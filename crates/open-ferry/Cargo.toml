@@ -50,6 +50,11 @@ tower-service = "0.3.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi", "registry"] }
 
+[target.'cfg(unix)'.dependencies]
+# Already in the lock file (core, management, supervisor and update use it):
+# the supervised worker's no-op SIGINT and SIGTERM handlers.
+libc = "0.2.189"
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }

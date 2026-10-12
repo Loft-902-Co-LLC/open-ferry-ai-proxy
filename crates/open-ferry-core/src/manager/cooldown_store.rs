@@ -104,12 +104,12 @@ use std::time::{Duration, Instant};
 use super::classify::has_unauthorized_auth_failure;
 use super::cooldown::{
     cooldown_disabled_for_auth, cooldown_reason, ensure_model_state, merge_model_state,
-    update_aggregated_availability,
+    reset_model_state, update_aggregated_availability,
 };
 use super::credential::is_zero;
 use super::quota_signals::{apply_cooldown_fields, cooldown_fields_of, merge_quota_observation};
 use super::text::canonical_model_key;
-use super::{Entry, Manager, Settings, Shared, lock};
+use super::{Entry, Manager, Settings, Shared, State, lock};
 use crate::auth::{Auth, ModelState, QuotaState, Status, Timestamp};
 use crate::config::Config;
 use crate::observe::redact::{Policy, Secrets};
@@ -210,8 +210,41 @@ struct Io {
     /// The target was installed and hasn't been restored from yet; nothing
     /// is saved to it until it is.
     pending_restore: bool,
+    /// The coming restore is [`Thaw::Restore`]'s: the file is the
+    /// authority, so the cooldowns it doesn't hold are cleared first.
+    authoritative: bool,
     /// What was last written to the target, when known.
     last_written: Option<Vec<Record>>,
+    /// Steps the tests put into an authoritative restore.
+    #[cfg(test)]
+    hooks: Option<RestoreHooks>,
+}
+
+/// Where a test looks into an authoritative restore, which runs both of its
+/// steps under one hold of the manager's state lock.
+#[cfg(test)]
+pub(crate) struct RestoreHooks {
+    /// After the clear, before the import.
+    pub(crate) between: Box<dyn Fn() + Send>,
+    /// After the import, with the state it left.
+    pub(crate) applied: Box<dyn Fn(&State) + Send>,
+    /// After the state lock is let go, before saving is turned on.
+    pub(crate) before_enable: Box<dyn Fn() + Send>,
+}
+
+/// Whether no hooks are left in the coming restores: they are used once, so
+/// that what they hold (a test's clone of the manager) is let go.
+#[cfg(test)]
+pub(crate) fn restore_hooks_are_gone(manager: &Manager) -> bool {
+    lock(&manager.shared.cooldown_store.signal.io)
+        .hooks
+        .is_none()
+}
+
+/// Puts `hooks` into the coming authoritative restores.
+#[cfg(test)]
+pub(crate) fn set_restore_hooks(manager: &Manager, hooks: RestoreHooks) {
+    lock(&manager.shared.cooldown_store.signal.io).hooks = Some(hooks);
 }
 
 /// An installed store.
@@ -318,7 +351,9 @@ pub enum Thaw {
     /// is read from it.
     Keep,
     /// The lease was given up and taken again, so the other process may
-    /// have written the file: restore from it first.
+    /// have written the file: restore from it first. The file is the
+    /// authority: the cooldowns it doesn't hold are cleared, and an empty
+    /// file clears them all. A file that can't be read changes nothing.
     Restore,
 }
 
@@ -378,6 +413,7 @@ pub fn thaw(manager: &Manager, kind: Thaw) {
         lock(&signal.control).frozen = false;
         if kind == Thaw::Restore && io.target.is_some() {
             io.pending_restore = true;
+            io.authoritative = true;
             io.last_written = None;
         }
     }
@@ -415,6 +451,7 @@ fn install(manager: &Manager, target: Option<Target>) {
         control.dirty = false;
     }
     io.pending_restore = target.is_some();
+    io.authoritative = false;
     io.target = target;
     io.last_written = None;
 }
@@ -428,23 +465,57 @@ fn restore_pending(manager: &Manager) {
         return;
     }
     io.pending_restore = false;
+    let replace = std::mem::take(&mut io.authoritative);
+    // Used once, for the hooks may hold the manager they are in.
+    #[cfg(test)]
+    let hooks = io.hooks.take();
     let Some(store) = io.target.as_ref().map(|target| target.store.clone()) else {
         return;
     };
     let records = match store.load() {
         Ok(records) => records,
         Err(err) => {
+            // An error is no answer: the current states stay.
             tracing::warn!("failed to restore cooldown state: {err}");
             enable(manager);
             return;
         }
     };
+    if replace {
+        // One step for request results: a result recorded between the clear
+        // and the import would put a healthy time back on a model, so that
+        // the import took the saved cooldown for an older one, or leave a
+        // fresh capped rest that the snapshot's schedule then loses to.
+        let now = manager.now();
+        let mut guard = manager.lock();
+        clear_cooldowns_locked(manager, &mut guard, now);
+        #[cfg(test)]
+        if let Some(hooks) = &hooks {
+            (hooks.between)();
+        }
+        if !records.is_empty() {
+            apply_locked(manager, &mut guard, &records, now);
+        }
+        #[cfg(test)]
+        if let Some(hooks) = &hooks {
+            (hooks.applied)(&guard);
+        }
+    } else if !records.is_empty() {
+        apply(manager, &records);
+    }
+    #[cfg(test)]
+    if let Some(hooks) = &hooks {
+        (hooks.before_enable)();
+    }
     if records.is_empty() {
         io.last_written = Some(Vec::new());
         enable(manager);
+        // A change made since the state lock was let go found saving off and
+        // was dropped; the file holds none. Nothing is written if there was
+        // none, as the state is what was last written.
+        changed(manager);
         return;
     }
-    apply(manager, &records);
     enable(manager);
     save_locked(manager, &mut io);
 }
@@ -741,7 +812,11 @@ fn cooldown_auth_file(auth: &Auth) -> String {
 fn apply(manager: &Manager, records: &[Record]) -> usize {
     let now = manager.now();
     let mut guard = manager.lock();
-    let state = &mut *guard;
+    apply_locked(manager, &mut guard, records, now)
+}
+
+/// [`apply`] on the state `manager` has locked, at `now`.
+fn apply_locked(manager: &Manager, state: &mut State, records: &[Record], now: Timestamp) -> usize {
     let settings = state.settings.clone();
     let (model_records, auth_records): (Vec<&Record>, Vec<&Record>) = records
         .iter()
@@ -779,6 +854,67 @@ fn apply(manager: &Manager, records: &[Record]) -> usize {
         state.sync_scheduler(manager.models(), id, now);
     }
     changed.len()
+}
+
+/// Clears every cooldown the credentials hold, their own and their models',
+/// for a restore that makes the file the authority (see [`Thaw::Restore`]).
+/// Unlike `clear_cooldown_state_for_auth` it leaves no time on what it
+/// clears, so that the restore doesn't take the record for an older one
+/// than a later result. A credential out of rotation for a rejected token
+/// stays out.
+fn clear_cooldowns_locked(manager: &Manager, state: &mut State, now: Timestamp) {
+    // The old capped rests go with the cooldowns they rested, those of
+    // credentials that look clean too; the snapshot's own are installed
+    // after, and a stale one must not fire later on a cleared model.
+    state.quota_checks.clear(&mut state.auths);
+    let mut cleared = Vec::new();
+    for (id, entry) in &mut state.auths {
+        let auth = &entry.auth;
+        let own = holds_cooldown(auth) && !has_unauthorized_auth_failure(auth);
+        let models = auth.model_states.values().any(|model| {
+            model.unavailable
+                || !is_zero(model.next_retry_after)
+                || model.quota.exceeded
+                || !is_zero(model.quota.next_recover_at)
+        });
+        // A healthy model's time would make the restore take a saved
+        // cooldown for older than a result, and drop it.
+        let stamped = auth
+            .model_states
+            .values()
+            .any(|model| model.updated_at.is_some());
+        if !own && !models && !stamped {
+            continue;
+        }
+        let auth = Arc::make_mut(&mut entry.auth);
+        if own {
+            auth.unavailable = false;
+            auth.status = Status::Active;
+            auth.status_message.clear();
+            apply_cooldown_fields(&mut auth.quota, QuotaState::default());
+            auth.last_error = None;
+            auth.next_retry_after = None;
+            auth.updated_at = None;
+        }
+        for model in auth.model_states.values_mut() {
+            if model.unavailable
+                || !is_zero(model.next_retry_after)
+                || model.quota.exceeded
+                || !is_zero(model.quota.next_recover_at)
+            {
+                reset_model_state(model, now);
+            }
+            model.updated_at = None;
+        }
+        if !auth.model_states.is_empty() {
+            update_aggregated_availability(auth, now);
+        }
+        auth.generation = auth.generation.saturating_add(1);
+        cleared.push(id.clone());
+    }
+    for id in &cleared {
+        state.sync_scheduler(manager.models(), id, now);
+    }
 }
 
 /// Whether `auth` has a cooldown of its own, running or not (as upstream's

@@ -143,7 +143,6 @@ pub(crate) struct Welcome {
 impl Welcome {
     /// The fields of the `welcome` that the supervisor crate's
     /// `Pending::attach` returned.
-    #[allow(dead_code, reason = "2c's -worker entry converts attach's welcome")]
     pub(crate) fn from_attached(welcome: open_ferry_supervisor::worker::Welcome) -> Self {
         let open_ferry_supervisor::worker::Welcome {
             role,
@@ -195,6 +194,10 @@ pub(super) struct Timing {
     pub(super) wedge_watcher: Option<WatcherHook>,
     #[cfg(test)]
     pub(super) fail_server: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    /// Notified when a stop has taken a take over in progress into its own
+    /// hands, and is about to wait for the take over's task.
+    #[cfg(test)]
+    pub(super) stop_took_the_take_over: Option<Arc<tokio::sync::Notify>>,
     #[cfg(test)]
     pub(super) updates: Option<open_ferry_update::UpdateService>,
     #[cfg(test)]
@@ -242,6 +245,8 @@ impl Default for Timing {
             #[cfg(test)]
             fail_server: None,
             #[cfg(test)]
+            stop_took_the_take_over: None,
+            #[cfg(test)]
             updates: None,
             #[cfg(test)]
             fail_resume_accept: false,
@@ -266,10 +271,6 @@ impl Default for Timing {
 /// This wrapper exits the process itself; 2c must call it rather than
 /// `run_with`, without dropping the runtime or waiting for blocking tasks. Abandoned writers
 /// retain the process-owned lease until the OS ends the process.
-#[allow(
-    dead_code,
-    reason = "main's supervised entry, another part, is the caller"
-)]
 pub(crate) async fn run<R, W>(
     config_path: PathBuf,
     log_level: LogLevel,
@@ -492,6 +493,9 @@ struct Taking {
     /// `None` once it has failed: the worker holds the lease and answers
     /// only `ping`, `status` and `stop`.
     task: Option<JoinHandle<Taken>>,
+    /// A `hand_over` came while the task ran: the task was told to cancel,
+    /// and its end decides what the worker does (L9.16).
+    hand_over_pending: bool,
 }
 
 /// A hand over in progress, done, or failed and waiting for `resume`.
@@ -510,7 +514,9 @@ struct Handing {
     handed: bool,
     /// The first step, cleaning off, done when it holds `true`.
     cleaned: watch::Receiver<bool>,
-    /// The rest of the hand over.
+    /// Tells the continuation that a resume is waiting for it.
+    cancel: watch::Sender<bool>,
+    /// The rest of the hand over. A resume takes it and joins it.
     hand: Option<JoinHandle<Result<String, String>>>,
     /// A resume, which retakes the lease when it was given up.
     resume: Option<JoinHandle<Result<(), String>>>,
@@ -936,6 +942,7 @@ where
             lease,
             cancel,
             task: Some(task),
+            hand_over_pending: false,
         }));
         Flow::Continue
     }
@@ -958,9 +965,25 @@ where
             return Flow::Continue;
         };
         taking.task = None;
+        let pending = taking.hand_over_pending;
+        let (handles, lease) = (taking.handles.clone(), taking.lease.clone());
         let taken = result
             .unwrap_or_else(|error| Taken::Failed(format!("the take over task failed: {error}")));
         match taken {
+            // A hand over came meanwhile: one that failed, or was dropped,
+            // is handled as ever and never hands over; one that stopped
+            // before its last step, or finished it, does (L9.16). A worker
+            // that serves hands over as it is, and says no `ready`.
+            Taken::Ready(active) if pending => {
+                return self
+                    .begin_hand_over(handles, Some(*active), Some(lease), false)
+                    .await;
+            }
+            Taken::Cancelled if pending => {
+                return self
+                    .begin_hand_over(handles, None, Some(lease), false)
+                    .await;
+            }
             Taken::Ready(active) => {
                 self.state = State::Active(active);
                 self.send(&Message::Ready).await;
@@ -1008,51 +1031,46 @@ where
     }
 
     /// L9.3: from active, watching, or a take over that hasn't failed. The
-    /// first step, cleaning off, can't fail; then management answers 503,
-    /// and the rest runs on a task of its own.
+    /// first step, cleaning off, can't fail; the rest, from the management
+    /// 503 on, runs on a task of its own. A take over is told to cancel, and
+    /// the hand over begins when its task ends, if it ends well.
     async fn on_hand_over(&mut self) -> Flow {
         if self.hooks.fault(Fault::IgnoreHandover).is_some() {
             tracing::debug!("ignoring hand_over, as the test fault says");
             return Flow::Continue;
         }
-        let valid = match &self.state {
-            State::Active(_) => true,
-            State::Taking(taking) => taking.task.is_some(),
-            _ => false,
-        };
-        if !valid {
-            return self.ignore("hand_over");
-        }
-        let (handles, active, lease, resumable) =
-            match std::mem::replace(&mut self.state, State::Loading) {
-                State::Active(active) => {
-                    let resumable = active.stage != Stage::Ready;
-                    (active.handles.clone(), Some(*active), None, resumable)
-                }
-                State::Taking(taking) => {
-                    // Cancel the take over and wait for it (L9.16): one that was
-                    // past its last step is serving, and hands over as `ready`.
-                    let Taking {
-                        handles,
-                        lease,
-                        cancel,
-                        task,
-                    } = *taking;
-                    let _ = cancel.send(true);
-                    let active = match task {
-                        Some(task) => match task.await {
-                            Ok(Taken::Ready(active)) => Some(*active),
-                            _ => None,
-                        },
-                        None => None,
-                    };
-                    (handles, active, Some(lease), false)
-                }
-                other => {
-                    self.state = other;
+        match &mut self.state {
+            State::Active(active) => {
+                let (handles, resumable) = (active.handles.clone(), active.stage != Stage::Ready);
+                let State::Active(active) = std::mem::replace(&mut self.state, State::Loading)
+                else {
                     return Flow::Continue;
-                }
-            };
+                };
+                self.begin_hand_over(handles, Some(*active), None, resumable)
+                    .await
+            }
+            // Cancel the take over and go on: its end, which the loop takes
+            // like any other, says what happens (L9.16). A task that has
+            // ended in failure is gone, and a second hand over is no news.
+            State::Taking(taking) if taking.task.is_some() && !taking.hand_over_pending => {
+                taking.hand_over_pending = true;
+                let _ = taking.cancel.send(true);
+                Flow::Continue
+            }
+            _ => self.ignore("hand_over"),
+        }
+    }
+
+    /// The hand over's start, for a worker that serves (`active`) and for one
+    /// whose take over a hand over cancelled: cleaning off, and the rest on a
+    /// task of its own. The management 503 follows cleaning, in that task.
+    async fn begin_hand_over(
+        &mut self,
+        handles: Handles,
+        active: Option<Active>,
+        lease: Option<LeaseSlot>,
+        resumable: bool,
+    ) -> Flow {
         let lease = lease
             .or_else(|| active.as_ref().map(|active| active.lease.clone()))
             .unwrap_or_else(|| lease_slot(None));
@@ -1064,29 +1082,34 @@ where
         ]);
         self.peers_gone = false;
         let cleaned = turn_cleaning_off(&handles);
-        handles.management.set_updating(true);
         let was_open = handles.gate.state() == GateState::Open;
+        let (cancel, cancelled) = watch::channel(false);
         let mut handing = Handing {
             active,
             handles: handles.clone(),
-            lease: lease.clone(),
+            lease,
             resumable,
             was_open,
             handed: false,
             cleaned: cleaned.clone(),
+            cancel,
             hand: None,
             resume: None,
         };
         if self.hooks.drops_channel_at(Place::HandingOver) {
+            // The fault stands in for the continuation, which this worker
+            // never runs: the 503 still follows cleaning.
+            let mut cleaned = cleaned;
+            cleaning_is_off(&mut cleaned).await;
+            handles.management.set_updating(true);
             self.state = State::Handing(Box::new(handing));
             self.drop_channel().await;
             return Flow::Continue;
         }
         handing.hand = Some(tokio::spawn(switch::hand_over(HandOver {
             handles,
-            lease,
-            was_open,
             cleaned,
+            cancel: cancelled,
         })));
         self.state = State::Handing(Box::new(handing));
         self.send_status().await;
@@ -1110,6 +1133,9 @@ where
         let reason = match result {
             Ok(Ok(id)) => {
                 handing.handed = true;
+                // The lease goes here and nowhere else: a driver that took
+                // `stop` or EOF never gets here, and keeps it until it exits.
+                switch::release_lease(&handing.lease);
                 let live = u64::try_from(self.control.live_count()).unwrap_or(u64::MAX);
                 self.send(&Message::HandedOver { state_id: id, live }).await;
                 self.hooks.event(Seen::HandedOver, false);
@@ -1149,22 +1175,22 @@ where
         let State::Handing(handing) = &mut self.state else {
             return Flow::Continue;
         };
-        // Abort the continuation and wait for it, never for a barrier it
-        // holds: the blocking poll of a held barrier ends on its own.
-        if let Some(hand) = handing.hand.take() {
-            hand.abort();
-            let _ = hand.await;
-        }
-        cleaning_is_off(&mut handing.cleaned).await;
         let Some(active) = &handing.active else {
             return Flow::Continue;
         };
+        // Tell the continuation, and wait for nothing here: the resume task
+        // joins it, so the loop goes on answering the supervisor. The part
+        // that is cancelled is waiting at a barrier or for the gate; a
+        // blocking step it has started runs to its end first.
+        let _ = handing.cancel.send(true);
         handing.resume = Some(tokio::spawn(switch::resume(Resume {
             handles: handing.handles.clone(),
             lease: handing.lease.clone(),
             commands: active.commands.clone(),
             retake_within: Duration::from_millis(self.budgets.resume_ms),
             timing: self.timing.clone(),
+            hand: handing.hand.take(),
+            cleaned: handing.cleaned.clone(),
         })));
         Flow::Continue
     }
@@ -1324,13 +1350,28 @@ where
             State::Taking(taking) => {
                 let Taking { cancel, task, .. } = *taking;
                 let _ = cancel.send(true);
+                #[cfg(test)]
+                if let Some(took) = &self.timing.stop_took_the_take_over {
+                    took.notify_one();
+                }
                 let Some(mut task) = task else {
                     return false;
                 };
                 return match tokio::time::timeout_at(deadline, &mut task).await {
                     // Past its last step: it serves, and stops as any does.
                     Ok(Ok(Taken::Ready(active))) => active.stop(deadline).await,
-                    Ok(_) => false,
+                    // The cancel above is not a failure; a take over that
+                    // failed on its own, or panicked, is one, and the worker
+                    // exits as a `take_failed` one does when stopped.
+                    Ok(Ok(Taken::Cancelled | Taken::Dropped)) => false,
+                    Ok(Ok(Taken::Failed(reason))) => {
+                        tracing::error!("the take over failed: {reason}");
+                        true
+                    }
+                    Ok(Err(error)) => {
+                        tracing::error!("the take over task failed: {error}");
+                        true
+                    }
                     Err(_) => {
                         task.abort();
                         false
@@ -1732,6 +1773,39 @@ async fn activate(
     timing: &Timing,
     launch: Launch,
 ) -> Result<Active, String> {
+    activate_unless_cancelled(prepared, config_path, lease, timing, launch, None)
+        .await
+        .map_err(|aborted| match aborted {
+            Aborted::Failed(reason) => reason,
+            Aborted::Cancelled => "the activation was cancelled".to_owned(),
+        })
+}
+
+/// Why an activation didn't end in an active worker.
+enum Aborted {
+    Failed(String),
+    /// A hand over cancelled the take over before its last step. What was
+    /// started is cleaned up as a failure's is, but the worker has not
+    /// failed: it keeps the lease and hands over.
+    Cancelled,
+}
+
+impl From<String> for Aborted {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+/// [`activate`], which a take over's `cancel` can stop right before the last
+/// step, the one that can't be taken back.
+async fn activate_unless_cancelled(
+    prepared: Prepared,
+    config_path: &Path,
+    lease: LeaseSlot,
+    timing: &Timing,
+    launch: Launch,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<Active, Aborted> {
     let Prepared {
         mut service,
         key,
@@ -1760,7 +1834,7 @@ async fn activate(
             timing.shutdown_reserve,
         )
         .await;
-        return Err(format!("failed to activate the service: {error}"));
+        return Err(format!("failed to activate the service: {error}").into());
     }
     // Bind fallibly now, but start the accept loops paused. W3 must copy
     // this order: reopen the write gate, resume accepting, then send ready
@@ -1808,7 +1882,7 @@ async fn activate(
                 timing.shutdown_reserve,
             )
             .await;
-            return Err(format!("failed to serve the sockets: {error}"));
+            return Err(format!("failed to serve the sockets: {error}").into());
         }
     };
     #[cfg(test)]
@@ -1883,10 +1957,28 @@ async fn activate(
                 timing.shutdown_reserve,
             )
             .await;
-            return Err(format!("failed to create watcher: {error}"));
+            return Err(format!("failed to create watcher: {error}").into());
         }
     };
     tracing::info!("file watcher started for config and auth directory changes");
+    // The commit point: a hand over's cancel that came during the steps
+    // above stops the take over here, before the gate opens and accept
+    // resumes. It cleans up as the watcher's failure does, without the
+    // failed flag; the worker keeps the lease.
+    if cancel.is_some_and(|cancel| *cancel.borrow()) {
+        service.close_sync();
+        service.close_reloads();
+        super::shut_down_by(
+            &service,
+            &stop_server,
+            Some(server),
+            control,
+            tokio::time::Instant::now(),
+            timing.shutdown_reserve,
+        )
+        .await;
+        return Err(Aborted::Cancelled);
+    }
     service.gate.reopen();
     #[cfg(test)]
     if timing.fail_resume_accept {
@@ -1952,7 +2044,7 @@ async fn activate(
             timing.shutdown_reserve,
         )
         .await;
-        return Err(format!("failed to resume accepting: {error}"));
+        return Err(format!("failed to resume accepting: {error}").into());
     }
     claude_cli::warn_outdated(&config.claude_cli);
     if launch == Launch::First {
@@ -2187,6 +2279,10 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
                 Some(Command::Reload(done)) => {
                     service.reload_from_disk(&config_path, &mut events).await;
                     let _ = done.send(());
+                }
+                Some(Command::ApplyDeferred(done)) => {
+                    let applied = service.apply_deferred(&config_path, &mut events).await;
+                    let _ = done.send(applied);
                 }
                 // Every sender is gone: nothing will ask again.
                 None => commands = None,

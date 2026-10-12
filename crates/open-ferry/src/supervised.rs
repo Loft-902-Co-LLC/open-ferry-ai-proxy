@@ -335,8 +335,9 @@ pub(crate) async fn forward_stops(
             tracing::warn!("{name} again: already stopping; waiting for the workers to stop");
         } else {
             stopping = true;
-            tracing::info!("{name}: stopping");
+            // The stop goes first: logging must not delay it.
             let _ = commands.send(Command::Stop);
+            tracing::info!("{name}: stopping");
         }
     }
 }
@@ -492,6 +493,12 @@ fn locate(flags: &Flags) -> Result<(DataDir, Option<Location>), String> {
 /// own logs go to standard error.
 pub fn supervise(flags: &Flags) -> ExitCode {
     let log = logging::init_stderr();
+    // Every exit path, a panic's unwind included, waits at most a second for
+    // the queued lines.
+    log.flush_after(|| run_supervisor(flags, &log))
+}
+
+fn run_supervisor(flags: &Flags, log: &logging::StderrLevel) -> ExitCode {
     let setup = || -> Result<(SupervisedHost, Setup), String> {
         let config_path = if flags.config.is_empty() {
             std::env::current_dir()
@@ -593,6 +600,9 @@ pub fn worker_entry(flags: &Flags) -> ExitCode {
         eprintln!("{message}");
         ExitCode::FAILURE
     };
+    // Before the runtime or any thread: no thread can see the default.
+    #[cfg(unix)]
+    leave_terminal_stops_to_the_supervisor();
     // Single-threaded: on Unix this removes `LISTEN_FDS` from the
     // environment, and it must be before the runtime and the logger.
     let pending = match open_ferry_supervisor::worker::take(OsStr::new(&flags.worker_control)) {
@@ -656,6 +666,36 @@ pub fn worker_entry(flags: &Flags) -> ExitCode {
     })
 }
 
+/// A worker's SIGINT and SIGTERM do nothing, so its stop stays under the
+/// supervisor's control channel.
+///
+/// The supervisor spawns workers in its own process group, so a terminal's
+/// Ctrl-C (SIGINT to the foreground group) or a service manager's SIGTERM to
+/// the whole cgroup reaches them as well, and would kill them at once,
+/// skipping the graceful stop. A no-op *handler* is installed, not `SIG_IGN`:
+/// exec resets a caught signal to its default but keeps an ignored one, so
+/// processes the worker starts keep the default disposition.
+///
+/// Windows needs nothing: workers are spawned with `CREATE_NO_WINDOW`, so
+/// they share no console, and so no console event, with the supervisor.
+#[cfg(unix)]
+fn leave_terminal_stops_to_the_supervisor() {
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: the handler is async-signal-safe (it does nothing), and
+        // `action` is fully initialised before the call.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = do_nothing as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn do_nothing(_signal: libc::c_int) {}
+
 /// The line for a failed attach.
 fn attach_failure(error: &AttachError) -> String {
     format!("worker: can't attach to the supervisor: {error:?}")
@@ -664,6 +704,42 @@ fn attach_failure(error: &AttachError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn current(signal: libc::c_int) -> libc::sigaction {
+        // SAFETY: a null new action only reads the current one.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            assert_eq!(libc::sigaction(signal, std::ptr::null(), &mut old), 0);
+            old
+        }
+    }
+
+    /// SIGINT and SIGTERM get a handler that does nothing: neither the default
+    /// (which kills the worker) nor `SIG_IGN` (which processes it starts would
+    /// inherit). The test restores what it found.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_catches_sigint_and_sigterm_with_a_handler_and_does_not_ignore_them() {
+        let signals = [libc::SIGINT, libc::SIGTERM];
+        let before = signals.map(current);
+        leave_terminal_stops_to_the_supervisor();
+        for signal in signals {
+            let now = current(signal);
+            assert_ne!(now.sa_sigaction, libc::SIG_DFL, "signal {signal}");
+            assert_ne!(now.sa_sigaction, libc::SIG_IGN, "signal {signal}");
+            assert_eq!(
+                now.sa_sigaction,
+                do_nothing as extern "C" fn(libc::c_int) as libc::sighandler_t
+            );
+        }
+        for (signal, old) in signals.into_iter().zip(before) {
+            // SAFETY: puts back an action read from the same signal.
+            unsafe {
+                libc::sigaction(signal, &old, std::ptr::null_mut());
+            }
+        }
+    }
 
     fn config(extra: &str) -> Config {
         Config::parse(format!("{extra}\n")).unwrap()
@@ -916,6 +992,48 @@ mod tests {
         forward_stops(source, tx).await;
         assert!(matches!(commands.recv().await, Some(Command::Stop)));
         assert!(commands.recv().await.is_none(), "a second stop was sent");
+    }
+
+    /// The stop is on the command channel before the first signal is logged,
+    /// so a log call that is slow cannot delay it.
+    #[test]
+    fn the_stop_is_sent_before_the_signal_is_logged() {
+        struct Probe {
+            commands: Arc<std::sync::Mutex<mpsc::UnboundedReceiver<Command>>>,
+            seen: Arc<std::sync::Mutex<Vec<bool>>>,
+        }
+        impl io::Write for Probe {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let stop = matches!(self.commands.lock().unwrap().try_recv(), Ok(Command::Stop));
+                self.seen.lock().unwrap().push(stop);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (tx, commands) = mpsc::unbounded_channel();
+        let commands = Arc::new(std::sync::Mutex::new(commands));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let (commands, seen) = (commands.clone(), seen.clone());
+                move || Probe {
+                    commands: commands.clone(),
+                    seen: seen.clone(),
+                }
+            })
+            .finish();
+        let (signals, source) = mpsc::unbounded_channel();
+        signals.send("SIGTERM").unwrap();
+        drop(signals);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(forward_stops(source, tx));
+        });
+        assert_eq!(*seen.lock().unwrap(), [true], "the line was logged first");
     }
 
     #[test]

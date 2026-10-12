@@ -758,6 +758,20 @@ mod held_refresh {
         .unwrap();
         let handles = active.handles.clone();
         let id = handles.manager.list()[0].id.clone();
+        // The watcher's first scan sends the file it read (access-0) as an
+        // added file, and a file credential is never stale to it: applied
+        // after the refresh published, it would put access-0 back. The
+        // activation registered the credential at generation 1, and the scan's
+        // update makes it 2, so wait for that before the refresh starts.
+        let mut scanned = false;
+        for _ in 0..500 {
+            if handles.manager.get(&id).unwrap().generation >= 2 {
+                scanned = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(scanned, "the watcher's first scan was never applied");
         let epoch = handles.manager.get(&id).unwrap().registration_epoch;
 
         // A refresh is in flight, holding the gate open for a hand over.
@@ -772,11 +786,11 @@ mod held_refresh {
 
         // The hand over starts closing the gate and waits for the refresh.
         let cleaned = real::turn_cleaning_off(&handles);
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
         let hand = tokio::spawn(real::hand_over(real::HandOver {
             handles: handles.clone(),
-            lease: lease.clone(),
-            was_open: true,
-            cleaned,
+            cleaned: cleaned.clone(),
+            cancel: cancelled,
         }));
         for _ in 0..500 {
             if handles.gate.state() == GateState::Quiescing {
@@ -785,9 +799,8 @@ mod held_refresh {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(handles.gate.state(), GateState::Quiescing);
-        // `resume` aborts it, as the worker does.
-        hand.abort();
-        let _ = hand.await;
+        // The worker cancels it and `resume` joins it.
+        cancel.send(true).unwrap();
 
         let (commands, mut reloads) = mpsc::unbounded_channel();
         tokio::time::timeout(
@@ -798,6 +811,8 @@ mod held_refresh {
                 commands,
                 retake_within: Duration::from_secs(1),
                 timing: Timing::default(),
+                hand: Some(hand),
+                cleaned,
             }),
         )
         .await
@@ -827,6 +842,434 @@ mod held_refresh {
         active
             .stop(tokio::time::Instant::now() + Duration::from_secs(2))
             .await;
+    }
+}
+
+/// A test's hold on one blocking step of the hand over or the take over, and
+/// the means to see it arrive and to let it go. Dropping it lets it go.
+struct Held {
+    arrival: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+impl Held {
+    /// Waits for the worker to be inside the step.
+    async fn arrived(&self) {
+        for _ in 0..500 {
+            if self.arrival.try_recv().is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the worker never reached the held step");
+    }
+
+    fn release(&self) {
+        let _ = self.release.send(());
+    }
+}
+
+/// `setup`, holding the blocking step `step`. (`Hooks` has private fields
+/// under the test feature, so no struct update here.)
+#[allow(clippy::field_reassign_with_default)]
+fn holding(mut setup: Setup, step: &'static str) -> (Setup, Held) {
+    let (hold, arrival, release) = crate::service::worker::hooks::StepHold::new(step);
+    let mut hooks = Hooks::default();
+    hooks.step_hold = Some(hold);
+    setup.timing.hooks = Some(hooks);
+    (setup, Held { arrival, release })
+}
+
+/// Asserts the worker sends nothing but statuses for a while: a bounded
+/// look at what must not happen, not an ordering.
+async fn quiet(rig: &mut Rig) {
+    let heard = tokio::time::timeout(Duration::from_millis(300), rig.fake().recv_other()).await;
+    assert!(heard.is_err(), "the worker sent {heard:?}");
+}
+
+// The blocking steps of the switch that a cancel can't stop, held by the
+// tests' own `StepHold`: they need no seam files.
+mod stepped {
+    use super::*;
+
+    // A hand over arriving in a take over's step that cannot be cut short
+    // is recorded and answered later: the loop goes on answering the
+    // supervisor, and the hand over follows the step (L9.16).
+    #[tokio::test]
+    async fn a_hand_over_during_a_blocked_take_over_leaves_the_worker_answering() {
+        let (setup, held) = holding(Setup::new(Role::Standby), "read_handover");
+        let mut rig = standby_rig(setup).await;
+        put_state(&rig.data, &state(STATE));
+        rig.fake().send(Message::TakeOver).await;
+        held.arrived().await;
+
+        rig.fake()
+            .send(Message::HandOver { budget_ms: 5_000 })
+            .await;
+        // The take over is still in its step, and the worker answers.
+        assert_eq!(rig.fake().ping().await, "taking-over");
+        let seen = rig.fake().sync().await;
+        assert!(
+            seen.iter()
+                .all(|message| matches!(message, Message::Status { .. })),
+            "{seen:?}"
+        );
+        // A second hand over is no news.
+        rig.fake()
+            .send(Message::HandOver { budget_ms: 5_000 })
+            .await;
+        held.release();
+        let id = match rig.fake().recv_other().await {
+            Message::HandedOver { state_id, .. } => state_id,
+            other => panic!("expected handed_over, got {other:?}"),
+        };
+        assert!(is_hex_id(&id), "{id}");
+        assert!(rig.lease_is_free(), "the hand over gave the lease up");
+        let seen = rig.fake().sync().await;
+        assert!(
+            seen.iter()
+                .all(|message| matches!(message, Message::Status { .. })),
+            "a worker that never served said {seen:?}"
+        );
+        assert!(succeeded(stop(&mut rig).await));
+    }
+
+    // L9.5: a resume waits for the mutating step the hand over has begun, and
+    // does not run beside it; afterwards the worker is as it was.
+    #[tokio::test]
+    async fn a_resume_waits_for_the_blocking_step_the_hand_over_began() {
+        let (setup, held) = holding(managed(Role::Active), "stop_background");
+        let mut rig = active_rig(setup).await;
+        let management = rig.management.unwrap();
+        rig.fake()
+            .send(Message::HandOver { budget_ms: 5_000 })
+            .await;
+        held.arrived().await;
+        assert!(rig.path("handover.json").exists());
+        assert!(
+            rig.rotating(),
+            "the step was held before it stopped rotation"
+        );
+
+        rig.fake().send(Message::Resume).await;
+        // The loop answers, and the resume has not ended.
+        let seen = rig.fake().sync().await;
+        assert!(
+            !seen
+                .iter()
+                .any(|message| matches!(message, Message::Resumed)),
+            "{seen:?}"
+        );
+        quiet(&mut rig).await;
+        held.release();
+
+        let next = rig.fake().recv_other().await;
+        assert!(matches!(next, Message::Resumed), "{next:?}");
+        assert_eq!(rig.fake().recv_status().await.2, "active");
+        assert!(
+            rig.rotating(),
+            "the step stopped the background work after the resume had started it"
+        );
+        assert!(!rig.cleaning() && !rig.lease_is_free());
+        let answer = get(management, MANAGEMENT_CONFIG).await;
+        assert!(!is_updating(&answer), "{answer}");
+        let answer = get(rig.main, "/healthz").await;
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert_eq!(rig.fake().ping().await, "active");
+        assert!(succeeded(stop(&mut rig).await));
+    }
+
+    // A take over that fails on its own while a stop waits for it is a
+    // failure, as it is for a worker the stop finds after its `take_failed`:
+    // the worker exits with failure. (A take over the stop cancelled is not.)
+    #[tokio::test]
+    async fn a_stop_during_a_take_over_that_then_fails_exits_with_failure() {
+        let (mut setup, held) = holding(Setup::new(Role::Standby), "read_handover");
+        let took = Arc::new(tokio::sync::Notify::new());
+        setup.timing.stop_took_the_take_over = Some(Arc::clone(&took));
+        let mut rig = standby_rig(setup).await;
+        std::fs::create_dir_all(&rig.data).unwrap();
+        std::fs::write(rig.path("handover.json"), "not json").unwrap();
+        rig.fake().send(Message::TakeOver).await;
+        held.arrived().await;
+        rig.fake().send(Message::Stop { budget_ms: 5_000 }).await;
+        // The stop owns the shutdown, and waits for the take over's task,
+        // before the held read is let go to fail.
+        tokio::time::timeout(WAIT, took.notified()).await.unwrap();
+        held.release();
+        assert_eq!(rig.exit().await, ExitCode::FAILURE);
+    }
+
+    // A hand over cancelled during activation, between the watcher and the
+    // gate, hands over without ever serving: no `ready`, nothing answered
+    // on the main listener.
+    #[tokio::test]
+    async fn a_cancel_during_activation_hands_over_with_the_gate_never_opened() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let blocked = Mutex::new(blocked);
+        let (arrived, arrival) = tokio::sync::oneshot::channel();
+        let arrived = Mutex::new(Some(arrived));
+        let (mut setup, held) = holding(Setup::new(Role::Standby), "write_handover");
+        setup.timing.wedge_watcher = Some(Arc::new(move |_, _| {
+            if let Some(arrived) = arrived.lock().unwrap().take() {
+                let _ = arrived.send(());
+            }
+            let _ = blocked.lock().unwrap().recv();
+        }));
+        let mut rig = standby_rig(setup).await;
+        put_state(&rig.data, &state(STATE));
+        rig.fake().send(Message::TakeOver).await;
+        tokio::time::timeout(WAIT, arrival).await.unwrap().unwrap();
+
+        rig.fake()
+            .send(Message::HandOver { budget_ms: 5_000 })
+            .await;
+        assert_eq!(rig.fake().ping().await, "taking-over");
+        release.send(()).unwrap();
+        // The hand over is on its way to writing the state: the worker never
+        // served, and nothing on the main listener answers.
+        held.arrived().await;
+        assert!(
+            try_get(rig.main, "/healthz").await.is_none(),
+            "the gate opened and accept resumed before the cancel"
+        );
+        held.release();
+        let id = match rig.fake().recv_other().await {
+            Message::HandedOver { state_id, .. } => state_id,
+            other => panic!("expected handed_over, got {other:?}"),
+        };
+        assert!(is_hex_id(&id), "{id}");
+        assert!(rig.lease_is_free());
+        assert!(succeeded(stop(&mut rig).await));
+    }
+}
+
+// The hand over's own steps, without a worker around it.
+mod quiescing {
+    use super::*;
+
+    // A hand over that finds the gate closing, as a take over that failed
+    // leaves it, settles it first: it goes on only once the operation that
+    // holds the gate is done, and the lease is not its to give up.
+    #[tokio::test]
+    async fn a_hand_over_that_finds_the_gate_closing_waits_for_its_operations() {
+        let (dir, prepared) = super::super::prepared::prepared(false);
+        let data = dir.path().join("data");
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
+        let active = activate(
+            prepared,
+            &dir.path().join("config.yaml"),
+            lease.clone(),
+            &Timing::default(),
+            Launch::First,
+        )
+        .await
+        .unwrap();
+        let handles = active.handles.clone();
+        let operation = handles.gate.begin_operation().unwrap();
+        handles.gate.quiesce(handles.gate.epoch()).unwrap();
+        assert_eq!(handles.gate.state(), GateState::Quiescing);
+
+        let cleaned = real::turn_cleaning_off(&handles);
+        let (_cancel, cancelled) = watch::channel(false);
+        let mut hand = tokio::spawn(real::hand_over(real::HandOver {
+            handles: handles.clone(),
+            cleaned,
+            cancel: cancelled,
+        }));
+        let early = tokio::time::timeout(Duration::from_millis(300), &mut hand).await;
+        assert!(
+            early.is_err(),
+            "the hand over went on while an operation held the gate: {early:?}"
+        );
+        assert!(!data.join("handover.json").exists());
+        assert_eq!(handles.gate.state(), GateState::Quiescing);
+
+        drop(operation);
+        let id = tokio::time::timeout(WAIT, hand)
+            .await
+            .expect("the hand over never settled the gate")
+            .unwrap()
+            .expect("the hand over failed");
+        assert!(is_hex_id(&id), "{id}");
+        assert_eq!(handles.gate.state(), GateState::Closed);
+        assert!(data.join("handover.json").exists());
+        assert!(
+            real::lease_held(&lease),
+            "the continuation gave the lease up"
+        );
+        active
+            .stop(tokio::time::Instant::now() + Duration::from_secs(2))
+            .await;
+    }
+}
+
+// The hand over's end and the resume's steps, without a worker around them:
+// the test is the service loop, and answers the resume's commands itself.
+mod ordering {
+    use futures_util::FutureExt;
+
+    use super::*;
+
+    type Resuming = std::pin::Pin<Box<dyn Future<Output = Result<(), String>>>>;
+
+    /// A service the hand over has handed over, the lease still in its slot.
+    struct Handed {
+        _dir: tempfile::TempDir,
+        active: crate::service::worker::Active,
+        lease: real::LeaseSlot,
+        data: std::path::PathBuf,
+        cleaned: watch::Receiver<bool>,
+    }
+
+    async fn handed() -> Handed {
+        let (dir, prepared) = super::super::prepared::prepared(false);
+        let data = dir.path().join("data");
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
+        let active = activate(
+            prepared,
+            &dir.path().join("config.yaml"),
+            lease.clone(),
+            &Timing::default(),
+            Launch::First,
+        )
+        .await
+        .unwrap();
+        let handles = active.handles.clone();
+        assert_eq!(handles.gate.state(), GateState::Open);
+        let cleaned = real::turn_cleaning_off(&handles);
+        let (_cancel, cancelled) = watch::channel(false);
+        let id = real::hand_over(real::HandOver {
+            handles: handles.clone(),
+            cleaned: cleaned.clone(),
+            cancel: cancelled,
+        })
+        .await
+        .expect("the hand over failed");
+        assert!(is_hex_id(&id), "{id}");
+        Handed {
+            _dir: dir,
+            active,
+            lease,
+            data,
+            cleaned,
+        }
+    }
+
+    impl Handed {
+        /// A resume after the driver gave the lease up, with a command
+        /// receiver of the test's own.
+        fn resume(&self) -> (Resuming, mpsc::UnboundedReceiver<real::Command>) {
+            let (commands, received) = mpsc::unbounded_channel();
+            let job = real::Resume {
+                handles: self.active.handles.clone(),
+                lease: self.lease.clone(),
+                commands,
+                retake_within: WAIT,
+                timing: Timing::default(),
+                hand: None,
+                cleaned: self.cleaned.clone(),
+            };
+            (Box::pin(real::resume(job)), received)
+        }
+
+        async fn stop(self) {
+            self.active
+                .stop(tokio::time::Instant::now() + Duration::from_secs(2))
+                .await;
+        }
+    }
+
+    /// Drives `resume` until it asks for `ApplyDeferred`, answering the
+    /// reload: the ack of the apply is returned.
+    async fn until_apply(
+        resume: &mut Resuming,
+        received: &mut mpsc::UnboundedReceiver<real::Command>,
+    ) -> tokio::sync::oneshot::Sender<Result<(), String>> {
+        loop {
+            tokio::select! {
+                result = &mut *resume => panic!("the resume ended before it asked to apply the config: {result:?}"),
+                command = received.recv() => match command.expect("the resume dropped its commands") {
+                    real::Command::Reload(done) => done.send(()).unwrap(),
+                    real::Command::ApplyDeferred(done) => return done,
+                },
+            }
+        }
+    }
+
+    // L9.3: a hand over that ends well leaves the lease to the driver, which
+    // gives it up when it takes the end of the hand over (L9.17). The
+    // driver's release is `a_hand_over_writes_the_state_and_gives_the_lease_up`.
+    #[tokio::test]
+    async fn a_hand_over_that_ends_well_leaves_the_lease_in_its_slot() {
+        let handed = handed().await;
+        assert!(
+            real::lease_held(&handed.lease),
+            "the continuation gave the lease up"
+        );
+        assert!(handed.data.join("handover.json").exists());
+        handed.stop().await;
+    }
+
+    // L9.5: `resumed` waits for the service loop to have applied the config.
+    // The loop's own wait for the gate applies a deferred config too, so only
+    // a resume that holds back until the ack is shown by a loop that answers
+    // late: the resume stays pending, accept paused and the 503 kept.
+    #[tokio::test]
+    async fn a_resume_waits_for_the_ack_of_the_apply_before_it_resumes() {
+        let handed = handed().await;
+        let handles = handed.active.handles.clone();
+        assert!(handles.management.is_updating());
+        assert!(handles.control.accepting_is_paused());
+        real::release_lease(&handed.lease);
+        let (mut resume, mut received) = handed.resume();
+
+        let ack = until_apply(&mut resume, &mut received).await;
+        // The resume asked, and is parked on the answer.
+        assert!(resume.as_mut().now_or_never().is_none());
+        assert_eq!(handles.gate.state(), GateState::Open);
+        let early = tokio::time::timeout(Duration::from_millis(500), &mut resume).await;
+        assert!(
+            early.is_err(),
+            "the resume went on without the ack: {early:?}"
+        );
+        assert!(handles.control.accepting_is_paused());
+        assert!(handles.management.is_updating());
+
+        ack.send(Ok(())).unwrap();
+        tokio::time::timeout(WAIT, resume)
+            .await
+            .expect("the resume never finished")
+            .expect("the resume failed");
+        assert!(!handles.control.accepting_is_paused());
+        assert!(!handles.management.is_updating());
+        handed.stop().await;
+    }
+
+    // L9.5: an `Err` for the apply, as when the config names an auth
+    // directory that couldn't be taken into use, ends the resume with that
+    // reason, and nothing it would have done after has been done.
+    #[tokio::test]
+    async fn a_resume_whose_apply_fails_resumes_nothing() {
+        let handed = handed().await;
+        let handles = handed.active.handles.clone();
+        real::release_lease(&handed.lease);
+        let (mut resume, mut received) = handed.resume();
+
+        let ack = until_apply(&mut resume, &mut received).await;
+        ack.send(Err("no such directory".to_owned())).unwrap();
+        let result = tokio::time::timeout(WAIT, resume)
+            .await
+            .expect("the resume never finished");
+        let reason = result.expect_err("the resume ignored the failed apply");
+        assert!(reason.contains("no such directory"), "{reason}");
+        assert!(handles.control.accepting_is_paused());
+        assert!(handles.management.is_updating());
+        handed.stop().await;
     }
 }
 
@@ -1492,5 +1935,311 @@ mod seams {
                 event("drained", true),
             ]
         );
+    }
+
+    // L9.16: a take over that fails or is dropped is not cancelled by a hand
+    // over that waits for it, and never hands over: the worker keeps the
+    // lease, says `take_failed`, and says no `handed_over`.
+    #[tokio::test]
+    async fn a_take_over_that_fails_with_a_hand_over_waiting_never_hands_over() {
+        let (setup, held) = holding(
+            marked(
+                Setup::new(Role::Standby),
+                "b",
+                &[("fail-before-ready", "on")],
+            ),
+            "read_handover",
+        );
+        let mut rig = standby_rig(setup).await;
+        put_state(&rig.data, &state(STATE));
+        rig.fake().send(Message::TakeOver).await;
+        held.arrived().await;
+        rig.fake()
+            .send(Message::HandOver { budget_ms: 5_000 })
+            .await;
+        // The hand over is recorded before the take over goes on to fail.
+        let seen = rig.fake().sync().await;
+        assert!(
+            seen.iter()
+                .all(|message| matches!(message, Message::Status { .. })),
+            "{seen:?}"
+        );
+        held.release();
+
+        let Message::TakeFailed { reason } = rig.fake().recv_other().await else {
+            panic!("expected take_failed");
+        };
+        assert_eq!(reason, "fail-before-ready");
+        let seen = rig.fake().sync().await;
+        assert!(
+            !seen
+                .iter()
+                .any(|message| matches!(message, Message::HandedOver { .. })),
+            "{seen:?}"
+        );
+        assert!(!rig.lease_is_free(), "a failed take over gave the lease up");
+        assert!(
+            !events(&rig).iter().any(|(name, _)| name == "handed_over"),
+            "{:?}",
+            events(&rig)
+        );
+        assert!(!rig.path("handover.json").exists());
+        assert_eq!(rig.fake().ping().await, "taking-over");
+        assert_eq!(stop(&mut rig).await, ExitCode::FAILURE);
+    }
+
+    // L9.5: a resume never waits for the observing steps of the hand over,
+    // such as the barrier the gate closes behind: it ends the hand over and
+    // answers at once, with the gate open again.
+    #[tokio::test]
+    async fn a_resume_while_the_hand_over_waits_at_a_barrier_resumes_promptly() {
+        let mut rig = active_rig(marked(managed(Role::Active), "a", &[])).await;
+        let management = rig.management.unwrap();
+        let mut barriers = Barriers::of(&rig);
+        barriers.hold(GATE_CLOSED);
+        rig.fake()
+            .send(Message::HandOver { budget_ms: 5_000 })
+            .await;
+        barriers.arrived(GATE_CLOSED).await;
+        assert!(!rig.path("handover.json").exists());
+
+        rig.fake().send(Message::Resume).await;
+        let next = rig.fake().recv_other().await;
+        assert!(matches!(next, Message::Resumed), "{next:?}");
+        assert!(!rig.lease_is_free(), "the lease was kept");
+        let answer = get(management, MANAGEMENT_CONFIG).await;
+        assert!(!is_updating(&answer), "{answer}");
+        let answer = get(rig.main, "/healthz").await;
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert!(rig.rotating());
+        assert!(
+            !rig.path("handover.json").exists(),
+            "the cancelled hand over went on to write its state"
+        );
+        barriers.release(GATE_CLOSED);
+        assert!(succeeded(stop(&mut rig).await));
+    }
+
+    // L9.17: only the driver gives the lease up, when it takes the end of the
+    // hand over; the continuation never does (see
+    // `ordering::a_hand_over_that_ends_well_leaves_the_lease_in_its_slot`). A
+    // `stop` while the hand over waits at the lease barrier ends the worker
+    // without a `handed_over`. The barrier stays held, so the stop is the only
+    // thing the worker can have taken: the hand over can't have ended. The
+    // race of a barrier that goes just as the stop is selected can't be
+    // set up from outside the worker, which has no signal for the choice.
+    #[tokio::test]
+    async fn a_stop_during_the_lease_barrier_keeps_the_lease_until_the_worker_exits() {
+        let mut rig = active_rig(marked(Setup::new(Role::Active), "a", &[])).await;
+        let mut barriers = Barriers::of(&rig);
+        barriers.hold(LEASE_RELEASE);
+        rig.fake()
+            .send(Message::HandOver { budget_ms: 5_000 })
+            .await;
+        barriers.arrived(LEASE_RELEASE).await;
+        rig.fake().send(Message::Stop { budget_ms: 3_000 }).await;
+
+        assert!(succeeded(rig.exit().await));
+        let rest = rig.fake().until_closed().await;
+        assert!(
+            !rest
+                .iter()
+                .any(|message| matches!(message, Message::HandedOver { .. })),
+            "{rest:?}"
+        );
+        assert!(!events(&rig).iter().any(|(name, _)| name == "handed_over"));
+    }
+
+    /// The answer to a `GET` that carries `key` as a bearer token.
+    async fn get_bearer(address: SocketAddr, path: &str, key: &str) -> String {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {key}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        tokio::time::timeout(WAIT, stream.read_to_string(&mut answer))
+            .await
+            .expect("no answer in time")
+            .unwrap();
+        answer
+    }
+
+    /// A codex credential named `name` in `dir`.
+    fn credential(dir: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(name),
+            r#"{"type":"codex","email":"a@example.com","access_token":"access-0","refresh_token":"refresh-0"}"#,
+        )
+        .unwrap();
+    }
+
+    // L9.5: a resume that took the lease back has applied the whole config
+    // when it says `resumed`: the new API keys, and the credentials of a new
+    // auth directory, which a closed gate had deferred.
+    #[tokio::test]
+    async fn a_resume_that_retakes_the_lease_applies_the_whole_config_before_resumed() {
+        // (That `resumed` waits for the loop's ack is shown by the switch-level
+        // `ordering::a_resume_waits_for_the_ack_of_the_apply_before_it_resumes`.)
+        let mut setup = marked(Setup::new(Role::Active), "a", &[]);
+        setup.config =
+            "api-keys:\n  - old-key\nremote-management:\n  secret-key: pw\n  allow-remote: true\n"
+                .to_owned();
+        let mut rig = active_rig(setup).await;
+        let root = rig._dir.path().to_owned();
+        credential(&root.join("auth"), "codex-old.json");
+        let mut listed = String::new();
+        for _ in 0..500 {
+            listed = get_bearer(rig.main, "/v0/management/auth-files", "pw").await;
+            if listed.contains("codex-old.json") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(listed.contains("codex-old.json"), "{listed}");
+        let answer = get_bearer(rig.main, "/v1/models", "old-key").await;
+        assert!(!answer.starts_with("HTTP/1.1 401"), "{answer}");
+
+        hand_over(&mut rig).await;
+        assert!(rig.lease_is_free());
+        credential(&root.join("auth-new"), "codex-new.json");
+        std::fs::write(
+            root.join("config.yaml"),
+            format!(
+                "host: 127.0.0.1\nport: {}\nauth-dir: '{}'\napi-keys:\n  - new-key\nremote-management:\n  secret-key: pw\n  allow-remote: true\n",
+                rig.main.port(),
+                root.join("auth-new").display()
+            ),
+        )
+        .unwrap();
+
+        rig.fake().send(Message::Resume).await;
+        let next = rig.fake().recv_other().await;
+        assert!(matches!(next, Message::Resumed), "{next:?}");
+        let answer = get_bearer(rig.main, "/v1/models", "old-key").await;
+        assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+        let answer = get_bearer(rig.main, "/v1/models", "new-key").await;
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        let listed = get_bearer(rig.main, "/v0/management/auth-files", "pw").await;
+        assert!(listed.contains("codex-new.json"), "{listed}");
+        assert!(!listed.contains("codex-old.json"), "{listed}");
+        assert!(succeeded(stop(&mut rig).await));
+    }
+
+    // L9.5: a config whose auth directory can't be taken into use is not
+    // applied, and a resume that retook the lease then does not say
+    // `resumed`: the worker ends with failure, as a failed resume does.
+    #[tokio::test]
+    async fn a_resume_whose_config_names_an_unusable_auth_dir_does_not_say_resumed() {
+        let mut rig = active_rig(marked(Setup::new(Role::Active), "a", &[])).await;
+        let root = rig._dir.path().to_owned();
+        hand_over(&mut rig).await;
+        assert!(rig.lease_is_free());
+        let file = root.join("not-a-directory");
+        std::fs::write(&file, "a file").unwrap();
+        std::fs::write(
+            root.join("config.yaml"),
+            format!(
+                "host: 127.0.0.1\nport: {}\nauth-dir: '{}'\n",
+                rig.main.port(),
+                file.display()
+            ),
+        )
+        .unwrap();
+
+        rig.fake().send(Message::Resume).await;
+        let rest = rig.fake().until_closed().await;
+        assert!(
+            !rest
+                .iter()
+                .any(|message| matches!(message, Message::Resumed)),
+            "{rest:?}"
+        );
+        assert_eq!(rig.exit().await, ExitCode::FAILURE);
+        assert!(!events(&rig).iter().any(|(name, _)| name == "resumed"));
+    }
+
+    // L9.5: a credential directory the resume can't list (here replaced by a
+    // regular file while the worker was handed over, the config unchanged) is
+    // not acknowledged: no `resumed`, the worker ends with failure, and what it
+    // still answers while it stops is not a served request. Unix only: on
+    // Windows the watcher's handle keeps the directory from being moved or
+    // removed, so the replacement can't be made.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resume_whose_auth_dir_became_a_file_does_not_say_resumed() {
+        let mut rig = active_rig(marked(managed(Role::Active), "a", &[])).await;
+        let management = rig.management.unwrap();
+        let root = rig._dir.path().to_owned();
+        hand_over(&mut rig).await;
+        assert!(rig.lease_is_free());
+        std::fs::rename(root.join("auth"), root.join("auth-aside")).unwrap();
+        std::fs::write(root.join("auth"), "a file").unwrap();
+
+        rig.fake().send(Message::Resume).await;
+        // Whatever either listener still answers while the worker stops is
+        // the closed gate's, not a served request.
+        for (address, path) in [(management, MANAGEMENT_CONFIG), (rig.main, "/healthz")] {
+            let probe = async {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
+                let request =
+                    format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+                stream.write_all(request.as_bytes()).await.ok()?;
+                let mut answer = String::new();
+                stream.read_to_string(&mut answer).await.ok()?;
+                Some(answer)
+            };
+            if let Ok(Some(answer)) = tokio::time::timeout(Duration::from_secs(2), probe).await {
+                assert!(answer.starts_with("HTTP/1.1 503"), "{path}: {answer}");
+            }
+        }
+        let rest = rig.fake().until_closed().await;
+        assert!(
+            !rest
+                .iter()
+                .any(|message| matches!(message, Message::Resumed)),
+            "{rest:?}"
+        );
+        assert_eq!(rig.exit().await, ExitCode::FAILURE);
+        assert!(!events(&rig).iter().any(|(name, _)| name == "resumed"));
+    }
+
+    // L9.5: a credential file deleted while the worker was handed over is not
+    // listed once `resumed` is said: the watcher's removal was held back by
+    // the closed gate.
+    #[tokio::test]
+    async fn a_resume_that_retakes_the_lease_forgets_a_credential_deleted_meanwhile() {
+        let mut setup = marked(Setup::new(Role::Active), "a", &[]);
+        setup.config = "remote-management:\n  secret-key: pw\n  allow-remote: true\n".to_owned();
+        let mut rig = active_rig(setup).await;
+        let root = rig._dir.path().to_owned();
+        credential(&root.join("auth"), "codex-gone.json");
+        credential(&root.join("auth"), "codex-kept.json");
+        let mut listed = String::new();
+        for _ in 0..500 {
+            listed = get_bearer(rig.main, "/v0/management/auth-files", "pw").await;
+            if listed.contains("codex-gone.json") && listed.contains("codex-kept.json") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(listed.contains("codex-gone.json"), "{listed}");
+
+        hand_over(&mut rig).await;
+        std::fs::remove_file(root.join("auth").join("codex-gone.json")).unwrap();
+        rig.fake().send(Message::Resume).await;
+        let next = rig.fake().recv_other().await;
+        assert!(matches!(next, Message::Resumed), "{next:?}");
+        let listed = get_bearer(rig.main, "/v0/management/auth-files", "pw").await;
+        assert!(listed.contains("codex-kept.json"), "{listed}");
+        assert!(!listed.contains("codex-gone.json"), "{listed}");
+        assert!(succeeded(stop(&mut rig).await));
     }
 }

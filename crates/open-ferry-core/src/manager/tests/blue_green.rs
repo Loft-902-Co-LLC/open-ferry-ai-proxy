@@ -612,6 +612,77 @@ async fn a_thaw_after_the_lease_was_released_restores_from_the_file() {
     assert!(rested.iter().any(|id| id == "auth-2"), "{rested:?}");
 }
 
+// Not upstream's: the file is the cooldown state once the lease was given
+// up. A cooldown this worker had when it handed over, and the other process
+// has since lifted, is gone after the restore, and is not written back.
+#[tokio::test(start_paused = true)]
+async fn a_restore_makes_the_saved_cooldowns_authoritative() {
+    let store = Arc::new(SwitchStore::default());
+    let h = cooldown_manager(&store);
+    rate_limit(&h, "auth-1");
+    freeze(&h.manager).expect("freeze");
+    assert_eq!(store.saved_ids(), ["auth-1"]);
+    assert!(
+        snapshot(&h.manager, h.now())
+            .iter()
+            .any(|record| record.auth_id == "auth-1")
+    );
+
+    // The other process lifted every cooldown and saved the file.
+    store.overwrite(Vec::new());
+    thaw(&h.manager, Thaw::Restore);
+    let kept = snapshot(&h.manager, h.now());
+    assert!(kept.is_empty(), "the cooldown outlived the file: {kept:?}");
+    flush(&h.manager);
+    assert!(
+        store.saved_ids().is_empty(),
+        "the lifted cooldown was written back: {:?}",
+        store.saved_ids()
+    );
+}
+
+// Not upstream's: the saved cooldown wins over a model that a request went
+// through while this worker was handed over. The healthy model's state is
+// newer than the record (a result needs no write permit), and the restore
+// must not take the record for one a later result cleared, or write the
+// loss back to the file.
+#[tokio::test(start_paused = true)]
+async fn a_restore_does_not_let_a_newer_healthy_model_veto_a_saved_cooldown() {
+    let store = Arc::new(SwitchStore::default());
+    let h = cooldown_manager(&store);
+    rate_limit(&h, "auth-1");
+    freeze(&h.manager).expect("freeze");
+    // The other process's cooldown, saved before the result below.
+    let mut saved = snapshot(&h.manager, h.now());
+    let until = h.now() + chrono::Duration::hours(1);
+    for record in &mut saved {
+        record.next_retry_after = Some(until);
+        record.quota.next_recover_at = record.quota.exceeded.then_some(until);
+    }
+    assert!(saved.iter().any(|record| record.model == "m1"), "{saved:?}");
+
+    h.clock.advance(Duration::from_secs(1));
+    h.manager.mark_result(&success("auth-1", "xai", "m1"));
+    let model = h.get("auth-1").model_states["m1"].clone();
+    assert!(!model.unavailable && model.updated_at > saved[0].updated_at);
+
+    store.overwrite(saved);
+    thaw(&h.manager, Thaw::Restore);
+    let kept = snapshot(&h.manager, h.now());
+    assert!(
+        kept.iter()
+            .any(|r| r.auth_id == "auth-1" && r.model == "m1"),
+        "the saved cooldown was vetoed: {kept:?}"
+    );
+    flush(&h.manager);
+    assert!(
+        lock(&store.records)
+            .iter()
+            .any(|r| r.auth_id == "auth-1" && r.model == "m1"),
+        "the saved cooldown was erased from the file"
+    );
+}
+
 // Not upstream's: a standby process neither restores nor saves until it
 // thaws, and the thaw restores because it never did.
 #[tokio::test(start_paused = true)]

@@ -110,10 +110,11 @@ pub async fn supervise<H: Host, D: Driver>(
         Err(StartupError::Stopped) => return Ok(Exit::Stopped),
         Err(error) => return Err(error),
     };
-    // Back at the front of an empty queue, in the order they came.
-    for command in kept {
-        let _ = command_tx.send(command);
-    }
+    // The core reads the kept commands first, then whatever the old queue
+    // still gets, in the order sent: they are not sent back through a queue
+    // that others write to.
+    let (mut commands, forwarder) = core_input(kept, commands);
+    let forwarder = AbortOnDrop(forwarder);
     let shared = Shared::new();
     let mut serving = started.endpoint.take().map(|server| {
         tokio::spawn(accept_loop(
@@ -188,7 +189,45 @@ pub async fn supervise<H: Host, D: Driver>(
     if let Some(serving) = serving {
         serving.abort();
     }
+    forwarder.abort();
     Ok(exit)
+}
+
+/// Aborts its task when dropped, so cancelling `supervise` or an unwind out
+/// of it does not leave the forwarder holding the command receiver.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl AbortOnDrop {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The core's command input: `kept` first, then everything that arrives on
+/// `commands`, in order. The returned task forwards from `commands`; it runs
+/// until aborted.
+fn core_input(
+    kept: Vec<Command>,
+    mut commands: UnboundedReceiver<Command>,
+) -> (UnboundedReceiver<Command>, tokio::task::JoinHandle<()>) {
+    let (input, output) = tokio::sync::mpsc::unbounded_channel();
+    for command in kept {
+        let _ = input.send(command);
+    }
+    let forwarder = tokio::spawn(async move {
+        while let Some(command) = commands.recv().await {
+            if input.send(command).is_err() {
+                break;
+            }
+        }
+    });
+    (output, forwarder)
 }
 
 /// The restart need at the start of a pass: one an older supervisor version set
@@ -209,6 +248,94 @@ pub(crate) fn needs_restart_after_recovery<H: Host>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn switch_to(to: &str) -> Command {
+        use crate::core::SwitchRequest;
+        use crate::protocol::Admission;
+        use open_ferry_update::journal::How;
+        let (replies, _) = tokio::sync::mpsc::unbounded_channel();
+        Command::Switch {
+            request: SwitchRequest {
+                to: to.to_owned(),
+                sha256: String::new(),
+                pin: String::new(),
+                how: How::Update,
+                auto: false,
+                admitted: Admission {
+                    while_off: false,
+                    mode_gen: 0,
+                },
+            },
+            replies,
+        }
+    }
+
+    fn target(command: Option<Command>) -> String {
+        match command {
+            Some(Command::Switch { request, .. }) => request.to,
+            Some(Command::Stop) => "stop".to_owned(),
+            None => "none".to_owned(),
+        }
+    }
+
+    /// A sender writes between the extraction of the kept commands and the
+    /// core's start: the kept ones are still read first, then the new one,
+    /// then those sent later, in order.
+    #[tokio::test]
+    async fn kept_commands_reach_the_core_ahead_of_everything_sent_after_them() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let kept = vec![switch_to("a"), switch_to("b")];
+        tx.send(switch_to("c")).unwrap();
+        let (mut input, forwarder) = core_input(kept, rx);
+        tx.send(switch_to("d")).unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let next = tokio::time::timeout(Duration::from_secs(5), input.recv())
+                .await
+                .expect("a command");
+            seen.push(target(next));
+        }
+        assert_eq!(seen, ["a", "b", "c", "d"]);
+        forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn the_forwarder_is_aborted_when_its_guard_is_dropped() {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_input, forwarder) = core_input(Vec::new(), rx);
+        let probe = forwarder.abort_handle();
+        let guard = AbortOnDrop(forwarder);
+        tokio::task::yield_now().await;
+        assert!(!probe.is_finished(), "the forwarder waits for commands");
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !probe.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the guard aborts the forwarder");
+    }
+
+    /// When startup took nothing, the commands left in the receiver reach the
+    /// core in the order they were sent.
+    #[tokio::test]
+    async fn commands_left_in_the_receiver_reach_the_core_in_order() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(switch_to("a")).unwrap();
+        tx.send(switch_to("b")).unwrap();
+        let (mut input, forwarder) = core_input(Vec::new(), rx);
+        tx.send(Command::Stop).unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let next = tokio::time::timeout(Duration::from_secs(5), input.recv())
+                .await
+                .expect("a command");
+            seen.push(target(next));
+        }
+        assert_eq!(seen, ["a", "b", "stop"]);
+        forwarder.abort();
+    }
 
     #[test]
     fn the_snapshot_between_a_panic_and_the_new_core_shows_no_switch_and_says_why() {

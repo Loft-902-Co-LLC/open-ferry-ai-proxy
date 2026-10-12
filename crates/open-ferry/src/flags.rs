@@ -227,7 +227,9 @@ const DEFINITIONS: &[Definition<Flags>] = &[
 /// those only a supervisor starts or a test uses.
 const HIDDEN: &[&str] = &[
     "password",
+    #[cfg(feature = "blue-green-test")]
     "test-data-dir",
+    #[cfg(feature = "blue-green-test")]
     "test-endpoint",
     "worker",
     "worker-control",
@@ -262,6 +264,10 @@ fn check_modes(flags: &Flags) -> Result<(), FlagError> {
     #[cfg(feature = "blue-green-test")]
     if !flags.supervise && (!flags.test_data_dir.is_empty() || !flags.test_endpoint.is_empty()) {
         return invalid("-test-data-dir and -test-endpoint need -supervise");
+    }
+    // A supervised worker gets no local password in this version.
+    if flags.supervise && !flags.password.0.is_empty() {
+        return invalid("-password can't be used with -supervise");
     }
     if (flags.worker || flags.supervise)
         && (flags.tui
@@ -496,6 +502,10 @@ mod tests {
             "-worker-control needs -worker"
         );
         assert_eq!(invalid(&["-system"]), "-system needs -supervise");
+        assert_eq!(
+            invalid(&["-supervise", "-password", "pw"]),
+            "-password can't be used with -supervise"
+        );
         assert_eq!(
             invalid(&["-supervise", "-tui"]),
             "-worker and -supervise can't be used with a login or the TUI"

@@ -22,8 +22,8 @@ use crate::auth::{QuotaState, Timestamp};
 use crate::exec::{Dispatcher, ExecError};
 use crate::manager::cooldown::add;
 use crate::manager::cooldown_store::{
-    FileStore, QuotaCheckRecord, Record, StateStore, flush, install_store, restore_now,
-    set_debounce, snapshot,
+    FileStore, QuotaCheckRecord, Record, RestoreHooks, StateStore, Thaw, flush, install_store,
+    restore_hooks_are_gone, restore_now, set_debounce, set_restore_hooks, snapshot, thaw,
 };
 use crate::manager::{Clock, Manager, QuotaCheck, Settings};
 
@@ -564,6 +564,241 @@ async fn with_the_cap_off_no_rest_is_restored_or_saved() {
     let records = snapshot(&rig.h.manager, rig.h.now());
     assert!(!records.is_empty());
     assert!(records.iter().all(|record| record.quota_check.is_none()));
+}
+
+// Not upstream's: a restore that makes the file the authority forgets the
+// capped rests with the cooldowns, so a stale one can't fire later on a
+// model that was cleared.
+#[tokio::test(start_paused = true)]
+async fn an_authoritative_restore_forgets_the_old_rests() {
+    let rig = Rig::new(HOUR, &[MODEL]);
+    attach(&rig, &RecordingStore::with_load(Vec::new()));
+    let reset = rig.at(5 * DAY);
+    rig.answer(Answer::Quota(reset, false));
+    assert!(!rig.call(MODEL).await);
+    assert_eq!(rig.checks().len(), 1);
+
+    // The file holds nothing: the other process lifted the rest.
+    thaw(&rig.h.manager, Thaw::Restore);
+    assert_eq!(rig.checks(), [], "the old rest outlived the file");
+    assert_eq!(rig.retry_at(MODEL), None);
+    rig.h.clock.advance(HOUR + MINUTE);
+    rig.answer(Answer::Ok);
+    assert!(rig.call(MODEL).await, "the model stays available");
+    assert_eq!(rig.checks(), []);
+}
+
+// Not upstream's: the rests of the file replace those held, so a snapshot
+// with another schedule for the same key installs its own.
+#[tokio::test(start_paused = true)]
+async fn an_authoritative_restore_installs_the_snapshots_schedule() {
+    let store = RecordingStore::with_load(Vec::new());
+    let rig = Rig::new(HOUR, &[MODEL]);
+    attach(&rig, &store);
+    let reset = rig.at(5 * DAY);
+    rig.answer(Answer::Quota(reset, false));
+    assert!(!rig.call(MODEL).await);
+    flush(&rig.h.manager);
+    let mut saved = store.saved();
+    let sooner = rig.at(30 * MINUTE);
+    for record in &mut saved {
+        if record.model == MODEL {
+            record.next_retry_after = Some(sooner);
+            record.quota.next_recover_at = Some(sooner);
+            record.quota_check = Some(QuotaCheckRecord {
+                wait: 30 * MINUTE,
+                check_at: sooner,
+                reset_at: reset,
+            });
+        }
+    }
+
+    install_store(&rig.h.manager, RecordingStore::with_load(saved));
+    thaw(&rig.h.manager, Thaw::Restore);
+    assert_eq!(rig.checks(), [check(MODEL, sooner, reset, 30 * MINUTE)]);
+    assert_eq!(rig.retry_at(MODEL), Some(sooner));
+}
+
+/// Has a call of `MODEL` start on a thread of its own at the point of an
+/// authoritative restore between its clear and its import, and waits a
+/// while for it. The call needs the manager's state lock: a restore that
+/// lets go of the lock between its two steps lets the call through, and its
+/// result is recorded in between; one that holds the lock keeps the call
+/// waiting until it is done, and the wait runs out. The thread is not joined
+/// there, for it would never finish when the lock is held; the test joins it
+/// after the restore.
+fn call_between_the_steps(rig: &Rig) -> Arc<Mutex<Vec<std::thread::JoinHandle<bool>>>> {
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let (manager, list) = (rig.h.manager.clone(), started.clone());
+    set_restore_hooks(
+        &rig.h.manager,
+        RestoreHooks {
+            between: Box::new(move || {
+                // The restore holds the state lock for both steps.
+                assert!(
+                    matches!(
+                        manager.shared.state.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ),
+                    "the state lock was let go between the clear and the import"
+                );
+                let (done, finished) = std::sync::mpsc::channel();
+                let manager = manager.clone();
+                let handle = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime");
+                    let reached = runtime.block_on(call(&manager, MODEL));
+                    let _ = done.send(());
+                    reached
+                });
+                let _ = finished.recv_timeout(Duration::from_millis(500));
+                list.lock().expect("threads").push(handle);
+            }),
+            applied: Box::new(|_| {}),
+            before_enable: Box::new(|| {}),
+        },
+    );
+    started
+}
+
+// Not upstream's: an authoritative restore clears and imports as one step for
+// request results. A call that gets its result recorded between the two
+// finds the quota cleared, reaches the provider and rests the model again on
+// the cap's schedule, which the import then keeps over the snapshot's. Here
+// the call waits for the restore, finds the model cooling and is held back,
+// so the file's rest is the one saved.
+#[tokio::test(start_paused = true)]
+async fn a_result_cannot_get_between_the_clear_and_the_import_of_a_restore() {
+    let rig = Rig::new(HOUR, &[MODEL]);
+    let reset = rig.at(5 * DAY);
+    let sooner = rig.at(30 * MINUTE);
+    rig.answer(Answer::Quota(reset, false));
+    let first = RecordingStore::with_load(Vec::new());
+    attach(&rig, &first);
+    assert!(!rig.call(MODEL).await);
+    flush(&rig.h.manager);
+    let mut saved = first.saved();
+    for record in &mut saved {
+        if record.model == MODEL {
+            record.next_retry_after = Some(sooner);
+            record.quota.next_recover_at = Some(sooner);
+            record.quota_check = Some(QuotaCheckRecord {
+                wait: 30 * MINUTE,
+                check_at: sooner,
+                reset_at: reset,
+            });
+        }
+    }
+    let second = RecordingStore::with_load(saved);
+    install_store(&rig.h.manager, second.clone());
+    let threads = call_between_the_steps(&rig);
+    let reached = rig.reached();
+
+    thaw(&rig.h.manager, Thaw::Restore);
+    for thread in threads.lock().expect("threads").drain(..) {
+        thread.join().expect("the call's thread");
+    }
+    assert!(restore_hooks_are_gone(&rig.h.manager));
+    assert_eq!(rig.reached(), reached, "the call got through the restore");
+    assert_eq!(rig.checks(), [check(MODEL, sooner, reset, 30 * MINUTE)]);
+    let kept = saved_model(&second.saved());
+    assert_eq!(kept.next_retry_after, Some(sooner));
+    assert_eq!(kept.quota_check.map(|c| c.check_at), Some(sooner));
+}
+
+// Not upstream's: the same step for a call that succeeds. Its result would put
+// a healthy time on the model, and the import would take the saved cooldown
+// for one that result cleared, and the save would erase it.
+#[tokio::test(start_paused = true)]
+async fn a_success_cannot_get_between_the_clear_and_the_import_of_a_restore() {
+    let rig = Rig::new(HOUR, &[MODEL]);
+    let reset = rig.at(5 * DAY);
+    let sooner = rig.at(30 * MINUTE);
+    rig.answer(Answer::Quota(reset, false));
+    let first = RecordingStore::with_load(Vec::new());
+    attach(&rig, &first);
+    assert!(!rig.call(MODEL).await);
+    flush(&rig.h.manager);
+    let mut saved = first.saved();
+    for record in &mut saved {
+        if record.model == MODEL {
+            record.next_retry_after = Some(sooner);
+            record.quota.next_recover_at = Some(sooner);
+            record.quota_check = Some(QuotaCheckRecord {
+                wait: 30 * MINUTE,
+                check_at: sooner,
+                reset_at: reset,
+            });
+        }
+    }
+    // A result after the record was saved is newer than it.
+    rig.h.clock.advance(MINUTE);
+    rig.answer(Answer::Ok);
+    let second = RecordingStore::with_load(saved);
+    install_store(&rig.h.manager, second.clone());
+    let threads = call_between_the_steps(&rig);
+    let reached = rig.reached();
+
+    thaw(&rig.h.manager, Thaw::Restore);
+    for thread in threads.lock().expect("threads").drain(..) {
+        thread.join().expect("the call's thread");
+    }
+    assert!(restore_hooks_are_gone(&rig.h.manager));
+    assert_eq!(rig.reached(), reached, "the call got through the restore");
+    assert_eq!(rig.retry_at(MODEL), Some(sooner));
+    let kept = saved_model(&second.saved());
+    assert_eq!(
+        kept.next_retry_after,
+        Some(sooner),
+        "the cooldown was erased"
+    );
+}
+
+// Not upstream's: saving is off from the install of a store until its restore
+// has ended, and a result recorded after the restore let go of the state lock,
+// before saving was on, is not noted. An empty snapshot ended the restore
+// without a save or a mark, so the file stayed empty until some later change.
+#[tokio::test(start_paused = true)]
+async fn an_empty_restore_saves_a_cooldown_recorded_before_saving_was_on() {
+    let rig = Rig::new(HOUR, &[MODEL]);
+    rig.answer(Answer::Quota(rig.at(5 * DAY), false));
+    let store = RecordingStore::with_load(Vec::new());
+    install_store(&rig.h.manager, store.clone());
+    let manager = rig.h.manager.clone();
+    set_restore_hooks(
+        &rig.h.manager,
+        RestoreHooks {
+            between: Box::new(|| {}),
+            applied: Box::new(|_| {}),
+            before_enable: Box::new(move || {
+                // The state lock is free, so the call finishes, and its
+                // result is recorded with saving still off, before this
+                // returns.
+                let manager = manager.clone();
+                let reached = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime");
+                    runtime.block_on(call(&manager, MODEL))
+                })
+                .join()
+                .expect("the call's thread");
+                assert!(!reached, "the call was served");
+            }),
+        },
+    );
+
+    thaw(&rig.h.manager, Thaw::Restore);
+    assert!(restore_hooks_are_gone(&rig.h.manager));
+    flush(&rig.h.manager);
+    let kept = saved_model(&store.saved());
+    assert!(
+        kept.next_retry_after.is_some(),
+        "the cooldown was not saved"
+    );
 }
 
 // Not upstream's: a file keeps a capped rest after upstream's fields, under

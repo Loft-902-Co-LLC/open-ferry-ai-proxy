@@ -298,6 +298,23 @@ impl QuotaChecks {
         }
     }
 
+    /// Forgets every credential's rests, for a restore that makes the saved
+    /// cooldowns the authority. A check in flight has its lease taken off
+    /// first, so a model it held isn't left out of rotation; the claim stays
+    /// with its caller, and dropping it finds no rest to release.
+    pub(crate) fn clear(&mut self, auths: &mut BTreeMap<String, Entry>) {
+        for ((id, _), rest) in std::mem::take(&mut self.rests) {
+            if let Some(Claim {
+                lease: Some((until, saved)),
+                ..
+            }) = rest.claim
+                && let Some(entry) = auths.get_mut(&id)
+            {
+                unlease(Arc::make_mut(&mut entry.auth), until, saved);
+            }
+        }
+    }
+
     /// Forgets credential `id`'s rests that reached the provider's reset.
     fn forget_ended(&mut self, id: &str, now: Timestamp) {
         for scope in self.scopes(id) {

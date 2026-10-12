@@ -76,20 +76,73 @@ pub const DEFAULT_CODEX_PLAN_TYPE: &str = "free";
 /// in name order. Files that can't be read or used are skipped; those with
 /// an invalid setting are logged by name.
 pub fn synthesize_file_auths(ctx: &SynthesisContext) -> Vec<Auth> {
-    let mut out = Vec::new();
     if ctx.auth_dir.as_os_str().is_empty() {
-        return out;
+        return Vec::new();
     }
     let Ok(entries) = fs::read_dir(&ctx.auth_dir) else {
-        return out;
+        return Vec::new();
     };
-    let mut names: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| !kind.is_dir()))
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| open_ferry_translate::go::to_lower(name).ends_with(".json"))
-        .collect();
+    // An entry the iterator fails on is skipped, and the rest are listed.
+    let names = json_names(
+        entries.map(|entry| entry.map(|entry| entry_name(&entry))),
+        false,
+    )
+    .unwrap_or_default();
+    synthesize_named(ctx, names)
+}
+
+/// Not upstream's: [`synthesize_file_auths`] that says when the directory
+/// itself couldn't be listed (missing, not a directory, no permission, or
+/// its enumeration failing part-way), where that one lists what it could.
+/// An empty directory name is an empty list, as there. A file that can't be
+/// read or used is still skipped.
+///
+/// # Errors
+/// The directory couldn't be opened, or reading its entries failed.
+pub fn try_synthesize_file_auths(ctx: &SynthesisContext) -> std::io::Result<Vec<Auth>> {
+    if ctx.auth_dir.as_os_str().is_empty() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(&ctx.auth_dir)?;
+    let names = json_names(
+        entries.map(|entry| entry.map(|entry| entry_name(&entry))),
+        true,
+    )?;
+    Ok(synthesize_named(ctx, names))
+}
+
+/// The name of a listed entry that is a file with a UTF-8 name.
+fn entry_name(entry: &fs::DirEntry) -> Option<String> {
+    if !entry.file_type().is_ok_and(|kind| !kind.is_dir()) {
+        return None;
+    }
+    entry.file_name().into_string().ok()
+}
+
+/// The `*.json` names among `entries`, sorted. An entry the enumeration
+/// failed on ends the listing with its error when `strict`, and is skipped
+/// otherwise.
+fn json_names(
+    entries: impl Iterator<Item = std::io::Result<Option<String>>>,
+    strict: bool,
+) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(Some(name)) => names.push(name),
+            Ok(None) => {}
+            Err(error) if strict => return Err(error),
+            Err(_) => {}
+        }
+    }
+    names.retain(|name| open_ferry_translate::go::to_lower(name).ends_with(".json"));
     names.sort();
+    Ok(names)
+}
+
+/// The records of the files `names` in the context's auth directory.
+fn synthesize_named(ctx: &SynthesisContext, names: Vec<String>) -> Vec<Auth> {
+    let mut out = Vec::new();
     for name in names {
         let full = join(&ctx.auth_dir, Path::new(&name));
         let Ok(data) = read_capped(&full) else {
@@ -467,6 +520,50 @@ mod tests {
         assert!(synthesize_file_auths(&ctx(Path::new(""))).is_empty());
         let dir = tempfile::tempdir().unwrap();
         assert!(synthesize_file_auths(&ctx(&dir.path().join("missing"))).is_empty());
+    }
+
+    #[test]
+    fn a_directory_that_cant_be_listed_is_an_error_to_the_fallible_listing() {
+        use super::try_synthesize_file_auths;
+        assert!(
+            try_synthesize_file_auths(&ctx(Path::new("")))
+                .unwrap()
+                .is_empty()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert!(try_synthesize_file_auths(&ctx(&dir.path().join("missing"))).is_err());
+        // A regular file where the directory should be.
+        let file = dir.path().join("not-a-dir");
+        fs::write(&file, b"x").unwrap();
+        assert!(try_synthesize_file_auths(&ctx(&file)).is_err());
+        assert!(synthesize_file_auths(&ctx(&file)).is_empty());
+        // A directory that lists, with a file that is skipped, is Ok.
+        fs::write(dir.path().join("empty.json"), b"").unwrap();
+        assert!(
+            try_synthesize_file_auths(&ctx(dir.path()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_listing_that_fails_part_way_is_an_error_to_the_strict_policy_only() {
+        use super::json_names;
+        let entries = || {
+            vec![
+                Ok(Some("b.json".to_owned())),
+                Ok(None),
+                Ok(Some("note.txt".to_owned())),
+                Err(std::io::Error::other("the enumeration failed")),
+                Ok(Some("a.JSON".to_owned())),
+            ]
+            .into_iter()
+        };
+        assert!(json_names(entries(), true).is_err());
+        assert_eq!(
+            json_names(entries(), false).unwrap(),
+            ["a.JSON".to_owned(), "b.json".to_owned()]
+        );
     }
 
     #[test]

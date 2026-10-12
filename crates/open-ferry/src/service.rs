@@ -152,7 +152,7 @@ use std::time::Duration;
 use chrono::Utc;
 use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
 use open_ferry_core::auth::synthesizer::file::{
-    apply_config_attributes, synthesize_auth_file, synthesize_file_auths,
+    apply_config_attributes, synthesize_auth_file, synthesize_file_auths, try_synthesize_file_auths,
 };
 use open_ferry_core::auth::synthesizer::{
     StableIdGenerator, SynthesisContext, synthesize_config_auths,
@@ -804,7 +804,7 @@ impl Service {
             Arc::clone(&registry) as _,
             Some(Arc::clone(&store) as _),
         );
-        let observability = observability::build(&config, &config_path);
+        let observability = observability::build(&config, &config_path, log_level.file_log());
         manager.set_gate(gate.clone());
         manager.set_error_events(observability.usage.error_events());
         let state = AppState::new(
@@ -940,6 +940,65 @@ impl Service {
             }
         }
         self.load_file_auths();
+    }
+
+    /// Not upstream's: applies the config that [`reload_from_disk`] had to
+    /// defer because the gate was closed, now that it is open, and reads the
+    /// credentials of the auth directory it names before returning. With
+    /// nothing deferred it only reads them again. Unlike a watcher's reload,
+    /// it says whether the directory the config names is the one the service
+    /// and the store now use: `apply_config` only logs a change it couldn't
+    /// make, and a resume must not serve the old directory's credentials as
+    /// the new config's. The credentials whose file is gone (deleted while
+    /// this worker was handed over) are unregistered before the rest is read.
+    ///
+    /// [`reload_from_disk`]: Self::reload_from_disk
+    async fn apply_deferred(
+        &mut self,
+        config_path: &Path,
+        events: &mut Option<mpsc::Receiver<WatchEvent>>,
+    ) -> Result<(), String> {
+        if let Some((config, sha256)) = self.deferred_config.take() {
+            let watching = self.apply_config(config, sha256, config_path).await;
+            self.follow(watching, events);
+        }
+        let named = self
+            .config
+            .resolve_auth_dir()
+            .map(absolute_dir)
+            .map_err(|error| format!("the config's auth directory: {error}"))?;
+        if named != self.auth_dir || self.store.base_dir() != named {
+            return Err(format!(
+                "the auth directory {} couldn't be taken into use",
+                named.display()
+            ));
+        }
+        // Listed before anything is unregistered or acknowledged: a
+        // directory that can't be listed (replaced by a file, no
+        // permission) must fail the resume, not look like an empty one.
+        let listed = try_synthesize_file_auths(&self.synthesis_context()).map_err(|error| {
+            format!(
+                "the auth directory {} couldn't be read: {error}",
+                named.display()
+            )
+        })?;
+        self.unregister_vanished_file_auths();
+        self.register_file_auths(listed);
+        Ok(())
+    }
+
+    /// Unregisters the file credentials whose file no longer exists.
+    fn unregister_vanished_file_auths(&mut self) {
+        let gone: Vec<(PathBuf, String)> = self
+            .file_auths
+            .iter()
+            .filter(|(path, _)| matches!(path.try_exists(), Ok(false)))
+            .map(|(path, id)| (path.clone(), id.clone()))
+            .collect();
+        for (path, id) in gone {
+            self.file_auths.remove(&path);
+            self.remove(&id);
+        }
     }
 
     /// Not upstream's: a standby's config, read again at take over (L9.1),
@@ -1306,8 +1365,13 @@ impl Service {
 
     /// Registers every credential file in the auth directory.
     fn load_file_auths(&mut self) {
+        self.register_file_auths(synthesize_file_auths(&self.synthesis_context()));
+    }
+
+    /// Registers `auths`, the records of the files in the auth directory.
+    fn register_file_auths(&mut self, auths: Vec<Auth>) {
         let rules = self.rules();
-        for auth in synthesize_file_auths(&self.synthesis_context()) {
+        for auth in auths {
             let path = PathBuf::from(auth.attribute("path").unwrap_or_default());
             let id = auth.id.clone();
             if self.upsert(auth, &rules) && !path.as_os_str().is_empty() {
@@ -2333,6 +2397,37 @@ self-update:
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
+    }
+
+    // Not upstream's: a resume's `apply_deferred` fails when the auth
+    // directory it names, unchanged, can no longer be listed (here replaced
+    // by a regular file), and neither forgets the credentials it had nor
+    // takes the empty listing for the directory's. No watcher runs here to
+    // hold the directory, so it can be replaced on Windows too.
+    #[tokio::test]
+    async fn apply_deferred_fails_for_an_auth_dir_that_cant_be_listed() {
+        let root = tempfile::tempdir().unwrap();
+        let auth_dir = root.path().join("auth");
+        std::fs::create_dir(&auth_dir).unwrap();
+        let path = codex_file(&auth_dir, "codex-a.json", "");
+        let mut service = service(&auth_dir, "");
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+
+        std::fs::remove_dir_all(&auth_dir).unwrap();
+        std::fs::write(&auth_dir, "a file").unwrap();
+        let error = service
+            .apply_deferred(Path::new(""), &mut None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("couldn't be read"), "{error}");
+        assert!(
+            service.manager.get(&id).is_some(),
+            "the credential was dropped"
+        );
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+        assert_eq!(service.manager.list().len(), 1);
     }
 
     #[tokio::test]

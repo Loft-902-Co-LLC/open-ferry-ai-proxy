@@ -1767,6 +1767,7 @@ dependencies = [
  "futures-util",
  "hyper",
  "hyper-util",
+ "libc",
  "open-ferry-core",
  "open-ferry-dashboard",
  "open-ferry-management",

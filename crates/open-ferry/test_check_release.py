@@ -26,13 +26,14 @@ class PositiveControl(unittest.TestCase):
                 capture_output=True, text=True, check=False,
             )
 
-    REQUIRED = (
-        b"refresh.after_rotate", b"refresh.before_save", b"persist.before", b"state.fail:",
-        b".blue-green-test",
-    )
     WORKER = (
         b"events.log", b"test-marker", b"x-open-ferry-test-marker",
         b"handover.written", b"handover_failed",
+    )
+    FLAGS = (b"test-data-dir", b"test-endpoint")
+    REQUIRED = (
+        b"refresh.after_rotate", b"refresh.before_save", b"persist.before", b"state.fail:",
+        b".blue-green-test", *WORKER, *FLAGS,
     )
 
     def test_each_required_hook_is_required(self):
@@ -50,8 +51,8 @@ class PositiveControl(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("positive control rejected:", result.stdout)
 
-    def test_each_worker_seam_string_fails_a_feature_off_artifact(self):
-        for text in (b".blue-green-test", *self.WORKER):
+    def test_each_worker_seam_and_test_flag_fails_a_feature_off_artifact(self):
+        for text in (b".blue-green-test", *self.WORKER, *self.FLAGS):
             with self.subTest(text=text):
                 result = self.check_artifact(b"nothing here\n" + text, feature=False)
                 self.assertNotEqual(result.returncode, 0)

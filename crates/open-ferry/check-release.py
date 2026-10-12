@@ -18,17 +18,16 @@ FORBIDDEN = (
     b"take_over.before_reload", b"rename.after_first", b"journal.before:",
     b"journal.after:", b"journal.fail:", b"state.fail:", b"disk.commit.before_replace",
     b".blue-green-test", b"events.log", b"test-marker", b"x-open-ferry-test-marker",
-    b"handover.written", b"handover_failed",
+    b"handover.written", b"handover_failed", b"test-data-dir", b"test-endpoint",
 )
 
-# What a feature build must carry, or the scan above proves nothing. The
-# worker's own seams (`events.log`, `test-marker`, the marker header,
-# `handover.written`, `handover_failed`) belong here too, but only once the
-# binary's entry point calls the worker: until then the linker drops them from
-# a feature build, and the scan for them above can't be shown to catch them.
+# What a feature build must carry, or the scan above proves nothing: the core's
+# hooks, the worker's seams (which `-worker` links in) and the supervisor's
+# test-only flags.
 REQUIRED = (
     b"refresh.after_rotate", b"refresh.before_save", b"persist.before", b"state.fail:",
-    b".blue-green-test",
+    b".blue-green-test", b"events.log", b"test-marker", b"x-open-ferry-test-marker",
+    b"handover.written", b"handover_failed", b"test-data-dir", b"test-endpoint",
 )
 
 

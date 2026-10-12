@@ -191,6 +191,10 @@ fn the_supervisor_and_worker_flags_refuse_bad_usage() {
         "-worker and -supervise can't be used together\n",
     );
     refused(&["-system"], "-system needs -supervise\n");
+    refused(
+        &["-supervise", "-password", "pw"],
+        "-password can't be used with -supervise\n",
+    );
     let help = run(dir.path(), &["-h"]);
     assert_eq!(code(&help), Some(0));
     let usage = String::from_utf8(help.stderr).unwrap();
