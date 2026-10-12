@@ -238,6 +238,9 @@ fn off_then_on_then_off_after_an_admission_while_off_cancels() {
 /// off, so this does not rest on timing.
 #[test]
 fn off_while_waiting_for_sign_ins_cancels() {
+    if lacks(Cap::SigninsPending) {
+        return;
+    }
     let fx = Fx::new();
     fx.stage(B, "B");
     fx.fault("signins-pending", "3@A");

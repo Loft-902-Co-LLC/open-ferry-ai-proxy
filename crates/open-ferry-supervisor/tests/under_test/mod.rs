@@ -62,7 +62,7 @@ pub const POLL: Duration = Duration::from_millis(20);
 
 /// Writes a worker binary the supervisor can execute: on Unix a file made by
 /// `fs::write` has no execute bit, and the worker would not start.
-fn write_executable(path: &Path, bytes: &[u8]) {
+pub fn write_executable(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
     #[cfg(unix)]
     {
@@ -71,9 +71,65 @@ fn write_executable(path: &Path, bytes: &[u8]) {
     }
 }
 
-/// The worker under test (L9.14). 2c: the real worker's path goes here.
+/// Which worker the tests run against (L9.14). The binary is not named here:
+/// it is whichever of the two the including test crate was built with. The
+/// supervisor crate's tests have `fake_worker` (and `worker_probe`); the
+/// `open-ferry` crate's have the real `open-ferry` and neither of the others.
+/// Cargo sets `CARGO_BIN_EXE_<name>` for a test crate only for its own
+/// package's binaries, so the choice needs no flag that could be set wrongly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Fake,
+    Real,
+}
+
+const FAKE_WORKER: Option<&str> = option_env!("CARGO_BIN_EXE_fake_worker");
+const REAL_WORKER: Option<&str> = option_env!("CARGO_BIN_EXE_open-ferry");
+const WORKER_PROBE: Option<&str> = option_env!("CARGO_BIN_EXE_worker_probe");
+
+pub fn kind() -> Kind {
+    match (FAKE_WORKER, REAL_WORKER) {
+        (Some(_), _) => Kind::Fake,
+        (None, Some(_)) => Kind::Real,
+        (None, None) => panic!("neither fake_worker nor open-ferry is a binary of this crate"),
+    }
+}
+
+/// What the worker under test can do. A test needing one the worker lacks
+/// returns at its start with `lacks`: it is skipped by capability, never by
+/// the worker's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cap {
+    /// The fake-only `send-fail` fault (a send to the supervisor fails).
+    SendFail,
+    /// The fake-only `signins-pending` fault (a status reports pending sign-ins).
+    SigninsPending,
+    /// The fake-only `spawn-grandchild` fault.
+    SpawnGrandchild,
+    /// `worker_probe`, the stand-in with modes (`Fx::stage_probe`).
+    Probe,
+}
+
+pub fn has(cap: Cap) -> bool {
+    match cap {
+        Cap::SendFail | Cap::SigninsPending | Cap::SpawnGrandchild => kind() == Kind::Fake,
+        Cap::Probe => WORKER_PROBE.is_some(),
+    }
+}
+
+/// True (after saying so) when the worker under test lacks `cap`: the caller
+/// returns, and the test is skipped.
+pub fn lacks(cap: Cap) -> bool {
+    let lacking = !has(cap);
+    if lacking {
+        eprintln!("skipped: the {:?} worker has no {cap:?}", kind());
+    }
+    lacking
+}
+
+/// The worker under test (L9.14).
 pub fn worker_binary() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_fake_worker"))
+    Path::new(FAKE_WORKER.or(REAL_WORKER).expect("a worker binary"))
 }
 
 /// The bytes the artifact of `version` has: the worker binary and a trailer
@@ -157,7 +213,11 @@ fn with_trailer(base: &[u8], version: &str) -> Vec<u8> {
 /// Its mode is read from `<config>/mode`. 2c has no use for it.
 fn probe_bytes(version: &str) -> Vec<u8> {
     static BASE: OnceLock<Vec<u8>> = OnceLock::new();
-    let base = BASE.get_or_init(|| lean(Path::new(env!("CARGO_BIN_EXE_worker_probe"))));
+    let base = BASE.get_or_init(|| {
+        lean(Path::new(WORKER_PROBE.expect(
+            "this crate has no worker_probe (check `has(Cap::Probe)`)",
+        )))
+    });
     with_trailer(base, version)
 }
 
@@ -385,6 +445,11 @@ async fn child_main(fixture: PathBuf) -> String {
     let defaults = Timings::default();
     let timings = Timings {
         load: ms(&spec, "load", defaults.load.as_millis() as u64),
+        active_load: ms(
+            &spec,
+            "active_load",
+            defaults.active_load.as_millis() as u64,
+        ),
         handover: ms(&spec, "handover", defaults.handover.as_millis() as u64),
         ready: ms(&spec, "ready", defaults.ready.as_millis() as u64),
         resume: ms(&spec, "resume", defaults.resume.as_millis() as u64),
@@ -507,6 +572,17 @@ fn supervisor_child() {
     std::fs::write(fixture.join("child.exit"), outcome).unwrap();
 }
 
+/// The name the test harness lists `supervisor_child` under, which the parent
+/// passes with `--exact`. This module is the crate root's `under_test` when a
+/// test file declares it, and a deeper module when another crate includes the
+/// test file with `#[path]`, so the name is the module's own path without the
+/// crate's name.
+fn child_test_name() -> String {
+    let path = module_path!();
+    let inside = path.split_once("::").map_or(path, |(_, rest)| rest);
+    format!("{inside}::supervisor_child")
+}
+
 // ---- the parent -----------------------------------------------------------
 
 /// Tests that start a supervisor take turns: on Unix the endpoint is one per
@@ -529,7 +605,7 @@ fn gate() -> &'static Gate {
 pub struct Permit;
 
 impl Permit {
-    fn take() -> Permit {
+    pub fn take() -> Permit {
         let limit = if cfg!(windows) { 4 } else { 1 };
         let mut taken = gate().taken.lock().unwrap();
         while *taken >= limit {
@@ -550,7 +626,7 @@ impl Drop for Permit {
 /// A fresh directory under a path the data directory's trust check accepts
 /// (the target directory on Windows, or `OFP_TEST_SCRATCH` when set: CI's
 /// runner, whose drive root is owned by NETWORK SERVICE; `$HOME` elsewhere).
-fn scratch() -> tempfile::TempDir {
+pub fn scratch() -> tempfile::TempDir {
     if cfg!(windows) {
         match std::env::var_os("OFP_TEST_SCRATCH") {
             Some(root) => tempfile::tempdir_in(root).unwrap(),
@@ -559,6 +635,76 @@ fn scratch() -> tempfile::TempDir {
     } else {
         tempfile::tempdir_in(std::env::var_os("HOME").expect("HOME is set")).unwrap()
     }
+}
+
+// ---- isolation ------------------------------------------------------------
+
+/// A loopback TCP port that is bound but not listening, held for the life of
+/// the test process: a connect to it is refused at once and reaches nothing.
+/// Update checks are pointed here (`isolate`).
+pub fn sink_port() -> u16 {
+    static SINK: OnceLock<(socket2::Socket, u16)> = OnceLock::new();
+    SINK.get_or_init(|| {
+        let socket =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        socket.bind(&loopback.into()).expect("bind the sink");
+        let port = socket
+            .local_addr()
+            .unwrap()
+            .as_socket()
+            .expect("an inet address")
+            .port();
+        (socket, port)
+    })
+    .1
+}
+
+/// Whether the variable `name` may not reach a child: one that identifies a
+/// client or an account (ANTHROPIC*, CLAUDE*, OPENAI*, CODEX*), a proxy, or
+/// one that overrides open-ferry's update or management settings.
+fn withheld(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["ANTHROPIC", "CLAUDE", "OPENAI", "CODEX", "OPEN_FERRY_"]
+        .iter()
+        .any(|prefix| upper.starts_with(prefix))
+        || upper.ends_with("_PROXY")
+        || upper == "PROXY"
+        || upper == "MANAGEMENT_PASSWORD"
+        || upper == "WRITABLE_PATH"
+}
+
+/// Makes `command` run isolated: none of the variables `withheld` names
+/// reaches it, and its update checks and installers go to the sink. A test
+/// that needs one of them sets it after this, on purpose.
+pub fn isolate(command: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(withheld) {
+            command.env_remove(&name);
+        }
+    }
+    let sink = format!("http://127.0.0.1:{}/releases", sink_port());
+    command
+        .env("OPEN_FERRY_UPDATE_BASE_URL", &sink)
+        .env("OPEN_FERRY_INSTALL_BASE_URL", &sink);
+}
+
+/// A minimal valid open-ferry config for the real worker: no providers, the
+/// auth directory under `dir`, `127.0.0.1` only, on `port` (0 for none to
+/// name), with the self-update `mode` and the checks a month apart.
+pub fn config_text(dir: &Path, port: u16, mode: &str) -> String {
+    let auth = dir.join("auth");
+    std::fs::create_dir_all(&auth).unwrap();
+    format!(
+        "host: 127.0.0.1\nport: {port}\nauth-dir: {}\nself-update:\n  mode: {mode}\n  check-every: 720h\n",
+        yaml_single_quoted(&auth.display().to_string())
+    )
+}
+
+/// `text` as a single-quoted YAML scalar: backslashes stay as they are and
+/// each `'` is doubled.
+pub fn yaml_single_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 /// Where the fixture's supervisor binds its endpoint, and where the fixture connects.
@@ -616,6 +762,8 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 #[derive(Clone, Debug)]
 pub struct Tm {
     pub load: u64,
+    /// The wait for an active worker's `loaded` after its handshake.
+    pub active_load: u64,
     pub handover: u64,
     pub ready: u64,
     pub resume: u64,
@@ -635,6 +783,7 @@ impl Default for Tm {
     fn default() -> Self {
         Tm {
             load: 30_000,
+            active_load: 180_000,
             handover: 30_000,
             ready: 30_000,
             resume: 15_000,
@@ -653,7 +802,7 @@ impl Default for Tm {
 impl Tm {
     fn json(&self) -> Value {
         json!({
-            "load": self.load, "handover": self.handover, "ready": self.ready,
+            "load": self.load, "active_load": self.active_load, "handover": self.handover, "ready": self.ready,
             "resume": self.resume, "watch": self.watch, "drain": self.drain,
             "signin_wait": self.signin_wait, "stop": self.stop,
             "status_every": self.status_every, "install_retry": self.install_retry,
@@ -732,6 +881,17 @@ fn peek_exit(pid: u32) -> Option<std::process::ExitStatus> {
 }
 
 impl Sup {
+    /// Takes a supervisor the test started itself (a real `open-ferry -supervise`)
+    /// under the guard that ends it by its handle. On Unix the child must lead
+    /// its own process group (`process_group(0)`), as `Fx::spawn`'s does.
+    pub fn adopt(child: std::process::Child, root: &Path) -> Sup {
+        Sup {
+            child: Some(child),
+            #[cfg(unix)]
+            seen: None,
+            root: root.to_owned(),
+        }
+    }
     pub fn pid(&self) -> u32 {
         self.child.as_ref().unwrap().id()
     }
@@ -919,7 +1079,12 @@ impl Fx {
         };
         std::fs::create_dir_all(fx.root().join("bin")).unwrap();
         std::fs::create_dir_all(fx.data().join(".blue-green-test")).unwrap();
-        std::fs::write(fx.root().join("config.yaml"), b"").unwrap();
+        // The fake ignores its config; the real worker reads one.
+        let config = match kind() {
+            Kind::Fake => String::new(),
+            Kind::Real => config_text(fx.root(), 0, "auto"),
+        };
+        std::fs::write(fx.root().join("config.yaml"), config).unwrap();
         write_executable(&fx.installed(), &artifact_bytes(A));
         fx.stage(A, "A");
         fx
@@ -1149,16 +1314,18 @@ impl Fx {
             .unwrap();
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
-            .args([
-                "--exact",
-                "under_test::supervisor_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("OFP_PT_FIXTURE", self.root())
+            .args(["--exact", &child_test_name(), "--ignored", "--nocapture"])
             .stdin(std::process::Stdio::null())
             .stdout(output.try_clone().unwrap())
             .stderr(output);
+        // The fixture is its working directory, and the workers inherit it:
+        // the logs directory is picked as the first writable `logs` in the
+        // working directory, so from the package root a stray
+        // `crates/open-ferry/logs` would take the logs and the usage ledger.
+        command.current_dir(self.root());
+        // The workers inherit what it has.
+        isolate(&mut command);
+        command.env("OFP_PT_FIXTURE", self.root());
         // Its own process group, so that `Sup`'s drop can end the workers too.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -1286,24 +1453,13 @@ impl Fx {
     }
 
     fn ask(&self, request: EndpointRequest) -> Option<EndpointReply> {
-        let root = self.root().to_owned();
         match self.identity() {
             Ok(()) => {}
             // Not the child's record (yet): nothing is asked, so nothing is trusted.
             Err(Refusal::Wait(_)) => return None,
             Err(foreign) => panic!("{}", foreign.why()),
         }
-        runtime().block_on(async {
-            tokio::time::timeout(Duration::from_secs(20), async {
-                let mut channel = Self::open(&root).await.ok()?;
-                channel.send(&request).await.ok()?;
-                let frame: Frame<EndpointReply> = channel.receive().await.ok()??;
-                Some(frame.message)
-            })
-            .await
-            .ok()
-            .flatten()
-        })
+        endpoint_ask(self.root(), request)
     }
 
     /// The port of the main listener the child bound.
@@ -1369,30 +1525,7 @@ Host: test
     }
 
     fn get_on(&self, listener: &str, path: &str) -> Option<(u16, Option<String>)> {
-        use std::io::{Read, Write};
-        let port = self.port(listener)?;
-        let wait = Duration::from_secs(5);
-        let mut stream = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            wait,
-        )
-        .ok()?;
-        stream.set_read_timeout(Some(wait)).ok()?;
-        write!(
-            stream,
-            "GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
-        )
-        .ok()?;
-        let mut text = String::new();
-        let _ = stream.read_to_string(&mut text);
-        let status = text.lines().next()?.split(' ').nth(1)?.parse().ok()?;
-        let marker = text.lines().find_map(|line| {
-            line.to_ascii_lowercase()
-                .starts_with("x-open-ferry-test-marker:")
-                .then(|| line.split_once(':').map(|(_, v)| v.trim().to_owned()))
-                .flatten()
-        });
-        Some((status, marker))
+        http_get(self.port(listener)?, path)
     }
 
     /// The status snapshot, `None` when the endpoint cannot be reached.
@@ -1990,6 +2123,68 @@ Host: test
             "the third supervisor changed the journal"
         );
         self.assert_history(id, old);
+    }
+}
+
+/// One plain HTTP request to `127.0.0.1:port`: the status code and the marker
+/// header (`x-open-ferry-test-marker`) of whichever worker answered. `None`
+/// when nothing answers within a few seconds, or the answer is not HTTP.
+pub fn http_get(port: u16, path: &str) -> Option<(u16, Option<String>)> {
+    use std::io::{Read, Write};
+    let wait = Duration::from_secs(5);
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        wait,
+    )
+    .ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut text = String::new();
+    let _ = stream.read_to_string(&mut text);
+    let status = text.lines().next()?.split(' ').nth(1)?.parse().ok()?;
+    let marker = text.lines().find_map(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("x-open-ferry-test-marker:")
+            .then(|| line.split_once(':').map(|(_, v)| v.trim().to_owned()))
+            .flatten()
+    });
+    Some((status, marker))
+}
+
+/// One request to the endpoint of the supervisor of the fixture at `root`,
+/// and its first reply; `None` when nothing answers within 20 seconds. It
+/// trusts nothing: a caller that must know whose supervisor answers checks
+/// `Fx::identity` first (`Fx::ask` does).
+pub fn endpoint_ask(root: &Path, request: EndpointRequest) -> Option<EndpointReply> {
+    runtime().block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut channel = Fx::open(root).await.ok()?;
+            channel.send(&request).await.ok()?;
+            let frame: Frame<EndpointReply> = channel.receive().await.ok()??;
+            Some(frame.message)
+        })
+        .await
+        .ok()
+        .flatten()
+    })
+}
+
+/// The text of `-test-endpoint` that puts a real `open-ferry -supervise` on the
+/// endpoint `client_location(root)` connects to. On Windows the pipe is derived
+/// from the data directory, so there is nothing to name: `None`.
+pub fn endpoint_flag(root: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        own_endpoint(root).map(|_| root.join("e").display().to_string())
+    }
+    #[cfg(windows)]
+    {
+        let _ = root;
+        None
     }
 }
 

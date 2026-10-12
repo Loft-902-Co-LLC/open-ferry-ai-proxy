@@ -67,6 +67,31 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
 
+      # The blue-green switch's test seams (worker faults, barriers, the
+      # supervisor's isolation flags) are compiled only with this feature.
+      # The supervisor's process tests run on it: against its fake worker,
+      # and open-ferry's against the real one. Each process runs with the
+      # environment cleaned, on its own data directory and endpoint, and its
+      # update checks go to a closed loopback port.
+      - name: Clippy with the blue-green test seams
+        run: cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
+
+      - name: Test with the blue-green test seams
+        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-fail-fast
+
+      # What the release workflow ships carries none of those seams: build it
+      # as it ships (the feature off) and scan it for their strings.
+      - name: Release builds hold no test seams
+        shell: bash
+        env:
+          PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --message-format=json > "$RUNNER_TEMP/supervisor-build.json"
+          "$PYTHON" -I crates/open-ferry-supervisor/check-release.py "$RUNNER_TEMP/supervisor-build.json"
+          cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --message-format=json > "$RUNNER_TEMP/open-ferry-build.json"
+          "$PYTHON" -I crates/open-ferry/check-release.py "$RUNNER_TEMP/open-ferry-build.json"
+
       - name: Docs
         run: cargo doc --no-deps --workspace --locked
         env:

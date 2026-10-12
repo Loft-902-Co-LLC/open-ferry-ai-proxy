@@ -32,5 +32,6 @@ path = "src/bin/fake_worker.rs"
 required-features = ["blue-green-test"]
 
 [dev-dependencies]
+socket2 = "0.6.5"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["test-util"] }

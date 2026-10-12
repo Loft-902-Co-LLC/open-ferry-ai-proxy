@@ -91,6 +91,9 @@ fn row_a_b_exits_before_it_loads() {
 
 #[test]
 fn row_a_b_never_greets_within_the_load_timeout() {
+    if lacks(Cap::Probe) {
+        return;
+    }
     let fx = Fx::new();
     fx.stage_probe(B, "stall");
     let tm = Tm {
@@ -156,6 +159,9 @@ fn row_a_a_missing_binary_is_the_environment() {
 
 #[test]
 fn row_b_b_needs_a_newer_supervisor() {
+    if lacks(Cap::Probe) {
+        return;
+    }
     let fx = Fx::new();
     fx.stage_probe(B, "min2");
     let _sup = fx.start(&Tm::default());
@@ -189,6 +195,9 @@ fn row_b_b_needs_a_newer_supervisor() {
 /// the version of the supervisor that decided it.
 #[test]
 fn row_b_the_state_file_records_needs_restart() {
+    if lacks(Cap::Probe) {
+        return;
+    }
     let fx = Fx::new();
     fx.stage_probe(B, "min2");
     let _sup = fx.start(&Tm::default());
@@ -267,6 +276,9 @@ fn row_c_a_cancel_while_a_is_quiescing_is_not_a_result() {
 
 #[test]
 fn row_d_a_exits_during_the_hand_over() {
+    if lacks(Cap::SendFail) {
+        return;
+    }
     let fx = Fx::new();
     fx.stage(B, "B");
     // The fake's `exit-after=handed_over` exits after it sent `handed_over`, so
@@ -393,6 +405,9 @@ fn row_e_b_reports_take_failed() {
 
 #[test]
 fn row_e_b_exits_before_ready() {
+    if lacks(Cap::SendFail) {
+        return;
+    }
     let fx = Fx::new();
     fx.stage(B, "B");
     // The fake's `exit-after=ready` exits after it sent `ready`. B is made to
