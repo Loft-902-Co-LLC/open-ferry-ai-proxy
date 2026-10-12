@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc::UnboundedReceiver;
+
 use open_ferry_update::data_dir::DataDir;
 use open_ferry_update::journal::{
     Artifact, Installed, JOURNAL_FILE, Journal, JournalError, JournalLoad, JournalStore, Outcome,
@@ -38,6 +40,7 @@ use open_ferry_update::staging::{StageExclusiveError, stage_exclusive_checked};
 use open_ferry_update::state::SwitchRecord;
 
 use crate::clock::Clock;
+use crate::core::Command;
 use crate::driver::{Driver, Registry, SpawnRequest, WorkerId};
 use crate::endpoint::{EndpointError, Identity, Location, Server, ServiceKind};
 use crate::host::Host;
@@ -142,11 +145,15 @@ pub enum StartupError {
     /// Another supervisor holds `supervisor.lock`.
     AlreadyRunning,
     Io(io::Error),
+    /// A stop arrived while startup waited for the update lock (only
+    /// [`start_watching`] returns it): nothing was started.
+    Stopped,
 }
 
 impl std::fmt::Display for StartupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Stopped => write!(f, "stopped while waiting for the update lock"),
             Self::AlreadyRunning => {
                 write!(f, "another supervisor already runs on this data directory")
             }
@@ -163,20 +170,107 @@ impl From<io::Error> for StartupError {
     }
 }
 
+/// What the supervisor's caller may send while startup waits for the update
+/// lock, before the core exists to read commands. A `Command::Stop` ends the
+/// wait ([`StartupError::Stopped`]); any other command is kept, in order, and
+/// handed back by [`EarlyCommands::into_kept`] for the core.
+pub struct EarlyCommands<'a> {
+    commands: &'a mut UnboundedReceiver<Command>,
+    kept: Vec<Command>,
+    closed: bool,
+}
+
+impl<'a> EarlyCommands<'a> {
+    pub fn new(commands: &'a mut UnboundedReceiver<Command>) -> Self {
+        Self {
+            commands,
+            kept: Vec::new(),
+            closed: false,
+        }
+    }
+
+    /// The commands taken so far that were not a stop, followed by those still
+    /// queued, in the order they were sent. Empty when none were taken, in
+    /// which case the queue is left as it is.
+    pub fn into_kept(mut self) -> Vec<Command> {
+        if !self.kept.is_empty() {
+            while let Ok(command) = self.commands.try_recv() {
+                self.kept.push(command);
+            }
+        }
+        self.kept
+    }
+
+    /// Waits `poll`, taking the commands that arrive meanwhile. `true` when a
+    /// stop was among them.
+    async fn pause(&mut self, poll: Duration) -> bool {
+        let until = tokio::time::Instant::now() + poll;
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until(until) => return false,
+                command = self.commands.recv(), if !self.closed => match command {
+                    Some(Command::Stop) => return true,
+                    Some(other) => self.kept.push(other),
+                    None => self.closed = true,
+                },
+            }
+        }
+    }
+}
+
+/// Why waiting for the update lock ended without it.
+#[derive(Debug)]
+pub(crate) enum WaitError {
+    Io(io::Error),
+    /// A `Command::Stop` arrived during the wait.
+    Stopped,
+}
+
+impl From<io::Error> for WaitError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<WaitError> for io::Error {
+    fn from(error: WaitError) -> Self {
+        match error {
+            WaitError::Io(error) => error,
+            WaitError::Stopped => io::Error::new(
+                io::ErrorKind::Interrupted,
+                "stopped while waiting for the update lock",
+            ),
+        }
+    }
+}
+
+impl From<WaitError> for StartupError {
+    fn from(error: WaitError) -> Self {
+        match error {
+            WaitError::Io(error) => Self::Io(error),
+            WaitError::Stopped => Self::Stopped,
+        }
+    }
+}
+
 /// Waits for the update lock with no limit (T6). Warns, and calls the host,
-/// when the wait begins and then every `lock_warn_every`.
+/// when the wait begins and then every `lock_warn_every`. This wait does not
+/// see a stop: it is for a caller that has no command channel to watch.
 async fn wait_for_update_lock<H: Host>(
     cfg: &Config,
     host: &H,
 ) -> io::Result<open_ferry_update::data_dir::UpdateLock> {
-    wait_for_update_lock_in(cfg, host, true).await
+    Ok(wait_for_update_lock_in(cfg, host, true, None).await?)
 }
 
+/// The same wait, which ends with `WaitError::Stopped` when `early` is given
+/// and a stop arrives on it before the lock is held.
 async fn wait_for_update_lock_in<H: Host>(
     cfg: &Config,
     host: &H,
     create_dirs: bool,
-) -> io::Result<open_ferry_update::data_dir::UpdateLock> {
+    mut early: Option<&mut EarlyCommands<'_>>,
+) -> Result<open_ferry_update::data_dir::UpdateLock, WaitError> {
     let began = tokio::time::Instant::now();
     let mut next_warning = began;
     loop {
@@ -199,7 +293,14 @@ async fn wait_for_update_lock_in<H: Host>(
             host.waiting_for_update_lock(waited);
             next_warning = now + cfg.timings.lock_warn_every;
         }
-        tokio::time::sleep(cfg.timings.lock_poll).await;
+        match early.as_deref_mut() {
+            Some(early) => {
+                if early.pause(cfg.timings.lock_poll).await {
+                    return Err(WaitError::Stopped);
+                }
+            }
+            None => tokio::time::sleep(cfg.timings.lock_poll).await,
+        }
     }
 }
 
@@ -453,11 +554,13 @@ async fn disabled_recovery<H: Host>(
     host: &H,
     clock: &dyn Clock,
     why: String,
-) -> io::Result<Recovery> {
+    early: Option<&mut EarlyCommands<'_>>,
+) -> Result<Recovery, WaitError> {
     let mut notes = Vec::new();
-    let update_lock = match wait_for_update_lock_in(cfg, host, false).await {
+    let update_lock = match wait_for_update_lock_in(cfg, host, false, early).await {
         Ok(lock) => Some(Arc::new(lock)),
-        Err(error) => {
+        Err(WaitError::Stopped) => return Err(WaitError::Stopped),
+        Err(WaitError::Io(error)) => {
             let note = format!(
                 "could not safely open {} while switching is disabled: {error}; running the installed file without the update lock",
                 cfg.data.root().join("update.lock").display()
@@ -1138,14 +1241,15 @@ pub(crate) async fn recover<H: Host>(
     store: &JournalStore,
     clock: &dyn Clock,
     rules: &TrustRules,
-) -> io::Result<Recovery> {
+    early: Option<&mut EarlyCommands<'_>>,
+) -> Result<Recovery, WaitError> {
     let mut notes = Vec::new();
     let untrusted = untrusted_files(cfg, rules);
     if let Some(why) = untrusted {
-        return disabled_recovery(cfg, host, clock, why).await;
+        return disabled_recovery(cfg, host, clock, why, early).await;
     }
     let untrusted = None;
-    let update_lock = Arc::new(wait_for_update_lock(cfg, host).await?);
+    let update_lock = Arc::new(wait_for_update_lock_in(cfg, host, true, early).await?);
     let load = match store.load() {
         Ok(load) => load,
         Err(JournalError::Newer { found, .. }) => JournalLoad::Newer { found },
@@ -1286,6 +1390,21 @@ pub async fn start<H: Host, D: Driver>(
     registry: &mut Registry,
     clock: &dyn Clock,
 ) -> Result<Started, StartupError> {
+    start_watching(cfg, host, driver, registry, clock, None).await
+}
+
+/// [`start`], which also watches `early` while it waits for the update lock:
+/// a stop that arrives then ends the start with [`StartupError::Stopped`], with
+/// no worker started and no lock held. The wait is the only place a stop is
+/// seen; once the lock is held, the start runs on and a stop is for the core.
+pub async fn start_watching<H: Host, D: Driver>(
+    cfg: &Config,
+    host: &H,
+    driver: &D,
+    registry: &mut Registry,
+    clock: &dyn Clock,
+    early: Option<&mut EarlyCommands<'_>>,
+) -> Result<Started, StartupError> {
     let identity = Identity::current(cfg.kind)?;
     let rules = TrustRules::for_identity(&identity);
     let store = JournalStore::new(cfg.data.root());
@@ -1311,9 +1430,9 @@ pub async fn start<H: Host, D: Driver>(
         notes: recovery_notes,
     } = if let Some(why) = untrusted_dirs(cfg, &rules) {
         tracing::error!("switching is disabled: {why}");
-        disabled_recovery(cfg, host, clock, why).await?
+        disabled_recovery(cfg, host, clock, why, early).await?
     } else {
-        Box::pin(recover(cfg, host, &store, clock, &rules)).await?
+        Box::pin(recover(cfg, host, &store, clock, &rules, early)).await?
     };
     notes.extend(recovery_notes);
     let mut disabled = executed.disabled.or(untrusted);
@@ -1821,9 +1940,9 @@ pub async fn reenter<H: Host, D: Driver>(
                 .is_none()
                 .then(|| "the supervisor lock is not held".to_owned())
         }) {
-        disabled_recovery(cfg, host, clock, why).await?
+        disabled_recovery(cfg, host, clock, why, None).await?
     } else {
-        Box::pin(recover(cfg, host, &started.store, clock, &rules)).await?
+        Box::pin(recover(cfg, host, &started.store, clock, &rules, None)).await?
     };
     started.journal = executed.journal;
     started.journal_stale = executed.journal_stale;

@@ -346,6 +346,80 @@ fn flag_in_the_file(rig: &Rig) -> bool {
         .needs_restart
 }
 
+/// A stop while startup waits for the update lock: `supervise` returns
+/// `Stopped` with no worker spawned and the lock free afterwards.
+#[tokio::test]
+async fn a_stop_while_startup_waits_for_the_update_lock_stops_with_no_worker() {
+    let rig = rig();
+    std::fs::create_dir_all(rig.cfg.data.root()).unwrap();
+    let held = rig.cfg.data.try_lock().unwrap().expect("lock");
+    let driver = FakeDriver::default();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let sender = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx.send(Command::Stop).unwrap();
+    };
+    let (exit, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(
+            supervise(
+                &rig.cfg,
+                &rig.host,
+                &driver,
+                &SystemClock,
+                tx.clone(),
+                rx,
+                default_limit()
+            ),
+            sender
+        )
+    })
+    .await
+    .expect("the stop was not seen during the wait");
+    assert_eq!(exit.unwrap(), Exit::Stopped);
+    assert_eq!(driver.spawned.load(Ordering::SeqCst), 0);
+    drop(held);
+    assert!(
+        rig.cfg.data.try_lock().unwrap().is_some(),
+        "the update lock is not free"
+    );
+}
+
+/// A stop after the lock was taken is the core's: the worker that was started
+/// is stopped through the normal path.
+#[tokio::test]
+async fn a_stop_after_the_update_lock_is_taken_reaches_the_core_and_stops_the_worker() {
+    let rig = rig();
+    std::fs::create_dir_all(rig.cfg.data.root()).unwrap();
+    let held = rig.cfg.data.try_lock().unwrap().expect("lock");
+    let driver = FakeDriver::default();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let script = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(held);
+        until("the worker", || driver.spawned.load(Ordering::SeqCst) == 1).await;
+        tx.send(Command::Stop).unwrap();
+    };
+    let (exit, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(
+            supervise(
+                &rig.cfg,
+                &rig.host,
+                &driver,
+                &SystemClock,
+                tx.clone(),
+                rx,
+                default_limit()
+            ),
+            script
+        )
+    })
+    .await
+    .expect("finishes");
+    assert_eq!(exit.unwrap(), Exit::Stopped);
+    assert_eq!(driver.spawned.load(Ordering::SeqCst), 1);
+    assert_eq!(*driver.stopped.lock().unwrap(), vec![1], "stop_all ran");
+}
+
 #[tokio::test]
 async fn a_restart_at_the_same_version_keeps_needs_restart_and_shows_it() {
     let rig = rig();

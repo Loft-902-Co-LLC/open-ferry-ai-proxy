@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use open_ferry_supervisor::clock::SystemClock;
+use open_ferry_supervisor::core::Command;
 use open_ferry_supervisor::driver::{
     Driver, EventSender, Registry, SpawnError, SpawnRequest, WorkerPort,
 };
@@ -17,7 +18,9 @@ use open_ferry_supervisor::endpoint::{Location, ServiceKind};
 use open_ferry_supervisor::host::{Host, ModeSnapshot};
 use open_ferry_supervisor::process::ProcessIdentity;
 use open_ferry_supervisor::protocol::ListenerTopology;
-use open_ferry_supervisor::startup::{Config, StartupError, reenter, start};
+use open_ferry_supervisor::startup::{
+    Config, EarlyCommands, StartupError, reenter, start, start_watching,
+};
 use open_ferry_supervisor::timings::Timings;
 use open_ferry_update::data_dir::DataDir;
 use open_ferry_update::fetch::BoxFuture;
@@ -413,6 +416,137 @@ async fn startup_waits_for_the_update_lock_and_does_nothing_before_it() {
         .unwrap()
         .expect("start");
     assert!(ran);
+    assert_eq!(driver.requests.lock().unwrap().len(), 1);
+}
+
+fn switch_to(to: &str) -> Command {
+    use open_ferry_supervisor::core::SwitchRequest;
+    use open_ferry_supervisor::protocol::Admission;
+    use open_ferry_update::journal::How;
+    let (replies, _) = tokio::sync::mpsc::unbounded_channel();
+    Command::Switch {
+        request: SwitchRequest {
+            to: to.to_owned(),
+            sha256: String::new(),
+            pin: String::new(),
+            how: How::Update,
+            auto: false,
+            admitted: Admission {
+                while_off: false,
+                mode_gen: 0,
+            },
+        },
+        replies,
+    }
+}
+
+/// A stop that arrives while startup waits for the update lock ends the start
+/// with nothing spawned and no lock held, and the commands before it are kept,
+/// in order, for the core.
+#[tokio::test]
+async fn a_stop_during_the_update_lock_wait_ends_the_start_with_nothing_started() {
+    let rig = Arc::new(rig());
+    std::fs::create_dir_all(rig.cfg.data.root()).unwrap();
+    let held = rig.cfg.data.try_lock().unwrap().expect("lock");
+    let driver = Arc::new(FakeDriver::default());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = {
+        let (rig, driver) = (rig.clone(), driver.clone());
+        tokio::spawn(async move {
+            let mut registry = Registry::new();
+            let mut early = EarlyCommands::new(&mut rx);
+            let result = start_watching(
+                &rig.cfg,
+                &rig.host,
+                &*driver,
+                &mut registry,
+                &SystemClock,
+                Some(&mut early),
+            )
+            .await;
+            (result.map(|_| ()), early.into_kept().len())
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while rig.host.waits.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the wait began");
+    tx.send(switch_to("a")).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!task.is_finished(), "a command that is not a stop ended it");
+    tx.send(Command::Stop).unwrap();
+    let (result, kept) = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("a stop ends the wait")
+        .unwrap();
+    assert!(matches!(result, Err(StartupError::Stopped)), "{result:?}");
+    assert_eq!(kept, 1, "the command before the stop is kept");
+    assert!(driver.requests.lock().unwrap().is_empty());
+    assert!(!rig.cfg.data.root().join("supervisor.json").exists());
+    // The update lock is the one held here, and the supervisor lock is free.
+    assert!(rig.cfg.data.try_lock().unwrap().is_none());
+    drop(held);
+    assert!(rig.cfg.data.try_lock().unwrap().is_some(), "lock leaked");
+    assert!(
+        open_ferry_supervisor::process::SupervisorLock::try_acquire(rig.cfg.data.root()).is_ok(),
+        "the supervisor lock was kept"
+    );
+}
+
+/// The commands that are not a stop come back in the order they were sent,
+/// those taken during the wait first, then those still queued.
+#[tokio::test]
+async fn commands_during_the_update_lock_wait_are_kept_in_order() {
+    let rig = Arc::new(rig());
+    std::fs::create_dir_all(rig.cfg.data.root()).unwrap();
+    let held = rig.cfg.data.try_lock().unwrap().expect("lock");
+    let driver = Arc::new(FakeDriver::default());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = {
+        let (rig, driver) = (rig.clone(), driver.clone());
+        tokio::spawn(async move {
+            let mut registry = Registry::new();
+            let mut early = EarlyCommands::new(&mut rx);
+            let started = start_watching(
+                &rig.cfg,
+                &rig.host,
+                &*driver,
+                &mut registry,
+                &SystemClock,
+                Some(&mut early),
+            )
+            .await
+            .expect("start");
+            drop(started);
+            early
+                .into_kept()
+                .into_iter()
+                .map(|command| match command {
+                    Command::Switch { request, .. } => request.to,
+                    Command::Stop => "stop".to_owned(),
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while rig.host.waits.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the wait began");
+    tx.send(switch_to("a")).unwrap();
+    tx.send(switch_to("b")).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(held);
+    let kept = tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .expect("finishes once the lock is free")
+        .unwrap();
+    assert_eq!(kept, ["a", "b"]);
     assert_eq!(driver.requests.lock().unwrap().len(), 1);
 }
 

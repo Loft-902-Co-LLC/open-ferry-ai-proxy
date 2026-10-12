@@ -25,7 +25,7 @@ use crate::host::Host;
 use crate::reentry::{CatchUnwind, ReentryLimit};
 use crate::serve::{Serve, accept_loop};
 use crate::snapshot::{Shared, Snapshot};
-use crate::startup::{Config, StartupError, reenter, start};
+use crate::startup::{Config, EarlyCommands, StartupError, reenter, start_watching};
 use crate::timings::{PANIC_REENTRIES, PANIC_WINDOW};
 
 /// The limit the supervisor runs with: [`PANIC_REENTRIES`] in [`PANIC_WINDOW`].
@@ -100,7 +100,20 @@ pub async fn supervise<H: Host, D: Driver>(
     mut limit: ReentryLimit,
 ) -> Result<Exit, StartupError> {
     let mut registry = Registry::new();
-    let mut started = start(cfg, host, driver, &mut registry, clock).await?;
+    // A stop while startup waits for the update lock ends it before any
+    // worker exists; a command that is not a stop is kept for the core.
+    let mut early = EarlyCommands::new(&mut commands);
+    let started = start_watching(cfg, host, driver, &mut registry, clock, Some(&mut early)).await;
+    let kept = early.into_kept();
+    let mut started = match started {
+        Ok(started) => started,
+        Err(StartupError::Stopped) => return Ok(Exit::Stopped),
+        Err(error) => return Err(error),
+    };
+    // Back at the front of an empty queue, in the order they came.
+    for command in kept {
+        let _ = command_tx.send(command);
+    }
     let shared = Shared::new();
     let mut serving = started.endpoint.take().map(|server| {
         tokio::spawn(accept_loop(
