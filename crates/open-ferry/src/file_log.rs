@@ -82,6 +82,13 @@ impl FileLog {
         }
     }
 
+    /// Not upstream's: the controls this output was built with, through
+    /// which a supervised worker turns rotation and cleaning on and off.
+    #[allow(dead_code, reason = "the W3 worker takes its controls from here")]
+    pub fn controls(&self) -> &LogControls {
+        &self.controls
+    }
+
     /// Sends the log lines to `main.log` in `dir` when `to_file`, else to
     /// standard output, and keeps `dir` under `max_total_size_mb` when
     /// that is positive (upstream's `ConfigureLogOutput`, with the
