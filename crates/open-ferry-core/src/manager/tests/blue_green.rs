@@ -639,6 +639,40 @@ async fn a_standby_cooldown_store_waits_for_its_thaw() {
     assert_eq!(store.loads(), 1, "restored once it thaws");
 }
 
+// Not upstream's: a worker that took over and hands over, or exits, before
+// it thaws (it has not restored from the file) must not write its own
+// cooldowns over the other worker's file.
+#[tokio::test(start_paused = true)]
+async fn a_worker_that_hands_over_before_its_thaw_leaves_the_others_file_alone() {
+    let store = Arc::new(SwitchStore::default());
+    let other_store = Arc::new(SwitchStore::default());
+    let other = cooldown_manager(&other_store);
+    rate_limit(&other, "auth-2");
+    store.overwrite(snapshot(&other.manager, other.now()));
+    let written = store.saved_ids();
+    assert_eq!(written, ["auth-2"]);
+
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, store.clone());
+    standby(&h.manager);
+    restore_now(&h.manager);
+    let mut registered = auth("auth-1", "xai");
+    registered.status = Status::Active;
+    h.manager.register_unsaved(registered).expect("register");
+    rate_limit(&h, "auth-1");
+
+    freeze(&h.manager).expect("a freeze before the thaw saves nothing and succeeds");
+    flush(&h.manager);
+    assert_eq!(store.saves(), 0, "nothing was written");
+    assert_eq!(store.loads(), 0, "nothing was read");
+    assert_eq!(
+        store.saved_ids(),
+        written,
+        "the other worker's file is as it was"
+    );
+}
+
 // Not upstream's: a save needs a write permit of the manager's gate. While
 // the gate is closed the cooldown file is left alone and the change waits.
 #[tokio::test(start_paused = true)]

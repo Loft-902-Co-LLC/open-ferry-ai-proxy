@@ -142,7 +142,6 @@ struct Shared {
     /// Serializes `pause_accept` and `resume_accept`, which hold it across
     /// their waits. Nothing else takes it. It holds how many loop failures
     /// a resume has reported.
-    #[allow(dead_code)] // W3: a worker's pause and resume take it
     gate: tokio::sync::Mutex<usize>,
     next_id: AtomicU64,
     first_request_deadline: Duration,
@@ -276,7 +275,6 @@ impl ServeControl {
     /// already accepted are served on. It returns only when no loop holds a
     /// listener, so none accepts after it returns, a release or stop that
     /// came first or meanwhile included. Pauses and resumes take turns.
-    #[allow(dead_code)] // W3: a standby that has served pauses on a hand over
     pub(crate) async fn pause_accept(&self) {
         let _turn = self.shared.gate.lock().await;
         self.shared.move_mode(&[Mode::Running], Mode::Paused);
@@ -294,7 +292,6 @@ impl ServeControl {
     /// again. An error if a loop couldn't since a resume last said so, if
     /// the loops were released or stopped meanwhile, or if the control was
     /// cut, which finishes it.
-    #[allow(dead_code)] // W3: `resume` accepts again
     pub(crate) async fn resume_accept(&self) -> io::Result<()> {
         let mut reported = self.shared.gate.lock().await;
         if self.shared.connections().cut {
@@ -402,7 +399,7 @@ impl ServeControl {
     }
 
     /// How many of the live connections have been upgraded.
-    #[allow(dead_code)] // W3: the handed-over state counts the upgraded
+    #[cfg(test)]
     pub(crate) fn upgraded_count(&self) -> usize {
         self.stats().upgraded
     }

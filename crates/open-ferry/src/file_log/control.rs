@@ -135,10 +135,6 @@ pub struct LogControls {
     pub(super) pair_pause: Arc<Mutex<Option<Arc<Pass>>>>,
 }
 
-#[allow(
-    dead_code,
-    reason = "the worker injects controls in its state-machine wiring"
-)]
 impl LogControls {
     pub fn new() -> Self {
         Self {
@@ -173,8 +169,28 @@ impl LogControls {
             .clone()
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the request logger's wiring, in main, takes it")
+    )]
     pub fn request_cleaning(&self) -> CleaningControls {
         self.request.clone()
+    }
+
+    /// Whether rotation is on, for the worker's tests.
+    #[cfg(test)]
+    pub(crate) fn rotation_enabled(&self) -> bool {
+        *self.rotation.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether cleaning is on, for the worker's tests.
+    #[cfg(test)]
+    pub(crate) fn cleaning_enabled(&self) -> bool {
+        *self
+            .cleaning
+            .enabled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Blocking: waits for any in-flight write. Call off runtime threads.

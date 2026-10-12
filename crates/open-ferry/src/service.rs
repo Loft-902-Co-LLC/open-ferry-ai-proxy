@@ -189,7 +189,7 @@ use crate::tls;
 
 mod management_listener;
 pub(crate) mod serve_loop;
-mod worker;
+pub(crate) mod worker;
 
 /// How often background refresh looks for tokens to renew.
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -400,13 +400,20 @@ async fn in_scope<T>(operation: Option<Operation>, work: impl FnOnce() -> T) -> 
 /// and returns `None` when checks can't run. The
 /// checks follow `config`'s `self-update`; while it is `off` they make no
 /// request.
-fn prepare_update_checks(config: &Config) -> Option<UpdateService> {
-    let data = match DataDir::for_this_user() {
-        Ok(data) => data,
-        Err(error) => {
-            tracing::warn!("update checks don't run: {error}");
-            return None;
-        }
+///
+/// A supervised worker passes the data directory its supervisor named
+/// (`welcome.installation.data_dir`); an ordinary run takes the user's from
+/// the environment.
+fn prepare_update_checks(config: &Config, data_dir: Option<&Path>) -> Option<UpdateService> {
+    let data = match data_dir {
+        Some(root) => DataDir::at(root),
+        None => match DataDir::for_this_user() {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::warn!("update checks don't run: {error}");
+                return None;
+            }
+        },
     };
     let make_fetch = update_checks::http_fetch();
     // Each check makes its own downloader from the config in force, so a
@@ -886,15 +893,16 @@ impl Service {
 
     /// Starts open-ferry's own update checks, when they can run.
     fn start_update_checks(&mut self) {
-        self.prepare_update_checks();
+        self.prepare_update_checks(None);
         if let Some(updates) = self.management.updates() {
             updates.start(update_settings::between(FIRST_CHECK.0, FIRST_CHECK.1));
         }
     }
 
     /// Attaches the updater before any router clones the management state.
-    fn prepare_update_checks(&mut self) {
-        if let Some(updates) = prepare_update_checks(&self.config) {
+    /// `data_dir` is the supervised worker's; `None` is the user's.
+    fn prepare_update_checks(&mut self, data_dir: Option<&Path>) {
+        if let Some(updates) = prepare_update_checks(&self.config, data_dir) {
             self.management = self.management.clone().with_updates(updates);
         }
     }
@@ -906,6 +914,51 @@ impl Service {
         } else {
             tracing::info!("core auth auto-refresh started (interval=15m0s)");
         }
+    }
+
+    /// Not upstream's: reads the config and the credentials again, for a
+    /// worker that retook the lease after a hand over (L9.5): the other
+    /// worker may have changed both while this one held nothing. An empty or
+    /// unreadable config is logged and the current one kept, as for the
+    /// watcher's reloads. The gate is still closed, so a change of the auth
+    /// directory waits for it to reopen.
+    async fn reload_from_disk(
+        &mut self,
+        config_path: &Path,
+        events: &mut Option<mpsc::Receiver<WatchEvent>>,
+    ) {
+        match load_config(config_path) {
+            Ok(Some((config, sha256, _))) => {
+                let watching = self
+                    .apply_config(Arc::new(config), Some(sha256), config_path)
+                    .await;
+                self.follow(watching, events);
+            }
+            Ok(None) => tracing::debug!("ignoring empty config file"),
+            Err(error) => {
+                tracing::error!("failed to reload config: {error}; keeping the current one");
+            }
+        }
+        self.load_file_auths();
+    }
+
+    /// Not upstream's: a standby's config, read again at take over (L9.1),
+    /// before the first activation reads the credentials and binds the auth
+    /// directory the config now names.
+    ///
+    /// # Errors
+    /// The config file can't be read or doesn't load. An empty file keeps
+    /// the current config.
+    fn reload_standby(&mut self, config_path: &Path) -> Result<(), String> {
+        let Some((config, sha256, _)) = load_config(config_path)? else {
+            return Ok(());
+        };
+        if let Ok(dir) = config.resolve_auth_dir() {
+            // Nothing is bound to the old directory yet.
+            self.auth_dir = absolute_dir(dir);
+        }
+        self.apply_config_authorized(Arc::new(config), Some(sha256), config_path);
+        Ok(())
     }
 
     /// Holds the cooldown store off while the service is a standby: it

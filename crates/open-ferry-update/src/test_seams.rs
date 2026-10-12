@@ -26,7 +26,11 @@ pub fn hit(root: &Path, name: &str) -> io::Result<()> {
     }
     if dir.join(format!("{name}.hold")).exists() {
         std::fs::write(dir.join(format!("{name}.arrived")), [])?;
-        while !dir.join(format!("{name}.release")).exists() {
+        // A barrier nobody will release any more is let go: its test, and
+        // the directory with it, is over. A worker that was aborted while
+        // it waited here leaves this thread behind, and a runtime waits for
+        // it when it is dropped.
+        while !dir.join(format!("{name}.release")).exists() && dir.exists() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
