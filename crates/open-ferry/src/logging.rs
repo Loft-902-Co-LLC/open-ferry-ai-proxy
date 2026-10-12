@@ -16,7 +16,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Registry, reload};
 
-use crate::file_log::{self, FileLog};
+use crate::file_log::{self, FileLog, LogControls};
 
 /// Changes the installed logger: its level, and through
 /// [`LogLevel::file_log`] where its lines go.
@@ -53,6 +53,20 @@ impl LogLevel {
 pub fn init() -> LogLevel {
     let (filter, level) = reload::Layer::new(targets(false));
     let (output, file_log) = file_log::init();
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(output)
+        .init();
+    LogLevel { level, file_log }
+}
+
+/// Installs the logger as `init` does, for a supervised worker: the main
+/// log's rotation and cleaning start off (`LogControls::supervised`), and
+/// the worker turns them on through `LogLevel::file_log`'s controls.
+#[allow(dead_code, reason = "2c's -worker entry installs it")]
+pub fn init_supervised() -> LogLevel {
+    let (filter, level) = reload::Layer::new(targets(false));
+    let (output, file_log) = file_log::init_with_controls(LogControls::supervised());
     tracing_subscriber::registry()
         .with(filter)
         .with(output)

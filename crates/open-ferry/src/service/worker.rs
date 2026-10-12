@@ -135,26 +135,23 @@ pub(crate) struct Welcome {
 }
 
 impl Welcome {
-    /// The fields of a `welcome`; any other message back as the error.
-    // 2c's `main` calls it on the supervisor's first message.
-    #[allow(dead_code)]
-    pub(crate) fn from_message(message: Message) -> Result<Self, Message> {
-        match message {
-            Message::Welcome {
-                role,
-                installation,
-                budgets,
-                topology,
-                switch_id,
-                ..
-            } => Ok(Self {
-                role,
-                installation,
-                budgets,
-                topology,
-                switch_id,
-            }),
-            other => Err(other),
+    /// The fields of the `welcome` that the supervisor crate's
+    /// `Pending::attach` returned.
+    #[allow(dead_code, reason = "2c's -worker entry converts attach's welcome")]
+    pub(crate) fn from_attached(welcome: open_ferry_supervisor::worker::Welcome) -> Self {
+        let open_ferry_supervisor::worker::Welcome {
+            role,
+            installation,
+            budgets,
+            topology,
+            switch_id,
+        } = welcome;
+        Self {
+            role,
+            installation,
+            budgets,
+            topology,
+            switch_id,
         }
     }
 }
