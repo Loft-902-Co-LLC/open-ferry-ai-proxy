@@ -84,7 +84,6 @@ impl FileLog {
 
     /// Not upstream's: the controls this output was built with, through
     /// which a supervised worker turns rotation and cleaning on and off.
-    #[allow(dead_code, reason = "the W3 worker takes its controls from here")]
     pub fn controls(&self) -> &LogControls {
         &self.controls
     }
@@ -132,7 +131,6 @@ impl FileLog {
     /// Log that event exactly when set_cleaning(true) returns false: every
     /// first enable after a start or a resumed hand over. Queued lines are
     /// flushed first.
-    #[allow(dead_code, reason = "the worker's resume wiring follows this API")]
     pub fn reopen(&self) -> std::io::Result<()> {
         self.output.reopen()
     }
@@ -177,7 +175,7 @@ impl FileLog {
 
 /// Blocking process-default wrapper: legacy, unsupervised only.
 /// Supervised workers use their private LogControls. Call off runtime threads.
-#[allow(dead_code, reason = "the worker's state wiring follows this API")]
+#[cfg(test)]
 pub fn set_rotation(enabled: bool) {
     LogControls::process_default().set_rotation(enabled);
 }
@@ -185,7 +183,7 @@ pub fn set_rotation(enabled: bool) {
 /// Blocking process-default wrapper: legacy, unsupervised only.
 /// Sets both cleaners as one step; repeated enable is idempotent. Supervised
 /// workers use their private LogControls. Call off runtime threads.
-#[allow(dead_code, reason = "the worker's state wiring follows this API")]
+#[cfg(test)]
 pub fn set_cleaning(enabled: bool) {
     LogControls::process_default().set_cleaning(enabled);
 }

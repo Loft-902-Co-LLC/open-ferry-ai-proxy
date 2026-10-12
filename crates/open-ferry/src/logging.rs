@@ -47,6 +47,17 @@ impl LogLevel {
             file_log: FileLog::default(),
         }
     }
+
+    /// Not upstream's: like [`detached`](Self::detached), with controls of its
+    /// own that start as a supervised worker's do (rotation and cleaning
+    /// off), so a test's state is its own, not the process's.
+    #[cfg(test)]
+    pub fn detached_supervised() -> Self {
+        Self {
+            level: reload::Layer::new(targets(false)).1,
+            file_log: FileLog::with_controls(LogControls::supervised()),
+        }
+    }
 }
 
 /// Installs the logger at info level, writing to the main log's output.

@@ -17,6 +17,18 @@ FORBIDDEN = (
     b"handover.gate_closing", b"handover.gate_closed", b"lease.release",
     b"take_over.before_reload", b"rename.after_first", b"journal.before:",
     b"journal.after:", b"journal.fail:", b"state.fail:", b"disk.commit.before_replace",
+    b".blue-green-test", b"events.log", b"test-marker", b"x-open-ferry-test-marker",
+    b"handover.written", b"handover_failed",
+)
+
+# What a feature build must carry, or the scan above proves nothing. The
+# worker's own seams (`events.log`, `test-marker`, the marker header,
+# `handover.written`, `handover_failed`) belong here too, but only once the
+# binary's entry point calls the worker: until then the linker drops them from
+# a feature build, and the scan for them above can't be shown to catch them.
+REQUIRED = (
+    b"refresh.after_rotate", b"refresh.before_save", b"persist.before", b"state.fail:",
+    b".blue-green-test",
 )
 
 
@@ -53,8 +65,7 @@ def main():
     for artifact in artifacts:
         if positive:
             content = artifact.read_bytes()
-            required = (b"refresh.after_rotate", b"refresh.before_save", b"persist.before", b"state.fail:")
-            missing = [text.decode("ascii") for text in required if text not in content]
+            missing = [text.decode("ascii") for text in REQUIRED if text not in content]
             if missing:
                 raise SystemExit(f"positive control missing required hooks: {', '.join(missing)}")
         try:

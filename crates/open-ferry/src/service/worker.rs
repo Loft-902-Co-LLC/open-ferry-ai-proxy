@@ -27,8 +27,8 @@
 //!   message that makes no sense in the state is logged and ignored.
 //!
 //! The switch messages (`hand_over`, `resume`, `take_over` and `go`) are
-//! W3's: they are answered `unsupported` here. `peers_gone` is taken silently
-//! in State::Active and ignored elsewhere (L9.15).
+//! handled by `switch` and the handlers below, and `peers_gone` is taken
+//! in an active or watching worker and ignored elsewhere (L9.15).
 //!
 //! The service loop (watcher events, credential changes and config reloads)
 //! runs on a task of its own, so a call in it that waits (a reload waits
@@ -88,7 +88,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use open_ferry_core::config::{Config, ConfigWatcher, WatchEvent};
-use open_ferry_core::gate::{ActivationKey, ActiveGate};
+use open_ferry_core::gate::{ActivationKey, ActiveGate, GateState};
 use open_ferry_providers::claude_cli;
 use open_ferry_supervisor::protocol::{
     Budgets, Channel, Frame, Installation, ListenerTopology, Message, Role,
@@ -104,7 +104,14 @@ use super::{Options, Server, Service, management_listener, serve_with};
 use crate::logging::LogLevel;
 use crate::tls;
 
+pub(crate) mod hooks;
+mod switch;
 mod topology;
+use hooks::{Barrier, Event as Seen, Fault, Hooks, Place, Point};
+use switch::{
+    Command, HandOver, Handles, LeaseSlot, Resume, Stage, TakeOver, Taken, cleaning_is_off,
+    lease_held, lease_slot, turn_cleaning_off,
+};
 use topology::{Served, Topology};
 
 #[cfg(test)]
@@ -129,8 +136,7 @@ pub(crate) struct Welcome {
     pub(crate) installation: Installation,
     pub(crate) budgets: Budgets,
     pub(crate) topology: Vec<ListenerTopology>,
-    // W3: a switch's workers log and answer by its id.
-    #[allow(dead_code)]
+    /// The id of the switch this worker is part of, which its log names.
     pub(crate) switch_id: Option<String>,
 }
 
@@ -173,6 +179,9 @@ pub(super) struct Timing {
     pub(super) send_timeout: Duration,
     pub(super) shutdown_reserve: Duration,
     activation_stop_budget: Duration,
+    /// The test seams of the worker. `None` builds them from the data
+    /// directory of the `welcome` (nothing at all without the feature).
+    pub(super) hooks: Option<Hooks>,
     #[cfg(test)]
     pub(super) routes: axum::Router,
     /// Runs on the service loop's task before it starts, to wedge it.
@@ -214,6 +223,12 @@ impl Default for Timing {
             send_timeout: CONTROL_SEND_TIMEOUT,
             activation_stop_budget: Duration::from_secs(5),
             shutdown_reserve: super::LEDGER_SHUTDOWN_TIMEOUT + Duration::from_millis(100),
+            // A test's worker has no seams unless the test gives it some.
+            hooks: if cfg!(test) {
+                Some(Hooks::default())
+            } else {
+                None
+            },
             #[cfg(test)]
             routes: axum::Router::new(),
             #[cfg(test)]
@@ -251,8 +266,10 @@ impl Default for Timing {
 /// This wrapper exits the process itself; 2c must call it rather than
 /// `run_with`, without dropping the runtime or waiting for blocking tasks. Abandoned writers
 /// retain the process-owned lease until the OS ends the process.
-// 2c wires it.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "main's supervised entry, another part, is the caller"
+)]
 pub(crate) async fn run<R, W>(
     config_path: PathBuf,
     log_level: LogLevel,
@@ -265,6 +282,8 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
+    #[cfg(feature = "blue-green-test")]
+    crate::seams::start_safety_net();
     let file_log = log_level.file_log().clone();
     let (code, deadline) = run_with_deadline(
         config_path,
@@ -349,6 +368,19 @@ where
 {
     let started_at = Instant::now();
     let budgets = welcome.budgets.clone();
+    let mut timing = timing;
+    timing.activation_stop_budget = Duration::from_millis(budgets.stop_ms);
+    // The seams, and every file the switch touches, are in the data
+    // directory the supervisor named: never the user's.
+    let data_dir = welcome.installation.data_dir.clone();
+    let hooks = timing
+        .hooks
+        .clone()
+        .unwrap_or_else(|| Hooks::in_data_dir(&data_dir));
+    hooks.exit_after(Point::Welcome);
+    if let Some(switch) = &welcome.switch_id {
+        tracing::info!("part of switch {switch}");
+    }
     // A connection that has carried no request when the release comes gets
     // the drain budget, and never more than the loop's own deadline.
     let control = ServeControl::with_first_request_deadline(
@@ -360,16 +392,17 @@ where
     );
     status.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let startup: Startup = Box::pin(start(
-        config_path,
+        config_path.clone(),
         log_level,
         options,
         welcome,
         listeners,
         timing.clone(),
         control.clone(),
+        hooks.clone(),
     ));
     let mut worker = Worker {
-        channel,
+        channel: Some(channel),
         channel_lost: false,
         stop_deadline: None,
         failed: timing.failed.clone(),
@@ -380,6 +413,10 @@ where
         mode: "unknown".to_owned(),
         peers_gone: false,
         state: State::Loading,
+        hooks,
+        data_dir,
+        config_path,
+        timing,
     };
     let code = worker.drive(startup, &mut status).await;
     let deadline = worker.stop_deadline.unwrap_or_else(|| {
@@ -416,10 +453,15 @@ enum State {
     Loading,
     /// Loaded, and held: the gate is closed, nothing runs, and the sockets
     /// aren't accepted on.
-    #[allow(dead_code)] // W3: take_over consumes the prepared standby
     Standby(Box<Standby>),
-    /// Serving.
+    /// Told `take_over`, and holding the lease: the task that takes over is
+    /// running, or has failed.
+    Taking(Box<Taking>),
+    /// Serving: active, ready or watching, by the stage.
     Active(Box<Active>),
+    /// Told `hand_over`, and handing over, handed over or waiting for a
+    /// `resume` after a failure.
+    Handing(Box<Handing>),
     /// Released: no new connections, and the existing ones finishing.
     Draining(Box<Draining>),
 }
@@ -429,21 +471,49 @@ impl State {
         match self {
             Self::Loading => "loading",
             Self::Standby(_) => "standby",
-            Self::Active(_) => "active",
+            Self::Taking(_) => "taking-over",
+            Self::Active(active) => active.stage.phase(),
+            Self::Handing(handing) if handing.handed => "handed-over",
+            Self::Handing(_) => "handing-over",
             Self::Draining(_) => "draining",
         }
     }
 }
 
-/// A loaded standby.
-// W3's `take_over` activates it: it needs all of these.
-#[allow(dead_code)]
-struct Standby {
-    service: Service,
-    key: ActivationKey,
-    topology: Topology,
-    config: Arc<Config>,
-    tls: Option<Arc<rustls::ServerConfig>>,
+/// A loaded standby: everything a take over needs.
+type Standby = Prepared;
+
+/// A take over in progress.
+struct Taking {
+    handles: Handles,
+    lease: LeaseSlot,
+    /// Tells the task to stop at its next step before the last.
+    cancel: watch::Sender<bool>,
+    /// `None` once it has failed: the worker holds the lease and answers
+    /// only `ping`, `status` and `stop`.
+    task: Option<JoinHandle<Taken>>,
+}
+
+/// A hand over in progress, done, or failed and waiting for `resume`.
+struct Handing {
+    /// The serving worker. `None` for one that never served: a take over
+    /// that a hand over cancelled before its last step.
+    active: Option<Active>,
+    handles: Handles,
+    lease: LeaseSlot,
+    /// Whether this worker began in `active` or `watching`: only it may
+    /// resume.
+    resumable: bool,
+    /// Whether the gate was open when the hand over began.
+    was_open: bool,
+    /// Whether `handed_over` is sent.
+    handed: bool,
+    /// The first step, cleaning off, done when it holds `true`.
+    cleaned: watch::Receiver<bool>,
+    /// The rest of the hand over.
+    hand: Option<JoinHandle<Result<String, String>>>,
+    /// A resume, which retakes the lease when it was given up.
+    resume: Option<JoinHandle<Result<(), String>>>,
 }
 
 /// A serving worker: the lease, and the task that runs the service loop and
@@ -461,8 +531,12 @@ struct Active {
     file_log: crate::file_log::FileLog,
     #[cfg(test)]
     stop_timeout_hook: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-    /// Held until the process exits, or (W3) a hand over completes.
-    _lease: ProcessLease,
+    stage: Stage,
+    handles: Handles,
+    /// Asks the service loop for what only it can do.
+    commands: mpsc::UnboundedSender<Command>,
+    /// Held until the process exits, or a hand over gives it up.
+    lease: LeaseSlot,
 }
 
 fn failure_code(code: ExitCode, failed: &AtomicBool) -> ExitCode {
@@ -576,10 +650,17 @@ enum Event {
     Drained,
     /// The server ended, without an error when true.
     ServerEnded(bool),
+    /// A take over's task ended.
+    Taken(Result<Taken, tokio::task::JoinError>),
+    /// A hand over's continuation ended.
+    HandOverDone(Result<Result<String, String>, tokio::task::JoinError>),
+    /// A resume ended.
+    ResumeDone(Result<Result<(), String>, tokio::task::JoinError>),
 }
 
 struct Worker<R, W> {
-    channel: Channel<R, W>,
+    /// `None` once the `drop-channel` fault has dropped it.
+    channel: Option<Channel<R, W>>,
     channel_lost: bool,
     stop_deadline: Option<tokio::time::Instant>,
     failed: Arc<AtomicBool>,
@@ -589,10 +670,15 @@ struct Worker<R, W> {
     started_at: Instant,
     mode: String,
     /// Whether the supervisor has said no other worker is alive while Active
-    /// (active or watching). W3 resets this when hand over turns cleaning off.
-    #[allow(dead_code)] // W-logs: log cleaning starts at the first one
+    /// (active or watching). A hand over resets it with log cleaning, which
+    /// it turns off, so the first `peers_gone` after a resume turns it on.
     peers_gone: bool,
     state: State,
+    hooks: Hooks,
+    /// The supervisor's data directory, from `welcome`.
+    data_dir: PathBuf,
+    config_path: PathBuf,
+    timing: Timing,
 }
 
 impl<R, W> Worker<R, W>
@@ -625,6 +711,9 @@ where
                 }
                 Event::Drained => self.on_drained().await,
                 Event::ServerEnded(clean) => self.on_server_ended(clean),
+                Event::Taken(result) => self.on_taken(result).await,
+                Event::HandOverDone(result) => self.on_hand_over_done(result).await,
+                Event::ResumeDone(result) => self.on_resume_done(result).await,
             };
             let flow = if self.channel_lost && !matches!(flow, Flow::Exit(_)) {
                 self.on_eof()
@@ -653,6 +742,12 @@ where
                 None => pending().await,
             }
         };
+        let receiving = async {
+            match channel {
+                Some(channel) => channel.receive::<Message>().await,
+                None => pending().await,
+            }
+        };
         let in_state = async {
             match state {
                 State::Draining(draining) => tokio::select! {
@@ -663,11 +758,43 @@ where
                     Some(clean) => Event::ServerEnded(clean),
                     None => Event::ServerEnded(false),
                 },
+                State::Taking(taking) => match &mut taking.task {
+                    Some(task) => Event::Taken(task.await),
+                    None => pending().await,
+                },
+                State::Handing(handing) => {
+                    let Handing {
+                        active,
+                        hand,
+                        resume,
+                        ..
+                    } = &mut **handing;
+                    tokio::select! {
+                        result = async {
+                            match hand {
+                                Some(hand) => hand.await,
+                                None => pending().await,
+                            }
+                        } => Event::HandOverDone(result),
+                        result = async {
+                            match resume {
+                                Some(resume) => resume.await,
+                                None => pending().await,
+                            }
+                        } => Event::ResumeDone(result),
+                        clean = async {
+                            match active {
+                                Some(active) => active.ended.recv().await,
+                                None => pending().await,
+                            }
+                        } => Event::ServerEnded(clean.unwrap_or(false)),
+                    }
+                }
                 _ => pending().await,
             }
         };
         tokio::select! {
-            frame = channel.receive::<Message>() => Event::Frame(frame),
+            frame = receiving => Event::Frame(frame),
             _ = status.tick() => Event::Tick,
             started = starting => Event::Started(started),
             event = in_state => event,
@@ -689,30 +816,12 @@ where
             Message::Stop { budget_ms } => {
                 Flow::Stop(Duration::from_millis(budget_ms), ExitCode::SUCCESS)
             }
-            // W3: the switch messages.
-            Message::HandOver { .. } | Message::Resume | Message::TakeOver | Message::Go => {
-                tracing::error!(
-                    "the {} message isn't supported by this worker yet",
-                    frame.message_type
-                );
-                self.send(&Message::Unsupported {
-                    message_type: frame.message_type,
-                })
-                .await;
-                Flow::Continue
-            }
-            // No reply. Only Active (active or watching) counts the first.
-            // This guard is right only while W3 keeps handing-over,
-            // handed-over, taking-over and ready out of State::Active.
-            // W3 resets the flag when hand over turns cleaning off.
-            Message::PeersGone if matches!(self.state, State::Active(_)) => {
-                if std::mem::replace(&mut self.peers_gone, true) {
-                    tracing::debug!("ignoring a repeated peers_gone");
-                } else {
-                    tracing::info!("no other worker is running");
-                }
-                Flow::Continue
-            }
+            Message::HandOver { .. } => self.on_hand_over().await,
+            Message::Resume => self.on_resume().await,
+            Message::TakeOver => self.on_take_over().await,
+            Message::Go => self.on_go().await,
+            // No reply.
+            Message::PeersGone => self.on_peers_gone().await,
             Message::Unknown => {
                 tracing::warn!("unsupported message {:?}", frame.message_type);
                 self.send(&Message::Unsupported {
@@ -742,15 +851,386 @@ where
         )
     }
 
+    /// Logs that `message` makes no sense now and does nothing.
+    fn ignore(&self, message: &str) -> Flow {
+        tracing::debug!(
+            "ignoring {message}, which makes no sense while {}",
+            self.state.phase()
+        );
+        Flow::Continue
+    }
+
+    /// Drops the channel and stops accepting, keeping the lease and staying
+    /// alive until killed: the `drop-channel` fault.
+    async fn drop_channel(&mut self) {
+        drop(self.channel.take());
+        self.control.pause_accept().await;
+    }
+
+    /// L9.15: the first `peers_gone` since log cleaning was last turned off
+    /// turns it on. Only an active or watching worker counts it.
+    async fn on_peers_gone(&mut self) -> Flow {
+        let State::Active(active) = &self.state else {
+            return self.ignore("peers_gone");
+        };
+        if active.stage == Stage::Ready {
+            return self.ignore("peers_gone");
+        }
+        if std::mem::replace(&mut self.peers_gone, true) {
+            tracing::debug!("ignoring a repeated peers_gone");
+            return Flow::Continue;
+        }
+        let (handles, lease) = (active.handles.clone(), lease_held(&active.lease));
+        // Logged exactly when this call turns cleaning on.
+        if !handles.set_cleaning(true).await {
+            tracing::info!("no other worker is running");
+            self.hooks.event(Seen::PeersGone, lease);
+        }
+        Flow::Continue
+    }
+
+    /// L9.1: take the lease with one try, then take over on a task of its
+    /// own, so the channel keeps being served meanwhile.
+    async fn on_take_over(&mut self) -> Flow {
+        if !matches!(self.state, State::Standby(_)) {
+            return self.ignore("take_over");
+        }
+        let State::Standby(standby) = std::mem::replace(&mut self.state, State::Loading) else {
+            return Flow::Continue;
+        };
+        self.hooks.clear_arrivals(&[Barrier::BeforeReload]);
+        self.send_status_as("taking-over").await;
+        let dir = self.data_dir.clone();
+        // The owner is made in the blocking task, before a cancellation can
+        // discard its result.
+        let tried = tokio::task::spawn_blocking(move || {
+            Lease::try_take(&dir).map(|lease| lease.map(|lease| ProcessLease(Some(lease))))
+        })
+        .await;
+        let lease = match tried {
+            Ok(Ok(Some(lease))) => lease,
+            Ok(Ok(None)) => {
+                return self
+                    .take_refused(standby, "another worker holds the active lease".to_owned())
+                    .await;
+            }
+            Ok(Err(error)) => return self.take_refused(standby, error.to_string()).await,
+            Err(error) => {
+                return self
+                    .take_refused(standby, format!("the task failed: {error}"))
+                    .await;
+            }
+        };
+        let handles = standby.handles.clone();
+        let lease = lease_slot(Some(lease));
+        let (cancel, cancelled) = watch::channel(false);
+        let task = tokio::spawn(switch::take_over(TakeOver {
+            standby: *standby,
+            lease: lease.clone(),
+            cancel: cancelled,
+            config_path: self.config_path.clone(),
+            timing: self.timing.clone(),
+        }));
+        self.state = State::Taking(Box::new(Taking {
+            handles,
+            lease,
+            cancel,
+            task: Some(task),
+        }));
+        Flow::Continue
+    }
+
+    /// A take over that couldn't take the lease: nothing changed, and the
+    /// worker is a standby again.
+    async fn take_refused(&mut self, standby: Box<Standby>, why: String) -> Flow {
+        self.state = State::Standby(standby);
+        self.send(&Message::TakeFailed {
+            reason: format!("lease: {why}"),
+        })
+        .await;
+        self.send_status().await;
+        Flow::Continue
+    }
+
+    /// A take over's task ended.
+    async fn on_taken(&mut self, result: Result<Taken, tokio::task::JoinError>) -> Flow {
+        let State::Taking(taking) = &mut self.state else {
+            return Flow::Continue;
+        };
+        taking.task = None;
+        let taken = result
+            .unwrap_or_else(|error| Taken::Failed(format!("the take over task failed: {error}")));
+        match taken {
+            Taken::Ready(active) => {
+                self.state = State::Active(active);
+                self.send(&Message::Ready).await;
+                self.hooks.event(Seen::Ready, true);
+                self.hooks.exit_after(Point::Ready);
+                self.send_status().await;
+            }
+            Taken::Dropped => self.drop_channel().await,
+            Taken::Failed(reason) => self.take_failed(reason).await,
+            Taken::Cancelled => {
+                self.take_failed("the take over was cancelled".to_owned())
+                    .await;
+            }
+        }
+        Flow::Continue
+    }
+
+    /// A take over failed after the lease: the worker keeps it, answers only
+    /// `ping`, `status` and `stop`, and exits with failure when stopped.
+    async fn take_failed(&mut self, reason: String) {
+        tracing::error!("the take over failed: {reason}");
+        self.failed.store(true, Ordering::SeqCst);
+        self.send(&Message::TakeFailed { reason }).await;
+    }
+
+    /// L9.2: a worker that took over starts its background work.
+    async fn on_go(&mut self) -> Flow {
+        let State::Active(active) = &mut self.state else {
+            return self.ignore("go");
+        };
+        if active.stage != Stage::Ready {
+            return self.ignore("go");
+        }
+        active.stage = Stage::Watching;
+        let handles = active.handles.clone();
+        handles.start_background().await;
+        self.hooks.event(Seen::Go, true);
+        self.hooks.exit_after(Point::Go);
+        if self.hooks.drops_channel_at(Place::Watching) {
+            self.drop_channel().await;
+            return Flow::Continue;
+        }
+        self.send_status().await;
+        Flow::Continue
+    }
+
+    /// L9.3: from active, watching, or a take over that hasn't failed. The
+    /// first step, cleaning off, can't fail; then management answers 503,
+    /// and the rest runs on a task of its own.
+    async fn on_hand_over(&mut self) -> Flow {
+        if self.hooks.fault(Fault::IgnoreHandover).is_some() {
+            tracing::debug!("ignoring hand_over, as the test fault says");
+            return Flow::Continue;
+        }
+        let valid = match &self.state {
+            State::Active(_) => true,
+            State::Taking(taking) => taking.task.is_some(),
+            _ => false,
+        };
+        if !valid {
+            return self.ignore("hand_over");
+        }
+        let (handles, active, lease, resumable) =
+            match std::mem::replace(&mut self.state, State::Loading) {
+                State::Active(active) => {
+                    let resumable = active.stage != Stage::Ready;
+                    (active.handles.clone(), Some(*active), None, resumable)
+                }
+                State::Taking(taking) => {
+                    // Cancel the take over and wait for it (L9.16): one that was
+                    // past its last step is serving, and hands over as `ready`.
+                    let Taking {
+                        handles,
+                        lease,
+                        cancel,
+                        task,
+                    } = *taking;
+                    let _ = cancel.send(true);
+                    let active = match task {
+                        Some(task) => match task.await {
+                            Ok(Taken::Ready(active)) => Some(*active),
+                            _ => None,
+                        },
+                        None => None,
+                    };
+                    (handles, active, Some(lease), false)
+                }
+                other => {
+                    self.state = other;
+                    return Flow::Continue;
+                }
+            };
+        let lease = lease
+            .or_else(|| active.as_ref().map(|active| active.lease.clone()))
+            .unwrap_or_else(|| lease_slot(None));
+        self.hooks.clear_arrivals(&[
+            Barrier::GateClosing,
+            Barrier::RefreshBeforeSave,
+            Barrier::GateClosed,
+            Barrier::LeaseRelease,
+        ]);
+        self.peers_gone = false;
+        let cleaned = turn_cleaning_off(&handles);
+        handles.management.set_updating(true);
+        let was_open = handles.gate.state() == GateState::Open;
+        let mut handing = Handing {
+            active,
+            handles: handles.clone(),
+            lease: lease.clone(),
+            resumable,
+            was_open,
+            handed: false,
+            cleaned: cleaned.clone(),
+            hand: None,
+            resume: None,
+        };
+        if self.hooks.drops_channel_at(Place::HandingOver) {
+            self.state = State::Handing(Box::new(handing));
+            self.drop_channel().await;
+            return Flow::Continue;
+        }
+        handing.hand = Some(tokio::spawn(switch::hand_over(HandOver {
+            handles,
+            lease,
+            was_open,
+            cleaned,
+        })));
+        self.state = State::Handing(Box::new(handing));
+        self.send_status().await;
+        Flow::Continue
+    }
+
+    /// The hand over's continuation ended: `handed_over`, or a failure that
+    /// gives the gate and accept back where they were (L9.4, L9.16) and
+    /// waits for `resume`.
+    async fn on_hand_over_done(
+        &mut self,
+        result: Result<Result<String, String>, tokio::task::JoinError>,
+    ) -> Flow {
+        let State::Handing(handing) = &mut self.state else {
+            return Flow::Continue;
+        };
+        handing.hand = None;
+        let handles = handing.handles.clone();
+        let (was_open, resumable) = (handing.was_open, handing.resumable);
+        let lease = lease_held(&handing.lease);
+        let reason = match result {
+            Ok(Ok(id)) => {
+                handing.handed = true;
+                let live = u64::try_from(self.control.live_count()).unwrap_or(u64::MAX);
+                self.send(&Message::HandedOver { state_id: id, live }).await;
+                self.hooks.event(Seen::HandedOver, false);
+                self.hooks.exit_after(Point::HandedOver);
+                self.send_status().await;
+                return Flow::Continue;
+            }
+            Ok(Err(reason)) => reason,
+            Err(error) => format!("the hand over task failed: {error}"),
+        };
+        tracing::error!("the hand over failed: {reason}; waiting for resume");
+        self.hooks.event(Seen::HandoverFailed, lease);
+        if was_open {
+            handles.gate.reopen();
+        }
+        // A worker that began active serves while it waits. One that took
+        // over never resumes accept: it was never resumable.
+        if resumable && let Err(error) = handles.control.resume_accept().await {
+            tracing::warn!("couldn't resume accepting after the failed hand over: {error}");
+        }
+        Flow::Continue
+    }
+
+    /// L9.5, both kinds. With no hand over in progress, an active or
+    /// watching worker answers `resumed` and changes nothing.
+    async fn on_resume(&mut self) -> Flow {
+        match &self.state {
+            State::Active(active) if active.stage != Stage::Ready => {
+                let lease = lease_held(&active.lease);
+                self.send(&Message::Resumed).await;
+                self.hooks.event(Seen::Resumed, lease);
+                return Flow::Continue;
+            }
+            State::Handing(handing) if handing.resumable && handing.resume.is_none() => {}
+            _ => return self.ignore("resume"),
+        }
+        let State::Handing(handing) = &mut self.state else {
+            return Flow::Continue;
+        };
+        // Abort the continuation and wait for it, never for a barrier it
+        // holds: the blocking poll of a held barrier ends on its own.
+        if let Some(hand) = handing.hand.take() {
+            hand.abort();
+            let _ = hand.await;
+        }
+        cleaning_is_off(&mut handing.cleaned).await;
+        let Some(active) = &handing.active else {
+            return Flow::Continue;
+        };
+        handing.resume = Some(tokio::spawn(switch::resume(Resume {
+            handles: handing.handles.clone(),
+            lease: handing.lease.clone(),
+            commands: active.commands.clone(),
+            retake_within: Duration::from_millis(self.budgets.resume_ms),
+            timing: self.timing.clone(),
+        })));
+        Flow::Continue
+    }
+
+    /// A resume ended: active again, or a worker that can't go on.
+    async fn on_resume_done(
+        &mut self,
+        result: Result<Result<(), String>, tokio::task::JoinError>,
+    ) -> Flow {
+        let reason = match result {
+            Ok(Ok(())) => {
+                let State::Handing(handing) = std::mem::replace(&mut self.state, State::Loading)
+                else {
+                    return Flow::Continue;
+                };
+                let Handing {
+                    active: Some(mut active),
+                    ..
+                } = *handing
+                else {
+                    return Flow::Continue;
+                };
+                active.stage = Stage::Active;
+                let lease = lease_held(&active.lease);
+                self.state = State::Active(Box::new(active));
+                self.send(&Message::Resumed).await;
+                self.hooks.event(Seen::Resumed, lease);
+                self.send_status().await;
+                return Flow::Continue;
+            }
+            Ok(Err(reason)) => reason,
+            Err(error) => format!("the resume task failed: {error}"),
+        };
+        if let State::Handing(handing) = &mut self.state {
+            handing.resume = None;
+        }
+        tracing::error!("the resume failed: {reason}; stopping");
+        self.failed.store(true, Ordering::SeqCst);
+        Flow::Stop(
+            Duration::from_millis(self.budgets.stop_ms),
+            ExitCode::FAILURE,
+        )
+    }
+
     async fn on_release(&mut self) -> Flow {
         match std::mem::replace(&mut self.state, State::Loading) {
             State::Active(active) => {
-                let drained = Box::pin(self.control.release());
-                self.state = State::Draining(Box::new(Draining {
-                    active: *active,
-                    drained,
-                }));
-                self.send_status().await;
+                self.drain(*active).await;
+                Flow::Continue
+            }
+            State::Handing(handing)
+                if handing.handed && handing.hand.is_none() && handing.resume.is_none() =>
+            {
+                match handing.active {
+                    Some(active) => self.drain(active).await,
+                    // It never served: nothing is left to finish.
+                    None => {
+                        self.hooks.event(Seen::Draining, false);
+                        self.send(&Message::Drained).await;
+                        self.hooks.event(Seen::Drained, false);
+                        return Flow::Stop(
+                            Duration::from_millis(self.budgets.stop_ms),
+                            ExitCode::SUCCESS,
+                        );
+                    }
+                }
                 Flow::Continue
             }
             other => {
@@ -761,9 +1241,22 @@ where
         }
     }
 
+    /// Stops accepting and finishes the connections of `active`.
+    async fn drain(&mut self, active: Active) {
+        let drained = Box::pin(self.control.release());
+        self.hooks.event(Seen::Draining, lease_held(&active.lease));
+        self.state = State::Draining(Box::new(Draining { active, drained }));
+        self.send_status().await;
+    }
+
     /// The last connection of a released worker ended.
     async fn on_drained(&mut self) -> Flow {
+        let lease = match &self.state {
+            State::Draining(draining) => lease_held(&draining.active.lease),
+            _ => false,
+        };
         self.send(&Message::Drained).await;
+        self.hooks.event(Seen::Drained, lease);
         Flow::Stop(
             Duration::from_millis(self.budgets.stop_ms),
             ExitCode::SUCCESS,
@@ -791,6 +1284,7 @@ where
         match result {
             Ok(Started { mode, state }) => {
                 self.mode = mode;
+                let standby = matches!(state, Ready::Standby(_));
                 match state {
                     Ready::Standby(standby) => self.state = State::Standby(standby),
                     Ready::Active(active) => self.state = State::Active(active),
@@ -799,6 +1293,13 @@ where
                 // before the first active or standby status; a loading one may precede it.
                 let ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
                 self.send(&Message::Loaded { ms }).await;
+                if standby {
+                    self.hooks.event(Seen::Loaded, false);
+                    self.hooks.event(Seen::Standby, false);
+                } else {
+                    self.hooks.event(Seen::Active, true);
+                }
+                self.hooks.exit_after(Point::Loaded);
                 self.send_status().await;
                 Flow::Continue
             }
@@ -820,19 +1321,61 @@ where
         let active = match std::mem::replace(&mut self.state, State::Loading) {
             State::Active(active) => *active,
             State::Draining(draining) => draining.active,
+            State::Taking(taking) => {
+                let Taking { cancel, task, .. } = *taking;
+                let _ = cancel.send(true);
+                let Some(mut task) = task else {
+                    return false;
+                };
+                return match tokio::time::timeout_at(deadline, &mut task).await {
+                    // Past its last step: it serves, and stops as any does.
+                    Ok(Ok(Taken::Ready(active))) => active.stop(deadline).await,
+                    Ok(_) => false,
+                    Err(_) => {
+                        task.abort();
+                        false
+                    }
+                };
+            }
+            State::Handing(handing) => {
+                let Handing {
+                    active,
+                    hand,
+                    resume,
+                    ..
+                } = *handing;
+                for task in [
+                    hand.map(|task| task.abort_handle()),
+                    resume.map(|task| task.abort_handle()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    task.abort();
+                }
+                let Some(active) = active else {
+                    return false;
+                };
+                active
+            }
             _ => return false,
         };
         active.stop(deadline).await
     }
 
     async fn send_status(&mut self) {
+        let phase = self.state.phase();
+        self.send_status_as(phase).await;
+    }
+
+    async fn send_status_as(&mut self, phase: &str) {
         let message = Message::Status {
             mode: self.mode.clone(),
             live: u64::try_from(self.control.live_count()).unwrap_or(u64::MAX),
             // The sign-ins in progress are in the management state, which
             // only the service owns.
             signins_pending: 0,
-            phase: self.state.phase().to_owned(),
+            phase: phase.to_owned(),
         };
         self.send(&message).await;
     }
@@ -841,7 +1384,10 @@ where
         if self.channel_lost {
             return;
         }
-        match tokio::time::timeout(self.send_timeout, self.channel.send(message)).await {
+        let Some(channel) = self.channel.as_mut() else {
+            return;
+        };
+        match tokio::time::timeout(self.send_timeout, channel.send(message)).await {
             Ok(Ok(())) => {}
             result => {
                 tracing::debug!("couldn't send to the supervisor: {result:?}; stopping");
@@ -861,8 +1407,16 @@ pub(super) struct Lease {
 }
 
 /// A lease owned by the process, including cancelled or failed startup.
-/// W3 may explicitly take the lease out only after a completed hand over.
+/// Only [`release`](Self::release), a hand over's, gives it up before the
+/// process exits.
 struct ProcessLease(Option<Lease>);
+
+impl ProcessLease {
+    /// Gives the lease up now: the lock goes with the handle.
+    fn release(mut self) {
+        drop(self.0.take());
+    }
+}
 
 impl Drop for ProcessLease {
     fn drop(&mut self) {
@@ -934,11 +1488,25 @@ struct Prepared {
     topology: Topology,
     config: Arc<Config>,
     tls: Option<Arc<rustls::ServerConfig>>,
+    /// What the switch shares with the service, cloned before it moves.
+    handles: Handles,
+}
+
+/// What `prepare` needs besides the config: where the worker's files are
+/// and what it shares.
+struct Context {
+    data_dir: PathBuf,
+    hooks: Hooks,
+    control: ServeControl,
+    /// Update checks of a test, in place of the real ones.
+    #[cfg(test)]
+    updates: Option<open_ferry_update::UpdateService>,
 }
 
 /// The start: the lease first for an active worker, then the config and the
 /// service, then, for a standby, the dry build of the routes, or for an
 /// active worker the first activation and serving.
+#[allow(clippy::too_many_arguments)]
 async fn start(
     config_path: PathBuf,
     log_level: LogLevel,
@@ -947,6 +1515,7 @@ async fn start(
     listeners: Vec<(String, StdListener)>,
     timing: Timing,
     control: ServeControl,
+    hooks: Hooks,
 ) -> Result<Started, Failure> {
     let mut timing = timing;
     timing.activation_stop_budget = Duration::from_millis(welcome.budgets.stop_ms);
@@ -955,6 +1524,10 @@ async fn start(
         role: role.clone(),
         reason,
     };
+    // At any load, active first start or standby (L9.10).
+    if let Some(reason) = hooks.failure(Fault::FailLoad) {
+        return Err(failed(reason));
+    }
     let lease = match role {
         Role::Active => Some(
             Lease::take(
@@ -966,6 +1539,22 @@ async fn start(
             .map_err(failed)?,
         ),
         Role::Standby => None,
+    };
+    if lease.is_some() {
+        // The first start reopens the log after the lease (L9.18).
+        let file_log = log_level.file_log().clone();
+        match tokio::task::spawn_blocking(move || file_log.reopen()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!("couldn't reopen the log: {error}"),
+            Err(error) => tracing::warn!("the log reopen task failed: {error}"),
+        }
+    }
+    let context = Context {
+        data_dir: welcome.installation.data_dir.clone(),
+        hooks,
+        control,
+        #[cfg(test)]
+        updates: timing.updates.clone(),
     };
     let prepare_path = config_path.clone();
     let prepare_options = options.clone();
@@ -986,6 +1575,7 @@ async fn start(
                 &welcome.topology,
                 listeners,
                 standby,
+                context,
             )?;
             if standby {
                 dry_build(&prepared)?;
@@ -1001,27 +1591,20 @@ async fn start(
         mode => mode.to_owned(),
     };
     let Some(lease) = lease else {
-        let Prepared {
-            service,
-            key,
-            topology,
-            config,
-            tls,
-        } = prepared;
         return Ok(Started {
             mode,
-            state: Ready::Standby(Box::new(Standby {
-                service,
-                key,
-                topology,
-                config,
-                tls,
-            })),
+            state: Ready::Standby(Box::new(prepared)),
         });
     };
-    let active = activate(prepared, &options, &config_path, &control, lease, &timing)
-        .await
-        .map_err(failed)?;
+    let active = activate(
+        prepared,
+        &config_path,
+        lease_slot(Some(lease)),
+        &timing,
+        Launch::First,
+    )
+    .await
+    .map_err(failed)?;
     Ok(Started {
         mode,
         state: Ready::Active(Box::new(active)),
@@ -1037,6 +1620,7 @@ fn prepare(
     welcome: &[ListenerTopology],
     listeners: Vec<(String, StdListener)>,
     standby: bool,
+    context: Context,
 ) -> Result<Prepared, String> {
     let (config, sha256) = Config::load_with_sha256(config_path)
         .map_err(|error| format!("failed to load config: {error}"))?;
@@ -1074,12 +1658,42 @@ fn prepare(
     if standby {
         service.hold_cooldown_store();
     }
+    // The updater is attached before any router clones the management
+    // state, and looks in the supervisor's data directory, never the user's.
+    #[cfg_attr(
+        not(test),
+        allow(unused_mut, reason = "only a test's updater is checked at once")
+    )]
+    let mut first_check =
+        super::update_settings::between(super::FIRST_CHECK.0, super::FIRST_CHECK.1);
+    if options.self_update {
+        #[cfg(test)]
+        if let Some(updates) = context.updates {
+            service.management = service.management.clone().with_updates(updates);
+            first_check = Duration::ZERO;
+        } else {
+            service.prepare_update_checks(Some(&context.data_dir));
+        }
+        #[cfg(not(test))]
+        service.prepare_update_checks(Some(&context.data_dir));
+    }
+    let handles = Handles {
+        gate: service.gate.clone(),
+        manager: service.manager.clone(),
+        management: service.management.clone(),
+        file_log: service.log_level.file_log().clone(),
+        control: context.control,
+        hooks: context.hooks,
+        data_dir: context.data_dir,
+        first_check,
+    };
     Ok(Prepared {
         service,
         key,
         topology,
         config,
         tls,
+        handles,
     })
 }
 
@@ -1098,15 +1712,25 @@ fn dry_build(prepared: &Prepared) -> Result<(), String> {
     built.map_err(|_| "building the routes panicked".to_owned())
 }
 
-/// Makes a prepared worker the active one: the first activation, the
-/// background work, serving the topology, and the service loop's task.
+/// How a worker came to be activated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Launch {
+    /// Its first start, active: the background work starts with it.
+    First,
+    /// A take over (L9.1): it serves at `ready`, and its background work
+    /// starts at `go`.
+    TakeOver,
+}
+
+/// Makes a prepared worker the active one: the first activation, serving
+/// the topology, and the service loop's task. A first start also starts the
+/// background work; a take over leaves it to `go`.
 async fn activate(
     prepared: Prepared,
-    options: &Options,
     config_path: &Path,
-    control: &ServeControl,
-    lease: ProcessLease,
+    lease: LeaseSlot,
     timing: &Timing,
+    launch: Launch,
 ) -> Result<Active, String> {
     let Prepared {
         mut service,
@@ -1114,21 +1738,11 @@ async fn activate(
         topology,
         config,
         tls,
+        handles,
     } = prepared;
-    let self_update = options.self_update;
-    #[cfg(test)]
-    let injected_updates = timing.updates.clone();
+    let own_control = handles.control.clone();
+    let control = &own_control;
     let (mut service, activated) = tokio::task::spawn_blocking(move || {
-        if self_update {
-            #[cfg(test)]
-            if let Some(updates) = injected_updates {
-                service.management = service.management.clone().with_updates(updates);
-            } else {
-                service.prepare_update_checks();
-            }
-            #[cfg(not(test))]
-            service.prepare_update_checks();
-        }
         let activated = service.first_activation(&key);
         (service, activated)
     })
@@ -1176,6 +1790,7 @@ async fn activate(
         tls,
         control,
         extra,
+        &handles.hooks,
         timing.failed.clone(),
         #[cfg(test)]
         timing.hold_server.clone(),
@@ -1339,21 +1954,13 @@ async fn activate(
         .await;
         return Err(format!("failed to resume accepting: {error}"));
     }
-    if let Some(updates) = service.management.updates() {
-        let first_check =
-            super::update_settings::between(super::FIRST_CHECK.0, super::FIRST_CHECK.1);
-        #[cfg(test)]
-        let first_check = if timing.updates.is_some() {
-            Duration::ZERO
-        } else {
-            first_check
-        };
-        updates.start(first_check);
-    }
     claude_cli::warn_outdated(&config.claude_cli);
-    service.start_auto_refresh();
+    if launch == Launch::First {
+        handles.start_background().await;
+    }
     let (stop, stop_rx) = oneshot::channel();
     let (ended_tx, ended) = mpsc::unbounded_channel();
+    let (commands, command_rx) = mpsc::unbounded_channel();
     let failed = timing.failed.clone();
     let file_log = service.log_level.file_log().clone();
     let serving = Serving {
@@ -1365,6 +1972,7 @@ async fn activate(
         stop_server,
         control: control.clone(),
         ended: ended_tx,
+        commands: command_rx,
         shutdown_reserve: timing.shutdown_reserve,
         #[cfg(test)]
         wedge: timing.wedge_service.clone(),
@@ -1383,19 +1991,27 @@ async fn activate(
         file_log,
         #[cfg(test)]
         stop_timeout_hook: None,
-        _lease: lease,
+        stage: match launch {
+            Launch::First => Stage::Active,
+            Launch::TakeOver => Stage::Ready,
+        },
+        handles,
+        commands,
+        lease,
     })
 }
 
 /// Serves `topology`'s sockets on `control`: the main one, and the
 /// management one, each with TLS as its flag says. The sender stops the
 /// server gracefully.
+#[allow(clippy::too_many_arguments)]
 fn serve(
     service: &Service,
     topology: Topology,
     tls: Option<Arc<rustls::ServerConfig>>,
     control: &ServeControl,
     extra: axum::Router,
+    hooks: &Hooks,
     failed: Arc<AtomicBool>,
     #[cfg(test)] hold: Option<Arc<tokio::sync::Notify>>,
 ) -> io::Result<(Server, watch::Sender<bool>)> {
@@ -1410,7 +2026,7 @@ fn serve(
                     control.clone(),
                     main,
                     main_tls,
-                    service.app_with(extra),
+                    hooks.mark(service.app_with(extra)),
                     stopped,
                 ),
                 #[cfg(test)]
@@ -1422,6 +2038,7 @@ fn serve(
             let management_tls = tls_for(&served);
             let management = tokio_listener(served.listener)?;
             let (main_app, management_app) = management_listener::apps(service, extra);
+            let (main_app, management_app) = (hooks.mark(main_app), hooks.mark(management_app));
             tokio::spawn(record_server(
                 held(
                     management_listener::serve_both(
@@ -1492,6 +2109,8 @@ struct Serving {
     control: ServeControl,
     /// Says the server ended, without an error when true.
     ended: mpsc::UnboundedSender<bool>,
+    /// What the switch asks of the loop, which owns the service.
+    commands: mpsc::UnboundedReceiver<Command>,
     shutdown_reserve: Duration,
     #[cfg(test)]
     wedge: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -1513,6 +2132,7 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
         stop_server,
         control,
         ended,
+        commands,
         shutdown_reserve,
         #[cfg(test)]
         wedge,
@@ -1524,6 +2144,7 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
     if let Some(wedge) = wedge {
         wedge();
     }
+    let mut commands = Some(commands);
     let mut server = Some(server);
     tokio::pin!(stop);
     let deadline = loop {
@@ -1557,6 +2178,19 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
                 }
                 let _ = ended.send(clean);
             }
+            command = async {
+                match &mut commands {
+                    Some(commands) => commands.recv().await,
+                    None => pending().await,
+                }
+            } => match command {
+                Some(Command::Reload(done)) => {
+                    service.reload_from_disk(&config_path, &mut events).await;
+                    let _ = done.send(());
+                }
+                // Every sender is gone: nothing will ask again.
+                None => commands = None,
+            },
             () = service.work(&config_path, &mut events) => {}
         }
     };

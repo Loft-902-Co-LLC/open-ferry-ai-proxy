@@ -261,16 +261,36 @@ impl ActiveGate {
     /// [`CloseError::NotOpen`] when the gate isn't open at `epoch`, and
     /// [`CloseError::Reopened`] when it was reopened while waiting.
     pub async fn close(&self, epoch: u64) -> Result<(), CloseError> {
-        {
-            let mut state = self.inner.lock();
-            if state.state != GateState::Open || state.epoch != epoch {
-                return Err(CloseError::NotOpen {
-                    state: state.state,
-                    epoch: state.epoch,
-                });
-            }
-            state.state = GateState::Quiescing;
+        self.quiesce(epoch)?;
+        self.settle(epoch).await
+    }
+
+    /// The first half of [`close`](Self::close): from `Open` at `epoch` to
+    /// `Quiescing`, at once. Not upstream's: a caller that must act between
+    /// the two states (the worker's barrier, once the gate is closing) calls
+    /// this, then [`settle`](Self::settle).
+    ///
+    /// # Errors
+    /// [`CloseError::NotOpen`] when the gate isn't open at `epoch`.
+    pub fn quiesce(&self, epoch: u64) -> Result<(), CloseError> {
+        let mut state = self.inner.lock();
+        if state.state != GateState::Open || state.epoch != epoch {
+            return Err(CloseError::NotOpen {
+                state: state.state,
+                epoch: state.epoch,
+            });
         }
+        state.state = GateState::Quiescing;
+        Ok(())
+    }
+
+    /// The second half of [`close`](Self::close): waits, while `Quiescing`
+    /// at `epoch`, until nothing lives, then goes to `Closed`.
+    ///
+    /// # Errors
+    /// [`CloseError::Reopened`] when the gate was reopened (or isn't
+    /// quiescing at `epoch`) while waiting.
+    pub async fn settle(&self, epoch: u64) -> Result<(), CloseError> {
         loop {
             let notified = self.inner.idle.notified();
             tokio::pin!(notified);

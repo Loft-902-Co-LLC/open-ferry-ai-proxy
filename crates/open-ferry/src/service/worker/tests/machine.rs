@@ -15,7 +15,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use super::*;
 use crate::logging::LogLevel;
 use crate::service::Options;
-use crate::service::worker::{Lease, Timing, Welcome, prepare, run_with};
+use crate::service::worker::{
+    Context, Hooks, Launch, Lease, Timing, Welcome, lease_slot, prepare, run_with,
+};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -188,6 +190,13 @@ struct Setup {
     timing: Timing,
     channel_capacity: usize,
     write_probe: Option<Arc<WriteProbe>>,
+    resume_ms: u64,
+    /// The worker's test seams, marked so, in its data directory.
+    #[cfg(feature = "blue-green-test")]
+    marker: Option<&'static str>,
+    /// Fault files, written before the worker starts: a kind and its content.
+    #[cfg(feature = "blue-green-test")]
+    faults: Vec<(&'static str, &'static str)>,
 }
 
 impl Setup {
@@ -222,9 +231,15 @@ impl Setup {
                 hold_server: None,
                 fail_listener: None,
                 activation_stop_budget: Duration::from_secs(5),
+                hooks: Some(Hooks::default()),
             },
             channel_capacity: 1 << 16,
             write_probe: None,
+            resume_ms: 5_000,
+            #[cfg(feature = "blue-green-test")]
+            marker: None,
+            #[cfg(feature = "blue-green-test")]
+            faults: Vec::new(),
         }
     }
 
@@ -268,7 +283,7 @@ impl Setup {
                 load_ms: self.load_ms,
                 handover_ms: 5_000,
                 ready_ms: 5_000,
-                resume_ms: 5_000,
+                resume_ms: self.resume_ms,
                 watch_ms: 5_000,
                 drain_ms: self.drain_ms,
                 stop_ms: self.stop_ms,
@@ -278,9 +293,29 @@ impl Setup {
         };
         let (ours, theirs) = duplex(self.channel_capacity);
         let (reader, writer) = split(ours);
+        #[cfg_attr(not(feature = "blue-green-test"), allow(unused_mut))]
+        let mut timing = self.timing;
+        #[cfg(feature = "blue-green-test")]
+        let hooks = {
+            let hooks = match self.marker {
+                Some(marker) => Hooks::in_data_dir_marked(&data, marker),
+                None if self.faults.is_empty() => Hooks::default(),
+                None => Hooks::in_data_dir_marked(&data, "test"),
+            };
+            for (kind, value) in &self.faults {
+                std::fs::write(
+                    data.join(".blue-green-test").join(format!("fault.{kind}")),
+                    value,
+                )
+                .unwrap();
+            }
+            timing.hooks = Some(hooks.clone());
+            hooks
+        };
+        let log = LogLevel::detached_supervised();
         let worker = tokio::spawn(run_with(
             config_path,
-            LogLevel::detached(),
+            log.clone(),
             Options::default(),
             Channel::new(
                 reader,
@@ -291,7 +326,7 @@ impl Setup {
             ),
             welcome,
             listeners,
-            self.timing,
+            timing,
         ));
         let (reader, writer) = split(theirs);
         Rig {
@@ -303,6 +338,9 @@ impl Setup {
                 channel: Channel::new(reader, writer),
             }),
             worker: Some(worker),
+            log,
+            #[cfg(feature = "blue-green-test")]
+            hooks,
         }
     }
 }
@@ -314,6 +352,11 @@ struct Rig {
     management: Option<SocketAddr>,
     fake: Option<Fake>,
     worker: Option<JoinHandle<ExitCode>>,
+    /// The worker's log, for the state of its rotation and cleaning.
+    log: LogLevel,
+    /// The worker's seams, to see where it would have exited.
+    #[cfg(feature = "blue-green-test")]
+    hooks: Hooks,
 }
 
 impl Rig {
@@ -327,6 +370,21 @@ impl Rig {
             .await
             .expect("the worker didn't exit in time")
             .unwrap()
+    }
+
+    /// A file in the worker's data directory.
+    fn path(&self, name: &str) -> PathBuf {
+        self.data.join(name)
+    }
+
+    /// Whether the worker's log rotation is on.
+    fn rotating(&self) -> bool {
+        self.log.file_log().controls().rotation_enabled()
+    }
+
+    /// Whether the worker's log cleaning is on.
+    fn cleaning(&self) -> bool {
+        self.log.file_log().controls().cleaning_enabled()
     }
 
     /// Whether another handle can take the lease.
@@ -494,30 +552,6 @@ async fn an_unknown_message_is_unsupported_in_every_state() {
     );
     rig.fake().send(Message::Stop { budget_ms: 100 }).await;
     assert!(succeeded(rig.exit().await));
-}
-
-// W3's messages are answered `unsupported`, with the type, and logged as
-// errors.
-#[tokio::test]
-async fn the_switch_messages_are_unsupported_until_w3() {
-    let (_guard, logged) = capture_here();
-    let mut rig = Setup::new(Role::Standby).start();
-    assert!(matches!(rig.fake().recv().await, Message::Loaded { .. }));
-    let sent = [
-        (Message::HandOver { budget_ms: 1 }, "hand_over"),
-        (Message::Resume, "resume"),
-        (Message::TakeOver, "take_over"),
-        (Message::Go, "go"),
-    ];
-    for (message, name) in sent {
-        rig.fake().send(message).await;
-        let Message::Unsupported { message_type } = rig.fake().recv_other().await else {
-            panic!("expected unsupported for {name}");
-        };
-        assert_eq!(message_type, name);
-    }
-    let errors = logged.at_least(Level::ERROR);
-    assert_eq!(errors.len(), 4, "{errors:?}");
 }
 
 // Stop and EOF must not erase a resume error whose cleanup is still waiting
@@ -1118,13 +1152,13 @@ async fn a_poisoned_partial_channel_attempts_no_further_write() {
     let mut worker = Worker {
         stop_deadline: None,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        channel: Channel::new(
+        channel: Some(Channel::new(
             tokio::io::empty(),
             ProbedWriter {
                 writer,
                 probe: Some(probe.clone()),
             },
-        ),
+        )),
         channel_lost: false,
         send_timeout: Duration::from_millis(50),
         budgets: Budgets {
@@ -1141,6 +1175,10 @@ async fn a_poisoned_partial_channel_attempts_no_further_write() {
         mode: "auto".into(),
         peers_gone: false,
         state: State::Loading,
+        hooks: Hooks::default(),
+        data_dir: PathBuf::new(),
+        config_path: PathBuf::new(),
+        timing: Timing::default(),
     };
     worker.send_status().await;
     assert!(worker.channel_lost);
@@ -1240,7 +1278,7 @@ mod prepared {
     use super::*;
     use crate::service::worker::Prepared;
 
-    fn prepared(standby: bool) -> (tempfile::TempDir, Prepared) {
+    pub(super) fn prepared(standby: bool) -> (tempfile::TempDir, Prepared) {
         let dir = tempfile::tempdir().unwrap();
         let (main, address) = loopback();
         let path = dir.path().join("config.yaml");
@@ -1255,25 +1293,46 @@ mod prepared {
         .unwrap();
         let prepared = prepare(
             &path,
-            LogLevel::detached(),
+            LogLevel::detached_supervised(),
             Options::default(),
             &[entry(MAIN, address, false)],
             vec![(MAIN.to_owned(), main)],
             standby,
+            context(dir.path()),
         )
         .unwrap();
         (dir, prepared)
     }
 
+    /// What `prepare` gets besides the config: no seams, a fresh control.
+    pub(super) fn context(dir: &std::path::Path) -> Context {
+        Context {
+            data_dir: dir.join("data"),
+            hooks: Hooks::default(),
+            control: crate::service::serve_loop::ServeControl::new(),
+            updates: None,
+        }
+    }
+
+    /// The handles of a prepared service, with `control` as theirs.
+    fn handles_for(
+        control: &crate::service::serve_loop::ServeControl,
+    ) -> crate::service::worker::Handles {
+        let (_dir, prepared) = prepared(false);
+        let mut handles = prepared.handles.clone();
+        handles.control = control.clone();
+        handles
+    }
+
     #[tokio::test]
     async fn peers_gone_counts_only_in_active() {
-        use crate::service::worker::{Draining, ProcessLease, Standby, State, Worker, activate};
+        use crate::service::worker::{Draining, Launch, ProcessLease, State, Worker, activate};
         use open_ferry_supervisor::protocol::Frame;
         let (_guard, logged) = capture_here();
         let (ours, mut peer) = duplex(4096);
         let (reader, writer) = split(ours);
         let mut worker = Worker {
-            channel: Channel::new(reader, writer),
+            channel: Some(Channel::new(reader, writer)),
             channel_lost: false,
             stop_deadline: None,
             failed: Timing::default().failed,
@@ -1292,6 +1351,10 @@ mod prepared {
             mode: "auto".into(),
             peers_gone: false,
             state: State::Loading,
+            hooks: Hooks::default(),
+            data_dir: PathBuf::new(),
+            config_path: PathBuf::new(),
+            timing: Timing::default(),
         };
         async fn send(worker: &mut Worker<ReadHalf<DuplexStream>, WriteHalf<DuplexStream>>) {
             worker
@@ -1304,25 +1367,18 @@ mod prepared {
         send(&mut worker).await;
         assert!(!worker.peers_gone, "Loading counted peers_gone");
         let (_standby_dir, standby) = prepared(true);
-        worker.state = State::Standby(Box::new(Standby {
-            service: standby.service,
-            key: standby.key,
-            topology: standby.topology,
-            config: standby.config,
-            tls: standby.tls,
-        }));
+        worker.state = State::Standby(Box::new(standby));
         send(&mut worker).await;
         assert!(!worker.peers_gone, "Standby counted peers_gone");
         let (dir, serving) = prepared(false);
         let active = activate(
             serving,
-            &Options::default(),
             &dir.path().join("config.yaml"),
-            &worker.control,
-            ProcessLease(Some(
+            lease_slot(Some(ProcessLease(Some(
                 Lease::try_take(&dir.path().join("data")).unwrap().unwrap(),
-            )),
+            )))),
             &Timing::default(),
+            Launch::First,
         )
         .await
         .unwrap();
@@ -1386,7 +1442,6 @@ mod prepared {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn activation_attaches_updates_before_routes_and_starts_checks_after_reopen() {
-        use crate::service::serve_loop::ServeControl;
         use crate::service::worker::{ProcessLease, activate};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let (dir, mut prepared) = prepared(false);
@@ -1433,8 +1488,17 @@ mod prepared {
             &prepared.config,
         );
         let data = dir.path().join("data");
-        let lease = ProcessLease(Some(Lease::try_take(&data).unwrap().unwrap()));
-        let control = ServeControl::new();
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
+        // The updater is attached the way `prepare` does it for a test.
+        prepared.service.management = prepared
+            .service
+            .management
+            .clone()
+            .with_updates(updates.clone());
+        prepared.handles.management = prepared.service.management.clone();
+        prepared.handles.first_check = Duration::ZERO;
         let (release, blocked) = std::sync::mpsc::channel::<()>();
         struct Release(std::sync::mpsc::Sender<()>);
         impl Drop for Release {
@@ -1447,7 +1511,6 @@ mod prepared {
         let (arrived, arrival) = tokio::sync::oneshot::channel();
         let arrived = Mutex::new(Some(arrived));
         let timing = Timing {
-            updates: Some(updates.clone()),
             wedge_watcher: Some(Arc::new(move |_, _| {
                 if let Some(arrived) = arrived.lock().unwrap().take() {
                     let _ = arrived.send(());
@@ -1458,21 +1521,7 @@ mod prepared {
         };
         let task = tokio::spawn({
             let path = dir.path().join("config.yaml");
-            let control = control.clone();
-            async move {
-                activate(
-                    prepared,
-                    &Options {
-                        self_update: true,
-                        ..Options::default()
-                    },
-                    &path,
-                    &control,
-                    lease,
-                    &timing,
-                )
-                .await
-            }
+            async move { activate(prepared, &path, lease, &timing, Launch::First).await }
         });
         tokio::time::timeout(WAIT, arrival).await.unwrap().unwrap();
         assert_eq!(gate.state(), GateState::Closed);
@@ -1506,7 +1555,6 @@ mod prepared {
 
     #[tokio::test]
     async fn a_partial_resume_failure_settles_an_owned_management_write() {
-        use crate::service::serve_loop::ServeControl;
         use crate::service::worker::{ProcessLease, activate};
         let dir = tempfile::tempdir().unwrap();
         let (main, main_address) = loopback();
@@ -1522,34 +1570,35 @@ mod prepared {
         };
         let prepared = prepare(
             &path,
-            LogLevel::detached(),
-            options.clone(),
+            LogLevel::detached_supervised(),
+            options,
             &[
                 entry(MAIN, main_address, false),
                 entry(MANAGEMENT, management_address, false),
             ],
             vec![(MAIN.into(), main), (MANAGEMENT.into(), management)],
             false,
+            context(dir.path()),
         )
         .unwrap();
         let gate = prepared.service.gate.clone();
         let data = dir.path().join("data");
-        let lease = ProcessLease(Some(Lease::try_take(&data).unwrap().unwrap()));
-        let control = ServeControl::new();
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
+        let control = prepared.handles.control.clone();
         let activation = tokio::spawn({
-            let control = control.clone();
             async move {
                 activate(
                     prepared,
-                    &options,
                     &path,
-                    &control,
                     lease,
                     &Timing {
                         fail_listener_when_sync_queued: true,
                         activation_stop_budget: Duration::from_millis(200),
                         ..Timing::default()
                     },
+                    Launch::First,
                 )
                 .await
             }
@@ -1571,20 +1620,20 @@ mod prepared {
 
     #[tokio::test]
     async fn dropping_active_records_failure_and_takes_the_emergency_cut() {
-        use crate::service::serve_loop::ServeControl;
         use crate::service::worker::{ProcessLease, activate, failure_code};
         let (dir, prepared) = prepared(false);
         let data = dir.path().join("data");
-        let lease = ProcessLease(Some(Lease::try_take(&data).unwrap().unwrap()));
-        let control = ServeControl::new();
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
+        let control = prepared.handles.control.clone();
         let timing = Timing::default();
         let active = activate(
             prepared,
-            &Options::default(),
             &dir.path().join("config.yaml"),
-            &control,
             lease,
             &timing,
+            Launch::First,
         )
         .await
         .ok()
@@ -1631,7 +1680,7 @@ mod prepared {
     #[tokio::test]
     async fn cancelling_stop_keeps_the_emergency_guard_armed() {
         use crate::service::serve_loop::ServeControl;
-        use crate::service::worker::{Active, ProcessLease};
+        use crate::service::worker::{Active, ProcessLease, Stage};
         let dir = tempfile::tempdir().unwrap();
         let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let control = ServeControl::new();
@@ -1646,7 +1695,12 @@ mod prepared {
             task: Some(tokio::spawn(std::future::pending::<()>())),
             file_log: crate::file_log::FileLog::default(),
             stop_timeout_hook: None,
-            _lease: ProcessLease(Some(Lease::try_take(dir.path()).unwrap().unwrap())),
+            stage: Stage::Active,
+            handles: handles_for(&control),
+            commands: tokio::sync::mpsc::unbounded_channel().0,
+            lease: lease_slot(Some(ProcessLease(Some(
+                Lease::try_take(dir.path()).unwrap().unwrap(),
+            )))),
         };
         let stopping_task = tokio::spawn(active.stop(tokio::time::Instant::now() + WAIT));
         stopping.await.unwrap();
@@ -1660,9 +1714,10 @@ mod prepared {
     #[tokio::test]
     async fn a_panic_completed_just_before_the_deadline_is_failure() {
         use crate::service::serve_loop::ServeControl;
-        use crate::service::worker::{Active, ProcessLease};
+        use crate::service::worker::{Active, ProcessLease, Stage};
         let dir = tempfile::tempdir().unwrap();
         let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let control = ServeControl::new();
         let (stop, _receiver) = tokio::sync::oneshot::channel();
         let (_sender, ended) = tokio::sync::mpsc::unbounded_channel();
         let panic_now = Arc::new(tokio::sync::Notify::new());
@@ -1679,13 +1734,18 @@ mod prepared {
         let active = Active {
             armed: true,
             failed,
-            control: ServeControl::new(),
+            control: control.clone(),
             stop: Some(stop),
             ended,
             task: Some(task),
             file_log: crate::file_log::FileLog::default(),
             stop_timeout_hook: Some((timed_out.clone(), observe.clone())),
-            _lease: ProcessLease(Some(Lease::try_take(dir.path()).unwrap().unwrap())),
+            stage: Stage::Active,
+            handles: handles_for(&control),
+            commands: tokio::sync::mpsc::unbounded_channel().0,
+            lease: lease_slot(Some(ProcessLease(Some(
+                Lease::try_take(dir.path()).unwrap().unwrap(),
+            )))),
         };
         let stopping = tokio::spawn(active.stop(tokio::time::Instant::now()));
         tokio::time::timeout(WAIT, timed_out.notified())
@@ -1708,9 +1768,10 @@ mod prepared {
     #[tokio::test]
     async fn a_service_cancelled_before_stop_is_failure() {
         use crate::service::serve_loop::ServeControl;
-        use crate::service::worker::{Active, ProcessLease};
+        use crate::service::worker::{Active, ProcessLease, Stage};
         let dir = tempfile::tempdir().unwrap();
         let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let control = ServeControl::new();
         let (stop, _receiver) = tokio::sync::oneshot::channel();
         let (_sender, ended) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(std::future::pending::<()>());
@@ -1723,32 +1784,37 @@ mod prepared {
         let active = Active {
             armed: true,
             failed,
-            control: ServeControl::new(),
+            control: control.clone(),
             stop: Some(stop),
             ended,
             task: Some(task),
             file_log: crate::file_log::FileLog::default(),
             stop_timeout_hook: None,
-            _lease: ProcessLease(Some(Lease::try_take(dir.path()).unwrap().unwrap())),
+            stage: Stage::Active,
+            handles: handles_for(&control),
+            commands: tokio::sync::mpsc::unbounded_channel().0,
+            lease: lease_slot(Some(ProcessLease(Some(
+                Lease::try_take(dir.path()).unwrap().unwrap(),
+            )))),
         };
         assert!(active.stop(deadline).await);
     }
 
     #[tokio::test]
     async fn dropping_the_stop_sender_is_an_explicit_failure_and_cut() {
-        use crate::service::serve_loop::ServeControl;
         use crate::service::worker::{ProcessLease, activate};
         let (dir, prepared) = prepared(false);
         let data = dir.path().join("data");
-        let lease = ProcessLease(Some(Lease::try_take(&data).unwrap().unwrap()));
-        let control = ServeControl::new();
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
+        let control = prepared.handles.control.clone();
         let mut active = activate(
             prepared,
-            &Options::default(),
             &dir.path().join("config.yaml"),
-            &control,
             lease,
             &Timing::default(),
+            Launch::First,
         )
         .await
         .ok()
@@ -1770,23 +1836,23 @@ mod prepared {
 
     #[tokio::test]
     async fn a_resume_accept_failure_closes_the_gate_and_retains_the_lease() {
-        use crate::service::serve_loop::ServeControl;
         use crate::service::worker::{ProcessLease, activate};
         let (dir, prepared) = prepared(false);
         let gate = prepared.service.gate.clone();
         let data = dir.path().join("data");
-        let lease = ProcessLease(Some(Lease::try_take(&data).unwrap().unwrap()));
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
         let timing = Timing {
             fail_resume_accept: true,
             ..Timing::default()
         };
         let error = activate(
             prepared,
-            &Options::default(),
             &dir.path().join("config.yaml"),
-            &ServeControl::new(),
             lease,
             &timing,
+            Launch::First,
         )
         .await
         .err()
@@ -1798,21 +1864,20 @@ mod prepared {
 
     #[tokio::test]
     async fn a_failed_watcher_never_opens_the_gate_and_cuts_the_started_server() {
-        use crate::service::serve_loop::ServeControl;
         use crate::service::worker::{ProcessLease, activate};
         let (dir, prepared) = prepared(false);
         let gate = prepared.service.gate.clone();
         let address = prepared.topology.main.listener.local_addr().unwrap();
         let data = dir.path().join("data");
-        let lease = ProcessLease(Some(Lease::try_take(&data).unwrap().unwrap()));
-        let control = ServeControl::new();
+        let lease = lease_slot(Some(ProcessLease(Some(
+            Lease::try_take(&data).unwrap().unwrap(),
+        ))));
         let error = activate(
             prepared,
-            &Options::default(),
             &dir.path().join("missing.yaml"),
-            &control,
             lease,
             &Timing::default(),
+            Launch::First,
         )
         .await
         .err()
@@ -2249,3 +2314,5 @@ async fn an_unobserved_api_server_panic_sets_the_failure_record() {
     assert_eq!(failure_code(ExitCode::SUCCESS, &failed), ExitCode::FAILURE);
     assert!(task.await.unwrap_err().is_panic());
 }
+
+mod switch;
