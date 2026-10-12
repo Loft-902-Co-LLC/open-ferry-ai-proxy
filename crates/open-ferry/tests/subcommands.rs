@@ -172,6 +172,76 @@ fn a_flag_first_reads_the_command_line_as_before() {
     assert!(!dir.path().join("config.yaml").exists());
 }
 
+// Not upstream's: the blue-green entries' flags that mean nothing together
+// are usage errors, exit 2, before anything starts, and the usage shows
+// -supervise but not the flags only a supervisor or a test passes.
+#[test]
+fn the_supervisor_and_worker_flags_refuse_bad_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let refused = |args: &[&str], message: &str| {
+        let output = run(dir.path(), args);
+        assert_eq!(code(&output), Some(2), "{args:?}");
+        let text = String::from_utf8(output.stderr).unwrap();
+        assert!(text.starts_with(message), "{args:?}: {text}");
+    };
+    refused(&["-worker-control", "3"], "-worker-control needs -worker\n");
+    refused(&["-worker"], "-worker needs -worker-control\n");
+    refused(
+        &["-worker", "-supervise", "-worker-control", "3"],
+        "-worker and -supervise can't be used together\n",
+    );
+    refused(&["-system"], "-system needs -supervise\n");
+    let help = run(dir.path(), &["-h"]);
+    assert_eq!(code(&help), Some(0));
+    let usage = String::from_utf8(help.stderr).unwrap();
+    assert!(usage.contains("\n  -supervise\n"));
+    assert!(usage.contains("\n  -system\n"));
+    assert!(!usage.contains("-worker"));
+    assert!(!usage.contains("-test-"));
+}
+
+// Not upstream's: the test flags are in a `blue-green-test` build and in no
+// other.
+#[cfg(not(feature = "blue-green-test"))]
+#[test]
+fn a_build_without_the_test_seams_has_no_test_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    for flag in ["-test-data-dir", "-test-endpoint"] {
+        let output = run(dir.path(), &["-supervise", flag, "x"]);
+        assert_eq!(code(&output), Some(2), "{flag}");
+        let text = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            text.starts_with(&format!("flag provided but not defined: {flag}\n")),
+            "{text}"
+        );
+    }
+}
+
+// Not upstream's: a worker that can't take over its control channel says so
+// in one line and exits non-zero, before it reads a config or logs.
+#[test]
+fn a_worker_without_a_control_channel_exits_with_one_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yaml");
+    let config = config.to_string_lossy().into_owned();
+    let control = if cfg!(windows) {
+        r"\\.\pipe\open-ferry-no-such-pipe-for-this-test"
+    } else {
+        "987654"
+    };
+    let output = run(
+        dir.path(),
+        &["-worker", "-config", &config, "-worker-control", control],
+    );
+    assert_ne!(code(&output), Some(0));
+    assert_ne!(code(&output), Some(2));
+    assert!(output.stdout.is_empty());
+    let text = String::from_utf8(output.stderr).unwrap();
+    assert!(text.starts_with("worker: "), "{text}");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(!dir.path().join("data").exists());
+}
+
 // Not upstream's: service shows its usage with -h, and exits with 2 for bad
 // usage before it looks at the system.
 #[test]

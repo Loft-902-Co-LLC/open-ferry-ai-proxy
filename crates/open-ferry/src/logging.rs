@@ -74,7 +74,6 @@ pub fn init() -> LogLevel {
 /// Installs the logger as `init` does, for a supervised worker: the main
 /// log's rotation and cleaning start off (`LogControls::supervised`), and
 /// the worker turns them on through `LogLevel::file_log`'s controls.
-#[allow(dead_code, reason = "2c's -worker entry installs it")]
 pub fn init_supervised() -> LogLevel {
     let (filter, level) = reload::Layer::new(targets(false));
     let (output, file_log) = file_log::init_with_controls(LogControls::supervised());
@@ -83,6 +82,38 @@ pub fn init_supervised() -> LogLevel {
         .with(output)
         .init();
     LogLevel { level, file_log }
+}
+
+/// The level of the supervisor's logger, which writes to standard error
+/// only. The supervisor never writes `main.log`: that is the workers'.
+#[derive(Clone)]
+pub struct StderrLevel {
+    level: reload::Handle<Targets, Registry>,
+}
+
+impl StderrLevel {
+    /// Logs at debug level when `debug`, and at info level otherwise.
+    pub fn set_debug(&self, debug: bool) {
+        if let Err(error) = self.level.reload(targets(debug)) {
+            tracing::warn!("failed to change the log level: {error}");
+        }
+    }
+}
+
+/// Installs the supervisor's logger at info level: lines go to standard
+/// error, with the same level targets as `init`. Nothing is written to a
+/// file, and no thread is started.
+pub fn init_stderr() -> StderrLevel {
+    let (filter, level) = reload::Layer::new(targets(false));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(false),
+        )
+        .init();
+    StderrLevel { level }
 }
 
 fn targets(debug: bool) -> Targets {

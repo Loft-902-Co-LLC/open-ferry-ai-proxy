@@ -52,6 +52,7 @@ mod os_service;
 #[cfg(feature = "blue-green-test")]
 mod seams;
 mod service;
+mod supervised;
 mod tls;
 mod tui;
 mod update;
@@ -100,6 +101,15 @@ fn main() -> ExitCode {
         // What the updater checks a downloaded binary prints.
         println!("open-ferry {}", open_ferry_update::CURRENT_VERSION);
         return ExitCode::SUCCESS;
+    }
+    // The blue-green entries come before anything that starts a thread or
+    // reads `.env`: a worker takes its sockets over while single-threaded,
+    // and neither entry reads the working directory's `.env`.
+    if flags.worker {
+        return supervised::worker_entry(&flags);
+    }
+    if flags.supervise {
+        return supervised::supervise(&flags);
     }
     // Upstream loads `.env` before it reads the config, so the variables it
     // sets apply to everything after. This is before `logging::init`, which

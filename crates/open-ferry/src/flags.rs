@@ -63,6 +63,23 @@ pub struct Flags {
     pub management_base_url: String,
     /// Print the version and exit (`-version`). Not upstream's.
     pub version: bool,
+    /// Run as a supervised worker (`-worker`). Not upstream's.
+    pub worker: bool,
+    /// How the worker reaches its supervisor: a descriptor number or a pipe
+    /// name (`-worker-control`).
+    pub worker_control: String,
+    /// Run the blue-green supervisor (`-supervise`). Not upstream's.
+    pub supervise: bool,
+    /// With `-supervise`: the system service's, not the user's (`-system`).
+    pub system: bool,
+    /// With `-supervise`, in a `blue-green-test` build only: the supervisor's
+    /// data directory (`-test-data-dir`).
+    #[cfg(feature = "blue-green-test")]
+    pub test_data_dir: String,
+    /// With `-supervise`, in a `blue-green-test` build only: where the
+    /// supervisor's endpoint is (`-test-endpoint`).
+    #[cfg(feature = "blue-green-test")]
+    pub test_endpoint: String,
 }
 
 /// A password from the command line, which `Debug` doesn't show.
@@ -111,7 +128,7 @@ pub(crate) fn takes(name: &str) -> bool {
 }
 
 /// The flags, sorted by name as Go's usage lists them.
-const DEFINITIONS: [Definition<Flags>; 12] = [
+const DEFINITIONS: &[Definition<Flags>] = &[
     Definition {
         name: "claude-login",
         usage: "Login to Claude using OAuth",
@@ -163,6 +180,28 @@ const DEFINITIONS: [Definition<Flags>; 12] = [
         kind: Kind::Bool(|flags, value| flags.standalone = value),
     },
     Definition {
+        name: "supervise",
+        usage: "Run the blue-green supervisor, which runs the server as workers and switches them on an update",
+        kind: Kind::Bool(|flags, value| flags.supervise = value),
+    },
+    Definition {
+        name: "system",
+        usage: "With -supervise, run as the system service's supervisor, not the user's",
+        kind: Kind::Bool(|flags, value| flags.system = value),
+    },
+    #[cfg(feature = "blue-green-test")]
+    Definition {
+        name: "test-data-dir",
+        usage: "",
+        kind: Kind::String(|flags, value| flags.test_data_dir = value),
+    },
+    #[cfg(feature = "blue-green-test")]
+    Definition {
+        name: "test-endpoint",
+        usage: "",
+        kind: Kind::String(|flags, value| flags.test_endpoint = value),
+    },
+    Definition {
         name: "tui",
         usage: "Start with terminal management UI",
         kind: Kind::Bool(|flags, value| flags.tui = value),
@@ -172,6 +211,26 @@ const DEFINITIONS: [Definition<Flags>; 12] = [
         usage: "Print the version and exit",
         kind: Kind::Bool(|flags, value| flags.version = value),
     },
+    Definition {
+        name: "worker",
+        usage: "",
+        kind: Kind::Bool(|flags, value| flags.worker = value),
+    },
+    Definition {
+        name: "worker-control",
+        usage: "",
+        kind: Kind::String(|flags, value| flags.worker_control = value),
+    },
+];
+
+/// The flags the usage leaves out: the password, as upstream's does, and
+/// those only a supervisor starts or a test uses.
+const HIDDEN: &[&str] = &[
+    "password",
+    "test-data-dir",
+    "test-endpoint",
+    "worker",
+    "worker-control",
 ];
 
 /// Reads `args`, without the program name.
@@ -179,7 +238,41 @@ pub fn parse<I>(args: I) -> Result<Flags, FlagError>
 where
     I: IntoIterator<Item = String>,
 {
-    parse_with(&DEFINITIONS, args).map(|(flags, _)| flags)
+    let (flags, _) = parse_with(DEFINITIONS, args)?;
+    check_modes(&flags)?;
+    Ok(flags)
+}
+
+/// Turns down the combinations of the supervisor's flags that mean nothing:
+/// each one is a usage error rather than ignored.
+fn check_modes(flags: &Flags) -> Result<(), FlagError> {
+    let invalid = |message: &str| Err(FlagError::Invalid(message.to_owned()));
+    if flags.worker && flags.supervise {
+        return invalid("-worker and -supervise can't be used together");
+    }
+    if flags.worker && flags.worker_control.is_empty() {
+        return invalid("-worker needs -worker-control");
+    }
+    if !flags.worker && !flags.worker_control.is_empty() {
+        return invalid("-worker-control needs -worker");
+    }
+    if flags.system && !flags.supervise {
+        return invalid("-system needs -supervise");
+    }
+    #[cfg(feature = "blue-green-test")]
+    if !flags.supervise && (!flags.test_data_dir.is_empty() || !flags.test_endpoint.is_empty()) {
+        return invalid("-test-data-dir and -test-endpoint need -supervise");
+    }
+    if (flags.worker || flags.supervise)
+        && (flags.tui
+            || flags.codex_login
+            || flags.codex_device_login
+            || flags.claude_login
+            || flags.standalone)
+    {
+        return invalid("-worker and -supervise can't be used with a login or the TUI");
+    }
+    Ok(())
 }
 
 /// Reads `args` as the flags of `definitions` define them, into a `T` that
@@ -271,7 +364,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 /// The usage text, as Go's `flag.PrintDefaults` writes it.
 pub fn usage(program: &str) -> String {
     let mut out = format!("Usage of {program}:\n");
-    write_defaults(&mut out, &DEFINITIONS, &["password"]);
+    write_defaults(&mut out, DEFINITIONS, HIDDEN);
     out
 }
 
@@ -373,6 +466,73 @@ mod tests {
         );
         assert_eq!(parse_args(&["-h"]), Err(FlagError::Help));
         assert_eq!(parse_args(&["--help"]), Err(FlagError::Help));
+    }
+
+    #[test]
+    fn reads_the_worker_and_supervisor_flags() {
+        let flags = parse_args(&["-worker", "-config", "/c.yaml", "-worker-control", "3"]).unwrap();
+        assert!(flags.worker && !flags.supervise);
+        assert_eq!(flags.worker_control, "3");
+        assert_eq!(flags.config, "/c.yaml");
+        let flags = parse_args(&["-supervise", "-system", "-config=/c.yaml"]).unwrap();
+        assert!(flags.supervise && flags.system && !flags.worker);
+        let flags = parse_args(&["-supervise"]).unwrap();
+        assert!(flags.supervise && !flags.system);
+    }
+
+    #[test]
+    fn turns_down_the_supervisor_flags_that_mean_nothing_together() {
+        let invalid = |args: &[&str]| match parse_args(args) {
+            Err(FlagError::Invalid(message)) => message,
+            other => panic!("{args:?}: {other:?}"),
+        };
+        assert_eq!(
+            invalid(&["-worker", "-supervise", "-worker-control", "3"]),
+            "-worker and -supervise can't be used together"
+        );
+        assert_eq!(invalid(&["-worker"]), "-worker needs -worker-control");
+        assert_eq!(
+            invalid(&["-worker-control", "3"]),
+            "-worker-control needs -worker"
+        );
+        assert_eq!(invalid(&["-system"]), "-system needs -supervise");
+        assert_eq!(
+            invalid(&["-supervise", "-tui"]),
+            "-worker and -supervise can't be used with a login or the TUI"
+        );
+        assert!(parse_args(&["-worker", "-claude-login", "-worker-control=x"]).is_err());
+    }
+
+    #[test]
+    fn the_usage_shows_the_supervisor_and_hides_the_internal_flags() {
+        let usage = usage("open-ferry");
+        assert!(usage.contains("\n  -supervise\n    \tRun the blue-green supervisor"));
+        assert!(usage.contains("\n  -system\n"));
+        assert!(!usage.contains("-worker"));
+        assert!(!usage.contains("-test-"));
+    }
+
+    #[cfg(feature = "blue-green-test")]
+    #[test]
+    fn the_test_flags_exist_in_a_test_build_and_need_the_supervisor() {
+        let flags =
+            parse_args(&["-supervise", "-test-data-dir", "/d", "-test-endpoint=/e/s"]).unwrap();
+        assert_eq!(flags.test_data_dir, "/d");
+        assert_eq!(flags.test_endpoint, "/e/s");
+        assert!(parse_args(&["-test-data-dir", "/d"]).is_err());
+        assert!(parse_args(&["-test-endpoint", "/e"]).is_err());
+    }
+
+    #[cfg(not(feature = "blue-green-test"))]
+    #[test]
+    fn a_build_without_the_test_seams_has_no_test_flags() {
+        assert_eq!(
+            parse_args(&["-supervise", "-test-data-dir", "/d"]),
+            Err(FlagError::Invalid(
+                "flag provided but not defined: -test-data-dir".into()
+            ))
+        );
+        assert!(!takes("test-endpoint"));
     }
 
     #[test]
