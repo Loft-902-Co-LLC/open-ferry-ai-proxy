@@ -22,6 +22,11 @@
 //! `clients` and `mcp` look at and change a setup, for people and agents
 //! (see [`agent`]). `-version` prints the version.
 //!
+//! `-supervise` runs the blue-green supervisor, which binds the listening
+//! sockets and starts the workers that serve them, and `-worker` (with
+//! `-worker-control`) is one such worker, started only by a supervisor (see
+//! [`supervised`]). Neither loads `.env`.
+//!
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
 //!   plugins and the other providers' logins aren't ported.

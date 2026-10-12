@@ -1,11 +1,11 @@
 //! Not upstream's: the worker's one view of the cross-process test seams
-//! (L7). With the `blue-green-test` feature it forwards to [`crate::seams`];
+//! (L7). With the `blue-green-test` feature it forwards to `crate::seams`;
 //! without it every call does nothing, and the names the seams go by are
 //! not in the binary: they are in `seams.rs`, which isn't built.
 
 use std::io;
 use std::path::Path;
-#[cfg(feature = "blue-green-test")]
+#[cfg(any(feature = "blue-green-test", test))]
 use std::sync::Arc;
 
 /// The fault kinds of L9.10.
@@ -106,6 +106,62 @@ pub(crate) struct Hooks {
     /// test can't survive `process::exit`.
     #[cfg(all(feature = "blue-green-test", test))]
     exits: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    /// Holds one mutating step of the hand over inside its blocking closure.
+    #[cfg(test)]
+    pub(crate) step_hold: Option<Arc<StepHold>>,
+}
+
+/// A test's hold on one blocking step of the hand over: the step reports
+/// that it arrived, then waits until the test releases it.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StepHold {
+    step: &'static str,
+    arrived: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl StepHold {
+    /// A hold on `step`, the receiver that gets a message when the step
+    /// arrives, and the sender that releases it.
+    pub(crate) fn new(
+        step: &'static str,
+    ) -> (
+        Arc<Self>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (arrived, arrival) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let hold = Arc::new(Self {
+            step,
+            arrived: std::sync::Mutex::new(arrived),
+            release: std::sync::Mutex::new(released),
+        });
+        (hold, arrival, release)
+    }
+}
+
+#[cfg(test)]
+impl Hooks {
+    /// Called inside a blocking step: waits there when a test holds `step`.
+    /// A released or dropped hold lets the step go.
+    pub(crate) fn hold_step(&self, step: &str) {
+        let Some(hold) = self.step_hold.as_ref().filter(|hold| hold.step == step) else {
+            return;
+        };
+        let _ = hold
+            .arrived
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .send(());
+        let _ = hold
+            .release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv();
+    }
 }
 
 #[cfg(feature = "blue-green-test")]
@@ -118,6 +174,8 @@ impl Hooks {
                 seams: Some(Arc::new(seams)),
                 #[cfg(test)]
                 exits: Arc::default(),
+                #[cfg(test)]
+                step_hold: None,
             },
             Err(error) => {
                 tracing::error!("the test seams can't start: {error}");

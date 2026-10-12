@@ -36,6 +36,9 @@ const NAME: &str = if cfg!(windows) {
 struct FakeHost {
     sha: Option<String>,
     waits: AtomicUsize,
+    /// Runs once, when the sockets are bound: after recovery, before the
+    /// start-up try is counted.
+    on_bind: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Host for FakeHost {
@@ -43,6 +46,9 @@ impl Host for FakeHost {
         Vec::new()
     }
     fn bind(&self) -> io::Result<Vec<(String, TcpListener)>> {
+        if let Some(hook) = self.on_bind.lock().unwrap().take() {
+            hook();
+        }
         Ok(Vec::new())
     }
     fn effective_mode(&self) -> ModeSnapshot {
@@ -213,6 +219,7 @@ fn rig() -> Rig {
         host: FakeHost {
             sha: Some(sha),
             waits: AtomicUsize::new(0),
+            on_bind: Mutex::new(None),
         },
         installed,
     }
@@ -538,9 +545,11 @@ async fn commands_during_the_update_lock_wait_are_kept_in_order() {
     })
     .await
     .expect("the wait began");
+    // Both are queued before the lock is let go, so startup, which takes
+    // what is queued when it holds the lock, has them by the time it commits:
+    // no wait for their consumption is needed.
     tx.send(switch_to("a")).unwrap();
     tx.send(switch_to("b")).unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
     drop(held);
     let kept = tokio::time::timeout(Duration::from_secs(20), task)
         .await
@@ -548,6 +557,160 @@ async fn commands_during_the_update_lock_wait_are_kept_in_order() {
         .unwrap();
     assert_eq!(kept, ["a", "b"]);
     assert_eq!(driver.requests.lock().unwrap().len(), 1);
+}
+
+/// A stop that is queued when the lock is free is not lost to a lock that has
+/// just become free: startup takes what is queued before it commits, and ends
+/// with nothing spawned or written.
+#[tokio::test]
+async fn a_stop_queued_when_the_update_lock_is_free_ends_the_start() {
+    let rig = rig();
+    let driver = FakeDriver::default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(switch_to("a")).unwrap();
+    tx.send(Command::Stop).unwrap();
+    let mut registry = Registry::new();
+    let mut early = EarlyCommands::new(&mut rx);
+    let result = start_watching(
+        &rig.cfg,
+        &rig.host,
+        &driver,
+        &mut registry,
+        &SystemClock,
+        Some(&mut early),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StartupError::Stopped)),
+        "{:?}",
+        result.map(|_| ())
+    );
+    assert_eq!(early.into_kept().len(), 1, "the command before the stop");
+    assert!(driver.requests.lock().unwrap().is_empty());
+    assert!(!rig.cfg.data.root().join("supervisor.json").exists());
+    assert!(
+        rig.cfg.data.try_lock().unwrap().is_some(),
+        "the update lock was kept"
+    );
+    assert!(
+        open_ferry_supervisor::process::SupervisorLock::try_acquire(rig.cfg.data.root()).is_ok(),
+        "the supervisor lock was kept"
+    );
+}
+
+/// The fallback after a start-up count that could not be written waits for the
+/// update lock too, with no worker yet: a stop there ends the start with
+/// nothing spawned and the locks let go.
+#[tokio::test]
+async fn a_stop_during_the_fallback_lock_wait_ends_the_start() {
+    let rig = Arc::new(rig());
+    let driver = Arc::new(FakeDriver::default());
+    let mut registry = Registry::new();
+    // A first start writes the journal.
+    drop(
+        start(&rig.cfg, &rig.host, &*driver, &mut registry, &SystemClock)
+            .await
+            .expect("start"),
+    );
+    assert_eq!(driver.requests.lock().unwrap().len(), 1);
+    // Startup's own launch binds the sockets after recovery and before the
+    // start-up try is counted. There the journal becomes unwritable, so the
+    // count fails and the launch falls back to the installed file, and the
+    // update lock is held by someone else.
+    let held: Arc<Mutex<Option<Box<dyn std::any::Any + Send>>>> = Arc::new(Mutex::new(None));
+    let root = rig.cfg.data.root().to_path_buf();
+    *rig.host.on_bind.lock().unwrap() = Some(Box::new({
+        let held = held.clone();
+        move || {
+            std::fs::write(
+                root.join(open_ferry_update::journal::JOURNAL_FILE),
+                b"not a journal",
+            )
+            .unwrap();
+            let lock = DataDir::at(&root).try_lock().unwrap().expect("lock");
+            *held.lock().unwrap() = Some(Box::new(lock));
+        }
+    }));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = {
+        let (rig, driver) = (rig.clone(), driver.clone());
+        tokio::spawn(async move {
+            let mut registry = Registry::new();
+            let mut early = EarlyCommands::new(&mut rx);
+            start_watching(
+                &rig.cfg,
+                &rig.host,
+                &*driver,
+                &mut registry,
+                &SystemClock,
+                Some(&mut early),
+            )
+            .await
+            .map(|_| ())
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while rig.host.waits.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fallback waits for the lock");
+    tx.send(Command::Stop).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("a stop ends the fallback's wait")
+        .unwrap();
+    assert!(matches!(result, Err(StartupError::Stopped)), "{result:?}");
+    assert_eq!(driver.requests.lock().unwrap().len(), 1, "nothing spawned");
+    held.lock().unwrap().take();
+    assert!(rig.cfg.data.try_lock().unwrap().is_some(), "lock leaked");
+}
+
+/// A stop that is queued before startup begins also ends it when the update
+/// lock cannot be opened at all and startup would otherwise run on without
+/// it.
+#[tokio::test]
+async fn a_queued_stop_ends_the_start_when_the_update_lock_cannot_be_opened() {
+    let rig = rig();
+    std::fs::create_dir_all(rig.cfg.data.root()).unwrap();
+    make_untrusted(rig.cfg.data.root());
+    let target = rig._dir.path().join("must-not-be-created");
+    let lock = rig.cfg.data.root().join("update.lock");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    #[cfg(windows)]
+    {
+        let result = std::process::Command::new(std::env::var_os("COMSPEC").unwrap())
+            .args(["/c", "mklink", "/J"])
+            .arg(&lock)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+    }
+    let driver = FakeDriver::default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(Command::Stop).unwrap();
+    let mut registry = Registry::new();
+    let mut early = EarlyCommands::new(&mut rx);
+    let result = start_watching(
+        &rig.cfg,
+        &rig.host,
+        &driver,
+        &mut registry,
+        &SystemClock,
+        Some(&mut early),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StartupError::Stopped)),
+        "{:?}",
+        result.map(|_| ())
+    );
+    assert!(!target.exists());
+    assert!(driver.requests.lock().unwrap().is_empty(), "a worker ran");
+    assert!(!rig.cfg.data.root().join("supervisor.json").exists());
 }
 
 /// 3.3: a restart finds the installed file gone and puts the confirmed
@@ -2280,6 +2443,7 @@ async fn startup_crash_child() {
     let host = FakeHost {
         sha: Some(hash_file(&data.binary("1.0.0", NAME)).unwrap()),
         waits: AtomicUsize::new(0),
+        on_bind: Mutex::new(None),
     };
     let cfg = Config {
         data,

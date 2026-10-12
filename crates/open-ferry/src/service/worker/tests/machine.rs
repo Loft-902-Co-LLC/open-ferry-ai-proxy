@@ -126,6 +126,9 @@ struct WriteProbe {
     partial: std::sync::atomic::AtomicBool,
     arrived: tokio::sync::Notify,
     writes: std::sync::atomic::AtomicUsize,
+    /// When the first stalled write began, which is when its send timeout
+    /// started.
+    first_stall: std::sync::OnceLock<Instant>,
 }
 
 struct ProbedWriter {
@@ -144,6 +147,7 @@ impl tokio::io::AsyncWrite for ProbedWriter {
                 .writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if probe.stall.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = probe.first_stall.set(Instant::now());
                 probe.arrived.notify_one();
                 return std::task::Poll::Pending;
             }
@@ -223,6 +227,7 @@ impl Setup {
                 wedge_lease: None,
                 wedge_watcher: None,
                 fail_server: None,
+                stop_took_the_take_over: None,
                 updates: None,
                 fail_resume_accept: false,
                 fail_listener_when_sync_queued: false,
@@ -297,7 +302,12 @@ impl Setup {
         let mut timing = self.timing;
         #[cfg(feature = "blue-green-test")]
         let hooks = {
-            let hooks = match self.marker {
+            // A test's hold on a step is not a seam file, and survives.
+            let step_hold = timing
+                .hooks
+                .as_ref()
+                .and_then(|hooks| hooks.step_hold.clone());
+            let mut hooks = match self.marker {
                 Some(marker) => Hooks::in_data_dir_marked(&data, marker),
                 None if self.faults.is_empty() => Hooks::default(),
                 None => Hooks::in_data_dir_marked(&data, "test"),
@@ -309,6 +319,7 @@ impl Setup {
                 )
                 .unwrap();
             }
+            hooks.step_hold = step_hold;
             timing.hooks = Some(hooks.clone());
             hooks
         };
@@ -1921,8 +1932,10 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     let mut setup = Setup::new(Role::Active);
     setup.stop_ms = 100;
     setup.write_probe = Some(probe.clone());
-    assert_eq!(setup.timing.send_timeout, Duration::from_secs(2));
-    let setup_send_timeout = setup.timing.send_timeout;
+    // A long send timeout, so the two behaviours are far apart in absolute
+    // terms: a loaded machine's delay doesn't grow with it.
+    let send_timeout = Duration::from_secs(5);
+    setup.timing.send_timeout = send_timeout;
     let mut rig = setup.start();
     assert_eq!(rig.fake().recv_status().await.2, "active");
     probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1930,12 +1943,22 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     tokio::time::timeout(WAIT, probe.arrived.notified())
         .await
         .unwrap();
-    let started = Instant::now();
     rig.fake().send(Message::Stop { budget_ms: 100 }).await;
-    assert!(succeeded(rig.exit().await));
-    // About 2.1 s. The wrong behaviour waits out the send timeout again
-    // (about 4.1 s), or for ever.
-    assert!(started.elapsed() < setup_send_timeout * 2);
+    // Waits longer than `exit` does, so a faulty run fails the bound below
+    // and not the exit wait.
+    let code = tokio::time::timeout(Duration::from_secs(20), rig.worker.take().unwrap())
+        .await
+        .expect("the worker didn't exit in time")
+        .unwrap();
+    let exited = Instant::now();
+    assert!(succeeded(code));
+    // Counted from the first stalled write, when the send timeout began:
+    // about 5.1 s. The wrong behaviour waits out the send timeout again, so
+    // at least about 10.1 s. The bound of 8 s leaves about 2.9 s over the
+    // right time and about 2.1 s under the wrong one, whatever delays the
+    // test thread.
+    let stalled_at = *probe.first_stall.get().unwrap();
+    assert!(exited.duration_since(stalled_at) < Duration::from_secs(8));
     assert!(!rig.lease_is_free());
 }
 

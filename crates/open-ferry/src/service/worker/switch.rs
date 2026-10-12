@@ -18,6 +18,7 @@ use open_ferry_core::manager::Manager;
 use open_ferry_core::manager::cooldown_store::{self, Thaw};
 use open_ferry_management::{Handover, ManagementState};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 
 use super::hooks::{Barrier, Event, Fault, Hooks, Place};
 use super::{Active, Lease, Prepared, ProcessLease, Timing};
@@ -48,6 +49,10 @@ pub(super) fn lease_held(slot: &LeaseSlot) -> bool {
 pub(super) enum Command {
     /// Read the config and the credentials again, and say when done.
     Reload(oneshot::Sender<()>),
+    /// Apply the config that waited for the gate to open, read the
+    /// credentials of its auth directory, and say when done: `Err` when the
+    /// directory the config names isn't the one in use.
+    ApplyDeferred(oneshot::Sender<Result<(), String>>),
 }
 
 /// How far a serving worker is in a switch, which is what its phase says.
@@ -113,7 +118,11 @@ impl Handles {
         let management = self.management.clone();
         let manager = self.manager.clone();
         let controls = self.file_log.controls().clone();
+        #[cfg(test)]
+        let held = self.hooks.clone();
         let _ = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            held.hold_step("stop_background");
             if let Some(updates) = management.updates() {
                 updates.stop();
             }
@@ -164,82 +173,132 @@ pub(super) async fn cleaning_is_off(wait: &mut watch::Receiver<bool>) {
     let _ = wait.wait_for(|done| *done).await;
 }
 
+/// Gives the lease up: taking it out and dropping it is one step. The worker's
+/// driver does this when the continuation ends well, never the continuation:
+/// a driver that took `stop` or EOF doesn't process that end, and a stopping
+/// worker keeps its lease until it exits (L9.17).
+pub(super) fn release_lease(slot: &LeaseSlot) {
+    if let Some(held) = locked(slot).take() {
+        held.release();
+    }
+}
+
 /// What the hand over's continuation needs.
 pub(super) struct HandOver {
     pub(super) handles: Handles,
-    pub(super) lease: LeaseSlot,
-    /// Whether the gate was open when the hand over began: a worker that
-    /// serves closes it in two steps, with barriers, and one that doesn't
-    /// has nothing to close (L9.16).
-    pub(super) was_open: bool,
     pub(super) cleaned: watch::Receiver<bool>,
+    /// Set by a resume. Only the waits that observe are cut short by it; a
+    /// mutating step that has started runs to its end, and one that hasn't
+    /// started doesn't.
+    pub(super) cancel: watch::Receiver<bool>,
 }
 
-/// L9.3 from the second step on: close the gate, write `handover.json`,
-/// freeze the cooldown, stop the background work, pause accept, give the
-/// lease up. The first step, cleaning off, and the management 503 before it
-/// are the worker's. The `Ok` is the id of the state written.
+const CANCELLED: &str = "the hand over was cancelled by a resume";
+
+/// Fails when a resume has cancelled the hand over: called before each step
+/// that changes something.
+fn not_cancelled(cancel: &watch::Receiver<bool>) -> Result<(), String> {
+    if *cancel.borrow() {
+        return Err(CANCELLED.to_owned());
+    }
+    Ok(())
+}
+
+/// Waits for `wait`, which only observes, unless a resume cancels first.
+async fn observe<T>(
+    cancel: &mut watch::Receiver<bool>,
+    wait: impl Future<Output = T>,
+) -> Result<T, String> {
+    tokio::select! {
+        out = wait => Ok(out),
+        () = cancelled(cancel) => Err(CANCELLED.to_owned()),
+    }
+}
+
+/// L9.3 from the second step on: the management 503, close the gate, write
+/// `handover.json`, freeze the cooldown, stop the background work, pause
+/// accept, and wait at the lease barrier. The first step, cleaning off, is the
+/// worker's; the lease is given up by the worker on the `Ok`, which is the id
+/// of the state written.
 ///
 /// It stops at the first step that fails (L9.4) and leaves the worker as that
 /// step found it: the worker restores the gate and accept.
 pub(super) async fn hand_over(job: HandOver) -> Result<String, String> {
     let HandOver {
         handles,
-        lease,
-        was_open,
         mut cleaned,
+        mut cancel,
     } = job;
     let hooks = &handles.hooks;
     cleaning_is_off(&mut cleaned).await;
-    if was_open {
-        let epoch = handles.gate.epoch();
-        handles
-            .gate
-            .quiesce(epoch)
-            .map_err(|error| format!("the gate didn't start closing: {error}"))?;
-        hooks
-            .barrier(Barrier::GateClosing, true)
-            .await
-            .map_err(|error| format!("a test barrier failed: {error}"))?;
-        if hooks.fault(Fault::HoldRefresh).is_some() {
-            hooks
-                .barrier(Barrier::RefreshBeforeSave, true)
-                .await
+    // Cleaning is off, and now the management API answers 503 (L9.3).
+    handles.management.set_updating(true);
+    not_cancelled(&cancel)?;
+    // By what the gate is, not by what it was: a take over that failed can
+    // leave it closing, and no lease may go while it is.
+    let epoch = handles.gate.epoch();
+    match handles.gate.state() {
+        GateState::Open => {
+            handles
+                .gate
+                .quiesce(epoch)
+                .map_err(|error| format!("the gate didn't start closing: {error}"))?;
+            observe(&mut cancel, hooks.barrier(Barrier::GateClosing, true))
+                .await?
+                .map_err(|error| format!("a test barrier failed: {error}"))?;
+            if hooks.fault(Fault::HoldRefresh).is_some() {
+                observe(&mut cancel, hooks.barrier(Barrier::RefreshBeforeSave, true))
+                    .await?
+                    .map_err(|error| format!("a test barrier failed: {error}"))?;
+            }
+            observe(&mut cancel, handles.gate.settle(epoch))
+                .await?
+                .map_err(|error| format!("the gate didn't close: {error}"))?;
+            observe(&mut cancel, hooks.barrier(Barrier::GateClosed, true))
+                .await?
                 .map_err(|error| format!("a test barrier failed: {error}"))?;
         }
-        handles
-            .gate
-            .settle(epoch)
-            .await
-            .map_err(|error| format!("the gate didn't close: {error}"))?;
-        hooks
-            .barrier(Barrier::GateClosed, true)
-            .await
-            .map_err(|error| format!("a test barrier failed: {error}"))?;
+        GateState::Quiescing => {
+            observe(&mut cancel, handles.gate.settle(epoch))
+                .await?
+                .map_err(|error| format!("the gate didn't close: {error}"))?;
+        }
+        GateState::Closed => {}
     }
+    not_cancelled(&cancel)?;
     let id = new_state_id();
     let handover = handles.management.freeze_attempts(id.clone());
     let dir = handles.data_dir.clone();
-    tokio::task::spawn_blocking(move || write_handover(&dir, &handover))
-        .await
-        .map_err(|error| format!("the handover task failed: {error}"))?
-        .map_err(|error| format!("couldn't write {HANDOVER_FILE}: {error}"))?;
+    #[cfg(test)]
+    let held = hooks.clone();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        held.hold_step("write_handover");
+        write_handover(&dir, &handover)
+    })
+    .await
+    .map_err(|error| format!("the handover task failed: {error}"))?
+    .map_err(|error| format!("couldn't write {HANDOVER_FILE}: {error}"))?;
     hooks.event(Event::HandoverWritten, true);
+    not_cancelled(&cancel)?;
     let manager = handles.manager.clone();
-    tokio::task::spawn_blocking(move || cooldown_store::freeze(&manager))
-        .await
-        .map_err(|error| format!("the cooldown task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    let held = hooks.clone();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        held.hold_step("freeze");
+        cooldown_store::freeze(&manager)
+    })
+    .await
+    .map_err(|error| format!("the cooldown task failed: {error}"))?
+    .map_err(|error| error.to_string())?;
+    not_cancelled(&cancel)?;
     handles.stop_background().await;
+    not_cancelled(&cancel)?;
     handles.control.pause_accept().await;
-    hooks
-        .barrier(Barrier::LeaseRelease, true)
-        .await
+    observe(&mut cancel, hooks.barrier(Barrier::LeaseRelease, true))
+        .await?
         .map_err(|error| format!("a test barrier failed: {error}"))?;
-    // Taking it out and dropping it is one step: nothing awaits between.
-    if let Some(held) = locked(&lease).take() {
-        held.release();
-    }
     Ok(id)
 }
 
@@ -295,14 +354,22 @@ pub(super) struct Resume {
     /// `budgets.resume_ms`: how long to try for the lease.
     pub(super) retake_within: Duration,
     pub(super) timing: Timing,
+    /// The hand over's continuation, already told to cancel. `None` when it
+    /// ended, or never ran.
+    pub(super) hand: Option<JoinHandle<Result<String, String>>>,
+    /// The hand over's first step, cleaning off.
+    pub(super) cleaned: watch::Receiver<bool>,
 }
 
 /// L9.5, both kinds, as one task so the worker answers the supervisor while
-/// it waits for the lease. With the lease still held: reopen the log, thaw
-/// the cooldown without restoring, and no reload (T1). After `handed_over`:
-/// retake the lease first, reload, and thaw with a restore. Then the
-/// background work, the gate, accept, and last of all the management API's
-/// 503 ends, so a probe that sees `resumed` finds it answering.
+/// it waits. First the hand over's continuation is joined, never aborted: a
+/// blocking step it has started can't be stopped, and a resume must not run
+/// beside it; then cleaning is off. With the lease still held: reopen the
+/// log, thaw the cooldown without restoring, and no reload (T1). After
+/// `handed_over`: retake the lease first, reload, and thaw with a restore.
+/// Then the background work, the gate, accept, and last of all the
+/// management API's 503 ends, so a probe that sees `resumed` finds it
+/// answering.
 pub(super) async fn resume(job: Resume) -> Result<(), String> {
     let Resume {
         handles,
@@ -310,7 +377,17 @@ pub(super) async fn resume(job: Resume) -> Result<(), String> {
         commands,
         retake_within,
         timing,
+        hand,
+        mut cleaned,
     } = job;
+    // No limit of its own: the supervisor's resume timeout and its kill by
+    // handle bound a stalled filesystem, and exiting ends the writer.
+    if let Some(hand) = hand {
+        let _ = hand.await;
+    }
+    cleaning_is_off(&mut cleaned).await;
+    // After the join: a continuation that got as far as its end left the
+    // lease where it was, and one that was cancelled never touched it.
     let kept = lease_held(&lease);
     if !kept {
         let taken = Lease::take(&handles.data_dir, retake_within, &timing).await?;
@@ -328,6 +405,19 @@ pub(super) async fn resume(job: Resume) -> Result<(), String> {
     }
     if handles.gate.state() != GateState::Open {
         handles.gate.reopen();
+    }
+    if !kept {
+        // The reload ran with the gate closed, and a config that changes the
+        // auth directory waits for it to open. `resumed` means the whole
+        // config is applied and its credentials are loaded.
+        let (done, applied) = oneshot::channel();
+        commands
+            .send(Command::ApplyDeferred(done))
+            .map_err(|_| "the service loop has ended".to_owned())?;
+        applied
+            .await
+            .map_err(|_| "the service loop ended before the config was applied".to_owned())?
+            .map_err(|reason| format!("the config wasn't applied: {reason}"))?;
     }
     let manager = handles.manager.clone();
     let kind = if kept { Thaw::Keep } else { Thaw::Restore };
@@ -410,11 +500,20 @@ pub(super) async fn take_over(job: TakeOver) -> Taken {
         return Taken::Failed(format!("reload: {error}"));
     }
     standby.config = Arc::clone(&standby.service.config);
+    // The TLS material stays as the standby loaded it: a take over comes
+    // seconds after the load, and upstream loads it once, at start.
     if *cancel.borrow() {
         return Taken::Cancelled;
     }
     let dir = handles.data_dir.clone();
-    match tokio::task::spawn_blocking(move || read_handover(&dir)).await {
+    #[cfg(test)]
+    let held = hooks.clone();
+    let read = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        held.hold_step("read_handover");
+        read_handover(&dir)
+    });
+    match read.await {
         Ok(Ok(handover)) => handles.management.restore_attempts(&handover),
         Ok(Err(reason)) => return Taken::Failed(reason),
         Err(error) => return Taken::Failed(format!("handover: the task failed: {error}")),
@@ -439,16 +538,18 @@ pub(super) async fn take_over(job: TakeOver) -> Taken {
     if *cancel.borrow() {
         return Taken::Cancelled;
     }
-    match super::activate(
+    match super::activate_unless_cancelled(
         standby,
         &config_path,
         lease,
         &timing,
         super::Launch::TakeOver,
+        Some(cancel),
     )
     .await
     {
         Ok(active) => Taken::Ready(Box::new(active)),
-        Err(reason) => Taken::Failed(reason),
+        Err(super::Aborted::Failed(reason)) => Taken::Failed(reason),
+        Err(super::Aborted::Cancelled) => Taken::Cancelled,
     }
 }

@@ -169,10 +169,6 @@ impl LogControls {
             .clone()
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the request logger's wiring, in main, takes it")
-    )]
     pub fn request_cleaning(&self) -> CleaningControls {
         self.request.clone()
     }
