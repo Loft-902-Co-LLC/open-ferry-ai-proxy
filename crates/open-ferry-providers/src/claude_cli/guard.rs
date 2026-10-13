@@ -1,13 +1,31 @@
 //! The application's check before Claude Code runs.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::Entry;
 
-type Check = dyn Fn(&Entry, &Path, &Path) -> Result<(), String> + Send + Sync;
+/// The environment policy returned by the application's path checks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SpawnEnvironment {
+    /// Keep the usual inherited environment, with the entry's account rules.
+    #[default]
+    Inherited,
+    /// Keep only locale, proxy and account variables, plus these trusted values.
+    Restricted {
+        /// The checked program directory followed by checked system directories.
+        path: OsString,
+        /// The entry's private temporary directory.
+        temp: PathBuf,
+        /// Checked home paths and native system values, overriding inheritance.
+        variables: Vec<(OsString, OsString)>,
+    },
+}
+
+type Check = dyn Fn(&Entry, &Path, &Path) -> Result<SpawnEnvironment, String> + Send + Sync;
 
 /// A spawn check supplied by the application, with refusals logged once
 /// for each entry and reason. Returned errors never contain the reason.
@@ -27,7 +45,7 @@ impl SpawnGuard {
     /// Checks the resolved program, account directory and working paths.
     /// Called before creating directories and again before spawning.
     pub fn new(
-        check: impl Fn(&Entry, &Path, &Path) -> Result<(), String> + Send + Sync + 'static,
+        check: impl Fn(&Entry, &Path, &Path) -> Result<SpawnEnvironment, String> + Send + Sync + 'static,
     ) -> Self {
         Self {
             check: Arc::new(check),
@@ -40,8 +58,8 @@ impl SpawnGuard {
         entry: &Entry,
         program: &Path,
         root: &Path,
-    ) -> Result<(), String> {
-        if let Err(reason) = (self.check)(entry, program, root) {
+    ) -> Result<SpawnEnvironment, String> {
+        (self.check)(entry, program, root).map_err(|reason| {
             let mut logged = self
                 .logged
                 .lock()
@@ -49,11 +67,27 @@ impl SpawnGuard {
             if logged.insert((entry.name.clone(), reason.clone())) {
                 tracing::warn!(entry = %entry.name, %reason, "claude-cli execution refused");
             }
-            return Err(
-                "claude-cli execution refused; see the service log for the remedy".to_owned(),
-            );
+            "claude-cli execution refused; see the service log for the remedy".to_owned()
+        })
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        entry: &Entry,
+        program: &Path,
+        root: &Path,
+    ) -> Result<(PathBuf, PathBuf, SpawnEnvironment), String> {
+        let environment = self.authorize(entry, program, root)?;
+        let (dir, work) = entry
+            .dirs(root)
+            .map_err(|error| format!("couldn't make the entry's directory: {error}"))?;
+        if let SpawnEnvironment::Restricted { temp, .. } = environment {
+            super::settings::create_private_dir(&temp).map_err(|error| {
+                format!("couldn't make the entry's temporary directory: {error}")
+            })?;
         }
-        Ok(())
+        let environment = self.authorize(entry, program, root)?;
+        Ok((dir, work, environment))
     }
 }
 
@@ -72,7 +106,7 @@ mod tests {
             assert!(!error.contains("private reason"));
         }
         assert_eq!(guard.logged.lock().unwrap().len(), 1);
-        let allowed = SpawnGuard::new(|_, _, _| Ok(()));
+        let allowed = SpawnGuard::new(|_, _, _| Ok(SpawnEnvironment::Inherited));
         assert!(
             allowed
                 .authorize(&entry, Path::new("program"), Path::new("root"))

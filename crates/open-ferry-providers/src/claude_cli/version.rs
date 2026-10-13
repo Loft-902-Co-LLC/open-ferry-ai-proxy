@@ -46,7 +46,7 @@ pub async fn check_version_guarded(
     check_version_in(entry, guard, &super::default_work_root()).await
 }
 
-async fn check_version_in(
+pub(super) async fn check_version_in(
     entry: &Entry,
     guard: Option<&super::SpawnGuard>,
     root: &std::path::Path,
@@ -55,24 +55,13 @@ async fn check_version_in(
         Ok(program) => program,
         Err(error) => return VersionCheck::Failed(error),
     };
-    let work = if let Some(guard) = guard {
-        if let Err(error) = guard.authorize(entry, &program, root) {
-            return VersionCheck::Failed(error);
+    let (work, environment) = if let Some(guard) = guard {
+        match guard.prepare(entry, &program, root) {
+            Ok((_, work, environment)) => (Some(work), environment),
+            Err(error) => return VersionCheck::Failed(error),
         }
-        let (_, work) = match entry.dirs(root) {
-            Ok(dirs) => dirs,
-            Err(error) => {
-                return VersionCheck::Failed(format!(
-                    "couldn't make the entry's directory: {error}"
-                ));
-            }
-        };
-        if let Err(error) = guard.authorize(entry, &program, root) {
-            return VersionCheck::Failed(error);
-        }
-        Some(work)
     } else {
-        None
+        (None, super::SpawnEnvironment::Inherited)
     };
     let mut command = Command::new(&program);
     if let Some(work) = work {
@@ -84,7 +73,7 @@ async fn check_version_in(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    entry.apply_env(&mut command);
+    entry.apply_env(&mut command, &environment);
     no_window(&mut command);
     let output = match tokio::time::timeout(VERSION_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,

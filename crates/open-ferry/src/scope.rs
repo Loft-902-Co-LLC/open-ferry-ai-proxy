@@ -890,7 +890,7 @@ pub(crate) fn claude_spawn_guard(
             let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
             let profile = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty());
             let inherited = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty());
-            authorize_claude_spawn(
+            let environment = authorize_claude_spawn(
                 probe.as_ref(),
                 entry,
                 program,
@@ -898,7 +898,27 @@ pub(crate) fn claude_spawn_guard(
                 home.as_deref().map(Path::new),
                 inherited.as_deref().map(Path::new),
                 profile.as_deref().map(Path::new),
-            )
+            )?;
+            #[cfg(windows)]
+            let environment = if matches!(
+                environment,
+                open_ferry_providers::claude_cli::SpawnEnvironment::Restricted { .. }
+            ) {
+                let (windows, system) = claude_windows_directories()?;
+                let appdata = std::env::var_os("APPDATA").filter(|value| !value.is_empty());
+                let local = std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty());
+                claude_windows_environment(
+                    probe.as_ref(),
+                    environment,
+                    &windows,
+                    &system,
+                    appdata.as_deref().map(Path::new),
+                    local.as_deref().map(Path::new),
+                )?
+            } else {
+                environment
+            };
+            Ok(environment)
         },
     ))
 }
@@ -911,59 +931,49 @@ fn authorize_claude_spawn(
     home: Option<&Path>,
     inherited_config: Option<&Path>,
     profile: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<open_ferry_providers::claude_cli::SpawnEnvironment, String> {
+    use open_ferry_providers::claude_cli::SpawnEnvironment;
     if !probe.privileged()? || probe.in_container() {
-        return Ok(());
+        return Ok(SpawnEnvironment::Inherited);
     }
     if probe.platform() == Platform::MacOs {
         return Err(macos_refusal().to_string());
     }
-    let text = |path: &Path| -> Result<String, String> {
-        let path = path.to_str().ok_or("the path isn't valid Unicode")?;
-        if !probe.platform().is_absolute(path)
-            || path
-                .split(|c| probe.platform().is_separator(c))
-                .any(|part| part == "." || part == "..")
-        {
-            return Err(format!(
-                "{path} isn't a full path without `.` or `..`; set full paths for command and config-dir"
-            ));
-        }
-        Ok(path.to_owned())
-    };
-    let remedy = |reason| {
-        format!(
-            "{reason}; make the program and its directories, config-dir and working directories root's (administrators or SYSTEM on Windows), not writable by others, with no links"
-        )
-    };
+    let text = |path: &Path| claude_path(probe, path);
+    let remedy = claude_remedy;
     probe.trusted_file(&text(program)?).map_err(remedy)?;
-    let account = match entry.config_dir_path() {
-        Some(path) => path,
-        None => {
-            let home = home.ok_or(
-                "Claude Code has no home directory; set config-dir to a trusted full path",
-            )?;
-            Path::new(&probe.platform().join(&text(home)?, ".claude")).to_path_buf()
+    let mut variables = Vec::new();
+    let windows_profile = (probe.platform() == Platform::Windows)
+        .then_some(profile)
+        .flatten();
+    for (name, path) in [("HOME", home), ("USERPROFILE", windows_profile)] {
+        if let Some(path) = path {
+            trusted_existing_dir(probe, &text(path)?).map_err(remedy)?;
+            variables.push((name.into(), path.as_os_str().to_owned()));
         }
+    }
+    let configured = entry.config_dir_path();
+    let account = if let Some(path) = configured.as_deref().or(inherited_config) {
+        text(path)?
+    } else {
+        let home = if probe.platform() == Platform::Windows {
+            profile.or(home)
+        } else {
+            home
+        }
+        .ok_or("Claude Code has no home directory; set config-dir to a trusted full path")?;
+        let home = text(home)?;
+        claude_optional_file(probe, &probe.platform().join(&home, ".claude.json"))?;
+        probe.platform().join(&home, ".claude")
     };
-    trusted_existing_dir(probe, &text(&account)?).map_err(remedy)?;
-    // Without an entry override Claude Code also honours this inherited path.
-    if entry.config_dir.is_empty()
+    trusted_existing_dir(probe, &account).map_err(remedy)?;
+    for name in ["settings.json", "settings.local.json"] {
+        claude_optional_file(probe, &probe.platform().join(&account, name))?;
+    }
+    if configured.is_none()
         && let Some(path) = inherited_config
     {
-        trusted_existing_dir(probe, &text(path)?).map_err(remedy)?;
-    }
-    // Windows also has USERPROFILE; check its default account directory
-    // when the entry and the environment supply no explicit config directory.
-    if probe.platform() == Platform::Windows
-        && entry.config_dir.is_empty()
-        && inherited_config.is_none()
-    {
-        let profile = profile.ok_or(
-            "Claude Code has no Windows profile directory; set config-dir to a trusted full path",
-        )?;
-        let account = probe.platform().join(&text(profile)?, ".claude");
-        trusted_existing_dir(probe, &account).map_err(remedy)?;
+        variables.push(("CLAUDE_CONFIG_DIR".into(), path.as_os_str().to_owned()));
     }
     if root.starts_with(std::env::temp_dir()) {
         return Err("Claude Code's working root is in the temporary directory; set a trusted LOCALAPPDATA (Windows) or XDG_RUNTIME_DIR/XDG_CACHE_HOME/HOME (Unix), or use a trusted data directory".to_owned());
@@ -971,10 +981,170 @@ fn authorize_claude_spawn(
     let root = text(root)?;
     let dir = probe.platform().join(&root, &entry.dir_name());
     let work = probe.platform().join(&dir, "work");
-    for path in [&root, &dir, &work] {
+    let temp = probe.platform().join(&work, "tmp");
+    for path in [&root, &dir, &work, &temp] {
         trusted_existing_dir(probe, path).map_err(remedy)?;
     }
+    let program = text(program)?;
+    let parent = probe
+        .platform()
+        .parent(&program)
+        .ok_or("the program has no directory")?;
+    probe.trusted_dir(&parent).map_err(remedy)?;
+    let mut paths = vec![parent];
+    if probe.platform() != Platform::Windows {
+        claude_system_paths(
+            probe,
+            &mut paths,
+            &["/usr/sbin", "/usr/bin", "/sbin", "/bin"],
+        )?;
+    }
+    Ok(SpawnEnvironment::Restricted {
+        path: claude_path_list(probe, &paths)?,
+        temp: temp.into(),
+        variables,
+    })
+}
+
+fn claude_path(probe: &dyn Probe, path: &Path) -> Result<String, String> {
+    let path = path.to_str().ok_or("the path isn't valid Unicode")?;
+    if !probe.platform().is_absolute(path)
+        || path
+            .split(|c| probe.platform().is_separator(c))
+            .any(|part| part == "." || part == "..")
+    {
+        return Err(format!(
+            "{path} isn't a full path without `.` or `..`; set full paths for command and config-dir"
+        ));
+    }
+    Ok(path.to_owned())
+}
+
+fn claude_remedy(reason: String) -> String {
+    format!(
+        "{reason}; make the program and its directories, config-dir and working directories root's (administrators or SYSTEM on Windows), not writable by others, with no links"
+    )
+}
+
+fn claude_optional_file(probe: &dyn Probe, path: &str) -> Result<(), String> {
+    match probe.state(path) {
+        State::Missing => Ok(()),
+        State::File => probe.trusted_file(path).map_err(claude_remedy),
+        _ => Err(claude_remedy(format!(
+            "{path} is not an accessible real file"
+        ))),
+    }
+}
+
+fn claude_system_paths(
+    probe: &dyn Probe,
+    paths: &mut Vec<String>,
+    system: &[&str],
+) -> Result<(), String> {
+    for path in system {
+        match probe.state(path) {
+            State::Missing => continue,
+            State::Directory => probe.trusted_dir(path).map_err(claude_remedy)?,
+            _ => {
+                return Err(claude_remedy(format!(
+                    "{path} is not an accessible real directory"
+                )));
+            }
+        }
+        paths.push((*path).to_owned());
+    }
     Ok(())
+}
+
+fn claude_path_list(probe: &dyn Probe, paths: &[String]) -> Result<std::ffi::OsString, String> {
+    let separator = if probe.platform() == Platform::Windows {
+        ';'
+    } else {
+        ':'
+    };
+    if paths.iter().any(|path| path.contains(separator)) {
+        return Err("Claude Code's program or system directory contains a PATH separator; use a trusted directory without it".to_owned());
+    }
+    Ok(paths.join(&separator.to_string()).into())
+}
+
+#[cfg(any(windows, test))]
+fn claude_windows_environment(
+    probe: &dyn Probe,
+    environment: open_ferry_providers::claude_cli::SpawnEnvironment,
+    windows: &str,
+    system: &str,
+    appdata: Option<&Path>,
+    local: Option<&Path>,
+) -> Result<open_ferry_providers::claude_cli::SpawnEnvironment, String> {
+    use open_ferry_providers::claude_cli::SpawnEnvironment;
+    let SpawnEnvironment::Restricted {
+        path,
+        temp,
+        mut variables,
+    } = environment
+    else {
+        return Ok(environment);
+    };
+    let windows = claude_path(probe, Path::new(windows))?;
+    let system = claude_path(probe, Path::new(system))?;
+    let wbem = probe.platform().join(&system, "Wbem");
+    let mut paths = vec![
+        path.to_str()
+            .ok_or("the program directory isn't valid Unicode")?
+            .to_owned(),
+    ];
+    claude_system_paths(probe, &mut paths, &[&system, &windows, &wbem])?;
+    let comspec = probe.platform().join(&system, "cmd.exe");
+    probe.trusted_file(&comspec).map_err(claude_remedy)?;
+    let drive = windows
+        .get(..2)
+        .filter(|drive| drive.ends_with(':'))
+        .ok_or("the Windows directory has no system drive")?;
+    let program_data = claude_path(probe, Path::new(&probe.program_data()?))?;
+    for (name, value) in [
+        ("SystemRoot", windows.as_str()),
+        ("windir", windows.as_str()),
+        ("ComSpec", comspec.as_str()),
+        ("SystemDrive", drive),
+        ("ProgramData", program_data.as_str()),
+        ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+    ] {
+        variables.push((name.into(), value.into()));
+    }
+    for (name, path) in [("APPDATA", appdata), ("LOCALAPPDATA", local)] {
+        if let Some(path) = path {
+            trusted_existing_dir(probe, &claude_path(probe, path)?).map_err(claude_remedy)?;
+            variables.push((name.into(), path.as_os_str().to_owned()));
+        }
+    }
+    Ok(SpawnEnvironment::Restricted {
+        path: claude_path_list(probe, &paths)?,
+        temp,
+        variables,
+    })
+}
+
+#[cfg(windows)]
+fn claude_windows_directories() -> Result<(String, String), String> {
+    use std::os::windows::ffi::OsStringExt as _;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetWindowsDirectoryW(buffer: *mut u16, size: u32) -> u32;
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+    let read = |get: unsafe extern "system" fn(*mut u16, u32) -> u32| {
+        let mut buffer = vec![0u16; 32768];
+        // SAFETY: the buffer is writable for the full length passed.
+        let length = unsafe { get(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        if length == 0 || length >= buffer.len() {
+            return Err("can't determine Claude Code's Windows system directories".to_owned());
+        }
+        std::ffi::OsString::from_wide(&buffer[..length])
+            .into_string()
+            .map_err(|_| "the Windows system directory isn't valid Unicode".to_owned())
+    };
+    Ok((read(GetWindowsDirectoryW)?, read(GetSystemDirectoryW)?))
 }
 
 /// [`authorize`], given whose directory `root` is.

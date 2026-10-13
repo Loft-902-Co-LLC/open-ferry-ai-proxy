@@ -73,19 +73,16 @@ pub async fn auth_status_guarded(
     guard: Option<&super::SpawnGuard>,
 ) -> Result<AuthStatus, StatusError> {
     let program = entry.program().map_err(StatusError::Run)?;
-    if let Some(guard) = guard {
+    let (_, work, environment) = if let Some(guard) = guard {
         guard
-            .authorize(entry, &program, work_root)
-            .map_err(StatusError::Run)?;
-    }
-    let (_, work) = entry.dirs(work_root).map_err(|error| {
-        StatusError::Run(format!("couldn't make the entry's directory: {error}"))
-    })?;
-    if let Some(guard) = guard {
-        guard
-            .authorize(entry, &program, work_root)
-            .map_err(StatusError::Run)?;
-    }
+            .prepare(entry, &program, work_root)
+            .map_err(StatusError::Run)?
+    } else {
+        let (dir, work) = entry.dirs(work_root).map_err(|error| {
+            StatusError::Run(format!("couldn't make the entry's directory: {error}"))
+        })?;
+        (dir, work, super::SpawnEnvironment::Inherited)
+    };
     let mut command = Command::new(&program);
     command
         .args(["auth", "status", "--json"])
@@ -94,7 +91,7 @@ pub async fn auth_status_guarded(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    entry.apply_env(&mut command);
+    entry.apply_env(&mut command, &environment);
     no_window(&mut command);
     let output = match tokio::time::timeout(STATUS_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
