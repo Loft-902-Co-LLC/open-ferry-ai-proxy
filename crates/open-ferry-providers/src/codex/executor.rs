@@ -206,6 +206,10 @@ impl CodexExecutor {
         self.clients.effective_proxy(&auth.proxy_url).to_owned()
     }
 
+    pub(super) fn global_proxy(&self) -> String {
+        self.clients.effective_proxy("").to_owned()
+    }
+
     /// The Responses WebSocket sessions.
     pub(super) fn websockets(&self) -> &websocket::Store {
         &self.websockets

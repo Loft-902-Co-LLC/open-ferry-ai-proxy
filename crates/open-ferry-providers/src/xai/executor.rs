@@ -167,6 +167,10 @@ impl XaiExecutor {
         self.clients.effective_proxy(&auth.proxy_url).to_owned()
     }
 
+    pub(super) fn global_proxy(&self) -> String {
+        self.clients.effective_proxy("").to_owned()
+    }
+
     /// What a call with `auth` is prepared with.
     pub(super) fn context<'a>(&'a self, auth: &'a Auth) -> Context<'a> {
         Context {
@@ -177,6 +181,7 @@ impl XaiExecutor {
     }
 
     /// The config retained by a WebSocket connection across reloads.
+    #[cfg(test)]
     pub(super) fn shared_config(&self) -> Option<Arc<Config>> {
         self.config.clone()
     }

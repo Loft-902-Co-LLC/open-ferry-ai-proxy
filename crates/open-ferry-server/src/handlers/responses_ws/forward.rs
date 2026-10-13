@@ -137,6 +137,7 @@ pub(super) async fn forward<S: Socket>(
     mut items: HandlerStream,
     mut options: ForwardOptions<'_>,
 ) -> Forwarded {
+    let _local_turn = conn.begin_turn();
     let mut completed = false;
     let mut response_started = false;
     let mut completed_output = b"[]".to_vec();
@@ -152,6 +153,8 @@ pub(super) async fn forward<S: Socket>(
     loop {
         let next = tokio::select! {
             payload = conn.local_interrupt() => {
+                // Like upstream, the HTTP path cannot match response IDs:
+                // a late interrupt arriving during this turn cancels it.
                 let response_id = str_at(&payload, "response_id").trim().to_owned();
                 let output = completed_output_from_payload(b"{\"response\":{\"output\":[]}}", &outputs);
                 let mut event = br#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}"#.to_vec();
@@ -244,7 +247,7 @@ pub(super) async fn forward<S: Socket>(
                 }
                 return Forwarded::Closed;
             }
-            if is_completion_event(&event_type) {
+            if is_completion_event(&event_type) || event_type == "response.incomplete" {
                 completed = true;
                 completed_output = completed_output_from_payload(&payload, &outputs);
                 str_at(&payload, "response.id")
@@ -272,12 +275,10 @@ async fn tick(ticker: Option<&mut Interval>) {
     }
 }
 
-/// Whether `event_type` ends a response (`isResponsesWebsocketCompletionEvent`).
+/// Whether the output can be restored (`isResponsesWebsocketCompletionEvent`).
+/// `response.incomplete` also ends a turn, but its partial output is untouched.
 pub(super) fn is_completion_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "response.completed" | "response.done" | "response.incomplete"
-    )
+    matches!(event_type, "response.completed" | "response.done")
 }
 
 /// An `error` event as a message: its status, or 500, and the event as the

@@ -68,6 +68,8 @@
 //! - Closing a connection drops it without a close frame, as gorilla's
 //!   `Close` does; a close from Codex is answered.
 //! - Connections are logged at debug level.
+//! - Credential removal includes pending handshakes, and interrupts recheck
+//!   the credential after acquiring the send lock, before writing.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -112,22 +114,28 @@ impl Store {
         self.sessions().get(id.trim()).cloned()
     }
 
-    /// Closes only the sessions connected with the removed credential.
+    /// Closes connected and pending sessions owned by the removed credential.
     pub(crate) fn close_auth(&self, auth_id: &str) {
         if auth_id.trim().is_empty() {
             return;
         }
-        let removed: Vec<_> = {
-            let mut sessions = self.sessions();
-            let ids: Vec<_> = sessions
-                .iter()
-                .filter(|(_, session)| session.state().auth_id == auth_id.trim())
-                .map(|(id, _)| id.clone())
-                .collect();
-            ids.iter().filter_map(|id| sessions.remove(id)).collect()
-        };
-        for session in removed {
-            session.close("auth_removed");
+        // Never nest the store lock with a session's state lock. Ownership
+        // publication and the decision to close share the state lock.
+        let candidates: Vec<_> = self
+            .sessions()
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        for (id, session) in candidates {
+            if session.close_for_auth(auth_id.trim()) {
+                let mut sessions = self.sessions();
+                if sessions
+                    .get(&id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+                {
+                    sessions.remove(&id);
+                }
+            }
         }
     }
 
@@ -160,6 +168,7 @@ impl Store {
                 return Err(errors::error(failure));
             }
             if lock(&conn.terminal_responses).contains(&response_id) {
+                tracing::debug!(outcome = "already_terminal", "codex websockets: interrupt");
                 return Ok(true);
             }
             if !state
@@ -176,9 +185,18 @@ impl Store {
                 "websocket credential is no longer enabled",
             ));
         }
-        conn.send(String::from_utf8_lossy(payload).into_owned())
+        // Authorization may change while another write holds the permit.
+        let mut sink = conn.sink.lock().await;
+        if !auth_check(&conn.target.auth_id) {
+            return Err(open_ferry_core::exec::ExecError::upstream(
+                400,
+                "websocket credential is no longer enabled",
+            ));
+        }
+        conn.send_locked(&mut sink, String::from_utf8_lossy(payload).into_owned())
             .await
             .map_err(|failure| errors::error(&failure))?;
+        tracing::debug!(outcome = "forwarded", "codex websockets: interrupt");
         Ok(true)
     }
 
@@ -264,9 +282,11 @@ pub(crate) struct Target {
     /// What the handshake sends, the token among them, redacted from the
     /// connection's failures; not part of what the target is.
     secrets: Secrets,
-    /// The config snapshot stays alive with the connection. Routing reuses
-    /// the resolved dial proxy below, including constructor overrides.
-    _config: Option<Arc<open_ferry_core::config::Config>>,
+    /// The config snapshot, for tests of retained routing.
+    #[cfg(test)]
+    config: Option<Arc<open_ferry_core::config::Config>>,
+    /// The global route at dial time, separately from a credential override.
+    global_proxy: String,
 }
 
 impl PartialEq for Target {
@@ -288,7 +308,9 @@ impl Target {
             proxy: proxy.trim().to_owned(),
             token: token.to_owned(),
             secrets: Secrets::from_iter([token]),
-            _config: None,
+            #[cfg(test)]
+            config: None,
+            global_proxy: proxy.trim().to_owned(),
         }
     }
 
@@ -298,11 +320,17 @@ impl Target {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_config(
         mut self,
         config: Option<Arc<open_ferry_core::config::Config>>,
     ) -> Self {
-        self._config = config;
+        self.config = config;
+        self
+    }
+
+    pub(crate) fn with_global_proxy(mut self, global_proxy: String) -> Self {
+        self.global_proxy = global_proxy;
         self
     }
 }
@@ -373,6 +401,15 @@ impl Conn {
             return Err(Failure::closed());
         }
         let mut sink = self.sink.lock().await;
+        self.send_locked(&mut sink, text).await
+    }
+
+    async fn send_locked(
+        &self,
+        sink: &mut Option<SplitSink<WsStream, Message>>,
+        text: String,
+    ) -> Result<(), Failure> {
+        let mut closing = self.closing.subscribe();
         let Some(sink) = sink.as_mut() else {
             return Err(Failure::closed());
         };
@@ -393,6 +430,17 @@ impl Conn {
     /// Whether the connection was closed.
     pub(crate) fn is_closed(&self) -> bool {
         *self.closing.borrow()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_closed(&self) {
+        let mut closing = self.closing.subscribe();
+        let _ = closing.wait_for(|closed| *closed).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn lock_send(&self) -> impl Drop + '_ {
+        self.sink.lock().await
     }
 
     /// The code Codex closed with, if it did.
@@ -482,7 +530,7 @@ impl Session {
             .conn
             .as_ref()
             .filter(|conn| conn.target.auth_id == auth_id.trim())
-            .map_or(fallback, |conn| conn.target._config.clone())
+            .map_or(fallback, |conn| conn.target.config.clone())
     }
 
     pub(crate) fn effective_proxy(
@@ -498,7 +546,7 @@ impl Session {
             .conn
             .as_ref()
             .filter(|conn| conn.target.auth_id == auth_id.trim())
-            .map_or(fallback, |conn| conn.target.proxy.clone())
+            .map_or(fallback, |conn| conn.target.global_proxy.clone())
     }
 
     fn new(id: &str, idle: Duration) -> Self {
@@ -677,6 +725,24 @@ impl Session {
             state.multi_agent = None;
             (state.conn.take(), state.active.take())
         };
+        self.finish_close(reason, detached, active);
+    }
+
+    fn close_for_auth(&self, auth_id: &str) -> bool {
+        let (detached, active) = {
+            let mut state = self.state();
+            if state.auth_id != auth_id {
+                return false;
+            }
+            state.closed = true;
+            state.multi_agent = None;
+            (state.conn.take(), state.active.take())
+        };
+        self.finish_close("auth_removed", detached, active);
+        true
+    }
+
+    fn finish_close(&self, reason: &str, detached: Option<Arc<Conn>>, active: Option<Active>) {
         self.closed.send_replace(true);
         if let Some(detached) = detached {
             self.log_disconnected(&detached, reason, None);
@@ -750,6 +816,9 @@ impl Session {
             if state.closed {
                 return Err(closed_session());
             }
+            // Publish before awaiting the handshake. Targeted removal takes
+            // this same lock and closes pending ownership as well.
+            state.auth_id.clone_from(&target.auth_id);
             if state
                 .conn
                 .as_ref()
