@@ -9,15 +9,15 @@
 //! The Codex client model catalog: upstream's `codex_client_models.json`.
 //! Each entry describes a model the way Codex clients expect it in their
 //! model list, and serves as the template for that model's entry (see
-//! [`crate::codex_models`]). The `gpt-5.5` entry is also the template for
-//! models the catalog doesn't list.
+//! [`crate::codex_models`]). The first entry is the template for models the
+//! catalog doesn't list, unless a `gpt-5.5` entry is present.
 //!
 //! The catalog in use is [`CodexClientCatalog::current`]: the built-in one,
 //! or the last valid one read from the file `models.codex-catalog` names
 //! (see [`super::catalog_sources`]), published to [`super::CatalogStore`].
 //!
 //! The catalog is checked as upstream checks it before use: it needs a
-//! default template, unique slugs, and the fields Codex can't do without.
+//! non-empty model list, unique slugs, and the fields Codex can't do without.
 //!
 //! Deviations from upstream:
 //! - A catalog is parsed once, when it is published, so it has no
@@ -44,7 +44,7 @@ use super::equal_fold;
 /// The built-in catalog.
 pub(crate) const EMBEDDED_CATALOG: &[u8] = include_bytes!("../../models/codex_client_models.json");
 
-/// The slug of the template for models the catalog doesn't list.
+/// The preferred slug of the template for models the catalog doesn't list.
 pub const DEFAULT_TEMPLATE: &str = "gpt-5.5";
 
 /// Why a Codex client model catalog was rejected. Its text is upstream's,
@@ -112,12 +112,14 @@ impl CodexClientCatalog {
             if slug.is_empty() {
                 continue;
             }
-            if slug == DEFAULT_TEMPLATE {
+            if default_template.is_none() || slug == DEFAULT_TEMPLATE {
                 default_template = Some(model.clone());
             }
             templates.insert(slug.to_owned(), model);
         }
-        let default_template = default_template.ok_or_else(missing_default)?;
+        let default_template = default_template.ok_or_else(|| {
+            CodexCatalogError("Codex client model catalog has no models".to_owned())
+        })?;
         Ok(Self {
             templates,
             default_template,
@@ -129,7 +131,8 @@ impl CodexClientCatalog {
         self.templates.get(slug)
     }
 
-    /// The template for models the catalog doesn't list (`gpt-5.5`).
+    /// The template for models the catalog doesn't list: the first entry,
+    /// unless `gpt-5.5` is present.
     pub fn default_template(&self) -> &Map<String, Value> {
         &self.default_template
     }
@@ -142,8 +145,7 @@ impl CodexClientCatalog {
 
 /// Checks that `data` is a Codex client model catalog upstream would serve
 /// (upstream's `ValidateCodexClientModelsJSON`): at least one model, each
-/// with a unique slug, the text, size and reasoning fields Codex needs, and
-/// a `gpt-5.5` entry.
+/// with a unique slug and the text, size and reasoning fields Codex needs.
 pub fn validate_codex_client_models_json(data: &[u8]) -> Result<(), CodexCatalogError> {
     let models = decode(data)?;
     if models.is_empty() {
@@ -171,17 +173,7 @@ pub fn validate_codex_client_models_json(data: &[u8]) -> Result<(), CodexCatalog
             ))
         })?;
     }
-    if !seen.contains(DEFAULT_TEMPLATE) {
-        return Err(missing_default());
-    }
     Ok(())
-}
-
-fn missing_default() -> CodexCatalogError {
-    CodexCatalogError(format!(
-        "Codex client model catalog is missing default template {}",
-        go::quote(DEFAULT_TEMPLATE)
-    ))
 }
 
 /// The catalog's models, decoded as Go decodes them into

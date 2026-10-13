@@ -896,3 +896,37 @@ fn write_string(out: &mut String, text: &str) {
     }
     out.push('"');
 }
+
+#[cfg(test)]
+mod fallback_template_tests {
+    use super::*;
+
+    #[test]
+    fn models_without_a_template_are_built_when_gpt_5_5_is_absent() {
+        let mut raw: Value =
+            serde_json::from_slice(crate::registry::codex_client::EMBEDDED_CATALOG).unwrap();
+        raw["models"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|model| model["slug"] != "gpt-5.5");
+        let templates = CodexClientCatalog::from_json(raw.to_string().as_bytes()).unwrap();
+        let registry = crate::registry::ModelRegistry::default();
+        let builder = Builder {
+            catalog: &registry,
+            statics: StaticCatalog::current(),
+            providers_for_model: None,
+            apply_patch: None,
+            optimize_multi_agent_v2: false,
+            client_version: "",
+        };
+        let model = ModelInfo {
+            id: "custom-model".into(),
+            context_length: 12345,
+            ..ModelInfo::default()
+        };
+        let built = builder.build(&templates, &[model]);
+        assert_eq!(built[0]["slug"], "custom-model");
+        assert_eq!(built[0]["base_instructions"], FALLBACK_INSTRUCTIONS);
+        assert_eq!(built[0]["context_window"], 12345);
+    }
+}
