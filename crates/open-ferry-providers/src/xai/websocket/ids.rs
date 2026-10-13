@@ -47,6 +47,11 @@ pub(super) struct Store {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(super) fn contains(&self, id: &str) -> bool {
+        self.states().contains_key(id)
+    }
+
     fn states(&self) -> MutexGuard<'_, HashMap<String, Arc<State>>> {
         self.states.lock().unwrap_or_else(PoisonError::into_inner)
     }

@@ -68,8 +68,13 @@
 //! - Closing a connection drops it without a close frame, as gorilla's
 //!   `Close` does; a close from Codex is answered.
 //! - Connections are logged at debug level.
-//! - Credential removal includes pending handshakes, and interrupts recheck
-//!   the credential after acquiring the send lock, before writing.
+//! - Pending ownership is published before dialing: removing either the
+//!   pending credential or the last successful owner closes the handshake.
+//!   Upstream sets authID after success, so only the latter closes it there.
+//!   Failed or cancelled dials restore the last successful owner unless a
+//!   later dial has claimed the session.
+//! - Interrupts recheck the credential after acquiring the send lock,
+//!   before writing.
 //! - Interrupts also refresh terminal and active state after acquiring the
 //!   send lock, so completion while waiting cannot forward a late interrupt.
 
@@ -257,6 +262,23 @@ impl Store {
         lock(&self.sessions)
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_locked(&self) -> bool {
+        self.sessions.try_lock().is_err()
+    }
+
+    /// Signals actual contention before waiting to recreate a session.
+    #[cfg(test)]
+    pub(crate) fn get_or_create_after_contention(
+        &self,
+        id: &str,
+        blocked: tokio::sync::oneshot::Sender<()>,
+    ) -> Option<Arc<Session>> {
+        assert!(self.is_locked(), "recreation must contend with cleanup");
+        blocked.send(()).unwrap();
+        self.get_or_create(id)
+    }
+
     /// The session `id` names, made if new; `None` for a blank ID
     /// (`getOrCreateSession`).
     pub(crate) fn get_or_create(&self, id: &str) -> Option<Arc<Session>> {
@@ -279,6 +301,11 @@ impl Store {
     /// Closes the session `id` names, or all of them for
     /// [`CLOSE_ALL_EXECUTION_SESSIONS`] (`CloseExecutionSession`).
     pub(crate) fn close(&self, id: &str) {
+        self.close_with(id, |_| {});
+    }
+
+    /// Cleans up an ID under the same store lock as its removal.
+    pub(crate) fn close_with(&self, id: &str, cleanup: impl FnOnce(&str)) {
         let id = id.trim();
         if id.is_empty() {
             return;
@@ -294,7 +321,12 @@ impl Store {
             }
             return;
         }
-        let session = self.sessions().remove(id);
+        let session = {
+            let mut sessions = self.sessions();
+            let session = sessions.remove(id);
+            cleanup(id);
+            session
+        };
         if let Some(session) = session {
             session.close("session_closed");
         }
@@ -521,8 +553,11 @@ struct State {
     conn: Option<Arc<Conn>>,
     /// Kept after a disconnect so credential removal also forgets idle state.
     auth_id: String,
+    /// The credential of the last successful dial, also matched on removal.
     successful_auth_id: String,
+    /// Monotonic identity for each pending ownership publication.
     next_claim: u64,
+    /// Only this claim may restore ownership when its dial ends unsuccessfully.
     pending_claim: Option<u64>,
     /// The connection on which a request renamed the collaboration
     /// namespace (`multiAgentV2OptimizedConn`).
@@ -637,6 +672,8 @@ impl Session {
     pub(crate) fn set_conn(&self, conn: Arc<Conn>) {
         let mut state = self.state();
         state.auth_id.clone_from(&conn.target.auth_id);
+        state.successful_auth_id.clone_from(&conn.target.auth_id);
+        state.pending_claim = None;
         state.conn = Some(conn);
         state.multi_agent = None;
     }
@@ -773,7 +810,7 @@ impl Session {
 
     fn detach_for_auth(&self, auth_id: &str) -> Option<(Option<Arc<Conn>>, Option<Active>)> {
         let mut state = self.state();
-        if state.auth_id != auth_id {
+        if auth_id.is_empty() || (state.auth_id != auth_id && state.successful_auth_id != auth_id) {
             return None;
         }
         state.closed = true;
@@ -854,9 +891,9 @@ impl Session {
     /// abandons it, and one that closed as it finished drops the new
     /// connection.
     ///
-    /// Pending ownership is published before dialing so credential removal
-    /// closes the handshake. Failure or cancellation restores the last
-    /// successful owner if this dial's claim is still current.
+    /// Pending ownership is published before dialing so removing either
+    /// owner closes the handshake. Failure or cancellation restores the
+    /// last successful owner if this dial's claim is still current.
     pub(crate) async fn ensure_conn_with_reuse<F, Fut>(
         self: &Arc<Self>,
         target: Target,
@@ -873,8 +910,6 @@ impl Session {
             if state.closed {
                 return Err(closed_session());
             }
-            // Publish before awaiting the handshake. Targeted removal takes
-            // this same lock and closes pending ownership as well.
             let stale = if state
                 .conn
                 .as_ref()
@@ -886,6 +921,8 @@ impl Session {
                 None
             };
             let ownership = if state.conn.is_none() {
+                // Publish before awaiting the handshake. Targeted removal takes
+                // this same lock and matches either owner.
                 state.next_claim += 1;
                 let claim = state.next_claim;
                 state.pending_claim = Some(claim);

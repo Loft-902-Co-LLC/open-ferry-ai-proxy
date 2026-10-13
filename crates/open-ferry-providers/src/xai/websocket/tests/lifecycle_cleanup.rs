@@ -13,28 +13,28 @@ async fn xai_recreation_waits_for_auth_metadata_cleanup() {
     let old = executor.websockets.ids.get("cleanup").unwrap();
     let (entered, removed) = tokio::sync::oneshot::channel();
     let (release, gate) = std::sync::mpsc::channel();
-    let cleanup = tokio::task::spawn_blocking({
+    *executor.websockets.cleanup_hook.lock().unwrap() = Some(Box::new({
         let executor = executor.clone();
         move || {
-            let mut entered = Some(entered);
-            executor
-                .websockets
-                .store
-                .close_auth_sessions_with(&a.id, |id| {
-                    entered.take().unwrap().send(()).unwrap();
-                    gate.recv_timeout(WAIT).unwrap();
-                    executor.websockets.ids.delete(id);
-                    executor.websockets.targets().remove(id);
-                });
+            assert!(executor.websockets.store.is_locked());
+            entered.send(()).unwrap();
+            gate.recv_timeout(WAIT).unwrap();
         }
+    }));
+    let cleanup = tokio::task::spawn_blocking({
+        let executor = executor.clone();
+        move || executor.websockets.close_auth(&a.id)
     });
     tokio::time::timeout(WAIT, removed).await.unwrap().unwrap();
     let (started, recreating) = tokio::sync::oneshot::channel();
     let recreate = tokio::task::spawn_blocking({
         let executor = executor.clone();
         move || {
-            started.send(()).unwrap();
-            let session = executor.websockets.store.get_or_create("cleanup").unwrap();
+            let session = executor
+                .websockets
+                .store
+                .get_or_create_after_contention("cleanup", started)
+                .unwrap();
             let state = executor.websockets.ids.get("cleanup").unwrap();
             state.replace_transcript(vec![json!({"type":"message", "content":"B"})]);
             executor.websockets.record_target(
@@ -161,7 +161,7 @@ async fn xai_waiting_compaction_takes_id_state_after_the_session_lock() {
     executor.close_execution_session("compact-order");
 }
 
-async fn failed_replacement_restores_owner(cancel: bool) {
+async fn removed_successful_owner_stays_closed(cancel: bool) {
     let (release, gate) = watch::channel(false);
     let server = Server::start(move |n| {
         if n == 0 {
@@ -180,7 +180,6 @@ async fn failed_replacement_restores_owner(cancel: bool) {
     let c = auth_as("xai-c", API_KEY, &server.url);
     streamed(&executor, &b, HELLO, ws_options("failed-owner")).await;
     let session = executor.websockets.store.get("failed-owner").unwrap();
-    let state = executor.websockets.ids.get("failed-owner").unwrap();
     let task = tokio::spawn({
         let executor = executor.clone();
         async move {
@@ -192,12 +191,11 @@ async fn failed_replacement_restores_owner(cancel: bool) {
     server
         .wait_for("C's pending dial", |r| r.handshakes.len() == 2)
         .await;
-    // The last successful owner must not remove C's pending claim.
+    // Production sends only one removal notification for B.
     executor.close_auth_execution_sessions(&b.id);
-    assert!(Arc::ptr_eq(
-        &session,
-        &executor.websockets.store.get("failed-owner").unwrap()
-    ));
+    assert!(executor.websockets.store.get("failed-owner").is_none());
+    assert!(!executor.websockets.ids.contains("failed-owner"));
+    assert!(!executor.websockets.targets().contains_key("failed-owner"));
     if cancel {
         task.abort();
         assert!(
@@ -218,12 +216,8 @@ async fn failed_replacement_restores_owner(cancel: bool) {
                 .is_err()
         );
     }
-    executor.close_auth_execution_sessions(&b.id);
     assert!(executor.websockets.store.get("failed-owner").is_none());
-    assert!(!Arc::ptr_eq(
-        &state,
-        &executor.websockets.ids.get("failed-owner").unwrap()
-    ));
+    assert!(!executor.websockets.ids.contains("failed-owner"));
     assert!(!executor.websockets.targets().contains_key("failed-owner"));
     let error = session
         .ensure_conn(
@@ -237,13 +231,51 @@ async fn failed_replacement_restores_owner(cancel: bool) {
 }
 
 #[tokio::test]
-async fn failed_xai_replacement_dial_restores_the_successful_owner() {
-    failed_replacement_restores_owner(false).await;
+async fn failed_xai_replacement_dial_cannot_resurrect_a_removed_successful_owner() {
+    removed_successful_owner_stays_closed(false).await;
 }
 
 #[tokio::test]
-async fn cancelled_xai_replacement_dial_restores_the_successful_owner() {
-    failed_replacement_restores_owner(true).await;
+async fn cancelled_xai_replacement_dial_cannot_resurrect_a_removed_successful_owner() {
+    removed_successful_owner_stays_closed(true).await;
+}
+
+#[tokio::test]
+async fn failing_xai_dial_after_one_successful_owner_removal_keeps_the_session_closed() {
+    let server = Server::turns(&[COMPLETED]).await;
+    let executor = executor();
+    let b = auth_as("xai-b", API_KEY, &server.url);
+    streamed(&executor, &b, HELLO, ws_options("removed-owner")).await;
+    let session = executor.websockets.store.get("removed-owner").unwrap();
+    // The dial is polled after C publishes its claim. Remove B once inside
+    // that poll, then return a dial failure rather than a close notification.
+    let error = session
+        .ensure_conn(
+            ConnTarget::new("xai-c", &server.url, "direct", API_KEY),
+            || async {
+                executor.close_auth_execution_sessions(&b.id);
+                Err(crate::codex::websocket::dial::DialError::Failed(
+                    ExecError::upstream(503, "dial failed after removal"),
+                ))
+            },
+        )
+        .await;
+    assert!(matches!(
+        error,
+        Err(crate::codex::websocket::dial::DialError::Failed(_))
+    ));
+    assert!(executor.websockets.store.get("removed-owner").is_none());
+    assert!(!executor.websockets.ids.contains("removed-owner"));
+    assert!(!executor.websockets.targets().contains_key("removed-owner"));
+    assert!(
+        session
+            .ensure_conn(
+                ConnTarget::new(&b.id, &server.url, "direct", API_KEY),
+                || async { panic!("a failed dial must not resurrect the session") },
+            )
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -264,7 +296,7 @@ async fn dropping_an_earlier_xai_dial_preserves_a_later_ownership_claim() {
     ));
     assert!(futures_util::poll!(&mut later).is_pending());
     drop(first);
-    executor.close_auth_execution_sessions(&b.id);
+    executor.close_auth_execution_sessions("xai-c");
     assert!(Arc::ptr_eq(
         &session,
         &executor.websockets.store.get("claims").unwrap()

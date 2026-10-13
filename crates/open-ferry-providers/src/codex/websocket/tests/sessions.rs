@@ -20,6 +20,30 @@ use crate::codex::CodexExecutor;
 
 const URL: &str = "ws://example.test/responses";
 
+#[tokio::test]
+async fn codex_removing_the_successful_owner_closes_a_pending_dial() {
+    let executor = executor();
+    let session = executor
+        .websockets()
+        .get_or_create("pending-owner")
+        .unwrap();
+    session.set_conn(Conn::detached(target("auth-b", URL, "direct")));
+    let mut dial =
+        Box::pin(session.ensure_conn(target("auth-c", URL, "direct"), std::future::pending));
+    assert!(futures_util::poll!(&mut dial).is_pending());
+    executor.close_auth_execution_sessions("auth-b");
+    assert!(executor.websockets().get("pending-owner").is_none());
+    assert!(within("removed owner's pending dial", dial).await.is_err());
+    assert!(
+        session
+            .ensure_conn(target("auth-c", URL, "direct"), || async {
+                panic!("a removed session must stay closed")
+            })
+            .await
+            .is_err()
+    );
+}
+
 fn target(auth_id: &str, url: &str, proxy: &str) -> Target {
     Target::new(auth_id, url, proxy, "token")
 }

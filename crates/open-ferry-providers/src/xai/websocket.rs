@@ -45,8 +45,9 @@
 //!   and `UpstreamDisconnectChan` aren't ported, as the server uses none of
 //!   them (as for Codex). Credential removal closes that credential's
 //!   sessions through `ProviderExecutor::close_auth_execution_sessions`.
-//! - Ownership is published before dialing so removal during a pending
-//!   handshake closes it; upstream sets authID only after a successful dial.
+//! - Ownership is published before dialing so removing either the pending
+//!   credential or the last successful owner closes an in-flight handshake;
+//!   upstream sets authID after success, so only the latter closes it there.
 //!   A failed or cancelled dial restores the last successful owner if its
 //!   pending claim is still current.
 //! - Every message xAI sends, a success or a failure, reaches the client
@@ -117,6 +118,8 @@ pub(super) struct Sessions {
     targets: Mutex<HashMap<String, Target>>,
     #[cfg(test)]
     id_state_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    #[cfg(test)]
+    cleanup_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Sessions {
@@ -127,6 +130,13 @@ impl Sessions {
         // Lock order: store -> ids -> targets; neither metadata store may
         // reenter the connection store while holding its lock.
         self.store.close_auth_sessions_with(auth_id, |id| {
+            #[cfg(test)]
+            {
+                let hook = self.cleanup_hook.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
             self.ids.delete(id);
             self.targets().remove(id);
         });
@@ -139,6 +149,8 @@ impl Sessions {
             targets: Mutex::new(HashMap::new()),
             #[cfg(test)]
             id_state_gate: Mutex::new(None),
+            #[cfg(test)]
+            cleanup_hook: Mutex::new(None),
         }
     }
 
@@ -178,9 +190,10 @@ impl Sessions {
             self.targets().clear();
             return;
         }
-        self.store.close(id);
-        self.ids.delete(id);
-        self.targets().remove(id);
+        self.store.close_with(id, |id| {
+            self.ids.delete(id);
+            self.targets().remove(id);
+        });
     }
 
     /// Whether the session `id` names last connected elsewhere: to another
