@@ -589,17 +589,6 @@ pub(crate) fn assess(
     kind: Kind,
     given: Option<&str>,
 ) -> Assessment {
-    assess_with_probe(machine, context, found, kind, given, &crate::scope::Host)
-}
-
-fn assess_with_probe(
-    machine: &mut dyn Machine,
-    context: &Context,
-    found: &Found,
-    kind: Kind,
-    given: Option<&str>,
-    probe: &dyn crate::scope::Probe,
-) -> Assessment {
     let platform = context.platform;
     let mut out = Assessment {
         working_dir: found.cwd.clone(),
@@ -642,13 +631,14 @@ fn assess_with_probe(
         return out;
     };
     out.config = Some(config.clone());
-    let authorized = match crate::scope::authorize_file(probe, std::path::Path::new(&config)) {
-        Ok(authorized) => authorized,
-        Err(error) => {
-            out.blockers.push(error.to_string());
-            return out;
-        }
-    };
+    let authorized =
+        match crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&config)) {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                out.blockers.push(error.to_string());
+                return out;
+            }
+        };
     let data = match if authorized {
         machine.read(&config)
     } else {

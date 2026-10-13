@@ -197,6 +197,9 @@ pub(crate) trait Machine: System {
     /// Asks `question`, which ends with `[y/N]`, and whether the answer is
     /// yes.
     fn ask(&mut self, question: &str) -> bool;
+    /// What the trust check asks of this machine before CLIProxyAPI's
+    /// config is read ([`crate::scope::authorize_file`]).
+    fn trust_probe(&self) -> &dyn crate::scope::Probe;
 }
 
 /// How long a stopped process has to exit before it is ended.
@@ -521,6 +524,10 @@ fn stop_process(pid: u32, name: Option<&str>, started: Option<u64>) -> io::Resul
 }
 
 impl Machine for Host {
+    fn trust_probe(&self) -> &dyn crate::scope::Probe {
+        &crate::scope::Host
+    }
+
     fn processes(&mut self, names: &[&str]) -> io::Result<Vec<Proc>> {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
         let mut sys = sysinfo::System::new();

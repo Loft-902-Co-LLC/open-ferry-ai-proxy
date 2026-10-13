@@ -118,30 +118,13 @@ fn init_writes_a_config_that_check_passes() {
     std::fs::write(&path, text).unwrap();
 
     let check = run(dir.path(), &["check", "-config", &shown, "-json"]);
-    assert_eq!(
-        code(&check),
-        Some(if privilege::privileged() { 1 } else { 0 })
-    );
+    let exit = code(&check);
     let out = String::from_utf8(check.stdout).unwrap();
     assert!(!out.contains(&client_key) && !out.contains(&management_key));
     let report: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(
-        report["errors"],
-        if privilege::privileged() { 1 } else { 0 },
-        "{report:#}"
-    );
-    if privilege::privileged() {
-        assert!(
-            report["findings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|finding| finding["check"] == "self-update"
-                    && finding["message"].as_str().is_some_and(
-                        |message| message.contains("safe") || message.contains("macOS")
-                    ))
-        );
-    }
+    let refused = refuses_the_accounts_records(&report);
+    assert_eq!(exit, Some(if refused { 1 } else { 0 }), "{report:#}");
+    assert_eq!(report["errors"], if refused { 1 } else { 0 }, "{report:#}");
     assert_eq!(report["config"], shown.as_str());
     let checks: Vec<&str> = report["findings"]
         .as_array()
@@ -164,21 +147,16 @@ fn init_writes_a_config_that_check_passes() {
     );
 
     let check = run(dir.path(), &["check", "-config", &shown]);
-    assert_eq!(
-        code(&check),
-        Some(if privilege::privileged() { 1 } else { 0 })
-    );
+    let exit = code(&check);
     let out = String::from_utf8(check.stdout).unwrap();
+    assert_eq!(exit, Some(if refused { 1 } else { 0 }), "{out}");
     assert!(out.starts_with(&format!("ok      config: {shown} loads\n")));
     assert!(
         out.lines()
             .last()
             .unwrap()
-            .starts_with(if privilege::privileged() {
-                "1 error, "
-            } else {
-                "no errors, "
-            })
+            .starts_with(if refused { "1 error, " } else { "no errors, " }),
+        "{out}"
     );
 
     let again = run(dir.path(), &["init", "-config", &shown]);
@@ -190,6 +168,26 @@ fn init_writes_a_config_that_check_passes() {
 
 // Not upstream's: check exits with 1 for an error and 2 when it can't
 // check; each subcommand has its own -h.
+/// Whether `report`, a `check -json` report, has the self-update check
+/// refuse the account's records: a privileged process refuses records
+/// others can write, such as an elevated Windows user's own, and on macOS
+/// any. Root's own records are its, so they pass.
+fn refuses_the_accounts_records(report: &Value) -> bool {
+    let refused = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| {
+            finding["check"] == "self-update"
+                && finding["level"] == "error"
+                && finding["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("safe") || message.contains("macOS"))
+        });
+    assert!(!refused || privilege::privileged(), "{report:#}");
+    refused
+}
+
 #[test]
 fn check_exits_with_its_codes() {
     let dir = tempfile::tempdir().unwrap();
@@ -803,6 +801,6 @@ fn privileged_entries_refuse_an_untrusted_dotenv_before_reading_config_or_runnin
         );
         assert!(errors.contains("Refusing to load"), "{errors}");
         assert!(errors.contains(".env"), "{errors}");
-        assert!(errors.contains("remove the file"), "{errors}");
+        assert!(errors.contains("writable only by"), "{errors}");
     }
 }
