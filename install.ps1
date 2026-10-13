@@ -69,7 +69,9 @@
 # Real elevation also ignores every FAKE_* setting and refuses Test* parameters.
 # Before downloading it checks ownership, write ACLs and reparse points on
 # the install directory and its ancestors, and creates protected staging.
-# External tools use full paths in trusted machine directories.
+# External tools use full paths in trusted machine directories. Real elevation
+# disables module autoloading and imports only shipped PSHOME modules; zip and
+# SHA256 use .NET. Start with -NoProfile: an already-run profile cannot be undone.
 #
 # The new open-ferry.exe installs itself (`open-ferry install-self`): it waits
 # for any other install or update, refuses to replace a binary a background
@@ -135,7 +137,7 @@ function Install-OpenFerry {
     # Emit the small native wrapper in memory: Add-Type can invoke a compiler
     # using the account's TEMP on PowerShell 5.1, even in an elevated terminal.
     if (-not ('OpenFerryInstallerNative' -as [type])) {
-        $name = New-Object Reflection.AssemblyName 'OpenFerryInstallerNative'
+        $name = [Reflection.AssemblyName]::new('OpenFerryInstallerNative')
         if ($PSVersionTable.PSEdition -eq 'Core') {
             $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($name, 'Run')
         } else {
@@ -154,7 +156,7 @@ function Install-OpenFerry {
                 'Standard', [bool], $method[2], 'Winapi', 'Unicode')
             $native.SetImplementationFlags('PreserveSig')
         }
-        $type.CreateType() | Out-Null
+        $null = $type.CreateType()
     }
     # Same rule as scope::Host: TokenElevation, or the SYSTEM SID. A failure
     # to read the token refuses before downloads or directory creation.
@@ -176,12 +178,26 @@ function Install-OpenFerry {
         $reallyPrivileged = [Runtime.InteropServices.Marshal]::ReadInt32($elevation) -ne 0 -or $identity.User.Value -eq 'S-1-5-18'
     } finally {
         $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
-        if ($token -ne [IntPtr]::Zero) { [OpenFerryInstallerNative]::CloseHandle($token) | Out-Null }
+        if ($token -ne [IntPtr]::Zero) { $null = [OpenFerryInstallerNative]::CloseHandle($token) }
         [Runtime.InteropServices.Marshal]::FreeHGlobal($tokenOut)
         [Runtime.InteropServices.Marshal]::FreeHGlobal($size)
         [Runtime.InteropServices.Marshal]::FreeHGlobal($elevation)
         $identity.Dispose()
     }
+    $useTrustedModules = {
+        # PSHOME belongs to the running PowerShell installation. Import only
+        # its shipped modules by full path; never search the caller's folders.
+        $systemModules = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell', 'v1.0', 'Modules')
+        $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules') + ';' + $systemModules
+        $PSModuleAutoLoadingPreference = 'None'
+        foreach ($moduleName in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Security')) {
+            Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $moduleName, "$moduleName.psd1")) -Force -ErrorAction Stop
+        }
+        if ($System) {
+            Write-Host 'For a machine install, start powershell or pwsh with -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -System. A profile that already ran cannot be undone.'
+        }
+    }
+    if ($reallyPrivileged) { . $useTrustedModules }
     $privileged = $reallyPrivileged
     $testMode = $false
     if ($TestBaseUrl -or $TestPrivilege -or $TestElevated -or $TestProgramFiles -or $TestProgramData -or $TestGh) {
@@ -205,6 +221,7 @@ function Install-OpenFerry {
         }
     }
     $hardened = $System -and ($reallyPrivileged -or $TestElevated)
+    if ($hardened -and -not $reallyPrivileged) { . $useTrustedModules }
     if ($reallyPrivileged) {
         foreach ($name in [Environment]::GetEnvironmentVariables('Process').Keys) {
             if ($name -like 'FAKE_*') {
@@ -528,7 +545,10 @@ function Install-OpenFerry {
         $archivePath = Join-Path $tmp $archive
         Save-Download "$baseUrl/download/v$Version/$archive" $archivePath
 
-        $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = [Security.Cryptography.SHA256]::Create()
+        $stream = [IO.File]::OpenRead($archivePath)
+        try { $actual = [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+        finally { $stream.Dispose(); $hash.Dispose() }
         if ($actual -ne $expected) {
             throw "$archive doesn't match SHA256SUMS (expected $expected, got $actual): not installing it"
         }
@@ -560,7 +580,8 @@ function Install-OpenFerry {
         # --- Install ---------------------------------------------------------
 
         $unpacked = Join-Path $tmp 'unpacked'
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $unpacked
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $unpacked)
         $source = Join-Path $unpacked "open-ferry-$Version-$target"
         if (-not (Test-Path -LiteralPath (Join-Path $source 'open-ferry.exe') -PathType Leaf)) {
             throw "$archive holds no open-ferry.exe"
@@ -894,9 +915,14 @@ try {
     }
     Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent -System $System.IsPresent -TestBaseUrl $TestBaseUrl -TestPrivilege $TestPrivilege -TestElevated $TestElevated.IsPresent -TestProgramFiles $TestProgramFiles -TestProgramData $TestProgramData -TestGh $TestGh
 } catch {
-    Write-Host "install.ps1: error: $($_.Exception.Message)" -ForegroundColor Red
-    # Run as a file, the script exits with 1. Run from irm, it only returns,
-    # as exit would close the caller's PowerShell, or end the caller's
-    # script. Only code run from a file has a script name.
-    if ((Get-PSCallStack)[0].ScriptName) { exit 1 }
+    # Even a failed privilege probe or rejected test parameter must not
+    # autoload error-reporting commands from the caller's module folders.
+    & {
+        param($Failure)
+        $PSModuleAutoLoadingPreference = 'None'
+        Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Utility.psd1')) -Force -ErrorAction Stop
+        Write-Host "install.ps1: error: $($Failure.Exception.Message)" -ForegroundColor Red
+        # A file exits with 1; irm/iex returns without closing its caller.
+        if ((Get-PSCallStack)[0].ScriptName) { exit 1 }
+    } $_
 }

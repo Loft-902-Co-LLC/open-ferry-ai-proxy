@@ -22,7 +22,7 @@ Each of these turns automatic updates off. Only you turn them back on.
 
   A running server follows the change when it reloads the config, as it does for any change.
 - **The environment.** `OPEN_FERRY_SELF_UPDATE=off` (or `notify`) lowers the mode, for containers, fleets and packages: `off` beats `notify`, which beats `auto`. It never raises it, so `auto` changes nothing, and a value that isn't a mode is ignored with a warning, so a typo can't turn updates on. Set it in the server's environment, or in the `.env` file in its working directory (beside the config, for [a service](cli.md#the-services-environment)). The server reads it at start.
-- **The install scripts.** Install with `--no-auto-update` (`-NoAutoUpdate` for `install.ps1`), or, for an account install, with `OPEN_FERRY_INSTALL_SELF_UPDATE=off` (or `notify`, or `auto`) in the environment. Machine installers ignore inherited overrides: use the command-line flag. The script sets the mode in the config with `open-ferry update -mode`, whether it wrote the config or kept yours:
+- **The install scripts.** Install with `--no-auto-update` (`-NoAutoUpdate` for `install.ps1`), or with `OPEN_FERRY_INSTALL_SELF_UPDATE=off` (or `notify`, or `auto`) in the environment. Both machine installers honour `OPEN_FERRY_INSTALL_SELF_UPDATE` (`off`, `notify` or `auto`), with the command-line flag taking precedence. Both also honour `OPEN_FERRY_INSTALL_SYSTEM` and `OPEN_FERRY_INSTALL_MIGRATE`, though machine mode always skips migration. Real root ignores other `OPEN_FERRY_INSTALL_*` overrides, `FAKE_*` and tool configuration settings; elevated Windows machine installs ignore the download, GitHub CLI, install-directory, config-path and test overrides and all `FAKE_*` settings. Choose machine paths with command-line options. The script sets the mode in the config with `open-ferry update -mode`, whether it wrote the config or kept yours:
 
   ```sh
   curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh -s -- --no-auto-update
@@ -82,13 +82,13 @@ Only a binary that `install.sh` or `install.ps1` put in place. Each writes `inst
 - the receipt names the binary that runs;
 - the binary is called `open-ferry` (`open-ferry.exe`);
 - open-ferry can write to its directory;
-- it doesn't run in a container: `/.dockerenv` or `/run/.containerenv` exists, or `container` or `KUBERNETES_SERVICE_HOST` is set.
+- it doesn't run in a container: `/.dockerenv` or `/run/.containerenv` exists, or `container` or `KUBERNETES_SERVICE_HOST` is set. This updater check differs from the installer and privileged config checks, which use marker files, including `/var/run/secrets/kubernetes.io`, rather than these variables.
 
 Any other install, such as the container image, a package manager's copy, a build from source, or a copy of the binary under another name or in another place, only says when a release is out, and why it doesn't install it. Update it the way you installed it: `docker pull` for the image, the install script for a binary. For an account install, the receipt is in the data directory of the user who ran the install script, and open-ferry reads it from that of the user it runs as, so a binary installed by one user and run as another only says when a release is out. A machine install keeps its receipt and records in `/var/lib/open-ferry` on Linux or `C:\ProgramData\open-ferry` on Windows. Privileged commands refuse records another account could change; commands that change machine records need root or an administrator. Deleting `install-receipt.json` has the same effect.
 
-A system service installed before this version, as a plain systemd unit or Windows service, keeps using root's or LocalSystem's account records. Reinstall it with `open-ferry service install -system` (uninstall the old service first), or rerun `install.sh --system` / `install.ps1 -System`, for the supervised machine form.
+A system service installed before this version, as a plain systemd unit or Windows service, keeps using root's or LocalSystem's account records. Reinstall it with `open-ferry service install -system` (uninstall the old service first) for the supervised machine form. Rerunning either binary installer does not reinstall the service; it prints the service-install command.
 
-When the install script can't write the receipt, it says so, and that open-ferry won't update itself.
+If `install-self` cannot publish the receipt, it reports the failure and tries to restore the previous binary and receipt; the installer fails. If restoration fails too, it names the files to restore by hand.
 
 **A drop-in made by `open-ferry migrate`.** On Linux and macOS with an install receipt, [`migrate`](migrating-from-cliproxyapi.md#the-drop-in-switch) puts a symbolic link under CLIProxyAPI's file name that leads to the installed open-ferry, so `open-ferry update` replaces the binary the link leads to, and the next start runs the new version. On Windows, and without an install receipt, it puts a copy there. The copy is another path than the receipt names, so it reports a new release but doesn't install it. To update it, run `open-ferry migrate -undo`, then `open-ferry migrate` again, after `open-ferry update` has updated the installed one. Only one `migrate` runs at a time: a second one exits with 1 and changes nothing. The lock is per record location, which follows `XDG_CONFIG_HOME`, `HOME` or `APPDATA`: a run that sees another location for the same CLIProxyAPI doesn't wait for the other, and fails when it moves CLIProxyAPI's binary, which never replaces a file, without changing CLIProxyAPI's binary. Don't move or replace `<binary>` or `<binary>.cliproxyapi` by hand while a drop-in is in place: use `open-ferry migrate -undo`, which puts the binary back only if it is the one recorded.
 
@@ -138,7 +138,7 @@ The receipt, at most 16 KiB, is one JSON object with these fields, all required:
 
 `installer` is `install.sh` or `install.ps1`, `binary` the absolute path it wrote, and `installed_at` UTC. The file has no byte order mark.
 
-The state is written whole and renamed into place; one that is missing or doesn't parse reads as empty, and the next check writes it again:
+The state is written whole and renamed into place; one that is missing or doesn't parse reads as empty, and the next check writes it again. A privileged process refuses untrusted records rather than treating them as empty:
 
 ```json
 {

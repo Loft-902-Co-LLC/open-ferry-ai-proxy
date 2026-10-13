@@ -270,6 +270,9 @@ jobs:
           else
             export OFP_TEST_SCRATCH="$GITHUB_WORKSPACE/target/ofp-scratch"
           fi
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export OFP_INSTALL_TESTS_STRICT=1
+          fi
           ${{ matrix.python }} -I tests/install/test_install.py -v
 
       # Alpine's sh and wget are BusyBox's, and its libc is musl, so this is
@@ -287,3 +290,18 @@ jobs:
           su -s /bin/sh -c "cd /work &&
           export OFP_TEST_SCRATCH=/work/target/ofp-scratch &&
           python3 -I tests/install/test_install.py -v" installer'
+
+  install-scripts-root:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test real root without network
+        run: |
+          mkdir -p "$RUNNER_TEMP/ofp-scratch"
+          chmod 755 "$RUNNER_TEMP/ofp-scratch"
+          docker run --rm --network none -v "$GITHUB_WORKSPACE:/src:ro" \
+            -v "$RUNNER_TEMP/ofp-scratch:/scratch" -e OFP_TEST_SCRATCH=/scratch \
+            python:3.12-bookworm python -I /src/tests/install/test_install.py -v
