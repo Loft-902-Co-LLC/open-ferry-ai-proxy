@@ -655,6 +655,7 @@ fn mask_tokens(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeDelta, Utc};
 
     fn line(value: Value) -> Vec<u8> {
         value.to_string().into_bytes()
@@ -903,20 +904,23 @@ mod tests {
 
     #[test]
     fn reads_rate_limit_windows_as_headers() {
+        let now = Utc::now();
+        let in_5h = (now + TimeDelta::seconds(3600)).timestamp();
+        let in_7d = (now + TimeDelta::seconds(7200)).timestamp();
         let mut state = Events::new(false);
         state.feed(&line(json!({
             "type": "rate_limit_event",
             "rate_limit_info": {
                 "status": "rejected",
-                "resetsAt": 1_900_000_000,
+                "resetsAt": in_5h,
                 "rateLimitType": "five_hour",
                 "overageStatus": "rejected",
                 "overageDisabledReason": "org_level_disabled",
                 "isUsingOverage": false,
                 "utilization": 1.0,
                 "unifiedWindows": {
-                    "five_hour": {"resetsAt": 1_900_000_000},
-                    "seven_day": {"utilization": 0.25, "resetsAt": 1_900_500_000},
+                    "five_hour": {"resetsAt": in_5h},
+                    "seven_day": {"utilization": 0.25, "resetsAt": in_7d},
                     "seven_day_opus": {"utilization": 0.5},
                     "Bad Name": {"utilization": 0.5},
                 },
@@ -936,8 +940,8 @@ mod tests {
             Some("rejected")
         );
         assert_eq!(
-            get("anthropic-ratelimit-unified-reset").as_deref(),
-            Some("1900000000")
+            get("anthropic-ratelimit-unified-reset"),
+            Some(in_5h.to_string())
         );
         assert_eq!(
             get("anthropic-ratelimit-unified-representative-claim").as_deref(),
@@ -960,16 +964,16 @@ mod tests {
             Some("1.0")
         );
         assert_eq!(
-            get("anthropic-ratelimit-unified-5h-reset").as_deref(),
-            Some("1900000000")
+            get("anthropic-ratelimit-unified-5h-reset"),
+            Some(in_5h.to_string())
         );
         assert_eq!(
             get("anthropic-ratelimit-unified-7d-utilization").as_deref(),
             Some("0.25")
         );
         assert_eq!(
-            get("anthropic-ratelimit-unified-7d-reset").as_deref(),
-            Some("1900500000")
+            get("anthropic-ratelimit-unified-7d-reset"),
+            Some(in_7d.to_string())
         );
         assert_eq!(get("anthropic-ratelimit-unified-7d-status"), None);
         assert_eq!(
