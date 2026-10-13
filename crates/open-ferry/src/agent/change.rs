@@ -296,7 +296,7 @@ pub(crate) fn undo_hint(ctx: &Context) -> String {
 
 /// The config file's contents.
 pub(crate) fn read_config(path: &Path) -> Result<Vec<u8>, Failure> {
-    std::fs::read(path).map_err(|error| {
+    crate::settings::read(&crate::scope::Host, path).map_err(|error| {
         Failure::new(
             "not_found",
             format!("can't read {}: {error}", path.display()),

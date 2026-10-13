@@ -11,6 +11,23 @@ use super::*;
 mod self_update;
 mod separate_address;
 
+#[test]
+fn a_refused_or_missing_config_stops_checks_before_loading_any_settings() {
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+
+    let path = Path::new("/work/config.yaml");
+    let mut probe = Fake::new(Platform::Linux, true);
+    let mut findings = Vec::new();
+    assert!(check_config_with_probe(&probe, path, &mut findings).is_none());
+    assert!(findings[0].message.contains("doesn't exist"));
+    findings.clear();
+    probe.file("/work/config.yaml").untrust("/work");
+    assert!(check_config_with_probe(&probe, path, &mut findings).is_none());
+    assert!(findings[0].message.contains("Refusing to load"));
+    assert_eq!(findings[0].level, Level::Error);
+}
+
 /// The time the tests take as now.
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap()

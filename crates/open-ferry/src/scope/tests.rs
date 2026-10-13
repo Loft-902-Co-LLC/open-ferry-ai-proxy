@@ -22,7 +22,7 @@ enum Node {
 
 /// A machine with the paths it is given; every path in it is cleaned for
 /// its platform, so Windows paths can be written with `/`.
-struct Fake {
+pub(crate) struct Fake {
     platform: Platform,
     privileged: Result<bool, String>,
     account: Result<String, String>,
@@ -36,17 +36,18 @@ struct Fake {
     receipt_errors: BTreeMap<String, ReceiptError>,
     /// The receipts read, in order.
     reads: RefCell<Vec<String>>,
+    listed: RefCell<Vec<String>>,
     /// What creating a directory fails with.
     create: Option<io::ErrorKind>,
     created: Vec<String>,
     /// Whether it is a container.
-    container: bool,
+    pub(crate) container: bool,
 }
 
 impl Fake {
     /// The machine of a user, `privileged` or not, whose data directory is
     /// their home's.
-    fn new(platform: Platform, privileged: bool) -> Fake {
+    pub(crate) fn new(platform: Platform, privileged: bool) -> Fake {
         let account = match (platform, privileged) {
             (Platform::Windows, _) => WINDOWS_ACCOUNT,
             (Platform::MacOs, _) => "/Users/me/.local/share/open-ferry",
@@ -63,6 +64,7 @@ impl Fake {
             receipts: BTreeMap::new(),
             receipt_errors: BTreeMap::new(),
             reads: RefCell::new(Vec::new()),
+            listed: RefCell::new(Vec::new()),
             create: None,
             created: Vec::new(),
             container: false,
@@ -93,7 +95,7 @@ impl Fake {
         self
     }
 
-    fn file(&mut self, path: &str) -> &mut Fake {
+    pub(crate) fn file(&mut self, path: &str) -> &mut Fake {
         self.node(path, Node::File)
     }
 
@@ -116,7 +118,7 @@ impl Fake {
     }
 
     /// Makes the trust check refuse `path` and everything below it.
-    fn untrust(&mut self, path: &str) -> &mut Fake {
+    pub(crate) fn untrust(&mut self, path: &str) -> &mut Fake {
         let path = self.path(path);
         self.untrusted.insert(path);
         self
@@ -165,6 +167,7 @@ impl Probe for Fake {
 
     fn entries(&self, dir: &str, limit: usize) -> io::Result<Vec<String>> {
         let dir = self.path(dir);
+        self.listed.borrow_mut().push(dir.clone());
         Ok(self
             .nodes
             .keys()
@@ -1017,4 +1020,84 @@ fn the_host_is_a_container_only_by_its_files() {
             .iter()
             .any(|path| Path::new(path).symlink_metadata().is_ok())
     );
+}
+
+#[test]
+fn request_logs_do_not_count_toward_the_record_tree_limit() {
+    for (platform, root) in [
+        (Platform::Linux, MACHINE),
+        (Platform::Windows, "C:/ProgramData/open-ferry"),
+    ] {
+        for name in ["logs", "auth/logs", "auth/team/logs"] {
+            let mut probe = Fake::new(platform, true);
+            let logs = platform.join(root, name);
+            for index in 0..=MAX_ENTRIES {
+                probe.file(&platform.join(&logs, &format!("request-{index}.log")));
+            }
+            assert_eq!(authorize(&probe, root), Ok(()), "{logs}");
+            assert!(
+                !probe.listed.borrow().contains(&platform.clean(&logs)),
+                "{logs}"
+            );
+            probe.untrust(&logs);
+            let refusal = refused(authorize(&probe, root));
+            assert!(refusal.reason.contains("untrusted"), "{refusal}");
+        }
+    }
+}
+
+#[test]
+fn a_log_directory_among_versions_is_still_walked() {
+    let mut probe = Fake::new(Platform::Linux, true);
+    let logs = format!("{MACHINE}/versions/logs");
+    for index in 0..=MAX_ENTRIES {
+        probe.file(&format!("{logs}/request-{index}.log"));
+    }
+    let refusal = refused(authorize(&probe, MACHINE));
+    assert!(
+        refusal.reason.contains("more than 10000 entries"),
+        "{refusal}"
+    );
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe
+        .file(&format!("{logs}/record"))
+        .untrust(&format!("{logs}/record"));
+    let refusal = refused(authorize(&probe, MACHINE));
+    assert!(refusal.reason.contains("untrusted"), "{refusal}");
+}
+
+#[test]
+fn runtime_auth_placement_checks_privilege_and_the_known_machine_root() {
+    for (platform, root) in [
+        (Platform::Linux, MACHINE),
+        (Platform::Windows, "C:/ProgramData/open-ferry"),
+    ] {
+        let mut probe = Fake::new(platform, true);
+        refused(authorize_auth_dir(&probe, Path::new(root)));
+        assert_eq!(
+            authorize_auth_dir(&probe, Path::new(&platform.join(root, "auth/team"))),
+            Ok(())
+        );
+        probe.container = true;
+        refused(authorize_auth_dir(&probe, Path::new(root)));
+        probe.privileged = Ok(false);
+        assert_eq!(authorize_auth_dir(&probe, Path::new(root)), Ok(()));
+        probe.privileged = Err("no token".to_owned());
+        refused(authorize_auth_dir(&probe, Path::new(root)));
+    }
+    let mut probe = Fake::new(Platform::Windows, true);
+    probe.program_data = Err("no known folder".to_owned());
+    refused(authorize_auth_dir(&probe, Path::new("D:/auth")));
+    let probe = Fake::new(Platform::MacOs, true);
+    assert_eq!(authorize_auth_dir(&probe, Path::new("/srv/auth")), Ok(()));
+}
+
+#[test]
+fn a_container_has_no_exemption_for_record_trees_or_machine_installs() {
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe.container = true;
+    probe.dir(ROOT_ACCOUNT).untrust(ROOT_ACCOUNT);
+    refused(authorize(&probe, ROOT_ACCOUNT));
+    probe.dir(MACHINE).untrust(MACHINE);
+    refused(provision(&mut probe));
 }

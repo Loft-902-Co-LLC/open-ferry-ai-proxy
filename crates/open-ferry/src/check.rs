@@ -41,7 +41,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -133,11 +133,7 @@ where
             return ExitCode::from(2);
         }
     };
-    let path = if options.config.is_empty() {
-        working_dir.join("config.yaml")
-    } else {
-        PathBuf::from(&options.config)
-    };
+    let path = crate::settings::config_path(&working_dir, &options.config);
     let mut findings = Vec::new();
     let dotenv = working_dir.join(".env");
     if let Err(error) = crate::load_dotenv(&dotenv)
@@ -305,8 +301,35 @@ pub(crate) async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
 
 /// The config exists and loads.
 fn check_config(path: &Path, findings: &mut Vec<Finding>) -> Option<Config> {
+    check_config_with_probe(&crate::scope::Host, path, findings)
+}
+
+fn check_config_with_probe(
+    probe: &dyn crate::scope::Probe,
+    path: &Path,
+    findings: &mut Vec<Finding>,
+) -> Option<Config> {
     const CHECK: &str = "config";
     let shown = path.display();
+    let authorized = match crate::scope::authorize_file(probe, path) {
+        Ok(authorized) => authorized,
+        Err(error) => {
+            findings.push(Finding::error(
+                CHECK,
+                error.reason,
+                error.remedy.unwrap_or_default(),
+            ));
+            return None;
+        }
+    };
+    if !authorized {
+        findings.push(Finding::error(
+            CHECK,
+            format!("{shown} doesn't exist"),
+            format!("write one with `open-ferry init -config {shown}`, or pass -config with your config's path"),
+        ));
+        return None;
+    }
     match fs::metadata(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             findings.push(Finding::error(

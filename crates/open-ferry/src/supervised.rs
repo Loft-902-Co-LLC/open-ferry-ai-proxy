@@ -276,7 +276,7 @@ impl Host for SupervisedHost {
     }
 
     fn effective_mode(&self) -> ModeSnapshot {
-        let read = Config::load(&self.config_path)
+        let read = crate::settings::load(&crate::scope::Host, &self.config_path)
             .map(|config| Settings::resolve(&config.self_update, (self.env)().as_deref()).mode)
             .map(|mode| mode == SelfUpdateMode::Off);
         let mut state = self.mode.lock().unwrap_or_else(|e| e.into_inner());
@@ -649,7 +649,7 @@ fn run_supervisor(
             absolute(Path::new(&flags.config))
                 .map_err(|error| format!("failed to find the config: {error}"))?
         };
-        let config = Config::load(&config_path)
+        let config = crate::settings::load(&crate::scope::Host, &config_path)
             .map_err(|error| format!("failed to load config: {error}"))?;
         log.set_debug(config.debug);
         let wanted = wanted(&config)?;

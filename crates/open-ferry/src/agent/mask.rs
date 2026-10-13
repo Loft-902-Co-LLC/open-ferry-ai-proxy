@@ -325,14 +325,14 @@ fn limited_file_secrets(path: &Path, limit: u64, secrets: &mut Secrets) {
 
 /// The auth directories of the config at `ctx.path`, where its credential
 /// files are kept: the one it sets (or the default when it sets none or
-/// doesn't load), and a relative one both from the working directory and
+/// doesn't parse), and a relative one both from the working directory and
 /// from the config's directory. In tests, only those under the temporary
-/// directory, so a test never looks at a real one.
+/// directory, so a test never looks at a real one. An unreadable or refused
+/// config is skipped.
 pub(crate) fn auth_dirs(ctx: &Context) -> Vec<PathBuf> {
-    let config = std::fs::read(&ctx.path)
-        .ok()
-        .and_then(|data| Config::load_bytes(&data).ok())
-        .unwrap_or_default();
+    let Some(config) = auth_config(&crate::scope::Host, &ctx.path) else {
+        return Vec::new();
+    };
     let Ok(dir) = config.resolve_auth_dir() else {
         return Vec::new();
     };
@@ -350,6 +350,13 @@ pub(crate) fn auth_dirs(ctx: &Context) -> Vec<PathBuf> {
     let temp = std::env::temp_dir();
     dirs.retain(|dir| !cfg!(test) || dir.starts_with(&temp));
     dirs
+}
+
+/// The config used only for secret masking; an unreadable or refused one
+/// supplies no auth-directory hints.
+fn auth_config(probe: &dyn crate::scope::Probe, path: &Path) -> Option<Config> {
+    let data = crate::settings::read(probe, path).ok()?;
+    Some(Config::load_bytes(&data).unwrap_or_default())
 }
 
 /// Why a file a value would be read from is refused.
@@ -815,6 +822,23 @@ fn hide_words(text: &str, forms: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refused_config_supplies_no_auth_directory_hint_for_masking() {
+        use crate::os_service::Platform;
+        use crate::update::scope_probe::Fake;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "auth-dir: auth\n").unwrap();
+        let mut probe = Fake::new(Platform::HOST.unwrap(), true);
+        probe
+            .file(path.to_str().unwrap())
+            .untrust(path.to_str().unwrap());
+        assert!(super::auth_config(&probe, &path).is_none());
+        probe.privileged = Ok(false);
+        assert_eq!(super::auth_config(&probe, &path).unwrap().auth_dir, "auth");
+    }
+
     use serde_json::json;
 
     use super::*;

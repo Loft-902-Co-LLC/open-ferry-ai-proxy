@@ -304,7 +304,7 @@ pub(crate) const KEY_HINT: &str = "the key is looked for in the config's managem
 /// Reads the config at `ctx.path` and looks for the server running for
 /// it.
 pub(crate) async fn probe(ctx: &Context) -> Result<Target, Failure> {
-    let data = std::fs::read(&ctx.path).map_err(|error| {
+    let data = crate::settings::read(&crate::scope::Host, &ctx.path).map_err(|error| {
         Failure::new(
             "not_found",
             format!("can't read {}: {error}", ctx.path.display()),
@@ -432,7 +432,7 @@ async fn runs_this_config(
         if reply.body == *data {
             return Ok(None);
         }
-        let again = std::fs::read(&ctx.path).map_err(|error| {
+        let again = crate::settings::read(&crate::scope::Host, &ctx.path).map_err(|error| {
             Failure::new(
                 "not_found",
                 format!("can't read {}: {error}", ctx.path.display()),

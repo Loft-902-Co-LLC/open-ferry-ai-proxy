@@ -702,6 +702,40 @@ pub(crate) fn check_auth_dir_placement(
     })
 }
 
+/// Checks a resolved auth directory before a privileged process uses it.
+/// Containers have the same placement rules as any other process.
+pub(crate) fn authorize_auth_dir(probe: &dyn Probe, auth_dir: &Path) -> Result<(), Refusal> {
+    if !privileged(probe)? {
+        return Ok(());
+    }
+    let root = machine_root(probe).map_err(|reason| Refusal {
+        reason,
+        remedy: None,
+    })?;
+    let Some(root) = root else {
+        return Ok(());
+    };
+    let refuse = |reason| Refusal {
+        reason,
+        remedy: None,
+    };
+    let text = auth_dir
+        .to_str()
+        .ok_or_else(|| refuse("the auth directory's path isn't valid Unicode".to_owned()))?;
+    let platform = probe.platform();
+    let auth_dir = if platform.is_absolute(text) {
+        text.to_owned()
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|error| refuse(format!("failed to get the working directory: {error}")))?;
+        let cwd = cwd
+            .to_str()
+            .ok_or_else(|| refuse("the working directory's path isn't valid Unicode".to_owned()))?;
+        platform.absolute(cwd, text).map_err(refuse)?
+    };
+    check_auth_dir_placement(platform, &root, &auth_dir)
+}
+
 /// [`authorize`], given whose directory `root` is.
 fn check(probe: &dyn Probe, root: &str, whose: Whose) -> Result<(), Refusal> {
     if !privileged(probe)? {
@@ -751,6 +785,7 @@ fn check(probe: &dyn Probe, root: &str, whose: Whose) -> Result<(), Refusal> {
 
 /// Refuses the existing directory `root` unless everything below it is a
 /// directory or a regular file the trust check passes, within the limits.
+/// Request log directories are checked themselves, but their data isn't walked.
 fn check_tree(probe: &dyn Probe, root: &str) -> Result<(), String> {
     let platform = probe.platform();
     let mut seen = 0;
@@ -768,14 +803,24 @@ fn check_tree(probe: &dyn Probe, root: &str) -> Result<(), String> {
             match probe.state(&path) {
                 // Gone since it was listed.
                 State::Missing => {}
-                State::Directory if depth >= MAX_DEPTH => {
-                    return Err(format!(
-                        "{path} is more than {MAX_DEPTH} levels below {root}"
-                    ));
-                }
                 State::Directory => {
                     probe.trusted_dir(&path)?;
-                    pending.push((path, depth + 1));
+                    let log_name = if platform == Platform::Windows {
+                        name.eq_ignore_ascii_case("logs")
+                    } else {
+                        name == "logs"
+                    };
+                    let logs = log_name
+                        && (dir == root
+                            || platform.is_within(&dir, &platform.join(root, AUTH_DIR)));
+                    if !logs {
+                        if depth >= MAX_DEPTH {
+                            return Err(format!(
+                                "{path} is more than {MAX_DEPTH} levels below {root}"
+                            ));
+                        }
+                        pending.push((path, depth + 1));
+                    }
                 }
                 State::File => probe.trusted_file(&path)?,
                 State::Other => return Err(format!("{path} is a link or a special file")),
@@ -1005,7 +1050,7 @@ fn create_machine_dir(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod receipt_access_tests {
