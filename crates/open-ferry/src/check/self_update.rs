@@ -271,11 +271,14 @@ mod scope_tests {
                 let found = findings(&probe, &binary);
                 assert_eq!(found.len(), 1);
                 assert_eq!(found[0].level, Level::Ok);
-                assert!(
-                    found[0]
-                        .message
-                        .contains("downloaded, checked and made ready")
-                );
+                // Another host reads a Windows path as one file name, not `open-ferry`.
+                if cfg!(windows) || platform != Platform::Windows {
+                    assert!(
+                        found[0]
+                            .message
+                            .contains("downloaded, checked and made ready")
+                    );
+                }
                 let receipt = platform.join(&machine, open_ferry_update::data_dir::RECEIPT_FILE);
                 assert!(probe.reads.borrow().iter().all(|path| path == &receipt));
                 assert!(probe.created.is_empty(), "check never provisions");
