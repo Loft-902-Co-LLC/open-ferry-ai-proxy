@@ -22,6 +22,10 @@
 //! there is one. `.env` in the working directory is loaded first, as the
 //! server loads it.
 //!
+//! `update` and `-rollback` change nothing while a supervisor runs from the
+//! installed binary (or while that can't be told): they say so, with result
+//! `supervised`, and how to stop the service and try again.
+//!
 //! Exit codes: 0 when it is up to date, or did what was asked; 1 when it
 //! failed or refused; 2 for bad usage; 3 when a newer release is out and
 //! wasn't installed.
@@ -35,7 +39,12 @@ use std::process::ExitCode;
 
 use open_ferry_core::config::Config;
 use open_ferry_core::config::save::update_nested_scalar;
+use open_ferry_supervisor::client::{self, Detection};
+use open_ferry_supervisor::endpoint::{Identity, ServiceKind};
+use open_ferry_supervisor::timings::DETECT_TIMEOUT;
 use open_ferry_update::background::http_fetch;
+use open_ferry_update::data_dir::NoDataDir;
+use open_ferry_update::install_lock::InstallLock;
 use open_ferry_update::state::SwitchRecord;
 use open_ferry_update::updater::Found;
 use open_ferry_update::{
@@ -189,6 +198,9 @@ where
             return ExitCode::FAILURE;
         }
     };
+    // Before `.env` is loaded: a `.env` in the working directory must not move
+    // the data directory this command's supervisor check looks at.
+    let data = DataDir::for_this_user();
     let dotenv = working_dir.join(".env");
     if let Err(error) = crate::load_dotenv(&dotenv)
         && !error.is_not_found()
@@ -205,7 +217,7 @@ where
     let mut console = Console::new(options.json, &mut stdout, &mut stderr);
     let outcome = match request {
         Request::Mode(mode) => set_mode(&path, mode, env.as_deref(), &mut console),
-        request => manual(request, &path, &options, &mut console),
+        request => manual(request, &path, &options, data, &mut console),
     };
     console.finish(outcome)
 }
@@ -232,7 +244,13 @@ fn config_path(flag: &str, working_dir: &Path, installed: Option<PathBuf>) -> Pa
 
 /// Runs a check, an update or a rollback, with the updater for this
 /// binary and the config at `path`.
-fn manual(request: Request, path: &Path, options: &Options, console: &mut Console) -> Outcome {
+fn manual(
+    request: Request,
+    path: &Path,
+    options: &Options,
+    data: Result<DataDir, NoDataDir>,
+    console: &mut Console,
+) -> Outcome {
     let config = if path.is_file() {
         match Config::load(path) {
             Ok(config) => Some(config),
@@ -253,7 +271,7 @@ fn manual(request: Request, path: &Path, options: &Options, console: &mut Consol
     );
     console.mode_line(request, &settings, path, config.is_some());
     let proxy_url = config.map(|config| config.proxy_url).unwrap_or_default();
-    let updater = match real_updater(&proxy_url) {
+    let updater = match real_updater(data, &proxy_url) {
         Ok(updater) => updater,
         Err(error) => {
             return Outcome::new(request.action(), &settings).failed(console, error.to_string());
@@ -283,14 +301,40 @@ fn manual(request: Request, path: &Path, options: &Options, console: &mut Consol
     ))
 }
 
-/// The updater for this binary, downloading through `proxy_url`.
-fn real_updater(proxy_url: &str) -> Result<Updater, UpdateError> {
-    let data = DataDir::for_this_user().map_err(UpdateError::NoDataDir)?;
+/// The updater for this binary, with the data directory found before `.env`
+/// was loaded, downloading through `proxy_url`.
+fn real_updater(data: Result<DataDir, NoDataDir>, proxy_url: &str) -> Result<Updater, UpdateError> {
+    let data = data.map_err(UpdateError::NoDataDir)?;
     let fetch = http_fetch()(proxy_url).map_err(|error| UpdateError::Fetch {
         what: "the release list",
         error,
     })?;
     Updater::for_this_binary(fetch, data)
+}
+
+/// Whether the installed binary `installed` may be replaced by a caller that
+/// holds `data`'s update lock: the binary's install lock, which the caller
+/// keeps until the switch and its records are done. A supervisor of the data
+/// directory, another install, a supervisor of another data directory, or an
+/// answer that can't be had, change nothing: [`UpdateError::Supervised`]. The
+/// reason, when there is one, comes before the hint on stopping the service.
+async fn clear_to_replace_in(data: &Path, installed: &Path) -> Result<InstallLock, UpdateError> {
+    let again = "run `open-ferry update` again";
+    let hint = || crate::os_service::hint::stop_and_retry(again);
+    let identity = Identity::current(ServiceKind::User).map_err(|error| {
+        UpdateError::Supervised(format!(
+            "could not tell whether an open-ferry supervisor runs: {error}\n{}",
+            hint()
+        ))
+    })?;
+    let deadline = std::time::Instant::now() + DETECT_TIMEOUT;
+    match client::detect(data, &identity, installed, deadline).await {
+        Detection::Clear(lock) => Ok(lock),
+        Detection::Supervised(_) => Err(UpdateError::Supervised(hint())),
+        Detection::Busy(why) | Detection::Refuse(why) => {
+            Err(UpdateError::Supervised(format!("{why}\n{}", hint())))
+        }
+    }
 }
 
 /// What the commands need of the updater.
@@ -339,6 +383,29 @@ struct RollbackPlan {
 /// The updater.
 struct Real(Updater);
 
+impl Real {
+    /// Whether the installed binary may be replaced, asked right after the
+    /// update lock is taken. `Ok` holds the binary's install lock, which the
+    /// caller keeps until the switch and its records are done. An install
+    /// that doesn't update itself is refused here
+    /// ([`UpdateError::NotSelfUpdating`]), so that a replacement only ever
+    /// runs holding the guard `detect` returned, whatever a later look at the
+    /// install says. A supervisor of the data directory, another install, a
+    /// supervisor of another data directory, or an answer that can't be had,
+    /// change nothing: [`UpdateError::Supervised`].
+    async fn clear_to_replace(&self) -> Result<InstallLock, UpdateError> {
+        clear_to_replace_for(self.0.install(), self.0.data.root()).await
+    }
+}
+
+/// [`clear_to_replace_in`] for `install`, which must be self-updating.
+async fn clear_to_replace_for(install: Install, data: &Path) -> Result<InstallLock, UpdateError> {
+    match install {
+        Install::SelfUpdating { binary } => clear_to_replace_in(data, &binary).await,
+        Install::NotifyOnly(why) => Err(UpdateError::NotSelfUpdating(why)),
+    }
+}
+
 impl Updates for Real {
     type Found = Found;
 
@@ -385,6 +452,7 @@ impl Updates for Real {
 
     async fn update(&self, found: Found) -> Result<SwitchRecord, UpdateError> {
         let _lock = self.0.lock()?;
+        let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
         state.latest = Some(found.release.version.clone());
         self.0.stage(&found, &mut state).await?;
@@ -393,6 +461,7 @@ impl Updates for Real {
 
     async fn rollback(&self) -> Result<SwitchRecord, UpdateError> {
         let _lock = self.0.lock()?;
+        let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
         self.0.rollback(&mut state).await
     }
@@ -522,7 +591,7 @@ struct Outcome {
     action: &'static str,
     /// `up-to-date`, `update-available`, `cannot-update`,
     /// `needs-confirmation`, `declined`, `updated`, `rolled-back`,
-    /// `mode-set` or `error`.
+    /// `mode-set`, `supervised` or `error`.
     result: &'static str,
     /// What the text output says.
     message: String,
@@ -584,6 +653,17 @@ impl Outcome {
         console.error(error.clone());
         self.error = Some(error);
         self.with("error", 1)
+    }
+
+    /// The outcome of an update that failed with `error`: `supervised`
+    /// when it changed nothing for a supervisor's sake, else `error`.
+    fn failed_update(self, console: &mut Console, error: &UpdateError) -> Self {
+        let supervised = matches!(error, UpdateError::Supervised(_));
+        let mut outcome = self.failed(console, error.to_string());
+        if supervised {
+            outcome.result = "supervised";
+        }
+        outcome
     }
 }
 
@@ -747,7 +827,7 @@ async fn update<U: Updates>(
             outcome.switch = Some(record);
             outcome.with("updated", 0)
         }
-        Err(error) => outcome.failed(console, error.to_string()),
+        Err(error) => outcome.failed_update(console, &error),
     }
 }
 
@@ -792,7 +872,7 @@ async fn rollback<U: Updates>(
             outcome.switch = Some(record);
             outcome.with("rolled-back", 0)
         }
-        Err(error) => outcome.failed(console, error.to_string()),
+        Err(error) => outcome.failed_update(console, &error),
     }
 }
 

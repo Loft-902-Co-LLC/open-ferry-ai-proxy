@@ -139,6 +139,9 @@ pub enum UpdateError {
     NoPrevious,
     /// The switch failed; the installed binary is as it was.
     Switch(SwitchError),
+    /// A supervisor runs from the installed binary, or whether one does can't
+    /// be told: nothing was changed. The text says why and what to do.
+    Supervised(String),
 }
 
 impl fmt::Display for UpdateError {
@@ -170,6 +173,7 @@ impl fmt::Display for UpdateError {
                 "there is no earlier version to roll back to: a rollback needs a switch made by open-ferry update",
             ),
             Self::Switch(error) => write!(f, "the switch failed, and nothing changed: {error}"),
+            Self::Supervised(message) => f.write_str(message),
         }
     }
 }

@@ -2721,6 +2721,7 @@ fn recovered_started(
         state_pending: false,
         run: None,
         switching_disabled: None,
+        install_lock: None,
         switched_off: false,
         ladder_off_reason: false,
         degraded: Some("return targets missing".to_owned()),

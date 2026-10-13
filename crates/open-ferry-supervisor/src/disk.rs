@@ -192,12 +192,15 @@ pub enum PruneOutcome {
     Partial { removed: Vec<String>, why: String },
 }
 
+/// Runs `work` on a blocking thread that owns `locks` (the update lock, and
+/// the install lock where the work touches the installed file), so that a
+/// cancelled caller does not let them go while the work still runs.
 async fn blocking_install<T: Send + 'static>(
-    lock: open_ferry_update::data_dir::UpdateLock,
+    locks: impl Send + 'static,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || {
-        let _lock = lock;
+        let _locks = locks;
         work()
     })
     .await
@@ -283,6 +286,69 @@ mod tests {
             answer = Disk::install_transaction(disk, journal.clone()).await;
         }
         answer
+    }
+
+    /// A cancelled runtime install transaction does not let the install lock
+    /// go while its blocking work runs: another data directory's detection
+    /// answers `Busy` until the work ends, and only then `Clear`.
+    #[tokio::test]
+    async fn cancelling_a_runtime_install_keeps_the_install_lock_until_it_finishes() {
+        use open_ferry_update::install_lock::InstallLock;
+        let rig = crate::testkit::Rig::new().await;
+        let journal = rig.disk.on_disk().unwrap();
+        let root = scratch();
+        let data = DataDir::at(root.join("data"));
+        std::fs::create_dir_all(data.root()).unwrap();
+        let other = root.join("other-data");
+        std::fs::create_dir_all(&other).unwrap();
+        let installed = root.join("installed");
+        std::fs::write(&installed, b"old binary").unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let mut disk = RealDisk::new(
+            data.clone(),
+            installed.clone(),
+            "open-ferry".to_owned(),
+            JournalStore::new(data.root()),
+        )
+        .with_install_lock(Some(std::sync::Arc::new(
+            InstallLock::try_acquire(&installed).unwrap(),
+        )));
+        disk.before_install = Some(std::sync::Arc::new(move || {
+            if let Some(sender) = entered_tx.lock().unwrap().take() {
+                sender.send(()).unwrap();
+            }
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10));
+        }));
+        let task = tokio::spawn(async move { Disk::install_transaction(&disk, journal).await });
+        entered_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let identity =
+            crate::endpoint::Identity::current(crate::endpoint::ServiceKind::User).unwrap();
+        let soon = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let during = crate::client::detect(&other, &identity, &installed, soon()).await;
+        release_tx.send(()).unwrap();
+        assert!(
+            matches!(during, crate::client::Detection::Busy(_)),
+            "cancel let the install lock go mid-install: {during:?}"
+        );
+        // A parallel child's fork-to-exec window can briefly retain our flock fd.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let after = crate::client::detect(&other, &identity, &installed, soon()).await;
+            if matches!(after, crate::client::Detection::Clear(_)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "still held: {after:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A directory of its own for one test. The name carries a timestamp as
@@ -766,6 +832,13 @@ pub struct RealDisk {
     /// The running supervisor's version, noted in the state when an outcome
     /// says a newer supervisor is needed.
     supervisor_version: String,
+    /// The supervisor's install lock, which every install transaction keeps
+    /// held on its blocking thread. `None` for a bare disk in a test.
+    install_lock: Option<std::sync::Arc<open_ferry_update::install_lock::InstallLock>>,
+    /// Runs on the blocking thread, locks held, before the transaction: a
+    /// test's way to hold the work still.
+    #[cfg(test)]
+    before_install: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl RealDisk {
@@ -782,7 +855,22 @@ impl RealDisk {
             store,
             trust: None,
             supervisor_version: open_ferry_update::CURRENT_VERSION.to_owned(),
+            install_lock: None,
+            #[cfg(test)]
+            before_install: None,
         }
+    }
+
+    /// Has each install transaction keep the supervisor's install lock held
+    /// through its blocking work. The supervisor already holds it for life;
+    /// this one handle is what the work holds a clone of.
+    #[must_use]
+    pub fn with_install_lock(
+        mut self,
+        lock: Option<std::sync::Arc<open_ferry_update::install_lock::InstallLock>>,
+    ) -> Self {
+        self.install_lock = lock;
+        self
     }
 
     /// Names the running supervisor's version, which an outcome that needs a
@@ -936,7 +1024,15 @@ impl Disk for RealDisk {
         };
         let disk = self.clone();
         let fallback = journal.clone();
-        match blocking_install(lock, move || install_transaction(&disk, journal)).await {
+        let locks = (lock, self.install_lock.clone());
+        let work = move || {
+            #[cfg(test)]
+            if let Some(hook) = &disk.before_install {
+                hook();
+            }
+            install_transaction(&disk, journal)
+        };
+        match blocking_install(locks, work).await {
             Ok(result) => result,
             Err(error) => (fallback, InstallResult::Failed(error.to_string())),
         }

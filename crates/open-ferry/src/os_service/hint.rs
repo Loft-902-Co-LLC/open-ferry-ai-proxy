@@ -6,10 +6,6 @@ use super::{SERVICE_NAME, launchd, systemd};
 
 /// The lines that tell a user to stop the user service, `again` (say, "run
 /// `open-ferry update` again"), and start the service again, on this system.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "2c-2's update CLI and install-self print it")
-)]
 pub(crate) fn stop_and_retry(again: &str) -> String {
     let (stop, start) = commands();
     format!(
@@ -20,10 +16,6 @@ pub(crate) fn stop_and_retry(again: &str) -> String {
 }
 
 /// The commands that stop and start the user service on this system.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "2c-2's update CLI and install-self print it")
-)]
 fn commands() -> (String, String) {
     if cfg!(windows) {
         (

@@ -2018,6 +2018,8 @@ async fn an_untrusted_version_is_unverified_before_hashing() {
     assert_eq!(started.run.unwrap().binary, rig.installed);
     drop(started.endpoint);
     drop(started.lock);
+    // A second start in this process waits for the install lock the first holds.
+    drop(started.install_lock);
     std::fs::remove_file(&journal).unwrap();
     let mut registry = Registry::new();
     let started = start(&rig.cfg, &rig.host, &driver, &mut registry, &SystemClock)

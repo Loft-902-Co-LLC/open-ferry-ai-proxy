@@ -22,6 +22,9 @@ struct Fake {
     plan: Option<RollbackPlan>,
     /// Whether the switch fails.
     switch_fails: bool,
+    /// Whether a supervisor runs, so that the update and the rollback
+    /// change nothing and say so.
+    supervised: bool,
     calls: RefCell<Vec<&'static str>>,
 }
 
@@ -43,6 +46,7 @@ impl Fake {
             }),
             plan: None,
             switch_fails: false,
+            supervised: false,
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -117,6 +121,9 @@ impl Updates for Fake {
 
     async fn update(&self, (): ()) -> Result<SwitchRecord, UpdateError> {
         self.calls.borrow_mut().push("update");
+        if self.supervised {
+            return Err(UpdateError::Supervised("a supervisor runs".to_owned()));
+        }
         if self.switch_fails {
             return Err(UpdateError::Busy);
         }
@@ -133,6 +140,9 @@ impl Updates for Fake {
 
     async fn rollback(&self) -> Result<SwitchRecord, UpdateError> {
         self.calls.borrow_mut().push("rollback");
+        if self.supervised {
+            return Err(UpdateError::Supervised("a supervisor runs".to_owned()));
+        }
         let plan = self.plan.as_ref().unwrap();
         Ok(SwitchRecord {
             from: plan.installed.clone(),
@@ -873,4 +883,180 @@ fn the_usage_says_how_to_turn_updates_off() {
     assert!(usage.contains("Turn automatic updates off: open-ferry update -mode off\n"));
     assert!(usage.contains("\n  -mode string\n"));
     assert!(usage.ends_with("\n  -yes\n    \tInstall or roll back without asking\n"));
+}
+
+#[tokio::test]
+async fn an_update_that_meets_a_supervisor_is_reported_as_supervised_and_exits_1() {
+    let mut fake = Fake::finding("0.2.0", "0.1.0");
+    fake.supervised = true;
+
+    let ran = go(
+        Request::Update,
+        &fake,
+        &settings("", None),
+        true,
+        true,
+        None,
+    )
+    .await;
+
+    assert_eq!((ran.code, ran.result), (1, "supervised"));
+    let json = ran.json();
+    assert_eq!(json["result"], "supervised");
+    assert_eq!(json["error"], "a supervisor runs");
+    assert!(json.get("switch").is_none());
+    assert_eq!(fake.calls(), ["latest", "update"]);
+}
+
+#[tokio::test]
+async fn a_rollback_that_meets_a_supervisor_is_reported_as_supervised_and_exits_1() {
+    let mut fake = Fake::finding("0.1.0", "0.2.0");
+    fake.plan = Some(RollbackPlan {
+        previous: "0.1.0".to_owned(),
+        installed: "0.2.0".to_owned(),
+        binary: PathBuf::from(BINARY),
+    });
+    fake.supervised = true;
+
+    let ran = go(
+        Request::Rollback,
+        &fake,
+        &settings("", None),
+        true,
+        false,
+        None,
+    )
+    .await;
+
+    assert_eq!((ran.code, ran.result), (1, "supervised"));
+    assert!(ran.err.contains("a supervisor runs"), "{}", ran.err);
+    assert_eq!(fake.calls(), ["rollback"]);
+}
+
+#[tokio::test]
+async fn check_still_works_while_a_supervisor_runs() {
+    let mut fake = Fake::finding("0.2.0", "0.1.0");
+    fake.supervised = true;
+
+    let ran = go(
+        Request::Check,
+        &fake,
+        &settings("", None),
+        false,
+        false,
+        None,
+    )
+    .await;
+
+    assert_eq!((ran.code, ran.result), (3, "update-available"));
+    assert_eq!(
+        fake.calls(),
+        ["latest"],
+        "a check asks nothing of the switch"
+    );
+}
+
+/// A data directory and an installed binary in a scratch directory.
+fn supervised_rig() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = match std::env::var_os("OFP_TEST_SCRATCH") {
+        Some(root) => tempfile::tempdir_in(root).unwrap(),
+        None => tempfile::tempdir().unwrap(),
+    };
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let installed = dir.path().join("open-ferry");
+    std::fs::write(&installed, b"installed bytes").unwrap();
+    (dir, data, installed)
+}
+
+/// Every file under `dir`, with its bytes; the empty lock files, which taking
+/// a lock creates, are left out.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_none_or(|ext| ext != "lock")
+                && path
+                    .file_name()
+                    .is_none_or(|name| name != ".open-ferry.lock")
+            {
+                found.push((path.clone(), std::fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[tokio::test]
+async fn with_no_supervisor_and_no_install_holding_the_lock_the_binary_is_clear_and_the_lock_is_held()
+ {
+    let (_dir, data, installed) = supervised_rig();
+
+    let lock = clear_to_replace_in(&data, &installed).await.unwrap();
+
+    assert_eq!(
+        InstallLock::try_acquire(&installed).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock,
+        "the caller keeps the install lock through the switch"
+    );
+    drop(lock);
+    assert_eq!(std::fs::read(&installed).unwrap(), b"installed bytes");
+}
+
+#[tokio::test]
+async fn a_held_install_lock_refuses_the_replacement_and_changes_no_file() {
+    let (dir, data, installed) = supervised_rig();
+    let _held = InstallLock::try_acquire(&installed).unwrap();
+    let before = snapshot(dir.path());
+
+    let error = clear_to_replace_in(&data, &installed).await.unwrap_err();
+
+    let UpdateError::Supervised(message) = error else {
+        panic!("{error:?}");
+    };
+    assert!(message.contains(".open-ferry.lock"), "{message}");
+    assert!(message.contains("Stop the service"), "{message}");
+    assert_eq!(snapshot(dir.path()), before);
+}
+
+#[tokio::test]
+async fn a_held_supervisor_lock_refuses_the_replacement_and_changes_no_file() {
+    use open_ferry_supervisor::process::SupervisorLock;
+    let (dir, data, installed) = supervised_rig();
+    let _held = SupervisorLock::try_acquire(&data).unwrap();
+    let before = snapshot(dir.path());
+
+    let error = clear_to_replace_in(&data, &installed).await.unwrap_err();
+
+    let UpdateError::Supervised(message) = error else {
+        panic!("{error:?}");
+    };
+    assert!(message.contains("Stop the service"), "{message}");
+    assert_eq!(snapshot(dir.path()), before);
+    assert_eq!(std::fs::read(&installed).unwrap(), b"installed bytes");
+    // The install lock taken on the way is let go again.
+    drop(InstallLock::try_acquire(&installed).unwrap());
+}
+
+#[tokio::test]
+async fn an_install_that_is_notify_only_is_refused_before_any_replacement_and_changes_no_file() {
+    let (dir, data, installed) = supervised_rig();
+    let before = snapshot(dir.path());
+
+    let error = clear_to_replace_for(Install::NotifyOnly(NotSelfUpdating::NoReceipt), &data)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, UpdateError::NotSelfUpdating(_)),
+        "{error:?}"
+    );
+    assert_eq!(snapshot(dir.path()), before);
+    // No install lock was taken either.
+    drop(InstallLock::try_acquire(&installed).unwrap());
 }
