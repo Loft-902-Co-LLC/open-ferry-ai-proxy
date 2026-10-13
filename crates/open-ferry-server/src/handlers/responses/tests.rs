@@ -1436,42 +1436,44 @@ async fn forwards_reasoning_content_unchecked() {
 
 #[tokio::test(start_paused = true)]
 async fn pre_first_token_tick_after_partial_frame_keeps_bootstrap_headers() {
-    // openai_responses_handlers.go:737-742,900-903. Feed the handler's
-    // bootstrap boundary directly, after exec's first-payload checking.
-    let (release, gate) = tokio::sync::oneshot::channel();
-    let first = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":";
-    let last = "{\"status\":\"completed\"}}\n\n";
+    // openai_responses_handlers.go:737-742,900-903. Whole JSON passes exec's
+    // SSE check, but this data-only frame without its delimiter stays pending
+    // in the handler's framer. A tick then commits the published headers.
+    let first = Bytes::from_static(
+        b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}",
+    );
     let mut headers = HeaderMap::new();
     headers.insert("x-upstream", http::HeaderValue::from_static("kept"));
-    let commit_headers = crate::stream::CommitHeaders::default();
-    let upstream_headers = commit_headers.clone();
-    let items = stream::iter([ok(first)])
-        .chain(stream::once(async move { Ok(gate.await.unwrap()) }))
-        .boxed();
-    let started = crate::exec::Started { headers, items };
-    let initial = async move {
-        upstream_headers.set(&started.headers);
-        super::prepare_initial_stream(started, false).await
+    let config = ServerConfig {
+        passthrough_headers: true,
+        streaming: StreamingConfig {
+            keepalive: Some(Duration::from_millis(10)),
+            keepalive_before_first_token: true,
+            ..StreamingConfig::default()
+        },
+        ..ServerConfig::default()
     };
-    let response = crate::stream::pre_first_token(
-        Some(Duration::from_millis(10)),
-        commit_headers,
-        initial,
-        |initial, committed| super::respond_initial_stream(initial, committed, None, true, None),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["x-upstream"], "kept");
-    assert_eq!(
-        response.headers()[header::CONTENT_TYPE],
-        "text/event-stream"
-    );
-    let mut body = response.into_body();
-    assert_eq!(
-        body.frame().await.unwrap().unwrap().into_data().unwrap(),
-        ": keep-alive\n\n"
-    );
-    release.send(Bytes::from(last)).unwrap();
-    let rest = body.collect().await.unwrap().to_bytes();
-    assert_eq!(rest, format!("{first}{last}\n"));
+    let (app, dispatcher) = app(config, vec![Outcome::Hang(headers, vec![Ok(first)])]);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let response = app
+            .oneshot(post("/v1/responses", STREAM, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-upstream"], "kept");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let mut body = response.into_body();
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            ": keep-alive\n\n"
+        );
+        drop(body);
+    })
+    .await
+    .expect("the partial-frame wait commits on a keepalive tick");
+    assert_eq!(dispatcher.calls().len(), 1);
+    assert_eq!(dispatcher.live_streams(), 0);
 }

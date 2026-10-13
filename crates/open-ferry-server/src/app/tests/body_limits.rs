@@ -344,7 +344,9 @@ async fn logging_read_failures_keep_cors_headers() {
         .body(Body::from_stream(chunks))
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
-    // request_logging.go:62-65 lets ordinary read failures reach CORS.
+    // Our logging read failure answers 400 before auth, with CORS headers.
+    // Upstream request_logging.go:62-65 continues to CORS and auth instead:
+    // 401 without a key, or 204 for OPTIONS.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(response.headers()["access-control-allow-origin"], "*");
 }
