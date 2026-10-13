@@ -2,8 +2,8 @@
 // (native Interactions routing, URLs, Execute and ExecuteStream) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Vertex's opt-in native Interactions endpoint. Regional service accounts
-//! retain the Gemini bridge; native service-account calls use global.
+//! Vertex's opt-in native Interactions endpoint. All native service-account
+//! calls use global, including accounts configured for a regional location.
 
 use super::*;
 use crate::gemini::interactions::{
@@ -14,28 +14,11 @@ pub(super) fn should_execute_native(auth: &Auth, options: &Options) -> bool {
     if options.source_format != Format::INTERACTIONS {
         return false;
     }
-    let enabled = auth
-        .attribute("interactions")
+    auth.attribute("interactions")
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("true") || value.trim() == "1")
         || ["interactions", "native_interactions"]
             .iter()
-            .any(|key| auth.metadata.get(*key).and_then(Value::as_bool) == Some(true));
-    if !enabled {
-        return false;
-    }
-    // Only service accounts have a regional endpoint. Missing locations
-    // use the existing regional default too.
-    if auth.attribute("api_key").unwrap_or_default().is_empty()
-        && auth
-            .metadata_str("access_token")
-            .unwrap_or_default()
-            .is_empty()
-    {
-        return auth
-            .metadata_str("location")
-            .is_some_and(|location| location.trim() == "global");
-    }
-    true
+            .any(|key| auth.metadata.get(*key).and_then(Value::as_bool) == Some(true))
 }
 
 impl VertexExecutor {

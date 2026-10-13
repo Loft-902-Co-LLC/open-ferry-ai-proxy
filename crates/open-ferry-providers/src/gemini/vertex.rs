@@ -17,9 +17,9 @@
 //! [`super::token`]).
 //!
 //! An Interactions client with an explicit `interactions` credential opt-in
-//! calls Vertex's native `/v1beta1/interactions` API instead. Global service
-//! accounts call its project-scoped endpoint with a bearer token; regional
-//! service accounts keep the Gemini bridge. See [`interactions`].
+//! calls Vertex's native `/v1beta1/interactions` API instead. Service accounts
+//! call its project-scoped global endpoint with a bearer token, including
+//! accounts configured for a regional location, as upstream does. See [`interactions`].
 //!
 //! Imagen models (any model whose name contains `imagen`) are called with
 //! `predict`. With a service account, the client's request becomes an

@@ -21,7 +21,7 @@ use open_ferry_core::auth::Auth;
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::models::ModelInfo;
 use open_ferry_core::registry::ModelRegistry;
-use open_ferry_providers::gemini::InteractionsExecutor;
+use open_ferry_providers::gemini::{InteractionsExecutor, VertexExecutor};
 use serde_json::{Value, json};
 
 use super::{AGENT, PATH, content_type, post, send};
@@ -139,6 +139,54 @@ fn proxy(mock: &Mock) -> Router {
     };
     let catalog = FakeCatalog::new().serve(SELECTION_MODEL, &["gemini-interactions"]);
     router(AppState::new(config, manager, Arc::new(catalog)))
+}
+
+// Ported from upstream TestInteractionsVertexModelUsesNativeInteractionsEndpoint
+// (CLIProxyAPI 2d5351b3, sdk/api/handlers/gemini/interactions_handlers_test.go).
+#[tokio::test]
+async fn a_vertex_model_uses_the_native_interactions_endpoint() {
+    let interaction = r#"{"id":"interaction_v1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"text":"vertex-ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#;
+    let mock = Mock::start(200, "application/json", interaction).await;
+    let model = "gemini-3.8-flash";
+    let registry = Arc::new(ModelRegistry::new());
+    let manager = Arc::new(Manager::new(Settings::default(), registry.clone(), None));
+    manager.register_executor(Arc::new(VertexExecutor::new("direct")));
+    let mut auth = Auth {
+        id: "interactions-vertex-auth".into(),
+        provider: "vertex".into(),
+        ..Auth::default()
+    };
+    auth.attributes
+        .insert("api_key".into(), "test-vertex-key".into());
+    auth.attributes.insert("base_url".into(), mock.url.clone());
+    auth.attributes.insert("interactions".into(), "true".into());
+    manager.register_unsaved(auth).unwrap();
+    registry.register_client(
+        "interactions-vertex-auth",
+        "vertex",
+        &[ModelInfo {
+            id: model.into(),
+            ..ModelInfo::default()
+        }],
+    );
+    let config = ServerConfig {
+        api_keys: vec!["sk-test".into()],
+        ..ServerConfig::default()
+    };
+    let catalog = FakeCatalog::new().serve(model, &["vertex"]);
+    let app = router(AppState::new(config, manager, Arc::new(catalog)));
+    let (status, _, body) = send(
+        &app,
+        post(PATH, r#"{"model":"gemini-3.8-flash","input":"hi vertex"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seen = mock.only();
+    assert_eq!(seen.path, "/v1beta1/interactions");
+    assert_eq!(seen.json()["input"], "hi vertex");
+    assert_eq!(seen.header("x-goog-api-key"), Some("test-vertex-key"));
+    let answer: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["steps"][0]["content"][0]["text"], "vertex-ok");
 }
 
 // TestInteractionsAgentUsesNativeInteractionsEndpoint. Also checks the key
