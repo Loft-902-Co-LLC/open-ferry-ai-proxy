@@ -415,9 +415,9 @@ pub struct SpawnSpec<'a> {
     pub exe: &'a Path,
     pub args: &'a [std::ffi::OsString],
     pub cwd: Option<&'a Path>,
-    /// The worker's standard output; the null device when `None`.
+    /// The worker's standard output; the supervisor's when `None`.
     pub stdout: Option<&'a File>,
-    /// The worker's standard error; the same file as `stdout` when `None`.
+    /// The worker's standard error; `stdout` when set, else the supervisor's.
     pub stderr: Option<&'a File>,
 }
 
@@ -456,11 +456,11 @@ impl WorkerProcess {
         let stdin = open_nul()?;
         let stdout = match spec.stdout {
             Some(file) => inheritable_copy(file)?,
-            None => open_nul()?,
+            None => inherited_output(std::io::stdout().as_raw_handle())?,
         };
         let stderr = match spec.stderr.or(spec.stdout) {
             Some(file) => inheritable_copy(file)?,
-            None => open_nul()?,
+            None => inherited_output(std::io::stderr().as_raw_handle())?,
         };
         let inherited = [raw(&stdin), raw(&stdout), raw(&stderr)];
         let mut attributes = AttributeList::inheriting(&inherited)?;
@@ -737,13 +737,27 @@ fn open_nul() -> io::Result<OwnedHandle> {
 /// A second, inheritable handle to the same file. The caller's own handle is
 /// left as it was.
 fn inheritable_copy(file: &File) -> io::Result<OwnedHandle> {
+    inheritable_handle(file.as_raw_handle())
+}
+
+/// Carries redirected output to workers, with NUL for a detached process
+/// that has no standard handle. Only the duplicate becomes inheritable.
+fn inherited_output(handle: HANDLE) -> io::Result<OwnedHandle> {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        open_nul()
+    } else {
+        inheritable_handle(handle)
+    }
+}
+
+fn inheritable_handle(handle: HANDLE) -> io::Result<OwnedHandle> {
     let mut copy: HANDLE = null_mut();
     // SAFETY: duplicates a handle of this process into this process.
     let ok = unsafe {
         let current = GetCurrentProcess();
         DuplicateHandle(
             current,
-            file.as_raw_handle(),
+            handle,
             current,
             &mut copy,
             0,
