@@ -528,6 +528,16 @@ impl Dispatcher for Manager {
         Manager::close_execution_session(self, session_id);
     }
 
+    fn interrupt_execution_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        payload: &'a [u8],
+    ) -> BoxFuture<'a, Result<bool, ExecError>> {
+        Box::pin(Manager::interrupt_execution_session(
+            self, session_id, payload,
+        ))
+    }
+
     fn websocket_support(
         &self,
         providers: &[ProviderId],

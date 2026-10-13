@@ -97,11 +97,26 @@ async fn replacement_with_a_shared_store_keeps_sessions_and_removal_is_targeted(
             .await
             .unwrap()
     );
+    // The server reaches the manager through the trait, so the trait must
+    // route there too rather than fall back to its default.
+    let dispatcher: &dyn crate::exec::Dispatcher = &manager;
+    assert!(
+        dispatcher
+            .interrupt_execution_session("session", b"{}")
+            .await
+            .unwrap()
+    );
     manager.remove("credential");
     assert_eq!(*removed.lock().unwrap(), ["credential"]);
     assert!(current.lock().unwrap().is_empty());
     assert!(
         !manager
+            .interrupt_execution_session("session", b"{}")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !dispatcher
             .interrupt_execution_session("session", b"{}")
             .await
             .unwrap()
