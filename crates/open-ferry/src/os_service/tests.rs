@@ -5219,9 +5219,7 @@ fn helper_paths_do_not_search_the_working_directory_or_path() {
 
 #[test]
 fn helpers_search_path_only_for_an_unprivileged_probe() {
-    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
-    std::fs::create_dir_all(&scratch).unwrap();
-    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let dir = crate::scope::runtime_test_probe::scratch_dir();
     let name = format!("open-ferry-fake-helper{}", std::env::consts::EXE_SUFFIX);
     let helper = dir.path().join(&name);
     std::fs::write(&helper, "fake helper: never executed").unwrap();
@@ -5270,9 +5268,7 @@ fn unprivileged_helpers_ignore_missing_empty_and_relative_path_entries() {
 #[cfg(windows)]
 #[test]
 fn unprivileged_helpers_use_pathext_and_path_order() {
-    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
-    std::fs::create_dir_all(&scratch).unwrap();
-    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let dir = crate::scope::runtime_test_probe::scratch_dir();
     let first = dir.path().join("first");
     let second = dir.path().join("second");
     std::fs::create_dir_all(&first).unwrap();
@@ -5311,9 +5307,7 @@ fn unprivileged_helpers_use_pathext_and_path_order() {
 #[test]
 fn unprivileged_helpers_skip_files_without_execute_permission() {
     use std::os::unix::fs::PermissionsExt as _;
-    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
-    std::fs::create_dir_all(&scratch).unwrap();
-    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let dir = crate::scope::runtime_test_probe::scratch_dir();
     let helper = dir.path().join("docker");
     std::fs::write(&helper, "fake: never executed").unwrap();
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o644)).unwrap();

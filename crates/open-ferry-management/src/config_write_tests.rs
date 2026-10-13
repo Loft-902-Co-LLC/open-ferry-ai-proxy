@@ -67,33 +67,24 @@ fn refuse_all(writer: &dyn ConfigWriter) {
     );
 }
 
-struct Logs(Arc<AtomicUsize>);
-
-impl tracing::Subscriber for Logs {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        assert_eq!(*event.metadata().level(), tracing::Level::WARN);
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
 #[tokio::test]
 async fn refused_writes_never_call_the_writer_and_log_once_without_content() {
     let state = state(Path::new("config.yaml"), Arc::new(NeverCalled))
         .with_config_read_check(|_| Err("test refusal".into()));
-    let logs = Arc::new(AtomicUsize::new(0));
     let writer = state.config_writer().unwrap();
-    tracing::subscriber::with_default(Logs(logs.clone()), || refuse_all(writer.as_ref()));
-    assert_eq!(logs.load(Ordering::SeqCst), 4);
+    let (logs, capturing) = crate::tests::capture::Logs::capture();
+    refuse_all(writer.as_ref());
+    drop(capturing);
+    let logs = logs.text();
+    assert_eq!(logs.lines().count(), 4, "{logs}");
+    for line in logs.lines() {
+        assert!(
+            line.starts_with("management config file not written reason=")
+                && line.contains("test refusal")
+                && !line.contains("1234"),
+            "{line}"
+        );
+    }
     let error = writer.edit_v8(&edit()).unwrap_err();
     let response = v8_error_response(&error);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
