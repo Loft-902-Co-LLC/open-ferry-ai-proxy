@@ -69,6 +69,7 @@ mod credential_policy;
 mod download;
 mod force_refresh;
 mod forced_provider;
+mod lifecycle_sessions;
 mod media_source_formats;
 mod meta_refresh;
 mod metadata_keys;

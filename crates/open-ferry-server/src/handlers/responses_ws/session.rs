@@ -366,7 +366,6 @@ impl<S: Socket> Session<S> {
             self.pinned.clone()
         };
         let selected: Arc<Mutex<Vec<String>>> = Arc::default();
-        let _local_turn = self.conn.begin_turn();
         let input = self
             .state
             .settings()
@@ -413,10 +412,6 @@ impl<S: Socket> Session<S> {
                     biased;
                     // A ready upstream error is observed before cancellation.
                     started = call.stream() => started,
-                    _ = self.conn.local_interrupt() => Started {
-                        headers: HeaderMap::new(),
-                        items: Box::pin(futures_util::stream::pending()),
-                    },
                     _ = self.conn.gone() => return ControlFlow::Break(()),
                 }
             }

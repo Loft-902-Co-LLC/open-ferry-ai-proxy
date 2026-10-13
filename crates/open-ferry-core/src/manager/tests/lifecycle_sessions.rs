@@ -106,6 +106,26 @@ async fn replacement_with_a_shared_store_keeps_sessions_and_removal_is_targeted(
             .await
             .unwrap()
     );
+    let mut disabled = (*manager.get("credential").unwrap()).clone();
+    disabled.status = crate::auth::Status::Disabled;
+    assert!(!disabled.disabled);
+    manager.update(disabled).unwrap();
+    assert!(!manager.get("credential").unwrap().disabled);
+    assert!(
+        !dispatcher
+            .interrupt_execution_session("session", b"{}")
+            .await
+            .unwrap()
+    );
+    let mut enabled = (*manager.get("credential").unwrap()).clone();
+    enabled.status = crate::auth::Status::Active;
+    manager.update(enabled).unwrap();
+    assert!(
+        dispatcher
+            .interrupt_execution_session("session", b"{}")
+            .await
+            .unwrap()
+    );
     manager.remove("credential");
     assert_eq!(*removed.lock().unwrap(), ["credential"]);
     assert!(current.lock().unwrap().is_empty());

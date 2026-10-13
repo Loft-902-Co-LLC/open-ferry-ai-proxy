@@ -160,22 +160,19 @@ pub(in crate::xai) async fn execute_stream(
         );
     }
     let url = websocket_url(auth)?;
-    let proxy = sessions.store.get(&session_id).map_or_else(
-        || executor.proxy_for(auth),
-        |session| session.effective_proxy(&auth.id, &auth.proxy_url, executor.proxy_for(auth)),
-    );
-    let target = Target {
-        auth_id: auth.id.clone(),
-        url: url.clone(),
-        proxy: proxy.clone(),
-    };
-
     let (session, ephemeral, guard) = match sessions.store.get_or_create(&session_id) {
         Some(session) => {
             let guard = session.lock_requests().await;
             (session, false, Some(guard))
         }
         None => (sessions.store.ephemeral(), true, None),
+    };
+    let proxy = session.effective_proxy(&auth.id, &auth.proxy_url, executor.proxy_for(auth));
+    let global_proxy = session.effective_proxy(&auth.id, "", executor.global_proxy());
+    let target = Target {
+        auth_id: auth.id.clone(),
+        url: url.clone(),
+        proxy: proxy.clone(),
     };
     let mut mapper = state.map(|state| Mapper::new(state, &client));
     if let Some(mapper) = mapper.as_mut() {
@@ -201,7 +198,9 @@ pub(in crate::xai) async fn execute_stream(
     let mut secrets = observe_send::secrets(&url, &headers, &proxy, auth);
     let conn_target = session::Target::new(&auth.id, &url, &proxy, token(auth))
         .with_secrets(&secrets)
-        .with_config(executor.shared_config());
+        .with_global_proxy(global_proxy);
+    #[cfg(test)]
+    let conn_target = conn_target.with_config(executor.shared_config());
     // A connection kept for the call was opened with the secrets of an
     // earlier one, which xAI may quote back too.
     if let Some(kept) = session.kept_secrets(&conn_target) {

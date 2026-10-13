@@ -23,9 +23,6 @@
 
 use super::credential::websockets_enabled;
 
-#[cfg(test)]
-#[path = "tests/lifecycle_sessions.rs"]
-mod lifecycle_sessions;
 use super::select::{ClientModels, lookup_executor};
 use super::text::{go_lower, parse_suffix};
 use super::{Manager, State};

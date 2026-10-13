@@ -11,7 +11,7 @@
 //! The client's connection: reads its requests, writes events, and closes it
 //! the ways upstream does.
 //!
-//! With response steering on, the connection is split: a task reads the
+//! The connection is always split: a task reads the
 //! client's messages into a bounded queue, which the session reads between
 //! turns and a Codex call reads while its stream runs, and the writes go to
 //! the other half.
@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes};
 use bytes::Bytes;
@@ -89,11 +90,25 @@ impl<S: Socket> Writer<S> {
 }
 
 /// Dropping a turn prevents an idle connection from accepting local cancellation.
-pub(super) struct LocalTurn(Arc<AtomicBool>);
+pub(super) struct LocalTurn(Arc<Mutex<LocalState>>, u64);
+
+#[derive(Default)]
+struct LocalState {
+    generation: u64,
+    active: bool,
+    frames: Option<watch::Sender<Option<Bytes>>>,
+}
 
 impl Drop for LocalTurn {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.generation != self.1 {
+            return;
+        }
+        state.active = false;
+        if let Some(frames) = &state.frames {
+            frames.send_replace(None);
+        }
     }
 }
 
@@ -101,12 +116,17 @@ struct Interrupt<S> {
     dispatcher: Arc<dyn open_ferry_core::exec::Dispatcher>,
     session_id: String,
     sink: Arc<tokio::sync::Mutex<SplitSink<S, Message>>>,
-    active: Arc<AtomicBool>,
-    local: watch::Sender<Option<Bytes>>,
+    local: Arc<Mutex<LocalState>>,
 }
 
 impl<S: Socket> Interrupt<S> {
     async fn handle(&self, payload: &Bytes) -> Result<(), axum::Error> {
+        // Capture before the asynchronous lookup: its result belongs only
+        // to the turn that was active when the interrupt arrived.
+        let generation = {
+            let state = self.local.lock().unwrap_or_else(PoisonError::into_inner);
+            state.active.then_some(state.generation)
+        };
         let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
         let result = if !value
             .get("response_id")
@@ -127,15 +147,29 @@ impl<S: Socket> Interrupt<S> {
                 tracing::debug!(outcome = "handled", "responses websocket: interrupt");
                 return Ok(());
             }
-            Ok(false) if self.active.load(Ordering::Acquire) => {
-                self.local.send_replace(Some(payload.clone()));
-                tracing::debug!(outcome = "local_http", "responses websocket: interrupt");
-                return Ok(());
-            }
             Ok(false) => {
+                let state = self.local.lock().unwrap_or_else(PoisonError::into_inner);
+                if state.active && generation == Some(state.generation) {
+                    if let Some(frames) = &state.frames {
+                        frames.send_if_modified(|frame| {
+                            if frame.is_some() {
+                                false
+                            } else {
+                                *frame = Some(payload.clone());
+                                true
+                            }
+                        });
+                    }
+                    tracing::debug!(outcome = "local_http", "responses websocket: interrupt");
+                    return Ok(());
+                }
                 ErrorMessage::new(400, "no active upstream websocket for response.interrupt")
             }
-            Err(error) => ErrorMessage::from_exec(error),
+            Err(error) => {
+                let mut error = ErrorMessage::from_exec(error);
+                error.status = 400;
+                error
+            }
         };
         tracing::debug!(outcome = "rejected", "responses websocket: interrupt");
         let payload = super::forward::error_payload(&error);
@@ -233,7 +267,7 @@ pub(super) struct Conn<S> {
     /// Whether the client sent a close frame, which needs its reply flushed.
     client_closed: bool,
     local: Option<watch::Sender<Option<Bytes>>>,
-    active: Arc<AtomicBool>,
+    local_state: Arc<Mutex<LocalState>>,
 }
 
 impl<S: Socket> Conn<S> {
@@ -244,12 +278,12 @@ impl<S: Socket> Conn<S> {
             reader: None,
             client_closed: false,
             local: None,
-            active: Arc::new(AtomicBool::new(false)),
+            local_state: Arc::default(),
         }
     }
 
-    /// The connection with a task reading it all the time, for response
-    /// steering: its messages queue for [`read`](Self::read) and for a
+    /// The connection with a task reading it all the time: its messages
+    /// queue for [`read`](Self::read) and for a
     /// call given [`input`](Self::input) (`readResponsesWebsocketInput`).
     pub(super) fn split(
         socket: S,
@@ -261,14 +295,16 @@ impl<S: Socket> Conn<S> {
         let (input, rx) = mpsc::channel(INPUT_QUEUE);
         let (gone, gone_rx) = watch::channel(false);
         let client_closed = Arc::new(AtomicBool::new(false));
-        let active = Arc::new(AtomicBool::new(false));
         let (local, _) = watch::channel(None);
+        let local_state = Arc::new(Mutex::new(LocalState {
+            frames: Some(local.clone()),
+            ..LocalState::default()
+        }));
         let interrupt = Interrupt {
             dispatcher,
             session_id,
             sink: sink.clone(),
-            active: active.clone(),
-            local: local.clone(),
+            local: local_state.clone(),
         };
         let task = tokio::spawn(read_input(
             stream,
@@ -287,16 +323,21 @@ impl<S: Socket> Conn<S> {
             }),
             client_closed: false,
             local: Some(local),
-            active,
+            local_state,
         }
     }
 
     pub(super) fn begin_turn(&self) -> LocalTurn {
-        if let Some(local) = &self.local {
-            local.send_replace(None);
+        let mut state = self
+            .local_state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(frames) = &state.frames {
+            frames.send_replace(None);
         }
-        self.active.store(true, Ordering::Release);
-        LocalTurn(self.active.clone())
+        state.generation += 1;
+        state.active = true;
+        LocalTurn(self.local_state.clone(), state.generation)
     }
 
     pub(super) fn local_interrupt(&self) -> impl Future<Output = Bytes> + Send + 'static {
