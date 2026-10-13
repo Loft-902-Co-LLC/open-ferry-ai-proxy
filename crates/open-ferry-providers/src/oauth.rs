@@ -51,7 +51,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Query, RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
@@ -121,6 +121,109 @@ pub enum CallbackResult {
     Error(String),
 }
 
+/// A callback with the dynamic client ID needed by Sign in with ChatGPT.
+/// Also returned by [`parse_oauth_callback`] for a pasted redirect.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct OAuthCallback {
+    /// The authorization code, or empty on failure.
+    pub code: String,
+    /// The authorization request's state; pasted redirects must be checked
+    /// against the pending login by the caller.
+    pub state: String,
+    /// The dynamically issued client ID, or empty for ordinary OAuth.
+    pub client_id: String,
+    /// The provider's error, or empty on success.
+    pub error: String,
+    /// The provider's error description, when supplied.
+    pub error_description: String,
+}
+
+impl std::fmt::Debug for OAuthCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCallback").finish_non_exhaustive()
+    }
+}
+
+/// Why a pasted OAuth redirect couldn't be parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallbackParseError {
+    /// The text isn't a callback URL or encoded parameter list.
+    InvalidUrl,
+    /// Neither a code nor a provider error was found.
+    MissingCode,
+}
+
+impl std::fmt::Display for CallbackParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidUrl => "invalid callback URL",
+            Self::MissingCode => "callback URL missing code",
+        })
+    }
+}
+
+impl std::error::Error for CallbackParseError {}
+
+/// Parses a pasted redirect, with query parameters taking precedence over
+/// fragment parameters (upstream `internal/misc/oauth.go`, v8.0.27).
+/// Empty input returns `None`. This only parses; the caller checks state.
+pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, CallbackParseError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(None);
+    }
+    let candidate = if input.contains("://") {
+        input.to_owned()
+    } else if input.starts_with(['?', '#']) {
+        format!("http://localhost/{input}")
+    } else if input.contains(['/', '?', '#', ':']) {
+        format!("http://{input}")
+    } else if input.contains('=') {
+        format!("http://localhost/?{input}")
+    } else {
+        return Err(CallbackParseError::InvalidUrl);
+    };
+    let url = url::Url::parse(&candidate).map_err(|_| CallbackParseError::InvalidUrl)?;
+    let query: Vec<_> = url.query_pairs().collect();
+    let fragment: Vec<_> =
+        url::form_urlencoded::parse(url.fragment().unwrap_or("").as_bytes()).collect();
+    let field = |name| {
+        let get = |pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)]| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.trim().to_owned())
+                .unwrap_or_default()
+        };
+        let value = get(&query);
+        if value.is_empty() {
+            get(&fragment)
+        } else {
+            value
+        }
+    };
+    let mut callback = OAuthCallback {
+        code: field("code"),
+        state: field("state"),
+        client_id: field("client_id"),
+        error: field("error"),
+        error_description: field("error_description"),
+    };
+    if callback.state.is_empty()
+        && let Some((code, state)) = callback.code.split_once('#')
+    {
+        callback.state = state.to_owned();
+        callback.code = code.to_owned();
+    }
+    if callback.error.is_empty() && !callback.error_description.is_empty() {
+        callback.error = std::mem::take(&mut callback.error_description);
+    }
+    if callback.code.is_empty() && callback.error.is_empty() {
+        return Err(CallbackParseError::MissingCode);
+    }
+    Ok(Some(callback))
+}
+
 /// Why waiting for the callback failed.
 #[derive(Debug)]
 pub enum CallbackError {
@@ -160,7 +263,7 @@ pub struct BrowserLogin {
 /// waiting says the sign-in stopped.
 pub struct CallbackServer {
     port: u16,
-    result: oneshot::Receiver<CallbackResult>,
+    result: oneshot::Receiver<OAuthCallback>,
     shutdown: watch::Sender<bool>,
     /// The login's outcome, for the success page: `None` until it is known.
     outcome: watch::Sender<Option<Outcome>>,
@@ -186,7 +289,7 @@ struct CallbackState {
     state: Arc<str>,
     /// The provider's name on the pages, such as `Codex`.
     provider: Arc<str>,
-    result: Arc<Mutex<Option<oneshot::Sender<CallbackResult>>>>,
+    result: Arc<Mutex<Option<oneshot::Sender<OAuthCallback>>>>,
     outcome: watch::Receiver<Option<Outcome>>,
     redirected: Arc<AtomicBool>,
     shown: Arc<watch::Sender<bool>>,
@@ -306,6 +409,21 @@ impl CallbackServer {
 
     /// Waits up to `timeout` for the redirect.
     pub async fn wait(&mut self, timeout: Duration) -> Result<CallbackResult, CallbackError> {
+        let callback = self.wait_for_callback(timeout).await?;
+        if callback.error.is_empty() {
+            Ok(CallbackResult::Code(callback.code))
+        } else {
+            Ok(CallbackResult::Error(callback.error))
+        }
+    }
+
+    /// Waits for the full callback, including its issued client ID. The
+    /// server checks state as it does for [`wait`](Self::wait); an SIWC
+    /// exchange also requires a nonempty issued client ID.
+    pub async fn wait_for_callback(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<OAuthCallback, CallbackError> {
         match tokio::time::timeout(timeout, &mut self.result).await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(_)) => Err(CallbackError::Closed),
@@ -464,6 +582,7 @@ impl AsyncWrite for LimitedConnection {
 async fn callback(
     State(server): State<CallbackState>,
     Query(query): Query<CallbackQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
     let nonempty = |value: Option<String>| value.filter(|value| !value.is_empty());
     let failed = |failure| {
@@ -475,7 +594,7 @@ async fn callback(
     };
     // Nothing without the login's state counts, not even an error report:
     // anyone who can reach the port could otherwise end the login.
-    if nonempty(query.state).as_deref() != Some(&*server.state) {
+    if query.state.as_deref().filter(|state| !state.is_empty()) != Some(&*server.state) {
         return failed(Failure::new(
             "This page isn't from your sign-in",
             "It didn't come from the sign-in the terminal is waiting for, so open-ferry \
@@ -515,7 +634,25 @@ async fn callback(
         .unwrap_or_else(PoisonError::into_inner)
         .take();
     if let Some(sender) = sender {
-        let _ = sender.send(result);
+        // Keep the original query extractor unchanged: extra parameters,
+        // including repeated client IDs, must not break ordinary callbacks.
+        let extra = |name: &str| {
+            url::form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes())
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default()
+        };
+        let (code, error) = match result {
+            CallbackResult::Code(code) => (code, String::new()),
+            CallbackResult::Error(error) => (String::new(), error),
+        };
+        let _ = sender.send(OAuthCallback {
+            code,
+            state: query.state.unwrap_or_default(),
+            client_id: extra("client_id").trim().to_owned(),
+            error,
+            error_description: extra("error_description"),
+        });
     }
     response
 }
@@ -551,6 +688,131 @@ async fn success(State(server): State<CallbackState>) -> Response {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // Ported from TestParseOAuthCallbackClientID (siwc_auth_test.go:95,
+    // v8.0.27), with fragment, precedence and pasted-input coverage.
+    #[test]
+    fn pasted_callbacks_keep_code_state_and_issued_client_id() {
+        for input in [
+            "http://127.0.0.1:1455/auth/callback?code=c1&state=s1&client_id=issued",
+            "http://127.0.0.1:1455/auth/callback#code=c1&state=s1&client_id=issued",
+            "127.0.0.1:1455/auth/callback?code=c1&state=s1&client_id=issued",
+            "?code=c1&state=s1&client_id=issued",
+            "#code=c1&state=s1&client_id=issued",
+            "code=c1&state=s1&client_id=issued",
+            "http://127.0.0.1/auth/callback?code=c1&state=s1#client_id=issued",
+            "http://127.0.0.1/auth/callback?code=%20c1%20&state=%20s1%20&client_id=%20issued%20",
+        ] {
+            let callback = parse_oauth_callback(input).unwrap().unwrap();
+            assert!(
+                callback.code == "c1" && callback.state == "s1" && callback.client_id == "issued"
+            );
+            assert!(callback.error.is_empty());
+        }
+        let callback = parse_oauth_callback(
+            "?code=c1&state=s1&client_id=query#code=c2&state=s2&client_id=fragment",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(callback.code == "c1" && callback.state == "s1" && callback.client_id == "query");
+        let callback = parse_oauth_callback("?code=c1%23s1&client_id=issued")
+            .unwrap()
+            .unwrap();
+        assert!(callback.code == "c1" && callback.state == "s1");
+        let callback = parse_oauth_callback(
+            "?error=access_denied&state=s1#error_description=No+access&client_id=issued",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            callback.error == "access_denied"
+                && callback.error_description == "No access"
+                && callback.client_id == "issued"
+        );
+        let callback = parse_oauth_callback("?error_description=Denied&state=s1")
+            .unwrap()
+            .unwrap();
+        assert!(callback.error == "Denied" && callback.error_description.is_empty());
+        assert!(parse_oauth_callback(" ").unwrap().is_none());
+        assert_eq!(
+            parse_oauth_callback("not-a-callback"),
+            Err(CallbackParseError::InvalidUrl)
+        );
+        assert_eq!(
+            parse_oauth_callback("?state=s1&client_id=issued"),
+            Err(CallbackParseError::MissingCode)
+        );
+        assert_eq!(
+            parse_oauth_callback("http://[bad/?code=private"),
+            Err(CallbackParseError::InvalidUrl)
+        );
+        assert!(!format!("{callback:?}").contains("Denied"));
+    }
+
+    #[tokio::test]
+    async fn richer_callback_keeps_the_issued_client_id_and_checks_state() {
+        let mut server = CallbackServer::start(0, "/auth/callback", "s1", "ChatGPT")
+            .await
+            .unwrap();
+        let wrong = fetch(
+            server.port(),
+            "/auth/callback?code=c1&state=wrong&client_id=issued",
+        )
+        .await;
+        assert_eq!(wrong.status, 400);
+        assert!(matches!(
+            server.wait_for_callback(Duration::from_millis(20)).await,
+            Err(CallbackError::Timeout)
+        ));
+        let answer = fetch(
+            server.port(),
+            "/auth/callback?code=c1&state=s1&client_id=%20issued%20",
+        )
+        .await;
+        assert_eq!(answer.status, 302);
+        let callback = server
+            .wait_for_callback(Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(callback.code == "c1" && callback.state == "s1" && callback.client_id == "issued");
+        assert!(callback.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ordinary_callbacks_still_deliver_only_code_or_error_with_extra_fields() {
+        let mut server = CallbackServer::start(0, "/callback", "s1", "Codex")
+            .await
+            .unwrap();
+        assert_eq!(
+            fetch(
+                server.port(),
+                "/callback?code=c1&state=s1&client_id=ignored&client_id=ignored-again"
+            )
+            .await
+            .status,
+            302
+        );
+        assert_eq!(
+            server.wait(Duration::from_secs(5)).await.unwrap(),
+            CallbackResult::Code("c1".into())
+        );
+        let mut server = CallbackServer::start(0, "/callback", "s1", "Claude")
+            .await
+            .unwrap();
+        assert_eq!(
+            fetch(
+                server.port(),
+                "/callback?error=access_denied&state=s1&client_id=ignored&error_description=ignored"
+            )
+            .await
+            .status,
+            400
+        );
+        assert_eq!(
+            server.wait(Duration::from_secs(5)).await.unwrap(),
+            CallbackResult::Error("access_denied".into())
+        );
+    }
 
     #[test]
     fn pkce_challenge_is_the_verifiers_hash() {

@@ -19,12 +19,71 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use chrono::{Local, SecondsFormat};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::jwt::DEFAULT_PLAN_TYPE;
 
 /// The `type` of a Codex credential file.
 pub const CREDENTIAL_TYPE: &str = "codex";
+
+/// The nested `siwc` credential, from upstream `openai.go:33-72` (v8.0.27).
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SiwcTokenData {
+    /// The bearer token for direct API calls.
+    pub access_token: String,
+    /// The token that gets new ones.
+    pub refresh_token: String,
+    /// The OpenID Connect ID token, when supplied.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id_token: String,
+    /// The client ID issued by the registration callback.
+    pub client_id: String,
+    /// The space-separated granted scopes.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// The individual granted scopes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// The margin-adjusted expiry, in RFC 3339.
+    #[serde(rename = "expired")]
+    pub expire: String,
+    /// When these tokens were fetched, in RFC 3339.
+    pub last_refresh: String,
+    /// The sign-in device UUID; sent only in the authorization URL.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub device_id: String,
+}
+
+impl fmt::Debug for SiwcTokenData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SiwcTokenData")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("id_token", &"[redacted]")
+            .field("expire", &self.expire)
+            .field("last_refresh", &self.last_refresh)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SiwcTokenData {
+    /// The value stored inside the credential's `siwc` object (`ToMap`).
+    pub fn to_json(&self) -> Map<String, Value> {
+        match serde_json::to_value(self).expect("SIWC fields serialize to JSON") {
+            Value::Object(object) => object,
+            _ => unreachable!("SIWC fields serialize to an object"),
+        }
+    }
+
+    /// Reads the nested `siwc` object, preserving absent optional fields.
+    /// Errors deliberately don't quote credential values.
+    pub fn from_json(object: &Map<String, Value>) -> Result<Self, &'static str> {
+        serde_json::from_value(Value::Object(object.clone()))
+            .map_err(|_| "invalid SIWC credential object")
+    }
+}
 
 /// Tokens from a code exchange or a refresh (upstream's `CodexTokenData`).
 #[derive(Clone, Default, PartialEq, Eq)]

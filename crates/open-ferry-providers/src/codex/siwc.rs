@@ -1,0 +1,509 @@
+// Ported from CLIProxyAPI internal/auth/codex/siwc_auth.go (v8.0.27, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! Sign in with ChatGPT's dynamic-client OAuth transport.
+//!
+//! The agent name is always open-ferry; token requests use our own version,
+//! OS and architecture. The device UUID goes only in the authorization URL
+//! and the nested credential, never in token forms or logs. Endpoints are
+//! injectable, response bodies are bounded, and errors don't quote remote
+//! bodies or credential values. Shared refresh requests survive cancelled
+//! waiters and time out after 30 seconds.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::Duration;
+
+use chrono::{DateTime, Local, SecondsFormat, TimeDelta};
+use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use super::client::{Clients, read_body};
+pub use super::token::SiwcTokenData;
+use crate::json;
+use crate::oauth::Pkce;
+
+/// Upstream `siwc_auth.go:21-35` protocol values (v8.0.27).
+pub const DYNAMIC_CLIENT_ID: &str = "dynamic_agent_client";
+/// Our fixed agent name, replacing upstream's configurable identifier.
+pub const AGENT_NAME_HINT: &str = "open-ferry";
+/// The registration authorization endpoint.
+pub const AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize";
+/// The dynamic-client token endpoint.
+pub const TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
+/// The resource authorized by this grant.
+pub const RESOURCE: &str = "https://api.openai.com/v1";
+/// The default loopback callback port.
+pub const DEFAULT_CALLBACK_PORT: u16 = 1455;
+/// The loopback callback path.
+pub const CALLBACK_PATH: &str = "/auth/callback";
+/// The default loopback redirect URI.
+pub const REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
+/// The scope required for direct API access.
+pub const DIRECT_TOKEN_SCOPE: &str = "chatgpt.tokens.use.direct";
+/// The requested scopes, in upstream's order.
+pub const SCOPE: &str =
+    "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+/// The margin subtracted from the issued access-token TTL.
+pub const EXPIRY_MARGIN: Duration = Duration::from_secs(3 * 60);
+/// How early the stored expiry should trigger a refresh.
+pub const REFRESH_LEAD: Duration = Duration::from_secs(5 * 60);
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RESPONSE_BYTES: usize = 1 << 20;
+
+/// The identity used for every SIWC token, API and websocket request.
+pub fn user_agent() -> String {
+    format!(
+        "open-ferry/{} ({}; {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+/// A redirect URI for the actual loopback listener's port.
+pub fn redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}{CALLBACK_PATH}")
+}
+
+/// Whether a trimmed value is a canonical UUID, as upstream's regex checks.
+pub fn is_valid_uuid(raw: &str) -> bool {
+    let raw = raw.trim().as_bytes();
+    raw.len() == 36
+        && raw.iter().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+/// SIWC endpoints; tests use a loopback base.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoints {
+    /// Where the browser registration starts.
+    pub authorize_url: String,
+    /// Where issued codes and refresh tokens are exchanged.
+    pub token_url: String,
+}
+
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self {
+            authorize_url: AUTHORIZE_URL.to_owned(),
+            token_url: TOKEN_URL.to_owned(),
+        }
+    }
+}
+
+impl Endpoints {
+    /// Upstream's paths under `base` (for example, `http://127.0.0.1:PORT`).
+    pub fn with_base(base: &str) -> Self {
+        let base = base.trim_end_matches('/');
+        Self {
+            authorize_url: format!("{base}/api/accounts/authorize"),
+            token_url: format!("{base}/api/accounts/oauth/token"),
+        }
+    }
+}
+
+/// A failed SIWC operation, without secret values or remote response bodies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Error {
+    message: String,
+    status: u16,
+    non_retryable: bool,
+}
+
+impl Error {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: 0,
+            non_retryable: false,
+        }
+    }
+
+    /// What failed.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The token endpoint's error HTTP status, or 0 for local errors.
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Calls SIWC's dynamic-client endpoints with the existing proxy-aware clients.
+#[derive(Clone)]
+pub struct SiwcAuth {
+    client: reqwest::Client,
+    endpoints: Endpoints,
+}
+
+impl fmt::Debug for SiwcAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SiwcAuth").finish_non_exhaustive()
+    }
+}
+
+impl SiwcAuth {
+    /// Uses the real SIWC endpoints with `client`.
+    pub fn new(client: reqwest::Client) -> Self {
+        Self {
+            client,
+            endpoints: Endpoints::default(),
+        }
+    }
+
+    /// Uses an environment, direct, or HTTP(S) proxy setting as Codex does.
+    pub fn with_proxy_url(proxy_url: &str) -> Self {
+        Self::new(Clients::new(proxy_url).get(""))
+    }
+
+    /// Uses injectable endpoints instead.
+    pub fn with_endpoints(mut self, endpoints: Endpoints) -> Self {
+        self.endpoints = endpoints;
+        self
+    }
+
+    /// The configured endpoints.
+    pub fn endpoints(&self) -> &Endpoints {
+        &self.endpoints
+    }
+
+    /// The registration URL (`GenerateSIWCAuthURL`). Use
+    /// [`crate::oauth::generate_state`] independently for state and nonce.
+    pub fn generate_auth_url(
+        &self,
+        state: &str,
+        nonce: &str,
+        device_id: &str,
+        redirect: &str,
+        pkce: &Pkce,
+    ) -> Result<String, Error> {
+        let device_id = device_id.trim();
+        if !is_valid_uuid(device_id) {
+            return Err(Error::new(
+                "Sign in with ChatGPT requires a valid device UUID",
+            ));
+        }
+        if state.trim().is_empty() {
+            return Err(Error::new("state is required"));
+        }
+        if nonce.trim().is_empty() {
+            return Err(Error::new("nonce is required"));
+        }
+        let host_id = format!("urn:uuid:{}", device_id.to_ascii_lowercase());
+        let form = encode_form(&[
+            ("client_id", DYNAMIC_CLIENT_ID),
+            ("agent_name_hint", AGENT_NAME_HINT),
+            ("ext_agent_host_id", &host_id),
+            ("response_type", "code"),
+            ("redirect_uri", redirect_or_default(redirect)),
+            ("resource", RESOURCE),
+            ("scope", SCOPE),
+            ("state", state.trim()),
+            ("code_challenge", &pkce.challenge),
+            ("code_challenge_method", "S256"),
+            ("nonce", nonce.trim()),
+        ]);
+        Ok(format!("{}?{form}", self.endpoints.authorize_url))
+    }
+
+    /// Exchanges a code with the callback's issued client ID, not the
+    /// registration client ID (`ExchangeSIWCCodeForTokens`).
+    pub async fn exchange_code_for_tokens(
+        &self,
+        code: &str,
+        issued_client_id: &str,
+        redirect: &str,
+        device_id: &str,
+        pkce: &Pkce,
+    ) -> Result<SiwcTokenData, Error> {
+        let client_id = issued_client_id.trim();
+        if client_id.is_empty() {
+            return Err(Error::new(
+                "OpenAI OAuth registration callback did not contain an issued client ID",
+            ));
+        }
+        if code.trim().is_empty() {
+            return Err(Error::new("authorization code is required"));
+        }
+        let form = encode_form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id),
+            ("code", code.trim()),
+            ("code_verifier", &pkce.verifier),
+            ("redirect_uri", redirect_or_default(redirect)),
+            ("resource", RESOURCE),
+        ]);
+        let mut data = self.request_token(form, true).await?;
+        data.client_id = client_id.to_owned();
+        data.device_id = device_id.trim().to_owned();
+        Ok(data)
+    }
+
+    /// Refreshes the nested credential. Concurrent requests for the same
+    /// endpoint, issued client ID and refresh token share a bounded task.
+    /// Each waiter keeps its own device UUID and previous ID token.
+    pub async fn refresh_tokens(&self, previous: &SiwcTokenData) -> Result<SiwcTokenData, Error> {
+        let token = previous.refresh_token.trim();
+        let client_id = previous.client_id.trim();
+        if token.is_empty() {
+            return Err(Error::new("SIWC refresh token is required"));
+        }
+        if client_id.is_empty() {
+            return Err(Error::new(
+                "Stored OpenAI OAuth credential does not contain an issued client ID; reconnect ChatGPT",
+            ));
+        }
+        let key: [u8; 32] = Sha256::new()
+            .chain_update(self.endpoints.token_url.as_bytes())
+            .chain_update([0])
+            .chain_update(client_id.as_bytes())
+            .chain_update([0])
+            .chain_update(token.as_bytes())
+            .finalize()
+            .into();
+        let shared = {
+            let mut refreshes = REFRESHES.lock().unwrap_or_else(PoisonError::into_inner);
+            match refreshes.get(&key) {
+                Some(shared) => shared.clone(),
+                None => {
+                    let auth = self.clone();
+                    let form = encode_form(&[
+                        ("grant_type", "refresh_token"),
+                        ("client_id", client_id),
+                        ("refresh_token", token),
+                        ("resource", RESOURCE),
+                    ]);
+                    let task = tokio::spawn(async move {
+                        let _cleanup = RefreshCleanup(key);
+                        auth.request_token(form, false).await
+                    });
+                    let shared = async move {
+                        task.await.unwrap_or_else(|_| {
+                            Err(Error::new(
+                                "SIWC token refresh failed: invalid single-flight result",
+                            ))
+                        })
+                    }
+                    .boxed()
+                    .shared();
+                    refreshes.insert(key, shared.clone());
+                    shared
+                }
+            }
+        };
+        let mut data = shared.await?;
+        data.client_id = client_id.to_owned();
+        data.device_id = previous.device_id.trim().to_owned();
+        if data.id_token.trim().is_empty() {
+            data.id_token.clone_from(&previous.id_token);
+        }
+        Ok(data)
+    }
+
+    /// Tries at least once and at most `max_retries` times, waiting one
+    /// second more before each retry, as upstream actually does. Reused
+    /// refresh tokens aren't retried. Cancelling a waiter stops its retries.
+    pub async fn refresh_tokens_with_retry(
+        &self,
+        previous: &SiwcTokenData,
+        max_retries: u32,
+    ) -> Result<SiwcTokenData, Error> {
+        let max_retries = max_retries.max(1);
+        let mut last = Error::new("SIWC token refresh failed");
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(attempt.into())).await;
+            }
+            match self.refresh_tokens(previous).await {
+                Ok(data) => return Ok(data),
+                Err(error) if error.non_retryable => return Err(error),
+                Err(error) => last = error,
+            }
+        }
+        last.message = format!(
+            "SIWC token refresh failed after {max_retries} attempts: {}",
+            last.message
+        );
+        Err(last)
+    }
+
+    async fn request_token(
+        &self,
+        form: String,
+        require_id_token: bool,
+    ) -> Result<SiwcTokenData, Error> {
+        let response = self
+            .client
+            .post(&self.endpoints.token_url)
+            .header(
+                http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .header(http::header::ACCEPT, "application/json")
+            .header(http::header::USER_AGENT, user_agent())
+            .timeout(REQUEST_TIMEOUT)
+            .body(form)
+            .send()
+            .await
+            .map_err(|_| Error::new("SIWC token request failed"))?;
+        let status = response.status().as_u16();
+        let body = read_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|_| Error::new("failed to read SIWC token response"))?;
+        if status != 200 {
+            // Upstream's non-retryable marker is retained without quoting
+            // the body: it may echo tokens, device IDs or callback values.
+            let non_retryable = String::from_utf8_lossy(&body)
+                .to_ascii_lowercase()
+                .contains("refresh_token_reused");
+            return Err(Error {
+                message: format!(
+                    "OpenAI OAuth token request failed ({status}){}",
+                    if non_retryable {
+                        ": refresh_token_reused"
+                    } else {
+                        ""
+                    }
+                ),
+                status,
+                non_retryable,
+            });
+        }
+        decode_token_response(&body, require_id_token, Local::now())
+    }
+}
+
+type SharedRefresh = Shared<BoxFuture<'static, Result<SiwcTokenData, Error>>>;
+static REFRESHES: LazyLock<Mutex<HashMap<[u8; 32], SharedRefresh>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct RefreshCleanup([u8; 32]);
+impl Drop for RefreshCleanup {
+    fn drop(&mut self) {
+        REFRESHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+fn redirect_or_default(redirect: &str) -> &str {
+    if redirect.trim().is_empty() {
+        REDIRECT_URI
+    } else {
+        redirect.trim()
+    }
+}
+
+fn encode_form(pairs: &[(&str, &str)]) -> String {
+    let mut pairs = pairs.to_vec();
+    pairs.sort_by_key(|(key, _)| *key);
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs)
+        .finish()
+}
+
+fn decode_token_response(
+    body: &[u8],
+    require_id_token: bool,
+    now: DateTime<Local>,
+) -> Result<SiwcTokenData, Error> {
+    let invalid_json = |_| Error::new("failed to parse SIWC token response");
+    let value: Value = serde_json::from_slice(body).map_err(|_| invalid_json(()))?;
+    let mut data = SiwcTokenData::default();
+    let mut expires_in = 0;
+    if let Some(object) =
+        json::object_or_null(&value, "siwcTokenResponse").map_err(|_| invalid_json(()))?
+    {
+        for (key, value) in object {
+            let result = match json::key_of(
+                key,
+                &[
+                    "access_token",
+                    "refresh_token",
+                    "id_token",
+                    "scope",
+                    "expires_in",
+                ],
+            ) {
+                Some("access_token") => {
+                    json::set_string(&mut data.access_token, value, "access_token")
+                }
+                Some("refresh_token") => {
+                    json::set_string(&mut data.refresh_token, value, "refresh_token")
+                }
+                Some("id_token") => json::set_string(&mut data.id_token, value, "id_token"),
+                Some("scope") => json::set_string(&mut data.scope, value, "scope"),
+                Some("expires_in") => json::set_int(&mut expires_in, value, "expires_in"),
+                _ => Ok(()),
+            };
+            result.map_err(|_| invalid_json(()))?;
+        }
+    }
+    if data.access_token.trim().is_empty() {
+        return Err(Error::new(
+            "OpenAI OAuth token response has invalid access_token",
+        ));
+    }
+    if data.refresh_token.trim().is_empty() {
+        return Err(Error::new(
+            "OpenAI OAuth token response has invalid refresh_token",
+        ));
+    }
+    // As upstream, the ID token's signature and nonce aren't verified;
+    // no matching of the SIWC account to the outer account is claimed.
+    if require_id_token && data.id_token.trim().is_empty() {
+        return Err(Error::new(
+            "OpenAI OAuth token response did not contain an ID token",
+        ));
+    }
+    if data.scope.trim().is_empty() {
+        return Err(Error::new("OpenAI OAuth token response has invalid scope"));
+    }
+    if expires_in <= 0 {
+        return Err(Error::new(
+            "OpenAI OAuth token response has invalid expires_in",
+        ));
+    }
+    data.scope = data.scope.trim().to_owned();
+    data.scopes = data.scope.split_whitespace().map(str::to_owned).collect();
+    if !data.scopes.iter().any(|scope| scope == DIRECT_TOKEN_SCOPE) {
+        return Err(Error::new(format!(
+            "OpenAI OAuth grant did not include {DIRECT_TOKEN_SCOPE}"
+        )));
+    }
+    let ttl = if expires_in > EXPIRY_MARGIN.as_secs() as i64 {
+        expires_in - EXPIRY_MARGIN.as_secs() as i64
+    } else {
+        expires_in
+    };
+    let expire = TimeDelta::try_seconds(ttl)
+        .and_then(|ttl| now.checked_add_signed(ttl))
+        .ok_or_else(|| Error::new("OpenAI OAuth token response has invalid expires_in"))?;
+    data.expire = expire.to_rfc3339_opts(SecondsFormat::Secs, true);
+    data.last_refresh = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    Ok(data)
+}
+
+#[cfg(test)]
+#[path = "siwc_tests.rs"]
+mod tests;
