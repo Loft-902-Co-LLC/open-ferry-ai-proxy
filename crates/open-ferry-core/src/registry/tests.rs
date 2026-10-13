@@ -508,6 +508,49 @@ fn credential_quota_keeps_healthy_catalog_across_refresh() {
 }
 
 #[test]
+fn credential_quota_without_another_client_stays_listed() {
+    for reason in ["credential_quota", "CREDENTIAL_QUOTA", "quota", "QUOTA"] {
+        for marked in [false, true] {
+            let registry = ModelRegistry::new();
+            registry.register_client("limited", "codex", &[model("limited-model")]);
+            registry.suspend_client_model("limited", "limited-model", reason);
+            if marked {
+                registry.set_model_quota_exceeded("limited", "limited-model");
+            }
+            assert_eq!(registry.available_model_maps("openai").len(), 1);
+            assert_eq!(registry.available_model_infos().len(), 1);
+            assert_eq!(registry.available_models_by_provider("codex").len(), 1);
+            assert_eq!(
+                registry
+                    .available_model_maps_at("openai", Instant::now() + QUOTA_WINDOW)
+                    .len(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn quota_suspension_does_not_double_count_a_mark_or_hide_other_failures() {
+    let now = Instant::now();
+    let mut registration = ModelRegistration {
+        count: 2,
+        suspended_clients: HashMap::from([
+            ("quota".into(), "credential_quota".into()),
+            ("failed".into(), "failure".into()),
+        ]),
+        ..ModelRegistration::default()
+    };
+    assert!(!registration.available(now));
+    registration
+        .quota_exceeded_clients
+        .insert("quota".into(), now);
+    assert!(!registration.available(now));
+    registration.count = 3;
+    assert!(registration.available(now));
+}
+
+#[test]
 fn re_registering_reconciles_counts() {
     let registry = ModelRegistry::new();
     registry.register_client("a", "codex", &[model("m1"), model("m1"), model("m2")]);

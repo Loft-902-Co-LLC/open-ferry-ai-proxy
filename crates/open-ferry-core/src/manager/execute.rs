@@ -39,6 +39,8 @@
 //!   (see `affinity`), and writes nothing into the call's metadata.
 //! - There are no context checks: dropping the call's future or stream stops
 //!   it where it is, so the Claude OAuth cancellation checks aren't needed.
+//!   A dropped bootstrap records a ready upstream error with `RetryAfter`
+//!   before discarding its source, preserving the confirmed cooldown.
 //! - A stream always has a source, so upstream's "upstream stream has no
 //!   source" error can't happen.
 //! - Removing `generate` from a WebSocket fallback payload re-serializes the
@@ -67,7 +69,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use http::HeaderMap;
 use open_ferry_translate::json::exact;
 use serde_json::Value;
@@ -464,17 +466,71 @@ enum Bootstrap {
     Failed(ExecError),
 }
 
-async fn read_stream_bootstrap(mut chunks: ChunkStream) -> Bootstrap {
+/// A dropped bootstrap still records a ready upstream error with a retry hint.
+/// Rust cancellation drops the future rather than setting a context flag.
+struct BootstrapCooldown<'a> {
+    manager: &'a Manager,
+    auth: Arc<Auth>,
+    attempt: &'a Attempt<'a>,
+    chunks: Option<ChunkStream>,
+}
+
+impl Drop for BootstrapCooldown<'_> {
+    fn drop(&mut self) {
+        let Some(chunks) = self.chunks.as_mut() else {
+            return;
+        };
+        loop {
+            match chunks.next().now_or_never() {
+                Some(Some(Ok(payload))) if payload.is_empty() => continue,
+                Some(Some(Err(err))) if retry_after_from_error(ErrView::Exec(&err)).is_some() => {
+                    let settings = self.manager.settings();
+                    let action = match_request_scoped_error_action(&self.auth, &err, &settings);
+                    let result = failure_result(self.attempt, &self.auth, &err, action, true);
+                    self.manager
+                        .mark_call_result(&result, self.attempt.session());
+                }
+                _ => {}
+            }
+            break;
+        }
+    }
+}
+
+async fn read_stream_bootstrap(
+    manager: &Manager,
+    auth: Arc<Auth>,
+    attempt: &Attempt<'_>,
+    chunks: ChunkStream,
+) -> Bootstrap {
+    let mut pending = BootstrapCooldown {
+        manager,
+        auth,
+        attempt,
+        chunks: Some(chunks),
+    };
     let mut saw_chunk = false;
     loop {
-        match chunks.next().await {
-            None => return Bootstrap::Closed { saw_chunk },
-            Some(Err(err)) => return Bootstrap::Failed(err),
+        match pending
+            .chunks
+            .as_mut()
+            .expect("bootstrap source")
+            .next()
+            .await
+        {
+            None => {
+                pending.chunks = None;
+                return Bootstrap::Closed { saw_chunk };
+            }
+            Some(Err(err)) => {
+                pending.chunks = None;
+                return Bootstrap::Failed(err);
+            }
             Some(Ok(payload)) if payload.is_empty() => saw_chunk = true,
             Some(Ok(first)) => {
                 return Bootstrap::Open {
                     first,
-                    rest: chunks,
+                    rest: pending.chunks.take().expect("bootstrap source"),
                 };
             }
         }
@@ -1227,7 +1283,7 @@ impl Manager {
                 mut headers,
                 chunks,
             } = stream;
-            let mut bootstrap = read_stream_bootstrap(chunks).await;
+            let mut bootstrap = read_stream_bootstrap(self, auth.clone(), &attempt, chunks).await;
             if let Bootstrap::Failed(err) = &bootstrap {
                 upstream = Some(Failure::bootstrap(err.clone(), headers.clone()));
                 if let Some(refreshed) = self
@@ -1251,7 +1307,9 @@ impl Manager {
                         }
                         Ok(retry) => {
                             headers = retry.headers;
-                            bootstrap = read_stream_bootstrap(retry.chunks).await;
+                            bootstrap =
+                                read_stream_bootstrap(self, auth.clone(), &attempt, retry.chunks)
+                                    .await;
                         }
                     }
                 }

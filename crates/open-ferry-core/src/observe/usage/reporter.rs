@@ -202,7 +202,7 @@ use super::parse::{
 };
 use super::record_json::Record;
 use super::response_model::{ResponseModel, is_model_substituted};
-use super::ttft::{Ttft, is_responses_token_event};
+use super::ttft::{Ttft, is_chat_token_event, is_responses_token_event};
 use crate::auth::Auth;
 use crate::exec::{ExecError, Format, Options, Request};
 use crate::observe::redact::{Policy, Secrets};
@@ -707,6 +707,10 @@ struct Call {
     response_model: ResponseModel,
     buffer: StreamUsageBuffer,
     lines: Lines,
+    /// Chat Completions SSE data, joined until the frame ends.
+    chat_frame: Vec<u8>,
+    chat_frame_overflow: bool,
+    error_response: bool,
     body: Vec<u8>,
     /// The answer outgrew [`BODY_BOUND`].
     body_overflow: bool,
@@ -749,6 +753,9 @@ impl Call {
             response_model: ResponseModel::default(),
             buffer: StreamUsageBuffer::default(),
             lines: Lines::default(),
+            chat_frame: Vec::new(),
+            chat_frame_overflow: false,
+            error_response: false,
             body: Vec::new(),
             body_overflow: false,
             event_stream: false,
@@ -793,6 +800,9 @@ impl Call {
         self.secrets.extend(request.secrets);
         self.secrets.add_auth(request.auth);
         self.lines = Lines::default();
+        self.chat_frame.clear();
+        self.chat_frame_overflow = false;
+        self.error_response = false;
         self.body = Vec::new();
         self.body_overflow = false;
         self.event_stream = false;
@@ -816,7 +826,8 @@ impl Call {
         self.ttft.start(now);
     }
 
-    fn response_head(&mut self, headers: &HeaderMap) {
+    fn response_head(&mut self, status: u16, headers: &HeaderMap) {
+        self.error_response = status >= 400;
         self.headers = record_headers(headers);
         self.event_stream = headers
             .get_all(http::header::CONTENT_TYPE)
@@ -850,7 +861,7 @@ impl Call {
             mode => {
                 if mode == Mode::CodexStream {
                     self.ttft.observe_token_event(false, now);
-                } else {
+                } else if mode != Mode::OpenAiStream || self.error_response {
                     self.ttft.mark_first_response_byte(now);
                 }
                 let mut lines = std::mem::take(&mut self.lines);
@@ -884,11 +895,31 @@ impl Call {
                 self.buffer.observe(parse_interactions_stream_usage(line));
             }
             Mode::OpenAiStream => {
+                // Keep line-level accounting for the existing usage readers;
+                // joined frames also cover providers that split JSON over data lines.
                 self.response_model.observe(line, &self.provider);
                 self.buffer.observe_openai_stream(line);
                 if is_done(line) {
+                    self.ttft.observe_token_event(true, now);
                     self.seen_done = true;
                     self.ended = true;
+                    self.chat_frame.clear();
+                    return;
+                }
+                let line = json::trim_space(line);
+                if line.is_empty() {
+                    self.chat_frame(now);
+                } else if let Some(payload) = line.strip_prefix(b"data:") {
+                    let payload = json::trim_space(payload);
+                    if self.chat_frame.len() + payload.len() + 1 > LINE_BOUND {
+                        self.chat_frame.clear();
+                        self.chat_frame_overflow = true;
+                    } else if !self.chat_frame_overflow {
+                        if !self.chat_frame.is_empty() {
+                            self.chat_frame.push(b'\n');
+                        }
+                        self.chat_frame.extend_from_slice(payload);
+                    }
                 }
             }
             Mode::CodexExecute => {
@@ -907,6 +938,22 @@ impl Call {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn chat_frame(&mut self, now: Instant) {
+        let payload = std::mem::take(&mut self.chat_frame);
+        let overflow = std::mem::take(&mut self.chat_frame_overflow);
+        if overflow || payload.is_empty() || self.ended {
+            return;
+        }
+        self.ttft
+            .observe_token_event(is_chat_token_event(&payload), now);
+        self.response_model.observe(&payload, &self.provider);
+        self.buffer.observe_openai_stream(&payload);
+        if is_done(&payload) {
+            self.seen_done = true;
+            self.ended = true;
         }
     }
 
@@ -1132,6 +1179,9 @@ impl Call {
         if !matches!(self.mode, Mode::Ignored | Mode::CodexWebsocket) && !self.mode.reads_whole() {
             let mut lines = std::mem::take(&mut self.lines);
             lines.flush(|line| self.line(line, now));
+            if self.mode == Mode::OpenAiStream {
+                self.chat_frame(now);
+            }
         }
         match (self.mode, outcome) {
             (Mode::Ignored, _) => None,
@@ -1446,9 +1496,9 @@ impl Tap for UsageTap {
         }
     }
 
-    fn response_head(&self, _status: u16, headers: &HeaderMap) {
+    fn response_head(&self, status: u16, headers: &HeaderMap) {
         if let Some(call) = self.lock().call.as_mut() {
-            call.response_head(headers);
+            call.response_head(status, headers);
         }
     }
 

@@ -14,6 +14,7 @@ mod error_events;
 mod manager;
 mod meta_usage;
 mod observer;
+mod openai_compat_ttft;
 mod plugin;
 mod queue;
 mod response_model;
