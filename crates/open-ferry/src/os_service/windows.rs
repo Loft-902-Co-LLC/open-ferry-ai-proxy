@@ -15,6 +15,14 @@
 //! directory, kept under 10 MiB by moving it to `service.log.1` as the
 //! server starts.
 //!
+//! When the binary can update itself the task runs `open-ferry service run
+//! -supervise -config <path> -data-dir <path>` instead: the same wrapper,
+//! which then starts the blue-green supervisor, not the server, in the job
+//! that ends it with the wrapper, and fails closed (starts nothing) if it
+//! can't make the job. `-data-dir` pins the data directory the install chose,
+//! so the supervisor doesn't work it out again from an environment the task
+//! may not share.
+//!
 //! With `-system` it is a Windows service, `open-ferry`, that runs as
 //! LocalSystem from boot: `open-ferry service run -system -config <path>`,
 //! which answers the service manager and serves in the same process. The
@@ -26,7 +34,7 @@
 
 use std::fmt::Write as _;
 
-use super::launchd::escape;
+use super::launchd::{escape, unescape};
 use super::{Cmd, Definition, Platform, SERVICE_NAME, Step, System, run_checked};
 
 /// Where the server's output goes, in the config's directory.
@@ -103,10 +111,20 @@ fn quote(word: &str) -> String {
     quoted
 }
 
-/// `service run`'s arguments for `definition`.
+/// `service run`'s arguments for `definition`. A supervised task runs
+/// `service run -supervise -config <path> -data-dir <path>`, and the wrapper
+/// starts `open-ferry -supervise ...` as its child; a Windows service is
+/// never supervised.
 fn run_arguments(definition: &Definition, system: bool) -> String {
     let flag = if system { " -system" } else { "" };
-    let mut arguments = format!("service run{flag} -config {}", quote(&definition.config));
+    let mut arguments = match (&definition.data_dir, system) {
+        (Some(data_dir), false) => format!(
+            "service run -supervise -config {} -data-dir {}",
+            quote(&definition.config),
+            quote(data_dir)
+        ),
+        _ => format!("service run{flag} -config {}", quote(&definition.config)),
+    };
     // `service run` goes to the config's directory unless it is told
     // another, such as the directory CLIProxyAPI ran in.
     let own = Platform::Windows.parent(&definition.config);
@@ -116,8 +134,171 @@ fn run_arguments(definition: &Definition, system: bool) -> String {
     arguments
 }
 
+/// The words of a Windows command line, split as the C runtime splits it:
+/// the inverse of [`quote`] for what [`run_arguments`] writes.
+/// Only a space or a tab separates words, as in the C runtime; any other
+/// whitespace outside double quotes is `None`.
+fn split_command_line(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    let mut backslashes = 0;
+    for c in line.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                // Pairs of backslashes before a quote are one each, and the
+                // quote then opens or closes; an odd one escapes the quote.
+                word.extend(std::iter::repeat_n('\\', backslashes / 2));
+                if backslashes % 2 == 1 {
+                    word.push('"');
+                } else {
+                    quoted = !quoted;
+                }
+                backslashes = 0;
+                started = true;
+            }
+            c => {
+                word.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                if (c == ' ' || c == '\t') && !quoted {
+                    if started {
+                        words.push(std::mem::take(&mut word));
+                        started = false;
+                    }
+                } else if c.is_whitespace() && !quoted {
+                    return None;
+                } else {
+                    word.push(c);
+                    started = true;
+                }
+            }
+        }
+    }
+    word.extend(std::iter::repeat_n('\\', backslashes));
+    if started || backslashes > 0 {
+        words.push(word);
+    }
+    Some(words)
+}
+
+/// The positions of the opening tags `<name` in `xml`: the name must end
+/// there (`<ExecutionTimeLimit>` is not an `<Exec`).
+fn opens(xml: &str, name: &str) -> Vec<usize> {
+    let tag = format!("<{name}");
+    xml.match_indices(&tag)
+        .map(|(at, _)| at)
+        .filter(|at| {
+            matches!(
+                xml.as_bytes().get(at + tag.len()),
+                Some(b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n')
+            )
+        })
+        .collect()
+}
+
+/// The content of the element opened at `at` (empty for `<name/>`), and
+/// where it ends.
+fn element<'a>(xml: &'a str, at: usize, name: &str) -> Option<(&'a str, usize)> {
+    let open_end = at + xml.get(at..)?.find('>')?;
+    if xml.get(at..open_end)?.ends_with('/') {
+        return Some(("", open_end + 1));
+    }
+    let close = format!("</{name}>");
+    let end = open_end + 1 + xml.get(open_end + 1..)?.find(&close)?;
+    Some((xml.get(open_end + 1..end)?, end + close.len()))
+}
+
+/// The `<Command>` and the `<Arguments>` (empty when there are none) of the
+/// one action of a task's XML, as written. `None` unless the XML is the
+/// shape our installer writes and `schtasks /query /xml` prints back: one
+/// `<Actions>` with one `<Exec>` and nothing else, one `<Command>` and at
+/// most one `<Arguments>`, both inside it, and no comment or CDATA.
+fn exec_parts(xml: &str) -> Option<(&str, &str)> {
+    if xml.contains("<!--") || xml.contains("<![CDATA[") {
+        return None;
+    }
+    let [actions] = opens(xml, "Actions")[..] else {
+        return None;
+    };
+    let (body, _) = element(xml, actions, "Actions")?;
+    let [exec] = opens(body, "Exec")[..] else {
+        return None;
+    };
+    let (exec_body, exec_end) = element(body, exec, "Exec")?;
+    // Any other action, of any type, makes the task something else.
+    if !body.get(..exec)?.trim().is_empty() || !body.get(exec_end..)?.trim().is_empty() {
+        return None;
+    }
+    let [command] = opens(exec_body, "Command")[..] else {
+        return None;
+    };
+    let arguments = opens(exec_body, "Arguments");
+    if opens(xml, "Command").len() != 1 || opens(xml, "Arguments").len() != arguments.len() {
+        return None;
+    }
+    let text = |at: usize, name: &str| {
+        element(exec_body, at, name)
+            .map(|(text, _)| text)
+            .filter(|text| !text.contains('<'))
+    };
+    let arguments = match arguments[..] {
+        [] => "",
+        [at] => text(at, "Arguments")?,
+        _ => return None,
+    };
+    Some((text(command, "Command")?, arguments))
+}
+
+/// The words of the `<Arguments>` of a task's XML, as `schtasks /query /xml`
+/// prints it.
+///
+/// An omitted or empty (`<Arguments/>`) element is an empty list: the task
+/// was read, and it runs its command with no arguments. `None` when the XML
+/// isn't plainly our task's (see `exec_parts`), or the arguments hold an
+/// unknown entity or whitespace the C runtime doesn't split at.
+pub(super) fn task_words(xml: &str) -> Option<Vec<String>> {
+    split_command_line(&unescape(exec_parts(xml)?.1)?)
+}
+
+/// The binary a task's XML runs: its `<Command>`, which holds one path (the
+/// arguments are elsewhere), so it is not split at spaces. Surrounding
+/// whitespace and one pair of double quotes are dropped. Outer `None`: the
+/// XML can't be read; inner `None`: the command is empty.
+fn task_binary(xml: &str) -> Option<Option<String>> {
+    let text = unescape(exec_parts(xml)?.0)?;
+    let text = text.trim();
+    let text = text
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(text);
+    Some((!text.is_empty()).then(|| text.to_owned()))
+}
+
+/// [`task_binary`], with an unreadable XML the same as an empty command.
+#[cfg(test)]
+pub(super) fn task_command(xml: &str) -> Option<String> {
+    task_binary(xml).flatten()
+}
+
+/// The words and the binary of a task's XML, or `None` when it can't be read.
+pub(super) fn task_definition(xml: &str) -> Option<(Vec<String>, Option<String>)> {
+    Some((task_words(xml)?, task_binary(xml)?))
+}
+
+/// Prints the task's XML.
+pub(super) fn task_xml_query() -> Cmd {
+    schtasks(&["/query", "/tn", SERVICE_NAME, "/xml"])
+}
+
 /// The task's definition: at the logon of the user whose SID is `sid`, as
 /// them, run `definition` through `service run`.
+///
+/// `RestartOnFailure` (a minute apart, ten times) covers only the scheduler's
+/// own failure to launch `service run`. It is not how the server is kept
+/// running: `service run` starts the server, or the supervisor, again itself
+/// when it fails (see `run`), and ends when that exits cleanly.
 pub(super) fn task_xml(definition: &Definition, sid: &str) -> String {
     let mut xml = String::new();
     let _ = write!(
@@ -159,6 +340,10 @@ pub(super) fn task_xml(definition: &Definition, sid: &str) -> String {
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>5</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>10</Count>
+    </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>

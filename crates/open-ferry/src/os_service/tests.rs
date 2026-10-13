@@ -245,7 +245,8 @@ fn execute_with(
 ) -> (Result<(), String>, String) {
     let request = parse(args(command_line)).unwrap();
     let mut out = Vec::new();
-    let result = execute(fake, context, &request, &mut out);
+    let updating = Updating::plain(data_dir(context), "the test asks for the plain form");
+    let result = execute(fake, context, &request, &updating, &mut out);
     (result, String::from_utf8(out).unwrap())
 }
 
@@ -269,6 +270,8 @@ fn parses_an_action_and_its_flags_as_go_does() {
             "-dry-run=true"
         ])),
         Ok(Request {
+            supervise: false,
+            data_dir: None,
             action: Action::Install,
             config: Some("c.yaml".to_owned()),
             system: true,
@@ -279,6 +282,8 @@ fn parses_an_action_and_its_flags_as_go_does() {
     assert_eq!(
         parse(args(&["install", "-config=", "--"])),
         Ok(Request {
+            supervise: false,
+            data_dir: None,
             action: Action::Install,
             config: None,
             system: false,
@@ -289,6 +294,8 @@ fn parses_an_action_and_its_flags_as_go_does() {
     assert_eq!(
         parse(args(&["uninstall", "-system=1", "-dry-run=false"])),
         Ok(Request {
+            supervise: false,
+            data_dir: None,
             action: Action::Uninstall,
             config: None,
             system: true,
@@ -303,6 +310,8 @@ fn parses_an_action_and_its_flags_as_go_does() {
     assert_eq!(
         parse(args(&["run", "-system", "-config", r"C:\x\config.yaml"])),
         Ok(Request {
+            supervise: false,
+            data_dir: None,
             action: Action::Run,
             config: Some(r"C:\x\config.yaml".to_owned()),
             system: true,
@@ -464,6 +473,7 @@ fn installs_with_the_installed_config_unless_told_otherwise() {
 
 fn user_definition() -> Definition {
     Definition {
+        data_dir: None,
         exe: "/home/me/.local/bin/open-ferry".to_owned(),
         config: LINUX_CONFIG.to_owned(),
         dir: "/home/me/.config/open-ferry".to_owned(),
@@ -498,6 +508,7 @@ fn writes_a_systemd_system_unit() {
     // Not upstream's: the system unit waits for the network, and starts at
     // boot.
     let definition = Definition {
+        data_dir: None,
         exe: "/usr/local/bin/open-ferry".to_owned(),
         config: "/etc/open-ferry/config.yaml".to_owned(),
         dir: "/etc/open-ferry".to_owned(),
@@ -528,6 +539,7 @@ WantedBy=multi-user.target
 fn escapes_what_systemd_would_expand() {
     // Not upstream's: `%` is a specifier and `$` a variable to systemd.
     let definition = Definition {
+        data_dir: None,
         exe: "/opt/my apps/open-ferry".to_owned(),
         config: "/srv/100% \"$HOME\"/config.yaml".to_owned(),
         dir: "/srv/100% \"$HOME\"".to_owned(),
@@ -543,6 +555,7 @@ fn escapes_what_systemd_would_expand() {
 fn writes_a_launchd_plist() {
     // Not upstream's: the agent's property list.
     let definition = Definition {
+        data_dir: None,
         exe: "/Users/me/.local/bin/open-ferry".to_owned(),
         config: MACOS_CONFIG.to_owned(),
         dir: "/Users/me/.config/open-ferry".to_owned(),
@@ -585,6 +598,7 @@ fn writes_a_launchd_plist() {
 fn escapes_paths_in_xml() {
     // Not upstream's: a path is text in the plist and the task's XML.
     let definition = Definition {
+        data_dir: None,
         exe: "/Applications/A&B <x>/open-ferry".to_owned(),
         config: "/Users/me/it's/config.yaml".to_owned(),
         dir: "/Users/me/it's".to_owned(),
@@ -599,6 +613,7 @@ fn escapes_paths_in_xml() {
 fn writes_a_scheduled_task() {
     // Not upstream's: the task's definition.
     let definition = Definition {
+        data_dir: None,
         exe: r"C:\Users\me\AppData\Local\Programs\open-ferry\open-ferry.exe".to_owned(),
         config: WINDOWS_CONFIG.to_owned(),
         dir: r"C:\Users\me\AppData\Roaming\open-ferry".to_owned(),
@@ -642,6 +657,10 @@ fn writes_a_scheduled_task() {
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>5</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>10</Count>
+    </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -660,6 +679,7 @@ fn a_task_runs_in_the_directory_it_was_given() {
     // Not upstream's: CLIProxyAPI ran in a directory of its own, and
     // `service run` goes there as the Windows service and task do not.
     let definition = Definition {
+        data_dir: None,
         exe: r"C:\Users\me\AppData\Local\Programs\open-ferry\open-ferry.exe".to_owned(),
         config: WINDOWS_CONFIG.to_owned(),
         dir: r"C:\CLIProxyAPI".to_owned(),
@@ -687,6 +707,8 @@ fn run_takes_a_directory() {
             r"C:\cpa"
         ])),
         Ok(Request {
+            supervise: false,
+            data_dir: None,
             action: Action::Run,
             config: Some(r"C:\x\config.yaml".to_owned()),
             system: false,
@@ -752,6 +774,7 @@ fn installs_a_systemd_user_unit() {
             "write /home/me/.config/systemd/user/open-ferry.service",
             "run systemctl --user daemon-reload",
             "run systemctl --user enable --now open-ferry.service",
+            "write_atomic /home/me/.local/share/open-ferry/service.json",
         ]
     );
     assert_eq!(
@@ -760,10 +783,12 @@ fn installs_a_systemd_user_unit() {
     );
     assert_eq!(
         out,
-        "Created /home/me/.config/systemd/user
+        "Installing the plain form, without the supervisor: the test asks for the plain form.
+Created /home/me/.config/systemd/user
 Wrote /home/me/.config/systemd/user/open-ferry.service
 Ran: systemctl --user daemon-reload
 Ran: systemctl --user enable --now open-ferry.service
+Wrote /home/me/.local/share/open-ferry/service.json
 open-ferry is installed and started, as a systemd user service: it starts when you log in, and again when it fails.
 Its logs: journalctl --user -u open-ferry
 To start it at boot and keep it running when you are logged out, run: loginctl enable-linger
@@ -803,10 +828,21 @@ fn a_dry_run_changes_nothing() {
     assert_eq!(
         out,
         format!(
-            "Would create /home/me/.config/systemd/user
+            "Installing the plain form, without the supervisor: the test asks for the plain form.
+Would create /home/me/.config/systemd/user
 Would write /home/me/.config/systemd/user/open-ferry.service:
 {unit}Would run: systemctl --user daemon-reload
 Would run: systemctl --user enable --now open-ferry.service
+Would write /home/me/.local/share/open-ferry/service.json:
+    {{
+      \"format\": 1,
+      \"kind\": \"user\",
+      \"manager\": \"systemd\",
+      \"supervised\": false,
+      \"data_dir\": \"/home/me/.local/share/open-ferry\",
+      \"exe\": \"/home/me/.local/bin/open-ferry\",
+      \"config\": \"/home/me/.config/open-ferry/config.yaml\"
+    }}
 Dry run: nothing was changed.
 "
         )
@@ -818,7 +854,8 @@ Dry run: nothing was changed.
     assert_eq!(events(&fake), ["run id -u"]);
     assert_eq!(
         out,
-        "Would run: systemctl --user disable --now open-ferry.service
+        "The service's data directory is /home/me/.local/share/open-ferry (worked out from the environment, as nothing else names it).
+Would run: systemctl --user disable --now open-ferry.service
 Would remove /home/me/.config/systemd/user/open-ferry.service
 Would run: systemctl --user daemon-reload
 Dry run: nothing was changed.
@@ -1011,6 +1048,7 @@ fn installs_a_systemd_system_unit() {
         ]
     );
     let definition = Definition {
+        data_dir: None,
         exe: "/opt/open-ferry/open-ferry".to_owned(),
         config: "/etc/open-ferry/config.yaml".to_owned(),
         dir: "/etc/open-ferry".to_owned(),
@@ -1057,6 +1095,13 @@ fn uninstalls_a_systemd_unit() {
             "systemctl --user disable --now open-ferry.service",
             1,
             "Failed to disable unit",
+        )
+        // The definition can't be read, so a supervisor may run: the manager
+        // is asked, and says the unit isn't running.
+        .answer(
+            "systemctl --user is-active open-ferry.service",
+            3,
+            "inactive\n",
         );
     let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
     assert_eq!(result, Ok(()));
@@ -1065,6 +1110,7 @@ fn uninstalls_a_systemd_unit() {
         [
             "run id -u",
             "run systemctl --user disable --now open-ferry.service",
+            "run systemctl --user is-active open-ferry.service",
             "remove /home/me/.config/systemd/user/open-ferry.service",
             "run systemctl --user daemon-reload",
         ]
@@ -1072,7 +1118,8 @@ fn uninstalls_a_systemd_unit() {
     assert!(fake.files.contains_key(LINUX_CONFIG));
     assert_eq!(
         out,
-        "Ran: systemctl --user disable --now open-ferry.service (failed with exit code 1: Failed to disable unit; going on)
+        "The service's data directory is /home/me/.local/share/open-ferry (worked out from the environment, as nothing else names it).
+Ran: systemctl --user disable --now open-ferry.service (failed with exit code 1: Failed to disable unit; the service is not running, going on)
 Removed /home/me/.config/systemd/user/open-ferry.service
 Ran: systemctl --user daemon-reload
 open-ferry is no longer installed as a systemd user service. The config and the auth directory are left as they are.
@@ -1136,9 +1183,11 @@ fn installs_and_uninstalls_a_launchd_agent() {
             &format!("write {MACOS_AGENT}"),
             "run launchctl enable gui/501/io.github.loft-902-co-llc.open-ferry",
             &format!("run launchctl bootstrap gui/501 {MACOS_AGENT}"),
+            "write_atomic /Users/me/.local/share/open-ferry/service.json",
         ]
     );
     let definition = Definition {
+        data_dir: None,
         exe: "/Users/me/.local/bin/open-ferry".to_owned(),
         config: MACOS_CONFIG.to_owned(),
         dir: "/Users/me/.config/open-ferry".to_owned(),
@@ -1160,6 +1209,7 @@ fn installs_and_uninstalls_a_launchd_agent() {
             "run id -u",
             "run launchctl bootout gui/501/io.github.loft-902-co-llc.open-ferry",
             &format!("remove {MACOS_AGENT}"),
+            "remove /Users/me/.local/share/open-ferry/service.json",
         ]
     );
 }
@@ -1273,7 +1323,12 @@ fn removes_the_task_file_when_registering_fails() {
         ))
     );
     assert!(!fake.files.contains_key(TASK_FILE));
-    assert_eq!(out, format!("Wrote {TASK_FILE}\nRemoved {TASK_FILE}\n"));
+    assert_eq!(
+        out,
+        format!(
+            "Installing the plain form, without the supervisor: the test asks for the plain form.\nWrote {TASK_FILE}\nRemoved {TASK_FILE}\n"
+        )
+    );
 }
 
 #[test]
@@ -1283,6 +1338,7 @@ fn plans_the_task_in_utf16_for_the_user_and_removes_its_file() {
     let mut fake = windows_user();
     let context = windows();
     let definition = Definition {
+        data_dir: None,
         exe: context.exe.clone(),
         config: WINDOWS_CONFIG.to_owned(),
         dir: r"C:\Users\me\AppData\Roaming\open-ferry".to_owned(),
@@ -1293,6 +1349,7 @@ fn plans_the_task_in_utf16_for_the_user_and_removes_its_file() {
         Target::ScheduledTask,
         &definition,
         &Account::Windows { elevated: false },
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1326,6 +1383,7 @@ fn uninstalls_a_scheduled_task() {
         events(&fake),
         [
             "run schtasks.exe /query /tn open-ferry",
+            "run schtasks.exe /query /tn open-ferry /xml",
             "run schtasks.exe /end /tn open-ferry",
             "run schtasks.exe /delete /tn open-ferry /f",
         ]
@@ -1543,6 +1601,7 @@ fn refuses_paths_a_definition_cannot_hold() {
 fn quotes_windows_arguments_as_the_c_runtime_reads_them() {
     // Not upstream's: the task's and the service's command lines.
     let definition = Definition {
+        data_dir: None,
         exe: r"C:\Program Files\open-ferry\open-ferry.exe".to_owned(),
         config: r"D:\weird dir\".to_owned(),
         dir: r"D:\weird dir".to_owned(),
@@ -1573,4 +1632,2088 @@ fn real_paths_lose_the_verbatim_prefix() {
         plain_windows_path(r"\\?\Volume{1}\cpa".to_owned()),
         r"\\?\Volume{1}\cpa"
     );
+}
+
+// The supervised form, which runs the blue-green supervisor.
+
+const LINUX_DATA: &str = "/home/me/.local/share/open-ferry";
+const MACOS_DATA: &str = "/Users/me/.local/share/open-ferry";
+const WINDOWS_DATA: &str = r"C:\Users\me\AppData\Local\open-ferry";
+
+fn supervised_definition() -> Definition {
+    Definition {
+        data_dir: Some(LINUX_DATA.to_owned()),
+        ..user_definition()
+    }
+}
+
+fn windows_supervised_definition() -> Definition {
+    Definition {
+        data_dir: Some(WINDOWS_DATA.to_owned()),
+        exe: r"C:\Users\me\AppData\Local\Programs\open-ferry\open-ferry.exe".to_owned(),
+        config: WINDOWS_CONFIG.to_owned(),
+        dir: r"C:\Users\me\AppData\Roaming\open-ferry".to_owned(),
+    }
+}
+
+/// A Windows context that has a `LOCALAPPDATA`, so a data directory.
+fn windows_with_data() -> Context {
+    let mut context = windows();
+    context.env.insert(
+        "LOCALAPPDATA".to_owned(),
+        r"C:\Users\me\AppData\Local".to_owned(),
+    );
+    context
+}
+
+/// Runs `service` with `command_line` against `fake` as `updating` decides.
+fn execute_updating(
+    fake: &mut Fake,
+    context: &Context,
+    command_line: &[&str],
+    updating: &Updating,
+) -> (Result<(), String>, String) {
+    let request = parse(args(command_line)).unwrap();
+    let mut out = Vec::new();
+    let result = execute(fake, context, &request, updating, &mut out);
+    (result, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn writes_a_supervised_systemd_user_unit() {
+    // Not upstream's: the supervised unit differs from the plain one in its
+    // command line and in how stopping it ends the processes.
+    assert_eq!(
+        systemd::unit(&supervised_definition(), false),
+        "# Installed by `open-ferry service install`; `open-ferry service uninstall` removes it.
+[Unit]
+Description=open-ferry AI proxy
+Documentation=https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy
+
+[Service]
+Type=simple
+ExecStart=\"/home/me/.local/bin/open-ferry\" -supervise -config \"/home/me/.config/open-ferry/config.yaml\" -data-dir \"/home/me/.local/share/open-ferry\"
+WorkingDirectory=/home/me/.config/open-ferry
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target
+"
+    );
+}
+
+#[test]
+fn writes_a_supervised_launchd_agent() {
+    // Not upstream's: the supervised agent runs the supervisor and gives it
+    // 60 s to stop.
+    let definition = Definition {
+        data_dir: Some(MACOS_DATA.to_owned()),
+        exe: "/Users/me/.local/bin/open-ferry".to_owned(),
+        config: MACOS_CONFIG.to_owned(),
+        dir: "/Users/me/.config/open-ferry".to_owned(),
+    };
+    let log = "/Users/me/Library/Logs/open-ferry.log";
+    let expected = [
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#,
+        "<!-- Installed by `open-ferry service install`; `open-ferry service uninstall` removes it. -->",
+        r#"<plist version="1.0">"#,
+        "<dict>",
+        "\t<key>Label</key>",
+        "\t<string>io.github.loft-902-co-llc.open-ferry</string>",
+        "\t<key>ProgramArguments</key>",
+        "\t<array>",
+        "\t\t<string>/Users/me/.local/bin/open-ferry</string>",
+        "\t\t<string>-supervise</string>",
+        "\t\t<string>-config</string>",
+        "\t\t<string>/Users/me/.config/open-ferry/config.yaml</string>",
+        "\t\t<string>-data-dir</string>",
+        "\t\t<string>/Users/me/.local/share/open-ferry</string>",
+        "\t</array>",
+        "\t<key>WorkingDirectory</key>",
+        "\t<string>/Users/me/.config/open-ferry</string>",
+        "\t<key>RunAtLoad</key>",
+        "\t<true/>",
+        "\t<key>KeepAlive</key>",
+        "\t<dict>",
+        "\t\t<key>SuccessfulExit</key>",
+        "\t\t<false/>",
+        "\t</dict>",
+        "\t<key>ExitTimeOut</key>",
+        "\t<integer>60</integer>",
+        "\t<key>StandardOutPath</key>",
+        "\t<string>/Users/me/Library/Logs/open-ferry.log</string>",
+        "\t<key>StandardErrorPath</key>",
+        "\t<string>/Users/me/Library/Logs/open-ferry.log</string>",
+        "</dict>",
+        "</plist>",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(launchd::plist(&definition, log, false), expected);
+    // The plain agent has no ExitTimeOut and no supervisor flags.
+    let plain = Definition {
+        data_dir: None,
+        ..definition
+    };
+    let plain = launchd::plist(&plain, log, false);
+    assert!(!plain.contains("ExitTimeOut"), "{plain}");
+    assert!(!plain.contains("-supervise"), "{plain}");
+}
+
+#[test]
+fn writes_a_supervised_scheduled_task() {
+    // Not upstream's: the supervised task runs `service run -supervise`, and
+    // is otherwise the plain task.
+    let plain = windows::task_xml(
+        &Definition {
+            data_dir: None,
+            ..windows_supervised_definition()
+        },
+        SID,
+    );
+    let supervised = windows::task_xml(&windows_supervised_definition(), SID);
+    let plain_line = r"      <Arguments>service run -config &quot;C:\Users\me\AppData\Roaming\open-ferry\config.yaml&quot;</Arguments>";
+    let supervised_line = r"      <Arguments>service run -supervise -config &quot;C:\Users\me\AppData\Roaming\open-ferry\config.yaml&quot; -data-dir &quot;C:\Users\me\AppData\Local\open-ferry&quot;</Arguments>";
+    assert!(plain.contains(plain_line), "{plain}");
+    assert_eq!(supervised, plain.replace(plain_line, supervised_line));
+    // Both forms restart the wrapper if the scheduler fails to launch it.
+    for xml in [&plain, &supervised] {
+        assert!(
+            xml.contains(
+                "    <RestartOnFailure>\n      <Interval>PT1M</Interval>\n      <Count>10</Count>\n    </RestartOnFailure>\n  </Settings>"
+            ),
+            "{xml}"
+        );
+    }
+}
+
+#[test]
+fn reads_the_flags_back_from_each_definition() {
+    // Not upstream's: `uninstall` learns from the definition itself whether a
+    // supervisor runs and where its data directory is.
+    let unit = systemd::unit(&supervised_definition(), false);
+    let words = systemd::exec_words(&unit).unwrap();
+    let exe = words.first().cloned();
+    assert_eq!(
+        flagged(&words, exe.clone()),
+        Flagged {
+            supervised: true,
+            data_dir: Some(LINUX_DATA.to_owned()),
+            exe: Some(supervised_definition().exe),
+            config: Some(LINUX_CONFIG.to_owned()),
+        }
+    );
+    let plain = systemd::exec_words(&systemd::unit(&user_definition(), false)).unwrap();
+    assert_eq!(
+        flagged(&plain, None),
+        Flagged {
+            config: Some(LINUX_CONFIG.to_owned()),
+            ..Flagged::default()
+        }
+    );
+    // A path with what systemd expands, quoted and read back whole.
+    let odd = Definition {
+        data_dir: Some("/home/me/100%/$x \"q\"".to_owned()),
+        ..supervised_definition()
+    };
+    let words = systemd::exec_words(&systemd::unit(&odd, false)).unwrap();
+    assert_eq!(
+        flagged(&words, None).data_dir.as_deref(),
+        Some("/home/me/100%/$x \"q\"")
+    );
+
+    let plist = launchd::plist(
+        &Definition {
+            data_dir: Some("/Users/me/a&b".to_owned()),
+            ..supervised_definition()
+        },
+        "/log",
+        false,
+    );
+    let words = launchd::program_arguments(&plist).unwrap();
+    assert_eq!(
+        flagged(&words, None).data_dir.as_deref(),
+        Some("/Users/me/a&b")
+    );
+    assert!(flagged(&words, None).supervised);
+
+    let definition = windows_supervised_definition();
+    let xml = windows::task_xml(&definition, SID);
+    let words = windows::task_words(&xml).unwrap();
+    assert_eq!(
+        windows::task_command(&xml).as_deref(),
+        Some(definition.exe.as_str())
+    );
+    assert_eq!(
+        flagged(&words, windows::task_command(&xml)),
+        Flagged {
+            supervised: true,
+            data_dir: Some(WINDOWS_DATA.to_owned()),
+            exe: Some(definition.exe),
+            config: Some(WINDOWS_CONFIG.to_owned()),
+        }
+    );
+}
+
+#[test]
+fn the_data_directory_follows_xdg_then_home() {
+    // Not upstream's: the same lookup `open-ferry update` makes.
+    assert_eq!(data_dir(&linux()).as_deref(), Ok(LINUX_DATA));
+    let xdg = context(
+        Platform::Linux,
+        "/home/me/.local/bin/open-ferry",
+        "/",
+        &[("HOME", "/home/me"), ("XDG_DATA_HOME", "/data")],
+    );
+    assert_eq!(data_dir(&xdg).as_deref(), Ok("/data/open-ferry"));
+    assert_eq!(data_dir(&macos()).as_deref(), Ok(MACOS_DATA));
+    assert_eq!(data_dir(&windows_with_data()).as_deref(), Ok(WINDOWS_DATA));
+    assert!(data_dir(&windows()).is_err());
+    let bare = context(Platform::Linux, "/bin/open-ferry", "/", &[]);
+    assert!(data_dir(&bare).is_err());
+    assert!(ENV_VARS.contains(&"XDG_DATA_HOME"));
+}
+
+#[test]
+fn says_which_form_it_installs_and_why() {
+    // Not upstream's: the choice is printed.
+    let supervised = Updating::supervised(LINUX_DATA).form();
+    assert!(
+        supervised.starts_with("Installing the supervised form"),
+        "{supervised}"
+    );
+    assert!(supervised.contains(LINUX_DATA), "{supervised}");
+    let plain = Updating::plain(Ok(LINUX_DATA.to_owned()), "it is a build here").form();
+    assert_eq!(
+        plain,
+        "Installing the plain form, without the supervisor: it is a build here."
+    );
+}
+
+#[test]
+fn installs_a_supervised_systemd_user_unit() {
+    // Not upstream's: the choice reaches the unit and the record.
+    let mut fake = Fake::default()
+        .uid(1000)
+        .file(LINUX_CONFIG, CONFIG)
+        .dir("/home/me/.config");
+    let updating = Updating::supervised(LINUX_DATA);
+    let (result, out) = execute_updating(&mut fake, &linux(), &["install"], &updating);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        text(&fake, LINUX_UNIT),
+        systemd::unit(&supervised_definition(), false)
+    );
+    assert!(out.starts_with("Installing the supervised form"), "{out}");
+    let record: serde_json::Value =
+        serde_json::from_str(&text(&fake, &format!("{LINUX_DATA}/service.json"))).unwrap();
+    assert_eq!(record["supervised"], true);
+    assert_eq!(record["manager"], "systemd");
+    assert_eq!(record["data_dir"], LINUX_DATA);
+    assert_eq!(
+        events(&fake).last().copied(),
+        Some("write_atomic /home/me/.local/share/open-ferry/service.json")
+    );
+}
+
+#[test]
+fn installs_a_supervised_scheduled_task() {
+    // Not upstream's: the task's XML and the record for the supervised form.
+    let mut fake = windows_user();
+    let updating = Updating::supervised(WINDOWS_DATA);
+    let (result, out) = execute_updating(&mut fake, &windows_with_data(), &["install"], &updating);
+    assert_eq!(result, Ok(()));
+    assert!(out.starts_with("Installing the supervised form"), "{out}");
+    let record: serde_json::Value =
+        serde_json::from_str(&text(&fake, &format!(r"{WINDOWS_DATA}\service.json"))).unwrap();
+    assert_eq!(record["manager"], "task");
+    assert_eq!(record["supervised"], true);
+    assert_eq!(record["data_dir"], WINDOWS_DATA);
+    // The task file is gone, and the record is written after the task runs.
+    assert!(!fake.files.contains_key(TASK_FILE));
+    let events = events(&fake);
+    let run = events
+        .iter()
+        .position(|event| *event == "run schtasks.exe /run /tn open-ferry")
+        .unwrap();
+    let record = events
+        .iter()
+        .position(|event| event.starts_with("write_atomic ") && event.ends_with("service.json"))
+        .unwrap();
+    assert!(run < record, "{events:?}");
+}
+
+fn record_of(manager: &str, data_dir: &str, supervised: bool, exe: &str, config: &str) -> String {
+    serde_json::json!({
+        "format": 1,
+        "kind": "user",
+        "manager": manager,
+        "supervised": supervised,
+        "data_dir": data_dir,
+        "exe": exe,
+        "config": config,
+    })
+    .to_string()
+}
+
+/// The record of the scheduled task the test definitions install.
+fn task_record(data_dir: &str, supervised: bool) -> String {
+    let definition = windows_supervised_definition();
+    record_of(
+        "task",
+        data_dir,
+        supervised,
+        &definition.exe,
+        &definition.config,
+    )
+}
+
+/// The record of the systemd user unit the test definitions install.
+fn unit_record(data_dir: &str, supervised: bool) -> String {
+    let definition = supervised_definition();
+    record_of(
+        "systemd",
+        data_dir,
+        supervised,
+        &definition.exe,
+        &definition.config,
+    )
+}
+
+const XML_QUERY: &str = "schtasks.exe /query /tn open-ferry /xml";
+
+fn supervised_task_fake() -> Fake {
+    Fake::default().answer(
+        XML_QUERY,
+        0,
+        &windows::task_xml(&windows_supervised_definition(), SID),
+    )
+}
+
+fn stopped(fake: &Fake) -> Vec<&str> {
+    fake.events
+        .iter()
+        .map(String::as_str)
+        .filter(|event| event.starts_with("stop_supervisor"))
+        .collect()
+}
+
+#[test]
+fn uninstalls_a_task_by_asking_its_supervisor_to_stop_first() {
+    // Not upstream's: stop, then end, then delete, and the record goes last.
+    let record = format!(r"{WINDOWS_DATA}\service.json");
+    let outcomes = [
+        (StopOutcome::Stopped, "Stopped the supervisor\n"),
+        (StopOutcome::NotRunning, "No supervisor was running\n"),
+        (
+            StopOutcome::TimedOut("still draining".to_owned()),
+            "The supervisor didn't stop within 50 s (still draining); going on\n",
+        ),
+        (
+            StopOutcome::Refused("no endpoint".to_owned()),
+            "Failed to ask the supervisor to stop (no endpoint); going on\n",
+        ),
+    ];
+    for (outcome, message) in outcomes {
+        let mut fake = supervised_task_fake().file(&record, &task_record(WINDOWS_DATA, true));
+        fake.stop = Some(outcome.clone());
+        let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+        // Whatever the answer, the task is ended and deleted.
+        assert_eq!(result, Ok(()), "{outcome:?}");
+        let expected = [
+            "run schtasks.exe /query /tn open-ferry".to_owned(),
+            format!("run {XML_QUERY}"),
+            format!("stop_supervisor {WINDOWS_DATA} 50s"),
+            "run schtasks.exe /end /tn open-ferry".to_owned(),
+            "run schtasks.exe /delete /tn open-ferry /f".to_owned(),
+            format!("remove {record}"),
+        ];
+        assert_eq!(fake.events, expected, "{outcome:?}");
+        assert!(
+            out.starts_with(&format!(
+                "The service's data directory is {WINDOWS_DATA} (from its definition).\n{message}Ran: schtasks.exe /end"
+            )),
+            "{outcome:?}: {out}"
+        );
+        assert!(!fake.files.contains_key(&record));
+    }
+}
+
+#[test]
+fn finds_the_data_directory_from_the_definition_then_the_record_then_the_environment() {
+    // Not upstream's: the order of the lookup `uninstall` makes.
+    let record_path = format!(r"{WINDOWS_DATA}\service.json");
+
+    // The definition's own `-data-dir` wins over the record.
+    let pinned = Definition {
+        data_dir: Some(r"D:\pinned".to_owned()),
+        ..windows_supervised_definition()
+    };
+    let mut fake = Fake::default()
+        .answer(XML_QUERY, 0, &windows::task_xml(&pinned, SID))
+        .file(&record_path, &task_record(WINDOWS_DATA, true));
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert_eq!(stopped(&fake), [r"stop_supervisor D:\pinned 50s"]);
+    assert!(
+        out.contains(r"The service's data directory is D:\pinned (from its definition)."),
+        "{out}"
+    );
+
+    // Without a readable definition no record can be checked, so the
+    // environment's directory is asked, and the message says it may not be
+    // the task's own.
+    let mut fake = Fake::default()
+        .fail(XML_QUERY, 1, "denied")
+        .file(&record_path, &task_record(WINDOWS_DATA, true));
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        stopped(&fake),
+        [format!("stop_supervisor {WINDOWS_DATA} 50s")]
+    );
+    assert!(out.contains(UNREADABLE), "{out}");
+    assert!(
+        out.contains("because the task's definition couldn't be read, so the supervisor of this directory is asked to stop, which may not be the task's own"),
+        "{out}"
+    );
+    assert!(fake.files.contains_key(&record_path));
+
+    // A readable definition with no `-data-dir` of its own: the record in
+    // the environment's directory, which matches it, names the directory,
+    // and it is removed with the task.
+    let plain = Definition {
+        data_dir: None,
+        ..windows_supervised_definition()
+    };
+    let mut fake = Fake::default()
+        .answer(XML_QUERY, 0, &windows::task_xml(&plain, SID))
+        .file(&record_path, &task_record(WINDOWS_DATA, false));
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(out.contains(&format!("(from {record_path})")), "{out}");
+    assert!(!out.contains("Leaving"), "{out}");
+    assert!(!fake.files.contains_key(&record_path));
+
+    // With neither, the directory the environment gives is asked.
+    let mut fake = Fake::default().fail(XML_QUERY, 1, "denied");
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        stopped(&fake),
+        [format!("stop_supervisor {WINDOWS_DATA} 50s")]
+    );
+    assert!(out.contains("worked out from the environment"), "{out}");
+
+    // With no data directory at all nothing is asked, and it says so.
+    let mut fake = Fake::default().fail(XML_QUERY, 1, "denied");
+    let (result, out) = execute_with(&mut fake, &windows(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(stopped(&fake).is_empty());
+    assert!(
+        out.contains("There is no data directory to ask a supervisor in"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_plain_task_is_not_asked_to_stop() {
+    // Not upstream's: only a supervised task has a supervisor to ask.
+    let plain = Definition {
+        data_dir: None,
+        ..windows_supervised_definition()
+    };
+    let mut fake = Fake::default().answer(XML_QUERY, 0, &windows::task_xml(&plain, SID));
+    let (result, _) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(stopped(&fake).is_empty());
+
+    // A record that says plain does not count when the definition can't be
+    // read: it is left alone, and the environment's directory is asked.
+    let record = format!(r"{WINDOWS_DATA}\service.json");
+    let mut fake = Fake::default()
+        .fail(XML_QUERY, 1, "denied")
+        .file(&record, &task_record(WINDOWS_DATA, false));
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        stopped(&fake),
+        [format!("stop_supervisor {WINDOWS_DATA} 50s")]
+    );
+    assert!(out.contains(UNREADABLE), "{out}");
+    assert!(fake.files.contains_key(&record));
+}
+
+#[test]
+fn a_supervised_unit_is_stopped_by_systemd_alone() {
+    // Not upstream's: systemd and launchd stop the whole unit or job within
+    // their time-outs, so no supervisor is asked, and the record goes last.
+    let record = format!("{LINUX_DATA}/service.json");
+    let mut fake = Fake::default()
+        .uid(1000)
+        .file(LINUX_UNIT, &systemd::unit(&supervised_definition(), false))
+        .file(&record, &unit_record(LINUX_DATA, true));
+    let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        events(&fake),
+        [
+            "run id -u",
+            "run systemctl --user disable --now open-ferry.service",
+            &format!("remove {LINUX_UNIT}"),
+            "run systemctl --user daemon-reload",
+            &format!("remove {record}"),
+        ]
+    );
+    assert!(out.contains("(from its definition)"), "{out}");
+}
+
+#[test]
+fn a_record_that_is_not_ours_is_ignored() {
+    // Not upstream's: `service.json` is read with care.
+    let good = unit_record(LINUX_DATA, true);
+    let definition = supervised_definition();
+    assert_eq!(
+        parse_record(good.as_bytes()),
+        Some(Record {
+            manager: "systemd".to_owned(),
+            supervised: true,
+            data_dir: LINUX_DATA.to_owned(),
+            exe: definition.exe,
+            config: definition.config,
+        })
+    );
+    let tail = r#""exe":"/e","config":"/c""#;
+    for bad in [
+        String::new(),
+        "not json".to_owned(),
+        format!(
+            r#"{{"format":2,"kind":"user","manager":"systemd","supervised":true,"data_dir":"/a",{tail}}}"#
+        ),
+        format!(
+            r#"{{"format":1,"kind":"system","manager":"systemd","supervised":true,"data_dir":"/a",{tail}}}"#
+        ),
+        format!(r#"{{"format":1,"kind":"user","manager":"systemd","data_dir":"/a",{tail}}}"#),
+        format!(r#"{{"format":1,"kind":"user","supervised":true,"data_dir":"/a",{tail}}}"#),
+        r#"{"format":1,"kind":"user","manager":"systemd","supervised":true,"data_dir":"/a"}"#
+            .to_owned(),
+    ] {
+        assert_eq!(parse_record(bad.as_bytes()), None, "{bad}");
+    }
+}
+
+/// What an uninstall of the scheduled task with `record` at the data
+/// directory's `service.json` and the supervised task's definition does.
+fn uninstall_task_with(record: &str) -> (Fake, Result<(), String>, String) {
+    let mut fake = supervised_task_fake().file(&format!(r"{WINDOWS_DATA}\service.json"), record);
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    (fake, result, out)
+}
+
+#[test]
+fn a_record_naming_another_directory_is_not_used_or_removed() {
+    // Not upstream's: a record is the service's only if it names the
+    // directory it is in, so a stale or crafted one can't point the stop (or
+    // the removal) at another data directory.
+    let path = format!(r"{WINDOWS_DATA}\service.json");
+    let other = r"D:\other";
+    // The definition is readable, so the record is checked against it.
+    let (fake, result, out) = uninstall_task_with(&task_record(other, true));
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        stopped(&fake),
+        [format!("stop_supervisor {WINDOWS_DATA} 50s")]
+    );
+    assert!(
+        out.contains(&format!(
+            "Leaving {path} alone and not using it: it names {other}, not the directory it is in."
+        )),
+        "{out}"
+    );
+    // It is not the service's, so it stays.
+    assert!(fake.files.contains_key(&path));
+    assert!(!fake.events.contains(&format!("remove {path}")));
+}
+
+#[test]
+fn a_record_of_another_manager_is_not_used_or_removed() {
+    let path = format!(r"{WINDOWS_DATA}\service.json");
+    let definition = windows_supervised_definition();
+    let record = record_of(
+        "systemd",
+        WINDOWS_DATA,
+        true,
+        &definition.exe,
+        &definition.config,
+    );
+    let mut fake = supervised_task_fake().file(&path, &record);
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(
+        out.contains("it is of a systemd service, not a task one"),
+        "{out}"
+    );
+    // Not used: the data directory is the definition's.
+    assert!(out.contains("(from its definition)"), "{out}");
+    assert!(fake.files.contains_key(&path));
+}
+
+#[test]
+fn a_record_that_differs_from_the_definition_is_not_used_or_removed() {
+    let path = format!(r"{WINDOWS_DATA}\service.json");
+    let definition = windows_supervised_definition();
+    for (record, said) in [
+        (
+            record_of(
+                "task",
+                WINDOWS_DATA,
+                true,
+                r"C:\elsewhere\open-ferry.exe",
+                &definition.config,
+            ),
+            "as the binary",
+        ),
+        (
+            record_of(
+                "task",
+                WINDOWS_DATA,
+                true,
+                &definition.exe,
+                r"C:\elsewhere\config.yaml",
+            ),
+            "as the config",
+        ),
+    ] {
+        let (fake, result, out) = uninstall_task_with(&record);
+        assert_eq!(result, Ok(()));
+        assert!(
+            out.contains(&format!("Leaving {path} alone and not using it: it names"))
+                && out.contains(said),
+            "{out}"
+        );
+        assert!(fake.files.contains_key(&path), "{record}");
+    }
+    // Paths compare as Windows compares them: by case.
+    let record = record_of(
+        "task",
+        &WINDOWS_DATA.to_uppercase(),
+        true,
+        &definition.exe.to_uppercase(),
+        &definition.config.to_lowercase(),
+    );
+    let (fake, result, out) = uninstall_task_with(&record);
+    assert_eq!(result, Ok(()));
+    assert!(!out.contains("Leaving"), "{out}");
+    assert!(!fake.files.contains_key(&path));
+}
+
+#[test]
+fn only_the_services_own_record_is_in_the_uninstall_plan() {
+    // Not upstream's: a rejected `service.json` is not in the plan's
+    // removals, and a valid one is, last.
+    let path = format!(r"{WINDOWS_DATA}\service.json");
+    let definition = windows_supervised_definition();
+    let rejected = [
+        // Another format, and a system service's.
+        r#"{"format":2,"kind":"user"}"#.to_owned(),
+        serde_json::json!({
+            "format": 1, "kind": "system", "manager": "task", "supervised": true,
+            "data_dir": WINDOWS_DATA, "exe": definition.exe, "config": definition.config,
+        })
+        .to_string(),
+        task_record(r"D:\other", true),
+        "not json".to_owned(),
+    ];
+    for record in rejected {
+        let mut fake = supervised_task_fake().file(&path, &record);
+        let (result, out) =
+            execute_with(&mut fake, &windows_with_data(), &["uninstall", "-dry-run"]);
+        assert_eq!(result, Ok(()));
+        assert!(!out.contains("Would remove"), "{record}: {out}");
+        assert!(
+            out.contains(&format!("Leaving {path} alone")),
+            "{record}: {out}"
+        );
+        // The real thing leaves it too.
+        let mut fake = supervised_task_fake().file(&path, &record);
+        let (result, _) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+        assert_eq!(result, Ok(()));
+        assert!(fake.files.contains_key(&path), "{record}");
+    }
+    let mut fake = supervised_task_fake().file(&path, &task_record(WINDOWS_DATA, true));
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall", "-dry-run"]);
+    assert_eq!(result, Ok(()));
+    let removals: Vec<&str> = out
+        .lines()
+        .filter(|line| line.starts_with("Would remove"))
+        .collect();
+    assert_eq!(removals, [format!("Would remove {path}")]);
+    let last = out.lines().rev().nth(1).unwrap();
+    assert_eq!(last, format!("Would remove {path}"), "{out}");
+}
+
+#[test]
+fn the_record_removed_is_in_the_directory_the_definition_names() {
+    // Not upstream's: a definition pinned to A, run where the environment
+    // gives B, has A's record looked at and removed; B's isn't this
+    // service's, so it is neither used, removed nor mentioned.
+    let a = r"D:\pinned";
+    let a_path = format!(r"{a}\service.json");
+    let b_path = format!(r"{WINDOWS_DATA}\service.json");
+    let pinned = Definition {
+        data_dir: Some(a.to_owned()),
+        ..windows_supervised_definition()
+    };
+    let xml = windows::task_xml(&pinned, SID);
+    let run = |records: &[(&str, String)]| {
+        let mut fake = Fake::default().answer(XML_QUERY, 0, &xml);
+        for (path, record) in records {
+            fake = fake.file(path, record);
+        }
+        let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+        assert_eq!(result, Ok(()), "{out}");
+        assert!(!out.contains("Leaving"), "{out}");
+        assert_eq!(stopped(&fake), [format!("stop_supervisor {a} 50s")]);
+        fake
+    };
+
+    // Records in both: A's goes, B's stays.
+    let fake = run(&[
+        (&a_path, task_record(a, true)),
+        (&b_path, task_record(WINDOWS_DATA, true)),
+    ]);
+    assert!(fake.events.contains(&format!("remove {a_path}")));
+    assert!(!fake.files.contains_key(&a_path));
+    assert!(fake.files.contains_key(&b_path));
+    assert!(!fake.events.contains(&format!("remove {b_path}")));
+
+    // Only in A: it goes.
+    let fake = run(&[(&a_path, task_record(a, true))]);
+    assert!(!fake.files.contains_key(&a_path));
+
+    // Only in B: nothing is removed.
+    let fake = run(&[(&b_path, task_record(WINDOWS_DATA, true))]);
+    assert!(fake.files.contains_key(&b_path));
+    assert!(!fake.events.iter().any(|event| event.starts_with("remove ")));
+}
+
+/// `xml` with the task's `<Arguments>` replaced by `arguments`.
+fn with_arguments(xml: &str, arguments: &str) -> String {
+    let start = xml.find("<Arguments>").unwrap();
+    let end = xml.find("</Arguments>").unwrap() + "</Arguments>".len();
+    format!(
+        "{}<Arguments>{arguments}</Arguments>{}",
+        &xml[..start],
+        &xml[end..]
+    )
+}
+
+#[test]
+fn a_record_or_definition_without_full_paths_is_not_used_or_removed() {
+    // Not upstream's: paths are compared only when they are full ones, so
+    // `home/me/x` is not `/home/me/x`.
+    let path = format!(r"{WINDOWS_DATA}\service.json");
+    let definition = windows_supervised_definition();
+    let xml = windows::task_xml(&definition, SID);
+    let left_alone = |fake: &Fake, out: &str, said: &str| {
+        assert!(
+            out.contains(&format!("Leaving {path} alone and not using it: ")) && out.contains(said),
+            "{out}"
+        );
+        assert!(fake.files.contains_key(&path));
+        assert!(!fake.events.contains(&format!("remove {path}")));
+    };
+
+    // Relative paths in the record.
+    for (record, said) in [
+        (
+            record_of(
+                "task",
+                WINDOWS_DATA,
+                true,
+                &definition.exe,
+                r"Roaming\config.yaml",
+            ),
+            "its config, Roaming\\config.yaml, isn't a full path",
+        ),
+        (
+            record_of(
+                "task",
+                WINDOWS_DATA,
+                true,
+                "open-ferry.exe",
+                &definition.config,
+            ),
+            "its binary, open-ferry.exe, isn't a full path",
+        ),
+        (
+            record_of(
+                "task",
+                "local/open-ferry",
+                true,
+                &definition.exe,
+                &definition.config,
+            ),
+            "its data directory, local/open-ferry, isn't a full path",
+        ),
+    ] {
+        let mut fake = Fake::default()
+            .answer(XML_QUERY, 0, &xml)
+            .file(&path, &record);
+        let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+        assert_eq!(result, Ok(()));
+        left_alone(&fake, &out, said);
+    }
+
+    // A readable definition whose config is relative, or missing.
+    let record = task_record(WINDOWS_DATA, true);
+    for (arguments, said) in [
+        (
+            format!(r#"service run -supervise -config config.yaml -data-dir "{WINDOWS_DATA}""#),
+            "the installed service's config, config.yaml, isn't a full path",
+        ),
+        (
+            format!(r#"service run -supervise -data-dir "{WINDOWS_DATA}""#),
+            "the installed service's definition doesn't name its config",
+        ),
+    ] {
+        let mut fake = Fake::default()
+            .answer(XML_QUERY, 0, &with_arguments(&xml, &arguments))
+            .file(&path, &record);
+        let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+        assert_eq!(result, Ok(()));
+        left_alone(&fake, &out, said);
+    }
+
+    // The same on Unix: the definition's `home/me/..` is not the record's
+    // `/home/me/..`.
+    let unit_path = format!("{LINUX_DATA}/service.json");
+    let relative = Definition {
+        config: "home/me/.config/open-ferry/config.yaml".to_owned(),
+        ..supervised_definition()
+    };
+    let record = record_of(
+        "systemd",
+        LINUX_DATA,
+        true,
+        &relative.exe,
+        "/home/me/.config/open-ferry/config.yaml",
+    );
+    let mut fake = Fake::default()
+        .uid(1000)
+        .file(LINUX_UNIT, &systemd::unit(&relative, false))
+        .file(&unit_path, &record);
+    let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(out.contains("isn't a full path"), "{out}");
+    assert!(fake.files.contains_key(&unit_path));
+}
+
+#[test]
+fn a_relative_data_dir_in_the_definition_is_never_a_stop_target() {
+    // Not upstream's: a relative `-data-dir` would be read from the
+    // uninstall's own working directory, so no supervisor is asked there,
+    // nor in the record's or the environment's directory in its place; the
+    // task is still ended and deleted.
+    let env_record = format!(r"{WINDOWS_DATA}\service.json");
+    let relative_record = r"data\service.json";
+    let pinned = Definition {
+        data_dir: Some("data".to_owned()),
+        ..windows_supervised_definition()
+    };
+    let mut fake = Fake::default()
+        .answer(XML_QUERY, 0, &windows::task_xml(&pinned, SID))
+        .file(&env_record, &task_record(WINDOWS_DATA, true))
+        .file(relative_record, &task_record("data", true));
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(stopped(&fake).is_empty(), "{:?}", fake.events);
+    assert!(
+        out.contains(
+            "There is no data directory to ask a supervisor in (its definition names data as its data directory, which isn't a full path), so none is asked to stop."
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("Leaving"), "{out}");
+    assert_eq!(
+        fake.events,
+        [
+            "run schtasks.exe /query /tn open-ferry".to_owned(),
+            format!("run {XML_QUERY}"),
+            "run schtasks.exe /end /tn open-ferry".to_owned(),
+            "run schtasks.exe /delete /tn open-ferry /f".to_owned(),
+        ]
+    );
+    assert!(fake.files.contains_key(&env_record));
+    assert!(fake.files.contains_key(relative_record));
+
+    // A unit pinning a relative directory: its records are left alone too.
+    let unit_record_path = format!("{LINUX_DATA}/service.json");
+    let relative = Definition {
+        data_dir: Some("data".to_owned()),
+        ..supervised_definition()
+    };
+    let mut fake = Fake::default()
+        .uid(1000)
+        .file(LINUX_UNIT, &systemd::unit(&relative, false))
+        .file(&unit_record_path, &unit_record(LINUX_DATA, true))
+        .file("data/service.json", &unit_record("data", true));
+    let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|e| e.starts_with("remove ") && e.ends_with("service.json")),
+        "{:?}",
+        fake.events
+    );
+    assert!(fake.files.contains_key(&unit_record_path));
+    assert!(fake.files.contains_key("data/service.json"));
+    assert!(!out.contains("Leaving"), "{out}");
+}
+
+#[test]
+fn a_task_with_no_arguments_is_a_readable_definition() {
+    // Not upstream's: the scheduler gave the task back, so a stale record in
+    // the environment's directory is compared to it (and found not to
+    // match), and the task is not taken for a supervised one.
+    let path = format!(r"{WINDOWS_DATA}\service.json");
+    let xml = windows::task_xml(&windows_supervised_definition(), SID);
+    let start = xml.find("<Arguments>").unwrap();
+    let end = xml.find("</Arguments>").unwrap() + "</Arguments>".len();
+    for element in [
+        "",
+        "<Arguments/>",
+        "<Arguments />",
+        "<Arguments></Arguments>",
+    ] {
+        let without = format!("{}{element}{}", &xml[..start], &xml[end..]);
+        let mut fake = Fake::default()
+            .answer(XML_QUERY, 0, &without)
+            .file(&path, &task_record(WINDOWS_DATA, true));
+        let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+        assert_eq!(result, Ok(()), "{element}: {out}");
+        assert!(
+            out.contains(&format!(
+                "Leaving {path} alone and not using it: the installed service's definition doesn't name its config."
+            )),
+            "{element}: {out}"
+        );
+        assert!(stopped(&fake).is_empty(), "{element}: {:?}", fake.events);
+        assert!(fake.files.contains_key(&path), "{element}");
+    }
+    // A query that failed is still no definition at all.
+    let mut fake = Fake::default()
+        .fail(XML_QUERY, 1, "denied")
+        .file(&path, &task_record(WINDOWS_DATA, true));
+    let (result, _) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        stopped(&fake),
+        [format!("stop_supervisor {WINDOWS_DATA} 50s")]
+    );
+}
+
+#[test]
+fn numeric_character_references_are_decoded_in_one_pass() {
+    // Not upstream's: other writers than ours and the scheduler write them.
+    let command = |text: &str| {
+        format!("<Actions><Exec><Command>{text}</Command><Arguments>x</Arguments></Exec></Actions>")
+    };
+    for text in [
+        r"&#34;C:\Program Files\x\open-ferry.exe&#34;",
+        r"&#x22;C:\Program Files\x\open-ferry.exe&#x22;",
+        r"&#X22;C:\Program Files\x\open-ferry.exe&quot;",
+    ] {
+        assert_eq!(
+            windows::task_command(&command(text)).as_deref(),
+            Some(r"C:\Program Files\x\open-ferry.exe"),
+            "{text}"
+        );
+    }
+    let arguments = r"<Actions><Exec><Command>x</Command><Arguments>service run -config &#34;C:\My Dir\config.yaml&#34; -supervise</Arguments></Exec></Actions>";
+    assert_eq!(
+        windows::task_words(arguments),
+        words(&[
+            "service",
+            "run",
+            "-config",
+            r"C:\My Dir\config.yaml",
+            "-supervise"
+        ])
+    );
+    // What a reference decodes to is not decoded again.
+    assert_eq!(launchd::unescape("&amp;#34;").as_deref(), Some("&#34;"));
+    assert_eq!(launchd::unescape("&amp;amp;").as_deref(), Some("&amp;"));
+    assert_eq!(launchd::unescape("&#38;#34;").as_deref(), Some("&#34;"));
+    // Invalid or out of range references, unknown entities and a bare `&`
+    // are unreadable.
+    for text in [
+        "&#;",
+        "&#x;",
+        "&#xD800;",
+        "&#1114112;",
+        "&#-34;",
+        "&#0;",
+        "&#abc;",
+        "&nope;",
+        "&",
+        "a & b",
+        "&#34",
+        "&nbsp;",
+    ] {
+        assert_eq!(launchd::unescape(text), None, "{text}");
+    }
+    assert_eq!(
+        launchd::unescape("a&#47;b&#x2F;c").as_deref(),
+        Some("a/b/c")
+    );
+    // Any number of leading zeros; no `;` is unreadable.
+    assert_eq!(launchd::unescape("&#0000000047;").as_deref(), Some("/"));
+    assert_eq!(
+        launchd::unescape("&#x00000000000002F;").as_deref(),
+        Some("/")
+    );
+    assert_eq!(
+        launchd::unescape(&format!("&#{}47;", "0".repeat(500))).as_deref(),
+        Some("/")
+    );
+    for text in [
+        format!("&#{}", "0".repeat(500)),
+        format!("&#x{}", "0".repeat(500)),
+        format!("&#{}47 and a; later", "0".repeat(50)),
+        "&#99999999999;".to_owned(),
+        "&#xFFFFFFFFF;".to_owned(),
+        "&#4x7;".to_owned(),
+        "&#x4g;".to_owned(),
+    ] {
+        assert_eq!(launchd::unescape(&text), None, "{text}");
+    }
+    // Only XML 1.0 `Char`s decode.
+    for text in [
+        "&#1;",
+        "&#8;",
+        "&#xB;",
+        "&#xC;",
+        "&#x1F;",
+        "&#xFFFE;",
+        "&#xFFFF;",
+        "&#xDFFF;",
+        "&#x110000;",
+    ] {
+        assert_eq!(launchd::unescape(text), None, "{text}");
+    }
+    assert_eq!(
+        launchd::unescape("&#9;&#xA;&#13;&#x20;&#xD7FF;&#xE000;&#xFFFD;&#x10000;&#x10FFFF;")
+            .as_deref(),
+        Some("\t\n\r \u{D7FF}\u{E000}\u{FFFD}\u{10000}\u{10FFFF}")
+    );
+    let plist = "<plist><dict><key>ProgramArguments</key><array><string>&#47;usr&#47;bin&#47;open-ferry</string></array></dict></plist>";
+    assert_eq!(
+        launchd::program_arguments(plist),
+        Some(vec!["/usr/bin/open-ferry".to_owned()])
+    );
+}
+
+#[test]
+fn a_task_command_with_spaces_is_one_path() {
+    // Not upstream's: `<Command>` holds one path, quoted or not.
+    let xml = |command: &str| {
+        format!(
+            "<Actions><Exec><Command>{command}</Command><Arguments>x</Arguments></Exec></Actions>"
+        )
+    };
+    for (command, expected) in [
+        (
+            r"C:\Program Files\open-ferry\open-ferry.exe",
+            r"C:\Program Files\open-ferry\open-ferry.exe",
+        ),
+        (
+            "&quot;C:\\Program Files\\open-ferry\\open-ferry.exe&quot;",
+            r"C:\Program Files\open-ferry\open-ferry.exe",
+        ),
+        (
+            "  C:\\Program Files\\a &amp; b\\of.exe \n",
+            r"C:\Program Files\a & b\of.exe",
+        ),
+        (r"C:\open-ferry\of.exe", r"C:\open-ferry\of.exe"),
+    ] {
+        assert_eq!(
+            windows::task_command(&xml(command)).as_deref(),
+            Some(expected),
+            "{command}"
+        );
+    }
+    assert_eq!(windows::task_command(&xml("  ")), None);
+
+    // What `task_xml` writes comes back, for a path with spaces and one with
+    // an ampersand.
+    for exe in [
+        r"C:\Program Files\open-ferry\open-ferry.exe",
+        r"C:\Users\me\a & b\open-ferry.exe",
+        r"C:\Users\me\AppData\Local\Programs\open-ferry\open-ferry.exe",
+    ] {
+        let definition = Definition {
+            exe: exe.to_owned(),
+            ..windows_supervised_definition()
+        };
+        assert_eq!(
+            windows::task_command(&windows::task_xml(&definition, SID)).as_deref(),
+            Some(exe)
+        );
+    }
+}
+
+#[test]
+fn a_task_is_read_only_when_it_has_our_one_action() {
+    // Not upstream's: anything but our shape is unreadable, which keeps the
+    // stop check on.
+    let xml = windows::task_xml(&windows_supervised_definition(), SID);
+    let unreadable = |xml: &str, why: &str| {
+        assert_eq!(windows::task_definition(xml), None, "{why}");
+    };
+    assert!(windows::task_definition(&xml).is_some());
+    let cmd_exec = "<Exec><Command>cmd.exe</Command><Arguments>/c exit 0</Arguments></Exec>";
+    let actions = "<Actions Context=\"Author\">\n";
+    assert!(xml.contains(actions));
+    unreadable(
+        &xml.replace(actions, &format!("{actions}{cmd_exec}\n")),
+        "cmd first",
+    );
+    unreadable(
+        &xml.replace("  </Actions>", &format!("{cmd_exec}\n  </Actions>")),
+        "cmd second",
+    );
+    unreadable(
+        &xml.replace(
+            "  </Actions>",
+            "<ComHandler><ClassId>{x}</ClassId></ComHandler>\n  </Actions>",
+        ),
+        "com handler",
+    );
+    unreadable(
+        &xml.replace("</Actions>", "</Actions><Command>x</Command>"),
+        "command outside",
+    );
+    unreadable(
+        &xml.replace("</Arguments>", "</Arguments><Arguments>x</Arguments>"),
+        "two arguments",
+    );
+    unreadable(
+        &xml.replace("</Actions>", "</Actions><Actions/>"),
+        "two actions",
+    );
+    unreadable(
+        &xml.replace("<Actions Context=\"Author\">", "<Actions/><X>"),
+        "empty",
+    );
+    unreadable(&xml.replace("<Task ", "<!-- x --><Task "), "comment");
+    unreadable(
+        &with_arguments(&xml, "<![CDATA[service run -supervise]]>"),
+        "cdata",
+    );
+    for arguments in [
+        "service run\u{a0}-supervise",
+        "service run\u{2003}-supervise",
+        "service run\n-supervise",
+        "service run &nbsp;-supervise",
+        "service run & -supervise",
+        "service run &#0; -supervise",
+    ] {
+        unreadable(&with_arguments(&xml, arguments), arguments);
+        // The words alone are unreadable when the arguments are the defect.
+        assert_eq!(
+            windows::task_words(&with_arguments(&xml, arguments)),
+            None,
+            "{arguments}"
+        );
+    }
+    for broken in [
+        xml.replace("</Arguments>", "</Arguments><Arguments>x</Arguments>"),
+        xml.replace("<Task ", "<!-- x --><Task "),
+        xml.replace(actions, &format!("{actions}{cmd_exec}\n")),
+    ] {
+        assert_eq!(windows::task_words(&broken), None);
+    }
+    unreadable(
+        &xml.replace("<Command>", "<Command>&nbsp;"),
+        "unknown entity in command",
+    );
+    unreadable(
+        &xml.replace("<Command>", "<Command>a & "),
+        "bare & in command",
+    );
+    unreadable(
+        &xml.replace("<Command>", "<Command><b/>"),
+        "markup in command",
+    );
+    // The `ExecutionTimeLimit` among the settings is no action.
+    assert!(xml.contains("<ExecutionTimeLimit>"));
+
+    // Through `uninstall`: a stale `supervised: false` record is left alone
+    // and the supervisor of the environment's directory is asked.
+    let two = xml.replace(actions, &format!("{actions}{cmd_exec}\n"));
+    let path = format!(r"{WINDOWS_DATA}\service.json");
+    let mut fake = Fake::default()
+        .answer(XML_QUERY, 0, &two)
+        .file(&path, &task_record(WINDOWS_DATA, false));
+    let (result, out) = execute_with(&mut fake, &windows_with_data(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(out.contains(UNREADABLE), "{out}");
+    assert_eq!(
+        stopped(&fake),
+        [format!("stop_supervisor {WINDOWS_DATA} 50s")]
+    );
+    assert!(fake.files.contains_key(&path));
+}
+
+#[test]
+fn what_task_xml_writes_reads_back_however_it_is_laid_out() {
+    // Not upstream's: odd characters in paths, and the XML as the scheduler
+    // may print it (CRLF, re-indented).
+    let odd = r#"C:\Users\me\a "q" b\\"c&d<e>é\o\config.yaml"#;
+    let data = r#"D:\data "x"\\&é<"#;
+    for supervised in [false, true] {
+        for exe in [
+            r"C:\Program Files\open-ferry\open-ferry.exe",
+            r"C:\Users\me\a & b é<\open-ferry.exe",
+        ] {
+            let definition = Definition {
+                data_dir: supervised.then(|| data.to_owned()),
+                exe: exe.to_owned(),
+                config: odd.to_owned(),
+                dir: "C:\\Users\\me\\My\u{a0}Dir".to_owned(),
+            };
+            let xml = windows::task_xml(&definition, SID);
+            let crlf = xml.replace('\n', "\r\n");
+            let reindented = xml
+                .lines()
+                .map(|line| format!("\t\t{}\r\n", line.trim_start()))
+                .collect::<String>();
+            for (layout, text) in [
+                ("as is", &xml),
+                ("crlf", &crlf),
+                ("re-indented", &reindented),
+            ] {
+                let (words, found) = windows::task_definition(text)
+                    .unwrap_or_else(|| panic!("{layout}: {exe} unreadable"));
+                assert_eq!(found.as_deref(), Some(exe), "{layout}");
+                let flags = flagged(&words, found);
+                assert_eq!(flags.supervised, supervised, "{layout}");
+                assert_eq!(flags.config.as_deref(), Some(odd), "{layout}");
+                assert_eq!(
+                    flags.data_dir.as_deref(),
+                    supervised.then_some(data),
+                    "{layout}"
+                );
+                assert!(
+                    words
+                        .iter()
+                        .any(|word| word == "C:\\Users\\me\\My\u{a0}Dir"),
+                    "{layout}: {words:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_task_schedulers_own_serialization_of_our_task_reads_back() {
+    // Not upstream's. This text did not come from our generator: it is what
+    // the Task Scheduler's serializer (COM `NewTask(0)`, set `XmlText`, read
+    // `XmlText` back; the same one `schtasks /query /xml` prints with) gives
+    // for our task, minus the byte order mark. It has literal `"` and `'` in
+    // the text, `&amp;`, a literal é, and a UTF-16 prolog.
+    let lf = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>test</Description>
+    <URI>\open-ferry-xmlcheck</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>S-1-5-REDACTED</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-REDACTED</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>10</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>"C:\Users\me\AppData\Local\Programs\open ferry\open-ferry.exe"</Command>
+      <Arguments>service run -supervise -config "C:\Users\me\My Odd&amp;Dir's é\config.yaml" -data-dir "C:\Users\me\data dir &amp; 100%\open-ferry"</Arguments>
+      <WorkingDirectory>C:\Users\me\My Odd&amp;Dir</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>"#;
+    let exe = r"C:\Users\me\AppData\Local\Programs\open ferry\open-ferry.exe";
+    let config = r"C:\Users\me\My Odd&Dir's é\config.yaml";
+    let data = r"C:\Users\me\data dir & 100%\open-ferry";
+    for (layout, text) in [("lf", lf.to_owned()), ("crlf", lf.replace('\n', "\r\n"))] {
+        let (found_words, found) =
+            windows::task_definition(&text).unwrap_or_else(|| panic!("{layout}: unreadable"));
+        assert_eq!(found.as_deref(), Some(exe), "{layout}");
+        assert_eq!(
+            Some(found_words.clone()),
+            words(&[
+                "service",
+                "run",
+                "-supervise",
+                "-config",
+                config,
+                "-data-dir",
+                data
+            ]),
+            "{layout}"
+        );
+        assert_eq!(windows::task_words(&text), Some(found_words.clone()));
+        let flags = flagged(&found_words, found);
+        assert!(flags.supervised, "{layout}");
+        assert_eq!(flags.data_dir.as_deref(), Some(data), "{layout}");
+        assert_eq!(flags.config.as_deref(), Some(config), "{layout}");
+    }
+}
+
+const SYSTEMD_STOP: &str = "systemctl --user disable --now open-ferry.service";
+const SYSTEMD_ACTIVE: &str = "systemctl --user is-active open-ferry.service";
+
+fn supervised_unit_fake(record: &str) -> Fake {
+    Fake::default()
+        .uid(1000)
+        .file(LINUX_UNIT, &systemd::unit(&supervised_definition(), false))
+        .file(record, &unit_record(LINUX_DATA, true))
+}
+
+#[test]
+fn a_supervised_unit_that_cannot_be_stopped_and_may_run_is_kept() {
+    // Not upstream's: nothing is removed while the manager can't say the
+    // supervisor is down.
+    let record = format!("{LINUX_DATA}/service.json");
+    let answers: [(Fake, &str); 3] = [
+        (
+            supervised_unit_fake(&record)
+                .fail(SYSTEMD_STOP, 1, "Failed to stop")
+                .answer(SYSTEMD_ACTIVE, 0, "active\n"),
+            "running",
+        ),
+        // The query itself fails in a way that proves nothing.
+        (
+            supervised_unit_fake(&record)
+                .fail(SYSTEMD_STOP, 1, "Failed to stop")
+                .fail(SYSTEMD_ACTIVE, 1, "Failed to connect to bus"),
+            "bus",
+        ),
+        (
+            supervised_unit_fake(&record)
+                .fail(SYSTEMD_STOP, 1, "Failed to stop")
+                .answer(SYSTEMD_ACTIVE, 3, "deactivating\n"),
+            "deactivating",
+        ),
+    ];
+    for (mut fake, case) in answers {
+        let (result, _) = execute_with(&mut fake, &linux(), &["uninstall"]);
+        let error = result.unwrap_err();
+        assert!(error.contains("may still be running"), "{case}: {error}");
+        assert!(error.contains(SYSTEMD_STOP), "{case}: {error}");
+        assert!(
+            error.contains("run the uninstall again; that is safe"),
+            "{case}: {error}"
+        );
+        assert!(fake.files.contains_key(LINUX_UNIT), "{case}");
+        assert!(fake.files.contains_key(&record), "{case}");
+        assert!(
+            !fake.events.iter().any(|event| event.starts_with("remove ")),
+            "{case}: {:?}",
+            fake.events
+        );
+    }
+}
+
+#[test]
+fn a_supervised_unit_that_cannot_be_stopped_but_is_not_running_is_removed() {
+    let record = format!("{LINUX_DATA}/service.json");
+    for answer in ["inactive\n", "failed\n", "unknown\n"] {
+        let mut fake = supervised_unit_fake(&record)
+            .fail(SYSTEMD_STOP, 1, "Failed to stop")
+            .answer(SYSTEMD_ACTIVE, 3, answer);
+        let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
+        assert_eq!(result, Ok(()), "{answer}");
+        assert!(
+            out.contains("the service is not running, going on"),
+            "{out}"
+        );
+        assert!(!fake.files.contains_key(LINUX_UNIT));
+        assert!(!fake.files.contains_key(&record));
+    }
+}
+
+#[test]
+fn a_stop_that_works_is_not_double_checked_and_a_plain_service_is_as_before() {
+    let record = format!("{LINUX_DATA}/service.json");
+    let mut fake = supervised_unit_fake(&record);
+    let (result, _) = execute_with(&mut fake, &linux(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(!fake.events.iter().any(|event| event.contains("is-active")));
+    // A plain unit whose stop fails goes on without asking.
+    let mut fake = Fake::default()
+        .uid(1000)
+        .file(LINUX_UNIT, &systemd::unit(&user_definition(), false))
+        .fail(SYSTEMD_STOP, 1, "Failed to stop");
+    let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(
+        out.contains("failed with exit code 1: Failed to stop; going on"),
+        "{out}"
+    );
+    assert!(!fake.events.iter().any(|event| event.contains("is-active")));
+}
+
+const LAUNCHD_BOOTOUT: &str = "launchctl bootout gui/501/io.github.loft-902-co-llc.open-ferry";
+const LAUNCHD_PRINT: &str = "launchctl print gui/501/io.github.loft-902-co-llc.open-ferry";
+
+fn supervised_agent_fake() -> Fake {
+    let definition = Definition {
+        data_dir: Some(MACOS_DATA.to_owned()),
+        exe: "/Users/me/.local/bin/open-ferry".to_owned(),
+        config: MACOS_CONFIG.to_owned(),
+        dir: "/Users/me/.config/open-ferry".to_owned(),
+    };
+    Fake::default()
+        .uid(501)
+        .file(
+            MACOS_AGENT,
+            &launchd::plist(&definition, "/Users/me/Library/Logs/open-ferry.log", false),
+        )
+        .file(
+            &format!("{MACOS_DATA}/service.json"),
+            &record_of(
+                "launchd",
+                MACOS_DATA,
+                true,
+                &definition.exe,
+                &definition.config,
+            ),
+        )
+}
+
+#[test]
+fn a_plist_with_program_is_a_readable_definition() {
+    // Not upstream's: `Program` is the executable, and `ProgramArguments` is
+    // then its `argv`, whose first string is not the executable.
+    let exe = "/Users/me/.local/bin/open-ferry";
+    let program_only =
+        format!("<plist><dict><key>Program</key><string>{exe}</string></dict></plist>");
+    assert_eq!(
+        launchd::program_arguments(&program_only),
+        Some(vec![exe.to_owned()])
+    );
+    let both = format!(
+        "<plist><dict><key>Program</key><string>{exe}</string><key>ProgramArguments</key><array><string>argv0</string><string>-supervise</string><string>-config</string><string>{MACOS_CONFIG}</string><string>-data-dir</string><string>{MACOS_DATA}</string></array></dict></plist>"
+    );
+    let words = launchd::program_arguments(&both).unwrap();
+    assert_eq!(
+        flagged(&words, words.first().cloned()),
+        Flagged {
+            supervised: true,
+            data_dir: Some(MACOS_DATA.to_owned()),
+            exe: Some(exe.to_owned()),
+            config: Some(MACOS_CONFIG.to_owned()),
+        }
+    );
+    // Neither key: nothing to tell.
+    assert_eq!(launchd::program_arguments("<plist><dict/></plist>"), None);
+
+    let record_path = format!("{MACOS_DATA}/service.json");
+    // `Program` alone: no config is named, so the stale self-naming record is
+    // left alone, and nothing is taken for supervised.
+    let mut fake = supervised_agent_fake().file(MACOS_AGENT, &program_only);
+    let (result, out) = execute_with(&mut fake, &macos(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Leaving {record_path} alone and not using it: the installed service's definition doesn't name its config."
+        )),
+        "{out}"
+    );
+    assert!(fake.files.contains_key(&record_path));
+    assert!(!fake.events.contains(&format!("remove {record_path}")));
+    assert!(!fake.files.contains_key(MACOS_AGENT));
+
+    // Not taken for supervised: a failed bootout is not checked, and the
+    // plist goes.
+    let mut fake = supervised_agent_fake()
+        .file(MACOS_AGENT, &program_only)
+        .fail(LAUNCHD_BOOTOUT, 5, "Boot-out failed");
+    let (result, out) = execute_with(&mut fake, &macos(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.contains("launchctl print")),
+        "{:?}",
+        fake.events
+    );
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.starts_with("stop_supervisor"))
+    );
+    assert!(!fake.files.contains_key(MACOS_AGENT));
+    assert!(fake.files.contains_key(&record_path));
+
+    // `Program` with `ProgramArguments`: the executable compared is
+    // `Program`, so the matching record is the service's and goes.
+    let mut fake = supervised_agent_fake().file(MACOS_AGENT, &both);
+    let (result, out) = execute_with(&mut fake, &macos(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(!out.contains("Leaving"), "{out}");
+    assert!(!fake.files.contains_key(&record_path));
+}
+
+/// A plist with `body` as its job dict's keys.
+fn plist_of(body: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n{body}\n</dict>\n</plist>\n"
+    )
+}
+
+fn words(items: &[&str]) -> Option<Vec<String>> {
+    Some(items.iter().map(|item| (*item).to_owned()).collect())
+}
+
+#[test]
+fn a_plist_is_read_by_its_structure() {
+    // Not upstream's: comments, nested dicts and other keys' values do not
+    // change what is read.
+    // A comment between a key and its value, before the root, between keys
+    // and between array elements.
+    let plist = format!(
+        "<!-- before -->{}",
+        plist_of(
+            "<!-- a --><key>Program</key><!-- executable --><string>/new/open-ferry</string>\n<!-- b -->\n<key>ProgramArguments</key><!-- c --><array><!-- d --><string>argv0</string><!-- e --><string>-supervise</string></array>"
+        )
+    );
+    assert_eq!(
+        launchd::program_arguments(&plist),
+        words(&["/new/open-ferry", "-supervise"])
+    );
+
+    // A `Program` inside another key's dict is not the job's.
+    let plist = plist_of(
+        "<key>EnvironmentVariables</key><dict><key>Program</key><string>/old/open-ferry</string><key>X</key><array><string>y</string></array></dict>\n<key>ProgramArguments</key><array><string>/new/open-ferry</string><string>-supervise</string></array>",
+    );
+    assert_eq!(
+        launchd::program_arguments(&plist),
+        words(&["/new/open-ferry", "-supervise"])
+    );
+    // So a record naming the nested path is not the installed service's.
+    let record_path = format!("{MACOS_DATA}/service.json");
+    let stale = record_of("launchd", MACOS_DATA, true, "/old/open-ferry", MACOS_CONFIG);
+    let plist = plist_of(&format!(
+        "<key>EnvironmentVariables</key><dict><key>Program</key><string>/old/open-ferry</string></dict>\n<key>ProgramArguments</key><array><string>/new/open-ferry</string><string>-supervise</string><string>-config</string><string>{MACOS_CONFIG}</string><string>-data-dir</string><string>{MACOS_DATA}</string></array>"
+    ));
+    let mut fake = supervised_agent_fake()
+        .file(MACOS_AGENT, &plist)
+        .file(&record_path, &stale);
+    let (result, out) = execute_with(&mut fake, &macos(), &["uninstall"]);
+    assert_eq!(result, Ok(()), "{out}");
+    assert!(
+        out.contains(
+            "it names /old/open-ferry as the binary, but the installed service runs /new/open-ferry"
+        ),
+        "{out}"
+    );
+    assert!(fake.files.contains_key(&record_path));
+
+    // An empty `ProgramArguments` is empty: the next array is not it.
+    let plist = plist_of(
+        "<key>Program</key><string>/bin/of</string>\n<key>ProgramArguments</key><array/>\n<key>WatchPaths</key><array><string>/tmp/a</string><string>/tmp/b</string></array>",
+    );
+    assert_eq!(launchd::program_arguments(&plist), words(&["/bin/of"]));
+    // Other values of every type are skipped by depth.
+    let plist = plist_of(
+        "<key>RunAtLoad</key><true/><key>Nice</key><integer>5</integer><key>X</key><real>1.5</real><key>D</key><date>2026-01-01T00:00:00Z</date><key>B</key><data>AAAA</data><key>E</key><dict/><key>F</key><false/><key>S</key><string/><key>A</key><array><dict><key>k</key><array/></dict></array><key>ProgramArguments</key><array><string>/bin/of</string><string/></array>",
+    );
+    assert_eq!(launchd::program_arguments(&plist), words(&["/bin/of", ""]));
+
+    // Unreadable: a value of another type, a string with markup in it, a
+    // key given twice, a document that is cut off or not a plist, and a
+    // plist that says neither.
+    for body in [
+        "<key>ProgramArguments</key><array><string>/bin/of</string><integer>1</integer></array>",
+        "<key>ProgramArguments</key><array><string>/bin/of</string><array/></array>",
+        "<key>ProgramArguments</key><array><string>/bin/<!-- x -->of</string></array>",
+        "<key>ProgramArguments</key><array><string><![CDATA[/bin/of]]></string></array>",
+        "<key>ProgramArguments</key><array><string><b>x</b></string></array>",
+        "<key>ProgramArguments</key><string>/bin/of</string>",
+        "<key>Program</key><array><string>/bin/of</string></array>",
+        "<key>Program</key><integer>1</integer>",
+        "<key>Program</key><string>/a</string><key>Program</key><string>/b</string>",
+        "<key>ProgramArguments</key><array/><key>ProgramArguments</key><array/>",
+        "<key>Program</key>",
+        "<key>Program</key><string>/bin/of",
+        "<key>Program</key><string>/bin/of</strong>",
+        "stray<key>Program</key><string>/bin/of</string>",
+        "<key>Label</key><string>x</string>",
+    ] {
+        assert_eq!(launchd::program_arguments(&plist_of(body)), None, "{body}");
+    }
+    for text in [
+        "",
+        "not a plist",
+        "<dict><key>Program</key><string>/bin/of</string></dict>",
+        "<plist><dict><key>Program</key><string>/bin/of</string>",
+        "<plist><dict><key>Program</key><string>/bin/of</string></dict>",
+        "<plist/>",
+        "<plist><dict><key>Program",
+        "<plist><!-- never closed",
+    ] {
+        assert_eq!(launchd::program_arguments(text), None, "{text}");
+    }
+    // A deep value costs a stack of tags, not the call stack.
+    let deep = format!(
+        "<key>E</key>{}{}<key>Program</key><string>/bin/of</string>",
+        "<dict><key>k</key>".repeat(100_000),
+        "</dict>".repeat(100_000)
+    );
+    assert_eq!(
+        launchd::program_arguments(&plist_of(&deep)),
+        words(&["/bin/of"])
+    );
+}
+
+#[test]
+fn a_supervised_agent_is_kept_unless_launchd_says_it_is_not_loaded() {
+    // Not upstream's: the same rule as the unit's.
+    let mut fake = supervised_agent_fake()
+        .fail(LAUNCHD_BOOTOUT, 5, "Boot-out failed")
+        .answer(LAUNCHD_PRINT, 0, "state = running\n");
+    let (result, _) = execute_with(&mut fake, &macos(), &["uninstall"]);
+    assert!(result.unwrap_err().contains("may still be running"));
+    assert!(fake.files.contains_key(MACOS_AGENT));
+    assert!(
+        fake.files
+            .contains_key(&format!("{MACOS_DATA}/service.json"))
+    );
+    assert!(!fake.events.iter().any(|event| event.starts_with("remove ")));
+
+    let mut fake = supervised_agent_fake()
+        .fail(LAUNCHD_BOOTOUT, 5, "Boot-out failed")
+        .fail(LAUNCHD_PRINT, 113, "Could not find service");
+    let (result, out) = execute_with(&mut fake, &macos(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(
+        out.contains("the service is not running, going on"),
+        "{out}"
+    );
+    assert!(!fake.files.contains_key(MACOS_AGENT));
+
+    let mut fake = supervised_agent_fake();
+    let (result, _) = execute_with(&mut fake, &macos(), &["uninstall"]);
+    assert_eq!(result, Ok(()));
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.contains("launchctl print"))
+    );
+}
+
+const UNREADABLE: &str =
+    "the installed service's definition can't be read, so the record can't be checked against it";
+
+#[test]
+fn a_plist_that_is_there_and_cannot_be_read_rejects_the_record_and_keeps_the_stop_check() {
+    // Not upstream's: a stale `supervised: false` record in the environment's
+    // directory must not turn the stop check off when the plist can't say
+    // what the job runs.
+    let record_path = format!("{MACOS_DATA}/service.json");
+    let stale = record_of(
+        "launchd",
+        MACOS_DATA,
+        false,
+        "/Users/me/.local/bin/open-ferry",
+        MACOS_CONFIG,
+    );
+    for plist in [
+        "bplist00\u{1}\u{0}\u{8}",
+        "<plist><dict><key>Program</key><string>/bin/of",
+        "<plist><dict><key>Label</key><string>x</string></dict></plist>",
+    ] {
+        // The job stays loaded: nothing is removed.
+        let mut fake = supervised_agent_fake()
+            .file(MACOS_AGENT, plist)
+            .file(&record_path, &stale)
+            .fail(LAUNCHD_BOOTOUT, 5, "Boot-out failed")
+            .answer(LAUNCHD_PRINT, 0, "state = running\n");
+        let (result, out) = execute_with(&mut fake, &macos(), &["uninstall"]);
+        let error = result.unwrap_err();
+        assert!(error.contains("may still be running"), "{plist}: {error}");
+        assert!(out.contains(UNREADABLE), "{plist}: {out}");
+        assert!(fake.files.contains_key(MACOS_AGENT), "{plist}");
+        assert!(fake.files.contains_key(&record_path), "{plist}");
+        assert!(
+            !fake.events.iter().any(|event| event.starts_with("remove ")),
+            "{plist}: {:?}",
+            fake.events
+        );
+
+        // The job is gone: the plist goes, the record it can't vouch for stays.
+        let mut fake = supervised_agent_fake()
+            .file(MACOS_AGENT, plist)
+            .file(&record_path, &stale)
+            .fail(LAUNCHD_BOOTOUT, 5, "Boot-out failed")
+            .fail(LAUNCHD_PRINT, 113, "Could not find service");
+        let (result, out) = execute_with(&mut fake, &macos(), &["uninstall"]);
+        assert_eq!(result, Ok(()), "{plist}: {out}");
+        assert!(out.contains(UNREADABLE), "{plist}: {out}");
+        assert!(!fake.files.contains_key(MACOS_AGENT), "{plist}");
+        assert!(fake.files.contains_key(&record_path), "{plist}");
+    }
+}
+
+#[test]
+fn a_unit_without_a_command_rejects_the_record_and_keeps_the_stop_check() {
+    let record = format!("{LINUX_DATA}/service.json");
+    let stale = unit_record(LINUX_DATA, false);
+    let unit = "[Unit]\nDescription=open-ferry\n[Service]\nRestart=always\n";
+    let mut fake = supervised_unit_fake(&record)
+        .file(LINUX_UNIT, unit)
+        .file(&record, &stale)
+        .fail(SYSTEMD_STOP, 1, "Failed to stop")
+        .answer(SYSTEMD_ACTIVE, 0, "active\n");
+    let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
+    assert!(result.unwrap_err().contains("may still be running"));
+    assert!(out.contains(UNREADABLE), "{out}");
+    assert!(fake.files.contains_key(LINUX_UNIT));
+    assert!(fake.files.contains_key(&record));
+    assert!(!fake.events.iter().any(|event| event.starts_with("remove ")));
+}
+
+#[test]
+fn a_unit_is_read_only_when_it_is_plainly_ours() {
+    // Not upstream's: anything systemd would read differently from us is
+    // unreadable, so the stop check stays on.
+    let unit = |exec: &str| {
+        format!(
+            "[Unit]\nDescription=x\n[Service]\nType=simple\n{exec}\n[Install]\nWantedBy=default.target\n"
+        )
+    };
+    let ok = |exec: &str| systemd::exec_words(&unit(exec));
+    // What the installer writes, and a plain hand edit: comments, blank
+    // lines, another section's ExecStart, spaces around `=`.
+    assert_eq!(
+        ok("ExecStart=\"/bin/of\" -config \"/a b/c.yaml\""),
+        words(&["/bin/of", "-config", "/a b/c.yaml"])
+    );
+    assert_eq!(
+        ok("# a comment\n; another\n\nExecStart = /bin/of \"100%%\" \"$$x\" \"q\\\"\\\\\""),
+        words(&["/bin/of", "100%", "$x", "q\"\\"])
+    );
+    // Unicode whitespace inside quotes is part of the word; tabs and CRLF
+    // are separators and line ends.
+    assert_eq!(
+        systemd::exec_words("[Service]\r\nExecStart=\t/bin/of\t\"/tmp/my\u{a0}config.yaml\"\r\n"),
+        words(&["/bin/of", "/tmp/my\u{a0}config.yaml"])
+    );
+    assert_eq!(
+        systemd::exec_words("[Unit]\nExecStart=/other\n[Service]\nExecStart=/bin/of\n"),
+        words(&["/bin/of"])
+    );
+    for exec in [
+        // The reviewer's unterminated quote, and a quote cut by a backslash.
+        "ExecStart=/bin/of -config \"/tmp/config.yaml",
+        "ExecStart=/bin/of \"/tmp/x\\",
+        // None, two, a reset, and an empty one.
+        "Restart=always",
+        "ExecStart=/bin/of\nExecStart=/bin/of2",
+        "ExecStart=\nExecStart=/bin/of",
+        "ExecStart=",
+        "ExecStart=   ",
+        // A continuation line.
+        "ExecStart=/bin/of \\\n-config x",
+        "ExecStart=/bin/of\nEnvironment=A=b \\\nc",
+        // Prefixes.
+        "ExecStart=-/bin/of",
+        "ExecStart=@/bin/of x",
+        "ExecStart=:/bin/of",
+        "ExecStart=+/bin/of",
+        "ExecStart=!/bin/of",
+        // A prefix on the decoded executable, quoted.
+        "ExecStart=\"-/bin/of\" -config /c",
+        "ExecStart=\"@/bin/of\"",
+        "ExecStart=\"+\"/bin/of",
+        // Unicode whitespace outside quotes is not systemd's separator.
+        "ExecStart=/bin/of -config /tmp/my\u{a0}config.yaml",
+        "ExecStart=/bin/of\u{2003}-config",
+        // Quotes and escapes.
+        "ExecStart=/bin/of 'a b'",
+        "ExecStart=/bin/of \"a\\nb\"",
+        "ExecStart=/bin/of a\\ b",
+        // A single `%` or `$`.
+        "ExecStart=/bin/of %h",
+        "ExecStart=/bin/of \"$HOME\"",
+        "ExecStart=/bin/of 100%",
+    ] {
+        assert_eq!(ok(exec), None, "{exec}");
+    }
+    // The ExecStart must be in `[Service]`.
+    assert_eq!(
+        systemd::exec_words("[Unit]\nExecStart=/bin/of\n[Install]\nExecStart=/x\n"),
+        None
+    );
+    assert_eq!(systemd::exec_words("ExecStart=/bin/of\n"), None);
+}
+
+#[test]
+fn a_unit_that_is_unreadable_to_us_keeps_the_stop_check_and_the_record() {
+    let record = format!("{LINUX_DATA}/service.json");
+    let stale = unit_record(LINUX_DATA, false);
+    let cut = "[Service]\nExecStart=/bin/of -config \"/tmp/config.yaml\n";
+    let drop_in = format!("{LINUX_UNIT}.d");
+    let cases: [(Fake, &str); 2] = [
+        (supervised_unit_fake(&record).file(LINUX_UNIT, cut), "cut"),
+        // A drop-in directory beside a unit we could read.
+        (supervised_unit_fake(&record).dir(&drop_in), "drop-in"),
+    ];
+    for (fake, case) in cases {
+        let mut fake = fake
+            .file(&record, &stale)
+            .fail(SYSTEMD_STOP, 1, "Failed to stop")
+            .answer(SYSTEMD_ACTIVE, 0, "active\n");
+        let (result, out) = execute_with(&mut fake, &linux(), &["uninstall"]);
+        assert!(
+            result.unwrap_err().contains("may still be running"),
+            "{case}"
+        );
+        assert!(out.contains(UNREADABLE), "{case}: {out}");
+        assert!(fake.files.contains_key(LINUX_UNIT), "{case}");
+        assert!(fake.files.contains_key(&record), "{case}");
+        assert!(
+            !fake.events.iter().any(|event| event.starts_with("remove ")),
+            "{case}: {:?}",
+            fake.events
+        );
+    }
+}
+
+#[test]
+fn a_plist_reader_takes_what_xml_allows_in_tags_doctypes_and_the_start() {
+    let job = "<dict><key>ProgramArguments</key><array><string>/bin/of</string></array></dict>";
+    let wanted = words(&["/bin/of"]);
+    for text in [
+        // A `>` inside a quoted attribute value.
+        format!("<plist version=\"1.0\" note=\">\">{job}</plist>"),
+        format!("<plist version='1.0' note='>'>{job}</plist>"),
+        // Quoted `>` and an internal subset in the DOCTYPE.
+        format!("<!DOCTYPE plist SYSTEM \"a>b\"><plist>{job}</plist>"),
+        format!("<!DOCTYPE plist [<!ENTITY x \"]>\">]><plist>{job}</plist>"),
+        format!("<!DOCTYPE plist [<!-- ]> --><!ENTITY x 'y'>] ><plist>{job}</plist>"),
+        // One byte order mark, whitespace and comments after the root.
+        format!("\u{FEFF}<plist>{job}</plist>"),
+        format!("<plist>{job}</plist>\n<!-- done --><?pi x?> \n"),
+        // Dashes in a comment that are not `--`.
+        format!("<!-- a-b - c --><plist>{job}</plist>"),
+    ] {
+        assert_eq!(launchd::program_arguments(&text), wanted, "{text}");
+    }
+    for text in [
+        format!("<plist>{job}</plist><"),
+        format!("<plist>{job}</plist>text"),
+        format!("<plist>{job}</plist><plist>{job}</plist>"),
+        format!("<plist>{job}</plist><![CDATA[x]]>"),
+        format!("\u{FEFF}\u{FEFF}<plist>{job}</plist>"),
+        format!("<!-- bad -- comment --><plist>{job}</plist>"),
+        format!("<!-- bad ---><plist>{job}</plist>"),
+        format!("<plist>{job}</plist><!-- a -- b -->"),
+        format!("<!DOCTYPE plist [<!ENTITY x \"]>\"><plist>{job}</plist>"),
+        "<plist note=\"><dict/></plist>".to_owned(),
+        // A declaration after the root, and `--` in a subset's comment.
+        format!("<plist>{job}</plist><!DOCTYPE plist>"),
+        format!("<!DOCTYPE plist [<!-- a -- b -->]><plist>{job}</plist>"),
+        format!("<!DOCTYPE plist [<!-- a --->]><plist>{job}</plist>"),
+    ] {
+        assert_eq!(launchd::program_arguments(&text), None, "{text}");
+    }
+    // A dict of many distinct keys is read in a blink, not squared.
+    let many: String = (0..100_000)
+        .map(|n| format!("<key>K{n}</key><true/>"))
+        .collect();
+    let plist = plist_of(&format!(
+        "{many}<key>ProgramArguments</key><array><string>/bin/of</string></array>"
+    ));
+    assert_eq!(launchd::program_arguments(&plist), wanted);
+    // Any direct key twice is unreadable, compared once decoded.
+    for body in [
+        "<key>Label</key><string>a</string><key>Label</key><string>b</string>",
+        "<key>Nice</key><integer>1</integer><key>N&#105;ce</key><integer>2</integer>",
+        "<key>RunAtLoad</key><true/><key>RunAtLoad</key><false/>",
+    ] {
+        let plist = plist_of(&format!(
+            "{body}<key>ProgramArguments</key><array><string>/bin/of</string></array>"
+        ));
+        assert_eq!(launchd::program_arguments(&plist), None, "{body}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_a_unix_name_is_kept_in_the_data_directory() {
+    // Not upstream's: only a Unix context built on Windows has its
+    // separators rewritten.
+    let home = context(
+        Platform::Linux,
+        "/home/a\\b/open-ferry",
+        "/home/a\\b",
+        &[("HOME", "/home/a\\b")],
+    );
+    assert_eq!(
+        data_dir(&home).unwrap(),
+        "/home/a\\b/.local/share/open-ferry"
+    );
+    let xdg = context(
+        Platform::Linux,
+        "/home/me/open-ferry",
+        "/home/me",
+        &[("HOME", "/home/me"), ("XDG_DATA_HOME", "/data/x\\y")],
+    );
+    assert_eq!(data_dir(&xdg).unwrap(), "/data/x\\y/open-ferry");
+}
+
+#[test]
+fn refuses_a_data_directory_a_definition_cannot_hold() {
+    // Not upstream's: the pinned data directory is checked as the other
+    // paths are, so it can't split a unit, a plist or a task.
+    let cases: [(Fake, Context, &str); 3] = [
+        (
+            Fake::default().uid(1000).file(LINUX_CONFIG, CONFIG),
+            linux(),
+            "/home/me/.local/share/open\nferry",
+        ),
+        (
+            Fake::default().uid(501).file(MACOS_CONFIG, CONFIG),
+            macos(),
+            "/Users/me/.local/share/open\nferry",
+        ),
+        (
+            windows_user(),
+            windows_with_data(),
+            "C:\\Users\\me\\AppData\\Local\\open\nferry",
+        ),
+    ];
+    for (mut fake, context, data) in cases {
+        let updating = Updating::supervised(data);
+        let (result, _) = execute_updating(&mut fake, &context, &["install"], &updating);
+        let error = result.unwrap_err();
+        assert!(
+            error.starts_with("The data directory's path, ") && error.contains("control character"),
+            "{error}"
+        );
+        assert!(
+            !fake.events.iter().any(|event| {
+                event.starts_with("write")
+                    || event.starts_with("mkdir")
+                    || event.contains("enable")
+                    || event.contains("/create")
+                    || event.contains("bootstrap")
+            }),
+            "{:?}",
+            fake.events
+        );
+    }
+}
+
+#[test]
+fn parses_the_supervised_run() {
+    // Not upstream's: `service run -supervise` needs the data directory the
+    // definition pins, and `-data-dir` goes with nothing else.
+    let data = std::env::temp_dir().to_string_lossy().into_owned();
+    let config = std::env::temp_dir()
+        .join("c.yaml")
+        .to_string_lossy()
+        .into_owned();
+    let run = parse(args(&[
+        "run",
+        "-supervise",
+        "-config",
+        &config,
+        "-data-dir",
+        &data,
+    ]))
+    .unwrap();
+    assert!(run.supervise);
+    assert_eq!(run.data_dir.as_deref(), Some(data.as_str()));
+    let cases: [(Vec<&str>, &str); 4] = [
+        (vec!["run", "-supervise", "-config", &config], "-data-dir"),
+        (
+            vec!["run", "-config", &config, "-data-dir", &data],
+            "-supervise",
+        ),
+        (
+            vec![
+                "run",
+                "-supervise",
+                "-system",
+                "-config",
+                &config,
+                "-data-dir",
+                &data,
+            ],
+            "Windows service",
+        ),
+        (
+            vec![
+                "run",
+                "-supervise",
+                "-config",
+                &config,
+                "-data-dir",
+                "relative",
+            ],
+            "absolute path",
+        ),
+    ];
+    for (line, why) in cases {
+        let error = parse(args(&line));
+        assert!(
+            matches!(&error, Err(FlagError::Invalid(message)) if message.contains(why)),
+            "{line:?}: {error:?}"
+        );
+    }
+    assert!(parse(args(&["install", "-supervise"])).is_err());
 }
