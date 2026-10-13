@@ -19,13 +19,11 @@ async fn reload_keeps_xai_sessions_and_removal_closes_only_one_credential() {
         .with_config(next_config.clone())
         .with_execution_sessions_from(&previous);
     assert!(previous.shares_execution_sessions_with(&next));
+    assert!(Arc::ptr_eq(&next.shared_config().unwrap(), &next_config));
     streamed(&next, &b, HELLO, ws_options("b")).await;
     assert_eq!(server.record().handshakes.len(), 2);
     let session = next.websockets.store.get("b").unwrap();
-    assert!(Arc::ptr_eq(
-        &session.effective_config(&b.id, Some(next_config)).unwrap(),
-        &config
-    ));
+    assert_eq!(session.global_proxy().as_deref(), Some("direct"));
     let state_a = next.websockets.ids.get("a").unwrap();
     let state_b = next.websockets.ids.get("b").unwrap();
     next.close_auth_execution_sessions(&a.id);
@@ -137,11 +135,149 @@ async fn clearing_an_xai_credential_proxy_redials_and_forgets_the_previous_respo
     )
     .await;
     assert_eq!(server.record().handshakes.len(), 2);
-    assert_eq!(proxy.connects().len(), 1);
+    assert!(proxy.connects().is_empty());
     assert!(
         json(&server.record().messages[2])
             .get("previous_response_id")
             .is_none()
     );
     next.close_execution_session("proxy-clear");
+}
+
+#[tokio::test]
+async fn removing_the_previous_xai_credential_preserves_pending_replacement_ownership() {
+    let (release, gate) = watch::channel(false);
+    let server = Server::start(move |n| {
+        if n == 0 {
+            Answer::accept(|mut peer| async move {
+                peer.recv().await.unwrap();
+                peer.send(COMPLETED).await;
+                peer.hold().await;
+            })
+        } else {
+            Answer::Held(
+                gate.clone(),
+                Box::new(Answer::accept(|peer| async move {
+                    peer.hold().await;
+                })),
+            )
+        }
+    })
+    .await;
+    let executor = Arc::new(executor());
+    let a = auth_as("xai-a", API_KEY, &server.url);
+    let b = auth_as("xai-b", API_KEY, &server.url);
+    streamed(&executor, &a, HELLO, ws_options("replacement")).await;
+    let session = executor.websockets.store.get("replacement").unwrap();
+    let state = executor.websockets.ids.get("replacement").unwrap();
+    let task = tokio::spawn({
+        let executor = executor.clone();
+        let b = b.clone();
+        async move {
+            executor
+                .execute_stream(b, request(HELLO), ws_options("replacement"))
+                .await
+        }
+    });
+    server
+        .wait_for("B's pending handshake", |r| r.handshakes.len() == 2)
+        .await;
+    executor.close_auth_execution_sessions(&a.id);
+    assert!(Arc::ptr_eq(
+        &session,
+        &executor.websockets.store.get("replacement").unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &state,
+        &executor.websockets.ids.get("replacement").unwrap()
+    ));
+    assert_eq!(
+        executor
+            .websockets
+            .targets()
+            .get("replacement")
+            .unwrap()
+            .auth_id,
+        a.id
+    );
+    assert!(!task.is_finished());
+    executor.close_auth_execution_sessions(&b.id);
+    assert!(
+        tokio::time::timeout(WAIT, task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(executor.websockets.store.get("replacement").is_none());
+    assert!(!Arc::ptr_eq(
+        &state,
+        &executor.websockets.ids.get("replacement").unwrap()
+    ));
+    assert!(!executor.websockets.targets().contains_key("replacement"));
+    release.send_replace(true);
+    server.wait_closed(2).await;
+    assert_eq!(server.record().messages.len(), 1);
+}
+
+#[tokio::test]
+async fn xai_replacement_after_reload_dials_the_new_global_proxy() {
+    let server = Server::turns(&[COMPLETED]).await;
+    let p1 = crate::codex::websocket::mock::Proxy::start().await;
+    let p2 = crate::codex::websocket::mock::Proxy::start().await;
+    let previous = XaiExecutor::new(p1.url.clone());
+    let mut credential = (*auth(&server.url)).clone();
+    credential.proxy_url = "direct".into();
+    streamed(
+        &previous,
+        &Arc::new(credential.clone()),
+        HELLO,
+        ws_options("proxy-reload"),
+    )
+    .await;
+    let next = XaiExecutor::new(p2.url.clone()).with_execution_sessions_from(&previous);
+    streamed(
+        &next,
+        &Arc::new(credential.clone()),
+        HELLO,
+        ws_options("proxy-reload"),
+    )
+    .await;
+    assert_eq!(server.record().handshakes.len(), 1);
+    assert_eq!(
+        next.websockets.targets().get("proxy-reload").unwrap().proxy,
+        "direct"
+    );
+    credential.proxy_url.clear();
+    streamed(
+        &next,
+        &Arc::new(credential.clone()),
+        HELLO,
+        ws_options("proxy-reload"),
+    )
+    .await;
+    assert!(p1.connects().is_empty());
+    assert_eq!(p2.connects().len(), 1);
+    assert_eq!(
+        next.websockets
+            .store
+            .get("proxy-reload")
+            .unwrap()
+            .global_proxy(),
+        Some(p2.url.clone())
+    );
+    assert_eq!(
+        next.websockets.targets().get("proxy-reload").unwrap().proxy,
+        p2.url
+    );
+    streamed(
+        &next,
+        &Arc::new(credential),
+        HELLO,
+        ws_options("proxy-reload"),
+    )
+    .await;
+    assert_eq!(server.record().handshakes.len(), 2);
+    assert_eq!(p2.connects().len(), 1);
+    next.close_execution_session("proxy-reload");
 }

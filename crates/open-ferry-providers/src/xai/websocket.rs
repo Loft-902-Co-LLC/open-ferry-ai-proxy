@@ -116,16 +116,12 @@ pub(super) struct Sessions {
 impl Sessions {
     /// Closes only connections and transcript state belonging to `auth_id`.
     pub(super) fn close_auth(&self, auth_id: &str) {
-        let ids: Vec<_> = self
-            .targets()
-            .iter()
-            .filter(|(_, target)| target.auth_id.trim() == auth_id.trim())
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in ids {
-            self.close(&id);
+        // The connection store publishes ownership before dialing. The last
+        // successful target can still name the previous credential here.
+        for id in self.store.close_auth_sessions(auth_id) {
+            self.ids.delete(&id);
+            self.targets().remove(&id);
         }
-        self.store.close_auth(auth_id);
     }
 
     pub(super) fn new() -> Self {

@@ -70,6 +70,8 @@
 //! - Connections are logged at debug level.
 //! - Credential removal includes pending handshakes, and interrupts recheck
 //!   the credential after acquiring the send lock, before writing.
+//! - Interrupts also refresh terminal and active state after acquiring the
+//!   send lock, so completion while waiting cannot forward a late interrupt.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -116,8 +118,13 @@ impl Store {
 
     /// Closes connected and pending sessions owned by the removed credential.
     pub(crate) fn close_auth(&self, auth_id: &str) {
+        self.close_auth_sessions(auth_id);
+    }
+
+    /// Returns the IDs whose current or pending ownership matched.
+    pub(crate) fn close_auth_sessions(&self, auth_id: &str) -> Vec<String> {
         if auth_id.trim().is_empty() {
-            return;
+            return Vec::new();
         }
         // Never nest the store lock with a session's state lock. Ownership
         // publication and the decision to close share the state lock.
@@ -126,17 +133,22 @@ impl Store {
             .iter()
             .map(|(id, session)| (id.clone(), session.clone()))
             .collect();
+        let mut removed = Vec::new();
         for (id, session) in candidates {
-            if session.close_for_auth(auth_id.trim()) {
+            if let Some((detached, active)) = session.detach_for_auth(auth_id.trim()) {
                 let mut sessions = self.sessions();
                 if sessions
                     .get(&id)
                     .is_some_and(|current| Arc::ptr_eq(current, &session))
                 {
                     sessions.remove(&id);
+                    removed.push(id);
                 }
+                drop(sessions);
+                session.finish_close("auth_removed", detached, active);
             }
         }
+        removed
     }
 
     pub(crate) async fn interrupt(
@@ -187,6 +199,32 @@ impl Store {
         }
         // Authorization may change while another write holds the permit.
         let mut sink = conn.sink.lock().await;
+        // Unlike upstream, refresh the turn snapshot after the permit too:
+        // its reader may have delivered completion while the write waited.
+        {
+            let state = session.state();
+            if !state
+                .conn
+                .as_ref()
+                .is_some_and(|current| current.id == conn.id)
+            {
+                return Ok(false);
+            }
+            if let Some((_, failure)) = state.terminal.as_ref().filter(|(id, _)| *id == conn.id) {
+                return Err(errors::error(failure));
+            }
+            if lock(&conn.terminal_responses).contains(&response_id) {
+                tracing::debug!(outcome = "already_terminal", "codex websockets: interrupt");
+                return Ok(true);
+            }
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.conn == conn.id)
+            {
+                return Ok(false);
+            }
+        }
         if !auth_check(&conn.target.auth_id) {
             return Err(open_ferry_core::exec::ExecError::upstream(
                 400,
@@ -282,9 +320,6 @@ pub(crate) struct Target {
     /// What the handshake sends, the token among them, redacted from the
     /// connection's failures; not part of what the target is.
     secrets: Secrets,
-    /// The config snapshot, for tests of retained routing.
-    #[cfg(test)]
-    config: Option<Arc<open_ferry_core::config::Config>>,
     /// The global route at dial time, separately from a credential override.
     global_proxy: String,
 }
@@ -308,8 +343,6 @@ impl Target {
             proxy: proxy.trim().to_owned(),
             token: token.to_owned(),
             secrets: Secrets::from_iter([token]),
-            #[cfg(test)]
-            config: None,
             global_proxy: proxy.trim().to_owned(),
         }
     }
@@ -317,15 +350,6 @@ impl Target {
     /// The target, its connection's failures also redacting `secrets`.
     pub(crate) fn with_secrets(mut self, secrets: &Secrets) -> Self {
         self.secrets.extend(secrets);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_config(
-        mut self,
-        config: Option<Arc<open_ferry_core::config::Config>>,
-    ) -> Self {
-        self.config = config;
         self
     }
 
@@ -387,6 +411,11 @@ impl Conn {
 
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The route actually used by this connection's handshake.
+    pub(crate) fn proxy(&self) -> &str {
+        &self.target.proxy
     }
 
     /// The secrets the connection's handshake sent.
@@ -519,18 +548,13 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// A retained connection keeps the configuration it was opened with.
+    /// The route retained by the connection, for assertions about reloads.
     #[cfg(test)]
-    pub(crate) fn effective_config(
-        &self,
-        auth_id: &str,
-        fallback: Option<Arc<open_ferry_core::config::Config>>,
-    ) -> Option<Arc<open_ferry_core::config::Config>> {
+    pub(crate) fn global_proxy(&self) -> Option<String> {
         self.state()
             .conn
             .as_ref()
-            .filter(|conn| conn.target.auth_id == auth_id.trim())
-            .map_or(fallback, |conn| conn.target.config.clone())
+            .map(|conn| conn.target.global_proxy.clone())
     }
 
     pub(crate) fn effective_proxy(
@@ -728,18 +752,14 @@ impl Session {
         self.finish_close(reason, detached, active);
     }
 
-    fn close_for_auth(&self, auth_id: &str) -> bool {
-        let (detached, active) = {
-            let mut state = self.state();
-            if state.auth_id != auth_id {
-                return false;
-            }
-            state.closed = true;
-            state.multi_agent = None;
-            (state.conn.take(), state.active.take())
-        };
-        self.finish_close("auth_removed", detached, active);
-        true
+    fn detach_for_auth(&self, auth_id: &str) -> Option<(Option<Arc<Conn>>, Option<Active>)> {
+        let mut state = self.state();
+        if state.auth_id != auth_id {
+            return None;
+        }
+        state.closed = true;
+        state.multi_agent = None;
+        Some((state.conn.take(), state.active.take()))
     }
 
     fn finish_close(&self, reason: &str, detached: Option<Arc<Conn>>, active: Option<Active>) {
@@ -755,7 +775,7 @@ impl Session {
         }
     }
 
-    /// The secrets the handshake of the connection [`Self::ensure_conn`]
+    /// The secrets the handshake of the connection [`Self::ensure_conn_with_reuse`]
     /// would keep for `target` sent, if there is one: a call that keeps it
     /// redacts them as well as its own.
     pub(crate) fn kept_secrets(&self, target: &Target) -> Option<Secrets> {
@@ -793,6 +813,20 @@ impl Session {
         );
     }
 
+    #[cfg(test)]
+    pub(crate) async fn ensure_conn<F, Fut>(
+        self: &Arc<Self>,
+        target: Target,
+        dial: F,
+    ) -> Result<(Arc<Conn>, Option<HeaderMap>), DialError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Dialed, DialError>>,
+    {
+        self.ensure_conn_with_reuse(target.clone(), &target, dial)
+            .await
+    }
+
     /// The session's connection for `target`, connecting with `dial` when
     /// there is none (`ensureUpstreamConn`). A connection for another
     /// target is closed first, and one already closed is let go. The
@@ -801,9 +835,11 @@ impl Session {
     /// A closed session fails. One that closes during the handshake
     /// abandons it, and one that closed as it finished drops the new
     /// connection.
-    pub(crate) async fn ensure_conn<F, Fut>(
+    /// Compares the saved route for reuse, but records the current dial target.
+    pub(crate) async fn ensure_conn_with_reuse<F, Fut>(
         self: &Arc<Self>,
         target: Target,
+        reuse_target: &Target,
         dial: F,
     ) -> Result<(Arc<Conn>, Option<HeaderMap>), DialError>
     where
@@ -822,7 +858,7 @@ impl Session {
             if state
                 .conn
                 .as_ref()
-                .is_some_and(|conn| conn.target != target || conn.is_closed())
+                .is_some_and(|conn| conn.target != *reuse_target || conn.is_closed())
             {
                 state.multi_agent = None;
                 state.conn.take()
@@ -831,7 +867,7 @@ impl Session {
             }
         };
         if let Some(stale) = stale {
-            let reason = if stale.target == target {
+            let reason = if stale.target == *reuse_target {
                 "closed"
             } else {
                 "target_changed"

@@ -20,7 +20,10 @@ use tokio::sync::oneshot;
 
 use super::support::*;
 use crate::auth::Auth;
-use crate::exec::{ChunkStream, Dispatcher, ExecError, Options, Request, Response, StreamResponse};
+use crate::exec::{
+    ChunkStream, Dispatcher, ErrorKind, ExecError, Options, Request, Response, StreamResponse,
+    TransportFault,
+};
 use crate::executor::ProviderExecutor;
 use crate::manager::{Settings, lock};
 
@@ -170,4 +173,89 @@ async fn a_ready_usage_limit_error_wins_over_a_client_that_left() {
     // The failure stands: no success cleared it, and nothing replayed it.
     assert_eq!(stored.quota.reason, "credential_quota");
     assert_eq!(executor.streams.load(Ordering::SeqCst), 1);
+}
+
+// TestManagerExecuteStreamPlainCancellationDoesNotCoolCredential, adapted
+// to a returned stream and the closed-session failure queued on disconnect.
+#[tokio::test]
+async fn a_ready_closed_session_error_after_disconnect_does_not_cool_the_credential() {
+    let (release, gate) = oneshot::channel::<()>();
+    let (finished, done) = oneshot::channel::<()>();
+    let chunks = stream::once(async { Ok(Bytes::from_static(CREATED)) })
+        .chain(stream::once(async move {
+            let _ = gate.await;
+            Err(ExecError::new(
+                ErrorKind::Upstream,
+                "codex websockets executor: use of closed network connection",
+            )
+            .with_transport(TransportFault::Transient))
+        }))
+        .chain(stream::once(async move {
+            let _ = finished.send(());
+            Ok(Bytes::new())
+        }))
+        .boxed();
+    // A drop witness proves that forwarding stopped, without timed settling.
+    struct End(Option<oneshot::Sender<()>>);
+    impl Drop for End {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+    let (ended, end) = oneshot::channel();
+    let witness = End(Some(ended));
+    let chunks = chunks
+        .map(move |chunk| {
+            let _ = &witness;
+            chunk
+        })
+        .boxed();
+    let executor = Arc::new(Scripted {
+        chunks: Mutex::new(Some(chunks)),
+        streams: AtomicUsize::new(0),
+    });
+    let h = Harness::with_store(Settings::default());
+    h.manager.register_executor(executor);
+    h.add(
+        auth_with_metadata(AUTH, "codex", serde_json::json!({"type": "codex"})),
+        &[MODEL],
+    );
+    let before = h.get(AUTH);
+    let mut opts = options();
+    opts.stream = true;
+    let mut response = h
+        .manager
+        .execute_stream(&providers(&["codex"]), request(MODEL), opts)
+        .await
+        .unwrap();
+    assert_eq!(response.chunks.next().await.unwrap().unwrap(), CREATED);
+    settle().await;
+    // Both source failure and client departure are ready on the next poll.
+    drop(response);
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), end)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(done.await.is_err(), "the source must stop after its error");
+    let stored = h.get(AUTH);
+    assert!(!stored.unavailable);
+    assert!(stored.next_retry_after.is_none());
+    assert!(!stored.quota.exceeded);
+    if let Some(model) = stored.model_states.get(MODEL) {
+        assert!(!model.unavailable);
+        assert!(model.next_retry_after.is_none());
+        assert!(!model.quota.exceeded);
+    }
+    // Upstream records a ready plain error too; it does not imply cooldown.
+    assert_eq!(stored.failed, before.failed + 1);
+    assert_eq!(stored.success, before.success);
+    assert!(
+        h.store
+            .saved()
+            .iter()
+            .any(|auth| auth.failed == stored.failed)
+    );
 }

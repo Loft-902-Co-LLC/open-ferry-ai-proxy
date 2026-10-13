@@ -154,10 +154,7 @@ async fn reload_shares_sessions_and_removal_closes_only_the_removed_credential()
     assert!(collect(response).await.1.is_none());
     assert_eq!(server.record().handshakes.len(), 2);
     let session = next.websockets().get("b").unwrap();
-    assert!(Arc::ptr_eq(
-        &session.effective_config(&b.id, Some(next_config)).unwrap(),
-        &config
-    ));
+    assert_eq!(session.global_proxy().as_deref(), Some("direct"));
     next.close_auth_execution_sessions(&a.id);
     server
         .wait_for("only credential a to close", |r| r.client_closed == 1)
@@ -303,7 +300,7 @@ async fn interrupt_revalidates_a_credential_after_waiting_for_the_send_lock() {
 }
 
 #[tokio::test]
-async fn clearing_a_codex_credential_proxy_redials_through_the_saved_global_proxy() {
+async fn clearing_a_codex_credential_proxy_redials_through_the_current_global_proxy() {
     let server = Server::turns(&[COMPLETED]).await;
     let proxy = super::super::mock::Proxy::start().await;
     let previous = CodexExecutor::new(proxy.url.clone());
@@ -331,6 +328,120 @@ async fn clearing_a_codex_credential_proxy_redials_through_the_saved_global_prox
         .unwrap();
     assert!(collect(response).await.1.is_none());
     assert_eq!(server.record().handshakes.len(), 2);
-    assert_eq!(proxy.connects().len(), 1);
+    assert!(proxy.connects().is_empty());
     next.close_execution_session("proxy-clear");
+}
+
+// Deviation from upstream: completion is checked again after the send permit.
+#[tokio::test]
+async fn interrupt_waiting_for_the_send_lock_drops_a_completed_response() {
+    let (complete, gate) = watch::channel(false);
+    let server = Server::start(move |_| {
+        let gate = gate.clone();
+        Answer::accept(move |mut peer| {
+            let mut gate = gate.clone();
+            async move {
+                peer.recv().await.unwrap();
+                peer.send(r#"{"type":"response.created","response":{"id":"resp-1"}}"#)
+                    .await;
+                gate.wait_for(|ready| *ready).await.unwrap();
+                peer.send(
+                    r#"{"type":"response.completed","response":{"id":"resp-1","output":[]}}"#,
+                )
+                .await;
+                peer.hold().await;
+            }
+        })
+    })
+    .await;
+    let executor = executor();
+    let mut response = executor
+        .execute_stream(
+            Arc::new(auth(&server.url)),
+            request("gpt-5-codex", HELLO),
+            ws_options("completion-gate"),
+        )
+        .await
+        .unwrap();
+    response.chunks.next().await.unwrap().unwrap();
+    let session = executor.websockets().get("completion-gate").unwrap();
+    let conn = session.conn().unwrap();
+    let permit = conn.lock_send().await;
+    let interrupt = executor.interrupt_execution_session(
+        "completion-gate",
+        INTERRUPT.as_bytes(),
+        Arc::new(|_| true),
+    );
+    tokio::pin!(interrupt);
+    assert!(futures_util::poll!(&mut interrupt).is_pending());
+    complete.send_replace(true);
+    // Consuming the completion proves the reader updated terminal state.
+    assert!(collect(response).await.1.is_none());
+    drop(permit);
+    assert!(interrupt.await.unwrap());
+    executor.close_execution_session("completion-gate");
+    server.wait_closed(1).await;
+    assert_eq!(server.record().messages.len(), 1);
+}
+
+#[tokio::test]
+async fn codex_replacement_after_reload_dials_the_new_global_proxy() {
+    let server = Server::turns(&[COMPLETED]).await;
+    let p1 = super::super::mock::Proxy::start().await;
+    let p2 = super::super::mock::Proxy::start().await;
+    let previous = CodexExecutor::new(p1.url.clone());
+    let mut credential = auth(&server.url);
+    credential.proxy_url = "direct".into();
+    let first = previous
+        .execute_stream(
+            Arc::new(credential.clone()),
+            request("gpt-5-codex", HELLO),
+            ws_options("proxy-reload"),
+        )
+        .await
+        .unwrap();
+    assert!(collect(first).await.1.is_none());
+    let next = CodexExecutor::new(p2.url.clone()).with_execution_sessions_from(&previous);
+    // A reload alone retains the existing connection and its route.
+    let second = next
+        .execute_stream(
+            Arc::new(credential.clone()),
+            request("gpt-5-codex", HELLO),
+            ws_options("proxy-reload"),
+        )
+        .await
+        .unwrap();
+    assert!(collect(second).await.1.is_none());
+    assert_eq!(server.record().handshakes.len(), 1);
+    credential.proxy_url.clear();
+    let third = next
+        .execute_stream(
+            Arc::new(credential.clone()),
+            request("gpt-5-codex", HELLO),
+            ws_options("proxy-reload"),
+        )
+        .await
+        .unwrap();
+    assert!(collect(third).await.1.is_none());
+    assert!(p1.connects().is_empty());
+    assert_eq!(p2.connects().len(), 1);
+    assert_eq!(
+        next.websockets()
+            .get("proxy-reload")
+            .unwrap()
+            .global_proxy(),
+        Some(p2.url.clone())
+    );
+    let fourth = next
+        .execute_stream(
+            Arc::new(credential),
+            request("gpt-5-codex", HELLO),
+            ws_options("proxy-reload"),
+        )
+        .await
+        .unwrap();
+    assert!(collect(fourth).await.1.is_none());
+    assert_eq!(server.record().handshakes.len(), 2);
+    assert_eq!(p2.connects().len(), 1);
+    next.close_execution_session("proxy-reload");
 }
