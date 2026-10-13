@@ -340,6 +340,48 @@ impl ConfigWriter for FileConfigWriter {
     }
 }
 
+/// Checks the state's paths before the writer can read or change any file.
+pub(crate) struct CheckedConfigWriter {
+    pub(crate) state: ManagementState,
+    pub(crate) writer: Arc<dyn ConfigWriter>,
+}
+
+impl ConfigWriter for CheckedConfigWriter {
+    fn save_preserving_comments(
+        &self,
+        config: &Config,
+        migrate_v8: bool,
+        expected_sha256: Option<&str>,
+    ) -> Result<Option<String>, WriteError> {
+        self.state
+            .authorize_config_write()
+            .map_err(WriteError::new)?;
+        self.writer
+            .save_preserving_comments(config, migrate_v8, expected_sha256)
+    }
+
+    fn write_file(&self, data: &[u8]) -> Result<Option<String>, WriteError> {
+        self.state
+            .authorize_config_write()
+            .map_err(WriteError::new)?;
+        self.writer.write_file(data)
+    }
+
+    fn edit_v8(&self, edit: &V8Edit) -> Result<(Config, Option<String>), V8EditError> {
+        self.state
+            .authorize_config_write()
+            .map_err(V8EditError::WriteFailed)?;
+        self.writer.edit_v8(edit)
+    }
+
+    fn undo(&self, check: &UndoCheck) -> Result<(Config, Option<String>), UndoError> {
+        self.state
+            .authorize_config_write()
+            .map_err(UndoError::Failed)?;
+        self.writer.undo(check)
+    }
+}
+
 /// What a v8 route answers when [`ConfigWriter::edit_v8`] made no change
 /// (upstream's `ConfigV8`).
 pub(crate) fn v8_error_response(error: &V8EditError) -> Response {
@@ -431,10 +473,7 @@ pub(crate) fn ok() -> Response {
 
 /// The state's writer, or the 503 answer.
 pub(crate) fn writer(state: &ManagementState) -> Result<Arc<dyn ConfigWriter>, Response> {
-    state
-        .config_writer()
-        .cloned()
-        .ok_or_else(writer_unavailable)
+    state.config_writer().ok_or_else(writer_unavailable)
 }
 
 /// The body of a request that changes the config: the 503 answer when the
@@ -559,10 +598,7 @@ async fn catch_up(state: &ManagementState, stale: Option<String>) -> bool {
 /// the file again. Not upstream's: the dashboard API's `config/undo` route
 /// calls it. On an error nothing was changed.
 pub async fn undo_config(state: &ManagementState, check: UndoCheck) -> Result<(), UndoError> {
-    let writer = state
-        .config_writer()
-        .cloned()
-        .ok_or(UndoError::Unavailable)?;
+    let writer = state.config_writer().ok_or(UndoError::Unavailable)?;
     let state = state.clone();
     run_task(async move {
         {
@@ -619,3 +655,7 @@ pub(crate) async fn run_task<T: Send + 'static>(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "config_write_tests.rs"]
+mod tests;
