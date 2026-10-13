@@ -35,9 +35,8 @@
 //! is logged.
 //!
 //! Deviations from upstream:
-//! - A body over the configured limit gets 413, and a body that fails to
-//!   read gets a 400 in the shape the other routes use, where upstream's
-//!   create answers either with a failed video.
+//! - A body that fails to read gets a 400 in the shape the other routes
+//!   use, where upstream's create answers with a failed video.
 //! - A body sent on to xAI with 128 or more arrays and objects inside one
 //!   another gets a 400 (see [`crate::body::check_depth`]).
 //! - The content route has no keep-alive while it asks xAI for the video:
@@ -196,8 +195,12 @@ fn body_model(raw: &[u8]) -> String {
 
 /// A failed video object for a refused create (`writeVideosFailedError`).
 fn failed(model: &str, message: &str) -> Response {
+    failed_with_status(400, model, message)
+}
+
+fn failed_with_status(status: u16, model: &str, message: &str) -> Response {
     error_response(
-        400,
+        status,
         HeaderMap::new(),
         Bytes::from(build::failed_response(
             model,
@@ -218,11 +221,25 @@ pub(crate) async fn create(
     let raw = if build::is_form(&build::content_type(&client.headers)) {
         match body::read_raw(&client.headers, body, settings.body_limit).await {
             Ok(raw) => build::form_request(&client.headers, &raw),
+            Err(response) if response.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                return failed_with_status(
+                    413,
+                    DEFAULT_MODEL,
+                    "Invalid request: http: request body too large",
+                );
+            }
             Err(response) => return response,
         }
     } else {
         let raw = match body::read_decoded(&client.headers, body, settings.body_limit).await {
             Ok(raw) => raw,
+            Err(response) if response.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                return failed_with_status(
+                    413,
+                    DEFAULT_MODEL,
+                    "Invalid request: http: request body too large",
+                );
+            }
             Err(response) => return response,
         };
         if !json::valid(&raw) {

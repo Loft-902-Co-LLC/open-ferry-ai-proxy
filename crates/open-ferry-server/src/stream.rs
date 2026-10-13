@@ -182,12 +182,23 @@ pub(crate) fn pre_first_token_interval(config: &StreamingConfig) -> Option<Durat
         .filter(|period| config.keepalive_before_first_token && !period.is_zero())
 }
 
-/// Waits for bootstrap and the first payload. A tick commits SSE without
-/// upstream headers; later failures are answered by `respond` in-stream.
+/// Headers available when a keepalive commits the response.
+#[derive(Clone, Default)]
+pub(crate) struct CommitHeaders(std::sync::Arc<std::sync::Mutex<HeaderMap>>);
+
+impl CommitHeaders {
+    pub(crate) fn set(&self, headers: &HeaderMap) {
+        *self.0.lock().unwrap() = headers.clone();
+    }
+}
+
+/// Waits for bootstrap and the first payload. A tick commits SSE with
+/// available upstream headers; later failures are answered by `respond` in-stream.
 /// The waiting future lives in the body, so dropping it cancels bootstrap
 /// directly rather than leaving a spawned task to join.
 pub(crate) async fn pre_first_token<T, F, R>(
     interval: Option<Duration>,
+    headers: CommitHeaders,
     call: F,
     respond: R,
 ) -> Response
@@ -247,7 +258,7 @@ where
             }
         }
     });
-    sse_response(&HeaderMap::new(), Body::from_stream(body))
+    sse_response(&headers.0.lock().unwrap(), Body::from_stream(body))
 }
 
 /// A 200 event stream: the SSE headers, then the provider's headers that

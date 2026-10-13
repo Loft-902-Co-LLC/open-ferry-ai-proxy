@@ -22,7 +22,8 @@
 //!
 //! Deviations from upstream:
 //! - A payload over 16 MiB (or the configured body limit, when lower) gets
-//!   the proxy's usual 413, and one that fails to arrive its usual 400.
+//!   413 with `{"error":"Failed to read search request"}`, and one that
+//!   fails to arrive gets the proxy's usual 400.
 //!   Upstream sends the first 16 MiB on, and answers a failed read with
 //!   `{"error":"Failed to read search request"}`.
 //! - An answer without a `Content-Type` goes out without one, where Go's
@@ -58,6 +59,14 @@ pub(crate) async fn search(
     let limit = MAX_SEARCH_BODY.min(state.settings().config.body_limit);
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,
+        Err(response) if response.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return error_response(
+                413,
+                HeaderMap::new(),
+                Bytes::from_static(br#"{"error":"Failed to read search request"}"#),
+                JSON_UTF8,
+            );
+        }
         Err(response) => return response,
     };
     // Upstream records the search in the request log, and no usage.

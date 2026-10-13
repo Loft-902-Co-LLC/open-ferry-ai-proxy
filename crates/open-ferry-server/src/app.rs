@@ -161,20 +161,20 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), safe_mode))
         .layer(CatchPanicLayer::custom(panicked))
+        .layer(middleware::from_fn(cors))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             logged_body_limit,
         ))
-        .layer(middleware::from_fn(cors))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_log::layer,
         ))
-        .layer(middleware::from_fn(access_log::layer))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             declared_body_limit,
         ))
+        .layer(middleware::from_fn(access_log::layer))
         .layer(middleware::from_fn_with_state(
             state,
             request_context::layer,
@@ -225,7 +225,17 @@ async fn logged_body_limit(
             next.run(Request::from_parts(parts, axum::body::Body::from(raw)))
                 .await
         }
-        Err(response) => response,
+        Err(response) if response.status() == StatusCode::PAYLOAD_TOO_LARGE => error_response(
+            413,
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"error":"http: request body too large"}"#),
+            JSON_UTF8,
+        ),
+        Err(mut response) => {
+            // Only an oversized logging read aborts before upstream's CORS.
+            set_cors_headers(response.headers_mut());
+            response
+        }
     }
 }
 
@@ -268,7 +278,11 @@ async fn cors(request: Request, next: Next) -> Response {
     } else {
         next.run(request).await
     };
-    let headers = response.headers_mut();
+    set_cors_headers(response.headers_mut());
+    response
+}
+
+fn set_cors_headers(headers: &mut HeaderMap) {
     for (name, value) in [
         (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
         (
@@ -280,7 +294,6 @@ async fn cors(request: Request, next: Next) -> Response {
     ] {
         headers.insert(name, HeaderValue::from_static(value));
     }
-    response
 }
 
 /// A handler's panic, as an empty 500.

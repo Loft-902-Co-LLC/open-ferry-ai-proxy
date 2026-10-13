@@ -93,6 +93,9 @@ pub(crate) async fn interactions(
     drop(settings);
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,
+        Err(response) if response.status() == http::StatusCode::PAYLOAD_TOO_LARGE => {
+            return local_error(413, "http: request body too large", "invalid_request_error");
+        }
         Err(response) => return response,
     };
     let target = match parse_target(&raw) {
@@ -103,15 +106,19 @@ pub(crate) async fn interactions(
     let call = new_call(&state, &client, &target, &model, raw);
 
     if target.stream {
+        let commit_headers = crate::stream::CommitHeaders::default();
+        let upstream_headers = commit_headers.clone();
         let first = async move {
             let started = match call {
                 Ok(call) => call.stream().await,
                 Err(error) => Started::failed(error),
             };
+            upstream_headers.set(&started.headers);
             (started.headers, peek(started.items).await)
         };
         return pre_first_token(
             pre_ft,
+            commit_headers,
             first,
             move |(headers, peeked), committed| match peeked {
                 Peeked::Failed(error) if committed => {

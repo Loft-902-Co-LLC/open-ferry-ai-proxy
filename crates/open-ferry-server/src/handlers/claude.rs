@@ -75,15 +75,19 @@ pub(crate) async fn messages(
     }
 
     let call = Call::new(&state, &client, Format::CLAUDE, &model, raw, "", true);
+    let commit_headers = crate::stream::CommitHeaders::default();
+    let upstream_headers = commit_headers.clone();
     let first = async move {
         let started = match call {
             Ok(call) => call.stream().await,
             Err(error) => Started::failed(error),
         };
+        upstream_headers.set(&started.headers);
         (started.headers, peek(started.items).await)
     };
     pre_first_token(
         pre_ft,
+        commit_headers,
         first,
         move |(headers, peeked), committed| match peeked {
             Peeked::Failed(error) if committed => {
