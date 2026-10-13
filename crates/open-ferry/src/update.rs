@@ -223,7 +223,8 @@ where
         .to_str()
         .ok_or_else(|| "the installed binary isn't valid Unicode".to_owned())
         .and_then(|binary| {
-            command_home(&scope::Host, binary, request).map_err(|error| error.to_string())
+            command_home(&scope::Host, binary, request, &options.config)
+                .map_err(|error| error.to_string())
         }) {
         Ok(home) => home,
         Err(error) => {
@@ -273,8 +274,8 @@ where
     };
     let env = std::env::var(open_ferry_update::MODE_ENV).ok();
     let outcome = match request {
-        Request::Mode(mode) => set_mode(&path, mode, env.as_deref(), &mut console),
-        request => manual(request, &path, &options, home, &mut console),
+        Request::Mode(mode) => set_mode(&scope::Host, &path, mode, env.as_deref(), &mut console),
+        request => manual(&scope::Host, request, &path, &options, home, &mut console),
     };
     console.finish(outcome)
 }
@@ -284,9 +285,10 @@ fn command_home(
     probe: &dyn scope::Probe,
     binary: &str,
     request: Request,
+    config: &str,
 ) -> Result<scope::Home, scope::Refusal> {
     let home = scope::lookup(probe, binary)?;
-    if request != Request::Check {
+    if request != Request::Check && !(matches!(request, Request::Mode(_)) && !config.is_empty()) {
         home.require_privilege()?;
     }
     Ok(home)
@@ -333,35 +335,32 @@ fn usage_error(program: &str, message: &str) -> ExitCode {
 /// exists, else `installed` when it exists, else the one in `working_dir`.
 fn config_path(flag: &str, working_dir: &Path, installed: Option<PathBuf>) -> PathBuf {
     if !flag.is_empty() {
-        return PathBuf::from(flag);
+        return open_ferry_core::auth::path::clean(&working_dir.join(flag));
     }
     let local = working_dir.join("config.yaml");
     if local.is_file() {
         return local;
     }
-    installed.filter(|path| path.is_file()).unwrap_or(local)
+    let path = installed.filter(|path| path.is_file()).unwrap_or(local);
+    open_ferry_core::auth::path::clean(&working_dir.join(path))
 }
 
 /// Runs a check, an update or a rollback, with the updater for this
 /// binary and the config at `path`.
 fn manual(
+    probe: &dyn scope::Probe,
     request: Request,
     path: &Path,
     options: &Options,
     home: scope::Home,
     console: &mut Console,
 ) -> Outcome {
-    let config = if path.is_file() {
-        match Config::load(path) {
-            Ok(config) => Some(config),
-            Err(error) => {
-                let settings = Settings::from_environment(&Default::default());
-                return Outcome::new(request.action(), &settings)
-                    .failed(console, format!("{} doesn't load: {error}", path.display()));
-            }
+    let config = match load_config(probe, path) {
+        Ok(config) => config,
+        Err(error) => {
+            let settings = Settings::from_environment(&Default::default());
+            return Outcome::new(request.action(), &settings).failed(console, error);
         }
-    } else {
-        None
     };
     let settings = Settings::from_environment(
         &config
@@ -1046,9 +1045,22 @@ fn restart_hint() -> &'static str {
     }
 }
 
+/// Reads settings only after the file is authorized; a missing file has none.
+fn load_config(probe: &dyn scope::Probe, path: &Path) -> Result<Option<Config>, String> {
+    if !scope::authorize_file(probe, path).map_err(|refusal| refusal.to_string())?
+        || !path.is_file()
+    {
+        return Ok(None);
+    }
+    Config::load(path)
+        .map(Some)
+        .map_err(|error| format!("{} doesn't load: {error}", path.display()))
+}
+
 /// `-mode`: writes `mode` as `self-update.mode` in the config at `path`,
 /// with `env` the value of `OPEN_FERRY_SELF_UPDATE`.
 fn set_mode(
+    probe: &dyn scope::Probe,
     path: &Path,
     mode: SelfUpdateMode,
     env: Option<&str>,
@@ -1057,7 +1069,11 @@ fn set_mode(
     let shown = path.display();
     let mut outcome = Outcome::new("mode", &Settings::resolve(&Default::default(), env));
     outcome.config = Some(shown.to_string());
-    if !path.is_file() {
+    let present = match scope::authorize_file(probe, path) {
+        Ok(present) => present,
+        Err(refusal) => return outcome.failed(console, refusal.to_string()),
+    };
+    if !present || !path.is_file() {
         return outcome.failed(
             console,
             format!(

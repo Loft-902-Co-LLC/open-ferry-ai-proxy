@@ -1,6 +1,6 @@
 # Updates
 
-open-ferry keeps itself up to date. By default it looks for a newer release every six hours, and when one is out it downloads it, checks its signature, and gets it ready for `open-ferry update` to install. The server never replaces its own binary and never restarts itself. You can turn this off, for good, in any of the ways below. CLIProxyAPI has nothing like it ([below](#cliproxyapi)).
+open-ferry keeps itself up to date. By default it looks for a newer release every six hours, and when one is out it downloads it, checks its signature, and gets it ready for `open-ferry update` to install. The server never replaces its own binary and never restarts itself. In a supervised service, the blue-green supervisor starts the staged version, checks it, and switches traffic to it automatically; in the plain form, run `open-ferry update` to install it. You can turn this off, for good, in any of the ways below. CLIProxyAPI has nothing like it ([below](#cliproxyapi)).
 
 ## Turning updates off
 
@@ -12,7 +12,7 @@ Each of these turns automatic updates off. Only you turn them back on.
   open-ferry update -mode off
   ```
 
-  It writes `self-update.mode: off` into the config: the one given with `-config`, else `config.yaml` in the working directory, else the installed config, where `open-ferry init` writes one. For an install for the whole machine, it is the machine's config instead, `/etc/open-ferry/config.yaml` on Linux or `C:\ProgramData\open-ferry\config.yaml` on Windows, and changing it needs root or an administrator. It writes the file as the management API does: the new file must load first, its comments are kept, the old one is kept as `<file name>.bak`, and it is replaced in one step. A running server that reads that config follows the change at once, with no restart. `-mode notify` keeps the check but installs nothing, and `-mode auto` turns updates back on.
+  It writes `self-update.mode: off` into the config: the one given with `-config`, else `config.yaml` in the working directory, else the installed config, where `open-ferry init` writes one. For an install for the whole machine, without `-config` it is the machine's config instead, `/etc/open-ferry/config.yaml` on Linux or `C:\ProgramData\open-ferry\config.yaml` on Windows, and changing it needs root or an administrator. With `-config`, `-mode` changes only that file and needs no privilege for the machine records. A privileged process checks that the config and every directory above it are trusted before any read or write (see [the trust rules](cli.md#a-service-for-the-whole-machine)). It writes the file as the management API does: the new file must load first, its comments are kept, the old one is kept as `<file name>.bak`, and it is replaced in one step. A running server that reads that config follows the change at once, with no restart. `-mode notify` keeps the check but installs nothing, and `-mode auto` turns updates back on.
 - **The config.** The setting lives in the config, at the top level in both layouts:
 
   ```yaml
@@ -22,7 +22,7 @@ Each of these turns automatic updates off. Only you turn them back on.
 
   A running server follows the change when it reloads the config, as it does for any change.
 - **The environment.** `OPEN_FERRY_SELF_UPDATE=off` (or `notify`) lowers the mode, for containers, fleets and packages: `off` beats `notify`, which beats `auto`. It never raises it, so `auto` changes nothing, and a value that isn't a mode is ignored with a warning, so a typo can't turn updates on. Set it in the server's environment, or in the `.env` file in its working directory (beside the config, for [a service](cli.md#the-services-environment)). The server reads it at start.
-- **The install scripts.** Install with `--no-auto-update` (`-NoAutoUpdate` for `install.ps1`), or with `OPEN_FERRY_INSTALL_SELF_UPDATE=off` (or `notify`, or `auto`) in the environment. The script sets the mode in the config with `open-ferry update -mode`, whether it wrote the config or kept yours:
+- **The install scripts.** Install with `--no-auto-update` (`-NoAutoUpdate` for `install.ps1`), or, for an account install, with `OPEN_FERRY_INSTALL_SELF_UPDATE=off` (or `notify`, or `auto`) in the environment. Machine installers ignore inherited overrides: use the command-line flag. The script sets the mode in the config with `open-ferry update -mode`, whether it wrote the config or kept yours:
 
   ```sh
   curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh -s -- --no-auto-update
@@ -43,7 +43,7 @@ With updates off, open-ferry makes no update request of any kind, and stages and
 
 | `self-update.mode` | What the server does |
 |---|---|
-| `auto` (the default) | Looks for a newer release. When there is one, downloads it, checks it, stages it in the [data directory](#files), and logs once that `open-ferry update` installs it |
+| `auto` (the default) | Looks for a newer release. When there is one, downloads it, checks it, stages it in the [data directory](#files), and logs once that `open-ferry update` installs it in the plain form. In a supervised service, the supervisor tries it and switches traffic after its checks pass |
 | `notify` | Looks for a newer release, and logs once for each new version. Downloads nothing else |
 | `off` | Nothing: no request, no staging, no install |
 
@@ -84,7 +84,9 @@ Only a binary that `install.sh` or `install.ps1` put in place. Each writes `inst
 - open-ferry can write to its directory;
 - it doesn't run in a container: `/.dockerenv` or `/run/.containerenv` exists, or `container` or `KUBERNETES_SERVICE_HOST` is set.
 
-Any other install, such as the container image, a package manager's copy, a build from source, or a copy of the binary under another name or in another place, only says when a release is out, and why it doesn't install it. Update it the way you installed it: `docker pull` for the image, the install script for a binary. The receipt is in the data directory of the user who ran the install script, and open-ferry reads it from that of the user it runs as, so a binary installed by one user and run as another only says when a release is out. Deleting `install-receipt.json` has the same effect.
+Any other install, such as the container image, a package manager's copy, a build from source, or a copy of the binary under another name or in another place, only says when a release is out, and why it doesn't install it. Update it the way you installed it: `docker pull` for the image, the install script for a binary. For an account install, the receipt is in the data directory of the user who ran the install script, and open-ferry reads it from that of the user it runs as, so a binary installed by one user and run as another only says when a release is out. A machine install keeps its receipt and records in `/var/lib/open-ferry` on Linux or `C:\ProgramData\open-ferry` on Windows. Privileged commands refuse records another account could change; commands that change machine records need root or an administrator. Deleting `install-receipt.json` has the same effect.
+
+A system service installed before this version, as a plain systemd unit or Windows service, keeps using root's or LocalSystem's account records. Reinstall it with `open-ferry service install -system` (uninstall the old service first), or rerun `install.sh --system` / `install.ps1 -System`, for the supervised machine form.
 
 When the install script can't write the receipt, it says so, and that open-ferry won't update itself.
 
@@ -96,7 +98,9 @@ When the install script can't write the receipt, it says so, and that open-ferry
 open-ferry update
 ```
 
-It checks for the latest release, says what it would do, and asks. Then it downloads the release (or takes the copy the server staged), checks it as above, and puts it in place of the installed binary: it copies the new binary beside the old one and renames it over the old, so the path never holds half a binary. The old binary is kept in the data directory for a rollback. On Windows, which won't replace a running `.exe`, the old one is first renamed `open-ferry.exe.old`, removed at the next update. `-yes` installs without asking; without a terminal to ask in, and without `-yes`, it installs nothing. Its flags and exit codes are in [docs/cli.md](cli.md#open-ferry-update).
+While a supervisor runs, `update` and `-rollback` refuse to change its binary or records, and say how to stop the service first. `-check` and `-mode` remain available.
+
+In the plain form, it checks for the latest release, says what it would do, and asks. Then it downloads the release (or takes the copy the server staged), checks it as above, and puts it in place of the installed binary: it copies the new binary beside the old one and renames it over the old, so the path never holds half a binary. The old binary is kept in the data directory for a rollback. On Windows, which won't replace a running `.exe`, the old one is first renamed `open-ferry.exe.old`, removed at the next update. `-yes` installs without asking; without a terminal to ask in, and without `-yes`, it installs nothing. Its flags and exit codes are in [docs/cli.md](cli.md#open-ferry-update).
 
 Nothing is restarted: the running server goes on with the old binary until you restart it, and `open-ferry update -check` says that a restart is needed. `open-ferry update` says how to restart for your system:
 
@@ -117,7 +121,7 @@ It puts back the version before the last update, from its copy in the data direc
 
 ## Files
 
-The data directory is `$XDG_DATA_HOME/open-ferry` when `XDG_DATA_HOME` is an absolute path, else `~/.local/share/open-ferry` (on macOS too), and `%LOCALAPPDATA%\open-ferry` on Windows. It holds:
+For an account install, the data directory is `$XDG_DATA_HOME/open-ferry` when `XDG_DATA_HOME` is an absolute path, else `~/.local/share/open-ferry` (on macOS too), and `%LOCALAPPDATA%\open-ferry` on Windows. For a machine install it is `/var/lib/open-ferry` on Linux or `C:\ProgramData\open-ferry` on Windows, independent of the environment. It holds:
 
 | File | What it is |
 |---|---|

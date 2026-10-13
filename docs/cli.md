@@ -34,7 +34,7 @@ open-ferry init [-config PATH] [-host HOST] [-port N] [-force] [-system]
 | `-config PATH` | Write the config to `PATH`. By default, the installed config path (below) |
 | `-host HOST` | The host the proxy listens on. By default `127.0.0.1`, so only this machine can reach it. `-host ""` listens on every interface |
 | `-port N` | The port the proxy listens on, from 1 to 65535. By default 8317, the template's |
-| `-force` | Replace an existing config. The old file is kept as `<file name>.bak` |
+| `-force` | Replace an existing config. The old file is kept as `<file name>.bak`. With `-system`, an existing config is always kept |
 | `-system` | Write the machine's config, for [a service for the whole machine](#a-service-for-the-whole-machine): `/etc/open-ferry/config.yaml` on Linux, `C:\ProgramData\open-ferry\config.yaml` on Windows, with `auth-dir` set to the machine's auth directory. It needs root or an administrator, and isn't on macOS yet. On Windows it creates a missing machine data directory, private to SYSTEM and Administrators. It never replaces an existing config, even with `-force` |
 
 The installed config path is:
@@ -188,7 +188,7 @@ open-ferry service status [-system]
 
 | Flag | What it does |
 |---|---|
-| `-config PATH` | `install` only. The config the service runs with, made a full path. By default, the installed config path (see [`open-ferry init`](#open-ferry-init)) |
+| `-config PATH` | `install` only. The config the service runs with, made a full path. By default, the installed config path (see [`open-ferry init`](#open-ferry-init)); with `-system`, the machine config, `/etc/open-ferry/config.yaml` on Linux or `C:\ProgramData\open-ferry\config.yaml` on Windows |
 | `-system` | A service for the whole machine, started at boot as root, or LocalSystem on Windows, instead of one for you. It needs root or an administrator; see [below](#a-service-for-the-whole-machine) |
 | `-dry-run` | `install` and `uninstall` only. Print the files it would write and the commands it would run, and change nothing. A dry run of `-system` works without root or an administrator |
 
@@ -200,7 +200,7 @@ The flags come after the action, and an argument after them is an error. `-h`, a
 - a config that doesn't load;
 - a service that is already installed. To install it again, for a new config or a new binary, run `open-ferry service uninstall` first, adding `-system` if it is the machine's.
 
-The service runs the binary that ran `install`, by its full path, as `open-ferry -config <config>`. If you move or replace that binary, install the service again.
+The service runs the binary that ran `install`, by its full path. When the install can update itself, a Linux unit or Windows task runs the blue-green supervisor with its chosen data directory pinned; a system Linux unit or Windows service uses the machine data directory. Otherwise it runs the plain form, `open-ferry -config <config>` (through `service run` on Windows), and says why. macOS system services stay plain. If you move the installed binary, install the service again.
 
 ### What it installs
 
@@ -215,7 +215,7 @@ Every service runs open-ferry in the config's directory, so the `.env` file ther
 
 **On Linux**, a user unit runs while you are logged in. To start it at boot and keep it running after you log out, run `loginctl enable-linger` once. `systemctl --user` needs your user session's bus: over `su` or `sudo -u`, it may fail with "Failed to connect to bus"; log in as that user instead.
 
-**On macOS**, the agent is loaded with `launchctl bootstrap gui/<your uid>`, which needs you to be logged in to the Mac's desktop. On a Mac no one is logged in to, as one you only reach over SSH may be, `install` fails; use `-system` there.
+**On macOS**, the agent is loaded with `launchctl bootstrap gui/<your uid>`, which needs you to be logged in to the Mac's desktop. On a Mac no one is logged in to, as one you only reach over SSH may be, `install` fails; a system service cannot load settings until the trust check can read macOS ACLs.
 
 **On Windows**, the service is a scheduled task by default, not a Windows service. That is deliberate:
 
@@ -223,20 +223,20 @@ Every service runs open-ferry in the config's directory, so the `.env` file ther
 - **A service that runs as you needs your password**, stored with the service manager, and changed there each time you change it.
 - **A scheduled task runs as you** when you log on, with no password stored, and needs no administrator to register.
 
-The task runs `open-ferry service run -config <config>`, which starts open-ferry with no window, its output going to `service.log` in the config's directory, and starts it again when it fails. `service.log` is moved to `service.log.1` as open-ferry starts, once it is past 10 MiB. Ending the task, or logging off, ends open-ferry with it. A console window may flash as the task starts. `service run` is only for the task and the Windows service to start; it isn't in the usage. It takes `-dir DIR`, the directory to start open-ferry in, which [`migrate`](#open-ferry-migrate) adds when CLIProxyAPI's working directory isn't the config's directory, so that open-ferry finds the `.env` file and the relative paths CLIProxyAPI did. `service install` itself takes no such flag and is unchanged.
+The plain task runs `open-ferry service run -config <config>`; a supervised task adds `-supervise -data-dir <data directory>`. The wrapper starts open-ferry with no window, its output going to `service.log` in the config's directory, and starts it again when it fails. `service.log` is moved to `service.log.1` as open-ferry starts, once it is past 10 MiB. Ending the task, or logging off, ends open-ferry with it. A console window may flash as the task starts. `service run` is only for the task and the Windows service to start; it isn't in the usage. It takes `-dir DIR`, the directory to start open-ferry in, which [`migrate`](#open-ferry-migrate) adds when CLIProxyAPI's working directory isn't the config's directory, so that open-ferry finds the `.env` file and the relative paths CLIProxyAPI did. `service install` itself takes no `-dir` flag.
 
 ### A service for the whole machine
 
-With `-system`, the service starts at boot, with no one logged in, as root on Linux and macOS and as LocalSystem on Windows. `install -system` and `uninstall -system` need root (`sudo`) or, on Windows, a terminal opened with "Run as administrator". Without them, `service` refuses and prints the command to run.
+With `-system`, the service starts at boot, with no one logged in, as root on Linux and as LocalSystem on Windows. The macOS launchd daemon runs as root too, but cannot load settings until the trust check can read macOS ACLs. `install -system` and `uninstall -system` need root (`sudo`) or, on Windows, a terminal opened with "Run as administrator". Without them, `service` refuses and prints the command to run.
 
 As the service runs with root's rights, `install -system` asks more of the config and the binary:
 
-- **The auth directory must be a full path.** A `~` would be root's home, or LocalSystem's profile, not yours, and the default, `~/.cli-proxy-api`, is one. Set `auth-dir` to a path such as `/var/lib/open-ferry` or `C:\ProgramData\open-ferry\auth`, and sign in again there, or copy your credential files over.
+- **The auth directory must be a full path.** A `~` would be root's home, or LocalSystem's profile, not yours, and the default, `~/.cli-proxy-api`, is one. Set `auth-dir` to a path such as `/var/lib/open-ferry/auth` or `C:\ProgramData\open-ferry\auth`, and sign in again there, or copy your credential files over. It must be the machine data directory's `auth` directory or below it, or a directory outside the machine data directory. The machine data directory itself, a parent of it, and any directory inside it other than `auth` and its subdirectories are refused: credentials must never sit among the machine's update records.
 - **Only root, or the administrators, may change the binary and the config.** Otherwise anyone who could change them could run code as root.
-  - On Linux and macOS, the binary and the config, after following links, and every directory above them, must be owned by root and writable by no other user or group (a directory with the sticky bit, such as `/tmp`, doesn't count). `/usr/local/bin/open-ferry` and `/etc/open-ferry/config.yaml` will do on most systems. On an Intel Mac with Homebrew, `/usr/local/bin` is yours, so use a directory such as `/opt/open-ferry`; on systems where `/usr/local` is writable by the `staff` group, likewise.
+  - On Linux, the binary, the config and every directory above them must be owned by root and writable by no other user or group. Links and ACLs granting another account write access are refused too. `/usr/local/bin/open-ferry` and `/etc/open-ferry/config.yaml` will do on most systems. On macOS, a privileged process refuses settings files because the check cannot read ACLs yet, so a system service cannot load its settings in this version. Run it as your account instead.
   - On Windows, the binary normally goes under `C:\Program Files\open-ferry`. The machine config is `C:\ProgramData\open-ferry\config.yaml`, inside the machine data directory created by `install.ps1 -System` with a protected DACL allowing only SYSTEM and Administrators. Its auth directory inherits that protection too. An existing machine directory is checked, never repaired or adopted when another account can change it. Keep the config there: saving it replaces the file, so it must inherit private permissions from its directory. A config beside the binary in Program Files would inherit read access for Users.
-- **So must the `.env` file.** Run as root or an administrator, as the service or from `sudo` or an elevated terminal, open-ferry and its commands load `.env` only when the file and every directory above it pass the same check as the config. Otherwise they refuse, and say which file and what to change.
-- **Run as root, you get no service of your own.** On Linux and macOS, `install` without `-system`, run as root, is refused: run it as the user the service is for, or add `-system`.
+- **So must the `.env` file.** Run as root or an administrator, every open-ferry command loads `.env` and the config only when the file and every directory above it pass the trust check. On macOS it refuses any such file while running as root, because the check cannot read ACLs yet. In a container marked by `/.dockerenv`, `/run/.containerenv` or `/var/run/secrets/kubernetes.io`, it reads them as they are. Otherwise it refuses an untrusted file and says what to change.
+- **Run as root or an administrator, you get no service of your own.** On Linux and macOS, `install` without `-system`, run as root, is refused. On Windows, it is refused from an elevated terminal too, including a dry run. Run it as the user the service is for, in a terminal not opened as administrator, or add `-system`. On Windows hosts where every terminal is elevated, use `install.ps1 -System` and `open-ferry service install -system` for the whole machine. An elevated terminal can still uninstall or show an old account service.
 
 Use `sudo sh install.sh --system` on Linux, or `.\install.ps1 -System` from an elevated Windows terminal, to create the machine binary, data directory and starting config. The starting config's `auth-dir` is `/var/lib/open-ferry/auth` or `C:\ProgramData\open-ferry\auth`. An existing config is kept. `-InstallDir` and `-ConfigPath` choose explicit Windows paths; inherited download and path overrides are ignored under elevation. Account installers run without sudo or elevation, except that root inside a Linux container may install for its own account.
 
@@ -259,7 +259,7 @@ A service doesn't start from your shell, so it doesn't get your shell's environm
 | Code | When |
 |---|---|
 | 0 | It did what was asked: the service was installed, removed or shown, or a dry run printed its plan. Also for `-h` |
-| 1 | It didn't: the config is missing or doesn't load, the service is already installed (for `install`) or isn't (for `uninstall` and `status`), it needs root or an administrator, a path or the auth directory is refused for `-system`, or a command failed. A line on standard error starting `service:` says why |
+| 1 | It didn't: the config is missing or doesn't load, the service is already installed (for `install`) or isn't (for `uninstall` and `status`), it needs root or an administrator, an account install was run as root or from an elevated terminal, a path or the auth directory is refused for `-system`, or a command failed. A line on standard error starting `service:` says why |
 | 2 | Bad usage: no action or an unknown one, a flag the action doesn't take, or an argument after the flags. The usage follows on standard error |
 
 ## `open-ferry update`
@@ -279,7 +279,7 @@ Installs the latest release of open-ferry in place of this one, rolls back, or s
 | `-check` | Only say whether a newer release is out, and whether a restart is needed to run the installed version. It changes nothing, not even the update state |
 | `-rollback` | Put back the version before the last update, from the copy kept in the data directory. Nothing is downloaded |
 | `-mode MODE` | Write `self-update.mode: MODE` into the config, as the management API writes it: the new file must load, its comments are kept, and the old one is kept as `<file name>.bak`. A running server that reads the config follows at once. `MODE` is `off`, `notify` or `auto` |
-| `-config PATH` | The config to read, and that `-mode` writes. By default `config.yaml` in the working directory, else the installed config, where `init` writes one. For an install for the whole machine, `-mode` writes the machine's config, `/etc/open-ferry/config.yaml` or `C:\ProgramData\open-ferry\config.yaml`, and needs root or an administrator |
+| `-config PATH` | The config to read, and that `-mode` writes. By default `config.yaml` in the working directory, else the installed config, where `init` writes one. For an install for the whole machine, `-mode` without `-config` writes the machine's config, `/etc/open-ferry/config.yaml` or `C:\ProgramData\open-ferry\config.yaml`, and needs root or an administrator. With `-config`, `-mode` changes only that config and needs no privilege for the machine records; a privileged process still checks the file before reading or writing it |
 | `-yes` | Install or roll back without asking |
 | `-json` | Print one JSON object instead of lines of text. It asks nothing, so it installs or rolls back only with `-yes` |
 

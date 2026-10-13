@@ -25,7 +25,9 @@
 //!
 //! With `-system` it is a Windows service, `open-ferry`, that runs as
 //! LocalSystem from boot: `open-ferry service run -system -config <path>`,
-//! which answers the service manager and serves in the same process. The
+//! which answers the service manager. A supervised service adds
+//! `-supervise -data-dir <machine directory>` and runs the supervisor in
+//! the wrapper; the plain form serves in the same process. The
 //! service manager starts it again 5 seconds after it fails. It prints to
 //! the same `service.log`, and the service manager logs its starts and
 //! stops in the System event log. Its config's auth directory must be a

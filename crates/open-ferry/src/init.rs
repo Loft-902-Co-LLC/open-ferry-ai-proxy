@@ -678,6 +678,11 @@ mod tests {
             // passes precisely when it does not start with `~`.
             assert!(!config.auth_dir.is_empty());
             assert!(!config.auth_dir.starts_with('~'));
+            let root = scope::machine_root(&Fake::new(platform)).unwrap().unwrap();
+            assert_eq!(
+                scope::check_auth_dir_placement(platform, &root, &config.auth_dir),
+                Ok(())
+            );
         }
     }
 

@@ -735,6 +735,11 @@ pub(crate) trait System {
     /// Whether the file `path` and its directories pass the same check
     /// (`trust::check_file`).
     fn trusted_file(&self, path: &str) -> Result<(), String>;
+    /// The machine data directory for an install's auth-directory check.
+    /// Fakes may supply the location for their simulated platform.
+    fn machine_root(&self, _platform: Platform) -> Result<Option<String>, String> {
+        scope::machine_root(&scope::Host)
+    }
     /// Waits `time`, between looks at what a service manager says.
     fn pause(&mut self, time: Duration);
 }
@@ -1360,7 +1365,7 @@ impl Account {
     pub(crate) fn probe(
         system: &mut dyn System,
         platform: Platform,
-        target: Target,
+        _target: Target,
     ) -> Result<Account, String> {
         match platform {
             Platform::Linux | Platform::MacOs => {
@@ -1371,11 +1376,9 @@ impl Account {
                     .map_err(|_| format!("`id -u` printed {uid:?}, not a user ID"))?;
                 Ok(Account::Unix { uid })
             }
-            // Only a Windows service needs an administrator.
-            Platform::Windows if target.system() => Ok(Account::Windows {
+            Platform::Windows => Ok(Account::Windows {
                 elevated: windows::elevated(system)?,
             }),
-            Platform::Windows => Ok(Account::Windows { elevated: false }),
         }
     }
 
@@ -1745,6 +1748,13 @@ pub(crate) fn prepare_install_with(
             "You are root, so this would install a service for root. Run it as the user the service is for, or add -system for a service of the whole machine:\n  {command}"
         ));
     }
+    if let Account::Windows { elevated: true } = account
+        && !target.system()
+    {
+        return Err(format!(
+            "This terminal is elevated, so this would install a service with an administrator's rights for your account. Run it in a terminal not opened as administrator, or add -system for a service of the whole machine:\n  {command}"
+        ));
+    }
     if target.system() && !account.privileged() && !dry_run {
         return Err(needs_admin(platform, "Installing", &command));
     }
@@ -1753,17 +1763,11 @@ pub(crate) fn prepare_install_with(
             "There is no config at {config}. Make one with `open-ferry init`, or name another with -config."
         ));
     }
-    let data = system
-        .read(&config)
-        .map_err(|error| format!("failed to read the config at {config}: {error}"))?;
-    let loaded = Config::load_bytes(&data)
-        .map_err(|error| format!("The config at {config} doesn't load: {error}"))?;
     let definition = if target.system() {
-        check_auth_dir(platform, &loaded)?;
         let mut definition = protected(system, context, &config, dir)?;
         // Check the paths as given too: resolving a link in `protected`
         // must not hide it from the real system trust check.
-        for path in [&context.exe, &config] {
+        for path in [&context.exe, &config, &definition.exe, &definition.config] {
             system.trusted_file(path).map_err(|why| {
                 format!("Refusing the system service: {path} failed the system trust check: {why}")
             })?;
@@ -1791,10 +1795,25 @@ pub(crate) fn prepare_install_with(
                 Some(dir) => dir.to_owned(),
                 None => platform.parent(&config).unwrap_or_else(|| config.clone()),
             },
-            config,
+            config: config.clone(),
             data_dir: updating.pinned().map(str::to_owned),
         }
     };
+    let data = system
+        .read(&definition.config)
+        .map_err(|error| format!("failed to read the config at {config}: {error}"))?;
+    let loaded = Config::load_bytes(&data)
+        .map_err(|error| format!("The config at {config} doesn't load: {error}"))?;
+    if target.system() {
+        check_auth_dir(platform, &loaded)?;
+        if platform != Platform::MacOs
+            && let Some(root) = system.machine_root(platform)?
+        {
+            let auth_dir = platform.absolute(&definition.dir, &loaded.auth_dir)?;
+            scope::check_auth_dir_placement(platform, &root, &auth_dir)
+                .map_err(|refusal| refusal.to_string())?;
+        }
+    }
     if target.installed(system, context)? {
         return Err(format!(
             "open-ferry is already installed as {} ({}). To install it again, run `open-ferry {NAME} uninstall{}` first.",
