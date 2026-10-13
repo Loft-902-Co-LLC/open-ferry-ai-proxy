@@ -74,6 +74,7 @@ curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/lates
 
 | `install.sh` | `install.ps1` | What it does |
 |---|---|---|
+| `--system` | `-System` | Install for the whole machine on Linux or Windows; needs root or an elevated terminal |
 | `--version VERSION` | `-Version VERSION` | Install this version rather than the latest release |
 | `--bin-dir DIR` | `-InstallDir DIR` | Install the binary in `DIR` |
 | `--config PATH` | `-ConfigPath PATH` | The config to keep, or to write when there's none |
@@ -84,6 +85,12 @@ curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/lates
 | `--no-migrate` | `-NoMigrate` | Don't look for CLIProxyAPI |
 
 `OPEN_FERRY_INSTALL_MIGRATE=yes` does what `--migrate` and `-Migrate` do, and `OPEN_FERRY_INSTALL_MIGRATE=no` what `--no-migrate` and `-NoMigrate` do; an option given wins over it.
+
+For a machine install, run `sudo sh install.sh --system` on Linux or `.\install.ps1 -System` from an elevated Windows terminal. The binary goes to `/usr/local/bin/open-ferry` or `C:\Program Files\open-ferry\open-ferry.exe`; the starting config goes to `/etc/open-ferry/config.yaml` or `C:\ProgramData\open-ferry\config.yaml`. Windows finds Program Files and ProgramData from the machine, rather than environment overrides. The machine data and auth directories are private to root, or SYSTEM and Administrators on Windows. The scripts skip the migration offer. To start at boot, use `sudo open-ferry service install -system -config /etc/open-ferry/config.yaml` on Linux, or `open-ferry service install -system -config C:\ProgramData\open-ferry\config.yaml` from an elevated Windows terminal. See [system services](docs/cli.md#a-service-for-the-whole-machine).
+
+Account installs run without sudo or elevation. Inside a Linux container, root may install for its own account; the installer prints a note. Machine installs on macOS are not supported yet.
+
+Under an elevated Windows `-System` run, `OPEN_FERRY_INSTALL_BASE_URL`, `OPEN_FERRY_INSTALL_GH`, `OPEN_FERRY_INSTALL_DIR` and `OPEN_FERRY_INSTALL_CONFIG` are ignored with a notice. Choose paths with `-InstallDir` and `-ConfigPath`; downloads use the official GitHub releases, and download, verification and unpacking take place in a new staging directory inside the install directory, removed on success or failure.
 
 To download from a mirror instead of GitHub, set `OPEN_FERRY_INSTALL_BASE_URL` to its address, in place of `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases`. The mirror needs GitHub's layout: `<base>/download/v<version>/<file>` for each release, and `<base>/latest/download/<file>` for the latest. The top of each script lists the rest of its settings.
 

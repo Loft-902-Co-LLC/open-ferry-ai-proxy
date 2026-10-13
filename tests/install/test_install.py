@@ -26,11 +26,15 @@ checked to refuse to run, when pwsh is installed.
 Every install goes to a temporary directory the test passes, and HOME,
 XDG_CONFIG_HOME, XDG_DATA_HOME, LOCALAPPDATA, APPDATA and the temporary
 directory are redirected to temporary directories too, so the install
-receipt is written in one. System installs use fake privilege, never real
-elevation, through OPEN_FERRY_INSTALL_TEST_PRIVILEGED (0 or 1), honored only
-with the existing loopback base URL and FAKE_OPEN_FERRY_INSTALL_LOG seam.
-The suite refuses to run as root or elevated. Machine default paths are
-recorded without writing there, or redirected to scratch through ProgramFiles.
+receipt is written in one. System installs use fake privilege through the
+loopback server and recording seam. On Windows, explicit TestBaseUrl,
+TestPrivilege and TestProgramFiles/TestProgramData parameters also let the
+fakes run on already elevated CI runners: inherited environment variables
+cannot turn on that seam in an elevated installer. TestElevated exercises
+that hardened path without elevating. Machine folders are passed as test
+parameters pointing into scratch. The suite refuses root and refuses real
+binary tests when elevated. Under elevation, pipeline tests invoke the
+script block with explicit parameters, since iex cannot pass parameters.
 The fakes refuse writes outside FAKE_OPEN_FERRY_SCRATCH, set to each case's
 scratch directory, even if a shell restores HOME after it was unset.
 
@@ -963,6 +967,7 @@ class ReleaseServer:
         self.httpd.server_close()
 
 
+ELEVATED = False
 BASE = None
 BASE_SH = None  # BASE as sh names it, on Windows
 SERVER = None
@@ -971,16 +976,37 @@ FAKE_BIN = None  # the fake uname, getconf and sysctl
 FAKE_GH = None  # the fake gh: gh, and gh.cmd for install.ps1
 
 
+def scratch_inside_target(scratch):
+    target = os.path.normcase(os.path.abspath(os.path.join(ROOT, "target")))
+    try:
+        return bool(scratch) and os.path.commonpath([os.path.normcase(os.path.abspath(scratch)), target]) == target
+    except ValueError:
+        return False
+
+
+class ScratchPathTests(unittest.TestCase):
+    def test_scratch_must_stay_in_this_checkout_target(self):
+        self.assertTrue(scratch_inside_target(os.path.join(ROOT, "target", "scratch")))
+        self.assertFalse(scratch_inside_target(None))
+        self.assertFalse(scratch_inside_target(os.path.join(ROOT, "outside")))
+        self.assertFalse(scratch_inside_target(os.path.join(ROOT, "target", "..", "outside")))
+        if WINDOWS:
+            self.assertTrue(scratch_inside_target(os.path.join(ROOT.swapcase(), "TARGET", "scratch")))
+            drive = "D:" if os.path.splitdrive(ROOT)[0].upper() != "D:" else "C:"
+            self.assertFalse(scratch_inside_target(drive + r"\scratch"))
+
+
 def setUpModule():
-    global BASE, BASE_SH, SERVER, FAKE_BIN, FAKE_GH
+    global BASE, BASE_SH, SERVER, FAKE_BIN, FAKE_GH, ELEVATED
     if WINDOWS:
         import ctypes
-        if ctypes.windll.shell32.IsUserAnAdmin():
-            raise RuntimeError("install tests must not run in an elevated terminal")
+        ELEVATED = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        if ELEVATED and REAL_BINARY:
+            raise RuntimeError("real binary install tests must not run in an elevated terminal")
     elif os.geteuid() == 0:
         raise RuntimeError("install tests must not run as root")
     scratch = os.environ.get("OFP_TEST_SCRATCH")
-    if not scratch or os.path.commonpath([os.path.abspath(scratch), os.path.join(ROOT, "target")]) != os.path.join(ROOT, "target"):
+    if not scratch_inside_target(scratch):
         raise RuntimeError("OFP_TEST_SCRATCH must be inside this worktree's target directory")
     os.makedirs(scratch, exist_ok=True)
     BASE = long_path(tempfile.mkdtemp(prefix="dist-install-", dir=scratch))
@@ -1075,6 +1101,8 @@ class InstallShTests(Case):
                 self.assertIn("sudo open-ferry migrate", result.output)
                 self.assertIn(f'service install -system -config "{sh_path(self.config)}"', result.output)
                 self.assertNotIn("Or run it at login", result.output)
+                self.assertIn(f'Start it:            sudo {self.command()} -config', result.output)
+                self.assertIn(f'Run it at boot:      sudo {self.command()} service install -system', result.output)
 
     def test_system_install_keeps_an_existing_config(self):
         write_file(self.config, "oauth:\n  auth-dir: /existing/credentials\n", mode=0o600)
@@ -1109,10 +1137,31 @@ class InstallShTests(Case):
         name = self.assertInstalled(LATEST, GNU)
         self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", "/etc/open-ferry/config.yaml"]])
 
+    def test_root_can_install_its_own_account_only_inside_a_linux_container(self):
+        for signal in ("none", "dockerenv", "containerenv", "container", "kubernetes"):
+            with self.subTest(signal=signal):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(), path_first=[FAKE_BIN],
+                    FAKE_UNAME_S="Linux", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+                    FAKE_CONTAINER_MARKER=signal,
+                    container="test" if signal == "container" else "",
+                    KUBERNETES_SERVICE_HOST="test" if signal == "kubernetes" else "",
+                )
+                self.assertExit(result, 1 if signal == "none" else 0)
+                if signal == "none":
+                    self.assertNothingInstalled()
+                else:
+                    name = self.assertInstalled(LATEST, GNU)
+                    self.assertNotIn("-system", read_log(self.install_log)[0])
+                    self.assertEqual(read_log(self.log), [[name, "init", "-config", sh_path(self.config)]])
+                    self.assertIn("inside a container: installing for root's own account", result.output)
+
     def test_privilege_refusals_happen_before_downloads(self):
         macos = "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root. Run it without sudo; installs for the whole machine come to macOS in a later version."
         cases = (
             ("Linux", "0", ["--system"], "installing open-ferry for the whole machine needs root. Run it with sudo."),
+            ("MINGW64_NT", "1", ["--system"], "--system is supported only on Linux."),
             ("Linux", "1", [], "an account install must not run as root. Run it without sudo, or install open-ferry for the whole machine with `install.sh --system`."),
             ("Darwin", "0", ["--system"], macos), ("Darwin", "1", ["--system"], macos), ("Darwin", "1", [], macos),
         )
@@ -1158,6 +1207,7 @@ class InstallShTests(Case):
         env.update(
             HOME=sh_path(self.home),
             TMPDIR=sh_path(self.tmp),
+            container="", KUBERNETES_SERVICE_HOST="", FAKE_CONTAINER_MARKER="none",
             OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("good"),
             OPEN_FERRY_INSTALL_GH=NO_GH,
             FAKE_OPEN_FERRY_LOG=sh_path(self.log),
@@ -1951,6 +2001,8 @@ class InstallShTests(Case):
 
 
 class InstallPs1Cases:
+    """install.ps1's tests, run under each PowerShell (shell)."""
+
     def test_the_fake_refuses_writes_outside_its_scratch_directory(self):
         result = self.run_file(
             *self.install_args(), FAKE_OPEN_FERRY_SCRATCH=os.path.join(self.work, "narrower"),
@@ -1973,6 +2025,19 @@ class InstallPs1Cases:
         self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", self.config]])
         self.assertEqual(read_log(self.migrate_log), [])
 
+    def test_pipeline_seam_passes_explicit_parameters_on_an_elevated_runner(self):
+        from unittest.mock import patch
+        with patch.dict(globals(), ELEVATED=True):
+            result = self.run_command(
+                f"irm {self.script_url()} | iex; Write-Host 'The session goes on.'",
+                OPEN_FERRY_INSTALL_DIR=self.install_dir, OPEN_FERRY_INSTALL_CONFIG=self.config,
+                OPEN_FERRY_INSTALL_SYSTEM="yes", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+            )
+        self.assertExit(result, 0)
+        self.assertInstalled(LATEST)
+        self.assertIn("Ignoring OPEN_FERRY_INSTALL_DIR", result.output)
+        self.assertIn("The session goes on.", result.output)
+
     def test_system_install_passes_the_scope_and_skips_migration(self):
         cases = ((["-System"], {}), ([], {"OPEN_FERRY_INSTALL_SYSTEM": "yes"}), (["-System"], {"OPEN_FERRY_INSTALL_SYSTEM": "no"}))
         for flags, extra in cases:
@@ -1992,32 +2057,112 @@ class InstallPs1Cases:
                 self.assertIn("run open-ferry migrate in a terminal opened as administrator", result.output)
                 self.assertIn(f"service install -system -config {ps_quote(self.config)}", result.output)
                 self.assertNotIn("Or run it at login", result.output)
+                self.assertIn("Run these commands from an elevated terminal:", result.output)
 
-    def test_system_default_paths_are_redirected_to_scratch(self):
-        program_files = os.path.join(self.work, "Program Files")
-        install_dir = os.path.join(program_files, "open-ferry")
-        config = os.path.join(install_dir, "config.yaml")
-        # Set this inside PowerShell too, so no inherited casing or shell
-        # startup can substitute the machine's real ProgramFiles directory.
-        result = self.run_command(
-            f"$env:ProgramFiles = {ps_quote(program_files)}; & {ps_quote(INSTALL_PS1)} -System",
-            PROGRAMFILES=program_files, OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+    def test_system_default_paths_use_machine_folders_and_ignore_the_environment(self):
+        install_dir = os.path.join(self.program_files, "open-ferry")
+        config = os.path.join(self.program_data, "open-ferry", "config.yaml")
+        result = self.run_file(
+            "-System", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", INSTALL_TEST_HARDENED="1",
+            ProgramFiles=os.path.join(self.work, "wrong x86"),
+            ProgramW6432=os.path.join(self.work, "wrong native"),
+            ProgramData=os.path.join(self.work, "wrong data"),
+            OPEN_FERRY_INSTALL_DIR=os.path.join(self.work, "wrong bin"),
+            OPEN_FERRY_INSTALL_CONFIG=os.path.join(self.work, "wrong config"),
         )
         self.assertExit(result, 0)
-        name = top_dir(LATEST, WINDOWS_TARGET)
-        with open(os.path.join(install_dir, "open-ferry.exe"), "rb") as f:
-            self.assertEqual(f.read(), EXES[name])
+        name = self.assertInstalled(LATEST, install_dir)
         self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", config]])
         self.assertIn(f"service install -system -config {ps_quote(config)}", result.output)
         self.assertEqual(read_text(config), f"fake-config: {name}\n")
+        for path in ("wrong x86", "wrong native", "wrong data", "wrong bin", "wrong config"):
+            self.assertFalse(os.path.exists(os.path.join(self.work, path)))
 
-    def test_system_config_defaults_beside_an_explicit_binary_directory(self):
-        config = os.path.join(self.install_dir, "config.yaml")
+    def test_system_config_defaults_to_program_data_with_an_explicit_binary_directory(self):
+        config = os.path.join(self.program_data, "open-ferry", "config.yaml")
         result = self.run_file("-System", "-InstallDir", self.install_dir, OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1")
         self.assertExit(result, 0)
         name = top_dir(LATEST, WINDOWS_TARGET)
         self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", config]])
         self.assertEqual(read_text(config), f"fake-config: {name}\n")
+
+    def test_elevated_system_install_ignores_redirecting_environment_and_stages_inside_install_dir(self):
+        # Watch the install-self barrier while the download and unpack tree exists.
+        gate = os.path.join(self.work, "release")
+        for path in ("wrong temp", "wrong tmp"):
+            os.makedirs(os.path.join(self.work, path))
+        env = self.env(
+            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_INSTALL_SELF_WAIT_FILE=gate,
+            OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("broken"),
+            OPEN_FERRY_INSTALL_GH=os.path.join(FAKE_GH, "gh.cmd"), FAKE_GH_EXIT="1",
+            OPEN_FERRY_INSTALL_DIR=os.path.join(self.work, "wrong bin"),
+            OPEN_FERRY_INSTALL_CONFIG=os.path.join(self.work, "wrong config"),
+            TEMP=os.path.join(self.work, "wrong temp"), TMP=os.path.join(self.work, "wrong tmp"),
+            INSTALL_TEST_HARDENED="1",
+        )
+        command = [*self.shell_args(), "-File", INSTALL_PS1, *self.install_args("-System"), *self.seam_args(env)]
+        process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(stop, process)
+        self.assertTrue(wait_for(lambda: bool(read_log(self.install_log)), timeout=150), "install did not reach install-self")
+        staging = [name for name in os.listdir(self.install_dir) if name.startswith("open-ferry-install-")]
+        self.assertEqual(len(staging), 1)
+        staged = os.path.join(self.install_dir, staging[0])
+        self.assertTrue(os.path.isfile(os.path.join(staged, "SHA256SUMS")))
+        self.assertTrue(os.path.isfile(os.path.join(staged, archive_name(LATEST, WINDOWS_TARGET))))
+        self.assertTrue(os.path.isdir(os.path.join(staged, "unpacked", top_dir(LATEST, WINDOWS_TARGET))))
+        write_file(gate, "go\n", mode=0o644)
+        output = process.communicate(timeout=180)[0].decode("utf-8", "replace")
+        self.assertEqual(process.returncode, 0, output)
+        self.assertInstalled(LATEST)
+        self.assertEqual(read_log(self.gh_log), [])
+        for option, remedy in (("BASE_URL", "-Version"), ("GH", "-NoAttestation"), ("DIR", "-InstallDir"), ("CONFIG", "-ConfigPath")):
+            self.assertRegex(output, f"Ignoring OPEN_FERRY_INSTALL_{option}.*{remedy}")
+        for path in ("wrong bin", "wrong config"):
+            self.assertFalse(os.path.exists(os.path.join(self.work, path)))
+        for path in ("wrong temp", "wrong tmp"):
+            self.assertEqual(os.listdir(os.path.join(self.work, path)), [])
+
+    def test_system_staging_is_cleaned_when_download_verification_attestation_or_install_fails(self):
+        cases = (
+            (dict(OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("absent")), "Couldn't download"),
+            (dict(OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("broken")), "doesn't match SHA256SUMS"),
+            (dict(OPEN_FERRY_INSTALL_GH=os.path.join(FAKE_GH, "gh.cmd"), FAKE_GH_EXIT="1"), "couldn't verify"),
+            (dict(FAKE_INSTALL_SELF_EXIT="1"), "Couldn't install"),
+        )
+        for extra, message in cases:
+            with self.subTest(message=message):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                result = self.run_file(
+                    *self.install_args("-System"), "-TestElevated", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", **extra,
+                )
+                self.assertExit(result, 1)
+                self.assertIn(message, result.output)
+                self.assertEqual(os.listdir(self.install_dir), [])
+                self.assertEqual(os.listdir(self.tmp), [])
+                self.assertFalse(os.path.exists(self.config))
+
+    def test_explicit_test_parameters_refuse_non_loopback_urls(self):
+        requests = list(SERVER.httpd.requests)
+        for base in ("http://localhost:1234", "https://127.0.0.1:1234", "http://127.0.0.1.example:1234", "http://user@127.0.0.1:1234"):
+            with self.subTest(base=base):
+                result = self.run_file(*self.install_args("-System"), "-TestBaseUrl", base, "-TestPrivilege", "1", INSTALL_TEST_NO_PARAMETERS="1")
+                self.assertExit(result, 1)
+                self.assertIn("test parameters need an http://127.0.0.1", result.output)
+                self.assertNothingInstalled()
+        self.assertEqual(SERVER.httpd.requests, requests)
+
+    def test_elevated_system_install_does_not_accept_environment_fake_privilege(self):
+        if ELEVATED:
+            self.skipTest("refusal of a genuinely unelevated token is exercised on unelevated runners")
+        requests = list(SERVER.httpd.requests)
+        result = self.run_file(
+            *self.install_args("-System"), "-TestBaseUrl", SERVER.url("good"), "-TestElevated",
+            INSTALL_TEST_NO_PARAMETERS="1", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+        )
+        self.assertExit(result, 1)
+        self.assertIn("needs an administrator", result.output)
+        self.assertNothingInstalled()
+        self.assertEqual(SERVER.httpd.requests, requests)
 
     def test_system_install_keeps_an_existing_config(self):
         write_file(self.config, "oauth:\n  auth-dir: C:/existing/credentials\n", mode=0o600)
@@ -2044,11 +2189,9 @@ class InstallPs1Cases:
         requests = list(SERVER.httpd.requests)
         result = self.run_file(*self.install_args("-System"), OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_OPEN_FERRY_INSTALL_LOG=None)
         self.assertExit(result, 1)
-        self.assertIn("needs an administrator. Run it in a terminal opened as administrator.", result.output)
+        self.assertIn("test parameters need an http://127.0.0.1", result.output)
         self.assertNothingInstalled()
         self.assertEqual(SERVER.httpd.requests, requests)
-
-    """install.ps1's tests, run under each PowerShell (shell)."""
 
     shell = None
 
@@ -2069,6 +2212,8 @@ class InstallPs1Cases:
         self.local = os.path.join(self.work, "LocalAppData")
         self.roaming = os.path.join(self.work, "AppData")
         self.tmp = os.path.join(self.work, "tmp")
+        self.program_files = os.path.join(self.work, "Program Files")
+        self.program_data = os.path.join(self.work, "ProgramData")
         for path in (self.local, self.roaming, self.tmp):
             os.makedirs(path)
 
@@ -2098,11 +2243,40 @@ class InstallPs1Cases:
     def shell_args(self):
         return [self.shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]
 
+    def seam_args(self, env):
+        if env.get("INSTALL_TEST_NO_PARAMETERS") == "1":
+            return []
+        hardened = env.get("INSTALL_TEST_HARDENED") == "1"
+        args = [
+            "-TestBaseUrl", SERVER.url("good") if hardened else env["OPEN_FERRY_INSTALL_BASE_URL"],
+            "-TestPrivilege", env.get("OPEN_FERRY_INSTALL_TEST_PRIVILEGED", "0"),
+            "-TestProgramFiles", self.program_files, "-TestProgramData", self.program_data,
+            "-TestGh", NO_GH if hardened else env["OPEN_FERRY_INSTALL_GH"],
+        ]
+        if hardened or ELEVATED:
+            args.append("-TestElevated")
+        return args
+
     def run_file(self, *args, **extra):
-        return run([*self.shell_args(), "-File", INSTALL_PS1, *args], self.env(**extra))
+        env = self.env(**extra)
+        return run([*self.shell_args(), "-File", INSTALL_PS1, *args, *self.seam_args(env)], env)
 
     def run_command(self, command, **extra):
-        return run([*self.shell_args(), "-Command", command], self.env(**extra))
+        env = self.env(**extra)
+        # iex has no parameter binding. Keep that path on unelevated hosts;
+        # elevated CI explicitly passes the seam into the same script block.
+        if ELEVATED:
+            pipeline = f"irm {self.script_url()} | iex"
+            block = f"& ([scriptblock]::Create((irm {self.script_url()})))"
+            command = command.replace(pipeline, block)
+            # Parameter names must remain tokens, not quoted strings.
+            args = " ".join(arg if arg.startswith("-Test") else ps_quote(arg) for arg in self.seam_args(env))
+            command = command.replace(block, block + " " + args)
+            if ' -System' in command or env.get("OPEN_FERRY_INSTALL_SYSTEM") == "yes":
+                for option, variable in (("-InstallDir", "OPEN_FERRY_INSTALL_DIR"), ("-ConfigPath", "OPEN_FERRY_INSTALL_CONFIG")):
+                    if env.get(variable):
+                        command = command.replace(block, block + " " + option + " " + ps_quote(env[variable]))
+        return run([*self.shell_args(), "-Command", command], env)
 
     def install_args(self, *more):
         return ["-InstallDir", self.install_dir, "-ConfigPath", self.config, *more]
@@ -2414,7 +2588,7 @@ class InstallPs1Cases:
         # Neither install-self goes on until the test has seen both.
         release = os.path.join(self.work, "release")
         env = self.env(FAKE_INSTALL_SELF_WAIT_FILE=release)
-        command = [*self.shell_args(), "-File", INSTALL_PS1, *self.install_args()]
+        command = [*self.shell_args(), "-File", INSTALL_PS1, *self.install_args(), *self.seam_args(env)]
         first = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(stop, first)
         second = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -2537,8 +2711,9 @@ class InstallPs1Cases:
     def run_asking(self, reply, *args, **extra):
         """Runs install.ps1 in a PowerShell that isn't -NonInteractive, so
         that it may ask, with reply (bytes) as its input, or none."""
-        command = [self.shell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", INSTALL_PS1, *args]
-        return run(command, self.env(**extra), input=reply)
+        env = self.env(**extra)
+        command = [self.shell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", INSTALL_PS1, *args, *self.seam_args(env)]
+        return run(command, env, input=reply)
 
     def migrate_calls(self, name, switched):
         return [[name, "migrate", "-json"]] + ([[name, "migrate", "-yes"]] if switched else [])

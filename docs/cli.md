@@ -63,7 +63,7 @@ Before it writes, `init` loads the new config as the proxy would, and checks tha
 
 It won't replace an existing file unless you pass `-force`. With `-force`, the old file is kept as `<file name>.bak`, which replaces an older `.bak`.
 
-**Who can read it.** On Linux and macOS the file is `0600`: only you can read it. A directory `init` creates is `0700`. On Windows, open-ferry doesn't set the file's permissions: it has the permissions it inherits from its folder. Under `%APPDATA%`, only you, administrators and SYSTEM can read it. If you write it elsewhere with `-config`, choose a folder only you can read.
+**Who can read it.** On Linux and macOS the file is `0600`: only you can read it. A directory `init` creates is `0700`. On Windows, open-ferry doesn't set the file's permissions: it has the permissions it inherits from its folder. Under `%APPDATA%`, only you, administrators and SYSTEM can read it. The machine config at `C:\ProgramData\open-ferry\config.yaml` inherits the protected machine directory's DACL, so only SYSTEM and Administrators can read it. If you write it elsewhere with `-config`, choose a folder only the intended account can read.
 
 ### What it prints
 
@@ -233,14 +233,12 @@ As the service runs with root's rights, `install -system` asks more of the confi
 - **The auth directory must be a full path.** A `~` would be root's home, or LocalSystem's profile, not yours, and the default, `~/.cli-proxy-api`, is one. Set `auth-dir` to a path such as `/var/lib/open-ferry` or `C:\ProgramData\open-ferry\auth`, and sign in again there, or copy your credential files over.
 - **Only root, or the administrators, may change the binary and the config.** Otherwise anyone who could change them could run code as root.
   - On Linux and macOS, the binary and the config, after following links, and every directory above them, must be owned by root and writable by no other user or group (a directory with the sticky bit, such as `/tmp`, doesn't count). `/usr/local/bin/open-ferry` and `/etc/open-ferry/config.yaml` will do on most systems. On an Intel Mac with Homebrew, `/usr/local/bin` is yours, so use a directory such as `/opt/open-ferry`; on systems where `/usr/local` is writable by the `staff` group, likewise.
-  - On Windows, the binary and the config must be under `C:\Program Files`, `C:\Program Files (x86)` or `C:\Windows`. Copy them to `C:\Program Files\open-ferry`, for one. `C:\ProgramData` doesn't count: every user may add files there.
+  - On Windows, the binary normally goes under `C:\Program Files\open-ferry`. The machine config is `C:\ProgramData\open-ferry\config.yaml`, inside the machine data directory created by `install.ps1 -System` with a protected DACL allowing only SYSTEM and Administrators. Its auth directory inherits that protection too. An existing machine directory is checked, never repaired or adopted when another account can change it. Keep the config there: saving it replaces the file, so it must inherit private permissions from its directory. A config beside the binary in Program Files would inherit read access for Users.
 - **Run as root, you get no service of your own.** On Linux and macOS, `install` without `-system`, run as root, is refused: run it as the user the service is for, or add `-system`.
 
-On Windows, `install -system` creates the service with `sc.exe`, to start at boot and again 5 seconds after any failure, an exit with an error included. The service writes to `service.log` beside the config, and the service manager logs its starts and stops in the System event log. The auth directory can be under `C:\ProgramData`, but every user may add files there unless you take that right away; for example, as an administrator:
+Use `sudo sh install.sh --system` on Linux, or `.\install.ps1 -System` from an elevated Windows terminal, to create the machine binary, data directory and starting config. The starting config's `auth-dir` is `/var/lib/open-ferry/auth` or `C:\ProgramData\open-ferry\auth`. An existing config is kept. `-InstallDir` and `-ConfigPath` choose explicit Windows paths; inherited download and path overrides are ignored under elevation. Account installers run without sudo or elevation, except that root inside a Linux container may install for its own account.
 
-```bat
-icacls C:\ProgramData\open-ferry /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
-```
+On Windows, `install -system` creates the service with `sc.exe`, to start at boot and again 5 seconds after any failure, an exit with an error included. The service writes to `service.log` beside the config, and the service manager logs its starts and stops in the System event log.
 
 ### The service's environment
 

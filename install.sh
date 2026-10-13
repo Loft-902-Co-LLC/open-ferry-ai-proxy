@@ -17,7 +17,8 @@
 # and no PATH.
 # With --system (Linux, as root), the binary goes to /usr/local/bin and
 # init -system writes /etc/open-ferry/config.yaml with the machine auth dir.
-# It skips migration; account installs must run without sudo.
+# It skips migration; account installs must run without sudo, except for
+# root installing its own account inside a Linux container.
 #
 # Run `sh install.sh --help` for the options. Environment:
 #   OPEN_FERRY_INSTALL_BASE_URL  where releases are downloaded from, in
@@ -192,12 +193,20 @@ fi
 
 # Refuse before downloading or creating any directory.
 os=$(uname -s)
+in_container=0
+if [ -e /.dockerenv ] || [ -e /run/.containerenv ] || [ -n "${container:-}" ] || [ -n "${KUBERNETES_SERVICE_HOST:-}" ]; then
+  in_container=1
+fi
 uid=$(id -u) || die "couldn't tell whether this process is privileged"
 # Only the fake-release suite's existing loopback and recording seam
 # may pretend to be root; a normal run uses the effective uid.
 case ${OPEN_FERRY_INSTALL_BASE_URL:-} in
   http://127.0.0.1:*)
     if [ -n "${FAKE_OPEN_FERRY_INSTALL_LOG:-}" ]; then
+      case ${FAKE_CONTAINER_MARKER:-} in
+        none) in_container=0 ;;
+        dockerenv | containerenv) in_container=1 ;;
+      esac
       case ${OPEN_FERRY_INSTALL_TEST_PRIVILEGED:-} in
         0) uid=1 ;;
         1) uid=0 ;;
@@ -210,12 +219,16 @@ if [ "$os" = Darwin ] && { [ "$system" = 1 ] || [ "$uid" = 0 ]; }; then
 fi
 if [ "$system" = 1 ]; then
   [ "$uid" = 0 ] || die "installing open-ferry for the whole machine needs root. Run it with sudo."
-  [ "$os" = Linux ] || die "--system is supported only on Linux; on Windows, use install.ps1 -System."
+  [ "$os" = Linux ] || die "--system is supported only on Linux."
   [ -n "$bin_dir" ] || bin_dir=/usr/local/bin
   [ -n "$config" ] || config=/etc/open-ferry/config.yaml
   migrate=no
 elif [ "$uid" = 0 ]; then
-  die "an account install must not run as root. Run it without sudo, or install open-ferry for the whole machine with \`install.sh --system\`."
+  if [ "$os" = Linux ] && [ "$in_container" = 1 ]; then
+    say "Running as root inside a container: installing for root's own account."
+  else
+    die "an account install must not run as root. Run it without sudo, or install open-ferry for the whole machine with \`install.sh --system\`."
+  fi
 fi
 
 if [ -z "$bin_dir" ] || [ -z "$config" ]; then
@@ -656,9 +669,11 @@ else
     say "  Switch over:         $command migrate"
   fi
   if [ "$skipped_init" = 0 ]; then
-    say "  Start it:            $command -config \"$config\""
+    start_command=$command
+    if [ "$system" = 1 ]; then start_command="sudo $command"; fi
+    say "  Start it:            $start_command -config \"$config\""
     if [ "$system" = 1 ]; then
-      say "  Run it at boot:      $command service install -system -config \"$config\""
+      say "  Run it at boot:      $start_command service install -system -config \"$config\""
     else
       say "  Or run it at login:  $command service install -config \"$config\""
     fi
