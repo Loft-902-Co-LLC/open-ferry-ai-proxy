@@ -130,7 +130,7 @@ pub struct ClientModelProjection {
     pub model_id: String,
     /// Whether the client is suspended for the model.
     pub suspended: bool,
-    /// Why, when suspended. A reason of `quota` counts as a cooldown.
+    /// Why, when suspended. `quota` and `credential_quota` count as cooldowns.
     pub suspend_reason: String,
     /// Whether the client hit its quota for the model.
     pub quota_exceeded: bool,
@@ -979,9 +979,8 @@ struct Tally {
     cooldown: i64,
     /// Clients suspended for anything else.
     other: i64,
-    /// Clients suspended for anything else that also have a recent quota
-    /// mark, so are counted twice.
-    quota_and_other: i64,
+    /// Suspended clients that also have a recent quota mark, counted twice.
+    quota_and_suspended: i64,
 }
 
 impl Tally {
@@ -992,20 +991,21 @@ impl Tally {
         reason: &str,
         now: Instant,
     ) {
-        if equal_fold(reason, "quota") {
+        if registration.has_recent_mark(client_id, now) {
+            self.quota_and_suspended += 1;
+        }
+        if equal_fold(reason, "quota") || equal_fold(reason, "credential_quota") {
             self.cooldown += 1;
             return;
         }
         self.other += 1;
-        if registration.has_recent_mark(client_id, now) {
-            self.quota_and_other += 1;
-        }
     }
 
     /// Whether a model with `count` registrations is listed. A model whose
     /// clients are only cooling down stays listed.
     fn available(&self, count: i64) -> bool {
-        let effective = (count - self.expired - self.other + self.quota_and_other).max(0);
+        let effective =
+            (count - self.expired - self.cooldown - self.other + self.quota_and_suspended).max(0);
         effective > 0 || (count > 0 && (self.expired > 0 || self.cooldown > 0) && self.other == 0)
     }
 }

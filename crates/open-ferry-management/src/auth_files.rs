@@ -47,7 +47,7 @@
 //!
 //! Deviations from upstream:
 //! - The plugin host isn't ported: `supports_quota` and `quota_provider`
-//!   come only from a `quota_probe` in the metadata.
+//!   come only from a `quota_probe` in the metadata, exposed on v0 only.
 //! - Quota observations are shown only for Claude and Codex; upstream's
 //!   include Devin's, which isn't ported.
 //! - Without a credential manager upstream lists the auth directory from
@@ -97,7 +97,7 @@ type Entry = BTreeMap<String, Json>;
 pub(crate) fn routes() -> Vec<Route> {
     vec![
         Route::key("/v0/management/auth-files", get(list)),
-        Route::key("/v8/management/credentials", get(list)),
+        Route::key("/v8/management/credentials", get(list_v8)),
         Route::key("/v0/management/auth-files/models", get(models)),
         Route::key("/v8/management/credentials/models", get(models)),
     ]
@@ -108,6 +108,15 @@ pub(crate) async fn list(
     State(state): State<ManagementState>,
     RawQuery(raw): RawQuery,
 ) -> Response {
+    list_version(state, raw, false).await
+}
+
+/// The v8 listing omits the declarative probes served only by v0.
+async fn list_v8(State(state): State<ManagementState>, RawQuery(raw): RawQuery) -> Response {
+    list_version(state, raw, true).await
+}
+
+async fn list_version(state: ManagementState, raw: Option<String>, v8: bool) -> Response {
     let query = Query::parse(raw.as_deref());
     let pagination = match Pagination::parse(&query) {
         Ok(pagination) => pagination,
@@ -119,8 +128,24 @@ pub(crate) async fn list(
     };
     let manager = state.manager().clone();
     // Listing reads each credential's file metadata.
-    let body = run_blocking(move || list_body(&manager, &filter, pagination, Utc::now())).await;
+    let mut body = run_blocking(move || list_body(&manager, &filter, pagination, Utc::now())).await;
+    if v8 {
+        hide_declarative_quota(&mut body);
+    }
     json::response(StatusCode::OK, &body)
+}
+
+fn hide_declarative_quota(body: &mut Json) {
+    if let Json::Map(body) = body
+        && let Some(Json::Array(files)) = body.get_mut("files")
+    {
+        for file in files {
+            if let Json::Map(entry) = file {
+                entry.remove("quota_probe");
+                entry.remove("supports_quota");
+            }
+        }
+    }
 }
 
 /// Runs `f` on the blocking pool, passing a panic on. Inside an
@@ -950,6 +975,43 @@ pub(crate) fn reconcile_cooldown_state(auth: &Auth, now: Timestamp) -> CooldownS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn v8_listing_hides_declarative_quota_and_v0_keeps_it() {
+        let registry = Arc::new(open_ferry_core::registry::ModelRegistry::new());
+        let manager = Manager::new(Default::default(), registry.clone(), None);
+        let mut auth = Auth {
+            id: "probe-auth".into(),
+            provider: "custom".into(),
+            ..Auth::default()
+        };
+        auth.attributes.insert("runtime_only".into(), "true".into());
+        auth.metadata.insert(
+            "quota_probe".into(),
+            serde_json::json!({"url":"http://127.0.0.1/quota"}),
+        );
+        manager.register(auth).unwrap();
+        let state = ManagementState::new(Arc::new(Default::default()), manager, registry, None);
+        for query in [None, Some("page=1&page_size=1".to_owned())] {
+            for v8 in [false, true] {
+                let response = if v8 {
+                    list_v8(State(state.clone()), RawQuery(query.clone())).await
+                } else {
+                    list(State(state.clone()), RawQuery(query.clone())).await
+                };
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                let files = body["files"].as_array().unwrap();
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0]["id"], "probe-auth");
+                assert_eq!(files[0].get("supports_quota").is_some(), !v8);
+                assert_eq!(files[0].get("quota_probe").is_some(), !v8);
+            }
+        }
+    }
 
     fn pagination(raw: &str) -> Result<Pagination, &'static str> {
         Pagination::parse(&Query::parse(Some(raw)))

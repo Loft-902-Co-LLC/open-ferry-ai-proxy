@@ -13,17 +13,167 @@
 //!   the round-robin and weighted routing strategies.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use chrono::TimeDelta;
+use futures_core::future::BoxFuture;
+use futures_util::StreamExt;
+use http::HeaderMap;
+use tokio::sync::mpsc;
 
 use super::support::*;
-use crate::auth::Status;
-use crate::exec::{Dispatcher, ExecError};
+use crate::auth::{Auth, Status};
+use crate::exec::{Dispatcher, ExecError, Options, Request, Response, StreamResponse};
+use crate::executor::ProviderExecutor;
 use crate::manager::models::Resolver;
 use crate::manager::select::{PickArgs, Selection, is_auth_blocked_for_model};
 use crate::manager::{RoutingStrategy, Settings};
+
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6503_test.go
+// (v8.0.27, MIT). Cancellation drops a pending future here, rather than
+// setting Go's request context while ExecuteStream returns.
+struct CanceledBootstrapExecutor {
+    source: Mutex<Option<mpsc::UnboundedReceiver<Result<Bytes, ExecError>>>>,
+    refresh_first: bool,
+    calls: AtomicUsize,
+}
+
+impl ProviderExecutor for CanceledBootstrapExecutor {
+    fn id(&self) -> &str {
+        "codex"
+    }
+
+    fn execute(
+        &self,
+        _auth: Arc<Auth>,
+        _request: Request,
+        _options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        Box::pin(async { Err(ExecError::upstream(501, "not used")) })
+    }
+
+    fn count_tokens(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        self.execute(auth, request, options)
+    }
+
+    fn execute_stream(
+        &self,
+        _auth: Arc<Auth>,
+        _request: Request,
+        _options: Options,
+    ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
+        Box::pin(async move {
+            let chunks = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 && self.refresh_first {
+                futures_util::stream::iter([Err(ExecError::upstream(401, "token invalidated"))])
+                    .boxed()
+            } else {
+                let source = crate::manager::lock(&self.source)
+                    .take()
+                    .expect("one source");
+                futures_util::stream::unfold(source, |mut source| async move {
+                    source.recv().await.map(|chunk| (chunk, source))
+                })
+                .boxed()
+            };
+            Ok(StreamResponse {
+                headers: HeaderMap::new(),
+                chunks,
+            })
+        })
+    }
+
+    fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
+        Box::pin(async move { Ok((*auth).clone()) })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_stream_bootstrap_keeps_ready_upstream_cooldown() {
+    for refresh_first in [false, true] {
+        for with_retry_after in [false, true] {
+            let h = Harness::new(Settings::default());
+            let mut candidate = auth("limited", "codex");
+            candidate.metadata =
+                serde_json::json!({"access_token":"stale", "refresh_token":"refresh"})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            h.add(candidate, &[MODEL]);
+            let (tx, rx) = mpsc::unbounded_channel();
+            let executor = Arc::new(CanceledBootstrapExecutor {
+                source: Mutex::new(Some(rx)),
+                refresh_first,
+                calls: AtomicUsize::new(0),
+            });
+            h.manager.register_executor(executor.clone());
+            let manager = h.manager.clone();
+            let task = tokio::spawn(async move {
+                let mut opts = options();
+                opts.stream = true;
+                manager
+                    .execute_stream(&providers(&["codex"]), request(MODEL), opts)
+                    .await
+            });
+            settle().await;
+            assert_eq!(
+                executor.calls.load(Ordering::SeqCst),
+                if refresh_first { 2 } else { 1 }
+            );
+            let error = if with_retry_after {
+                quota_error(true, Duration::from_secs(600))
+            } else {
+                ExecError::canceled()
+            };
+            tx.send(Ok(Bytes::new())).unwrap();
+            tx.send(Err(error)).unwrap();
+            // Abort before the ready chunk gets another normal poll.
+            task.abort();
+            assert!(task.await.is_err_and(|err| err.is_cancelled()));
+            let current = h.get("limited");
+            if with_retry_after {
+                assert!(current.unavailable);
+                assert!(
+                    current
+                        .next_retry_after
+                        .is_some_and(|t| t >= h.now() + TimeDelta::minutes(5))
+                );
+                assert_eq!(current.quota.reason, "credential_quota");
+            } else {
+                assert!(!current.unavailable);
+                assert!(current.next_retry_after.is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_executor_error_records_retry_hint_before_returning() {
+    let h = Harness::new(Settings::default());
+    h.add(auth("limited", "codex"), &[MODEL]);
+    let executor = FakeExecutor::with("codex", |_| {
+        Reply::Err(quota_error(true, Duration::from_secs(600)))
+    });
+    h.executor(&executor);
+    let _ = h
+        .manager
+        .execute_stream(&providers(&["codex"]), request(MODEL), options())
+        .await;
+    let current = h.get("limited");
+    assert!(current.unavailable);
+    assert!(
+        current
+            .next_retry_after
+            .is_some_and(|t| t >= h.now() + TimeDelta::minutes(5))
+    );
+}
 
 const MODEL: &str = "stream-quota-model";
 const SIBLING_MODEL: &str = "stream-quota-sibling";
