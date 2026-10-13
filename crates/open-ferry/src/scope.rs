@@ -273,10 +273,12 @@ impl Probe for Host {
 /// read, passes the trust check, and holds a receipt (passing it too) that
 /// names `binary`, links resolved; a privileged process also needs
 /// [`authorize`] to pass for it. Otherwise they are the account's, which a
-/// privileged process needs [`authorize`] to pass for. A machine data
-/// directory that can't be used refuses a privileged process, unless the
-/// account's receipt names `binary`. An unprivileged process may get the
-/// machine's records for reading, never the account's for lack of privilege.
+/// privileged process needs [`authorize`] to pass for; the account's data
+/// directory is used as it is given. A machine data directory that can't be
+/// read or used refuses a privileged process, unless the account's records
+/// pass [`authorize`] and their receipt names `binary`. An unprivileged
+/// process may get the machine's records for reading, never the account's
+/// for lack of privilege.
 pub(crate) fn lookup(probe: &dyn Probe, binary: &str) -> Result<Home, Refusal> {
     let platform = probe.platform();
     let privileged = privileged(probe)?;
@@ -291,10 +293,10 @@ pub(crate) fn lookup(probe: &dyn Probe, binary: &str) -> Result<Home, Refusal> {
         return Ok(Home::new(platform, Scope::Machine, root, privileged));
     }
     let account = match probe.account_dir() {
-        Ok(account) => platform.clean(&account),
+        Ok(account) => account,
         Err(reason) => {
             return Err(match machine {
-                Machine::Unusable(refusal) if privileged => refusal,
+                Machine::Unreadable(refusal) | Machine::Unusable(refusal) if privileged => refusal,
                 _ => Refusal {
                     reason,
                     remedy: None,
@@ -305,15 +307,18 @@ pub(crate) fn lookup(probe: &dyn Probe, binary: &str) -> Result<Home, Refusal> {
     let receipt = platform.join(&account, RECEIPT_FILE);
     let mut home = Home::new(platform, Scope::Account, account.clone(), privileged);
     match machine {
-        Machine::Unusable(refusal) if privileged => {
+        Machine::Unreadable(refusal) | Machine::Unusable(refusal) if privileged => {
             // Only an install of the account's own stands beside a machine
-            // data directory that can't be used.
-            if check(probe, &account, Whose::Account).is_err() || !names(probe, &receipt, binary) {
+            // data directory that can't be read or used, and its receipt is
+            // read only once the account's records pass.
+            if check(probe, &account, Whose::Account).is_err()
+                || names(probe, &receipt, binary) != Ok(true)
+            {
                 return Err(refusal);
             }
         }
-        Machine::Unreadable => {
-            if !names(probe, &receipt, binary) && probe.trusted_file(binary).is_ok() {
+        Machine::Unreadable(_) => {
+            if names(probe, &receipt, binary) != Ok(true) && probe.trusted_file(binary).is_ok() {
                 home.machine_hint = Some(machine_hint(platform));
             }
         }
@@ -470,9 +475,11 @@ enum Machine {
     Ours(String),
     /// No receipt, or one that names another binary.
     Other,
-    /// It can't be read.
-    Unreadable,
-    /// It can't be found, or the trust check refuses it or its receipt.
+    /// It or its receipt can't be read: the refusal of a privileged
+    /// process, which can't tell whose it is.
+    Unreadable(Refusal),
+    /// It can't be found, the trust check refuses it or its receipt, or the
+    /// receipt isn't valid.
     Unusable(Refusal),
 }
 
@@ -488,17 +495,19 @@ fn find_machine(probe: &dyn Probe, binary: &str) -> Machine {
             });
         }
     };
-    let unusable = |reason: String| {
-        Machine::Unusable(Refusal {
-            reason,
-            remedy: Some(remedy(platform, Whose::Machine, &root)),
-        })
+    let refusal = |reason: String| Refusal {
+        reason,
+        remedy: Some(remedy(platform, Whose::Machine, &root)),
     };
+    let unusable = |reason: String| Machine::Unusable(refusal(reason));
+    let unreadable = |reason: String| Machine::Unreadable(refusal(reason));
     match probe.state(&root) {
         State::Missing => return Machine::Absent,
         State::Directory => {}
         State::File | State::Other => return unusable(format!("{root} is not a real directory")),
-        State::Inaccessible(_) => return Machine::Unreadable,
+        State::Inaccessible(error) => {
+            return unreadable(format!("{root} can't be looked at: {error}"));
+        }
     }
     if let Err(reason) = probe.trusted_dir(&root) {
         return unusable(reason);
@@ -510,27 +519,37 @@ fn find_machine(probe: &dyn Probe, binary: &str) -> Machine {
         State::Directory | State::Other => {
             return unusable(format!("{receipt} is not a regular file"));
         }
-        State::Inaccessible(_) => return Machine::Unreadable,
+        State::Inaccessible(error) => {
+            return unreadable(format!("{receipt} can't be looked at: {error}"));
+        }
     }
     if let Err(reason) = probe.trusted_file(&receipt) {
         return unusable(reason);
     }
-    if names(probe, &receipt, binary) {
-        Machine::Ours(root)
-    } else {
-        Machine::Other
+    match names(probe, &receipt, binary) {
+        Ok(true) => Machine::Ours(root),
+        Ok(false) => Machine::Other,
+        Err(ReceiptError::Unreadable(error)) => {
+            unreadable(format!("{receipt} can't be read: {error}"))
+        }
+        Err(ReceiptError::Malformed(error)) => {
+            unusable(format!("{receipt} isn't a valid install receipt: {error}"))
+        }
     }
 }
 
-/// Whether the receipt at `path` names `binary`, links resolved.
-fn names(probe: &dyn Probe, path: &str, binary: &str) -> bool {
-    let Ok(Some(receipt)) = probe.receipt(path) else {
-        return false;
+/// Whether the receipt at `path` names `binary`, links resolved: no
+/// receipt names nothing.
+fn names(probe: &dyn Probe, path: &str, binary: &str) -> Result<bool, ReceiptError> {
+    let Some(receipt) = probe.receipt(path)? else {
+        return Ok(false);
     };
-    match (probe.canonical(&receipt.binary), probe.canonical(binary)) {
-        (Ok(named), Ok(binary)) => named == binary,
-        _ => false,
-    }
+    Ok(
+        match (probe.canonical(&receipt.binary), probe.canonical(binary)) {
+            (Ok(named), Ok(binary)) => named == binary,
+            _ => false,
+        },
+    )
 }
 
 /// [`authorize`], given whose directory `root` is.
@@ -546,16 +565,17 @@ fn check(probe: &dyn Probe, root: &str, whose: Whose) -> Result<(), Refusal> {
         && !root
             .split(|c| platform.is_separator(c))
             .any(|part| part == "." || part == "..");
+    if !full {
+        return Err(Refusal {
+            reason: format!("{root} is not a full path without `.` or `..`"),
+            remedy: Some(remedy(platform, whose, root)),
+        });
+    }
     let root = platform.clean(root);
     let refuse = |reason: String| Refusal {
         reason,
         remedy: Some(remedy(platform, whose, &root)),
     };
-    if !full {
-        return Err(refuse(format!(
-            "{root} is not a full path without `.` or `..`"
-        )));
-    }
     let mut existing = root.clone();
     loop {
         match probe.state(&existing) {
@@ -664,7 +684,8 @@ fn needs_privilege(platform: Platform, doing: &str) -> Refusal {
     }
 }
 
-/// What to do about a data directory a privileged process can't use.
+/// What to do about a data directory a privileged process can't use. The
+/// machine's holds the machine's credentials, so nothing here deletes it.
 fn remedy(platform: Platform, whose: Whose, root: &str) -> String {
     match (whose, platform) {
         (Whose::Account, Platform::Windows) => format!(
@@ -676,11 +697,11 @@ fn remedy(platform: Platform, whose: Whose, root: &str) -> String {
             machine_install(platform)
         ),
         (Whose::Machine, Platform::Windows) => format!(
-            "Remove {root} as an administrator and install again with {}.",
+            "Stop the open-ferry service, then as an administrator fix what is named, or move {root} aside and install again with {}; keep its auth directory private, since it holds the machine's credentials.",
             machine_install(platform)
         ),
         (Whose::Machine, Platform::Linux | Platform::MacOs) => format!(
-            "Remove {root} as root and install again with {}.",
+            "Stop the open-ferry service, then as root fix what is named, or move {root} aside and install again with {}; keep its auth directory private, since it holds the machine's credentials.",
             machine_install(platform)
         ),
     }
