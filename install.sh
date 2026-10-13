@@ -15,6 +15,9 @@
 # (~/.config/open-ferry/config.yaml when XDG_CONFIG_HOME isn't an absolute
 # path), it writes one with `open-ferry init`. It edits no shell profile
 # and no PATH.
+# With --system (Linux, as root), the binary goes to /usr/local/bin and
+# init -system writes /etc/open-ferry/config.yaml with the machine auth dir.
+# It skips migration; account installs must run without sudo.
 #
 # Run `sh install.sh --help` for the options. Environment:
 #   OPEN_FERRY_INSTALL_BASE_URL  where releases are downloaded from, in
@@ -24,6 +27,9 @@
 #   OPEN_FERRY_INSTALL_SELF_UPDATE  off, notify or auto: set self-update.mode
 #                                in the config (--no-auto-update is off)
 #   OPEN_FERRY_INSTALL_MIGRATE   yes: as --migrate; no: as --no-migrate
+#   OPEN_FERRY_INSTALL_SYSTEM    yes: as --system; no: an account install
+#   OPEN_FERRY_INSTALL_TEST_PRIVILEGED  0 or 1: fake privilege only with a
+#                                loopback base URL and FAKE_OPEN_FERRY_INSTALL_LOG
 #
 # The new binary installs itself (`open-ferry install-self`): it waits for
 # any other install or update, refuses to replace a binary a background
@@ -49,11 +55,14 @@ Options:
                      latest release
   --target TARGET    install the build for this target rather than this
                      system's, such as x86_64-unknown-linux-musl
-  --bin-dir DIR      install the binary in DIR (default: ~/.local/bin)
+  --system           install for the whole machine on Linux; needs root
+  --bin-dir DIR      install the binary in DIR (default: ~/.local/bin;
+                     with --system: /usr/local/bin)
   --config PATH      the config to keep, or to write when there is none
                      (default: $XDG_CONFIG_HOME/open-ferry/config.yaml, or
                      ~/.config/open-ferry/config.yaml when XDG_CONFIG_HOME
-                     isn't an absolute path)
+                     isn't an absolute path; with --system:
+                     /etc/open-ferry/config.yaml)
   --no-attestation   don't check the build provenance attestation, even
                      when gh is installed; the SHA256SUMS check still runs
   --no-auto-update   turn automatic updates off (self-update.mode: off in
@@ -66,6 +75,7 @@ Options:
 
 Environment: OPEN_FERRY_INSTALL_MIGRATE=yes is --migrate, and
 OPEN_FERRY_INSTALL_MIGRATE=no is --no-migrate; the options win over it.
+OPEN_FERRY_INSTALL_SYSTEM=yes is --system; no is an account install.
 EOF
 }
 
@@ -98,6 +108,7 @@ attestation=1
 self_update=${OPEN_FERRY_INSTALL_SELF_UPDATE:-}
 migrate=
 migrate_why=--migrate
+system=
 while [ "$#" -gt 0 ]; do
   case $1 in
     --version | --target | --bin-dir | --config)
@@ -123,6 +134,10 @@ while [ "$#" -gt 0 ]; do
         --bin-dir=*) bin_dir=$value ;;
         --config=*) config=$value ;;
       esac
+      shift
+      ;;
+    --system)
+      system=1
       shift
       ;;
     --no-attestation)
@@ -165,6 +180,42 @@ if [ -z "$migrate" ]; then
     0 | no | false) migrate=no ;;
     *) usage_error "OPEN_FERRY_INSTALL_MIGRATE is yes or no, not $OPEN_FERRY_INSTALL_MIGRATE" ;;
   esac
+fi
+
+if [ -z "$system" ]; then
+  case ${OPEN_FERRY_INSTALL_SYSTEM:-} in
+    '' | 0 | no | false) system=0 ;;
+    1 | yes | true) system=1 ;;
+    *) usage_error "OPEN_FERRY_INSTALL_SYSTEM is yes or no, not $OPEN_FERRY_INSTALL_SYSTEM" ;;
+  esac
+fi
+
+# Refuse before downloading or creating any directory.
+os=$(uname -s)
+uid=$(id -u) || die "couldn't tell whether this process is privileged"
+# Only the fake-release suite's existing loopback and recording seam
+# may pretend to be root; a normal run uses the effective uid.
+case ${OPEN_FERRY_INSTALL_BASE_URL:-} in
+  http://127.0.0.1:*)
+    if [ -n "${FAKE_OPEN_FERRY_INSTALL_LOG:-}" ]; then
+      case ${OPEN_FERRY_INSTALL_TEST_PRIVILEGED:-} in
+        0) uid=1 ;;
+        1) uid=0 ;;
+      esac
+    fi
+    ;;
+esac
+if [ "$os" = Darwin ] && { [ "$system" = 1 ] || [ "$uid" = 0 ]; }; then
+  die "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root. Run it without sudo; installs for the whole machine come to macOS in a later version."
+fi
+if [ "$system" = 1 ]; then
+  [ "$uid" = 0 ] || die "installing open-ferry for the whole machine needs root. Run it with sudo."
+  [ "$os" = Linux ] || die "--system is supported only on Linux; on Windows, use install.ps1 -System."
+  [ -n "$bin_dir" ] || bin_dir=/usr/local/bin
+  [ -n "$config" ] || config=/etc/open-ferry/config.yaml
+  migrate=no
+elif [ "$uid" = 0 ]; then
+  die "an account install must not run as root. Run it without sudo, or install open-ferry for the whole machine with \`install.sh --system\`."
 fi
 
 if [ -z "$bin_dir" ] || [ -z "$config" ]; then
@@ -395,7 +446,9 @@ fi
 status=0
 # `install-self` is in every release (0.1.0 has it, and no release is older),
 # so a version this script can name has it: no fallback, no probe.
-"$staged" install-self -from "$staged" -to "$installed" -installer install.sh </dev/null || status=$?
+set -- install-self -from "$staged" -to "$installed" -installer install.sh
+if [ "$system" = 1 ]; then set -- "$@" -system; fi
+"$staged" "$@" </dev/null || status=$?
 case $status in
   0) ;;
   3)
@@ -457,6 +510,9 @@ is_terminal() {
 found_cpa=0
 switched=0
 switch_failed=
+if [ "$system" = 1 ]; then
+  say "Skipping the migrate offer for a machine install. To migrate CLIProxyAPI, run: sudo open-ferry migrate"
+fi
 if [ "$migrate" != no ]; then
   search=$("$installed" migrate -json </dev/null 2>/dev/null || true)
   case $search in
@@ -545,7 +601,9 @@ else
   wrote_config=1
   say "Writing a starting config with open-ferry init..."
   say ""
-  "$installed" init -config "$config" || die "open-ferry init couldn't write $config"
+  set -- init -config "$config"
+  if [ "$system" = 1 ]; then set -- init -system -config "$config"; fi
+  "$installed" "$@" || die "open-ferry init couldn't write $config"
   say ""
 fi
 
@@ -599,7 +657,11 @@ else
   fi
   if [ "$skipped_init" = 0 ]; then
     say "  Start it:            $command -config \"$config\""
-    say "  Or run it at login:  $command service install -config \"$config\""
+    if [ "$system" = 1 ]; then
+      say "  Run it at boot:      $command service install -system -config \"$config\""
+    else
+      say "  Or run it at login:  $command service install -config \"$config\""
+    fi
     if [ "$wrote_config" = 1 ]; then
       say "  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with the management key above"
     else
