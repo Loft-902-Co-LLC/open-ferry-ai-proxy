@@ -23,7 +23,7 @@
 //!   fails.
 //! - open-ferry's `claude-cli` list follows `claude-api-key`, left out when
 //!   it is empty.
-//! - open-ferry's `routing.quota` follows `session-affinity-subagents`,
+//! - open-ferry's `routing.quota` follows `session-affinity-rebind-on`,
 //!   left out when nothing in it is set.
 //! - open-ferry's `self-update` follows `claude-cli`, left out when nothing
 //!   in it is set.
@@ -282,13 +282,13 @@ pub(super) fn config(config: &Config) -> Json {
                     "session-affinity-ttl",
                     string(&config.routing.session_affinity_ttl),
                 )
-                .omit_empty(
-                    "session-affinity-rebind-on",
-                    string(&config.routing.session_affinity_rebind_on),
-                )
                 .omit_nil(
                     "session-affinity-subagents",
                     config.routing.session_affinity_subagents.map(Json::Bool),
+                )
+                .omit_empty(
+                    "session-affinity-rebind-on",
+                    string(&config.routing.session_affinity_rebind_on),
                 )
                 .omit_nil("quota", routing_quota(&config.routing.quota))
                 .done(),
@@ -845,6 +845,19 @@ fn model_setting(setting: &OAuthModelSetting) -> Json {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn routing_keys_follow_upstreams_field_order() {
+        let mut cfg = Config::default();
+        cfg.routing.strategy = "round-robin".into();
+        cfg.routing.session_affinity = true;
+        cfg.routing.session_affinity_ttl = "1h".into();
+        cfg.routing.session_affinity_subagents = Some(false);
+        cfg.routing.session_affinity_rebind_on = "quota".into();
+        assert!(config(&cfg).encode().contains(
+            r#""routing":{"strategy":"round-robin","session-affinity":true,"session-affinity-ttl":"1h","session-affinity-subagents":false,"session-affinity-rebind-on":"quota"}"#
+        ));
+    }
 
     #[test]
     fn new_config_keys_use_upstreams_json_names_and_omission_rules() {

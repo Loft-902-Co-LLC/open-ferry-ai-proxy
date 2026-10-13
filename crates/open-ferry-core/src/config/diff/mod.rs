@@ -107,11 +107,6 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         old.streaming.send_keepalive_before_ft,
         new.streaming.send_keepalive_before_ft,
     );
-    changes.flag(
-        "claude.tool-search",
-        old.claude.tool_search,
-        new.claude.tool_search,
-    );
     changes.text(
         "routing.session-affinity-rebind-on",
         &old.routing.session_affinity_rebind_on,
@@ -194,6 +189,11 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         "codex.orphan-delegation-compatibility",
         old.codex.orphan_delegation_compatibility,
         new.codex.orphan_delegation_compatibility,
+    );
+    changes.flag(
+        "claude.tool-search",
+        old.claude.tool_search,
+        new.claude.tool_search,
     );
     changes.flag(
         "xai.inject-x-search",

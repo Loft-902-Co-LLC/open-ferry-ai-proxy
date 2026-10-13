@@ -482,9 +482,17 @@ fn errors_name_the_answer() {
 // `super::super::load`.)
 #[test]
 fn v8_example_is_valid() {
-    let example = include_str!("../testdata/config.example.yaml");
-    assert_valid(example);
-    let text = example.replace("\r\n", "\n");
+    // v8.0.27 adds a Sign in with ChatGPT client identity setting. That
+    // provider and its impersonation setting aren't ported, so omit it
+    // from validation while keeping the fixture identical to upstream.
+    let example = include_str!("../testdata/config.example.yaml")
+        .replace("\r\n", "\n")
+        .replace(
+            "      signin-with-chatgpt-identifier: \"CLIProxyAPI\"\n",
+            "",
+        );
+    assert_valid(&example);
+    let text = example;
     let (_, block) = text
         .split_once("# BEGIN API KEY EXAMPLES\n")
         .expect("examples start");

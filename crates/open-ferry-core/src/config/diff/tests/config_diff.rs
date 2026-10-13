@@ -334,6 +334,25 @@ fn codex_orphan_delegation_compatibility() {
     );
 }
 
+#[test]
+fn claude_tool_search_follows_codex_orphan_delegation_in_diff_order() {
+    let old = Config::default();
+    let mut new = old.clone();
+    new.request_log = true;
+    new.codex.orphan_delegation_compatibility = true;
+    new.claude.tool_search = true;
+    new.xai.inject_x_search = true;
+    assert_eq!(
+        build_change_details(&old, &new),
+        [
+            "request-log: false -> true",
+            "codex.orphan-delegation-compatibility: false -> true",
+            "claude.tool-search: false -> true",
+            "xai.inject-x-search: false -> true",
+        ]
+    );
+}
+
 // Ports TestBuildConfigChangeDetails_XAIKeys.
 #[test]
 fn xai_keys() {
