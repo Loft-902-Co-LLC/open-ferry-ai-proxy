@@ -906,7 +906,7 @@ mod tests {
     fn reads_rate_limit_windows_as_headers() {
         let now = Utc::now();
         let in_5h = (now + TimeDelta::seconds(3600)).timestamp();
-        let in_7d = (now + TimeDelta::seconds(7200)).timestamp();
+        let in_2h = (now + TimeDelta::seconds(7200)).timestamp();
         let mut state = Events::new(false);
         state.feed(&line(json!({
             "type": "rate_limit_event",
@@ -920,7 +920,7 @@ mod tests {
                 "utilization": 1.0,
                 "unifiedWindows": {
                     "five_hour": {"resetsAt": in_5h},
-                    "seven_day": {"utilization": 0.25, "resetsAt": in_7d},
+                    "seven_day": {"utilization": 0.25, "resetsAt": in_2h},
                     "seven_day_opus": {"utilization": 0.5},
                     "Bad Name": {"utilization": 0.5},
                 },
@@ -973,7 +973,7 @@ mod tests {
         );
         assert_eq!(
             get("anthropic-ratelimit-unified-7d-reset"),
-            Some(in_7d.to_string())
+            Some(in_2h.to_string())
         );
         assert_eq!(get("anthropic-ratelimit-unified-7d-status"), None);
         assert_eq!(

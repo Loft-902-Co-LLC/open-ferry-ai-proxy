@@ -241,7 +241,7 @@ pub(crate) fn extract_and_remove_betas(body: &mut Value) -> Vec<String> {
 
 /// `sanitizeClaudeMessagesForClaudeUpstreamWithDebug`: keeps the thinking
 /// signatures a Claude model can replay and drops the rest, then removes
-/// empty web-search domain lists.
+/// empty web-search domain lists and repairs tool IDs with `tool_call_ids::normalize`.
 pub(crate) fn sanitize_for_upstream(body: &mut Value, base_model: &str) {
     if Provider::from_model_name(base_model) == Provider::Claude {
         let report = sanitize_claude_messages_for_claude_upstream(body, base_model, false);

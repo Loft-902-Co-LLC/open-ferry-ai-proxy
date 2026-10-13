@@ -27,18 +27,28 @@ fn id_field(block: &Value) -> Option<&'static str> {
     }
 }
 
+// gjson Array() treats a non-array value as a one-item list.
+fn items(value: &Value) -> &[Value] {
+    match value {
+        Value::Array(items) => items,
+        _ => std::slice::from_ref(value),
+    }
+}
+
+fn items_mut(value: &mut Value) -> &mut [Value] {
+    match value {
+        Value::Array(items) => items,
+        _ => std::slice::from_mut(value),
+    }
+}
+
 pub(super) fn normalize(body: &mut Value) {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+    let Some(messages) = body.get_mut("messages") else {
         return;
     };
     let mut used = HashSet::new();
-    for message in messages.iter() {
-        for block in message
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
+    for message in items(messages) {
+        for block in message.get("content").into_iter().flat_map(items) {
             if let Some(id) = id_field(block)
                 .and_then(|field| block.get(field))
                 .and_then(Value::as_str)
@@ -49,13 +59,8 @@ pub(super) fn normalize(body: &mut Value) {
         }
     }
     let mut mapped = HashMap::<String, String>::new();
-    for message in messages {
-        for block in message
-            .get_mut("content")
-            .and_then(Value::as_array_mut)
-            .into_iter()
-            .flatten()
-        {
+    for message in items_mut(messages) {
+        for block in message.get_mut("content").into_iter().flat_map(items_mut) {
             let Some(field) = id_field(block) else {
                 continue;
             };
@@ -85,6 +90,20 @@ pub(super) fn normalize(body: &mut Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn walks_single_message_and_content_objects() {
+        let mut body = json!({"messages":{"content":{"type":"tool_use","id":"call:one"}}});
+        normalize(&mut body);
+        assert_eq!(body["messages"]["content"]["id"], "cpa_tid_v1_Y2FsbDpvbmU");
+        let mut body = json!({"messages":[{"content":{"type":"tool_use","id":"call:one"}},
+            {"content":{"type":"tool_result","tool_use_id":"call:one"}}]});
+        normalize(&mut body);
+        assert_eq!(
+            body["messages"][0]["content"]["id"],
+            body["messages"][1]["content"]["tool_use_id"]
+        );
+    }
 
     #[test]
     fn repairs_calls_and_results_without_colliding_with_portable_ids() {

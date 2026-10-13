@@ -69,13 +69,40 @@ pub(super) fn seal(summary: &str, model: &str) -> Result<String, ExecError> {
     Ok(format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(ciphertext)))
 }
 
-fn unseal(content: &str) -> Result<String, ExecError> {
+pub(super) fn unseal(content: &str) -> Result<String, ExecError> {
+    open_capsule(content).map(|data| data.summary)
+}
+
+fn open_capsule(content: &str) -> Result<Capsule, ExecError> {
     let raw = content
         .strip_prefix(PREFIX)
         .ok_or_else(|| plain_error("unrecognized compaction capsule format"))?;
-    let mut ciphertext = URL_SAFE_NO_PAD
-        .decode(raw)
-        .map_err(|error| plain_error(format!("decode compaction capsule: {error}")))?;
+    // Go's RawURLEncoding ignores line breaks and accepts non-zero trailing bits.
+    let corrupt = |offset| {
+        plain_error(format!(
+            "decode compaction capsule: illegal base64 data at input byte {offset}"
+        ))
+    };
+    let mut cleaned = Vec::with_capacity(raw.len());
+    for (offset, byte) in raw.bytes().enumerate() {
+        match byte {
+            b'\r' | b'\n' => continue,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => cleaned.push(byte),
+            _ => return Err(corrupt(offset)),
+        }
+    }
+    if cleaned.len() % 4 == 1 {
+        // Go reports the EOF position minus the one symbol in this quantum,
+        // including any skipped CR/LF bytes in that position.
+        return Err(corrupt(raw.len() - 1));
+    }
+    let decoder = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::URL_SAFE,
+        base64::engine::general_purpose::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::RequireNone)
+            .with_decode_allow_trailing_bits(true),
+    );
+    let mut ciphertext = decoder.decode(&cleaned).map_err(|_| corrupt(raw.len()))?;
     if ciphertext.len() < 12 + 16 {
         return Err(plain_error("compaction capsule ciphertext too short"));
     }
@@ -87,14 +114,23 @@ fn unseal(content: &str) -> Result<String, ExecError> {
             &mut ciphertext[12..],
         )
         .map_err(|_| {
-            plain_error("invalid or corrupted compaction capsule: authentication failed")
+            plain_error(
+                "invalid or corrupted compaction capsule: cipher: message authentication failed",
+            )
         })?;
     serde_json::from_slice::<Capsule>(plaintext)
-        .map(|data| data.summary)
         .map_err(|error| plain_error(format!("unmarshal compaction capsule: {error}")))
 }
 
+fn contains_compaction(raw: &[u8]) -> bool {
+    raw.windows(b"compaction".len())
+        .any(|window| window == b"compaction")
+}
+
 fn expand_payload(raw: &Bytes) -> Result<Bytes, ExecError> {
+    if !contains_compaction(raw) {
+        return Ok(raw.clone());
+    }
     let Ok(mut body) = exact::from_slice(raw) else {
         return Ok(raw.clone());
     };
@@ -148,6 +184,9 @@ pub(super) fn expand(
 }
 
 fn has_trigger(raw: &[u8]) -> bool {
+    if !contains_compaction(raw) {
+        return false;
+    }
     serde_json::from_slice::<Value>(raw)
         .ok()
         .is_some_and(|body| {
@@ -296,14 +335,14 @@ impl ClaudeExecutor {
         let capsule = seal(&summary, base_model)?;
         let cached = int_at(&body, "usage.cache_read_input_tokens");
         let input = int_at(&body, "usage.input_tokens")
-            + int_at(&body, "usage.cache_creation_input_tokens")
-            + cached;
+            .saturating_add(int_at(&body, "usage.cache_creation_input_tokens"))
+            .saturating_add(cached);
         let output = int_at(&body, "usage.output_tokens");
         let now = Utc::now();
         let id = now.timestamp_nanos_opt().unwrap_or_default();
         let payload = json!({"object":"response.compaction","status":"completed","id":format!("resp_ag_compact_{id}"),"created_at":now.timestamp(),"model":base_model,
             "output":[{"type":"compaction","status":"completed","id":format!("cmp_ag_compact_{id}"),"encrypted_content":capsule}],
-            "usage":{"input_tokens":input,"output_tokens":output,"total_tokens":input+output,"input_tokens_details":{"cached_tokens":cached},"output_tokens_details":{"reasoning_tokens":0}}});
+            "usage":{"input_tokens":input,"output_tokens":output,"total_tokens":input.saturating_add(output),"input_tokens_details":{"cached_tokens":cached},"output_tokens_details":{"reasoning_tokens":0}}});
         Ok(Response {
             payload: Bytes::from(payload.to_string()),
             headers: response.headers,
@@ -362,6 +401,83 @@ pub(super) fn into_stream(response: Response) -> Result<StreamResponse, ExecErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SealAntigravityCompaction in helps/antigravity_compaction.go, copied into a
+    // standalone stdlib-only program and run with Go 1.26.4 (GOTOOLCHAIN=local).
+    // Fixed payload: {"summary":"Go fixture summary.\n日本語",
+    // "model":"claude-sonnet-4-5","created_at":1728000000}; nonce from crypto/rand.
+    const GO_CAPSULE: &str = "cpa-ag-compact-v1:THIozpwXpOWrdR_hF4fLD1Ium7a4AernRqn5GP-EmPgwaKbu-FkHV37orJsu68xFk31BZyakApuDxSFSAEEJgjUo3UUiKJZqCF_IJkRCGJFhpTK_7F8JcoBefNEeM7yZOAeDLxePBQt8MrAQATcwzrz5pc0zGt95M6EOdw";
+
+    #[test]
+    fn opens_go_sealed_capsule_and_checks_every_field() {
+        let data = open_capsule(GO_CAPSULE).unwrap();
+        assert_eq!(data.summary, "Go fixture summary.\n日本語");
+        assert_eq!(data.model, "claude-sonnet-4-5");
+        assert_eq!(data.created_at, 1728000000);
+    }
+
+    #[test]
+    fn base64_accepts_go_line_breaks_and_nonzero_trailing_bits() {
+        let wrapped = GO_CAPSULE.replacen("THIo", "TH\r\nIo", 1);
+        assert_eq!(unseal(&wrapped).unwrap(), unseal(GO_CAPSULE).unwrap());
+        let mut trailing = GO_CAPSULE.to_owned();
+        assert_eq!(trailing.pop(), Some('w'));
+        trailing.push('x');
+        assert_eq!(unseal(&trailing).unwrap(), unseal(GO_CAPSULE).unwrap());
+    }
+
+    #[test]
+    fn expansion_errors_match_go() {
+        for (raw, message) in [
+            (
+                "!",
+                "decode compaction capsule: illegal base64 data at input byte 0",
+            ),
+            (
+                "AAAAA",
+                "decode compaction capsule: illegal base64 data at input byte 4",
+            ),
+            (
+                "AA\r\n!",
+                "decode compaction capsule: illegal base64 data at input byte 4",
+            ),
+            (
+                "A\r\n",
+                "decode compaction capsule: illegal base64 data at input byte 2",
+            ),
+            (
+                "!AAAA",
+                "decode compaction capsule: illegal base64 data at input byte 0",
+            ),
+            (
+                "AA=",
+                "decode compaction capsule: illegal base64 data at input byte 2",
+            ),
+            ("AA", "compaction capsule ciphertext too short"),
+            (
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "invalid or corrupted compaction capsule: cipher: message authentication failed",
+            ),
+        ] {
+            let body = Bytes::from(json!({"input":[{"type":"compaction","encrypted_content":format!("{PREFIX}{raw}")}]}).to_string());
+            let error = expand_payload(&body).unwrap_err();
+            assert_eq!(error.status, 400);
+            assert_eq!(
+                error.message,
+                format!("invalid compaction capsule: {message}")
+            );
+        }
+    }
+
+    #[test]
+    fn requests_without_compaction_pass_through_untouched() {
+        let raw = Bytes::from_static(br#"{ "input" : [ {"type":"message", "content":"hi"} ] }"#);
+        assert!(!contains_compaction(&raw));
+        assert!(!has_trigger(&raw));
+        let expanded = expand_payload(&raw).unwrap();
+        assert_eq!(expanded, raw);
+        assert_eq!(expanded.as_ptr(), raw.as_ptr());
+    }
 
     #[test]
     fn capsules_round_trip_and_reject_tampering() {
