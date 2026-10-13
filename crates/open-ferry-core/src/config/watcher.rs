@@ -120,6 +120,12 @@ const EVENT_CAPACITY: usize = 64;
 /// How often a send to a full channel checks whether the watcher stopped.
 const FULL_CHANNEL_POLL: Duration = Duration::from_millis(10);
 
+/// Checks the config file before each read: `Err` with the reason skips the
+/// read, as a file that can't be read is skipped. A privileged binary uses
+/// it so that it never reads a config file it wouldn't trust (not
+/// upstream's).
+pub type ReadGuard = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
+
 /// The last revision handed out by [`next_revision`].
 static LAST_REVISION: AtomicU64 = AtomicU64::new(0);
 
@@ -221,6 +227,16 @@ impl ConfigWatcher {
         config_path: impl AsRef<Path>,
         config: &Config,
     ) -> Result<(Self, mpsc::Receiver<WatchEvent>), WatchError> {
+        Self::start_guarded(config_path, config, None)
+    }
+
+    /// [`start`](Self::start), with `guard` checking the config file before
+    /// each read of it.
+    pub fn start_guarded(
+        config_path: impl AsRef<Path>,
+        config: &Config,
+        guard: Option<ReadGuard>,
+    ) -> Result<(Self, mpsc::Receiver<WatchEvent>), WatchError> {
         let config_path = absolute(config_path.as_ref(), "config file")?;
         if let Err(error) = fs::metadata(&config_path) {
             return Err(WatchError::new(format!(
@@ -264,7 +280,8 @@ impl ConfigWatcher {
         }
 
         let aliases = Aliases::new(&dirs);
-        let state = WatchState::new(config_path.clone(), auth_dir.clone());
+        let mut state = WatchState::new(config_path.clone(), auth_dir.clone());
+        state.read_guard = guard;
         let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
         let stopped = Arc::new(AtomicBool::new(false));
         let thread_stopped = Arc::clone(&stopped);
@@ -438,6 +455,8 @@ struct WatchState {
     auth_hashes: HashMap<String, Hash>,
     /// When each auth file was last seen removed, by [`path_key`].
     remove_times: HashMap<String, Instant>,
+    /// The check before each config read, if any.
+    read_guard: Option<ReadGuard>,
 }
 
 impl WatchState {
@@ -450,6 +469,7 @@ impl WatchState {
             last_config_hash: None,
             auth_hashes: HashMap::new(),
             remove_times: HashMap::new(),
+            read_guard: None,
         }
     }
 
@@ -567,6 +587,12 @@ impl WatchState {
     /// [`reload_config_if_changed`](Self::reload_config_if_changed), or with
     /// `force` without its hash check (not upstream's).
     fn reload_config_file(&mut self, force: bool) -> Option<WatchEvent> {
+        if let Some(guard) = &self.read_guard
+            && let Err(reason) = guard(&self.config_path)
+        {
+            error!(%reason, "config file not read");
+            return None;
+        }
         let data = match fs::read(&self.config_path) {
             Ok(data) => data,
             Err(error) => {
@@ -1028,6 +1054,35 @@ mod tests {
             state.reload_config_file(true),
             Some(WatchEvent::ConfigInvalid(_))
         ));
+    }
+
+    // Not upstream's: a refusing guard skips the read, forced or not, and
+    // the file loads once the guard lets it.
+    #[test]
+    fn a_refusing_read_guard_skips_the_config_read() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let allow = Arc::new(AtomicBool::new(false));
+        let checked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (guard_allow, guard_checked) = (Arc::clone(&allow), Arc::clone(&checked));
+        state.read_guard = Some(Arc::new(move |path: &Path| {
+            guard_checked.lock().unwrap().push(path.to_path_buf());
+            if guard_allow.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("untrusted".to_owned())
+            }
+        }));
+        fixture.write_config("port: 9292\n");
+        assert_eq!(state.reload_config_if_changed(), None);
+        assert_eq!(state.reload_config_file(true), None);
+        assert_eq!(state.last_config_hash, None);
+        assert_eq!(
+            *checked.lock().unwrap(),
+            vec![fixture.config_path.clone(), fixture.config_path.clone()]
+        );
+        allow.store(true, Ordering::SeqCst);
+        assert_eq!(config_of(state.reload_config_if_changed()).port, 9292);
     }
 
     #[test]

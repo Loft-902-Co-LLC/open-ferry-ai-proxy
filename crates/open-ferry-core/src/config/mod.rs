@@ -125,7 +125,7 @@ pub use types::{
     VertexCompatKey, VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
-pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision};
+pub use watcher::{AuthFile, ConfigWatcher, ReadGuard, WatchError, WatchEvent, next_revision};
 
 /// The clean-ups loading applies to a section, as upstream's handlers call
 /// them on what a management write changes.
