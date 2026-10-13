@@ -2,7 +2,7 @@
 //! they come to: the program to run, its environment and its directories.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -108,22 +108,62 @@ impl Entry {
         (!self.config_dir.is_empty()).then(|| expand_home(&self.config_dir))
     }
 
-    /// Applies the entry's environment to `command`, which otherwise
-    /// inherits open-ferry's: removes every `ANTHROPIC_*` and `CLAUDE*`
-    /// variable and `MAX_THINKING_TOKENS`, keeping `CLAUDE_CODE_OAUTH_TOKEN`
-    /// and `CLAUDE_CONFIG_DIR` only when the entry has no config directory,
-    /// and sets `CLAUDE_CONFIG_DIR` when it has one. Only the variables'
-    /// names are looked at, never their values.
-    pub(crate) fn apply_env(&self, command: &mut tokio::process::Command) {
+    /// Applies the guard's environment policy and the entry's account rules.
+    pub(crate) fn apply_env(
+        &self,
+        command: &mut tokio::process::Command,
+        environment: &super::SpawnEnvironment,
+    ) {
+        if matches!(environment, super::SpawnEnvironment::Inherited) {
+            let config_dir = self.config_dir_path();
+            for name in std::env::vars_os().map(|(name, _)| name) {
+                if scrubbed(&name, config_dir.is_none()) {
+                    command.env_remove(name);
+                }
+            }
+            if let Some(dir) = config_dir {
+                command.env("CLAUDE_CONFIG_DIR", dir);
+            }
+        } else {
+            command
+                .env_clear()
+                .envs(self.environment(std::env::vars_os(), environment));
+        }
+    }
+
+    /// Builds a child environment without changing the process environment.
+    pub(super) fn environment(
+        &self,
+        inherited: impl IntoIterator<Item = (OsString, OsString)>,
+        environment: &super::SpawnEnvironment,
+    ) -> Vec<(OsString, OsString)> {
         let config_dir = self.config_dir_path();
-        for name in std::env::vars_os().map(|(name, _)| name) {
-            if scrubbed(&name, config_dir.is_none()) {
-                command.env_remove(&name);
+        let mut variables: Vec<_> = inherited
+            .into_iter()
+            .filter(|(name, _)| {
+                !scrubbed(name, config_dir.is_none())
+                    && (matches!(environment, super::SpawnEnvironment::Inherited) || allowed(name))
+            })
+            .collect();
+        if let super::SpawnEnvironment::Restricted {
+            path,
+            temp,
+            variables: trusted,
+        } = environment
+        {
+            variables.extend(trusted.iter().cloned());
+            variables.push(("PATH".into(), path.clone()));
+            if cfg!(windows) {
+                variables.push(("TEMP".into(), temp.as_os_str().to_owned()));
+                variables.push(("TMP".into(), temp.as_os_str().to_owned()));
+            } else {
+                variables.push(("TMPDIR".into(), temp.as_os_str().to_owned()));
             }
         }
         if let Some(dir) = config_dir {
-            command.env("CLAUDE_CONFIG_DIR", dir);
+            variables.push(("CLAUDE_CONFIG_DIR".into(), dir.into_os_string()));
         }
+        variables
     }
 
     /// The name of the entry's directory under a work root: its name, made
@@ -176,6 +216,21 @@ impl Entry {
         clean_stale_prompts(&entry);
         Ok((entry, work))
     }
+}
+
+fn allowed(name: &OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    name.starts_with("LC_")
+        || matches!(
+            name.as_str(),
+            "LANG"
+                | "TZ"
+                | "HTTP_PROXY"
+                | "HTTPS_PROXY"
+                | "NO_PROXY"
+                | "ALL_PROXY"
+                | "CLAUDE_CODE_OAUTH_TOKEN"
+        )
 }
 
 /// Whether a variable named `name` is removed from Claude Code's
@@ -276,7 +331,7 @@ fn is_program(path: &Path) -> bool {
 
 /// Makes `dir` and its missing parents; on Unix those it makes are for the
 /// user alone.
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(super) fn create_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;

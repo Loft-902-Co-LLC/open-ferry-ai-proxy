@@ -1360,7 +1360,7 @@ fn unrecognised_containers_get_an_actionable_settings_remedy() {
 }
 
 #[test]
-fn windows_default_claude_accounts_require_a_home_and_a_trusted_profile() {
+fn windows_default_claude_accounts_accept_a_trusted_profile_without_home() {
     use open_ferry_providers::claude_cli::Entry;
     let entry = Entry::from_auth(&open_ferry_core::auth::Auth::default());
     let program = Path::new("C:/trusted/bin/claude.exe");
@@ -1400,22 +1400,17 @@ fn windows_default_claude_accounts_require_a_home_and_a_trusted_profile() {
         .is_ok()
     );
     assert!(
-        authorize_claude_spawn(&probe, &entry, program, root, None, None, Some(profile))
-            .unwrap_err()
-            .contains("set config-dir")
+        authorize_claude_spawn(&probe, &entry, program, root, None, None, Some(profile)).is_ok()
     );
-    assert!(
-        authorize_claude_spawn(&probe, &entry, program, root, Some(home), None, None)
-            .unwrap_err()
-            .contains("set config-dir")
-    );
+    assert!(authorize_claude_spawn(&probe, &entry, program, root, Some(home), None, None).is_ok());
     probe.untrust("D:/account").dir("C:/trusted/account");
     let explicit = Entry {
         config_dir: "C:/trusted/account".into(),
         ..entry
     };
     assert!(
-        authorize_claude_spawn(&probe, &explicit, program, root, None, None, Some(profile)).is_ok()
+        authorize_claude_spawn(&probe, &explicit, program, root, None, None, Some(profile))
+            .is_err()
     );
 }
 
@@ -1447,5 +1442,306 @@ fn canonical_verbatim_paths_compare_auth_and_machine_roots_in_the_same_namespace
             .aliases
             .insert(probe.path("D:/alias"), verbatim.into());
         assert!(authorize_auth_dir(&probe, Path::new("D:/alias/versions")).is_err());
+    }
+}
+
+mod claude {
+    use super::*;
+    use open_ferry_providers::claude_cli::{Entry, SpawnEnvironment};
+
+    fn entry() -> Entry {
+        Entry {
+            config_dir: "/srv/account".into(),
+            ..Entry::from_auth(&open_ferry_core::auth::Auth::default())
+        }
+    }
+
+    fn linux() -> Fake {
+        let mut probe = Fake::new(Platform::Linux, true);
+        probe
+            .file("/srv/bin/claude")
+            .dir("/srv/account")
+            .dir("/srv/entries");
+        probe
+    }
+
+    fn authorize(probe: &Fake, entry: &Entry) -> Result<SpawnEnvironment, String> {
+        authorize_claude_spawn(
+            probe,
+            entry,
+            Path::new("/srv/bin/claude"),
+            Path::new("/srv/entries"),
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn privileged_paths_include_only_existing_trusted_system_directories_and_private_temp() {
+        let mut probe = linux();
+        for path in ["/usr/sbin", "/usr/bin", "/sbin", "/bin"] {
+            probe.dir(path);
+        }
+        let entry = entry();
+        let SpawnEnvironment::Restricted { path, temp, .. } = authorize(&probe, &entry).unwrap()
+        else {
+            panic!("restricted")
+        };
+        assert_eq!(path, "/srv/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        assert_eq!(
+            temp.to_str().unwrap(),
+            format!("/srv/entries/{}/work/tmp", entry.dir_name())
+        );
+        for path in [
+            "/srv/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+            temp.to_str().unwrap(),
+        ] {
+            probe.dir(path).untrust(path);
+            assert!(
+                authorize(&probe, &entry)
+                    .unwrap_err()
+                    .contains("not writable by others"),
+                "{path}"
+            );
+            probe.untrusted.clear();
+        }
+        let SpawnEnvironment::Restricted { path, .. } = authorize(&linux(), &entry).unwrap() else {
+            panic!("restricted")
+        };
+        assert_eq!(path, "/srv/bin");
+        probe.node("/bin", Node::Link);
+        assert!(authorize(&probe, &entry).is_err());
+    }
+
+    #[test]
+    fn a_program_directory_cannot_inject_another_path_entry() {
+        for (platform, program, account, root) in [
+            (
+                Platform::Linux,
+                "/srv/bin:/untrusted/claude",
+                "/srv/account",
+                "/srv/entries",
+            ),
+            (
+                Platform::Windows,
+                "C:/trusted;D:/untrusted/claude.cmd",
+                "C:/account",
+                "C:/entries",
+            ),
+        ] {
+            let mut probe = Fake::new(platform, true);
+            probe.file(program).dir(account).dir(root);
+            let entry = Entry {
+                config_dir: account.into(),
+                ..entry()
+            };
+            assert!(
+                authorize_claude_spawn(
+                    &probe,
+                    &entry,
+                    Path::new(program),
+                    Path::new(root),
+                    None,
+                    None,
+                    None
+                )
+                .unwrap_err()
+                .contains("PATH separator")
+            );
+        }
+    }
+
+    #[test]
+    fn account_settings_leaves_are_checked_even_inside_a_trusted_directory() {
+        for name in ["settings.json", "settings.local.json"] {
+            let path = format!("/srv/account/{name}");
+            let mut probe = linux();
+            probe.file(&path);
+            assert!(authorize(&probe, &entry()).is_ok());
+            probe.untrust(&path);
+            assert!(
+                authorize(&probe, &entry())
+                    .unwrap_err()
+                    .contains("not writable by others")
+            );
+            probe.untrusted.clear();
+            probe.node(&path, Node::Link);
+            assert!(
+                authorize(&probe, &entry())
+                    .unwrap_err()
+                    .contains("real file")
+            );
+        }
+    }
+
+    #[test]
+    fn default_home_settings_and_inherited_config_settings_are_checked() {
+        let entry = Entry {
+            config_dir: String::new(),
+            ..entry()
+        };
+        let mut probe = linux();
+        probe
+            .dir("/root")
+            .file("/root/.claude.json")
+            .untrust("/root/.claude.json");
+        let run = |probe: &Fake, inherited| {
+            authorize_claude_spawn(
+                probe,
+                &entry,
+                Path::new("/srv/bin/claude"),
+                Path::new("/srv/entries"),
+                Some(Path::new("/root")),
+                inherited,
+                None,
+            )
+        };
+        assert!(run(&probe, None).is_err());
+        probe.untrusted.clear();
+        assert!(run(&probe, None).is_ok());
+        probe.node("/root/.claude.json", Node::Link);
+        assert!(run(&probe, None).is_err());
+        probe
+            .file("/srv/account/settings.json")
+            .untrust("/srv/account/settings.json");
+        assert!(run(&probe, Some(Path::new("/srv/account"))).is_err());
+        probe.untrusted.clear();
+        let SpawnEnvironment::Restricted { variables, .. } =
+            run(&probe, Some(Path::new("/srv/account"))).unwrap()
+        else {
+            panic!("restricted")
+        };
+        assert!(variables.contains(&("CLAUDE_CONFIG_DIR".into(), "/srv/account".into())));
+    }
+
+    #[test]
+    fn unprivileged_and_container_guards_keep_the_inherited_policy() {
+        let mut probe = linux();
+        probe.untrust("/srv");
+        probe.privileged = Ok(false);
+        assert_eq!(
+            authorize(&probe, &entry()).unwrap(),
+            SpawnEnvironment::Inherited
+        );
+        probe.privileged = Ok(true);
+        probe.container = true;
+        assert_eq!(
+            authorize(&probe, &entry()).unwrap(),
+            SpawnEnvironment::Inherited
+        );
+    }
+
+    #[test]
+    fn windows_profile_without_home_selects_its_settings_and_refuses_unknown_home() {
+        let mut probe = Fake::new(Platform::Windows, true);
+        probe
+            .file("C:/trusted/bin/claude.exe")
+            .dir("C:/trusted/entries")
+            .dir("D:/profile");
+        let entry = Entry::from_auth(&open_ferry_core::auth::Auth::default());
+        let run = |probe: &Fake, profile| {
+            authorize_claude_spawn(
+                probe,
+                &entry,
+                Path::new("C:/trusted/bin/claude.exe"),
+                Path::new("C:/trusted/entries"),
+                None,
+                None,
+                profile,
+            )
+        };
+        assert!(run(&probe, Some(Path::new("D:/profile"))).is_ok());
+        assert!(run(&probe, None).unwrap_err().contains("set config-dir"));
+        for path in [
+            "D:/profile/.claude/settings.json",
+            "D:/profile/.claude/settings.local.json",
+            "D:/profile/.claude.json",
+        ] {
+            probe.file(path).untrust(path);
+            assert!(run(&probe, Some(Path::new("D:/profile"))).is_err());
+            probe.untrusted.clear();
+        }
+    }
+
+    #[test]
+    fn windows_native_values_paths_and_home_variables_are_trusted_before_retention() {
+        let mut probe = Fake::new(Platform::Windows, true);
+        for path in [
+            "C:/Native/Windows",
+            "C:/Native/System",
+            "C:/Native/System/Wbem",
+            "C:/ProgramData",
+            "D:/profile/roaming",
+            "D:/profile/local",
+        ] {
+            probe.dir(path);
+        }
+        probe.file("C:/Native/System/cmd.exe");
+        let environment = || SpawnEnvironment::Restricted {
+            path: "D:/program".into(),
+            temp: "D:/work/tmp".into(),
+            variables: Vec::new(),
+        };
+        let run = |probe: &Fake| {
+            claude_windows_environment(
+                probe,
+                environment(),
+                "C:/Native/Windows",
+                "C:/Native/System",
+                Some(Path::new("D:/profile/roaming")),
+                Some(Path::new("D:/profile/local")),
+            )
+        };
+        let SpawnEnvironment::Restricted {
+            path, variables, ..
+        } = run(&probe).unwrap()
+        else {
+            panic!("restricted")
+        };
+        assert_eq!(
+            path.to_str().unwrap(),
+            format!(
+                "D:/program;C:/Native/System;C:/Native/Windows;{}",
+                probe.platform.join("C:/Native/System", "Wbem")
+            )
+        );
+        let program_data = probe.program_data().unwrap();
+        for (name, value) in [
+            ("SystemRoot", "C:/Native/Windows"),
+            ("windir", "C:/Native/Windows"),
+            ("SystemDrive", "C:"),
+            ("ProgramData", program_data.as_str()),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+            ("APPDATA", "D:/profile/roaming"),
+            ("LOCALAPPDATA", "D:/profile/local"),
+        ] {
+            assert!(variables.contains(&(name.into(), value.into())), "{name}");
+        }
+        assert!(variables.contains(&(
+            "ComSpec".into(),
+            probe.platform.join("C:/Native/System", "cmd.exe").into()
+        )));
+        for path in [
+            "C:/Native/Windows",
+            "C:/Native/System",
+            "C:/Native/System/Wbem",
+            "C:/Native/System/cmd.exe",
+            "D:/profile/roaming",
+            "D:/profile/local",
+        ] {
+            probe.untrust(path);
+            assert!(run(&probe).is_err(), "{path}");
+            probe.untrusted.clear();
+        }
+        probe.nodes.remove(&probe.path("C:/Native/System/Wbem"));
+        let SpawnEnvironment::Restricted { path, .. } = run(&probe).unwrap() else {
+            panic!("restricted")
+        };
+        assert!(!path.to_string_lossy().contains("Wbem"));
     }
 }

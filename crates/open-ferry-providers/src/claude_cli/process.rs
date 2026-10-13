@@ -152,15 +152,14 @@ pub(crate) fn spawn_guarded(
 ) -> Result<Running, String> {
     let entry = invocation.entry;
     let program = entry.program()?;
-    if let Some(guard) = guard {
-        guard.authorize(entry, &program, root)?;
-    }
-    let (dir, work) = entry
-        .dirs(root)
-        .map_err(|error| format!("couldn't make the entry's directory: {error}"))?;
-    if let Some(guard) = guard {
-        guard.authorize(entry, &program, root)?;
-    }
+    let (dir, work, environment) = if let Some(guard) = guard {
+        guard.prepare(entry, &program, root)?
+    } else {
+        let (dir, work) = entry
+            .dirs(root)
+            .map_err(|error| format!("couldn't make the entry's directory: {error}"))?;
+        (dir, work, super::SpawnEnvironment::Inherited)
+    };
     let prompt = PromptFile::create(&dir, invocation.system)
         .map_err(|error| format!("couldn't write the system prompt file: {error}"))?;
     let mut command = Command::new(&program);
@@ -176,7 +175,7 @@ pub(crate) fn spawn_guarded(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    entry.apply_env(&mut command);
+    entry.apply_env(&mut command, &environment);
     if let Some(tokens) = invocation.max_output_tokens {
         command.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", tokens.to_string());
     }
@@ -429,7 +428,7 @@ mod tests {
             if entry.work_dirs(root).1.exists() {
                 Err("new directory refused".into())
             } else {
-                Ok(())
+                Ok(super::super::SpawnEnvironment::Inherited)
             }
         });
         let slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
