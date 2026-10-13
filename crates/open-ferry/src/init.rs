@@ -704,9 +704,7 @@ mod tests {
     #[test]
     fn system_init_checks_auth_directory_trust_before_writing_the_config() {
         for platform in [Platform::Linux, Platform::Windows] {
-            let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
-            fs::create_dir_all(&scratch).unwrap();
-            let dir = tempfile::tempdir_in(scratch).unwrap();
+            let dir = crate::scope::runtime_test_probe::scratch_dir();
             let path = dir.path().join("config.yaml");
             let mut fake = Fake::new(platform);
             fake.auth_trust = Err("the auth directory is writable by another account".to_owned());
