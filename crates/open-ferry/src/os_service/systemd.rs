@@ -52,7 +52,7 @@ Documentation={DOCS}
     }
     let command = match &definition.data_dir {
         Some(data_dir) => format!(
-            "{} -supervise -config {} -data-dir {}",
+            "{} -supervise{flag} -config {} -data-dir {}",
             quote(&definition.exe),
             quote(&definition.config),
             quote(data_dir)

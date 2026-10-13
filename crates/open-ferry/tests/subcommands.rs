@@ -251,7 +251,15 @@ fn a_worker_without_a_control_channel_exits_with_one_line() {
 #[test]
 fn service_shows_its_usage_and_refuses_bad_usage() {
     let dir = tempfile::tempdir().unwrap();
-    for args in [&["service", "-h"][..], &["service", "status", "-h"]] {
+    // Successful install dry runs still query the service manager. Their
+    // `Would ...` output for both system forms is tested with the recording
+    // System in os_service::tests; here help returns before machine access.
+    for args in [
+        &["service", "-h"][..],
+        &["service", "status", "-h"],
+        &["service", "install", "-system", "-dry-run", "-h"],
+        &["service", "uninstall", "-system", "-dry-run", "-h"],
+    ] {
         let help = run(dir.path(), args);
         assert_eq!(code(&help), Some(0), "{args:?}");
         let err = String::from_utf8(help.stderr).unwrap();
@@ -259,6 +267,8 @@ fn service_shows_its_usage_and_refuses_bad_usage() {
             err.contains(" service install [-config PATH] [-system] [-dry-run]\n"),
             "{err}"
         );
+        assert!(help.stdout.is_empty());
+        assert!(!dir.path().join("data").exists());
     }
     for (args, message) in [
         (
