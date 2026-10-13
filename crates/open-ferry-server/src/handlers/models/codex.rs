@@ -33,7 +33,8 @@ mod tests;
 use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
 use open_ferry_core::auth::synthesizer::vertex::VERTEX;
 use open_ferry_core::codex_models::{
-    ApplyPatchCapability, ProvidersForModel, build_response, marshal_compact,
+    ApplyPatchCapability, ProvidersForModel, ToolSearchCapability, build_response_with_tool_search,
+    marshal_compact,
 };
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go;
@@ -56,13 +57,18 @@ pub(super) fn response(state: &AppState, client_version: &str) -> String {
     let catalog = state.catalog();
     let providers_for_model = |model: &str| catalog.model_providers(model);
     let apply_patch = |model: &str| supports_apply_patch(catalog, model);
-    let response = build_response(
+    let native = |model: &str| catalog.supports_native_tool_search(model);
+    let response = build_response_with_tool_search(
         catalog,
         &catalog.available_models(),
         Some(&providers_for_model as ProvidersForModel<'_>),
         codex
             .enable_apply_patch
             .then_some(&apply_patch as ApplyPatchCapability<'_>),
+        settings
+            .config
+            .claude_tool_search
+            .then_some(&native as ToolSearchCapability<'_>),
         codex.optimize_multi_agent_v2,
         client_version,
     );

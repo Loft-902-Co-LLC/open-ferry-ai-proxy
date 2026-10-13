@@ -47,3 +47,4 @@ mod tool_call_ids;
 pub(crate) mod usage;
 
 pub use executor::ClaudeExecutor;
+pub use executor::tool_search::supports_native_tool_search;

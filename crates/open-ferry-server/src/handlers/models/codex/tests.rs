@@ -864,3 +864,71 @@ async fn apply_patch_bridge_matrix_catalog() {
         }
     }
 }
+
+// Ported from codex_client_models_tool_search_test.go (v8.0.27, MIT).
+struct SearchCatalog {
+    registry: Arc<ModelRegistry>,
+    supported: std::sync::atomic::AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ModelCatalog for SearchCatalog {
+    fn model_providers(&self, model: &str) -> Vec<String> {
+        self.registry.model_providers(model)
+    }
+    fn first_available_model(&self) -> Option<String> {
+        self.registry.first_available_model()
+    }
+    fn available_models(&self) -> Vec<ModelInfo> {
+        self.registry.available_models()
+    }
+    fn model_info(&self, model: &str, provider: &str) -> Option<ModelInfo> {
+        self.registry.model_info(model, provider)
+    }
+    fn supports_native_tool_search(&self, _model: &str) -> bool {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.supported.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn claude_search_catalog_follows_switch_and_only_consults_evidence_when_on() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let registry = Arc::new(ModelRegistry::new());
+    let id = "catalog-claude-tool-search";
+    registry.register_client("official", "claude", &[model(id)]);
+    let catalog = Arc::new(SearchCatalog {
+        registry: Arc::clone(&registry),
+        supported: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+    });
+    let state = AppState::new(
+        ServerConfig::default(),
+        FakeDispatcher::new([]),
+        catalog.clone(),
+    );
+    for enabled in [true, false, true] {
+        state.set_config(ServerConfig {
+            claude_tool_search: enabled,
+            ..ServerConfig::default()
+        });
+        catalog.calls.store(0, Ordering::SeqCst);
+        let models = entries(&get(&state, "/v1/models?client_version=0.153.4", None).await);
+        assert_eq!(entry(&models, id)["supports_search_tool"], enabled);
+        assert_eq!(catalog.calls.load(Ordering::SeqCst) > 0, enabled);
+    }
+    catalog.supported.store(false, Ordering::SeqCst);
+    let models = entries(&get(&state, "/v1/models?client_version=0.153.4", None).await);
+    assert_ne!(entry(&models, id)["supports_search_tool"], true);
+    // A plain registry has no native-credential evidence and fails closed.
+    let state = self::state(
+        &registry,
+        ServerConfig {
+            claude_tool_search: true,
+            ..ServerConfig::default()
+        },
+    );
+    let models = entries(&get(&state, "/v1/models?client_version=0.153.4", None).await);
+    assert_ne!(entry(&models, id)["supports_search_tool"], true);
+}
