@@ -287,6 +287,26 @@ impl PinStore {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn pins_and_their_directories_are_not_writable_by_others_with_umask_zero() {
+        use crate::journal::creation_tests::{assert_mode, with_umask_zero};
+        with_umask_zero(
+            "pins::tests::pins_and_their_directories_are_not_writable_by_others_with_umask_zero",
+            |root| {
+                let versions = root.join("data/versions");
+                let store = PinStore::new(&versions);
+                let pin = store
+                    .create("0.3.0", SHA, at("2026-10-09T10:00:00Z"))
+                    .unwrap();
+                for path in [root.join("data"), versions, store.dir().to_path_buf()] {
+                    assert_mode(&path, 0o755);
+                }
+                assert_mode(&store.file(&pin.id), 0o644);
+            },
+        );
+    }
+
     fn at(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text)
             .unwrap()

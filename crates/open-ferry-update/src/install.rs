@@ -58,7 +58,7 @@ impl System for RealSystem {
             return fs::metadata(dir).is_ok_and(|metadata| !metadata.permissions().readonly());
         }
         let probe = dir.join(format!(".open-ferry-write-test.{}", std::process::id()));
-        match OpenOptions::new().write(true).create_new(true).open(&probe) {
+        match create_write_probe(&probe) {
             Ok(file) => {
                 drop(file);
                 let _ = fs::remove_file(&probe);
@@ -67,6 +67,17 @@ impl System for RealSystem {
             Err(_) => false,
         }
     }
+}
+
+fn create_write_probe(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Whether the files `exists` finds and the variables `var` gives say
@@ -240,6 +251,26 @@ fn assess_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_write_probe_is_private_at_creation_with_umask_zero() {
+        use crate::journal::creation_tests::{assert_mode, with_umask_zero};
+        with_umask_zero(
+            "install::tests::the_write_probe_is_private_at_creation_with_umask_zero",
+            |root| {
+                let probe = root.join("probe");
+                let _file = create_write_probe(&probe).unwrap();
+                assert_mode(&probe, 0o600);
+                assert!(RealSystem { write_probe: true }.dir_writable(root));
+                assert!(
+                    !root
+                        .join(format!(".open-ferry-write-test.{}", std::process::id()))
+                        .exists()
+                );
+            },
+        );
+    }
 
     /// A machine whose running binary is somewhere that matches nothing.
     struct Fake {
