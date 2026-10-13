@@ -23,6 +23,9 @@ use crate::gemini::testing::{
     options, request, service_account_auth, stream_options,
 };
 
+#[path = "interactions_tests.rs"]
+mod interactions_tests;
+
 /// An executor that doesn't use the environment's proxy.
 fn executor() -> VertexExecutor {
     VertexExecutor::new("direct")

@@ -109,6 +109,9 @@ pub fn vertex_auth(
     if !models_hash.is_empty() {
         attrs.insert("models_hash".to_owned(), models_hash);
     }
+    if entry.interactions == Some(true) {
+        attrs.insert("interactions".to_owned(), "true".to_owned());
+    }
     add_config_headers_to_attrs(&entry.headers, &mut attrs);
     let metadata = retry_metadata(entry.disable_cooling, entry.request_retry, &[]);
 
@@ -197,6 +200,38 @@ mod tests {
             vertex_api_key: keys,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn interactions_opt_in_becomes_a_credential_attribute() {
+        for enabled in [None, Some(false), Some(true)] {
+            let auths = synth(&vertex(vec![VertexCompatKey {
+                interactions: enabled,
+                ..key("vertex-key", "http://127.0.0.1")
+            }]))
+            .unwrap();
+            assert_eq!(
+                auths[0].attribute("interactions"),
+                if enabled == Some(true) {
+                    Some("true")
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn service_account_json_root_preserves_interactions_opt_in() {
+        let auth = super::super::file::synthesize_auth_file(
+            &ctx(),
+            std::path::Path::new("vertex-test.json"),
+            br#"{"type":"vertex","project_id":"proxy-test","location":"global","interactions":true,"service_account":{"type":"service_account"}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(auth.metadata.get("interactions"), Some(&Value::Bool(true)));
+        assert_eq!(auth.provider, "vertex");
     }
 
     #[test]

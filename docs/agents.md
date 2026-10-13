@@ -230,6 +230,14 @@ A fresh config has no upstream credentials, so every model request fails until i
 
   A config in CLIProxyAPI's legacy layout names them `gemini-api-key`, `claude-api-key` and so on, which is still read.
 
+  Vertex keys can set `interactions: true` under `api-keys.vertex[].keys[]`
+  (legacy: `vertex-api-key[]`) to send Interactions requests to Vertex's native
+  `/v1beta1/interactions` endpoint. A Vertex service-account credential JSON
+  can set `"interactions": true` at its root; with `"location": "global"`,
+  calls use `/v1beta1/projects/{project}/locations/global/interactions` with
+  the account's bearer token. Streaming adds `?alt=sse`. Unset or false keeps
+  the Gemini `generateContent` bridge, as do regional service accounts.
+
 The dashboard (below) can sign in and upload credential files too. The server picks up changes to the config and the auth directory without a restart. `open-ferry credentials list` then shows each credential and its state.
 
 ## Point a client at it

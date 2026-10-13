@@ -193,7 +193,7 @@ pub(super) fn sanitize_input_ids(body: &mut Value) {
 /// `applyGeminiInteractionsRequestHeaders` and
 /// `applyGeminiInteractionsRevisionHeader`: an `Api-Revision` the headers
 /// don't already carry is the client's, else [`API_REVISION`].
-pub(super) fn apply_api_revision(headers: &mut HeaderMap, client: &HeaderMap) {
+pub(in crate::gemini) fn apply_api_revision(headers: &mut HeaderMap, client: &HeaderMap) {
     if has_value(headers.get(&API_REVISION_HEADER)) {
         return;
     }
@@ -214,7 +214,7 @@ fn has_value(value: Option<&HeaderValue>) -> bool {
 
 /// Translates the Interactions answer `data` to the request `sent` into the
 /// client's format.
-pub(super) fn translate_answer(
+pub(in crate::gemini) fn translate_answer(
     request: &Request,
     options: &Options,
     sent: &Value,

@@ -69,10 +69,8 @@ use open_ferry_translate::go::equal_fold;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::Value;
 
-use self::request::{
-    api_key, apply_api_revision, interactions_url, sanitize_input_ids, translate_answer,
-    translate_pair,
-};
+use self::request::{api_key, interactions_url, sanitize_input_ids, translate_pair};
+pub(super) use self::request::{apply_api_revision, translate_answer};
 use self::stream::StreamSetup;
 use super::{Credential, GeminiExecutor, build_headers, post, read_answer, reject_compact};
 use crate::apply_patch_responses;
@@ -154,40 +152,14 @@ impl InteractionsExecutor {
         options: &Options,
         stream: bool,
     ) -> Result<Value, ExecError> {
-        let config = self.config.as_deref();
-        let base = base_model(&request.model);
-        let (original, mut body, refusal) = translate_pair(config, request, options, base, stream);
-        if let Some(refusal) = refusal {
-            return Err(refusal.into());
-        }
-        if json::exists(&body, "model") && !base.is_empty() {
-            set_string_if_different(&mut body, "model", base);
-        }
-        thinking::apply_request(
-            &mut body,
-            &request.model,
-            options.source_format.as_str(),
-            &Body::parse(&request.payload),
-            &Body::parse(&options.original_request),
+        prepare_request(
+            self.config.as_deref(),
             self.models(),
-        )?;
-        let translate = |_: Value| original.clone();
-        let target = payload::Target {
-            executor: PROVIDER,
-            protocol: &Format::INTERACTIONS,
-            model: base,
-            root: "",
+            PROVIDER,
+            request,
+            options,
             stream,
-            tracked: &[],
-            translate: Some(&translate),
-        };
-        sanitize_input_ids(&mut body);
-        if stream {
-            set_bool_if_different(&mut body, "stream", true);
-        }
-        // The rules see the body as it is sent.
-        payload::apply(config, &target, request, options, &mut body);
-        Ok(body)
+        )
     }
 
     /// The request headers (`applyGeminiHeaders` and the revision).
@@ -253,18 +225,65 @@ impl InteractionsExecutor {
         let (response, secrets) = self
             .send(auth, request, options, &body, AttemptKind::Stream)
             .await?;
-        Ok(translate_stream(response, request, options, &body, secrets))
+        Ok(translate_stream(
+            response, request, options, &body, secrets, NAME,
+        ))
     }
+}
+
+/// Prepares a native Gemini or Vertex Interactions body with payload rules last.
+pub(super) fn prepare_request(
+    config: Option<&Config>,
+    models: Option<&dyn ModelCatalog>,
+    provider: &str,
+    request: &Request,
+    options: &Options,
+    stream: bool,
+) -> Result<Value, ExecError> {
+    let base = base_model(&request.model);
+    let (original, mut body, refusal) = translate_pair(config, request, options, base, stream);
+    if let Some(refusal) = refusal {
+        return Err(refusal.into());
+    }
+    if json::exists(&body, "model") && !base.is_empty() {
+        set_string_if_different(&mut body, "model", base);
+    }
+    thinking::apply_request(
+        &mut body,
+        &request.model,
+        options.source_format.as_str(),
+        &Body::parse(&request.payload),
+        &Body::parse(&options.original_request),
+        models,
+    )?;
+    let translate = |_: Value| original.clone();
+    let target = payload::Target {
+        executor: provider,
+        protocol: &Format::INTERACTIONS,
+        model: base,
+        root: "",
+        stream,
+        tracked: &[],
+        translate: Some(&translate),
+    };
+    sanitize_input_ids(&mut body);
+    if stream {
+        set_bool_if_different(&mut body, "stream", true);
+    }
+    // The rules see the body as it is sent.
+    payload::apply(config, &target, request, options, &mut body);
+    Ok(body)
 }
 
 /// Translates the Interactions stream in `response`, to the request `sent`
 /// with `secrets`, into the client's format.
-fn translate_stream(
+pub(super) fn translate_stream(
     response: reqwest::Response,
     request: &Request,
     options: &Options,
     sent: &Value,
     secrets: Secrets,
+    name: &'static str,
 ) -> StreamResponse {
     let headers = response.headers().clone();
     let format = response_format(options);
@@ -290,7 +309,7 @@ fn translate_stream(
         source_format: options.source_format.clone(),
         original: original_bytes,
         secrets,
-        name: NAME,
+        name,
     };
     StreamResponse {
         headers,
