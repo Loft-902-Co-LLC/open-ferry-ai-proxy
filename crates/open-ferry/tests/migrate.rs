@@ -22,6 +22,9 @@ fn run_as(binary: &Path, dir: &Path, args: &[&str]) -> Output {
         .env_remove("MANAGEMENT_PASSWORD")
         .env_remove("WRITABLE_PATH")
         .env_remove("writable_path")
+        .env("LOCALAPPDATA", dir)
+        .env("XDG_DATA_HOME", dir)
+        .env("HOME", dir)
         .output()
         .unwrap()
 }
@@ -167,7 +170,7 @@ fn serves_under_cliproxyapis_name() {
     std::fs::write(
         &config,
         format!(
-            "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys:\n  - 'test-client-key-for-the-renamed-binary'\n",
+            "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys:\n  - 'test-client-key-for-the-renamed-binary'\nself-update:\n  mode: off\n",
             auth.display()
         ),
     )
@@ -179,6 +182,9 @@ fn serves_under_cliproxyapis_name() {
         .env_remove("MANAGEMENT_PASSWORD")
         .env_remove("WRITABLE_PATH")
         .env_remove("writable_path")
+        .env("LOCALAPPDATA", dir.path())
+        .env("XDG_DATA_HOME", dir.path())
+        .env("HOME", dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

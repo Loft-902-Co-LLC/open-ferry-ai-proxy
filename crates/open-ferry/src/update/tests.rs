@@ -10,6 +10,189 @@ use serde_json::Value;
 
 use super::*;
 
+mod command_scope {
+    use super::*;
+    use crate::os_service::Platform;
+    use crate::scope::{Probe, Scope, State};
+    use crate::update::scope_probe::{Fake, Node};
+
+    const REQUESTS: [Request; 4] = [
+        Request::Check,
+        Request::Update,
+        Request::Rollback,
+        Request::Mode(SelfUpdateMode::Off),
+    ];
+
+    #[test]
+    fn account_commands_keep_unprivileged_behavior_and_privileged_records_need_trust() {
+        for platform in [Platform::Windows, Platform::Linux, Platform::MacOs] {
+            let mut probe = Fake::new(platform, false);
+            let account = probe.account_dir().unwrap();
+            probe.dir(&account).untrust(&account);
+            for request in REQUESTS {
+                assert_eq!(
+                    command_home(&probe, BINARY, request).unwrap().scope,
+                    Scope::Account
+                );
+            }
+            probe.privileged = Ok(true);
+            for request in REQUESTS {
+                let message = command_home(&probe, BINARY, request)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    message.contains(match platform {
+                        Platform::Windows => "not opened as administrator",
+                        Platform::Linux => "without sudo",
+                        Platform::MacOs => "macOS",
+                    }),
+                    "{message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn privileged_commands_may_use_their_trusted_account_records() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            let mut probe = Fake::new(platform, true);
+            let account = probe.account_dir().unwrap();
+            probe.dir(&account);
+            for request in REQUESTS {
+                assert_eq!(
+                    command_home(&probe, BINARY, request).unwrap().scope,
+                    Scope::Account
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn check_assesses_writability_without_creating_a_probe_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir
+            .path()
+            .join(format!(".open-ferry-write-test.{}", std::process::id()));
+        std::fs::write(&sentinel, b"already here").unwrap();
+        let updater = real_updater(DataDir::at(dir.path().join("data")), "", true).unwrap();
+        assert!(
+            updater.system.dir_writable(dir.path()),
+            "a check reads the permissions instead of trying to create the existing sentinel"
+        );
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"already here");
+        assert!(!updater.data.root().exists());
+    }
+
+    #[test]
+    fn machine_checks_are_read_only_and_changes_require_privilege() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            let mut probe = Fake::new(platform, false);
+            let machine = scope::machine_root(&probe).unwrap().unwrap();
+            let binary = platform.join(&machine, "open-ferry");
+            probe.file(&binary).with_receipt(&machine, &binary);
+            let home = command_home(&probe, &binary, Request::Check).unwrap();
+            assert_eq!(home.scope, Scope::Machine);
+            assert_eq!(home.kind, ServiceKind::System);
+            for request in &REQUESTS[1..] {
+                let message = command_home(&probe, &binary, *request)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    message.contains(if platform == Platform::Windows {
+                        "terminal opened as administrator"
+                    } else {
+                        "Run it with sudo"
+                    }),
+                    "{message}"
+                );
+            }
+            probe.privileged = Ok(true);
+            for request in REQUESTS {
+                assert_eq!(
+                    command_home(&probe, &binary, request).unwrap().scope,
+                    Scope::Machine
+                );
+            }
+            assert!(probe.created.is_empty(), "lookup never provisions");
+        }
+    }
+
+    #[test]
+    fn the_unreadable_machine_hint_is_said_in_text_and_json() {
+        let mut probe = Fake::new(Platform::Windows, false);
+        let machine = scope::machine_root(&probe).unwrap().unwrap();
+        probe.node(&machine, Node::Hidden);
+        let home = command_home(
+            &probe,
+            "C:/Program Files/open-ferry/open-ferry.exe",
+            Request::Check,
+        )
+        .unwrap();
+        for json in [false, true] {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let mut console = Console::new(json, &mut out, &mut err);
+            say_machine_hint(&home, &mut console);
+            assert!(console.said[0].contains("whole machine"));
+            if !json {
+                assert!(String::from_utf8(out).unwrap().contains("administrator"));
+            }
+        }
+        assert_eq!(
+            probe.state(&machine),
+            State::Inaccessible("access is denied".to_owned())
+        );
+    }
+
+    #[test]
+    fn machine_mode_uses_the_explicit_or_existing_machine_config() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            let mut probe = Fake::new(platform, true);
+            let machine = scope::machine_root(&probe).unwrap().unwrap();
+            let binary = platform.join(&machine, "open-ferry");
+            probe.file(&binary).with_receipt(&machine, &binary);
+            let request = Request::Mode(SelfUpdateMode::Off);
+            let home = command_home(&probe, &binary, request).unwrap();
+            let choose = |probe: &Fake, flag| {
+                command_config(
+                    probe,
+                    &home,
+                    Path::new(&binary),
+                    request,
+                    flag,
+                    Path::new("working"),
+                    None,
+                )
+            };
+            assert!(choose(&probe, "").unwrap_err().contains("pass -config"));
+            assert_eq!(
+                choose(&probe, "explicit.yaml").unwrap(),
+                Path::new("explicit.yaml")
+            );
+            let config = scope::machine_config(platform, &binary).unwrap();
+            probe.file(&config);
+            assert_eq!(choose(&probe, "").unwrap(), Path::new(&config));
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_replacement_refuses_with_system_stop_instructions() {
+        let (_dir, data, installed) = supervised_rig();
+        let _held = open_ferry_supervisor::process::SupervisorLock::try_acquire(&data).unwrap();
+        let message = clear_to_replace_in(&data, &installed, ServiceKind::System)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("open-ferry -supervise -system"));
+        assert!(message.contains(if cfg!(windows) {
+            "sc.exe stop open-ferry"
+        } else if cfg!(target_os = "macos") {
+            "sudo launchctl bootout"
+        } else {
+            "sudo systemctl stop open-ferry"
+        }));
+    }
+}
+
 /// Where the fake install's binary is.
 const BINARY: &str = "/opt/open-ferry/open-ferry";
 
@@ -997,7 +1180,9 @@ async fn with_no_supervisor_and_no_install_holding_the_lock_the_binary_is_clear_
  {
     let (_dir, data, installed) = supervised_rig();
 
-    let lock = clear_to_replace_in(&data, &installed).await.unwrap();
+    let lock = clear_to_replace_in(&data, &installed, ServiceKind::User)
+        .await
+        .unwrap();
 
     assert_eq!(
         InstallLock::try_acquire(&installed).unwrap_err().kind(),
@@ -1014,7 +1199,9 @@ async fn a_held_install_lock_refuses_the_replacement_and_changes_no_file() {
     let _held = InstallLock::try_acquire(&installed).unwrap();
     let before = snapshot(dir.path());
 
-    let error = clear_to_replace_in(&data, &installed).await.unwrap_err();
+    let error = clear_to_replace_in(&data, &installed, ServiceKind::User)
+        .await
+        .unwrap_err();
 
     let UpdateError::Supervised(message) = error else {
         panic!("{error:?}");
@@ -1031,7 +1218,9 @@ async fn a_held_supervisor_lock_refuses_the_replacement_and_changes_no_file() {
     let _held = SupervisorLock::try_acquire(&data).unwrap();
     let before = snapshot(dir.path());
 
-    let error = clear_to_replace_in(&data, &installed).await.unwrap_err();
+    let error = clear_to_replace_in(&data, &installed, ServiceKind::User)
+        .await
+        .unwrap_err();
 
     let UpdateError::Supervised(message) = error else {
         panic!("{error:?}");
@@ -1048,9 +1237,13 @@ async fn an_install_that_is_notify_only_is_refused_before_any_replacement_and_ch
     let (dir, data, installed) = supervised_rig();
     let before = snapshot(dir.path());
 
-    let error = clear_to_replace_for(Install::NotifyOnly(NotSelfUpdating::NoReceipt), &data)
-        .await
-        .unwrap_err();
+    let error = clear_to_replace_for(
+        Install::NotifyOnly(NotSelfUpdating::NoReceipt),
+        &data,
+        ServiceKind::User,
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         matches!(error, UpdateError::NotSelfUpdating(_)),
