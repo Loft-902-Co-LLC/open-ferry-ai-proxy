@@ -11,11 +11,15 @@
 //! waiters and time out after 30 seconds. Successful rotations are reused for
 //! up to ten minutes in a bounded cache. Sets known spent by this process become
 //! tombstones, including for outstanding waiters. Removing a successful entry
-//! retires its outstanding waiters too. Lost tasks are detected without waiters.
+//! retires its outstanding waiters too. If even the sole waiter stays unpolled
+//! across ten minutes or 256 newer refreshes, removal can lose its rotation;
+//! the credential then needs a reload or a new sign-in because its old token is spent.
+//! Lost tasks are detected on the next refresh call or by a polling waiter.
 //! Runtime shutdown permits one retry only before sending; shutdown or panic
-//! after the conservative send mark (before connecting) fails closed for up to
-//! ten minutes or until eviction, then a new request is sent. A full cache of
-//! in-flight requests refuses new refreshes rather than duplicating them.
+//! after the conservative send mark (before connecting) retires predecessors and
+//! fails closed for up to ten minutes from detection or until eviction, then a
+//! new request is sent. A full cache of in-flight requests refuses new refreshes
+//! rather than duplicating them.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -191,7 +195,6 @@ impl SiwcAuth {
         Self {
             client,
             endpoints: Endpoints::default(),
-            #[cfg(test)]
             panic_after_send: None,
         }
     }
@@ -298,8 +301,9 @@ impl SiwcAuth {
     /// until eviction or expiry. Removing a successful entry also retires its
     /// outstanding waiters. Tasks lost to runtime shutdown are retried once only
     /// before sending. Shutdown or panic after the conservative send mark (before
-    /// connecting) fails closed for later callers too, for up to ten minutes or
-    /// until eviction; after that a new request is sent. Pre-send panics and
+    /// connecting) retires predecessors and fails closed for later callers too,
+    /// for up to ten minutes from detection on the next refresh call or by a
+    /// polling waiter, or until eviction; after that a new request is sent. Pre-send panics and
     /// ordinary transport errors remain retryable. If all entries are
     /// in flight, new refreshes fail locally with a retryable error. Callers must run
     /// refresh-then-persist in a task that a client disconnect cannot cancel,
@@ -527,12 +531,16 @@ fn refresh_key(endpoint: &str, client: &str, token: &str) -> [u8; 32] {
 
 // Finished tasks must not occupy in-flight capacity just because no waiter polled.
 fn reap_lost_refreshes(map: &mut HashMap<[u8; 32], RefreshEntry>) {
-    map.retain(|_, entry| {
+    let mut spent = Vec::new();
+    map.retain(|key, entry| {
         if entry.completed.is_none() && entry.task.as_ref().is_some_and(|task| task.is_finished()) {
             if !entry.started.load(Ordering::SeqCst) {
                 return false;
             }
-            entry.completed = Some(tokio::time::Instant::now());
+            spent.push(*key);
+            entry
+                .completed
+                .get_or_insert_with(tokio::time::Instant::now);
             entry.shared =
                 futures_util::future::ready(Err(RefreshError::Request(interrupted_refresh())))
                     .boxed()
@@ -540,6 +548,16 @@ fn reap_lost_refreshes(map: &mut HashMap<[u8; 32], RefreshEntry>) {
         }
         true
     });
+    for key in spent {
+        retire_predecessors(map, key);
+    }
+}
+
+fn retire_predecessors(map: &HashMap<[u8; 32], RefreshEntry>, key: [u8; 32]) {
+    // Invalidate outstanding waiters too, even if this task's entry was evicted.
+    for entry in map.values().filter(|entry| entry.successor == Some(key)) {
+        entry.superseded.store(true, Ordering::SeqCst);
+    }
 }
 
 fn retire_refresh(entry: &RefreshEntry) {
@@ -612,10 +630,7 @@ fn finish_refresh_in_cache(
 ) {
     let mut map = cache.lock().unwrap_or_else(PoisonError::into_inner);
     if spent {
-        // Invalidate outstanding waiters too, even if this task's entry was evicted.
-        for entry in map.values().filter(|entry| entry.successor == Some(key)) {
-            entry.superseded.store(true, Ordering::SeqCst);
-        }
+        retire_predecessors(&map, key);
     }
     if let Some(entry) = map.get_mut(&key)
         && Arc::ptr_eq(&entry.id, id)
@@ -654,6 +669,7 @@ fn shared_refresh_in_cache(
                 if started.load(Ordering::SeqCst) {
                     // Keep the interruption for the grace window: replay is unsafe.
                     let mut map = cache.lock().unwrap_or_else(PoisonError::into_inner);
+                    retire_predecessors(&map, key);
                     if let Some(entry) = map.get_mut(&key)
                         && Arc::ptr_eq(&entry.id, &id)
                     {
