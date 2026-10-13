@@ -47,6 +47,12 @@ impl Config {
         load_bytes(&read(path.as_ref())?)
     }
 
+    /// [`Config::load_bytes`] without the warnings a load from disk logs
+    /// once, for callers that re-read the file on a timer. Not upstream's.
+    pub fn load_bytes_quietly(data: &[u8]) -> Result<Config, ConfigError> {
+        from_bytes(data, "failed to parse config file: ")
+    }
+
     /// [`Config::load`], returning with the config the SHA-256 of the
     /// contents it loaded, in lowercase hex. Not upstream's: the
     /// management API saves the config only while the file still holds
@@ -1618,6 +1624,15 @@ mod tests {
         let (_, messages) =
             logged(|| Config::parse(fs::read(&path).expect("read")).expect("management parse"));
         assert!(messages.is_empty());
+        // The supervisor re-reads the self-update mode every tick.
+        let (config, messages) = logged(|| {
+            Config::load_bytes_quietly(&fs::read(&path).expect("read")).expect("quiet load")
+        });
+        assert!(messages.is_empty());
+        assert_eq!(
+            config.codex.signin_with_chatgpt_identifier,
+            "private_identifier"
+        );
     }
 
     #[test]

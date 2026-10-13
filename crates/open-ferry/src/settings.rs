@@ -44,6 +44,12 @@ pub(crate) fn load(probe: &dyn Probe, path: &Path) -> Result<Config, String> {
     Config::load_bytes(&read(probe, path)?).map_err(|error| error.to_string())
 }
 
+/// [`load`] without the warnings a load from disk logs once, for callers
+/// that re-read the config on a timer or only check it before a load that warns.
+pub(crate) fn load_quietly(probe: &dyn Probe, path: &Path) -> Result<Config, String> {
+    Config::load_bytes_quietly(&read(probe, path)?).map_err(|error| error.to_string())
+}
+
 /// Loads an authorized config and hashes exactly the contents it loaded.
 pub(crate) fn load_with_sha256(probe: &dyn Probe, path: &Path) -> Result<(Config, String), String> {
     let data = read(probe, path)?;

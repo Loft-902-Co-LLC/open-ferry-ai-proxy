@@ -392,7 +392,8 @@ fn serve_for_service_manager(
 
 /// Checks the service's settings and resolved auth directory before dispatch.
 fn check_config(probe: &dyn crate::scope::Probe, path: &Path) -> Result<(), String> {
-    let config = crate::settings::load(probe, path)?;
+    // Quietly: the service's own load warns.
+    let config = crate::settings::load_quietly(probe, path)?;
     let auth_dir = config
         .resolve_auth_dir()
         .map_err(|error| format!("failed to resolve auth directory: {error}"))?;
