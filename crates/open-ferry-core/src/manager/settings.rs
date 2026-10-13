@@ -77,6 +77,8 @@ pub(crate) struct RoutingState {
     /// Whether subagents may take their parent's credential: yes unless
     /// session affinity is on and says no.
     pub(crate) session_affinity_subagents: bool,
+    /// When a bound session moves to another credential: "quota" only
+    /// while session affinity is on and says so, "any" otherwise.
     pub(crate) session_affinity_rebind_on: &'static str,
 }
 
