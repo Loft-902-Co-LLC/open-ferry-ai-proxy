@@ -1061,18 +1061,328 @@ async fn custom_headers_cannot_set_the_clients_identity() {
 }
 
 #[tokio::test]
-async fn compact_is_not_supported() {
-    let executor = ClaudeExecutor::new("direct").with_base_url("http://127.0.0.1:9");
+async fn compact_returns_a_sealed_summary_with_responses_usage() {
+    let mock = Mock::start(Reply::json(r#"{"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Build summary."}],"usage":{"input_tokens":11,"cache_creation_input_tokens":3,"cache_read_input_tokens":100,"output_tokens":7}}"#)).await;
     let options = Options {
         alt: COMPACT_ALT.into(),
         ..options(Format::OPENAI_RESPONSE)
     };
-    let error = executor
-        .execute(api_key_auth(), request(json!({})), options)
+    let response = mock
+        .executor()
+        .execute(
+            api_key_auth(),
+            request(json!({"input":"Check the build"})),
+            options,
+        )
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&response.payload).unwrap();
+    assert_eq!(body["object"], "response.compaction");
+    assert_eq!(body["output"].as_array().unwrap().len(), 1);
+    assert_eq!(body["output"][0]["type"], "compaction");
+    assert!(
+        body["output"][0]["encrypted_content"]
+            .as_str()
+            .unwrap()
+            .starts_with("cpa-ag-compact-v1:")
+    );
+    assert_eq!(body["usage"]["input_tokens"], 114);
+    assert_eq!(body["usage"]["output_tokens"], 7);
+    assert_eq!(body["usage"]["total_tokens"], 121);
+    assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 100);
+    let seen = mock.last();
+    assert!(
+        seen.body
+            .contains("Please provide a concise and comprehensive summary")
+    );
+    assert!(seen.body.contains("Check the build"));
+    assert_eq!(seen.json()["stream"], false);
+    assert!(!seen.body.contains("resp_ag_compact_"));
+}
+
+#[tokio::test]
+async fn compaction_stream_expands_previous_capsules_and_drops_foreign_ones() {
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    let capsule =
+        crate::claude::compaction::seal("Earlier build summary", "claude-sonnet-4-5").unwrap();
+    let payload = json!({"input":[
+        {"type":"compaction","encrypted_content":capsule},
+        {"type":"compaction","encrypted_content":"gAAAAA-native"},
+        {"type":"message","role":"user","content":"Continue"},
+        {"type":"compaction_trigger"}
+    ],"previous_response_id":"resp-old","tool_choice":"required","metadata":{"x":1}});
+    let response = mock
+        .executor()
+        .execute_stream(
+            api_key_auth(),
+            request(payload),
+            stream_options(Format::OPENAI_RESPONSE),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.headers["content-type"], "text/event-stream");
+    let frames = response.chunks.collect::<Vec<_>>().await;
+    let events: Vec<Value> = frames
+        .iter()
+        .map(|frame| {
+            let frame = std::str::from_utf8(frame.as_ref().unwrap()).unwrap();
+            serde_json::from_str(
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.completed"
+        ]
+    );
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event["sequence_number"], index);
+    }
+    assert_eq!(
+        events[2]["item"]["encrypted_content"],
+        events[3]["item"]["encrypted_content"]
+    );
+    assert_eq!(events[3]["item"], events[4]["response"]["output"][0]);
+    assert_eq!(events[4]["response"]["usage"]["total_tokens"], 17);
+    let seen = mock.last();
+    assert!(seen.body.contains("Earlier build summary"));
+    assert!(!seen.body.contains("gAAAAA-native"));
+    assert!(!seen.body.contains("compaction_trigger"));
+    assert!(!seen.body.contains("previous_response_id"));
+}
+
+#[tokio::test]
+async fn corrupt_capsules_in_either_payload_fail_before_sending() {
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    let bad = json!({"input":[{"type":"compaction","encrypted_content":"cpa-ag-compact-v1:AA"}]});
+    for original in [false, true] {
+        for streaming in [false, true] {
+            let mut opts = options(Format::OPENAI_RESPONSE);
+            let req = if original {
+                opts.original_request = Bytes::from(bad.to_string());
+                request(json!({"input":"continue"}))
+            } else {
+                request(bad.clone())
+            };
+            let error = if streaming {
+                mock.executor()
+                    .execute_stream(api_key_auth(), req, opts)
+                    .await
+                    .unwrap_err()
+            } else {
+                mock.executor()
+                    .execute(api_key_auth(), req, opts)
+                    .await
+                    .unwrap_err()
+            };
+            assert_eq!(error.status, 400);
+            assert!(error.message.starts_with("invalid compaction capsule:"));
+        }
+    }
+    assert!(mock.requests().is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_replay_expands_our_summary_and_ignores_foreign_capsules() {
+    let capsule = crate::claude::compaction::seal("Replay context", "claude-sonnet-4-5").unwrap();
+    let mock = Mock::start(Reply::sse(SSE)).await;
+    let payload = json!({"input":[{"type":"compaction","encrypted_content":capsule},
+        {"type":"compaction","encrypted_content":"foreign"},{"type":"message","role":"user","content":"continue"}]});
+    mock.executor()
+        .execute(
+            api_key_auth(),
+            request(payload.clone()),
+            options(Format::OPENAI_RESPONSE),
+        )
+        .await
+        .unwrap();
+    mock.executor()
+        .execute_stream(
+            api_key_auth(),
+            request(payload),
+            stream_options(Format::OPENAI_RESPONSE),
+        )
+        .await
+        .unwrap()
+        .chunks
+        .collect::<Vec<_>>()
+        .await;
+    for seen in mock.requests() {
+        assert!(seen.body.contains("Replay context"));
+        assert!(!seen.body.contains("encrypted_content"));
+        assert!(!seen.body.contains("foreign"));
+    }
+}
+
+#[tokio::test]
+async fn summary_keeps_tool_history_with_definitions_and_flattens_it_without() {
+    for definitions in [false, true] {
+        let mock = Mock::start(Reply::json(MESSAGE)).await;
+        let mut payload = json!({"input":[
+            {"type":"message","role":"user","content":"check build"},
+            {"type":"function_call","name":"check_build","call_id":"call:1","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call:1","output":"build ok"},
+            {"type":"compaction_trigger"}]});
+        if definitions {
+            payload["tools"] = json!([{"type":"function","name":"check_build","parameters":{"type":"object","properties":{}}}]);
+        }
+        mock.executor()
+            .execute(
+                api_key_auth(),
+                request(payload),
+                options(Format::OPENAI_RESPONSE),
+            )
+            .await
+            .unwrap();
+        let seen = mock.last();
+        assert!(seen.body.contains("check_build") && seen.body.contains("build ok"));
+        let body = seen.json();
+        let blocks: Vec<&Value> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .collect();
+        assert_eq!(
+            blocks.iter().any(|block| block["type"] == "tool_use"),
+            definitions
+        );
+        assert_eq!(
+            blocks.iter().any(|block| block["type"] == "tool_result"),
+            definitions
+        );
+        if definitions {
+            assert_eq!(body["tool_choice"]["type"], "none");
+        }
+    }
+}
+
+#[tokio::test]
+async fn original_trigger_selects_original_history_for_summary() {
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    let mut opts = options(Format::OPENAI_RESPONSE);
+    opts.original_request = Bytes::from(json!({"input":[{"type":"message","role":"user","content":"Original history"},{"type":"compaction_trigger"}]}).to_string());
+    mock.executor()
+        .execute(
+            api_key_auth(),
+            request(json!({"input":"Changed history"})),
+            opts,
+        )
+        .await
+        .unwrap();
+    assert!(mock.last().body.contains("Original history"));
+    assert!(!mock.last().body.contains("Changed history"));
+}
+
+#[tokio::test]
+async fn summary_payload_rules_apply_after_tool_choice_and_token_defaults() {
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    let config = Config::parse(
+        r"
+payload:
+  override:
+    - models:
+        - name: claude-sonnet-4-5
+      params:
+        max_tokens: 1234
+        tool_choice.type: auto
+",
+    )
+    .unwrap();
+    let payload = json!({"tools":[{"type":"function","name":"check","parameters":{"type":"object"}}],"input":[{"type":"compaction_trigger"}]});
+    mock.executor()
+        .with_config(Arc::new(config))
+        .execute(
+            api_key_auth(),
+            request(payload),
+            options(Format::OPENAI_RESPONSE),
+        )
+        .await
+        .unwrap();
+    let body = mock.last().json();
+    assert_eq!(body["max_tokens"], 1234);
+    assert_eq!(body["tool_choice"]["type"], "auto");
+}
+
+#[tokio::test]
+async fn compaction_propagates_upstream_errors_and_rejects_missing_summary_text() {
+    let mut opts = options(Format::OPENAI_RESPONSE);
+    opts.alt = COMPACT_ALT.into();
+    let mock = Mock::start(Reply::error(429, "busy").header("retry-after", "60")).await;
+    let error = mock
+        .executor()
+        .execute(api_key_auth(), request(json!({})), opts.clone())
         .await
         .unwrap_err();
-    assert_eq!(error.status, 501);
-    assert_eq!(error.message, "/responses/compact not supported");
+    assert_eq!(error.status, 429);
+    assert_eq!(error.message, "busy");
+    assert!(error.retry_after.is_some());
+    let mock = Mock::start(Reply::json(
+        r#"{"content":[{"type":"thinking","thinking":"only reasoning"}]}"#,
+    ))
+    .await;
+    let error = mock
+        .executor()
+        .execute(api_key_auth(), request(json!({})), opts)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "extract summary: no summary text found in upstream response"
+    );
+}
+
+#[tokio::test]
+async fn tool_ids_are_repaired_in_execute_stream_and_count() {
+    let payload = json!({"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call:one","name":"check","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call:one","content":"ok"}]}]});
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    mock.executor()
+        .execute(
+            api_key_auth(),
+            request(payload.clone()),
+            options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let stream_mock = Mock::start(Reply::sse(SSE)).await;
+    stream_mock
+        .executor()
+        .execute_stream(
+            api_key_auth(),
+            request(payload.clone()),
+            stream_options(Format::CLAUDE),
+        )
+        .await
+        .unwrap()
+        .chunks
+        .collect::<Vec<_>>()
+        .await;
+    let count_mock = Mock::start(Reply::json(r#"{"input_tokens":42}"#)).await;
+    count_mock
+        .executor()
+        .count_tokens(api_key_auth(), request(payload), options(Format::CLAUDE))
+        .await
+        .unwrap();
+    for seen in [mock.last(), stream_mock.last(), count_mock.last()] {
+        let body = seen.json();
+        let id = body["messages"][0]["content"][0]["id"].as_str().unwrap();
+        assert_eq!(id, "cpa_tid_v1_Y2FsbDpvbmU");
+        assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], id);
+    }
 }
 
 #[tokio::test]

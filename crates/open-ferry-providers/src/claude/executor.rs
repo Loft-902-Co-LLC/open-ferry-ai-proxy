@@ -79,6 +79,7 @@ use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::{Map, Value};
 
 use super::client::{Clients, error_chain, read_body, read_body_prefix};
+use super::compaction;
 use super::headers::{self, Inputs};
 use super::oauth::{ClaudeAuth, Endpoints, REFRESH_LEAD};
 use super::ratelimit::{classify, fast_direct_error, plain_error, wrap_fast};
@@ -195,6 +196,7 @@ impl ClaudeExecutor {
         base_model: &str,
         upstream_stream: bool,
         set_stream: bool,
+        summary: bool,
     ) -> Result<Prepared, ExecError> {
         let config = self.config.as_deref();
         let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
@@ -217,6 +219,9 @@ impl ClaudeExecutor {
         }
         let translation = body.clone();
         sanitize_for_upstream(&mut body, base_model);
+        if summary {
+            compaction::finalize_summary(&mut body);
+        }
         // The rules see the body as it is sent. Upstream tracks only the
         // diagnostics path, for its cloaking, which isn't ported.
         self.apply_payload_rules(request, options, base_model, upstream_stream, &mut body);
@@ -335,9 +340,21 @@ impl ClaudeExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        if options.alt == COMPACT_ALT {
-            return Err(compact_error());
+        let (request, options) = compaction::expand(request, options)?;
+        if compaction::requested(&request, &options) {
+            return self.execute_compaction(&request, &options, auth).await;
         }
+        self.execute_messages_inner(auth, &request, &options, false)
+            .await
+    }
+
+    pub(super) async fn execute_messages_inner(
+        &self,
+        auth: &Auth,
+        request: &Request,
+        options: &Options,
+        summary: bool,
+    ) -> Result<Response, ExecError> {
         let base_model = thinking::parse_suffix(&request.model).0;
         let target = self.target(auth);
         let url = format!("{}/v1/messages?beta=true", target.base_url);
@@ -345,7 +362,7 @@ impl ClaudeExecutor {
         // A client that needs translating gets it from Claude's stream.
         let upstream_stream = format != Format::CLAUDE;
         let prepared =
-            self.prepare_messages(request, options, base_model, upstream_stream, true)?;
+            self.prepare_messages(request, options, base_model, upstream_stream, true, summary)?;
         let headers = build_headers(&target, &prepared, auth, options, upstream_stream, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
@@ -407,14 +424,18 @@ impl ClaudeExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<StreamResponse, ExecError> {
-        if options.alt == COMPACT_ALT {
-            return Err(compact_error());
+        let (request, options) = compaction::expand(request, options)?;
+        if compaction::requested(&request, &options) {
+            let response = self.execute_compaction(&request, &options, auth).await?;
+            return compaction::into_stream(response);
         }
+        let request = &request;
+        let options = &options;
         let base_model = thinking::parse_suffix(&request.model).0;
         let target = self.target(auth);
         let url = format!("{}/v1/messages?beta=true", target.base_url);
         let format = response_format(options);
-        let prepared = self.prepare_messages(request, options, base_model, true, false)?;
+        let prepared = self.prepare_messages(request, options, base_model, true, false, false)?;
         let headers = build_headers(&target, &prepared, auth, options, true, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 

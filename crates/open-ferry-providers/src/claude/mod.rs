@@ -34,6 +34,7 @@
 //!   Anthropic's API (a 501 for now).
 
 mod client;
+mod compaction;
 pub(crate) mod executor;
 mod headers;
 pub mod oauth;
@@ -42,6 +43,7 @@ mod request;
 pub(crate) mod stream;
 mod thinking;
 pub mod token;
+mod tool_call_ids;
 pub(crate) mod usage;
 
 pub use executor::ClaudeExecutor;
