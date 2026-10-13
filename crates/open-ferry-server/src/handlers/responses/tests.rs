@@ -1433,3 +1433,45 @@ async fn forwards_reasoning_content_unchecked() {
     assert_eq!(&calls[1].request.payload[..], compact.as_bytes());
     assert_eq!(calls[1].options.alt, "responses/compact");
 }
+
+#[tokio::test(start_paused = true)]
+async fn pre_first_token_tick_after_partial_frame_keeps_bootstrap_headers() {
+    // openai_responses_handlers.go:737-742,900-903. Feed the handler's
+    // bootstrap boundary directly, after exec's first-payload checking.
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let first = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":";
+    let last = "{\"status\":\"completed\"}}\n\n";
+    let mut headers = HeaderMap::new();
+    headers.insert("x-upstream", http::HeaderValue::from_static("kept"));
+    let commit_headers = crate::stream::CommitHeaders::default();
+    let upstream_headers = commit_headers.clone();
+    let items = stream::iter([ok(first)])
+        .chain(stream::once(async move { Ok(gate.await.unwrap()) }))
+        .boxed();
+    let started = crate::exec::Started { headers, items };
+    let initial = async move {
+        upstream_headers.set(&started.headers);
+        super::prepare_initial_stream(started, false).await
+    };
+    let response = crate::stream::pre_first_token(
+        Some(Duration::from_millis(10)),
+        commit_headers,
+        initial,
+        |initial, committed| super::respond_initial_stream(initial, committed, None, true, None),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-upstream"], "kept");
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    let mut body = response.into_body();
+    assert_eq!(
+        body.frame().await.unwrap().unwrap().into_data().unwrap(),
+        ": keep-alive\n\n"
+    );
+    release.send(Bytes::from(last)).unwrap();
+    let rest = body.collect().await.unwrap().to_bytes();
+    assert_eq!(rest, format!("{first}{last}\n"));
+}

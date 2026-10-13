@@ -196,14 +196,17 @@ async fn respond_streaming(
     );
     let codex = is_codex_client(&client.headers);
     let context = client.context.clone();
+    let commit_headers = crate::stream::CommitHeaders::default();
+    let upstream_headers = commit_headers.clone();
     let first = async move {
         let started = match call {
             Ok(call) => call.stream().await,
             Err(error) => Started::failed(error),
         };
+        upstream_headers.set(&started.headers);
         prepare_initial_stream(started, codex).await
     };
-    crate::stream::pre_first_token(pre_ft, first, move |initial, committed| {
+    crate::stream::pre_first_token(pre_ft, commit_headers, first, move |initial, committed| {
         respond_initial_stream(initial, committed, keepalive, passthrough, context)
     })
     .await

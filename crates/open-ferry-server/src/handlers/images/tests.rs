@@ -822,7 +822,7 @@ async fn a_stream_that_fails_first_answers_with_the_error() {
     assert!(body.contains("image upstream busy"), "{body}");
 }
 
-// Not upstream's: while a stream waits for its first payload it writes
+// With upstream's pre-first-token switch on, a waiting stream writes
 // keep-alives, without the provider's headers (see the module docs), and
 // dropping the response cancels the call.
 #[tokio::test(start_paused = true)]
@@ -944,7 +944,7 @@ async fn xai_streams_are_written_as_completed_events() {
     assert!(!calls[0].options.stream);
 }
 
-// Not upstream's: an xAI stream that waits writes keep-alives, then its
+// With upstream's pre-first-token switch on, xAI writes keep-alives, then its
 // events; one with no images answers 502.
 #[tokio::test(start_paused = true)]
 async fn xai_streams_keep_alive_while_they_wait() {
@@ -1164,4 +1164,36 @@ async fn bad_requests_are_turned_away() {
     let (status, _, _) = send(&app, post_form(&[("prompt", &big)], &[])).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert!(dispatcher.calls().is_empty());
+}
+
+// openai_images_handlers.go:80-95: post-payload ticks depend on the interval,
+// while pre-payload ticks additionally require send-keepalive-before-ft.
+#[tokio::test(start_paused = true)]
+async fn image_keepalives_after_first_payload_do_not_need_the_pre_first_token_switch() {
+    for model in ["gpt-image-2", "compat-image"] {
+        let mut config = keepalive(1);
+        config.streaming.keepalive_before_first_token = false;
+        let first = Bytes::from_static(
+            b"event: image_generation.partial_image\ndata: {\"hello\":true}\n\n",
+        );
+        let (app, dispatcher) = server(
+            config,
+            vec![Outcome::Hang(HeaderMap::new(), vec![Ok(first.clone())])],
+        );
+        let payload = format!(r#"{{"model":"{model}","prompt":"cat","stream":true}}"#);
+        let response = app.oneshot(post_json(GENERATIONS, &payload)).await.unwrap();
+        let mut body = response.into_body();
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            first
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                ": keep-alive\n\n"
+            );
+        }
+        drop(body);
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
 }

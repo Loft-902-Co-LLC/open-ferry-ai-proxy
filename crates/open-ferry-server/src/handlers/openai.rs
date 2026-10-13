@@ -174,12 +174,16 @@ async fn stream_chat(
     let keepalive = settings.config.streaming.keepalive;
     let pre_ft = crate::stream::pre_first_token_interval(&settings.config.streaming);
     drop(settings);
+    let commit_headers = crate::stream::CommitHeaders::default();
+    let upstream_headers = commit_headers.clone();
     let first = async move {
         let started = start.await;
+        upstream_headers.set(&started.headers);
         (started.headers, peek(started.items).await)
     };
     crate::stream::pre_first_token(
         pre_ft,
+        commit_headers,
         first,
         move |(headers, peeked), committed| match peeked {
             Peeked::Failed(error) if committed => {

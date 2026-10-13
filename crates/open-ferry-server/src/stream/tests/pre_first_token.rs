@@ -188,6 +188,8 @@ pub(crate) async fn check_protocol(
         let response = app.oneshot(request(path, payload, codex)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "text/event-stream");
+        // Call::stream still waits for the first accepted payload before
+        // exposing headers, even when execute_stream has already resolved.
         assert!(!response.headers().contains_key("x-late-upstream"));
         let mut body = response.into_body();
         assert_eq!(
@@ -542,5 +544,120 @@ async fn pre_first_token_disabled_waits_keep_the_http_error_and_raw_gemini_never
             let body = response.into_body().collect().await.unwrap().to_bytes();
             assert!(!String::from_utf8_lossy(&body).contains(HEARTBEAT));
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pre_first_token_success_follows_the_heartbeat_for_each_protocol() {
+    // The upstream bootstrap holds the first payload through pre-FT ticks:
+    // sdk/api/handlers/handlers.go (ExecuteStreamBootstrap), stream_forwarder.go.
+    let cases = [
+        (
+            "/v1/messages",
+            r#"{"model":"m","messages":[],"stream":true}"#,
+            "claude",
+            "m",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ),
+        (
+            "/v1beta/models/m:streamGenerateContent",
+            r#"{"contents":[]}"#,
+            "gemini",
+            "m",
+            r#"{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}"#,
+            "",
+        ),
+        (
+            "/v1/chat/completions",
+            r#"{"model":"m","messages":[],"stream":true}"#,
+            "openai",
+            "m",
+            r#"{"choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}]}"#,
+            "",
+        ),
+        (
+            "/v1beta/interactions",
+            r#"{"model":"m","input":"hi","stream":true}"#,
+            "gemini-interactions",
+            "m",
+            "event: interaction.complete\ndata: {\"hello\":true}\n\n",
+            "event: interaction.complete\ndata: {\"hello\":true}\n\n",
+        ),
+        (
+            "/v1/images/generations",
+            r#"{"model":"gpt-image-2","prompt":"cat","stream":true}"#,
+            "codex",
+            "gpt-image-2",
+            "event: image_generation.completed\ndata: {\"b64_json\":\"AA==\"}\n\n",
+            "event: image_generation.completed\ndata: {\"b64_json\":\"AA==\"}\n\n",
+        ),
+        (
+            "/v1/images/edits",
+            r#"{"model":"compat-image","prompt":"cat","image":"data:image/png;base64,AA==","stream":true}"#,
+            "compat",
+            "compat-image",
+            "event: image_edit.completed\ndata: {\"b64_json\":\"AA==\"}\n\n",
+            "event: image_edit.completed\ndata: {\"b64_json\":\"AA==\"}\n\n",
+        ),
+    ];
+    for (path, payload, provider, model, first, expected) in cases {
+        for bootstrap in [true, false] {
+            let (app, release, dropped) = server(enabled(), provider, model, bootstrap);
+            let response = app.oneshot(request(path, payload, false)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut body = response.into_body();
+            assert_eq!(
+                body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                HEARTBEAT
+            );
+            release.send(Ok(Bytes::from(first))).unwrap();
+            let rest =
+                String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
+            let expected = if expected.is_empty() {
+                format!(
+                    "data: {first}\n\n{}",
+                    if provider == "openai" {
+                        "data: [DONE]\n\n"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                expected.to_owned()
+            };
+            assert_eq!(rest, expected, "{path}, bootstrap={bootstrap}");
+            assert!(dropped.load(Ordering::SeqCst));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pre_first_token_xai_images_success_follows_the_heartbeat() {
+    for path in ["/v1/images/generations", "/v1/images/edits"] {
+        let (app, release, _) = server(enabled(), "xai", "grok-imagine-image", true);
+        let response = app.oneshot(request(path,
+            r#"{"model":"grok-imagine-image","prompt":"cat","image":"data:image/png;base64,AA==","stream":true}"#,
+            false)).await.unwrap();
+        let mut body = response.into_body();
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            HEARTBEAT
+        );
+        release
+            .send(Ok(Bytes::from_static(br#"{"data":[{"b64_json":"AA=="}]}"#)))
+            .unwrap();
+        let rest = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        let prefix = if path.ends_with("edits") {
+            "image_edit"
+        } else {
+            "image_generation"
+        };
+        assert_eq!(
+            rest,
+            format!(
+                "event: {prefix}.completed\ndata: {{\"type\":\"{prefix}.completed\",\"b64_json\":\"AA==\"}}\n\n"
+            )
+        );
     }
 }

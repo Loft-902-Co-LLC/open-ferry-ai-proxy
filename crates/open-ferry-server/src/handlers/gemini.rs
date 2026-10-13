@@ -159,15 +159,19 @@ pub(crate) async fn action(
     if method == Method::Stream {
         let sse = alt.is_empty();
         let call = Call::new(&state, &client, Format::GEMINI, &model, raw, &alt, true);
+        let commit_headers = crate::stream::CommitHeaders::default();
+        let upstream_headers = commit_headers.clone();
         let first = async move {
             let started = match call {
                 Ok(call) => call.stream().await,
                 Err(error) => Started::failed(error),
             };
+            upstream_headers.set(&started.headers);
             (started.headers, peek(started.items).await)
         };
         return crate::stream::pre_first_token(
             pre_ft.filter(|_| sse),
+            commit_headers,
             first,
             move |(headers, peeked), committed| match peeked {
                 Peeked::Failed(error) if committed => {

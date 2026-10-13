@@ -17,8 +17,8 @@
 //! Deviations from upstream, besides those noted on each module:
 //! - Routes match paths exactly. Gin redirects a path with a trailing slash,
 //!   and matches percent-encoded paths decoded; both get 404 here.
-//! - A request body over [`ServerConfig::body_limit`], before or after
-//!   decoding, gets 413. Upstream reads any size.
+//! - Non-positive `max-request-body-bytes` keeps the 64 MiB
+//!   [`ServerConfig::body_limit`]; upstream disables its cap.
 //! - `Content-Encoding: gzip` takes concatenated members, and zstd errors
 //!   read differently.
 //! - JSON written here, except on the Gemini routes, doesn't escape `<`,

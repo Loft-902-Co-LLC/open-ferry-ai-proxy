@@ -116,11 +116,31 @@ async fn every_body_route_rejects_chunked_oversize_in_the_upstream_shape() {
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
-        assert_eq!(
-            body_text(response).await,
-            r#"{"error":{"message":"Invalid request: http: request body too large","type":"invalid_request_error"}}"#,
-            "{route}"
-        );
+        let actual: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        let expected = match *route {
+            // sdk/api/handlers/gemini/interactions_handlers.go:95-98.
+            "/v1beta/interactions" => serde_json::json!({"error": {
+                "message": "http: request body too large", "type": "invalid_request_error"
+            }}),
+            // sdk/api/handlers/openai/openai_videos_handlers.go:585,701-705.
+            "/openai/v1/videos" => {
+                let id = actual["id"].as_str().unwrap();
+                assert!(id.starts_with("video_"), "{actual}");
+                assert_eq!(id.len(), 38);
+                serde_json::json!({"id": id, "object": "video", "status": "failed",
+                    "progress": 0, "model": "grok-imagine-video", "error": {
+                    "code": "invalid_request_error", "message": "Invalid request: http: request body too large"
+                }})
+            }
+            // internal/api/server_routes.go:348-351 (both aliases).
+            "/v1/alpha/search" | "/backend-api/codex/alpha/search" => {
+                serde_json::json!({"error": "Failed to read search request"})
+            }
+            _ => serde_json::json!({"error": {
+                "message": "Invalid request: http: request body too large", "type": "invalid_request_error"
+            }}),
+        };
+        assert_eq!(actual, expected, "{route}");
     }
 }
 
@@ -177,14 +197,31 @@ async fn logging_rejects_unauthenticated_chunked_oversize() {
         ..Observability::default()
     };
     let app = crate::router(state_with_limit(64).with_observability(observability));
+    // internal/api/max_request_body_bytes_test.go:115-129: 1 KiB offered,
+    // no more than limit + 1 bytes read. Single-byte chunks expose over-reading.
+    let read = Arc::new(AtomicUsize::new(0));
+    let counted = read.clone();
+    let chunks = stream::iter(0..1024).map(move |_| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(Bytes::from_static(b"x"))
+    });
     let request = Request::post(ROUTES[0])
-        .body(Body::from_stream(stream::iter([Ok::<_, std::io::Error>(
-            Bytes::from(vec![b'x'; 65]),
-        )])))
+        .header("origin", "https://caller.test")
+        .body(Body::from_stream(chunks))
         .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(read.load(Ordering::SeqCst) <= 65);
+    // internal/api/middleware/request_logging.go:57-60 runs before CORS.
+    assert!(
+        !response
+            .headers()
+            .keys()
+            .any(|name| name.as_str().starts_with("access-control-"))
+    );
     assert_eq!(
-        app.oneshot(request).await.unwrap().status(),
-        StatusCode::PAYLOAD_TOO_LARGE
+        body_text(response).await,
+        r#"{"error":"http: request body too large"}"#
     );
 }
 
@@ -242,4 +279,72 @@ async fn multipart_oversize_is_rejected_before_parsing() {
             .status(),
         StatusCode::PAYLOAD_TOO_LARGE
     );
+}
+
+#[derive(Clone, Default)]
+struct AccessCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        self.0.lock().unwrap().push(message.0);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn declared_oversize_is_access_logged_before_authentication() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let capture = AccessCapture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let request = Request::post(ROUTES[0])
+        .header("content-length", "128")
+        .body(Body::empty())
+        .unwrap();
+    let response = crate::router(state_with_limit(64))
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let _ = body_text(response).await;
+    let lines = capture.0.lock().unwrap();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("413 |")
+                && line.contains("POST")
+                && line.contains(ROUTES[0]))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn logging_read_failures_keep_cors_headers() {
+    let scratch = scratch();
+    let mut config = Config::default();
+    config.request_log = true;
+    let observability = Observability {
+        request_log: RequestLogger::new(&config, &scratch, &scratch.join("config.yaml")),
+        ..Observability::default()
+    };
+    let app = crate::router(state_with_limit(64).with_observability(observability));
+    let chunks = stream::iter([Err::<Bytes, _>(std::io::Error::other("broken body"))]);
+    let request = Request::post(ROUTES[0])
+        .body(Body::from_stream(chunks))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    // request_logging.go:62-65 lets ordinary read failures reach CORS.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
 }
