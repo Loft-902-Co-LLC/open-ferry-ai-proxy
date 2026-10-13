@@ -26,7 +26,9 @@
 //! `-supervise` runs the blue-green supervisor, which binds the listening
 //! sockets and starts the workers that serve them, and `-worker` (with
 //! `-worker-control`) is one such worker, started only by a supervisor (see
-//! [`supervised`]). Neither loads `.env`.
+//! [`supervised`]). `-supervise` loads the working directory's `.env` once,
+//! after it finds the data directory and before any thread starts, and its
+//! workers inherit what that set; `-worker` loads none.
 //!
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
@@ -111,8 +113,9 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     // The blue-green entries come before anything that starts a thread or
-    // reads `.env`: a worker takes its sockets over while single-threaded,
-    // and neither entry reads the working directory's `.env`.
+    // reads `.env`: a worker takes its sockets over while single-threaded and
+    // reads no `.env`, and the supervisor loads the working directory's once
+    // itself, before its first thread.
     if flags.worker {
         return supervised::worker_entry(&flags);
     }

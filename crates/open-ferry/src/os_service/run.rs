@@ -40,6 +40,7 @@ use windows_service::service_control_handler::{
     self, ServiceControlHandlerResult, ServiceStatusHandle,
 };
 use windows_service::{define_windows_service, service_dispatcher};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Console::{
     FreeConsole, GetConsoleProcessList, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
 };
@@ -70,8 +71,15 @@ const STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// Runs the server for the task, or with `system` for the Windows service,
 /// with the config at the full path `config`, in `dir` or else the config's
-/// directory.
-pub(super) fn main(config: &str, dir: Option<&str>, system: bool) -> ExitCode {
+/// directory. With `supervised` (the data directory, a full path) the task
+/// runs the blue-green supervisor, not the server, and fails closed: unless
+/// the job that ends it with this process is in place, nothing is started.
+pub(super) fn main(
+    config: &str,
+    dir: Option<&str>,
+    system: bool,
+    supervised: Option<&str>,
+) -> ExitCode {
     let config = PathBuf::from(config);
     let dir = match (dir, config.parent()) {
         (Some(dir), _) if Path::new(dir).is_absolute() => PathBuf::from(dir),
@@ -97,12 +105,47 @@ pub(super) fn main(config: &str, dir: Option<&str>, system: bool) -> ExitCode {
     if system {
         serve_for_service_manager(config, log)
     } else {
-        supervise(&config, &log)
+        supervise(&config, &log, supervised.map(Path::new))
     }
 }
 
-/// Runs the server as a child with no window, and again when it fails.
-fn supervise(config: &Path, log: &Path) -> ExitCode {
+/// The child's arguments: the server's `-config <path>`, or with `data_dir`
+/// the supervisor's `-supervise -config <path> -data-dir <path>`.
+fn child_arguments(config: &Path, data_dir: Option<&Path>) -> Vec<OsString> {
+    let mut arguments = Vec::new();
+    if data_dir.is_some() {
+        arguments.push(OsString::from("-supervise"));
+    }
+    arguments.push(OsString::from("-config"));
+    arguments.push(config.as_os_str().to_owned());
+    if let Some(data_dir) = data_dir {
+        arguments.push(OsString::from("-data-dir"));
+        arguments.push(data_dir.as_os_str().to_owned());
+    }
+    arguments
+}
+
+/// What to do about `contained`, how this process fared at being put in a job
+/// that ends the child with it: nothing when it worked; when it didn't, a
+/// plain run says so and goes on (the server may outlive the wrapper), while
+/// a supervised one fails closed, because a supervisor and its workers that
+/// outlive the wrapper would keep serving with nothing to stop them, and
+/// block a restart.
+fn containment(supervised: bool, contained: io::Result<()>) -> Result<Option<String>, String> {
+    match contained {
+        Ok(()) => Ok(None),
+        Err(error) if supervised => Err(format!(
+            "failed to make a job that ends the supervisor and its workers with this process: {error}; not starting them"
+        )),
+        Err(error) => Ok(Some(format!(
+            "the server may outlive this process, which failed to make a job: {error}"
+        ))),
+    }
+}
+
+/// Runs the server as a child with no window, and again when it fails; with
+/// `data_dir`, the supervisor.
+fn supervise(config: &Path, log: &Path, data_dir: Option<&Path>) -> ExitCode {
     detach_console();
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -114,14 +157,15 @@ fn supervise(config: &Path, log: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(error) = end_children_with_this_process() {
-        note(
-            log,
-            format_args!(
-                "the server may outlive this process, which failed to make a job: {error}"
-            ),
-        );
+    match containment(data_dir.is_some(), end_children_with_this_process()) {
+        Ok(None) => {}
+        Ok(Some(warning)) => note(log, warning),
+        Err(message) => {
+            note(log, message);
+            return ExitCode::FAILURE;
+        }
     }
+    let arguments = child_arguments(config, data_dir);
     let mut delay = None;
     loop {
         rotate(log);
@@ -129,8 +173,7 @@ fn supervise(config: &Path, log: &Path) -> ExitCode {
         let status = open_log(log).and_then(|output| {
             let errors = output.try_clone()?;
             Command::new(&exe)
-                .arg("-config")
-                .arg(config)
+                .args(&arguments)
                 .stdin(Stdio::null())
                 .stdout(output)
                 .stderr(errors)
@@ -192,12 +235,39 @@ fn detach_console() {
 /// Puts this process in a job that ends every process in it when this one
 /// ends, so the server, which is started in it, doesn't outlive it.
 fn end_children_with_this_process() -> io::Result<()> {
+    contain(|job| {
+        // SAFETY: both handles are valid.
+        if unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })
+}
+
+/// Makes a job that ends its processes when its handle closes, and has
+/// `assign` put this process in it. On success the handle is never closed, so
+/// it closes, and the job ends its processes, when this process ends (closing
+/// it earlier, while this process is in the job, would end this process). On a
+/// failure it is closed here, when this process is not in the job, so nothing
+/// is left open.
+fn contain(assign: impl FnOnce(HANDLE) -> io::Result<()>) -> io::Result<()> {
     // SAFETY: no attributes and no name ask for an unnamed job with the
     // default security.
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if job.is_null() {
         return Err(io::Error::last_os_error());
     }
+    let made = set_kill_on_close(job).and_then(|()| assign(job));
+    if made.is_err() {
+        // SAFETY: `job` is a valid handle of ours, and this process is not in
+        // the job: the assignment failed or never ran.
+        unsafe { CloseHandle(job) };
+    }
+    made
+}
+
+/// Has `job` end its processes when its last handle closes.
+fn set_kill_on_close(job: HANDLE) -> io::Result<()> {
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     let size = u32::try_from(size_of_val(&limits)).map_err(io::Error::other)?;
@@ -212,11 +282,6 @@ fn end_children_with_this_process() -> io::Result<()> {
         )
     };
     if set == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: both handles are valid. The job's is never closed, so it
-    // closes, and the job ends its processes, when this process ends.
-    if unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) } == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -397,6 +462,43 @@ mod tests {
         assert_eq!(restart_delay(Some(MAX_DELAY), soon), MAX_DELAY);
         // A server that ran for a while starts the waits over.
         assert_eq!(restart_delay(Some(MAX_DELAY), MAX_DELAY), FIRST_DELAY);
+    }
+
+    #[test]
+    fn a_failed_assignment_fails_a_supervised_run_closed_and_a_plain_one_goes_on() {
+        // Not upstream's: the supervised task fails closed.
+        let failed = || contain(|_| Err(io::Error::other("injected")));
+        // The injected failure reaches the policy, and this process, which
+        // was never in the job, is still here to read it.
+        let error = failed().unwrap_err();
+        assert_eq!(error.to_string(), "injected");
+        let message = containment(true, failed()).unwrap_err();
+        assert!(message.contains("injected"), "{message}");
+        assert!(message.contains("not starting"), "{message}");
+        let warning = containment(false, failed()).unwrap().unwrap();
+        assert!(warning.contains("may outlive"), "{warning}");
+        assert_eq!(containment(true, Ok(())), Ok(None));
+        assert_eq!(containment(false, Ok(())), Ok(None));
+    }
+
+    #[test]
+    fn the_child_is_the_server_or_the_supervisor() {
+        let config = Path::new(r"C:\ferry\config.yaml");
+        let data = Path::new(r"C:\ferry\data");
+        assert_eq!(
+            child_arguments(config, None),
+            ["-config", r"C:\ferry\config.yaml"]
+        );
+        assert_eq!(
+            child_arguments(config, Some(data)),
+            [
+                "-supervise",
+                "-config",
+                r"C:\ferry\config.yaml",
+                "-data-dir",
+                r"C:\ferry\data"
+            ]
+        );
     }
 
     #[test]

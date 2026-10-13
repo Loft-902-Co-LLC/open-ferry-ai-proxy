@@ -190,7 +190,7 @@ const DEFINITIONS: &[Definition<Flags>] = &[
     },
     Definition {
         name: "supervise",
-        usage: "Run the blue-green supervisor, which runs the server as workers and switches them on an update",
+        usage: "Run the blue-green supervisor, which runs the server as workers and switches them on an update; it reads the working directory's .env once, for its workers too",
         kind: Kind::Bool(|flags, value| flags.supervise = value),
     },
     Definition {
