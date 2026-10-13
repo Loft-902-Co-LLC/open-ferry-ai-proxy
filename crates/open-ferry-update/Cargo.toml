@@ -30,7 +30,7 @@ tar = { version = "0.4.46", default-features = false }
 tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros", "process"] }
 tracing = "0.1.44"
 url = "2.5.8"
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 axum = "0.8.9"
