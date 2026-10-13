@@ -7,6 +7,7 @@ use super::*;
 /// test says; a command it wasn't told of succeeds and prints nothing.
 #[derive(Clone, Default)]
 struct Fake {
+    privileged: bool,
     files: BTreeMap<String, Vec<u8>>,
     dirs: BTreeSet<String>,
     owners: BTreeMap<String, Owner>,
@@ -34,6 +35,9 @@ impl Fake {
     }
 
     fn answer(mut self, cmd: &str, code: i32, stdout: &str) -> Fake {
+        if cmd == "whoami.exe /groups /fo csv /nh" {
+            self.privileged = stdout.contains("S-1-16-12288") || stdout.contains("S-1-16-16384");
+        }
         self.answers.insert(
             cmd.to_owned(),
             Output {
@@ -75,7 +79,8 @@ impl Fake {
         self
     }
 
-    fn uid(self, uid: u32) -> Fake {
+    fn uid(mut self, uid: u32) -> Fake {
+        self.privileged = uid == 0;
         self.answer("id -u", 0, &format!("{uid}\n"))
     }
 
@@ -116,6 +121,9 @@ impl Fake {
 }
 
 impl System for Fake {
+    fn privileged(&self) -> Result<bool, String> {
+        Ok(self.privileged)
+    }
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
         self.events.push(format!("run {cmd}"));
         if let Some(answer) = self
@@ -134,7 +142,10 @@ impl System for Fake {
     }
 
     fn exists(&self, path: &str) -> bool {
-        self.files.contains_key(path) || self.dirs.contains(path)
+        self.files.contains_key(path)
+            || self.dirs.contains(path)
+            || path == "/"
+            || path.ends_with(":\\")
     }
 
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
@@ -977,15 +988,11 @@ fn refuses_to_install_twice() {
 
 #[test]
 fn refuses_root_for_a_user_service() {
-    // Not upstream's: root's user service is almost certainly a mistake.
     let mut fake = Fake::default().uid(0).file(LINUX_CONFIG, CONFIG);
     let (result, _) = execute_with(&mut fake, &linux(), &["install"]);
-    assert_eq!(
-        result,
-        Err(format!(
-            "You are root, so this would install a service for root. Run it as the user the service is for, or add -system for a service of the whole machine:\n  /home/me/.local/bin/open-ferry service install -config {LINUX_CONFIG}"
-        ))
-    );
+    assert!(result.unwrap_err().contains("You are root"));
+    assert!(fake.events.is_empty());
+    assert!(fake.reads.borrow().is_empty());
 }
 
 #[test]
@@ -1290,55 +1297,35 @@ fn installs_and_uninstalls_a_launchd_agent() {
 }
 
 #[test]
-fn installs_a_launchd_daemon() {
-    // Not upstream's: `install -system` on macOS.
-    let mut fake = Fake::default()
-        .uid(0)
-        .file(
-            "/Library/Application Support/open-ferry/config.yaml",
-            SYSTEM_CONFIG,
-        )
-        .dir("/Library/LaunchDaemons")
-        .dir("/Library/Logs");
+fn refuses_a_launchd_daemon_before_reading_or_running_anything() {
     let context = context(
         Platform::MacOs,
         "/usr/local/bin/open-ferry",
         "/",
         &[("HOME", "/var/root")],
     );
-    let (result, _) = execute_with(
-        &mut fake,
-        &context,
-        &[
-            "install",
-            "-system",
-            "-config",
-            "/Library/Application Support/open-ferry/config.yaml",
-        ],
-    );
-    assert_eq!(result, Ok(()));
-    let plist = "/Library/LaunchDaemons/io.github.loft-902-co-llc.open-ferry.plist";
-    assert_eq!(
-        events(&fake),
-        [
-            "run id -u",
-            &format!("write {plist}"),
-            "run launchctl enable system/io.github.loft-902-co-llc.open-ferry",
-            &format!("run launchctl bootstrap system {plist}"),
-        ]
-    );
-    assert!(text(&fake, plist).contains("<string>/Library/Logs/open-ferry.log</string>"));
-
-    fake.events.clear();
-    let (result, _) = execute_with(&mut fake, &context, &["status", "-system"]);
-    assert_eq!(result, Ok(()));
-    assert_eq!(
-        events(&fake),
-        [
-            "run id -u",
-            "show launchctl print system/io.github.loft-902-co-llc.open-ferry"
-        ]
-    );
+    for dry_run in [false, true] {
+        let mut fake = Fake::default().uid(0);
+        let mut args = vec!["install", "-system"];
+        if dry_run {
+            args.push("-dry-run");
+        }
+        let error = execute_with(&mut fake, &context, &args).0.unwrap_err();
+        assert!(error.contains("macOS"));
+        assert!(error.contains("without -system"));
+        assert!(fake.events.is_empty());
+        assert!(fake.reads.borrow().is_empty());
+    }
+    let plist = launchd::plist_path(&context, true).unwrap();
+    for action in ["status", "uninstall"] {
+        let mut fake = Fake::default().uid(0).file(&plist, "old daemon");
+        assert!(
+            execute_with(&mut fake, &context, &[action, "-system"])
+                .0
+                .is_ok()
+        );
+        assert!(fake.reads.borrow().iter().all(|path| path == &plist));
+    }
 }
 
 fn windows_user() -> Fake {
@@ -1367,7 +1354,6 @@ fn installs_a_scheduled_task() {
     assert_eq!(
         events(&fake),
         [
-            "run whoami.exe /groups /fo csv /nh",
             "run schtasks.exe /query /tn open-ferry",
             "run schtasks.exe /query /fo csv /nh",
             "run whoami.exe /user /fo csv /nh",
@@ -1459,7 +1445,6 @@ fn uninstalls_a_scheduled_task() {
         events(&fake),
         [
             "run schtasks.exe /query /tn open-ferry",
-            "run whoami.exe /groups /fo csv /nh",
             "run schtasks.exe /query /tn open-ferry /xml",
             "run schtasks.exe /end /tn open-ferry",
             "run schtasks.exe /delete /tn open-ferry /f",
@@ -1511,7 +1496,6 @@ fn installs_a_windows_service() {
     assert_eq!(
         events(&fake),
         [
-            "run whoami.exe /groups /fo csv /nh",
             "run sc.exe query open-ferry",
             r#"run sc.exe create open-ferry binPath= "\"C:\Program Files\open-ferry\open-ferry.exe\" service run -system -config \"C:\Program Files\open-ferry\config.yaml\"" start= auto DisplayName= open-ferry"#,
             r#"run sc.exe description open-ferry "open-ferry AI proxy""#,
@@ -1598,13 +1582,7 @@ fn a_windows_service_dry_run_says_it_needs_an_administrator() {
         ],
     );
     assert_eq!(result, Ok(()));
-    assert_eq!(
-        events(&fake),
-        [
-            "run whoami.exe /groups /fo csv /nh",
-            "run sc.exe query open-ferry"
-        ]
-    );
+    assert_eq!(events(&fake), ["run sc.exe query open-ferry"]);
     assert!(out.ends_with(
         "Would run: sc.exe start open-ferry\nDry run: nothing was changed.\nWithout -dry-run, this needs an administrator.\n"
     ));
@@ -1636,7 +1614,6 @@ fn uninstalls_a_windows_service() {
         events(&fake),
         [
             "run sc.exe query open-ferry",
-            "run whoami.exe /groups /fo csv /nh",
             "run sc.exe qc open-ferry",
             "run sc.exe stop open-ferry",
             "run sc.exe delete open-ferry",
@@ -2120,7 +2097,6 @@ fn uninstalls_a_task_by_asking_its_supervisor_to_stop_first() {
         assert_eq!(result, Ok(()), "{outcome:?}");
         let expected = [
             "run schtasks.exe /query /tn open-ferry".to_owned(),
-            "run whoami.exe /groups /fo csv /nh".to_owned(),
             format!("run {XML_QUERY}"),
             format!("stop_supervisor {WINDOWS_DATA} 50s"),
             "run schtasks.exe /end /tn open-ferry".to_owned(),
@@ -2638,7 +2614,6 @@ fn a_relative_data_dir_in_the_definition_is_never_a_stop_target() {
         fake.events,
         [
             "run schtasks.exe /query /tn open-ferry".to_owned(),
-            "run whoami.exe /groups /fo csv /nh".to_owned(),
             format!("run {XML_QUERY}"),
             "run schtasks.exe /end /tn open-ferry".to_owned(),
             "run schtasks.exe /delete /tn open-ferry /f".to_owned(),
@@ -3826,7 +3801,7 @@ fn the_host_stops_a_system_supervisor_only_through_a_trusted_directory() {
     let dir = tempfile::tempdir().unwrap();
     #[cfg(windows)]
     {
-        let output = std::process::Command::new("icacls.exe")
+        let output = std::process::Command::new(helper_path("icacls.exe").unwrap())
             .arg(dir.path())
             .args(["/grant", "*S-1-1-0:(W)"])
             .output()
@@ -4021,6 +3996,7 @@ fn every_system_form_requires_real_trust_of_the_exe_config_and_working_directory
                 };
                 fake.files = base.files.clone();
                 fake.answers = base.answers.clone();
+                fake.privileged = base.privileged;
                 let updating = if supervised {
                     Updating::supervised(MACHINE_DATA)
                 } else {
@@ -4321,6 +4297,11 @@ fn system_records_are_atomic_after_install_and_only_for_the_supervised_form() {
                 &["install", "-system", "-config", config],
                 &updating,
             );
+            if platform == Platform::MacOs {
+                assert!(result.unwrap_err().contains("macOS"));
+                assert!(fake.reads.borrow().is_empty());
+                continue;
+            }
             assert_eq!(result, Ok(()));
             let path = platform.join(data, RECORD_FILE);
             if supervised && platform != Platform::MacOs {
@@ -4404,7 +4385,6 @@ fn scm_uninstall_stops_the_system_supervisor_then_waits_before_delete_and_record
             events(&fake),
             [
                 "run sc.exe query open-ferry",
-                "run whoami.exe /groups /fo csv /nh",
                 "run sc.exe qc open-ferry",
                 r"stop_supervisor C:\ProgramData\open-ferry 50s system",
                 "run sc.exe stop open-ferry",
@@ -4845,11 +4825,7 @@ fn system_dry_runs_describe_both_forms_and_the_wait_without_changing_anything() 
     assert!(before < stop && stop < wait && wait < delete && delete < remove);
     assert_eq!(
         events(&fake),
-        [
-            "run sc.exe query open-ferry",
-            "run whoami.exe /groups /fo csv /nh",
-            "run sc.exe qc open-ferry"
-        ]
+        ["run sc.exe query open-ferry", "run sc.exe qc open-ferry"]
     );
 }
 #[test]
@@ -4868,7 +4844,7 @@ fn elevated_windows_account_installs_are_refused_before_any_plan_or_config_read(
         let error = result.unwrap_err();
         assert!(error.contains("This terminal is elevated"), "{error}");
         assert!(error.contains("add -system"), "{error}");
-        assert_eq!(events(&fake), ["run whoami.exe /groups /fo csv /nh"]);
+        assert!(events(&fake).is_empty());
         assert!(fake.reads.borrow().is_empty());
         assert!(!fake.files.contains_key(TASK_FILE));
     }
@@ -4924,7 +4900,8 @@ fn system_installs_keep_auth_files_out_of_machine_records() {
         } else {
             let error = result.unwrap_err();
             assert!(
-                error.contains("credential files among the machine's records"),
+                error.contains("credential files among the machine's records")
+                    || error.contains("without `.` or `..`"),
                 "{auth}: {error}"
             );
         }
@@ -4974,6 +4951,172 @@ fn an_untrusted_system_config_is_never_read_as_given_or_resolved() {
                 fake.reads.borrow().is_empty(),
                 "{platform:?}: read before refusal"
             );
+        }
+    }
+}
+
+#[test]
+fn auth_directory_trust_and_aliases_are_checked_at_install() {
+    for (auth, existing, untrusted, alias, accepted) in [
+        (
+            r"C:\ProgramData\open-ferry\auth",
+            r"C:\ProgramData\open-ferry",
+            false,
+            None,
+            true,
+        ),
+        (r"D:\credentials", r"D:\credentials", false, None, true),
+        (r"D:\credentials", r"D:\credentials", true, None, false),
+        (
+            r"D:\credentials\missing",
+            r"D:\credentials",
+            true,
+            None,
+            false,
+        ),
+        (
+            r"C:\PROGRA~3\OPEN-F~1\logs",
+            r"C:\PROGRA~3\OPEN-F~1",
+            false,
+            Some(r"C:\ProgramData\open-ferry"),
+            false,
+        ),
+        (
+            r"C:\PROGRA~3\OPEN-F~1\logs",
+            r"C:\PROGRA~3\OPEN-F~1",
+            false,
+            Some(r"\\?\C:\ProgramData\open-ferry"),
+            false,
+        ),
+        (
+            r"c:\programdata\OPEN-FERRY\logs",
+            r"c:\programdata\OPEN-FERRY",
+            false,
+            None,
+            false,
+        ),
+        (
+            r"D:\credentials\..\auth",
+            r"D:\credentials",
+            false,
+            None,
+            false,
+        ),
+        (
+            r"D:\credentials\.\auth",
+            r"D:\credentials",
+            false,
+            None,
+            false,
+        ),
+    ] {
+        let (mut fake, context) = windows_admin(PROGRAM_FILES_EXE);
+        fake = fake
+            .dir(existing)
+            .file(PROGRAM_FILES_CONFIG, &format!("auth-dir: '{auth}'\n"));
+        if untrusted {
+            fake.untrusted.insert(existing.to_owned());
+        }
+        if let Some(actual) = alias {
+            fake.resolved_paths
+                .insert(existing.to_owned(), actual.to_owned());
+        }
+        let result = execute_with(
+            &mut fake,
+            &context,
+            &[
+                "install",
+                "-system",
+                "-dry-run",
+                "-config",
+                PROGRAM_FILES_CONFIG,
+            ],
+        )
+        .0;
+        assert_eq!(result.is_ok(), accepted, "{auth}: {result:?}");
+        if !accepted {
+            assert!(result.unwrap_err().contains("set auth-dir"));
+        }
+    }
+    for file in [false, true] {
+        let (mut fake, context) = windows_admin(PROGRAM_FILES_EXE);
+        let auth = r"D:\credentials";
+        fake = fake.file(PROGRAM_FILES_CONFIG, &format!("auth-dir: '{auth}'\n"));
+        if file {
+            fake = fake.file(auth, "credentials");
+        } else {
+            fake = fake.dir(auth).link(auth, r"C:\ProgramData\open-ferry\logs");
+        }
+        let error = execute_with(
+            &mut fake,
+            &context,
+            &[
+                "install",
+                "-system",
+                "-dry-run",
+                "-config",
+                PROGRAM_FILES_CONFIG,
+            ],
+        )
+        .0
+        .unwrap_err();
+        assert!(error.contains("Refusing the auth directory"), "{error}");
+    }
+}
+
+#[test]
+fn helper_paths_do_not_search_the_working_directory_or_path() {
+    #[cfg(windows)]
+    for name in ["whoami.exe", "schtasks.exe", "sc.exe"] {
+        let path = helper_path(name).unwrap();
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap(), name);
+        assert!(
+            path.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .eq_ignore_ascii_case("system32")
+        );
+    }
+    #[cfg(unix)]
+    {
+        let path = helper_path("id").unwrap();
+        assert!(
+            ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+                .iter()
+                .any(|dir| path.parent().unwrap() == Path::new(dir))
+        );
+        assert!(helper_path("open-ferry-missing-test-helper").is_err());
+    }
+}
+
+#[test]
+fn privileged_account_install_refuses_before_context_or_receipt_assessment() {
+    for platform in [Platform::Linux, Platform::Windows] {
+        for dry_run in [false, true] {
+            let mut fake = Fake {
+                privileged: true,
+                ..Fake::default()
+            };
+            let mut args = vec!["install"];
+            if dry_run {
+                args.push("-dry-run");
+            }
+            let request = parse(super::tests::args(&args)).unwrap();
+            let result = run(
+                &mut fake,
+                platform,
+                &request,
+                || panic!("must not discover context before refusal"),
+                |_, _| panic!("must not assess or read a receipt before refusal"),
+                &mut Vec::new(),
+            );
+            assert!(result.unwrap_err().contains("add -system"));
+            assert!(fake.events.is_empty());
+            assert!(fake.reads.borrow().is_empty());
         }
     }
 }

@@ -321,6 +321,9 @@ fn command_config(
                 .to_owned(),
         );
     }
+    if !flag.is_empty() && probe.privileged()? {
+        return Ok(working_dir.join(flag));
+    }
     Ok(config_path(flag, working_dir, installed))
 }
 
