@@ -263,6 +263,7 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
         }
     }
     strip_auth_indexes_from_root(root);
+    save::normalize_collection_node_styles(root);
     let data = marshal(&doc).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
     let config =
         Config::parse(&data).map_err(|error| V8EditError::Unprocessable(error.to_string()))?;

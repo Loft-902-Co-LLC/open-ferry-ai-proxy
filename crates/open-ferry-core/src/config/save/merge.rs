@@ -26,6 +26,9 @@
 //! upstream's `[]string` path is.
 //!
 //! Deviations from upstream:
+//! - Vertex's pointer-backed `interactions: false` is preserved when newly
+//!   inserted, like the other optional booleans. Upstream's default-pruning
+//!   whitelist omits it, so that save loses an explicit false.
 //! - The settings this port doesn't type (see [`UNTYPED`]) are never written
 //!   from the generated tree, which only holds their defaults: the file's
 //!   value is kept as it is, a mapping only gains keys it lacks (through the
@@ -401,8 +404,10 @@ fn is_known_default_value(path: &[String], node: &Node) -> bool {
     {
         return false;
     }
-    if matches!(last, Some("cache-user-id" | "disable-cooling"))
-        && node.kind == Kind::Scalar
+    if matches!(
+        last,
+        Some("cache-user-id" | "disable-cooling" | "interactions")
+    ) && node.kind == Kind::Scalar
         && node.tag == BOOL_TAG
     {
         return false;
@@ -584,11 +589,23 @@ fn should_prune_nested_mapping_keys(path: &[String]) -> bool {
     }
 }
 
-/// `normalizeCollectionNodeStyles`: every mapping and non-empty list in
-/// block style, empty lists as `[]`. Scalars keep their style.
+/// `NormalizeCollectionNodeStyles`: collections in block style, empty
+/// lists as `[]`, and double-quoted string mapping keys in plain style.
+/// Other scalars keep their style.
 pub(crate) fn normalize_collection_node_styles(node: &mut Node) {
     match node.kind {
-        Kind::Mapping => node.style = Style::NONE,
+        Kind::Document => {}
+        Kind::Mapping => {
+            node.style = Style::NONE;
+            for [key, _] in node.content.as_chunks_mut::<2>().0 {
+                if key.kind == Kind::Scalar
+                    && key.tag == STR_TAG
+                    && key.style == Style::DOUBLE_QUOTED
+                {
+                    key.style = Style::NONE;
+                }
+            }
+        }
         Kind::Sequence if node.content.is_empty() => node.style = Style::FLOW,
         Kind::Sequence => node.style = Style::NONE,
         _ => return,

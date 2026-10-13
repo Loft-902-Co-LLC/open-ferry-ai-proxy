@@ -17,6 +17,9 @@
 //! host (`format_url`), so no user information, path or query.
 //!
 //! Deviations from upstream:
+//! - The new body-limit, pre-first-token keepalive, affinity rebind and
+//!   Vertex Interactions settings get change lines too. Upstream reloads
+//!   those settings but does not give them individual diff lines.
 //! - Only the settings open-ferry types have lines. The sections it reads
 //!   and ignores (pprof, cloaking and `claude-code`, fingerprints,
 //!   Antigravity, Devin, Codex live media relay and
@@ -94,6 +97,26 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         &new.gpt_image_2_base_model,
     );
     changes.flag("request-log", old.request_log, new.request_log);
+    changes.int(
+        "max-request-body-bytes",
+        old.max_request_body_bytes,
+        new.max_request_body_bytes,
+    );
+    changes.flag(
+        "streaming.send-keepalive-before-ft",
+        old.streaming.send_keepalive_before_ft,
+        new.streaming.send_keepalive_before_ft,
+    );
+    changes.flag(
+        "claude.tool-search",
+        old.claude.tool_search,
+        new.claude.tool_search,
+    );
+    changes.text(
+        "routing.session-affinity-rebind-on",
+        &old.routing.session_affinity_rebind_on,
+        &new.routing.session_affinity_rebind_on,
+    );
     changes.int(
         "logs-max-total-size-mb",
         old.logs_max_total_size_mb,
@@ -348,6 +371,11 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
                 o.rebuild_mid_system_message,
                 n.rebuild_mid_system_message,
             );
+            changes.flag(
+                &field("native-tool-search"),
+                o.native_tool_search,
+                n.native_tool_search,
+            );
             changes.optional_int(&field("request-retry"), o.request_retry, n.request_retry);
         }
     }
@@ -580,6 +608,7 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
             .enumerate()
         {
             let field = |name: &str| format!("vertex[{i}].{name}");
+            changes.optional_bool(&field("interactions"), o.interactions, n.interactions);
             changes.url(&field("base-url"), &o.base_url, &n.base_url);
             changes.url(&field("proxy-url"), &o.proxy_url, &n.proxy_url);
             changes.trimmed(&field("prefix"), &o.prefix, &n.prefix);

@@ -41,6 +41,7 @@ pub(crate) const MAX_CREDENTIAL_WEIGHT: i64 = 1_000_000;
 /// Every legacy setting with its v8 path, as `(legacy, v8)`, in upstream's
 /// field order.
 pub(crate) const V8_PATHS: &[(&str, &str)] = &[
+    ("max-request-body-bytes", "server.max-request-body-bytes"),
     ("proxy-url", "requests.proxy-url"),
     (
         "disable-image-generation",
@@ -69,6 +70,10 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     (
         "streaming.bootstrap-retries",
         "requests.streaming.bootstrap-retries",
+    ),
+    (
+        "streaming.send-keepalive-before-ft",
+        "requests.streaming.send-keepalive-before-ft",
     ),
     (
         "nonstream-keepalive-interval",
@@ -337,6 +342,7 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
         "claude.model-level-cooling",
         "upstream.claude.model-level-cooling",
     ),
+    ("claude.tool-search", "upstream.claude.tool-search"),
     (
         "claude-header-defaults.user-agent",
         "upstream.claude.header-defaults.user-agent",
@@ -837,7 +843,7 @@ mod tests {
     #[test]
     fn paths_table_matches_upstream_shape() {
         // Upstream's, and open-ferry's management.separate-address.
-        assert_eq!(V8_PATHS.len(), 114 + 1);
+        assert_eq!(V8_PATHS.len(), 117 + 1);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();

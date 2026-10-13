@@ -18,6 +18,8 @@ For each request, the credential manager takes the credentials that can serve th
 
 The first three are CLIProxyAPI's, and work as they do there. A failed request is retried on another credential as `routing.retry` says.
 
+`routing.session-affinity-rebind-on` selects which failures rebind an established session to the failover credential. `any` (the default) rebinds on every credential-attributed failure. `quota` keeps the original binding across transient failures (408, 5xx, an empty stream or a buffer limit), while quota and auth failures (429, 401/402/403, 404/model support and `invalid_grant`) rebind. It is ignored when session affinity is disabled. Values are preserved as written; only `quota`, trimmed and case insensitive, selects that policy, and every other value uses `any`.
+
 ## Routing by quota
 
 ```yaml

@@ -28,6 +28,7 @@
 //! `logging-to-file`, `logs-max-total-size-mb`, `error-logs-max-files`,
 //! `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`,
 //! `request-log`, `proxy-url`, `disable-image-generation`,
+//! `max-request-body-bytes`,
 //! `passthrough-headers`, `streaming`,
 //! `nonstream-keepalive-interval`, `disable-cooling`,
 //! `save-cooldown-status`, `transient-error-cooldown-seconds`,
@@ -38,7 +39,7 @@
 //! `ws-auth`, `force-model-prefix`,
 //! `video-result-auth-cache-ttl`, `client.codex`, `codex` (minus cloaking
 //! and the live media relay), `codex-header-defaults.beta-features`,
-//! `claude.model-level-cooling`,
+//! `claude.model-level-cooling`, `claude.tool-search`,
 //! `xai`, `gemini-api-key`, `interactions-api-key`, `codex-api-key`,
 //! `xai-api-key`, `meta-api-key`, `claude-api-key` (minus `cloak` and
 //! `fingerprint-profile`), `openai-compatibility`, `vertex-api-key`,
@@ -97,6 +98,8 @@ mod safe_mode;
 pub mod save;
 #[cfg(test)]
 mod self_update_tests;
+#[cfg(test)]
+mod sync_contract_tests;
 #[cfg(test)]
 mod testing;
 mod types;
