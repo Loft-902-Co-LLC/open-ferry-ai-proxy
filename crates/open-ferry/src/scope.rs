@@ -24,6 +24,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+mod credentials;
+pub(crate) use credentials::{authorize_credential_file, credential_file_guard};
+
 #[cfg(test)]
 pub(crate) mod runtime_test_probe;
 

@@ -30,6 +30,7 @@
 pub mod classification;
 pub mod compat;
 mod expiry;
+pub mod file_guard;
 pub mod file_store;
 mod go;
 mod index;

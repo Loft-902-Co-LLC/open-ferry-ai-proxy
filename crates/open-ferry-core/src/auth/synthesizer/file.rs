@@ -142,10 +142,25 @@ fn json_names(
 
 /// The records of the files `names` in the context's auth directory.
 fn synthesize_named(ctx: &SynthesisContext, names: Vec<String>) -> Vec<Auth> {
+    synthesize_named_with_reader(ctx, names, read_capped)
+}
+
+fn synthesize_named_with_reader(
+    ctx: &SynthesisContext,
+    names: Vec<String>,
+    read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> Vec<Auth> {
     let mut out = Vec::new();
     for name in names {
         let full = join(&ctx.auth_dir, Path::new(&name));
-        let Ok(data) = read_capped(&full) else {
+        if ctx
+            .file_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.allows_read(&full))
+        {
+            continue;
+        }
+        let Ok(data) = read(&full) else {
             continue;
         };
         if data.is_empty() {
@@ -487,6 +502,38 @@ fn base_name<'a>(path: &'a Path, path_str: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_guard_skips_refused_files_before_reading_and_keeps_the_others() {
+        use crate::auth::file_guard::FileGuard;
+        use std::cell::RefCell;
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
+        fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::tempdir_in(root).unwrap();
+        let mut context = ctx(dir.path());
+        context.file_guard = Some(FileGuard::new(|path| {
+            if path.file_name().unwrap() == "unsafe.json" {
+                Err("untrusted owner".to_owned())
+            } else {
+                Ok(())
+            }
+        }));
+        let reads = RefCell::new(Vec::new());
+        let names = vec!["unsafe.json".to_owned(), "trusted.json".to_owned()];
+        let read = |path: &Path| {
+            reads.borrow_mut().push(path.to_path_buf());
+            Ok(br#"{"type":"codex"}"#.to_vec())
+        };
+        let auths = synthesize_named_with_reader(&context, names.clone(), read);
+        assert_eq!(auths.len(), 1);
+        assert_eq!(reads.borrow().len(), 1);
+        assert_eq!(reads.borrow()[0].file_name().unwrap(), "trusted.json");
+        context.file_guard = None;
+        reads.borrow_mut().clear();
+        assert_eq!(synthesize_named_with_reader(&context, names, read).len(), 2);
+        assert_eq!(reads.borrow().len(), 2);
+    }
+
     use super::*;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;

@@ -289,7 +289,7 @@ pub(crate) async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
     };
     check_client_keys(&config, &mut findings);
     check_management_key(&config, env, &mut findings);
-    let auths = check_auth_dir(&config, env.now, &mut findings);
+    let auths = check_auth_dir(env.probe.as_ref(), &config, env.now, &mut findings);
     check_tls(&config, &mut findings);
     check_address(&config, &mut findings).await;
     management::check_management_address(&config, env, &mut findings).await;
@@ -418,9 +418,20 @@ fn check_management_key(config: &Config, env: &Environment, findings: &mut Vec<F
 /// The auth directory can be read, and each credential file in it reads
 /// as the server reads it. Returns the credentials that do, by file name.
 fn check_auth_dir(
+    probe: &dyn crate::scope::Probe,
     config: &Config,
     now: DateTime<Utc>,
     findings: &mut Vec<Finding>,
+) -> Vec<(String, Auth)> {
+    check_auth_dir_with_reader(probe, config, now, findings, read_capped)
+}
+
+fn check_auth_dir_with_reader(
+    probe: &dyn crate::scope::Probe,
+    config: &Config,
+    now: DateTime<Utc>,
+    findings: &mut Vec<Finding>,
+    read: impl Fn(&Path) -> io::Result<Vec<u8>>,
 ) -> Vec<(String, Auth)> {
     const CHECK: &str = "auth directory";
     const READABLE: &str = "make it a directory the user the proxy runs as can read";
@@ -439,6 +450,14 @@ fn check_auth_dir(
         findings.push(Finding::ok(
             CHECK,
             "none is set, so no credential file is read",
+        ));
+        return Vec::new();
+    }
+    if let Err(error) = crate::scope::authorize_auth_dir(probe, &dir) {
+        findings.push(Finding::error(
+            CHECK,
+            error.reason,
+            error.remedy.unwrap_or_default(),
         ));
         return Vec::new();
     }
@@ -490,7 +509,15 @@ fn check_auth_dir(
     for name in names {
         let check = format!("credential {name}");
         let full = dir.join(&name);
-        let data = match read_capped(&full) {
+        if let Err(error) = crate::scope::authorize_credential_file(probe, &full) {
+            files.push(Finding::error(
+                check,
+                error.reason,
+                error.remedy.unwrap_or_default(),
+            ));
+            continue;
+        }
+        let data = match read(&full) {
             Ok(data) => data,
             Err(error) => {
                 files.push(Finding::error(

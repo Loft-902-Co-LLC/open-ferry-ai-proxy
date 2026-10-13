@@ -87,7 +87,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use open_ferry_core::config::{Config, ConfigWatcher, WatchEvent};
+use open_ferry_core::config::{Config, WatchEvent};
 use open_ferry_core::gate::{ActivationKey, ActiveGate, GateState};
 use open_ferry_providers::claude_cli;
 use open_ferry_supervisor::protocol::{
@@ -1926,6 +1926,7 @@ async fn activate_unless_cancelled(
     #[cfg(test)]
     let watcher_control = control.clone();
     let probe = Arc::clone(&service.probe);
+    let file_guard = service.store.file_guard();
     let watcher = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let watcher_config = {
@@ -1935,11 +1936,7 @@ async fn activate_unless_cancelled(
             }
             Arc::new(config)
         };
-        ConfigWatcher::start_guarded(
-            &watcher_path,
-            &watcher_config,
-            Some(super::config_read_guard(Arc::clone(&probe))),
-        )
+        super::start_watcher(&watcher_path, &watcher_config, probe, file_guard)
     })
     .await
     .map_err(|error| format!("watcher task failed: {error}"));
