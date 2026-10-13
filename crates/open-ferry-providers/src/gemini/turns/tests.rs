@@ -179,3 +179,37 @@ fn strip_removes_call_ids() {
         "9007199254740993"
     );
 }
+
+#[test]
+fn trailing_function_response_media_gets_a_user_turn() {
+    for key in ["inlineData", "inline_data", "fileData", "file_data"] {
+        for role in ["model", "assistant", "user"] {
+            for path in ["contents", "request.contents"] {
+                let contents = json!([
+                    {"role":"model", "parts":[{"functionCall":{"name":"view_image"}}]},
+                    {"role":role, "parts":[{"functionResponse":{"name":"view_image", "response":{"result":""}, "parts":[{key:{"mimeType":"image/png", "data":"AAAA"}}]}}]}
+                ]);
+                let mut body = if path == "contents" {
+                    json!({"contents":contents})
+                } else {
+                    json!({"request":{"contents":contents}})
+                };
+                let before = body.clone();
+                ensure_trailing_user(&mut body, path);
+                if role == "user" {
+                    assert_eq!(body, before);
+                } else {
+                    assert_eq!(roles(&body, path), format!("model,{role},user"));
+                    assert_eq!(
+                        json::get(&body, &format!("{path}.2")),
+                        Some(&empty_user_turn())
+                    );
+                    assert_eq!(
+                        json::get(&body, &format!("{path}.1")),
+                        json::get(&before, &format!("{path}.1"))
+                    );
+                }
+            }
+        }
+    }
+}

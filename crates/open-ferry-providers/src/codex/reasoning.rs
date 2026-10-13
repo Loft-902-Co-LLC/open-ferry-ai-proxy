@@ -7,7 +7,8 @@
 //! Codex: cleartext `content` moves into an empty `summary` (Codex allows no
 //! reasoning content), an `encrypted_content` that isn't a valid GPT
 //! reasoning signature is dropped (in compatibility mode, unless it is of a
-//! format no known provider uses, which the third-party model replays), and
+//! format no known provider uses, which the third-party model replays; Meta
+//! also keeps these foreign formats), and
 //! with `store` off, a reasoning item's
 //! `id` goes when it has no usable `encrypted_content`, since Codex would
 //! look the ID up and fail.
@@ -29,6 +30,16 @@ use crate::json::{bool_of, get, str_at, str_of};
 /// `is_compat`, a third-party Responses model's cleartext reasoning and IDs
 /// are kept. Returns whether anything changed.
 pub(crate) fn sanitize_reasoning(body: &mut Value, is_compat: bool) -> bool {
+    sanitize_reasoning_with_options(body, is_compat, is_compat)
+}
+
+/// Keeps foreign-format encrypted reasoning for Meta, while applying the
+/// usual Responses content and orphan-ID rules.
+pub(crate) fn sanitize_reasoning_keep_foreign(body: &mut Value) -> bool {
+    sanitize_reasoning_with_options(body, false, true)
+}
+
+fn sanitize_reasoning_with_options(body: &mut Value, is_compat: bool, keep_foreign: bool) -> bool {
     // Codex doesn't persist items with store off, so a reasoning ID without
     // usable encrypted content would be looked up and fail.
     let strip_ids = !bool_of(get(body, "store"));
@@ -43,7 +54,7 @@ pub(crate) fn sanitize_reasoning(body: &mut Value, is_compat: bool) -> bool {
         let Value::Object(item) = item else {
             continue;
         };
-        changed |= sanitize_item(item, index, strip_ids, is_compat);
+        changed |= sanitize_item(item, index, strip_ids, is_compat, keep_foreign);
     }
     changed
 }
@@ -53,6 +64,7 @@ fn sanitize_item(
     index: usize,
     strip_ids: bool,
     is_compat: bool,
+    keep_foreign: bool,
 ) -> bool {
     let mut changed = false;
     let has_content = matches!(item.get("content"), Some(Value::Array(parts)) if !parts.is_empty());
@@ -81,13 +93,15 @@ fn sanitize_item(
         Value::String(raw) if raw.as_str() != raw.trim() => {
             Some("encrypted_content has leading or trailing whitespace".to_owned())
         }
-        // In compatibility mode a third-party Responses model (such as
+        // With foreign replay enabled a third-party Responses model (such as
         // Muse) expects its own encrypted content of an unknown format back;
         // an empty one and a known provider's still go.
         Value::String(raw) => inspect_gpt_reasoning_signature(raw)
             .err()
             .filter(|_| {
-                !is_compat || raw.is_empty() || detect_signature_provider(raw) != Provider::Unknown
+                !keep_foreign
+                    || raw.is_empty()
+                    || detect_signature_provider(raw) != Provider::Unknown
             })
             .map(|error| error.to_string()),
         Value::Null => Some("encrypted_content is null".to_owned()),

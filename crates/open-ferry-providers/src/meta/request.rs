@@ -16,7 +16,8 @@
 //! `client_metadata`. `previous_response_id` is kept, unlike for Codex. A
 //! custom `apply_patch` tool is declared as a function (see
 //! [`crate::apply_patch_responses`]), `instructions` is filled in, and
-//! reasoning items, `web_search` tools and a Codex client's tool parameter
+//! reasoning items (keeping foreign encrypted content), `web_search` tools
+//! and a Codex client's tool parameter
 //! types are made fit for Meta. The payload rules apply last, to the body
 //! as it is sent, so a field a rule writes is sent even if it is one of
 //! those dropped.
@@ -54,7 +55,7 @@ use super::tools::sanitize_web_search_tools;
 use crate::apply_patch_responses;
 use crate::codex::client::USER_AGENT;
 use crate::codex::compat;
-use crate::codex::reasoning::sanitize_reasoning;
+use crate::codex::reasoning::sanitize_reasoning_keep_foreign;
 use crate::codex::request::{
     base_model, ensure_header, normalize_instructions, parse_object, response_format,
     set_bool_if_different, set_string_if_different,
@@ -323,7 +324,7 @@ pub(super) fn prepare(
     apply_patch_responses::normalize_request(&mut body, Some(&original))
         .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
     normalize_instructions(&mut body, false);
-    sanitize_reasoning(&mut body, false);
+    sanitize_reasoning_keep_foreign(&mut body);
     sanitize_web_search_tools(&mut body);
     let user_agent = header_value(
         options
@@ -690,5 +691,38 @@ mod tests {
         assert_eq!(off.body["stream"], false);
         let on = prepare(None, None, &request, &options, true).unwrap();
         assert_eq!(on.body["stream"], true);
+    }
+    #[test]
+    fn prepare_preserves_foreign_reasoning_without_enabling_compat() {
+        let foreign = "opaque-encrypted-reasoning-token-xyz";
+        let claude = crate::gemini::testing::CLAUDE_SIGNATURE;
+        let payload = json!({"store":false,"input":[
+            {"type":"reasoning","id":"rs_foreign","encrypted_content":foreign,"content":[{"type":"reasoning_text","text":"thinking"}],"summary":[]},
+            {"type":"reasoning","id":"rs_claude","encrypted_content":claude},
+            {"type":"reasoning","id":"rs_empty","encrypted_content":""},
+            {"type":"reasoning","id":"rs_space","encrypted_content":format!(" {foreign}")},
+            {"type":"reasoning","id":"rs_orphan"},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+        ]});
+        let request = Request {
+            model: "muse-spark-1.3".into(),
+            payload: Bytes::from(payload.to_string()),
+        };
+        let options = Options::new(Format::OPENAI_RESPONSE);
+        for stream in [false, true] {
+            let prepared = prepare(None, None, &request, &options, stream).unwrap();
+            let input = prepared.body["input"].as_array().unwrap();
+            assert_eq!(input[0]["encrypted_content"], foreign);
+            assert_eq!(input[0]["id"], "rs_foreign");
+            assert_eq!(input[0]["content"], json!([]));
+            assert_eq!(
+                input[0]["summary"],
+                json!([{"type":"summary_text","text":"thinking"}])
+            );
+            for item in &input[1..5] {
+                assert!(item.get("encrypted_content").is_none());
+                assert!(item.get("id").is_none());
+            }
+        }
     }
 }
