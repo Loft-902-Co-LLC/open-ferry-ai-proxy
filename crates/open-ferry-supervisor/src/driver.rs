@@ -435,7 +435,13 @@ fn open_log(request: &SpawnRequest) -> Result<Option<std::fs::File>, SpawnError>
     let Some(path) = &request.log else {
         return Ok(None);
     };
-    std::fs::OpenOptions::new()
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o644);
+    }
+    options
         .create(true)
         .append(true)
         .open(path)
@@ -1067,6 +1073,67 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_worker_log_is_not_writable_by_other_accounts_with_umask_zero() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(root) = std::env::var_os("OFP_WORKER_LOG_CREATION_ROOT") {
+            // SAFETY: only this test runs in the isolated child.
+            unsafe { libc::umask(0) };
+            let root = PathBuf::from(root);
+            let request = SpawnRequest {
+                id: 1,
+                version: String::new(),
+                sha256: String::new(),
+                binary: PathBuf::new(),
+                role: Role::Active,
+                switch_id: None,
+                config: PathBuf::new(),
+                installation: Installation {
+                    installed: PathBuf::new(),
+                    data_dir: root.clone(),
+                    receipt: serde_json::json!({}),
+                },
+                topology: Vec::new(),
+                listeners: Arc::new(Vec::new()),
+                budgets: crate::timings::Timings::default().budgets(),
+                handshake_timeout: Duration::from_secs(1),
+                log: Some(root.join("worker.log")),
+            };
+            let file = open_log(&request).unwrap().unwrap();
+            assert_eq!(
+                file.metadata().unwrap().permissions().mode() & 0o7777,
+                0o644
+            );
+            std::fs::write(root.join("completed"), b"completed").unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "driver::tests::the_worker_log_is_not_writable_by_other_accounts_with_umask_zero",
+                "--test-threads=1",
+            ])
+            .env("OFP_WORKER_LOG_CREATION_ROOT", root.path())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "worker-log creation child: {status}");
+                assert!(root.path().join("completed").is_file(), "child did not run");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("worker-log creation child exceeded its watchdog");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     fn sleeping_process() -> Proc {
         #[cfg(unix)]

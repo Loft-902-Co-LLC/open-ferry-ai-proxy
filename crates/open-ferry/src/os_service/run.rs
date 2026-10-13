@@ -54,6 +54,7 @@ use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, GetCurrentProcess}
 use super::SERVICE_NAME;
 use super::windows::LOG_FILE;
 use crate::flags::Flags;
+use open_ferry_supervisor::timings::STOP_BUDGET;
 
 /// The size past which `service.log` is moved aside as the server starts.
 const MAX_LOG: u64 = 10 * 1024 * 1024;
@@ -80,6 +81,12 @@ pub(super) fn main(
     system: bool,
     supervised: Option<&str>,
 ) -> ExitCode {
+    if system
+        && supervised.is_some()
+        && let Err(message) = crate::supervised::require_system_account()
+    {
+        return refuse_for_service_manager(message);
+    }
     let config = PathBuf::from(config);
     let dir = match (dir, config.parent()) {
         (Some(dir), _) if Path::new(dir).is_absolute() => PathBuf::from(dir),
@@ -103,7 +110,7 @@ pub(super) fn main(
     }
     let log = dir.join(LOG_FILE);
     if system {
-        serve_for_service_manager(config, log)
+        serve_for_service_manager(config, log, supervised.map(PathBuf::from))
     } else {
         supervise(&config, &log, supervised.map(Path::new))
     }
@@ -317,16 +324,35 @@ static PREPARED: Mutex<Option<Prepared>> = Mutex::new(None);
 /// How the server exited, for `serve_for_service_manager` to return.
 static EXITED: Mutex<Option<ExitCode>> = Mutex::new(None);
 
+/// A refused SCM entry still connects to the dispatcher so it can report
+/// Stopped with a service-specific failure. A hand run prints the same refusal.
+static REFUSED: Mutex<Option<String>> = Mutex::new(None);
+
+fn refuse_for_service_manager(message: String) -> ExitCode {
+    if let Ok(mut refused) = REFUSED.lock() {
+        *refused = Some(message.clone());
+    }
+    if service_dispatcher::start(SERVICE_NAME, ffi_service_main).is_err() {
+        eprintln!("{message}");
+    }
+    ExitCode::FAILURE
+}
+
 struct Prepared {
     config: PathBuf,
     log: PathBuf,
     working_dir: io::Result<PathBuf>,
     dotenv: Option<Result<(), crate::dotenv::Error>>,
+    supervised: Option<PathBuf>,
 }
 
 /// Hands the process to the service manager, which runs `service_main` on
 /// a thread of its own, and returns once the service has stopped.
-fn serve_for_service_manager(config: PathBuf, log: PathBuf) -> ExitCode {
+fn serve_for_service_manager(
+    config: PathBuf,
+    log: PathBuf,
+    supervised: Option<PathBuf>,
+) -> ExitCode {
     // As `main` does, before any thread starts.
     let working_dir = std::env::current_dir();
     let dotenv = working_dir
@@ -339,6 +365,7 @@ fn serve_for_service_manager(config: PathBuf, log: PathBuf) -> ExitCode {
             log,
             working_dir,
             dotenv,
+            supervised,
         });
     }
     if let Err(error) = service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
@@ -355,7 +382,26 @@ fn serve_for_service_manager(config: PathBuf, log: PathBuf) -> ExitCode {
 }
 
 fn service_main(_arguments: Vec<OsString>) {
-    let code = serve_as_service();
+    let refusal = REFUSED.lock().ok().and_then(|mut refused| refused.take());
+    let code = if let Some(message) = refusal {
+        eprintln!("{message}");
+        if let Ok(status) = service_control_handler::register(SERVICE_NAME, |control| {
+            if control == ServiceControl::Interrogate {
+                ServiceControlHandlerResult::NoError
+            } else {
+                ServiceControlHandlerResult::NotImplemented
+            }
+        }) {
+            report(
+                status,
+                ServiceState::Stopped,
+                ServiceExitCode::ServiceSpecific(1),
+            );
+        }
+        ExitCode::FAILURE
+    } else {
+        serve_as_service()
+    };
     if let Ok(mut exited) = EXITED.lock() {
         *exited = Some(code);
     }
@@ -371,6 +417,9 @@ fn serve_as_service() -> ExitCode {
     else {
         return ExitCode::FAILURE;
     };
+    if prepared.supervised.is_some() {
+        return supervise_as_service(prepared);
+    }
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let mut stop = Some(stop);
     let handler = move |control| match control {
@@ -405,6 +454,183 @@ fn serve_as_service() -> ExitCode {
         ServiceExitCode::ServiceSpecific(1)
     };
     report(status, ServiceState::Stopped, exit_code);
+    code
+}
+
+const SUPERVISED_STOP_WAIT: Duration = STOP_BUDGET.saturating_add(Duration::from_secs(10));
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
+
+/// Events of the control loop, including a stop received during startup.
+enum StatusEvent {
+    Started,
+    Stop(Duration),
+    Tick(Duration),
+    Exited(bool),
+}
+
+#[derive(Default)]
+struct StatusSequence {
+    stopping: Option<Duration>,
+    checkpoint: u32,
+    exited: bool,
+}
+
+impl StatusSequence {
+    /// Pure status policy; the caller supplies time and reports the result.
+    fn event(&mut self, event: StatusEvent) -> Option<ServiceStatus> {
+        if self.exited {
+            return None;
+        }
+        let (state, exit_code, checkpoint) = match event {
+            StatusEvent::Started if self.stopping.is_none() => {
+                (ServiceState::Running, ServiceExitCode::Win32(0), 0)
+            }
+            StatusEvent::Stop(now) if self.stopping.is_none() => {
+                self.stopping = Some(now);
+                self.checkpoint = 1;
+                (ServiceState::StopPending, ServiceExitCode::Win32(0), 1)
+            }
+            StatusEvent::Tick(now) => {
+                let elapsed = now.checked_sub(self.stopping?)?;
+                if elapsed >= SUPERVISED_STOP_WAIT {
+                    return None;
+                }
+                let checkpoint =
+                    u32::try_from(elapsed.as_secs() / CHECKPOINT_EVERY.as_secs()).ok()? + 1;
+                if checkpoint <= self.checkpoint {
+                    return None;
+                }
+                self.checkpoint = checkpoint;
+                (
+                    ServiceState::StopPending,
+                    ServiceExitCode::Win32(0),
+                    checkpoint,
+                )
+            }
+            StatusEvent::Exited(clean) => {
+                self.exited = true;
+                (
+                    ServiceState::Stopped,
+                    if clean {
+                        ServiceExitCode::Win32(0)
+                    } else {
+                        ServiceExitCode::ServiceSpecific(1)
+                    },
+                    0,
+                )
+            }
+            _ => return None,
+        };
+        Some(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: state,
+            controls_accepted: if state == ServiceState::Running {
+                ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN
+            } else {
+                ServiceControlAccept::empty()
+            },
+            exit_code,
+            checkpoint,
+            wait_hint: if state == ServiceState::StopPending {
+                SUPERVISED_STOP_WAIT
+            } else {
+                Duration::ZERO
+            },
+            process_id: None,
+        })
+    }
+}
+
+fn stop_control(control: ServiceControl) -> Option<&'static str> {
+    match control {
+        ServiceControl::Stop => Some("service stop"),
+        ServiceControl::Shutdown => Some("system shutdown"),
+        _ => None,
+    }
+}
+
+/// Queue StopPending before the command can make a fast startup stop exit.
+fn queue_service_stop(
+    events: &std::sync::mpsc::Sender<StatusEvent>,
+    stops: &tokio::sync::mpsc::UnboundedSender<&'static str>,
+    name: &'static str,
+    now: Duration,
+) {
+    let _ = events.send(StatusEvent::Stop(now));
+    let _ = stops.send(name);
+}
+
+/// Runs the same supervisor as `-supervise`, with SCM controls as its stops.
+fn supervise_as_service(prepared: Prepared) -> ExitCode {
+    let (stops, stopped) = tokio::sync::mpsc::unbounded_channel();
+    let (events, received) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    let controls = events.clone();
+    let mut stopping = false;
+    let handler = move |control| {
+        if let Some(name) = stop_control(control) {
+            if !stopping {
+                stopping = true;
+                queue_service_stop(&controls, &stops, name, started.elapsed());
+            }
+            ServiceControlHandlerResult::NoError
+        } else if control == ServiceControl::Interrogate {
+            ServiceControlHandlerResult::NoError
+        } else {
+            ServiceControlHandlerResult::NotImplemented
+        }
+    };
+    let Ok(status) = service_control_handler::register(SERVICE_NAME, handler) else {
+        return ExitCode::FAILURE;
+    };
+    let mut sequence = StatusSequence::default();
+    if let Err(message) = crate::supervised::require_system_account() {
+        eprintln!("{message}");
+        if let Some(report) = sequence.event(StatusEvent::Exited(false)) {
+            let _ = status.set_service_status(report);
+        }
+        return ExitCode::FAILURE;
+    }
+    rotate(&prepared.log);
+    let _ = redirect_output(&prepared.log);
+    if let Some(report) = sequence.event(StatusEvent::Started) {
+        let _ = status.set_service_status(report);
+    }
+    let reporter = std::thread::spawn(move || {
+        loop {
+            // Wake on controls immediately and on each checkpoint boundary.
+            let wait = sequence.stopping.map_or(CHECKPOINT_EVERY, |stop| {
+                let elapsed = started.elapsed().saturating_sub(stop);
+                CHECKPOINT_EVERY
+                    - Duration::from_nanos(
+                        (elapsed.as_nanos() % CHECKPOINT_EVERY.as_nanos()) as u64,
+                    )
+            });
+            let event = match received.recv_timeout(wait) {
+                Ok(event) => event,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    StatusEvent::Tick(started.elapsed())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StatusEvent::Exited(false),
+            };
+            if let Some(report) = sequence.event(event) {
+                let _ = status.set_service_status(report);
+            }
+            if sequence.exited {
+                break;
+            }
+        }
+    });
+    let flags = Flags {
+        config: prepared.config.to_string_lossy().into_owned(),
+        system: true,
+        supervise: true,
+        data_dir: prepared.supervised.unwrap().to_string_lossy().into_owned(),
+        ..Flags::default()
+    };
+    let code = crate::supervised::supervise_service(&flags, prepared.dotenv, stopped);
+    let _ = events.send(StatusEvent::Exited(code == ExitCode::SUCCESS));
+    let _ = reporter.join();
     code
 }
 
@@ -445,6 +671,210 @@ fn report(status: ServiceStatusHandle, state: ServiceState, exit_code: ServiceEx
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Reporter {
+        sequence: StatusSequence,
+        reports: Vec<ServiceStatus>,
+    }
+
+    impl Reporter {
+        fn event(&mut self, event: StatusEvent) {
+            if let Some(status) = self.sequence.event(event) {
+                self.reports.push(status);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stop_status_is_queued_before_the_supervisor_can_exit() {
+        for control in [ServiceControl::Stop, ServiceControl::Shutdown] {
+            let (events, received) = std::sync::mpsc::channel();
+            let (stops, mut stopped) = tokio::sync::mpsc::unbounded_channel();
+            let exited = events.clone();
+            let worker = std::thread::spawn(move || {
+                assert!(stopped.blocking_recv().is_some());
+                exited.send(StatusEvent::Exited(true)).unwrap();
+            });
+            queue_service_stop(
+                &events,
+                &stops,
+                stop_control(control).unwrap(),
+                Duration::ZERO,
+            );
+            worker.join().unwrap();
+            let mut reporter = Reporter::default();
+            reporter.event(StatusEvent::Started);
+            reporter.event(received.try_recv().unwrap());
+            reporter.event(received.try_recv().unwrap());
+            assert_eq!(
+                reporter
+                    .reports
+                    .iter()
+                    .map(|status| status.current_state)
+                    .collect::<Vec<_>>(),
+                [
+                    ServiceState::Running,
+                    ServiceState::StopPending,
+                    ServiceState::Stopped
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn supervised_stop_reports_increasing_checkpoints_only_before_the_deadline() {
+        let mut reporter = Reporter::default();
+        reporter.event(StatusEvent::Started);
+        reporter.event(StatusEvent::Tick(Duration::ZERO));
+        reporter.event(StatusEvent::Stop(Duration::from_secs(20)));
+        reporter.event(StatusEvent::Stop(Duration::from_secs(21)));
+        for seconds in 20..=85 {
+            reporter.event(StatusEvent::Tick(Duration::from_secs(seconds)));
+        }
+        assert_eq!(reporter.reports[0].current_state, ServiceState::Running);
+        assert_eq!(reporter.reports[0].wait_hint, Duration::ZERO);
+        assert_eq!(
+            reporter.reports[0].controls_accepted,
+            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN
+        );
+        let pending = &reporter.reports[1..];
+        assert_eq!(pending.len(), 12);
+        for (index, status) in pending.iter().enumerate() {
+            assert_eq!(status.current_state, ServiceState::StopPending);
+            assert_eq!(status.checkpoint, u32::try_from(index).unwrap() + 1);
+            assert_eq!(status.wait_hint, Duration::from_secs(60));
+            assert!(status.controls_accepted.is_empty());
+        }
+        reporter.event(StatusEvent::Exited(true));
+        let stopped = reporter.reports.last().unwrap();
+        assert_eq!(stopped.current_state, ServiceState::Stopped);
+        assert_eq!(stopped.exit_code, ServiceExitCode::Win32(0));
+        assert_eq!(stopped.checkpoint, 0);
+        assert_eq!(stopped.wait_hint, Duration::ZERO);
+        reporter.event(StatusEvent::Tick(Duration::from_secs(90)));
+        reporter.event(StatusEvent::Stop(Duration::from_secs(90)));
+        assert_eq!(reporter.reports.len(), 14);
+    }
+
+    #[test]
+    fn an_early_stop_and_a_startup_failure_have_the_same_exit_mapping() {
+        for clean in [true, false] {
+            let mut reporter = Reporter::default();
+            reporter.event(StatusEvent::Started);
+            // Startup is still waiting for its locks; no ready worker is needed.
+            reporter.event(StatusEvent::Stop(Duration::ZERO));
+            reporter.event(StatusEvent::Exited(clean));
+            assert_eq!(
+                reporter
+                    .reports
+                    .iter()
+                    .map(|s| s.current_state)
+                    .collect::<Vec<_>>(),
+                [
+                    ServiceState::Running,
+                    ServiceState::StopPending,
+                    ServiceState::Stopped
+                ]
+            );
+            assert_eq!(
+                reporter.reports[2].exit_code,
+                if clean {
+                    ServiceExitCode::Win32(0)
+                } else {
+                    ServiceExitCode::ServiceSpecific(1)
+                }
+            );
+        }
+        let mut reporter = Reporter::default();
+        reporter.event(StatusEvent::Exited(false));
+        assert_eq!(
+            reporter.reports[0].exit_code,
+            ServiceExitCode::ServiceSpecific(1)
+        );
+        assert_eq!(reporter.reports[0].current_state, ServiceState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn shutdown_and_stop_feed_the_same_early_command_path() {
+        for control in [ServiceControl::Stop, ServiceControl::Shutdown] {
+            let (signals, stopped) = tokio::sync::mpsc::unbounded_channel();
+            let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+            signals.send(stop_control(control).unwrap()).unwrap();
+            drop(signals);
+            crate::supervised::forward_stops(stopped, commands).await;
+            assert!(matches!(
+                received.try_recv(),
+                Ok(open_ferry_supervisor::core::Command::Stop)
+            ));
+        }
+        assert!(stop_control(ServiceControl::Interrogate).is_none());
+    }
+
+    #[tokio::test]
+    async fn scm_controls_stop_the_supervisor_during_its_update_lock_wait() {
+        use crate::supervised::{Setup, SupervisedHost, startup_config};
+        use open_ferry_supervisor::core::Exit;
+        use open_ferry_supervisor::driver::ProcessDriver;
+        use open_ferry_supervisor::endpoint::ServiceKind;
+        use open_ferry_update::DataDir;
+
+        for control in [ServiceControl::Stop, ServiceControl::Shutdown] {
+            let root = tempfile::tempdir().unwrap();
+            let data = DataDir::at(root.path().join("data"));
+            let _lock = data.try_lock().unwrap().unwrap();
+            let installed = root.path().join("not-a-worker");
+            fs::write(&installed, b"never started").unwrap();
+            let config = root.path().join("config.yaml");
+            let (signals, stopped) = tokio::sync::mpsc::unbounded_channel();
+            let (commands, received) = tokio::sync::mpsc::unbounded_channel();
+            let forward = tokio::spawn(crate::supervised::forward_stops(stopped, commands.clone()));
+            let name = stop_control(control).unwrap();
+            let waited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = waited.clone();
+            let host = SupervisedHost::new(config.clone(), installed.clone(), Vec::new())
+                .with_waiting_hook(move |_| {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    signals.send(name).unwrap();
+                });
+            let cfg = startup_config(Setup {
+                config,
+                kind: ServiceKind::User,
+                data,
+                installed,
+                endpoint: None,
+            });
+            let driver = ProcessDriver::new(cfg.kind, cfg.timings.exit_poll);
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                open_ferry_supervisor::supervise::supervise(
+                    &cfg,
+                    &host,
+                    &driver,
+                    &open_ferry_supervisor::clock::SystemClock,
+                    commands,
+                    received,
+                    open_ferry_supervisor::supervise::default_limit(),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, Ok(Exit::Stopped)), "{result:?}");
+            assert!(waited.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(!cfg.data.root().join("supervisor.json").exists());
+            let mut reporter = Reporter::default();
+            reporter.event(StatusEvent::Started);
+            reporter.event(StatusEvent::Stop(Duration::ZERO));
+            reporter.event(StatusEvent::Exited(
+                crate::supervised::exit_status(&result) == 0,
+            ));
+            assert_eq!(
+                reporter.reports.last().unwrap().exit_code,
+                ServiceExitCode::Win32(0)
+            );
+            forward.abort();
+        }
+    }
 
     #[test]
     fn restart_waits_longer_while_the_server_keeps_failing() {

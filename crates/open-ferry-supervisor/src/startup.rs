@@ -1787,6 +1787,8 @@ pub async fn launch_watching<H: Host, D: Driver>(
         listeners: started.listeners.clone(),
         budgets: cfg.timings.budgets(),
         handshake_timeout: cfg.timings.load,
+        // Inherit the supervisor's output, including a service wrapper's
+        // redirected service.log. Windows duplicates only these handles.
         log: None,
     };
     let spawned = driver.spawn(request, registry.events()).await;

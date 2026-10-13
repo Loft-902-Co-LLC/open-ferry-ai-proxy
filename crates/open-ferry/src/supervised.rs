@@ -10,6 +10,10 @@
 //! hash. The supervisor's logs go to standard error only; `main.log` is the
 //! workers'.
 //!
+//! `-system` is the system service's supervisor, running as root or SYSTEM.
+//! A hand-run privileged `-supervise` without it is a user supervisor of
+//! the root or administrator account, held to the system trust rules.
+//!
 //! `-worker` runs one worker (see [`worker_entry`]): it takes over the
 //! control channel and the sockets its supervisor passed, and serves them.
 //!
@@ -42,7 +46,7 @@ use open_ferry_update::settings::Settings;
 use tokio::sync::mpsc;
 
 use crate::flags::Flags;
-use crate::{logging, service};
+use crate::{logging, scope, service};
 
 /// A listener the supervisor binds: its name (`main` or `management`), its
 /// host as the config writes it (empty for every interface), its port, and
@@ -531,7 +535,13 @@ fn locate(flags: &Flags) -> Result<(DataDir, Option<Location>), String> {
 /// the data directory is: the task's definition pins it with `-data-dir`).
 /// A `-worker` loads no `.env`: it has its supervisor's environment.
 pub fn supervise(flags: &Flags) -> ExitCode {
-    let located = locate(flags);
+    let located = match authorized_location(flags) {
+        Ok(located) => located,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
     let dotenv = std::env::current_dir()
         .ok()
         .map(|dir| crate::load_dotenv(&dir.join(".env")));
@@ -543,13 +553,86 @@ pub fn supervise(flags: &Flags) -> ExitCode {
     }
     // Every exit path, a panic's unwind included, waits at most a second for
     // the queued lines.
-    log.flush_after(|| run_supervisor(flags, &log, located))
+    log.flush_after(|| run_supervisor(flags, &log, located, None))
+}
+
+/// Refuses a system supervisor outside the system service's account.
+fn system_account(
+    system: bool,
+    runs_as_system: Result<bool, String>,
+    platform: crate::os_service::Platform,
+) -> Result<(), String> {
+    if !system {
+        return Ok(());
+    }
+    if runs_as_system? {
+        return Ok(());
+    }
+    let start = match platform {
+        crate::os_service::Platform::Windows => "sc start open-ferry",
+        crate::os_service::Platform::Linux => "systemctl start open-ferry",
+        crate::os_service::Platform::MacOs => "use an unprivileged user supervisor on macOS",
+    };
+    Err(format!(
+        "a system supervisor runs only as the system service; {start}"
+    ))
+}
+
+pub(crate) fn require_system_account() -> Result<(), String> {
+    system_account(
+        true,
+        scope::runs_as_system(),
+        crate::os_service::Platform::HOST.unwrap_or(crate::os_service::Platform::MacOs),
+    )
+}
+
+/// The privileged gate, before a receipt is read or startup writes anything.
+fn authorize_data(probe: &dyn scope::Probe, data: &DataDir) -> Result<(), scope::Refusal> {
+    let root = data.root().to_str().ok_or_else(|| scope::Refusal {
+        reason: format!("{} isn't valid Unicode", data.root().display()),
+        remedy: None,
+    })?;
+    scope::authorize(probe, root)
+}
+
+fn authorized_location(flags: &Flags) -> Result<(DataDir, Option<Location>), String> {
+    if flags.system {
+        require_system_account()?;
+    }
+    let located = locate(flags)?;
+    authorize_data(&scope::Host, &located.0).map_err(|refusal| refusal.to_string())?;
+    Ok(located)
+}
+
+/// The SCM entry: `.env` was loaded before the dispatcher started a thread.
+/// Its Stop and Shutdown controls replace console signal watchers.
+#[cfg(windows)]
+pub(crate) fn supervise_service(
+    flags: &Flags,
+    dotenv: Option<Result<(), crate::dotenv::Error>>,
+    stops: mpsc::UnboundedReceiver<&'static str>,
+) -> ExitCode {
+    let located = match authorized_location(flags) {
+        Ok(located) => located,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let log = logging::init_stderr();
+    if let Some(Err(error)) = dotenv
+        && !error.is_not_found()
+    {
+        tracing::warn!("failed to load .env file: {error}");
+    }
+    log.flush_after(|| run_supervisor(flags, &log, located, Some(stops)))
 }
 
 fn run_supervisor(
     flags: &Flags,
     log: &logging::StderrLevel,
-    located: Result<(DataDir, Option<Location>), String>,
+    located: (DataDir, Option<Location>),
+    stops: Option<mpsc::UnboundedReceiver<&'static str>>,
 ) -> ExitCode {
     let setup = || -> Result<(SupervisedHost, Setup), String> {
         let config_path = if flags.config.is_empty() {
@@ -568,7 +651,7 @@ fn run_supervisor(
             .and_then(std::fs::canonicalize)
             .map(plain)
             .map_err(|error| format!("failed to find the open-ferry binary: {error}"))?;
-        let (data, endpoint) = located?;
+        let (data, endpoint) = located;
         let kind = if flags.system {
             ServiceKind::System
         } else {
@@ -608,12 +691,15 @@ fn run_supervisor(
         }
     };
     let result = runtime.block_on(async {
-        let signals = match watch_signals() {
-            Ok(signals) => signals,
-            Err(error) => {
-                tracing::error!("failed to watch for stop signals: {error}");
-                return None;
-            }
+        let signals = match stops {
+            Some(stops) => stops,
+            None => match watch_signals() {
+                Ok(signals) => signals,
+                Err(error) => {
+                    tracing::error!("failed to watch for stop signals: {error}");
+                    return None;
+                }
+            },
         };
         let (command_tx, commands) = mpsc::unbounded_channel();
         // A stop sent before the core runs waits in the channel.
@@ -756,6 +842,143 @@ fn attach_failure(error: &AttachError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct GateProbe {
+        platform: crate::os_service::Platform,
+        privileged: Result<bool, String>,
+        trusted: bool,
+        checked: std::cell::Cell<usize>,
+    }
+
+    impl scope::Probe for GateProbe {
+        fn platform(&self) -> crate::os_service::Platform {
+            self.platform
+        }
+        fn privileged(&self) -> Result<bool, String> {
+            self.privileged.clone()
+        }
+        fn account_dir(&self) -> Result<String, String> {
+            panic!("must not locate account records")
+        }
+        fn program_data(&self) -> Result<String, String> {
+            Ok("C:/ProgramData".into())
+        }
+        fn state(&self, _: &str) -> scope::State {
+            self.checked.set(self.checked.get() + 1);
+            scope::State::Directory
+        }
+        fn entries(&self, _: &str, _: usize) -> io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn trusted_dir(&self, _: &str) -> Result<(), String> {
+            if self.trusted {
+                Ok(())
+            } else {
+                Err("data is untrusted".into())
+            }
+        }
+        fn trusted_file(&self, _: &str) -> Result<(), String> {
+            panic!("no files")
+        }
+        fn receipt(
+            &self,
+            _: &str,
+        ) -> Result<Option<Receipt>, open_ferry_update::receipt::ReceiptError> {
+            panic!("must not read a receipt")
+        }
+        fn canonical(&self, _: &str) -> io::Result<String> {
+            panic!("must not resolve paths")
+        }
+        fn create_machine_dir(&mut self, _: &str) -> io::Result<()> {
+            panic!("must not provision")
+        }
+    }
+
+    #[test]
+    fn the_privileged_gate_passes_only_trusted_records_and_prints_the_remedy() {
+        use crate::os_service::Platform;
+        for (platform, path, remedy) in [
+            (Platform::Linux, "/root/data", "without sudo"),
+            (
+                Platform::Windows,
+                "C:/Users/admin/data",
+                "not opened as administrator",
+            ),
+        ] {
+            let data = DataDir::at(path);
+            let mut probe = GateProbe {
+                platform,
+                privileged: Ok(false),
+                trusted: false,
+                checked: 0.into(),
+            };
+            assert_eq!(authorize_data(&probe, &data), Ok(()));
+            assert_eq!(probe.checked.get(), 0, "unprivileged paths are untouched");
+            probe.privileged = Ok(true);
+            let refusal = authorize_data(&probe, &data).unwrap_err();
+            assert_eq!(refusal.reason, "data is untrusted");
+            assert!(refusal.to_string().starts_with("data is untrusted. "));
+            assert!(refusal.to_string().contains(remedy), "{refusal}");
+            probe.trusted = true;
+            assert_eq!(authorize_data(&probe, &data), Ok(()));
+            probe.privileged = Err("token failed".into());
+            assert!(
+                authorize_data(&probe, &data)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("token failed")
+            );
+        }
+        let probe = GateProbe {
+            platform: Platform::MacOs,
+            privileged: Ok(true),
+            trusted: true,
+            checked: 0.into(),
+        };
+        assert!(authorize_data(&probe, &DataDir::at("/root/data")).is_err());
+        assert_eq!(probe.checked.get(), 0);
+    }
+
+    #[test]
+    fn a_system_supervisor_needs_root_or_system_even_for_an_administrator() {
+        use crate::os_service::Platform;
+        for (platform, start) in [
+            (Platform::Windows, "sc start open-ferry"),
+            (Platform::Linux, "systemctl start open-ferry"),
+        ] {
+            assert_eq!(
+                system_account(false, Err("not queried".into()), platform),
+                Ok(())
+            );
+            assert_eq!(system_account(true, Ok(true), platform), Ok(()));
+            let message = system_account(true, Ok(false), platform).unwrap_err();
+            assert_eq!(
+                message,
+                format!("a system supervisor runs only as the system service; {start}")
+            );
+            assert_eq!(
+                system_account(true, Err("account failed".into()), platform),
+                Err("account failed".into())
+            );
+        }
+        assert!(
+            system_account(true, Ok(false), Platform::MacOs)
+                .unwrap_err()
+                .contains("unprivileged user supervisor")
+        );
+    }
+
+    #[cfg(feature = "blue-green-test")]
+    #[test]
+    fn the_test_data_directory_is_the_one_the_gate_will_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let flags = Flags {
+            data_dir: dir.path().join("ordinary").to_string_lossy().into_owned(),
+            test_data_dir: dir.path().join("test").to_string_lossy().into_owned(),
+            ..Flags::default()
+        };
+        assert_eq!(locate(&flags).unwrap().0.root(), dir.path().join("test"));
+    }
 
     #[cfg(unix)]
     fn current(signal: libc::c_int) -> libc::sigaction {
