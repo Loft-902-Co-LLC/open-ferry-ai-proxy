@@ -23,7 +23,7 @@ use std::io;
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use open_ferry_core::config::{Config, SelfUpdateMode};
@@ -161,13 +161,14 @@ struct ModeState {
 /// What the supervisor asks of the binary (see [`Host`]).
 pub(crate) struct SupervisedHost {
     config_path: PathBuf,
-    exe: PathBuf,
     wanted: Vec<Wanted>,
     /// The sockets' own addresses, once bound.
     bound: Mutex<Option<Vec<ListenerTopology>>>,
     mode: Mutex<ModeState>,
     env: Box<dyn Fn() -> Option<String> + Send + Sync>,
-    sha256: OnceLock<Option<String>>,
+    /// The hash of the image this supervisor was loaded from, taken in
+    /// [`SupervisedHost::new`]: `None` when the binary couldn't be read.
+    sha256: Option<String>,
     /// Called with how long the update lock has been waited for, for the
     /// Windows service to tell the service manager it is still starting.
     waiting: Option<Box<dyn Fn(Duration) + Send + Sync>>,
@@ -176,10 +177,22 @@ pub(crate) struct SupervisedHost {
 impl SupervisedHost {
     /// A host for the config at `config_path` (absolute), whose listeners
     /// are `wanted` and whose own binary is `exe`.
+    ///
+    /// The own hash is taken here, from the file as it is now, not from the
+    /// path when it is first asked for: a supervisor waits for the update lock
+    /// before anything else, and an install-self or update that replaces the
+    /// binary meanwhile must not lend it the new file's hash beside its own
+    /// (old) version. It then sees that the installed file isn't its own bytes
+    /// and runs degraded until restarted. What remains is the time from the
+    /// exec to here, milliseconds. A whole read rather than a kept handle: the
+    /// hash is wanted at the first recovery anyway, and no handle is left open
+    /// on the running image for the updater to move aside.
     pub(crate) fn new(config_path: PathBuf, exe: PathBuf, wanted: Vec<Wanted>) -> Self {
+        let sha256 = std::fs::read(&exe)
+            .ok()
+            .map(|data| open_ferry_update::release::sha256_hex(&data));
         Self {
             config_path,
-            exe,
             wanted,
             bound: Mutex::new(None),
             // Until a read works, nothing may be switched.
@@ -189,7 +202,7 @@ impl SupervisedHost {
                 complained: None,
             }),
             env: Box::new(environment_mode),
-            sha256: OnceLock::new(),
+            sha256,
             waiting: None,
         }
     }
@@ -293,13 +306,7 @@ impl Host for SupervisedHost {
     }
 
     fn own_sha256(&self) -> Option<String> {
-        self.sha256
-            .get_or_init(|| {
-                std::fs::read(&self.exe)
-                    .ok()
-                    .map(|data| open_ferry_update::release::sha256_hex(&data))
-            })
-            .clone()
+        self.sha256.clone()
     }
 
     fn waiting_for_update_lock(&self, waited: Duration) {
@@ -326,18 +333,37 @@ pub(crate) fn exit_status(result: &Result<Exit, StartupError>) -> u8 {
 /// after it, which don't skip the workers' stop. Returns when `signals`
 /// closes.
 pub(crate) async fn forward_stops(
+    signals: mpsc::UnboundedReceiver<&'static str>,
+    commands: mpsc::UnboundedSender<Command>,
+) {
+    forward_stops_logging(signals, commands, log_signal).await;
+}
+
+/// The line for a signal: `again` for one after the first.
+fn log_signal(name: &'static str, again: bool) {
+    if again {
+        tracing::warn!("{name} again: already stopping; waiting for the workers to stop");
+    } else {
+        tracing::info!("{name}: stopping");
+    }
+}
+
+/// `forward_stops` with the logging as a parameter, so a test can observe
+/// when it is called without going through tracing's global state.
+async fn forward_stops_logging(
     mut signals: mpsc::UnboundedReceiver<&'static str>,
     commands: mpsc::UnboundedSender<Command>,
+    log: impl Fn(&'static str, bool),
 ) {
     let mut stopping = false;
     while let Some(name) = signals.recv().await {
         if stopping {
-            tracing::warn!("{name} again: already stopping; waiting for the workers to stop");
+            log(name, true);
         } else {
             stopping = true;
             // The stop goes first: logging must not delay it.
             let _ = commands.send(Command::Stop);
-            tracing::info!("{name}: stopping");
+            log(name, false);
         }
     }
 }
@@ -497,14 +523,34 @@ fn locate(flags: &Flags) -> Result<(DataDir, Option<Location>), String> {
 
 /// `-supervise`: runs the supervisor until it is stopped. The supervisor's
 /// own logs go to standard error.
+///
+/// The data directory is found first, from the environment the supervisor
+/// started with. Then the working directory's `.env` is loaded, once, before
+/// the logger starts its thread, so the workers, which inherit the
+/// supervisor's environment, see its settings (but they never decide where
+/// the data directory is: the task's definition pins it with `-data-dir`).
+/// A `-worker` loads no `.env`: it has its supervisor's environment.
 pub fn supervise(flags: &Flags) -> ExitCode {
+    let located = locate(flags);
+    let dotenv = std::env::current_dir()
+        .ok()
+        .map(|dir| crate::load_dotenv(&dir.join(".env")));
     let log = logging::init_stderr();
+    if let Some(Err(error)) = dotenv
+        && !error.is_not_found()
+    {
+        tracing::warn!("failed to load .env file: {error}");
+    }
     // Every exit path, a panic's unwind included, waits at most a second for
     // the queued lines.
-    log.flush_after(|| run_supervisor(flags, &log))
+    log.flush_after(|| run_supervisor(flags, &log, located))
 }
 
-fn run_supervisor(flags: &Flags, log: &logging::StderrLevel) -> ExitCode {
+fn run_supervisor(
+    flags: &Flags,
+    log: &logging::StderrLevel,
+    located: Result<(DataDir, Option<Location>), String>,
+) -> ExitCode {
     let setup = || -> Result<(SupervisedHost, Setup), String> {
         let config_path = if flags.config.is_empty() {
             std::env::current_dir()
@@ -522,7 +568,7 @@ fn run_supervisor(flags: &Flags, log: &logging::StderrLevel) -> ExitCode {
             .and_then(std::fs::canonicalize)
             .map(plain)
             .map_err(|error| format!("failed to find the open-ferry binary: {error}"))?;
-        let (data, endpoint) = locate(flags)?;
+        let (data, endpoint) = located?;
         let kind = if flags.system {
             ServiceKind::System
         } else {
@@ -956,6 +1002,25 @@ mod tests {
     }
 
     #[test]
+    fn own_sha256_stays_the_hash_of_the_image_when_the_binary_is_replaced_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("open-ferry");
+        std::fs::write(&exe, b"abc").unwrap();
+        let host = SupervisedHost::new("c.yaml".into(), exe.clone(), Vec::new());
+        // As install-self does: the old file aside, a different one in its place.
+        let new = dir.path().join("open-ferry.new");
+        std::fs::write(&new, b"a different binary").unwrap();
+        let aside = dir.path().join("open-ferry.old");
+        std::fs::rename(&exe, &aside).unwrap();
+        std::fs::rename(&new, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"a different binary");
+        assert_eq!(
+            host.own_sha256().as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+    }
+
+    #[test]
     fn waiting_for_the_update_lock_calls_the_hook_with_the_wait() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let record = seen.clone();
@@ -1001,45 +1066,32 @@ mod tests {
     }
 
     /// The stop is on the command channel before the first signal is logged,
-    /// so a log call that is slow cannot delay it.
+    /// so a log call that is slow cannot delay it. The logging is a
+    /// parameter, so the test sees the channel at the moment of each log call
+    /// and depends on no tracing state shared with other tests.
     #[test]
     fn the_stop_is_sent_before_the_signal_is_logged() {
-        struct Probe {
-            commands: Arc<std::sync::Mutex<mpsc::UnboundedReceiver<Command>>>,
-            seen: Arc<std::sync::Mutex<Vec<bool>>>,
-        }
-        impl io::Write for Probe {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                let stop = matches!(self.commands.lock().unwrap().try_recv(), Ok(Command::Stop));
-                self.seen.lock().unwrap().push(stop);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
         let (tx, commands) = mpsc::unbounded_channel();
-        let commands = Arc::new(std::sync::Mutex::new(commands));
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer({
-                let (commands, seen) = (commands.clone(), seen.clone());
-                move || Probe {
-                    commands: commands.clone(),
-                    seen: seen.clone(),
-                }
-            })
-            .finish();
+        let commands = std::cell::RefCell::new(commands);
         let (signals, source) = mpsc::unbounded_channel();
         signals.send("SIGTERM").unwrap();
+        signals.send("SIGINT").unwrap();
         drop(signals);
+        let seen = std::cell::RefCell::new(Vec::new());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        tracing::subscriber::with_default(subscriber, || {
-            runtime.block_on(forward_stops(source, tx));
-        });
-        assert_eq!(*seen.lock().unwrap(), [true], "the line was logged first");
+        runtime.block_on(forward_stops_logging(source, tx, |name, again| {
+            let stop = matches!(commands.borrow_mut().try_recv(), Ok(Command::Stop));
+            seen.borrow_mut().push((name, again, stop));
+        }));
+        // The first signal was logged with the Stop already sent; the second
+        // was logged as a repeat, with no second Stop behind it.
+        assert_eq!(
+            *seen.borrow(),
+            [("SIGTERM", false, true), ("SIGINT", true, false)],
+            "the line was logged first"
+        );
     }
 
     #[test]

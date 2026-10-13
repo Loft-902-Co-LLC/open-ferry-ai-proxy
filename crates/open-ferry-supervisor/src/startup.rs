@@ -28,6 +28,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use open_ferry_update::data_dir::DataDir;
+use open_ferry_update::install_lock::InstallLock;
 use open_ferry_update::journal::{
     Artifact, Installed, JOURNAL_FILE, Journal, JournalError, JournalLoad, JournalStore, Outcome,
     Worker, WorkerRole,
@@ -94,6 +95,11 @@ pub struct Run {
     pub binary: PathBuf,
 }
 
+/// How long startup retries a busy `supervisor.lock` before it says another
+/// supervisor runs, and how often it tries.
+const SUPERVISOR_LOCK_RETRY: Duration = Duration::from_secs(2);
+const SUPERVISOR_LOCK_RETRY_POLL: Duration = Duration::from_millis(100);
+
 /// What startup leaves the supervisor with.
 pub struct Started {
     /// Held for life, even when switching is disabled. `None` is accepted only
@@ -109,6 +115,11 @@ pub struct Started {
     pub run: Option<Run>,
     /// Why switching is disabled, if it is.
     pub switching_disabled: Option<String>,
+    /// The install lock of the installed binary, held for life once startup
+    /// took it; every later launch and install reuses this one handle, as a
+    /// second would wait on the first for ever. `None` only in a hand-built
+    /// state, which takes it when it needs it.
+    pub install_lock: Option<Arc<InstallLock>>,
     /// `switch_off` ran: a failed ladder write turned switching off. Nothing
     /// is written to the journal or the state from here until a restart.
     pub switched_off: bool,
@@ -332,25 +343,113 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
         .map_err(|error| io::Error::other(error.to_string()))
 }
 
-/// Keeps the lock in the blocking operation, not only in its cancellable caller.
+/// Keeps the locks in the blocking operation, not only in its cancellable
+/// caller: the update lock, and the install lock of the file it may replace.
 async fn blocking_with_lock<T: Send + 'static>(
-    lock: Arc<open_ferry_update::data_dir::UpdateLock>,
+    locks: impl Send + 'static,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<T> {
     blocking(move || {
-        let _held = lock;
+        let _held = locks;
         work()
     })
     .await
 }
 
+/// The install lock of the installed binary, taken once and kept in `slot`: a
+/// clone of what is already there, or else a wait for it with no limit, as the
+/// update lock's. It is the last lock of the order (supervisor, update,
+/// install), and is taken before anything touches the installed file. Warns
+/// when the wait begins and then every `lock_warn_every`, naming the lock file.
+/// A stop on `early` ends the wait; any error but contention ends the start.
+async fn ensure_install_lock<H: Host>(
+    cfg: &Config,
+    _host: &H,
+    slot: &mut Option<Arc<InstallLock>>,
+    mut early: Option<&mut EarlyCommands<'_>>,
+) -> Result<Arc<InstallLock>, WaitError> {
+    if let Some(lock) = slot {
+        return Ok(lock.clone());
+    }
+    let began = tokio::time::Instant::now();
+    let mut next_warning = began;
+    loop {
+        match InstallLock::try_acquire(&cfg.installed) {
+            Ok(lock) => {
+                if let Some(early) = early.as_deref_mut()
+                    && early.take_ready()
+                {
+                    return Err(WaitError::Stopped);
+                }
+                let lock = Arc::new(lock);
+                *slot = Some(lock.clone());
+                return Ok(lock);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(WaitError::Io(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not take the install lock beside {}: {error}",
+                        cfg.installed.display()
+                    ),
+                )));
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now >= next_warning {
+            let lock =
+                InstallLock::path_for(&cfg.installed).unwrap_or_else(|_| cfg.installed.clone());
+            tracing::warn!(
+                "waiting for the install lock {} for {} s; another open-ferry supervisor or install uses this binary",
+                lock.display(),
+                (now - began).as_secs()
+            );
+            next_warning = now + cfg.timings.lock_warn_every;
+        }
+        match early.as_deref_mut() {
+            Some(early) => {
+                if early.pause(cfg.timings.lock_poll).await {
+                    return Err(WaitError::Stopped);
+                }
+            }
+            None => tokio::time::sleep(cfg.timings.lock_poll).await,
+        }
+    }
+}
+
+/// A test's way to hold the facts' blocking work still, by installed path.
+#[cfg(test)]
+type FactsHook = (PathBuf, Arc<dyn Fn() + Send + Sync>);
+
+#[cfg(test)]
+static FACTS_HOOKS: std::sync::Mutex<Vec<FactsHook>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn facts_hook(installed: &Path) {
+    let hook = FACTS_HOOKS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(path, _)| path == installed)
+        .map(|(_, hook)| hook.clone());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// What is on disk, for recovery.
+///
+/// `locks` (the update guard when there is one, and the install guard) move
+/// into the blocking work that opens and hashes the installed file, so a
+/// cancelled start can't release them while it still runs.
 async fn gather_facts<H: Host>(
     cfg: &Config,
     host: &H,
     clock: &dyn Clock,
+    locks: impl Send + 'static,
 ) -> io::Result<(Facts, BTreeMap<String, String>)> {
-    gather_facts_in(cfg, host, clock, true).await
+    gather_facts_in(cfg, host, clock, true, locks).await
 }
 
 async fn gather_facts_in<H: Host>(
@@ -358,56 +457,60 @@ async fn gather_facts_in<H: Host>(
     host: &H,
     clock: &dyn Clock,
     include_versions: bool,
+    locks: impl Send + 'static,
 ) -> io::Result<(Facts, BTreeMap<String, String>)> {
     let identity = Identity::current(cfg.kind)?;
     let rules = TrustRules::for_identity(&identity);
     let data = cfg.data.clone();
     let installed = cfg.installed.clone();
     let name = cfg.binary_name.clone();
-    let (installed_sha256, installed_size, versions, refused) = blocking(move || {
-        let (sha, size) = if include_versions {
-            (
-                open_ferry_update::installed_file::hash_installed(&installed).unwrap_or(None),
-                std::fs::metadata(&installed)
-                    .map(|meta| meta.len())
-                    .unwrap_or(0),
-            )
-        } else {
-            hash_disabled_installed(&installed).unwrap_or((None, 0))
-        };
-        let mut versions = BTreeMap::new();
-        let mut refused = BTreeMap::new();
-        if include_versions {
-            for version in data.kept_versions() {
-                let binary = data.binary(&version, &name);
-                // Missing is a recovery fact, not a trust refusal. Do not follow
-                // a linked leaf, including a dangling link, to classify it.
-                if std::fs::symlink_metadata(&binary)
-                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-                {
-                    continue;
-                }
-                if let Err(error) = check_file(&binary, &rules) {
-                    refused.insert(version, error.to_string());
-                    continue;
-                }
-                match hash_disabled_installed(&binary) {
-                    Ok((Some(hash), _)) => {
-                        versions.insert(version, hash);
+    let (installed_sha256, installed_size, versions, refused) =
+        blocking_with_lock(locks, move || {
+            #[cfg(test)]
+            facts_hook(&installed);
+            let (sha, size) = if include_versions {
+                (
+                    open_ferry_update::installed_file::hash_installed(&installed).unwrap_or(None),
+                    std::fs::metadata(&installed)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0),
+                )
+            } else {
+                hash_disabled_installed(&installed).unwrap_or((None, 0))
+            };
+            let mut versions = BTreeMap::new();
+            let mut refused = BTreeMap::new();
+            if include_versions {
+                for version in data.kept_versions() {
+                    let binary = data.binary(&version, &name);
+                    // Missing is a recovery fact, not a trust refusal. Do not follow
+                    // a linked leaf, including a dangling link, to classify it.
+                    if std::fs::symlink_metadata(&binary)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                    {
+                        continue;
                     }
-                    Ok(_) => {}
-                    Err(error) => {
-                        refused.insert(
-                            version,
-                            format!("{} is unverified: {error}", binary.display()),
-                        );
+                    if let Err(error) = check_file(&binary, &rules) {
+                        refused.insert(version, error.to_string());
+                        continue;
+                    }
+                    match hash_disabled_installed(&binary) {
+                        Ok((Some(hash), _)) => {
+                            versions.insert(version, hash);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            refused.insert(
+                                version,
+                                format!("{} is unverified: {error}", binary.display()),
+                            );
+                        }
                     }
                 }
             }
-        }
-        (sha, size, versions, refused)
-    })
-    .await?;
+            (sha, size, versions, refused)
+        })
+        .await?;
     Ok((
         Facts {
             now: clock.now(),
@@ -576,6 +679,7 @@ async fn disabled_recovery<H: Host>(
     host: &H,
     clock: &dyn Clock,
     why: String,
+    install_slot: &mut Option<Arc<InstallLock>>,
     mut early: Option<&mut EarlyCommands<'_>>,
 ) -> Result<Recovery, WaitError> {
     let mut notes = Vec::new();
@@ -585,7 +689,7 @@ async fn disabled_recovery<H: Host>(
         Err(WaitError::Io(error)) => {
             // Running on without the lock is a commitment to start: a stop
             // that is already queued is honoured first.
-            if let Some(early) = early
+            if let Some(early) = early.as_deref_mut()
                 && early.take_ready()
             {
                 return Err(WaitError::Stopped);
@@ -599,6 +703,9 @@ async fn disabled_recovery<H: Host>(
             None
         }
     };
+    // Even with no update lock: nothing below touches the installed file
+    // before the install lock is held.
+    let install_lock = ensure_install_lock(cfg, host, install_slot, early).await?;
     let identity = Identity::current(cfg.kind)?;
     let rules = TrustRules::for_identity(&identity);
     // A directory-chain refusal is the reason for this fallback, not a reason
@@ -606,7 +713,8 @@ async fn disabled_recovery<H: Host>(
     if let Err(error) = check_file(&cfg.installed, &rules) {
         notes.push(error.to_string());
     }
-    let (facts, _) = gather_facts_in(cfg, host, clock, false).await?;
+    let (facts, _) =
+        gather_facts_in(cfg, host, clock, false, (update_lock.clone(), install_lock)).await?;
     Ok(Recovery {
         executed: disabled_execution(cfg, &facts, why),
         update_lock,
@@ -756,6 +864,10 @@ fn defer_install_report(outcomes: &mut Vec<Outcome>, old: &Journal, id: &str) {
 }
 
 /// Executes `plan` (3.3). The update lock is held by the caller.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the two locks are separate inputs: one is the update lock, the other the install lock"
+)]
 async fn execute<H: Host>(
     cfg: &Config,
     host: &H,
@@ -764,6 +876,7 @@ async fn execute<H: Host>(
     mut plan: RecoveryPlan,
     facts: &Facts,
     update_lock: &Arc<open_ferry_update::data_dir::UpdateLock>,
+    install_lock: &Arc<InstallLock>,
 ) -> Executed {
     sync_recovered_install(&cfg.installed, load, facts, &mut plan, &|path| {
         #[cfg(feature = "blue-green-test")]
@@ -1038,7 +1151,7 @@ async fn execute<H: Host>(
         let prepared_store = store.clone();
         let prepared = {
             let (target, from) = (target.clone(), from.clone());
-            blocking_with_lock(update_lock.clone(), move || {
+            blocking_with_lock((update_lock.clone(), install_lock.clone()), move || {
                 #[cfg(feature = "blue-green-test")]
                 if let Err(error) =
                     open_ferry_update::test_seams::hit(paths.data.root(), "startup.before_install")
@@ -1270,15 +1383,18 @@ pub(crate) async fn recover<H: Host>(
     store: &JournalStore,
     clock: &dyn Clock,
     rules: &TrustRules,
-    early: Option<&mut EarlyCommands<'_>>,
+    install_slot: &mut Option<Arc<InstallLock>>,
+    mut early: Option<&mut EarlyCommands<'_>>,
 ) -> Result<Recovery, WaitError> {
     let mut notes = Vec::new();
     let untrusted = untrusted_files(cfg, rules);
     if let Some(why) = untrusted {
-        return disabled_recovery(cfg, host, clock, why, early).await;
+        return disabled_recovery(cfg, host, clock, why, install_slot, early).await;
     }
     let untrusted = None;
-    let update_lock = Arc::new(wait_for_update_lock_in(cfg, host, true, early).await?);
+    let update_lock =
+        Arc::new(wait_for_update_lock_in(cfg, host, true, early.as_deref_mut()).await?);
+    let install_lock = ensure_install_lock(cfg, host, install_slot, early).await?;
     let load = match store.load() {
         Ok(load) => load,
         Err(JournalError::Newer { found, .. }) => JournalLoad::Newer { found },
@@ -1292,10 +1408,11 @@ pub(crate) async fn recover<H: Host>(
     };
     // A newer journal already requires the disabled path: do not inspect
     // versions that cannot influence it.
+    let held = (update_lock.clone(), install_lock.clone());
     let (facts, refused) = if matches!(load, JournalLoad::Newer { .. }) {
-        gather_facts_in(cfg, host, clock, false).await?
+        gather_facts_in(cfg, host, clock, false, held).await?
     } else {
-        gather_facts(cfg, host, clock).await?
+        gather_facts(cfg, host, clock, held).await?
     };
     for reason in refused.values() {
         tracing::warn!("version is unverified: {reason}");
@@ -1395,7 +1512,17 @@ pub(crate) async fn recover<H: Host>(
         // Boxed, as `recover` is where it is called: `execute`'s future is about
         // 70 KB and `recover`'s about 143 KB, and `start` held both inline (a 287 KB
         // future) on a thread of 2 MiB.
-        Box::pin(execute(cfg, host, store, &load, plan, &facts, &update_lock)).await
+        Box::pin(execute(
+            cfg,
+            host,
+            store,
+            &load,
+            plan,
+            &facts,
+            &update_lock,
+            &install_lock,
+        ))
+        .await
     };
     // An install-source refusal disables switching, not degraded restart
     // backoff: the executed result can carry both independently.
@@ -1409,6 +1536,35 @@ pub(crate) async fn recover<H: Host>(
         untrusted,
         notes,
     })
+}
+
+/// Takes `supervisor.lock`. Contention is retried for up to
+/// `SUPERVISOR_LOCK_RETRY`: a supervisor that is stopping, or a client's
+/// detection that holds the lock for a moment, is not a second supervisor. A
+/// stop on `early` ends the retry. After that, [`StartupError::AlreadyRunning`].
+async fn acquire_supervisor_lock(
+    cfg: &Config,
+    mut early: Option<&mut EarlyCommands<'_>>,
+) -> Result<SupervisorLock, StartupError> {
+    let until = tokio::time::Instant::now() + SUPERVISOR_LOCK_RETRY;
+    loop {
+        match SupervisorLock::try_acquire(cfg.data.root()) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+        if tokio::time::Instant::now() >= until {
+            return Err(StartupError::AlreadyRunning);
+        }
+        match early.as_deref_mut() {
+            Some(early) => {
+                if early.pause(SUPERVISOR_LOCK_RETRY_POLL).await {
+                    return Err(StartupError::Stopped);
+                }
+            }
+            None => tokio::time::sleep(SUPERVISOR_LOCK_RETRY_POLL).await,
+        }
+    }
 }
 
 /// Runs startup (see the module comment) and starts the active worker.
@@ -1440,18 +1596,13 @@ pub async fn start_watching<H: Host, D: Driver>(
     let rules = TrustRules::for_identity(&identity);
     let store = JournalStore::new(cfg.data.root());
     let mut notes = Vec::new();
+    let mut install_slot = None;
 
     // 1. The lock is held for life, including on the disabled path.
     if cfg.kind == ServiceKind::User {
         crate::trust::create_private_dir(cfg.data.root())?;
     }
-    let lock = match SupervisorLock::try_acquire(cfg.data.root()) {
-        Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            return Err(StartupError::AlreadyRunning);
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let lock = acquire_supervisor_lock(cfg, early.as_deref_mut()).await?;
     // A cancelled handshake can own a process without ever returning a port.
     registry.wait_until_empty().await;
     let Recovery {
@@ -1461,7 +1612,15 @@ pub async fn start_watching<H: Host, D: Driver>(
         notes: recovery_notes,
     } = if let Some(why) = untrusted_dirs(cfg, &rules) {
         tracing::error!("switching is disabled: {why}");
-        disabled_recovery(cfg, host, clock, why, early.as_deref_mut()).await?
+        disabled_recovery(
+            cfg,
+            host,
+            clock,
+            why,
+            &mut install_slot,
+            early.as_deref_mut(),
+        )
+        .await?
     } else {
         Box::pin(recover(
             cfg,
@@ -1469,6 +1628,7 @@ pub async fn start_watching<H: Host, D: Driver>(
             &store,
             clock,
             &rules,
+            &mut install_slot,
             early.as_deref_mut(),
         ))
         .await?
@@ -1519,6 +1679,7 @@ pub async fn start_watching<H: Host, D: Driver>(
         state_pending: executed.state_pending,
         run: executed.run,
         switching_disabled: disabled,
+        install_lock: install_slot,
         switched_off: false,
         ladder_off_reason: false,
         degraded: executed.degraded,
@@ -2005,9 +2166,18 @@ pub async fn reenter<H: Host, D: Driver>(
                 .is_none()
                 .then(|| "the supervisor lock is not held".to_owned())
         }) {
-        disabled_recovery(cfg, host, clock, why, None).await?
+        disabled_recovery(cfg, host, clock, why, &mut started.install_lock, None).await?
     } else {
-        Box::pin(recover(cfg, host, &started.store, clock, &rules, None)).await?
+        Box::pin(recover(
+            cfg,
+            host,
+            &started.store,
+            clock,
+            &rules,
+            &mut started.install_lock,
+            None,
+        ))
+        .await?
     };
     started.journal = executed.journal;
     started.journal_stale = executed.journal_stale;
@@ -2298,6 +2468,7 @@ mod tests {
             plan,
             &facts,
             &lock,
+            &Arc::new(InstallLock::try_acquire(&cfg.installed).unwrap()),
         )
         .await;
         let specific = executed.disabled.clone().unwrap();
@@ -2434,5 +2605,413 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// What the install-lock tests share: a host and a runner that say nothing,
+    /// and a data directory and an installed file in a scratch directory.
+    struct QuietHost;
+    impl Host for QuietHost {
+        fn topology(&self) -> Vec<crate::protocol::ListenerTopology> {
+            Vec::new()
+        }
+        fn bind(&self) -> io::Result<Vec<(String, TcpListener)>> {
+            Ok(Vec::new())
+        }
+        fn effective_mode(&self) -> crate::host::ModeSnapshot {
+            crate::host::ModeSnapshot {
+                off: false,
+                mode_gen: 0,
+            }
+        }
+        fn own_version(&self) -> String {
+            "1.0.0".into()
+        }
+        fn own_sha256(&self) -> Option<String> {
+            None
+        }
+        fn waiting_for_update_lock(&self, _: Duration) {}
+    }
+
+    struct QuietRunner;
+    impl Runner for QuietRunner {
+        fn version<'a>(
+            &'a self,
+            _: &'a Path,
+            _: Duration,
+        ) -> open_ferry_update::fetch::BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Ok("open-ferry 1.0.0".into()) })
+        }
+    }
+
+    fn scratch_dir() -> tempfile::TempDir {
+        if cfg!(unix) {
+            tempfile::tempdir_in(
+                std::env::var_os("HOME").expect("trust checks require a non-/tmp root"),
+            )
+            .unwrap()
+        } else if let Some(root) = std::env::var_os("OFP_TEST_SCRATCH") {
+            tempfile::tempdir_in(root).unwrap()
+        } else {
+            tempfile::tempdir_in(".").unwrap()
+        }
+    }
+
+    /// A config whose waits are short, over `dir`'s `data` and `installed`.
+    fn quick_config(dir: &Path) -> Config {
+        let data = DataDir::at(dir.join("data"));
+        std::fs::create_dir_all(data.root()).unwrap();
+        let installed = dir.join("installed");
+        std::fs::write(&installed, b"installed bytes").unwrap();
+        Config {
+            data,
+            installed,
+            config: dir.join("config"),
+            kind: ServiceKind::User,
+            timings: Timings {
+                lock_poll: Duration::from_millis(20),
+                lock_warn_every: Duration::from_millis(50),
+                ..Timings::default()
+            },
+            receipt: serde_json::json!({}),
+            binary_name: "binary".into(),
+            runner: Arc::new(QuietRunner),
+            detect_timeout: Duration::from_secs(5),
+            endpoint_location: None,
+        }
+    }
+
+    /// Makes `update.lock` a directory, so that opening it fails and recovery
+    /// takes the disabled path's "running without the update lock" arm.
+    fn break_the_update_lock(cfg: &Config) {
+        std::fs::create_dir(cfg.data.root().join("update.lock")).unwrap();
+    }
+
+    fn user_identity() -> Identity {
+        Identity::current(ServiceKind::User).unwrap()
+    }
+
+    fn soon() -> std::time::Instant {
+        std::time::Instant::now() + Duration::from_secs(5)
+    }
+
+    #[tokio::test]
+    async fn a_disabled_recovery_without_the_update_lock_still_waits_for_a_held_install_lock() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        break_the_update_lock(&cfg);
+        let held = InstallLock::try_acquire(&cfg.installed).unwrap();
+        let mut slot = None;
+        let waiting = tokio::time::timeout(
+            Duration::from_millis(300),
+            disabled_recovery(
+                &cfg,
+                &QuietHost,
+                &crate::clock::SystemClock,
+                "switching is disabled for the test".into(),
+                &mut slot,
+                None,
+            ),
+        )
+        .await;
+        assert!(waiting.is_err(), "it went on without the install lock");
+        assert!(slot.is_none());
+        drop(held);
+        let recovery = disabled_recovery(
+            &cfg,
+            &QuietHost,
+            &crate::clock::SystemClock,
+            "switching is disabled for the test".into(),
+            &mut slot,
+            None,
+        )
+        .await
+        .map_err(|_| "recovery failed")
+        .unwrap();
+        assert!(recovery.update_lock.is_none(), "the update lock was broken");
+        let lock = slot.expect("the install lock is taken before the installed file is touched");
+        assert_eq!(
+            InstallLock::try_acquire(&cfg.installed).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(lock);
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_the_install_lock_wait_ends_the_wait_and_takes_nothing() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let _held = InstallLock::try_acquire(&cfg.installed).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut early = EarlyCommands::new(&mut rx);
+        let mut slot = None;
+        let stopper = async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            tx.send(Command::Stop).unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            ensure_install_lock(&cfg, &QuietHost, &mut slot, Some(&mut early)),
+            stopper
+        );
+        assert!(matches!(result, Err(WaitError::Stopped)));
+        assert!(slot.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_install_lock_that_cannot_be_taken_for_another_reason_ends_the_start() {
+        let dir = scratch_dir();
+        let mut cfg = quick_config(dir.path());
+        cfg.installed = dir.path().join("missing").join("installed");
+        let mut slot = None;
+        let result = ensure_install_lock(&cfg, &QuietHost, &mut slot, None).await;
+        let Err(WaitError::Io(error)) = result else {
+            panic!("{:?}", result.map(|_| ()));
+        };
+        assert!(error.to_string().contains("install lock"), "{error}");
+        assert!(slot.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_start_goes_on_once_the_install_lock_is_released() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let held = InstallLock::try_acquire(&cfg.installed).unwrap();
+        let mut slot = None;
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(held);
+        };
+        let (result, ()) = tokio::join!(
+            ensure_install_lock(&cfg, &QuietHost, &mut slot, None),
+            release
+        );
+        let lock = result.map_err(|_| "no lock").unwrap();
+        assert!(Arc::ptr_eq(&lock, slot.as_ref().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn a_second_ensure_reuses_the_held_lock_instead_of_waiting_on_itself() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let mut slot = None;
+        let first = ensure_install_lock(&cfg, &QuietHost, &mut slot, None)
+            .await
+            .map_err(|_| "no lock")
+            .unwrap();
+        // A second handle would wait on the first for ever: the timeout is the failure.
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            ensure_install_lock(&cfg, &QuietHost, &mut slot, None),
+        )
+        .await
+        .expect("a second acquisition waited on the first")
+        .map_err(|_| "no lock")
+        .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// A panic re-entry recovers again, as after a restart, with the one install
+    /// lock it already holds: no second acquisition, so no hang.
+    #[tokio::test]
+    async fn recovering_again_after_a_panic_reuses_the_held_install_lock() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let store = JournalStore::new(cfg.data.root());
+        let rules = TrustRules::for_identity(&user_identity());
+        let mut slot = None;
+        let first = Box::pin(recover(
+            &cfg,
+            &QuietHost,
+            &store,
+            &crate::clock::SystemClock,
+            &rules,
+            &mut slot,
+            None,
+        ))
+        .await
+        .map_err(|_| "first recovery failed")
+        .unwrap();
+        drop(first);
+        let held = slot.clone().expect("recovery takes the install lock");
+        let second = tokio::time::timeout(
+            Duration::from_secs(20),
+            Box::pin(recover(
+                &cfg,
+                &QuietHost,
+                &store,
+                &crate::clock::SystemClock,
+                &rules,
+                &mut slot,
+                None,
+            )),
+        )
+        .await
+        .expect("recovering again waited on the install lock it holds")
+        .map_err(|_| "second recovery failed")
+        .unwrap();
+        drop(second);
+        assert!(Arc::ptr_eq(&held, slot.as_ref().unwrap()));
+    }
+
+    /// The blocking work of a recovery that was cancelled still holds the
+    /// install lock: another data directory's detection answers `Busy` until the
+    /// work ends, and `Clear` only after.
+    #[tokio::test]
+    async fn cancelling_a_blocking_recovery_keeps_the_install_lock_until_it_finishes() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let other = dir.path().join("other-data");
+        std::fs::create_dir_all(&other).unwrap();
+        let update_lock = Arc::new(cfg.data.try_lock().unwrap().unwrap());
+        let mut slot = None;
+        let install_lock = ensure_install_lock(&cfg, &QuietHost, &mut slot, None)
+            .await
+            .map_err(|_| "no lock")
+            .unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(blocking_with_lock((update_lock, install_lock), move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        entered_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // The supervisor's own handle goes too: only the blocking work holds it.
+        drop(slot);
+        let during = crate::client::detect(&other, &user_identity(), &cfg.installed, soon()).await;
+        release_tx.send(()).unwrap();
+        assert!(
+            matches!(during, crate::client::Detection::Busy(_)),
+            "cancel released the install lock mid-work: {during:?}"
+        );
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let after =
+                crate::client::detect(&other, &user_identity(), &cfg.installed, soon()).await;
+            if matches!(after, crate::client::Detection::Clear(_)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "still held: {after:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The real recovery, cancelled while its fact-gathering work still runs
+    /// (opening and hashing the installed file): both locks stay held by that
+    /// work, so another data directory's detection answers `Busy` until it
+    /// ends, and `Clear` only after.
+    #[tokio::test]
+    async fn cancelling_a_recovery_while_it_hashes_the_installed_file_keeps_both_locks() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let other = dir.path().join("other-data");
+        std::fs::create_dir_all(&other).unwrap();
+        let installed = cfg.installed.clone();
+        let data = cfg.data.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        FACTS_HOOKS.lock().unwrap().push((
+            installed.clone(),
+            Arc::new(move || {
+                if let Some(sender) = entered_tx.lock().unwrap().take() {
+                    sender.send(()).unwrap();
+                }
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+            }),
+        ));
+        let task = tokio::spawn(async move {
+            let store = JournalStore::new(cfg.data.root());
+            let rules = TrustRules::for_identity(&user_identity());
+            let mut slot = None;
+            let _ = Box::pin(recover(
+                &cfg,
+                &QuietHost,
+                &store,
+                &crate::clock::SystemClock,
+                &rules,
+                &mut slot,
+                None,
+            ))
+            .await;
+        });
+        entered_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let during = crate::client::detect(&other, &user_identity(), &installed, soon()).await;
+        // `Ok(None)`: someone else still holds it.
+        let update_taken = data.try_lock().map(|lock| lock.is_some());
+        release_tx.send(()).unwrap();
+        FACTS_HOOKS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &installed);
+        assert!(
+            matches!(during, crate::client::Detection::Busy(_)),
+            "cancel released the install lock mid-work: {during:?}"
+        );
+        assert!(
+            matches!(update_taken, Ok(false)),
+            "cancel released the update lock mid-work: {update_taken:?}"
+        );
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let after = crate::client::detect(&other, &user_identity(), &installed, soon()).await;
+            if matches!(after, crate::client::Detection::Clear(_)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "still held: {after:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_lock_that_stays_busy_is_retried_and_then_already_running() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let _other = SupervisorLock::try_acquire(cfg.data.root()).unwrap();
+        let began = std::time::Instant::now();
+        let result = acquire_supervisor_lock(&cfg, None).await;
+        assert!(matches!(result, Err(StartupError::AlreadyRunning)));
+        assert!(
+            began.elapsed() >= Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_lock_that_comes_free_within_the_retry_is_taken() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let other = SupervisorLock::try_acquire(cfg.data.root()).unwrap();
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            drop(other);
+        };
+        let (result, ()) = tokio::join!(acquire_supervisor_lock(&cfg, None), release);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_the_supervisor_lock_retry_ends_it() {
+        let dir = scratch_dir();
+        let cfg = quick_config(dir.path());
+        let _other = SupervisorLock::try_acquire(cfg.data.root()).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut early = EarlyCommands::new(&mut rx);
+        tx.send(Command::Stop).unwrap();
+        let began = std::time::Instant::now();
+        let result = acquire_supervisor_lock(&cfg, Some(&mut early)).await;
+        assert!(matches!(result, Err(StartupError::Stopped)));
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
     }
 }

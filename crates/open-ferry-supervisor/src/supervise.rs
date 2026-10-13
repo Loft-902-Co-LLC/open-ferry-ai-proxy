@@ -131,7 +131,8 @@ pub async fn supervise<H: Host, D: Driver>(
         started.store.clone(),
     )
     .with_trust(cfg.kind)
-    .with_supervisor_version(host.own_version());
+    .with_supervisor_version(host.own_version())
+    .with_install_lock(started.install_lock.clone());
     let exit = loop {
         let mut runtime = Runtime::from_started(&started, &registry, cfg, clock, Instant::now());
         // After recovery: a restart need that this supervisor version set

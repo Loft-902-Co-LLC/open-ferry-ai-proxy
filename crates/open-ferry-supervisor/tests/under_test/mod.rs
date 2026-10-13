@@ -29,6 +29,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use open_ferry_supervisor::clock::SystemClock;
+use open_ferry_supervisor::core::Command;
 use open_ferry_supervisor::driver::{
     Cmd, Driver, EventSender, ProcessDriver, SpawnError, SpawnRequest, WorkerPort,
 };
@@ -476,7 +477,7 @@ async fn child_main(fixture: PathBuf) -> String {
     };
     let installed = fixture.join("bin").join(NAME);
     let cfg = Config {
-        data: DataDir::at(fixture.join("data")),
+        data: DataDir::at(data_in(&fixture)),
         installed: installed.clone(),
         config: fixture.join(spec["config"].as_str().unwrap_or("config.yaml")),
         kind: ServiceKind::User,
@@ -541,6 +542,16 @@ async fn child_main(fixture: PathBuf) -> String {
         }),
     };
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    // A test ends the start-up or the run the way a service stop does, by
+    // creating `stop-early` in the fixture (`Fx::request_stop`).
+    let stopper = tx.clone();
+    let stop_file = fixture.join("stop-early");
+    tokio::spawn(async move {
+        while !stop_file.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = stopper.send(Command::Stop);
+    });
     let exit = supervise(
         &cfg,
         &host,
@@ -554,6 +565,37 @@ async fn child_main(fixture: PathBuf) -> String {
     format!("{exit:?}")
 }
 
+/// Writes the supervisor's warnings and errors to stderr, which is
+/// `child.log`: without a subscriber the `tracing` macros go nowhere, and a
+/// test waits on these lines as barriers (a lock wait's warning).
+struct WarningsToStderr;
+
+impl tracing::Subscriber for WarningsToStderr {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        eprintln!("{} {}", event.metadata().level(), message.0);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 /// The entry point of the supervisor child. Only meaningful with
 /// `OFP_PT_FIXTURE` set, which `Fx::start` does.
 #[test]
@@ -562,6 +604,7 @@ fn supervisor_child() {
     let Some(fixture) = std::env::var_os("OFP_PT_FIXTURE") else {
         return;
     };
+    let _ = tracing::subscriber::set_global_default(WarningsToStderr);
     let fixture = PathBuf::from(fixture);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -742,7 +785,20 @@ pub fn client_location(fixture: &Path) -> io::Result<Location> {
         return Ok(own);
     }
     let identity = Identity::current(ServiceKind::User)?;
-    Location::resolve(&identity, &fixture.join("data")).map_err(io::Error::other)
+    Location::resolve(&identity, &data_in(fixture)).map_err(io::Error::other)
+}
+
+/// The fixture's data directory: `open-ferry` in the fixture when the fixture
+/// was made by `Fx::new_for_this_user_layout` (so a child with `LOCALAPPDATA`
+/// or `XDG_DATA_HOME` at the fixture finds it as the user's data directory),
+/// otherwise `data`.
+pub fn data_in(fixture: &Path) -> PathBuf {
+    let own = fixture.join("open-ferry");
+    if own.is_dir() {
+        own
+    } else {
+        fixture.join("data")
+    }
 }
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -963,12 +1019,8 @@ impl Drop for Sup {
 /// The pids of every worker that logged an event in the fixture at `root`.
 #[cfg(unix)]
 fn events_pids(root: &Path) -> Vec<u32> {
-    let text = std::fs::read_to_string(
-        root.join("data")
-            .join(".blue-green-test")
-            .join("events.log"),
-    )
-    .unwrap_or_default();
+    let text = std::fs::read_to_string(data_in(root).join(".blue-green-test").join("events.log"))
+        .unwrap_or_default();
     text.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|v| v["pid"].as_u64().map(|p| p as u32))
@@ -1067,6 +1119,17 @@ pub struct Staged {
 impl Fx {
     /// A fixture with `1.0.0` (A) installed and kept, marker `A`.
     pub fn new() -> Fx {
+        Fx::build(false)
+    }
+
+    /// As `new`, but the data directory is `<root>/open-ferry`, which is where
+    /// a child with `LOCALAPPDATA` and `XDG_DATA_HOME` set to `root()` looks
+    /// for the user's data directory.
+    pub fn new_for_this_user_layout() -> Fx {
+        Fx::build(true)
+    }
+
+    fn build(user_layout: bool) -> Fx {
         let permit = Permit::take();
         let dir = scratch();
         let fx = Fx {
@@ -1078,6 +1141,10 @@ impl Fx {
             _permit: permit,
         };
         std::fs::create_dir_all(fx.root().join("bin")).unwrap();
+        if user_layout {
+            // Before any `data()`: the directory's existence names it.
+            std::fs::create_dir_all(fx.root().join("open-ferry")).unwrap();
+        }
         std::fs::create_dir_all(fx.data().join(".blue-green-test")).unwrap();
         // The fake ignores its config; the real worker reads one.
         let config = match kind() {
@@ -1094,7 +1161,7 @@ impl Fx {
         self.dir.path()
     }
     pub fn data(&self) -> PathBuf {
-        self.root().join("data")
+        data_in(self.root())
     }
     pub fn installed(&self) -> PathBuf {
         self.root().join("bin").join(NAME)
@@ -1431,6 +1498,22 @@ impl Fx {
                 Err(foreign) => panic!("{}", foreign.why()),
             },
         );
+    }
+
+    /// Tells the supervisor child to stop, as a service stop does: it ends
+    /// its start-up wait, or its run (`stop-early`, read by `child_main`).
+    pub fn request_stop(&self) {
+        std::fs::write(self.root().join("stop-early"), "").unwrap();
+    }
+
+    /// What the supervisor child's run ended with, once it has (`child.exit`).
+    pub fn child_exit(&self) -> Option<String> {
+        std::fs::read_to_string(self.root().join("child.exit")).ok()
+    }
+
+    /// The supervisor child's stderr so far: its warnings and errors.
+    pub fn child_log(&self) -> String {
+        std::fs::read_to_string(self.root().join("child.log")).unwrap_or_default()
     }
 
     /// Waits for the child supervisor to exit by itself.
