@@ -16,6 +16,7 @@
 //!   the Antigravity provider isn't.
 
 mod native;
+mod pre_first_token;
 
 use std::sync::Arc;
 use std::time::Duration;

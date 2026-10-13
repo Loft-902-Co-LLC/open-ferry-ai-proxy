@@ -7,8 +7,9 @@
 //! `POST /v1/responses` and `POST /v1/responses/compact`, also served under
 //! `/backend-api/codex/`.
 //!
-//! A stream is held back until its first data event, so a failure before
-//! then is a JSON error with its status. After that, the events go through
+//! A stream is held back until its first data event or configured pre-first-
+//! token keepalive, so a failure before either is a JSON error with its
+//! status. After that, the events go through
 //! a framer that keeps them whole and ends the stream with one terminal
 //! event: the provider's, or a failure the client can read.
 //!
@@ -34,7 +35,7 @@
 //! - What is held back is bounded. The framer holds back at most
 //!   [`MAX_EVENT_BYTES`] of an event, and at most that much more is held
 //!   back before the first data event. Past either, the call is dropped and
-//!   the stream fails with a 502: a JSON error before the first data event,
+//!   the stream fails with a 502: a JSON error before SSE is committed,
 //!   and otherwise the failure event that ends a stream. Upstream holds
 //!   both back without limit.
 
@@ -182,8 +183,9 @@ async fn respond_streaming(
     let settings = state.settings();
     let passthrough = settings.config.passthrough_headers;
     let keepalive = settings.config.streaming.keepalive;
+    let pre_ft = crate::stream::pre_first_token_interval(&settings.config.streaming);
     drop(settings);
-    let Started { headers, mut items } = match Call::new(
+    let call = Call::new(
         state,
         client,
         Format::OPENAI_RESPONSE,
@@ -191,78 +193,139 @@ async fn respond_streaming(
         payload,
         "",
         true,
-    ) {
-        Ok(call) => call.stream().await,
-        Err(error) => Started::failed(error),
+    );
+    let codex = is_codex_client(&client.headers);
+    let context = client.context.clone();
+    let first = async move {
+        let started = match call {
+            Ok(call) => call.stream().await,
+            Err(error) => Started::failed(error),
+        };
+        prepare_initial_stream(started, codex).await
     };
-    let mut framer = Framer::new(is_codex_client(&client.headers));
-    let context = client.context.as_deref();
-    let writer = |framer| ResponsesWriter::new(framer).log_to(client.context.clone());
+    crate::stream::pre_first_token(pre_ft, first, move |initial, committed| {
+        respond_initial_stream(initial, committed, keepalive, passthrough, context)
+    })
+    .await
+}
+
+/// Everything held back until the first complete data event, or failure.
+struct InitialStream {
+    headers: HeaderMap,
+    items: crate::exec::HandlerStream,
+    framer: Framer,
+    output: BytesMut,
+    error: Option<ErrorMessage>,
+    closed: bool,
+    /// The initial buffer limit must fail before flushing a partial frame
+    /// into a first data event, unless a keepalive already committed SSE.
+    initial_limit_exceeded: bool,
+}
+
+/// Includes provider bootstrap and framing in the pre-first-token wait.
+async fn prepare_initial_stream(started: Started, codex: bool) -> InitialStream {
+    let Started { headers, mut items } = started;
+    let mut framer = Framer::new(codex);
     let mut initial = BytesMut::new();
+    let mut closed = false;
+    let mut initial_limit_exceeded = false;
     let error = loop {
         match items.next().await {
             Some(Ok(chunk)) => {
                 if let Err(error) = framer.write_chunk(&mut initial, &chunk) {
-                    break error;
+                    break Some(error);
                 }
                 if framer.data_frames == 0 {
                     if initial.len() > MAX_EVENT_BYTES {
-                        let error = sanitize_error(ErrorMessage::new(
+                        initial_limit_exceeded = true;
+                        break Some(ErrorMessage::new(
                             502,
                             format!(
                                 "upstream stream sent more than {MAX_EVENT_BYTES} bytes before its first payload"
                             ),
                         ));
-                        request_log::record_api_error(context, &error);
-                        return openai_error_response(&error, passthrough);
                     }
                     continue;
                 }
-                if let Some(error) = &framer.terminal_error {
-                    log_stream_error(&framer, error, context);
-                    return sse_response(&headers, Body::from(initial.freeze()));
-                }
-                let rest = forward(items, writer(framer), keepalive);
-                return sse_response(&headers, prepend(initial.freeze(), rest));
+                break None;
             }
-            Some(Err(error)) => break error,
+            Some(Err(error)) => break Some(error),
             None => {
+                closed = true;
                 framer.flush(&mut initial);
                 if framer.data_frames == 0 {
-                    let error = sanitize_error(ErrorMessage::new(
+                    break Some(ErrorMessage::new(
                         502,
                         "upstream stream closed before first payload",
                     ));
-                    request_log::record_api_error(context, &error);
-                    return openai_error_response(&error, passthrough);
                 }
-                if let Some(error) = &framer.terminal_error {
-                    log_stream_error(&framer, error, context);
-                } else if framer.terminal_event.is_empty() {
-                    let error = sanitize_error(ErrorMessage::new(
+                if framer.terminal_error.is_none() && framer.terminal_event.is_empty() {
+                    break Some(ErrorMessage::new(
                         502,
                         "upstream stream closed before a terminal event",
                     ));
-                    let mut writer = writer(framer);
-                    let error = writer.normalize_terminal_error(error);
-                    writer.write_terminal_error(&error, &mut initial);
                 }
-                return sse_response(&headers, Body::from(initial.freeze()));
+                break None;
             }
         }
     };
-    // The call goes now, before the client hears of the error.
-    drop(items);
-    framer.flush(&mut initial);
-    let error = sanitize_error(error);
-    if framer.data_frames == 0 {
-        request_log::record_api_error(context, &error);
-        return openai_error_response(&error, passthrough);
+    InitialStream {
+        headers,
+        items,
+        framer,
+        output: initial,
+        error,
+        closed,
+        initial_limit_exceeded,
     }
-    let mut writer = writer(framer);
-    let error = writer.normalize_terminal_error(error);
-    writer.write_terminal_error(&error, &mut initial);
-    sse_response(&headers, Body::from(initial.freeze()))
+}
+
+/// A pre-FT keepalive commits the same stream error framing as a data event,
+/// including `response.failed` for a caller identifying itself as Codex.
+fn respond_initial_stream(
+    initial: InitialStream,
+    committed: bool,
+    keepalive: Option<std::time::Duration>,
+    passthrough: bool,
+    context: Option<Arc<RequestContext>>,
+) -> Response {
+    let InitialStream {
+        headers,
+        items,
+        mut framer,
+        mut output,
+        error,
+        closed,
+        initial_limit_exceeded,
+    } = initial;
+    if let Some(error) = error {
+        drop(items);
+        if !initial_limit_exceeded || committed {
+            framer.flush(&mut output);
+        }
+        let error = sanitize_error(error);
+        if !committed && framer.data_frames == 0 {
+            request_log::record_api_error(context.as_deref(), &error);
+            return openai_error_response(&error, passthrough);
+        }
+        let mut writer = ResponsesWriter::new(framer).log_to(context);
+        let error = writer.normalize_terminal_error(error);
+        writer.write_terminal_error(&error, &mut output);
+        return sse_response(&headers, Body::from(output.freeze()));
+    }
+    if let Some(error) = &framer.terminal_error {
+        log_stream_error(&framer, error, context.as_deref());
+        return sse_response(&headers, Body::from(output.freeze()));
+    }
+    if closed {
+        return sse_response(&headers, Body::from(output.freeze()));
+    }
+    let rest = forward(
+        items,
+        ResponsesWriter::new(framer).log_to(context),
+        keepalive,
+    );
+    sse_response(&headers, prepend(output.freeze(), rest))
 }
 
 /// `first`, then `rest`.

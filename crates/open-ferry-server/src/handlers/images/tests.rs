@@ -111,6 +111,7 @@ fn keepalive(seconds: u64) -> ServerConfig {
         passthrough_headers: true,
         streaming: StreamingConfig {
             keepalive: Some(Duration::from_secs(seconds)),
+            keepalive_before_first_token: true,
             ..StreamingConfig::default()
         },
         ..ServerConfig::default()

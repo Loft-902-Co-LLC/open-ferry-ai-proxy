@@ -26,7 +26,7 @@ use serde_json::Value;
 use super::{gjson_string, parse_body};
 use crate::body;
 use crate::errors::{ErrorMessage, openai_body, openai_error_response};
-use crate::exec::{Call, ClientRequest, HandlerStream};
+use crate::exec::{Call, ClientRequest, Started};
 use crate::json;
 use crate::state::AppState;
 use crate::stream::{Peeked, StreamWriter, forward, json_response, keep_alive, peek, sse_response};
@@ -58,12 +58,14 @@ pub(crate) async fn chat_completions(
     let model = gjson_string(parsed.get("model"));
     let alt = client.alt.clone();
     if stream {
-        let started = match Call::new(&state, &client, Format::OPENAI, &model, payload, &alt, true)
-        {
-            Ok(call) => call.stream().await,
-            Err(error) => crate::exec::Started::failed(error),
+        let call = Call::new(&state, &client, Format::OPENAI, &model, payload, &alt, true);
+        let start = async move {
+            match call {
+                Ok(call) => call.stream().await,
+                Err(error) => Started::failed(error),
+            }
         };
-        stream_chat(&state, started.headers, started.items, Some).await
+        stream_chat(&state, start, Some).await
     } else {
         respond_once(&state, &client, &model, payload, &alt, Ok).await
     }
@@ -91,11 +93,14 @@ pub(crate) async fn completions(
     let model = gjson_string(chat.get("model"));
     let payload = Bytes::from(chat.to_string());
     if stream {
-        let started = match Call::new(&state, &client, Format::OPENAI, &model, payload, "", true) {
-            Ok(call) => call.stream().await,
-            Err(error) => crate::exec::Started::failed(error),
+        let call = Call::new(&state, &client, Format::OPENAI, &model, payload, "", true);
+        let start = async move {
+            match call {
+                Ok(call) => call.stream().await,
+                Err(error) => Started::failed(error),
+            }
         };
-        stream_chat(&state, started.headers, started.items, |chunk| {
+        stream_chat(&state, start, |chunk| {
             convert_chat_completions_stream_chunk_to_completions(&chunk)
                 .map(|converted| Bytes::from(converted.to_string()))
         })
@@ -161,33 +166,46 @@ async fn respond_once(
 /// `rewrite`, which drops a payload by giving `None`.
 async fn stream_chat(
     state: &AppState,
-    headers: http::HeaderMap,
-    items: HandlerStream,
+    start: impl std::future::Future<Output = Started> + Send + 'static,
     rewrite: impl FnMut(Bytes) -> Option<Bytes> + Send + 'static,
 ) -> Response {
     let settings = state.settings();
     let passthrough = settings.config.passthrough_headers;
     let keepalive = settings.config.streaming.keepalive;
+    let pre_ft = crate::stream::pre_first_token_interval(&settings.config.streaming);
     drop(settings);
-    match peek(items).await {
-        Peeked::Failed(error) => openai_error_response(&error, passthrough),
-        Peeked::Closed => sse_response(&headers, Body::from("data: [DONE]\n\n")),
-        Peeked::First(first, rest) => {
-            let mut rewrite = rewrite;
-            let items = stream::iter([Ok(first)])
-                .chain(rest)
-                .filter_map(move |item| {
-                    let item = match item {
-                        Ok(chunk) => rewrite(chunk).map(Ok),
-                        Err(error) => Some(Err(error)),
-                    };
-                    std::future::ready(item)
-                })
-                .boxed();
-            let writer = ChatWriter::default();
-            sse_response(&headers, forward(items, writer, keepalive))
-        }
-    }
+    let first = async move {
+        let started = start.await;
+        (started.headers, peek(started.items).await)
+    };
+    crate::stream::pre_first_token(
+        pre_ft,
+        first,
+        move |(headers, peeked), committed| match peeked {
+            Peeked::Failed(error) if committed => {
+                let items = stream::iter([Err(error)]).boxed();
+                sse_response(&headers, forward(items, ChatWriter::default(), None))
+            }
+            Peeked::Failed(error) => openai_error_response(&error, passthrough),
+            Peeked::Closed => sse_response(&headers, Body::from("data: [DONE]\n\n")),
+            Peeked::First(first, rest) => {
+                let mut rewrite = rewrite;
+                let items = stream::iter([Ok(first)])
+                    .chain(rest)
+                    .filter_map(move |item| {
+                        let item = match item {
+                            Ok(chunk) => rewrite(chunk).map(Ok),
+                            Err(error) => Some(Err(error)),
+                        };
+                        std::future::ready(item)
+                    })
+                    .boxed();
+                let writer = ChatWriter::default();
+                sse_response(&headers, forward(items, writer, keepalive))
+            }
+        },
+    )
+    .await
 }
 
 /// Writes a Chat Completions event stream.

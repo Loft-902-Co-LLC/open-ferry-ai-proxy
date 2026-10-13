@@ -23,13 +23,12 @@
 //!
 //! A stream is SSE. A payload that is already an `event:` or `data:` line
 //! goes on as it is, any other gets `data: `, and each ends with a blank
-//! line. An error before the first payload is an OpenAI error body, as on
-//! the other routes; one partway through ends the stream with
-//! `event: error` and that body. Nothing marks a stream that ends well.
+//! line. An error before the first payload is an OpenAI error body, unless
+//! a pre-first-token keepalive has committed SSE already; then, as for one
+//! partway through, it ends the stream with `event: error` and that body.
+//! Nothing marks a stream that ends well.
 //!
 //! Deviations from upstream:
-//! - A body over the configured limit gets 413, and the message for a body
-//!   that fails to read starts with `Invalid request: `.
 //! - There is no model router or plugin executor to send an `agent`
 //!   elsewhere, so upstream's 400 "agent is only supported for native
 //!   interactions execution" comes from the manager, when the providers a
@@ -57,7 +56,10 @@ use crate::exec::{Call, ClientRequest, Started};
 use crate::json;
 use crate::routing::{self, Route};
 use crate::state::AppState;
-use crate::stream::{Peeked, StreamWriter, forward, json_response, keep_alive, peek, sse_response};
+use crate::stream::{
+    Peeked, StreamWriter, forward, json_response, keep_alive, peek, pre_first_token,
+    pre_first_token_interval, sse_response,
+};
 
 /// The model an `agent` call's credential is picked by (upstream's
 /// `interactionsAgentAuthSelectionModel`).
@@ -87,6 +89,7 @@ pub(crate) async fn interactions(
     let limit = settings.config.body_limit;
     let nonstream_keepalive = settings.config.nonstream_keepalive;
     let keepalive = settings.config.streaming.keepalive;
+    let pre_ft = pre_first_token_interval(&settings.config.streaming);
     drop(settings);
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,
@@ -100,19 +103,31 @@ pub(crate) async fn interactions(
     let call = new_call(&state, &client, &target, &model, raw);
 
     if target.stream {
-        let started = match call {
-            Ok(call) => call.stream().await,
-            Err(error) => Started::failed(error),
+        let first = async move {
+            let started = match call {
+                Ok(call) => call.stream().await,
+                Err(error) => Started::failed(error),
+            };
+            (started.headers, peek(started.items).await)
         };
-        return match peek(started.items).await {
-            Peeked::Failed(error) => openai_error_response(&error, passthrough),
-            Peeked::Closed => sse_response(&started.headers, Body::empty()),
-            Peeked::First(first, rest) => {
-                let items = stream::iter([Ok(first)]).chain(rest).boxed();
-                let body = forward(items, InteractionsWriter, keepalive);
-                sse_response(&started.headers, body)
-            }
-        };
+        return pre_first_token(
+            pre_ft,
+            first,
+            move |(headers, peeked), committed| match peeked {
+                Peeked::Failed(error) if committed => {
+                    let items = stream::iter([Err(error)]).boxed();
+                    sse_response(&headers, forward(items, InteractionsWriter, None))
+                }
+                Peeked::Failed(error) => openai_error_response(&error, passthrough),
+                Peeked::Closed => sse_response(&headers, Body::empty()),
+                Peeked::First(first, rest) => {
+                    let items = stream::iter([Ok(first)]).chain(rest).boxed();
+                    let body = forward(items, InteractionsWriter, keepalive);
+                    sse_response(&headers, body)
+                }
+            },
+        )
+        .await;
     }
 
     let call = match call {
