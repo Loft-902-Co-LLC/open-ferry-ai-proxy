@@ -7,7 +7,7 @@
 // codexPrepareDirectOpenAIImageEditPayload,
 // codexRewriteOpenAIImageEditMultipartToJSON,
 // codexSetOpenAIImageEditFormValues, codexOpenAIImageEditFormJSONValue,
-// codexOpenAIImageEditFormJSONPath, codexDirectOpenAIImageModel,
+// codexOpenAIImageEditFormJSONPath, codexDirectOpenAIImageRouteModel,
 // codexOpenAIImageBaseModel, codexIsDirectOpenAIImageModel,
 // prepareCodexOpenAIImageBody, codexPrepareOpenAIImageRequest,
 // codexPrepareOpenAIImageGenerationJSON, codexPrepareOpenAIImageEditJSON,
@@ -28,8 +28,8 @@
 //! A call for one of the Image API's models (`gpt-image-1.5`,
 //! `gpt-image-2`, and `gpt-image-2.5` with its `-flare` and `-sunburst`
 //! variants, named by the requested model metadata, body's `model` or else
-//! the call's, read without
-//! a thinking suffix or a `provider/` prefix and in any case) goes to
+//! the call's, read without a thinking suffix or a `provider/` prefix and
+//! in any case) goes to
 //! `<base>/images/generations` or `<base>/images/edits` with the body as
 //! the client sent it: the resolved upstream model set (configured names
 //! keep their case and prefix), `"stream": true` for a stream and no
@@ -82,7 +82,7 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::{HeaderValue, header};
 use open_ferry_core::auth::Auth;
-use open_ferry_core::config::{CodexKey, Config};
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
     ChunkStream, ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
 };
@@ -94,6 +94,7 @@ use serde_json::{Map, Value, json};
 
 use super::{CodexExecutor, MAX_ERROR_BODY};
 use crate::codex::client::{error_chain, read_body, read_body_prefix};
+use crate::codex::compat::codex_key_config;
 use crate::codex::input_ids::sanitize_input_item_ids;
 use crate::codex::request::{
     base_model, build_headers, credentials, endpoint, format_is, normalize_instructions,
@@ -180,7 +181,7 @@ fn image_base_model(model: &str) -> String {
 }
 
 /// The Image API model and endpoint of a call for one
-/// (`codexDirectOpenAIImageModel` and `codexDirectOpenAIImageEndpoint`).
+/// (`codexDirectOpenAIImageRouteModel` and `codexDirectOpenAIImageEndpoint`).
 fn direct(request: &Request, options: &Options) -> Option<(String, &'static str)> {
     let named = exact::from_slice(&request.payload)
         .map(|payload| str_at(&payload, "model"))
@@ -237,51 +238,6 @@ fn direct_upstream_model(
     } else {
         model.to_owned()
     }
-}
-
-/// `resolveCodexKeyConfig`, matching the credential's key and base URL.
-fn codex_key_config<'c>(config: &'c Config, auth: &Auth) -> Option<&'c CodexKey> {
-    let entries = &config.codex_api_key;
-    let (key, base) = (
-        auth.attribute("api_key").unwrap_or_default().trim(),
-        auth.attribute("base_url").unwrap_or_default().trim(),
-    );
-    if let Some(entry) = auth
-        .attribute("config_index")
-        .and_then(|index| index.trim().parse::<usize>().ok())
-        .and_then(|index| entries.get(index))
-    {
-        let (entry_key, entry_base) = (entry.api_key.trim(), entry.base_url.trim());
-        if (key.is_empty() || eq_fold(entry_key, key))
-            && (base.is_empty() || eq_fold(entry_base, base))
-        {
-            return Some(entry);
-        }
-    }
-    for entry in entries {
-        let (entry_key, entry_base) = (entry.api_key.trim(), entry.base_url.trim());
-        if !key.is_empty() && !base.is_empty() {
-            if eq_fold(entry_key, key) && eq_fold(entry_base, base) {
-                return Some(entry);
-            }
-            continue;
-        }
-        if !key.is_empty()
-            && eq_fold(entry_key, key)
-            && (entry_base.is_empty() || eq_fold(entry_base, base))
-        {
-            return Some(entry);
-        }
-        if key.is_empty() && !base.is_empty() && eq_fold(entry_base, base) {
-            return Some(entry);
-        }
-    }
-    if key.is_empty() {
-        return None;
-    }
-    entries
-        .iter()
-        .find(|entry| eq_fold(entry.api_key.trim(), key))
 }
 
 /// An error of the request itself, which upstream returns as a plain error.
@@ -1197,6 +1153,8 @@ fn tool_stream(state: ToolStream) -> ChunkStream {
 
 #[cfg(test)]
 mod tests {
+    use open_ferry_core::config::CodexKey;
+
     use super::*;
 
     /// `imageGenItem`: a minimal `image_generation_call` item.
@@ -1458,6 +1416,7 @@ mod tests {
             b"event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"usage\":{\"images\":1},\"b64_json\":\"BB==\"}\n\n"
         );
     }
+
     // TestCodexImageResolvedModelOnWire: the requested name selects the
     // endpoint, while the resolved name reaches the upstream unchanged.
     #[tokio::test]
@@ -1535,17 +1494,19 @@ mod tests {
                 for format in ["generation", "edit", "multipart"] {
                     for stream in [false, true] {
                         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-                        let app = axum::Router::new().fallback(move |uri: http::Uri, headers: http::HeaderMap, body: Bytes| {
-                        let tx = tx.clone();
-                        async move {
-                            tx.send((uri.path().to_owned(), headers, body)).await.unwrap();
-                            if stream {
-                                "event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"AA==\"}\n\n"
-                            } else {
-                                r#"{"created":1713833628,"data":[{"b64_json":"AA=="}]}"#
-                            }
-                        }
-                    });
+                        let app = axum::Router::new().fallback(
+                            move |uri: http::Uri, headers: http::HeaderMap, body: Bytes| {
+                                let tx = tx.clone();
+                                async move {
+                                    tx.send((uri.path().to_owned(), headers, body)).await.unwrap();
+                                    if stream {
+                                        "event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"AA==\"}\n\n"
+                                    } else {
+                                        r#"{"created":1713833628,"data":[{"b64_json":"AA=="}]}"#
+                                    }
+                                }
+                            },
+                        );
                         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                         let url = format!("http://{}", listener.local_addr().unwrap());
                         let server =

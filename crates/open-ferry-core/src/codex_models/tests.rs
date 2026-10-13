@@ -1080,3 +1080,31 @@ fn synthesized_entries_get_compact_instructions_and_null_options() {
         })
     );
 }
+
+#[test]
+fn models_without_a_template_use_the_first_entry_when_gpt_5_5_is_absent() {
+    let mut raw: Value =
+        serde_json::from_slice(crate::registry::codex_client::EMBEDDED_CATALOG).unwrap();
+    raw["models"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| entry["slug"] != "gpt-5.5");
+    raw["models"][0]["supports_parallel_tool_calls"] = json!(true);
+    for entry in raw["models"].as_array_mut().unwrap().iter_mut().skip(1) {
+        entry["supports_parallel_tool_calls"] = json!(false);
+    }
+    let templates = CodexClientCatalog::from_json(raw.to_string().as_bytes()).unwrap();
+    let registry = ModelRegistry::new();
+    let builder = Builder {
+        catalog: &registry,
+        statics: StaticCatalog::current(),
+        providers_for_model: None,
+        apply_patch: None,
+        optimize_multi_agent_v2: false,
+        client_version: "",
+    };
+    let built = builder.build(&templates, &[model("third-party-model")]);
+    assert_eq!(built.as_array().unwrap().len(), 1);
+    assert_eq!(built[0]["slug"], "third-party-model");
+    assert_eq!(built[0]["supports_parallel_tool_calls"], true);
+}

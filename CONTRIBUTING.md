@@ -98,7 +98,7 @@ open-ferry downloads no model catalog. The catalogs it builds in are files in th
   - `priority`, an integer of 0 or more;
   - `supported_reasoning_levels`, a list that isn't empty, of objects each with an `effort` of its own, one of them the `default_reasoning_level`.
 
-  The `gpt-5.5` entry must stay: it is the template for the models the catalog doesn't list.
+  The first entry is the template for models the catalog doesn't list, unless `gpt-5.5` is present, in which case its entry is the template.
 - **Tests.** Run the checks above. `cargo test -p open-ferry-core registry` and `cargo test -p open-ferry-translate models` cover the catalogs: `the_embedded_catalog_loads` and `the_translators_catalog_matches_the_built_in_one` read the general catalog, and `embedded_catalog_is_valid` the Codex one, whose models it counts. Update the tests that count or name a model you add, change or remove.
 - **Parity.** Run `tools/parity` (see [UPSTREAM.md](UPSTREAM.md#checking-parity)). Its Go side reads the catalogs built into the upstream checkout, so suites that read a model's entry can differ on a model you changed: the thinking and translator suites, the Codex client list (`codex_models`) and multi-agent v2. Every `different` case must be one your change explains; list them in the pull request.
 - **UPSTREAM.md.** Once a built-in catalog differs from upstream's file, UPSTREAM.md must say how: which models were added, changed or removed, and why. It now calls both copies unchanged.

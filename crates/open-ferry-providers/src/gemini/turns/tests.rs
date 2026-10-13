@@ -213,3 +213,20 @@ fn trailing_function_response_media_gets_a_user_turn() {
         }
     }
 }
+
+#[test]
+fn trailing_function_response_accepts_object_parts() {
+    for key in ["inlineData", "inline_data", "fileData", "file_data", "text"] {
+        let mut body = json!({"contents":[{"role":"model","parts":[
+            {"functionResponse":{"name":"view_image","parts":{key:{"data":"AAAA"}}}}
+        ]}]});
+        let before = body.clone();
+        ensure_trailing_user(&mut body, "contents");
+        if key == "text" {
+            assert_eq!(body, before);
+        } else {
+            assert_eq!(body["contents"][0], before["contents"][0]);
+            assert_eq!(body["contents"][1], empty_user_turn());
+        }
+    }
+}

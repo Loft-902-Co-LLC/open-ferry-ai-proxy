@@ -8,8 +8,7 @@
 //! reasoning content), an `encrypted_content` that isn't a valid GPT
 //! reasoning signature is dropped (in compatibility mode, unless it is of a
 //! format no known provider uses, which the third-party model replays; Meta
-//! also keeps these foreign formats), and
-//! with `store` off, a reasoning item's
+//! also keeps these foreign formats). With `store` off, a reasoning item's
 //! `id` goes when it has no usable `encrypted_content`, since Codex would
 //! look the ID up and fail.
 //!
