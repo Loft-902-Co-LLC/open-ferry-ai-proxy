@@ -68,6 +68,7 @@ use chrono::{DateTime, Utc};
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 use open_ferry_core::auth::synthesizer::SynthesisContext;
+use open_ferry_core::auth::file_guard::FileGuard;
 use open_ferry_core::auth::synthesizer::file::synthesize_auth_file;
 use open_ferry_core::auth::{Auth, AuthStore, FileStore, Status, Timestamp};
 use open_ferry_core::config::save::sha256_hex;
@@ -371,11 +372,16 @@ struct AuthDir {
 
 impl AuthDir {
     fn new() -> Self {
+        Self::guarded(None)
+    }
+
+    /// [`AuthDir::new`], its store authorizing files with `guard`.
+    fn guarded(guard: Option<FileGuard>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let auths = dir.path().join("auths");
         std::fs::create_dir(&auths).unwrap();
         Self {
-            store: Arc::new(FileStore::new(&auths)),
+            store: Arc::new(FileStore::new(&auths).with_file_guard(guard)),
             dir,
         }
     }

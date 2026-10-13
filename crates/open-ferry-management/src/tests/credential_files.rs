@@ -27,6 +27,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use http::{Method, StatusCode};
+use open_ferry_core::auth::file_guard::FileGuard;
 use serde_json::json;
 
 use super::{
@@ -410,6 +411,30 @@ async fn download_returns_file() {
         answer.header("content-disposition"),
         Some(r#"attachment; filename="download-user.json""#)
     );
+}
+
+// Not upstream's: a store whose guard refuses a credential file refuses its
+// download, and still serves the files it allows.
+#[tokio::test]
+async fn download_refuses_files_the_guard_refuses() {
+    let auth_dir = AuthDir::guarded(Some(FileGuard::new(|path| {
+        if path.file_name().is_some_and(|name| name == "refused.json") {
+            Err("untrusted owner".to_owned())
+        } else {
+            Ok(())
+        }
+    })));
+    auth_dir.write("refused.json", CODEX);
+    auth_dir.write("allowed.json", OTHER);
+    let api = Api::over(&auth_dir);
+
+    download(&api, "refused.json").await.assert(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        r#"{"error":"failed to read file: untrusted owner"}"#,
+    );
+    download(&api, "allowed.json")
+        .await
+        .assert(StatusCode::OK, OTHER);
 }
 
 // TestDownloadAuthFile_RejectsPathSeparators

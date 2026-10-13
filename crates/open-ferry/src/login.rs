@@ -163,7 +163,10 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
             "Codex"
         }
     );
-    let (outcome, code) = match credentials::save(&FileStore::new(auth_dir), &mut auth) {
+    let store = FileStore::new(auth_dir).with_file_guard(crate::scope::credential_file_guard(
+        crate::scope::runtime_probe(),
+    ));
+    let (outcome, code) = match credentials::save(&store, &mut auth) {
         Ok(path) => {
             if !path.is_empty() {
                 println!("Authentication saved to {path}");

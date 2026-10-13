@@ -204,7 +204,17 @@ async fn download(State(state): State<ManagementState>, RawQuery(raw): RawQuery)
         return StoreUnavailable.into_response();
     };
     let file = name.clone();
-    let read = run_blocking(move || read_unlinked(&files.file_path(&file)?)).await;
+    let read = run_blocking(move || {
+        let path = files.file_path(&file)?;
+        // Not upstream's: a privileged service reads only trusted files.
+        if let Some(guard) = files.file_guard() {
+            guard
+                .check_read(&path)
+                .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
+        }
+        read_unlinked(&path)
+    })
+    .await;
     let data = match read {
         Ok(data) => data,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
