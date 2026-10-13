@@ -122,10 +122,15 @@ fn open_capsule(content: &str) -> Result<Capsule, ExecError> {
         .map_err(|error| plain_error(format!("unmarshal compaction capsule: {error}")))
 }
 
+/// Whether the body may name a compaction type: spelled out, or with a letter
+/// written as a JSON escape. Every letter of "compaction" is U+0061 to U+0074,
+/// so an escape that can't spell one keeps the fast path.
 fn contains_compaction(raw: &[u8]) -> bool {
     raw.windows(b"compaction".len())
         .any(|window| window == b"compaction")
-        || raw.windows(2).any(|window| window == b"\\u")
+        || raw
+            .windows(b"\\u006".len())
+            .any(|window| window == b"\\u006" || window == b"\\u007")
 }
 
 fn expand_payload(raw: &Bytes) -> Result<Bytes, ExecError> {
@@ -521,6 +526,16 @@ mod tests {
         let expanded = expand_payload(&raw).unwrap();
         assert_eq!(expanded, raw);
         assert_eq!(expanded.as_ptr(), raw.as_ptr());
+    }
+
+    #[test]
+    fn escapes_that_cant_spell_compaction_keep_the_fast_path() {
+        let raw = Bytes::from_static(
+            b"{\"input\":[{\"type\":\"message\",\"content\":\"\\u001b[1m\\u003c\"}]}",
+        );
+        assert!(!contains_compaction(&raw));
+        assert!(!has_trigger(&raw));
+        assert_eq!(expand_payload(&raw).unwrap().as_ptr(), raw.as_ptr());
     }
 
     #[test]

@@ -482,9 +482,10 @@ fn errors_name_the_answer() {
 // `super::super::load`.)
 #[test]
 fn v8_example_is_valid() {
-    // v8.0.27 adds a Sign in with ChatGPT client identity setting. That
-    // provider and its impersonation setting aren't ported, so omit it
-    // from validation while keeping the fixture identical to upstream.
+    // v8.0.27 adds `signin-with-chatgpt-identifier`, which the v8 schema
+    // doesn't accept yet, so omit it from validation while keeping the
+    // fixture identical to upstream. TODO: the Sign in with ChatGPT port
+    // keeps the key for configuration compatibility; drop this then.
     let example = include_str!("../testdata/config.example.yaml")
         .replace("\r\n", "\n")
         .replace(
