@@ -39,6 +39,7 @@
 //! Upstream can't install itself as a service, and has no `service` (see
 //! [`flags`]).
 
+pub(crate) mod hint;
 mod launchd;
 #[cfg(windows)]
 mod run;
@@ -55,9 +56,14 @@ pub(crate) use windows::{SERVICE_RUNNING, service_state_number, user_identity};
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::{ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use open_ferry_core::config::{Config, DEFAULT_AUTH_DIR};
+use open_ferry_supervisor::client::{self, StopOutcome};
+use open_ferry_supervisor::endpoint::{Identity, ServiceKind};
+use open_ferry_supervisor::timings::STOP_BUDGET;
 
 use crate::flags::{self, FlagError, Kind};
 use crate::installed;
@@ -633,6 +639,12 @@ pub(crate) trait System {
     fn create_dir_all(&mut self, path: &str) -> io::Result<()>;
     fn write(&mut self, path: &str, data: &[u8]) -> io::Result<()>;
     fn remove(&mut self, path: &str) -> io::Result<()>;
+    /// Writes `data` to `path` through a temporary file beside it, so a
+    /// reader finds the old file or the new one, never part of one.
+    fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()>;
+    /// Asks the user's supervisor of the data directory `data_dir` to stop,
+    /// and waits up to `budget` for it to end (`client::stop`).
+    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome;
 }
 
 /// A command's output as text. Windows tools such as `schtasks /xml` may
@@ -772,6 +784,30 @@ impl System for Host {
     fn remove(&mut self, path: &str) -> io::Result<()> {
         std::fs::remove_file(path)
     }
+
+    fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        open_ferry_update::journal::atomic_write(Path::new(path), data, true)
+    }
+
+    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
+        let identity = match Identity::current(ServiceKind::User) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return StopOutcome::Refused(format!("failed to find this user: {error}"));
+            }
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return StopOutcome::Refused(format!("failed to start an async runtime: {error}"));
+            }
+        };
+        let deadline = Instant::now() + budget;
+        runtime.block_on(client::stop(Path::new(data_dir), &identity, deadline))
+    }
 }
 
 /// Runs `cmd`, and fails unless it succeeds.
@@ -802,6 +838,19 @@ pub(crate) enum Step {
     Run(Cmd),
     /// Runs a command whose failure is reported, and doesn't stop the rest.
     TryRun(Cmd),
+    /// Writes a record, as UTF-8, through [`System::write_atomic`].
+    #[expect(dead_code, reason = "2c-2's service install writes service.json")]
+    WriteAtomic {
+        path: String,
+        text: String,
+    },
+    /// Asks the supervisor of a data directory to stop, waiting up to
+    /// `STOP_BUDGET`, before the service manager ends the service. How that
+    /// went is said, and doesn't stop the rest.
+    #[expect(dead_code, reason = "2c-2's service uninstall stops a supervised task")]
+    StopSupervisor {
+        data_dir: String,
+    },
 }
 
 /// What `install` or `uninstall` does.
@@ -900,6 +949,27 @@ fn apply_step(system: &mut dyn System, step: &Step, out: &mut dyn Write) -> Resu
                 format_args!("Failed to run `{cmd}`: {error}; going on"),
             ),
         },
+        Step::WriteAtomic { path, text } => {
+            system
+                .write_atomic(path, text.as_bytes())
+                .map_err(|error| format!("failed to write {path}: {error}"))?;
+            say(out, format_args!("Wrote {path}"));
+        }
+        Step::StopSupervisor { data_dir } => match system.stop_supervisor(data_dir, STOP_BUDGET) {
+            StopOutcome::Stopped => say(out, format_args!("Stopped the supervisor")),
+            StopOutcome::NotRunning => say(out, format_args!("No supervisor was running")),
+            StopOutcome::TimedOut(seen) => say(
+                out,
+                format_args!(
+                    "The supervisor didn't stop within {} s ({seen}); going on",
+                    STOP_BUDGET.as_secs()
+                ),
+            ),
+            StopOutcome::Refused(why) => say(
+                out,
+                format_args!("Failed to ask the supervisor to stop ({why}); going on"),
+            ),
+        },
     }
     Ok(())
 }
@@ -922,6 +992,19 @@ pub(crate) fn describe(plan: &Plan, out: &mut dyn Write) {
             }
             Step::Remove(path) => say(out, format_args!("Would remove {path}")),
             Step::Run(cmd) | Step::TryRun(cmd) => say(out, format_args!("Would run: {cmd}")),
+            Step::WriteAtomic { path, text } => {
+                say(out, format_args!("Would write {path}:"));
+                for line in text.lines() {
+                    say(out, format_args!("    {line}"));
+                }
+            }
+            Step::StopSupervisor { data_dir } => say(
+                out,
+                format_args!(
+                    "Would ask the supervisor of {data_dir} to stop, and wait up to {} s",
+                    STOP_BUDGET.as_secs()
+                ),
+            ),
         }
     }
     for path in &plan.cleanup {

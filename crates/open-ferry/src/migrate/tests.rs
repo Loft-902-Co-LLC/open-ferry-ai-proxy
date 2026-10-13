@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone as _, Utc};
+use open_ferry_supervisor::client::StopOutcome;
 use serde_json::Value;
 
 use super::discover::file_name;
@@ -566,6 +567,19 @@ impl System for Fake {
         self.need_parent(path)?;
         self.files.insert(path.to_owned(), data.to_vec());
         Ok(())
+    }
+
+    fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.events.push(format!("write_atomic {path}"));
+        self.need_parent(path)?;
+        self.files.insert(path.to_owned(), data.to_vec());
+        Ok(())
+    }
+
+    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
+        self.events
+            .push(format!("stop_supervisor {data_dir} {}s", budget.as_secs()));
+        StopOutcome::NotRunning
     }
 
     fn remove(&mut self, path: &str) -> io::Result<()> {

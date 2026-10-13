@@ -3,6 +3,7 @@
 //! This crate does not run a switch, parse server config, or contact providers.
 //! Phase two supplies the state machine and worker lifecycle.
 
+pub mod client;
 pub mod clock;
 pub mod control;
 pub mod core;

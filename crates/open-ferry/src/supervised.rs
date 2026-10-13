@@ -462,13 +462,23 @@ fn test_endpoint(value: &str) -> Result<Location, String> {
     }
 }
 
+/// The data directory `-data-dir` pins, else the user's
+/// (`DataDir::for_this_user`).
+fn data_dir(flags: &Flags) -> Result<DataDir, String> {
+    if flags.data_dir.is_empty() {
+        DataDir::for_this_user().map_err(|error| error.to_string())
+    } else {
+        Ok(DataDir::at(PathBuf::from(&flags.data_dir)))
+    }
+}
+
 /// Where the data directory and the endpoint are: the real ones, or in a
 /// test build the ones the test flags name.
 fn locate(flags: &Flags) -> Result<(DataDir, Option<Location>), String> {
     #[cfg(feature = "blue-green-test")]
     {
         let data = if flags.test_data_dir.is_empty() {
-            DataDir::for_this_user().map_err(|error| error.to_string())?
+            data_dir(flags)?
         } else {
             DataDir::at(absolute(Path::new(&flags.test_data_dir)).map_err(|e| e.to_string())?)
         };
@@ -481,11 +491,7 @@ fn locate(flags: &Flags) -> Result<(DataDir, Option<Location>), String> {
     }
     #[cfg(not(feature = "blue-green-test"))]
     {
-        let _ = flags;
-        Ok((
-            DataDir::for_this_user().map_err(|error| error.to_string())?,
-            None,
-        ))
+        Ok((data_dir(flags)?, None))
     }
 }
 
