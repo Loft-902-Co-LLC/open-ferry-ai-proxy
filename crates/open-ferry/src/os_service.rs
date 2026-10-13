@@ -113,28 +113,36 @@ where
     if request.action == Action::Run {
         return run_for_service_manager(&request);
     }
-    let context = match Context::host() {
-        Ok(context) => context,
-        Err(message) => {
-            eprintln!("{NAME}: {message}");
+    let platform = match Platform::HOST {
+        Some(platform) => platform,
+        None => {
+            eprintln!("service supports Linux, macOS and Windows only");
             return ExitCode::FAILURE;
         }
     };
-    let updating = if request.action == Action::Install {
-        if request.system {
-            Updating::assess_system(
-                &scope::Host,
-                &update_install::RealSystem::default(),
-                &context,
-            )
-        } else {
-            Updating::assess(&context)
-        }
-    } else {
-        Updating::plain(data_dir(&context), "no install was requested")
-    };
     let mut out = io::stdout().lock();
-    match execute(&mut Host, &context, &request, &updating, &mut out) {
+    match run(
+        &mut Host,
+        platform,
+        &request,
+        Context::host,
+        |context, request| {
+            if request.action == Action::Install {
+                if request.system {
+                    Updating::assess_system(
+                        &scope::Host,
+                        &update_install::RealSystem::default(),
+                        context,
+                    )
+                } else {
+                    Updating::assess(context)
+                }
+            } else {
+                Updating::plain(data_dir(context), "no install was requested")
+            }
+        },
+        &mut out,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             let _ = out.flush();
@@ -142,6 +150,21 @@ where
             ExitCode::FAILURE
         }
     }
+}
+
+/// Decides an install refusal before discovering paths or assessing receipts.
+fn run(
+    system: &mut dyn System,
+    platform: Platform,
+    request: &Request,
+    context: impl FnOnce() -> Result<Context, String>,
+    updating: impl FnOnce(&Context, &Request) -> Updating,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    install_refusal(system, platform, request)?;
+    let context = context()?;
+    let updating = updating(&context, request);
+    execute(system, &context, request, &updating, out)
 }
 
 /// `open-ferry service run`, which only the service definitions start.
@@ -706,6 +729,12 @@ pub(crate) trait System {
     /// Runs `cmd` with its output shown, and gives its exit code.
     fn show(&mut self, cmd: &Cmd) -> io::Result<Option<i32>>;
     fn exists(&self, path: &str) -> bool;
+    fn privileged(&self) -> Result<bool, String> {
+        scope::Probe::privileged(&scope::Host)
+    }
+    fn is_dir(&self, path: &str) -> bool {
+        self.owner(path).is_ok_and(|owner| owner.dir)
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     /// `path` with every symbolic link resolved.
     fn real_path(&self, path: &str) -> io::Result<String>;
@@ -742,6 +771,130 @@ pub(crate) trait System {
     }
     /// Waits `time`, between looks at what a service manager says.
     fn pause(&mut self, time: Duration);
+}
+
+/// Refuses an unsafe install before context, receipts, configs or helpers.
+fn install_refusal(
+    system: &dyn System,
+    platform: Platform,
+    request: &Request,
+) -> Result<(), String> {
+    if request.action != Action::Install {
+        return Ok(());
+    }
+    if request.system {
+        if platform == Platform::MacOs {
+            return Err("open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root. Install a user service with `open-ferry service install` without -system.".to_owned());
+        }
+        return Ok(());
+    }
+    if system.privileged()? {
+        let reason = if platform == Platform::Windows {
+            "This terminal is elevated, so this would install a service with an administrator's rights for your account. Run it in a terminal not opened as administrator"
+        } else {
+            "You are root, so this would install a service for root. Run it as the user the service is for"
+        };
+        return Err(format!(
+            "{reason}, or add -system for a service of the whole machine."
+        ));
+    }
+    Ok(())
+}
+
+/// Checks trust and actual placement before credentials can be written.
+pub(crate) fn authorize_auth_dir_with(
+    platform: Platform,
+    root: &str,
+    path: &str,
+    state: &dyn Fn(&str) -> scope::State,
+    trusted: &dyn Fn(&str) -> Result<(), String>,
+    canonical: &dyn Fn(&str) -> io::Result<String>,
+) -> Result<(), String> {
+    let refuse = |why| {
+        format!(
+            "Refusing the auth directory {path}: {why}. Make it and every directory above it root's (on Windows, the administrators'), not writable by others, with no links, or set auth-dir to {}.",
+            platform.join(root, "auth")
+        )
+    };
+    if !platform.is_absolute(path)
+        || path
+            .split(|c| platform.is_separator(c))
+            .any(|part| part == "." || part == "..")
+    {
+        return Err(refuse(
+            "it isn't a full path without `.` or `..`".to_owned(),
+        ));
+    }
+    scope::check_auth_dir_placement(platform, root, path).map_err(|why| refuse(why.to_string()))?;
+    let mut existing = path.to_owned();
+    let mut missing = Vec::new();
+    loop {
+        match state(&existing) {
+            scope::State::Directory => break,
+            scope::State::Missing => {
+                let parent = platform
+                    .parent(&existing)
+                    .filter(|parent| parent != &existing)
+                    .ok_or_else(|| refuse("no existing ancestor could be found".to_owned()))?;
+                let name = existing
+                    .rsplit(|c| platform.is_separator(c))
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                missing.push(name);
+                existing = parent;
+            }
+            _ => return Err(refuse(format!("{existing} isn't a directory"))),
+        }
+    }
+    trusted(&existing).map_err(refuse)?;
+    let actual = canonical(&existing)
+        .map_err(|why| refuse(format!("failed to resolve {existing}: {why}")))?;
+    let mut actual = if platform == Platform::Windows {
+        plain_windows_path(actual)
+    } else {
+        actual
+    };
+    for part in missing.iter().rev() {
+        actual = platform.join(&actual, part);
+    }
+    scope::check_auth_dir_placement(platform, root, &actual).map_err(|why| refuse(why.to_string()))
+}
+
+/// Resolves native helpers without searching PATH or the current directory.
+fn helper_path(program: &str) -> io::Result<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+        }
+        let mut buffer = vec![0u16; 32768];
+        // SAFETY: the buffer is writable for the full length passed.
+        let length =
+            unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length >= buffer.len() {
+            return Err(io::Error::other("the system directory path is too long"));
+        }
+        use std::os::windows::ffi::OsStringExt as _;
+        Ok(std::path::PathBuf::from(OsString::from_wide(&buffer[..length])).join(program))
+    }
+    #[cfg(not(windows))]
+    {
+        ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+            .into_iter()
+            .map(|dir| Path::new(dir).join(program))
+            .find(|path| path.is_file())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no system helper {program} in /usr/sbin, /usr/bin, /sbin or /bin"),
+                )
+            })
+    }
 }
 
 /// A command's output as text. Windows tools such as `schtasks /xml` may
@@ -818,8 +971,12 @@ const MAX_READ: u64 = 8 * 1024 * 1024;
 pub(crate) struct Host;
 
 impl System for Host {
+    fn is_dir(&self, path: &str) -> bool {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+    }
+
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
-        let output = std::process::Command::new(cmd.program)
+        let output = std::process::Command::new(helper_path(cmd.program)?)
             .args(&cmd.args)
             .stdin(Stdio::null())
             .output()?;
@@ -831,7 +988,7 @@ impl System for Host {
     }
 
     fn show(&mut self, cmd: &Cmd) -> io::Result<Option<i32>> {
-        let status = std::process::Command::new(cmd.program)
+        let status = std::process::Command::new(helper_path(cmd.program)?)
             .args(&cmd.args)
             .stdin(Stdio::null())
             .status()?;
@@ -1377,7 +1534,7 @@ impl Account {
                 Ok(Account::Unix { uid })
             }
             Platform::Windows => Ok(Account::Windows {
-                elevated: windows::elevated(system)?,
+                elevated: system.privileged()?,
             }),
         }
     }
@@ -1590,6 +1747,7 @@ fn execute(
     updating: &Updating,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    install_refusal(system, context.platform, request)?;
     let target = Target::new(context.platform, request.system);
     match request.action {
         Action::Install => install(system, context, target, request, updating, out),
@@ -1723,6 +1881,19 @@ pub(crate) fn prepare_install_with(
     dry_run: bool,
     updating: &Updating,
 ) -> Result<Prepared, String> {
+    install_refusal(
+        system,
+        context.platform,
+        &Request {
+            action: Action::Install,
+            system: target.system(),
+            dry_run,
+            config: Some(config.to_owned()),
+            dir: None,
+            supervise: false,
+            data_dir: None,
+        },
+    )?;
     let platform = context.platform;
     let config = config.to_owned();
     check_path(platform, "The open-ferry binary's path", &context.exe)?;
@@ -1741,20 +1912,6 @@ pub(crate) fn prepare_install_with(
         target.flag(),
         platform.quote(&config)
     );
-    if let Account::Unix { uid: 0 } = account
-        && !target.system()
-    {
-        return Err(format!(
-            "You are root, so this would install a service for root. Run it as the user the service is for, or add -system for a service of the whole machine:\n  {command}"
-        ));
-    }
-    if let Account::Windows { elevated: true } = account
-        && !target.system()
-    {
-        return Err(format!(
-            "This terminal is elevated, so this would install a service with an administrator's rights for your account. Run it in a terminal not opened as administrator, or add -system for a service of the whole machine:\n  {command}"
-        ));
-    }
     if target.system() && !account.privileged() && !dry_run {
         return Err(needs_admin(platform, "Installing", &command));
     }
@@ -1806,12 +1963,29 @@ pub(crate) fn prepare_install_with(
         .map_err(|error| format!("The config at {config} doesn't load: {error}"))?;
     if target.system() {
         check_auth_dir(platform, &loaded)?;
-        if platform != Platform::MacOs
-            && let Some(root) = system.machine_root(platform)?
-        {
-            let auth_dir = platform.absolute(&definition.dir, &loaded.auth_dir)?;
-            scope::check_auth_dir_placement(platform, &root, &auth_dir)
-                .map_err(|refusal| refusal.to_string())?;
+        if let Some(root) = system.machine_root(platform)? {
+            let auth_dir = &loaded.auth_dir;
+            let auth_dir = if platform.is_absolute(auth_dir) {
+                auth_dir.to_owned()
+            } else {
+                format!("{}{}{auth_dir}", definition.dir, platform.separator())
+            };
+            authorize_auth_dir_with(
+                platform,
+                &root,
+                &auth_dir,
+                &|path| {
+                    if !system.exists(path) {
+                        scope::State::Missing
+                    } else if system.is_dir(path) {
+                        scope::State::Directory
+                    } else {
+                        scope::State::File
+                    }
+                },
+                &|path| system.trusted_dir(path),
+                &|path| system.real_path(path),
+            )?;
         }
     }
     if target.installed(system, context)? {

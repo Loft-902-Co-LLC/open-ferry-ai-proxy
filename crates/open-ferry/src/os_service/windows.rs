@@ -46,23 +46,6 @@ pub(super) const LOG_FILE: &str = "service.log";
 /// (`ERROR_SERVICE_DOES_NOT_EXIST`).
 pub(super) const SERVICE_DOES_NOT_EXIST: i32 = 1060;
 
-/// The SIDs of the integrity levels an administrator's elevated process
-/// has: high, and system.
-const ELEVATED_LEVELS: [&str; 2] = ["S-1-16-12288", "S-1-16-16384"];
-
-/// Whether this process runs elevated, as an administrator.
-pub(super) fn elevated(system: &mut dyn System) -> Result<bool, String> {
-    let output = run_checked(
-        system,
-        &Cmd::new("whoami.exe", &["/groups", "/fo", "csv", "/nh"]),
-    )?;
-    Ok(output.stdout.lines().any(|line| {
-        line.split(',')
-            .map(|field| field.trim().trim_matches('"'))
-            .any(|field| ELEVATED_LEVELS.contains(&field))
-    }))
-}
-
 /// The SID of the user running this, which the task runs as.
 pub(super) fn user_sid(system: &mut dyn System) -> Result<String, String> {
     user_identity(system).map(|(_, sid)| sid)

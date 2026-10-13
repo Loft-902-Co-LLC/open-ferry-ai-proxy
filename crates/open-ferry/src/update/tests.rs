@@ -1470,3 +1470,35 @@ fn trusted_and_unprivileged_configs_still_load_and_change_mode() {
         assert_eq!(Config::load(&path).unwrap().self_update.mode, "off");
     }
 }
+
+#[test]
+fn privileged_config_flags_preserve_dot_components_for_authorization() {
+    use crate::os_service::Platform;
+    for privileged in [false, true] {
+        let platform = Platform::HOST.unwrap();
+        let mut probe = scope_probe::Fake::new(platform, privileged);
+        let account = scope::Probe::account_dir(&probe).unwrap();
+        probe.dir(&account);
+        let home = scope::lookup(&probe, "open-ferry").unwrap();
+        let work = Path::new(if cfg!(windows) {
+            r"C:\trusted"
+        } else {
+            "/trusted"
+        });
+        for flag in ["link/../config.yaml", "./config.yaml"] {
+            let path = command_config(&probe, &home, Request::Check, flag, work, None).unwrap();
+            if privileged {
+                assert_eq!(path, work.join(flag));
+                assert!(
+                    scope::authorize_file(&probe, &path)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("without `.` or `..`")
+                );
+            } else {
+                assert_eq!(path, open_ferry_core::auth::path::clean(&work.join(flag)));
+                assert!(scope::authorize_file(&probe, &path).unwrap());
+            }
+        }
+    }
+}

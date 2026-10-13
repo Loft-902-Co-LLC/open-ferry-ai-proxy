@@ -283,6 +283,16 @@ fn init_scoped(
         scope::provision(probe).map_err(|refusal| refusal.to_string())?;
     }
     let auth_dir = scope::machine_auth_dir(probe).map_err(|refusal| refusal.to_string())?;
+    if let Some(root) = scope::machine_root(probe)? {
+        crate::os_service::authorize_auth_dir_with(
+            probe.platform(),
+            &root,
+            &auth_dir,
+            &|path| probe.state(path),
+            &|path| probe.trusted_dir(path),
+            &|path| probe.canonical(path),
+        )?;
+    }
     if fs::symlink_metadata(path).is_ok() {
         return Err(format!(
             "{} already exists; init -system leaves an existing config and its credentials alone",
@@ -593,6 +603,7 @@ mod tests {
         privileged: Result<bool, String>,
         state: scope::State,
         trust: Result<(), String>,
+        auth_trust: Result<(), String>,
         program_data: String,
         created: Vec<String>,
         create_error: Option<io::ErrorKind>,
@@ -605,6 +616,7 @@ mod tests {
                 privileged: Ok(true),
                 state: scope::State::Directory,
                 trust: Ok(()),
+                auth_trust: Ok(()),
                 program_data: r"C:\ProgramData".into(),
                 created: Vec::new(),
                 create_error: None,
@@ -628,7 +640,10 @@ mod tests {
         fn entries(&self, _dir: &str, _limit: usize) -> io::Result<Vec<String>> {
             Ok(Vec::new())
         }
-        fn trusted_dir(&self, _path: &str) -> Result<(), String> {
+        fn trusted_dir(&self, path: &str) -> Result<(), String> {
+            if path.ends_with("auth") {
+                return self.auth_trust.clone();
+            }
             self.trust.clone()
         }
         fn account_dir(&self) -> Result<String, String> {
@@ -644,8 +659,8 @@ mod tests {
         fn receipt(&self, _path: &str) -> Result<Option<Receipt>, ReceiptError> {
             panic!("init does not read receipts")
         }
-        fn canonical(&self, _path: &str) -> io::Result<String> {
-            panic!("init does not resolve the installed binary")
+        fn canonical(&self, path: &str) -> io::Result<String> {
+            Ok(path.to_owned())
         }
         fn create_machine_dir(&mut self, path: &str) -> io::Result<()> {
             if let Some(error) = self.create_error {
@@ -683,6 +698,26 @@ mod tests {
                 scope::check_auth_dir_placement(platform, &root, &config.auth_dir),
                 Ok(())
             );
+        }
+    }
+
+    #[test]
+    fn system_init_checks_auth_directory_trust_before_writing_the_config() {
+        for platform in [Platform::Linux, Platform::Windows] {
+            let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
+            fs::create_dir_all(&scratch).unwrap();
+            let dir = tempfile::tempdir_in(scratch).unwrap();
+            let path = dir.path().join("config.yaml");
+            let mut fake = Fake::new(platform);
+            fake.auth_trust = Err("the auth directory is writable by another account".to_owned());
+            let error =
+                match init_scoped(&path, &listen(DEFAULT_HOST, None), false, true, &mut fake) {
+                    Ok(_) => panic!("an untrusted auth directory must refuse"),
+                    Err(error) => error,
+                };
+            assert!(error.contains("Refusing the auth directory"));
+            assert!(error.contains("set auth-dir"));
+            assert!(!path.exists());
         }
     }
 
