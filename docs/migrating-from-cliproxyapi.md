@@ -108,6 +108,8 @@ The auth directory and log mounts stay as they are, as do `CLI_PROXY_CONFIG_PATH
 
 ## Config and auth directory
 
+`oauth.providers.codex.signin-with-chatgpt-identifier` (legacy `codex.signin-with-chatgpt-identifier`) is accepted for configuration compatibility only. Its trimmed value is preserved on save and included in config diffs, but never used for requests: open-ferry always identifies itself as `open-ferry`. For the Sign in with ChatGPT binding flow, see [the CLI documentation](cli.md).
+
 **What stays the same:**
 - **Both config layouts load:** the legacy one and the v8 one. Changes to the config or the auth directory are picked up without a restart, as before.
 - **The auth directory** is the config's `auth-dir`, by default `~/.cli-proxy-api`, with the same credential files.

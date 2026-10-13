@@ -585,6 +585,9 @@ pub struct CodexConfig {
     /// upstream account and model per socket; accepted input is never
     /// replayed. Off by default.
     pub response_steering: bool,
+    /// Retained for configuration compatibility only. Never used for requests;
+    /// open-ferry always names itself as open-ferry, with no identity accessor.
+    pub signin_with_chatgpt_identifier: String,
 }
 
 impl CodexConfig {

@@ -190,6 +190,11 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         old.codex.orphan_delegation_compatibility,
         new.codex.orphan_delegation_compatibility,
     );
+    changes.trimmed(
+        "codex.signin-with-chatgpt-identifier",
+        &old.codex.signin_with_chatgpt_identifier,
+        &new.codex.signin_with_chatgpt_identifier,
+    );
     changes.flag(
         "claude.tool-search",
         old.claude.tool_search,

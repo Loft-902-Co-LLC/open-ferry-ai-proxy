@@ -122,6 +122,16 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     sanitize_meta_keys(&mut config.meta_api_key);
     config.codex_header_defaults.beta_features =
         config.codex_header_defaults.beta_features.trim().to_owned();
+    config.codex.signin_with_chatgpt_identifier = config
+        .codex
+        .signin_with_chatgpt_identifier
+        .trim()
+        .to_owned();
+    if !config.codex.signin_with_chatgpt_identifier.is_empty() {
+        tracing::warn!(
+            "signin-with-chatgpt-identifier is retained for configuration compatibility; open-ferry always names itself as open-ferry."
+        );
+    }
     sanitize_claude_keys(&mut config.claude_api_key);
     sanitize_claude_cli(&mut config.claude_cli);
     validate_claude_cli(&config.claude_cli)?;

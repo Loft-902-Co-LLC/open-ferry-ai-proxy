@@ -871,6 +871,15 @@ oauth:
   #         - "context_length_exceeded"
   #       action: "stop"
 
+  # Codex OAuth provider settings.
+  # providers:
+  #   codex:
+  #     # Accepted for configuration compatibility only; never used for requests.
+  #     # open-ferry always identifies itself as open-ferry.
+  #     signin-with-chatgpt-identifier: "CLIProxyAPI"
+  #     # Default headers for Codex OAuth model requests.
+  #     # header-defaults: {}
+
 # Image and video behavior.
 multimedia:
   # disable-image-generation supports: false (default), true, "chat", or "passthrough".

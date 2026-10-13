@@ -223,7 +223,11 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ),
     (
         "oauth.providers.codex",
-        &["header-defaults", "live-media-relay"],
+        &[
+            "header-defaults",
+            "live-media-relay",
+            "signin-with-chatgpt-identifier",
+        ],
     ),
     (
         "oauth.providers.codex.header-defaults",

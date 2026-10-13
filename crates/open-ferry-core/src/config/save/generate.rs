@@ -366,6 +366,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                 )
                 .put("live-media-relay", live_media_relay())
                 .put("response-steering", Value::Bool(codex.response_steering))
+                .omit_empty(
+                    "signin-with-chatgpt-identifier",
+                    s(&codex.signin_with_chatgpt_identifier),
+                )
                 .done(),
         )
         .put(

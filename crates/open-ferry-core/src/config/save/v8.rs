@@ -532,6 +532,11 @@ pub(crate) fn restore_v8_layout(
     original: &[u8],
     cfg: &Config,
 ) -> Result<(), SaveError> {
+    // Optional compatibility text must also disappear when an existing
+    // value is cleared, rather than survive the comment-preserving merge.
+    if cfg.codex.signin_with_chatgpt_identifier.is_empty() {
+        delete_yaml_path(root, "codex.signin-with-chatgpt-identifier");
+    }
     let upstreams_map =
         yaml_path(layout, "api-keys").is_some_and(|keys| keys.kind == Kind::Mapping);
     for &(old, current) in V8_PATHS {
