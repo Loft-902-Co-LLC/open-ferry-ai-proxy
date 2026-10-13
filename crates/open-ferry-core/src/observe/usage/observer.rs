@@ -44,6 +44,10 @@ pub struct UsageEvent {
     pub credential: Option<EventCredential>,
     /// The key the client authenticated with, empty for none.
     pub client_key: ClientKey,
+    /// The client authentication provider, empty when unknown.
+    pub access_provider: String,
+    /// Whether the client key was authenticated by a built-in provider.
+    pub is_native_key: bool,
     /// The client asked for a stream.
     pub stream: bool,
     /// The call failed.

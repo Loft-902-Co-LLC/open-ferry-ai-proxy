@@ -34,7 +34,7 @@ fn column<T: rusqlite::types::FromSql>(connection: &Connection, sql: &str) -> Ve
         .unwrap()
 }
 
-/// Not upstream's: a new ledger has the schema at version 1, the default
+/// Not upstream's: a new ledger has the schema at version 2, the default
 /// settings and a secret of its own, all kept when it is opened again.
 #[test]
 fn a_new_ledger_has_the_schema_and_its_defaults() {
@@ -44,7 +44,7 @@ fn a_new_ledger_has_the_schema_and_its_defaults() {
 
     assert_eq!(
         column::<i64>(&connection, "SELECT version FROM schema_version"),
-        [1]
+        [2]
     );
     let tables = column::<String>(
         &connection,
@@ -80,7 +80,7 @@ fn a_new_ledger_has_the_schema_and_its_defaults() {
     assert_eq!(client_key_secret(&again).unwrap(), secret);
     assert_eq!(
         column::<i64>(&again, "SELECT version FROM schema_version"),
-        [1]
+        [2]
     );
 }
 
@@ -94,18 +94,18 @@ fn a_newer_schema_is_left_alone() {
     newer
         .execute_batch(
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
-             INSERT INTO schema_version (version) VALUES (2);
+             INSERT INTO schema_version (version) VALUES (3);
              CREATE TABLE future (x INTEGER);",
         )
         .unwrap();
     drop(newer);
 
     let error = schema::open(&path).unwrap_err();
-    assert!(error.contains("version 2"), "{error}");
+    assert!(error.contains("version 3"), "{error}");
 
     let ledger = Ledger::start(dir.path(), &usage(true));
     let reason = ledger.unavailable_reason().unwrap();
-    assert!(reason.contains("version 2"), "{reason}");
+    assert!(reason.contains("version 3"), "{reason}");
     assert!(!ledger.recording());
     assert_eq!(ledger.file(), None);
     ledger.shutdown();
@@ -113,7 +113,7 @@ fn a_newer_schema_is_left_alone() {
     let check = Connection::open(&path).unwrap();
     assert_eq!(
         column::<i64>(&check, "SELECT version FROM schema_version"),
-        [2]
+        [3]
     );
     assert_eq!(
         column::<String>(
@@ -173,7 +173,7 @@ fn a_new_ledger_gets_the_reader_floor() {
     assert_eq!(client_key_secret(&again).unwrap(), secret);
     assert_eq!(
         column::<i64>(&again, "SELECT version FROM schema_version"),
-        [1]
+        [2]
     );
     assert_eq!(
         column::<i64>(
@@ -219,27 +219,27 @@ fn a_newer_ledger_opens_only_when_its_floor_allows() {
     let dir = tempfile::tempdir().unwrap();
 
     let readable = dir.path().join("readable.db");
-    newer_ledger(&readable, 2, Some("1"));
+    newer_ledger(&readable, 3, Some("1"));
     let connection = schema::open(&readable).unwrap();
     assert_eq!(
         column::<i64>(&connection, "SELECT version FROM schema_version"),
-        [2]
+        [3]
     );
     assert_eq!(floor(&connection).as_deref(), Some("1"));
     drop(connection);
 
     let unreadable = dir.path().join("unreadable.db");
-    newer_ledger(&unreadable, 2, Some("2"));
+    newer_ledger(&unreadable, 3, Some("3"));
     let error = schema::open(&unreadable).unwrap_err();
-    assert!(error.contains("version 2"), "{error}");
+    assert!(error.contains("version 3"), "{error}");
 
     let unmarked = dir.path().join("unmarked.db");
-    newer_ledger(&unmarked, 2, None);
+    newer_ledger(&unmarked, 3, None);
     let error = schema::open(&unmarked).unwrap_err();
-    assert!(error.contains("version 2"), "{error}");
+    assert!(error.contains("version 3"), "{error}");
 
     let garbled = dir.path().join("garbled.db");
-    newer_ledger(&garbled, 2, Some("soon"));
+    newer_ledger(&garbled, 3, Some("soon"));
     assert!(schema::open(&garbled).is_err());
 }
 
@@ -621,4 +621,105 @@ fn no_client_key_is_kept() {
     for window in KEY.as_bytes().windows(8) {
         assert!(!contains(window), "{}", String::from_utf8_lossy(window));
     }
+}
+
+#[test]
+fn authentication_metadata_is_written_and_queried_without_full_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut connection = schema::open(&dir.path().join(LEDGER_FILE)).unwrap();
+    let secret = client_key_secret(&connection).unwrap();
+    let usage = usage(true);
+    let (receiver, _observation) = usage.observe();
+    for (provider, native) in [("config-inline", true), ("", false)] {
+        use open_ferry_core::auth::Auth;
+        use open_ferry_core::exec::{Format, Options, Request};
+        use open_ferry_core::observe::{Outcome, RequestContext, SelectedAuth};
+        use std::sync::Arc;
+
+        let context = Arc::new(RequestContext::new(
+            http::Method::POST,
+            "/v1/chat/completions".to_owned(),
+        ));
+        context.set_client_key("sk-client-test-secret-1234");
+        context.set_access_provider(provider);
+        context.set_is_native_key(native);
+        context.select(SelectedAuth::new(Arc::new(Auth {
+            id: "test-upstream".to_owned(),
+            provider: "codex".to_owned(),
+            ..Auth::default()
+        })));
+        let request = Request {
+            model: "gpt-5".to_owned(),
+            payload: Default::default(),
+        };
+        let tap = usage
+            .tap(&context, &request, &Options::new(Format::OPENAI))
+            .unwrap();
+        tap.finish(Outcome::Completed);
+        let record = receiver.try_recv().unwrap();
+        insert(&mut connection, &[record], &secret).unwrap();
+    }
+    let (rows, _) = super::query::list_requests(
+        &connection,
+        &super::query::Filter {
+            to_ms: i64::MAX,
+            ..super::query::Filter::default()
+        },
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].access_provider, "");
+    assert!(!rows[0].is_native_key);
+    assert_eq!(rows[1].access_provider, "config-inline");
+    assert!(rows[1].is_native_key);
+    let json = serde_json::to_string(&rows).unwrap();
+    assert!(json.contains("config-inline"));
+    assert!(!json.contains("sk-client-test-secret-1234"));
+}
+
+#[test]
+fn version_one_rows_migrate_with_unknown_authentication_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(LEDGER_FILE);
+    let mut connection = schema::open(&path).unwrap();
+    let secret = client_key_secret(&connection).unwrap();
+    insert(
+        &mut connection,
+        &[event("2026-10-05T10:00:00Z", "codex", "gpt-5")],
+        &secret,
+    )
+    .unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE requests DROP COLUMN access_provider;
+         ALTER TABLE requests DROP COLUMN is_native_key;
+         UPDATE schema_version SET version = 1;",
+        )
+        .unwrap();
+    drop(connection);
+    let connection = schema::open(&path).unwrap();
+    assert_eq!(
+        column::<i64>(&connection, "SELECT version FROM schema_version"),
+        [2]
+    );
+    assert_eq!(floor(&connection).as_deref(), Some("1"));
+    assert_eq!(client_key_secret(&connection).unwrap(), secret);
+    let (rows, _) = super::query::list_requests(
+        &connection,
+        &super::query::Filter {
+            to_ms: i64::MAX,
+            ..super::query::Filter::default()
+        },
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].model, "gpt-5");
+    assert_eq!(rows[0].access_provider, "");
+    assert!(!rows[0].is_native_key);
+    drop(connection);
+    assert!(schema::open(&path).is_ok(), "migration is not repeated");
 }
