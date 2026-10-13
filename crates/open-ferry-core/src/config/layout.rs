@@ -302,7 +302,11 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ),
     (
         "requests.streaming",
-        &["bootstrap-retries", "keepalive-seconds"],
+        &[
+            "bootstrap-retries",
+            "keepalive-seconds",
+            "send-keepalive-before-ft",
+        ],
     ),
     (
         "routing",
@@ -312,6 +316,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "quota",
             "retry",
             "session-affinity",
+            "session-affinity-rebind-on",
             "session-affinity-subagents",
             "session-affinity-ttl",
             "strategy",
@@ -349,6 +354,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "discovery",
             "github-token",
             "host",
+            "max-request-body-bytes",
             "port",
             "tls",
             "trusted-proxies",
@@ -376,6 +382,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "disable-cloaking-model-list",
             "header-defaults",
             "model-level-cooling",
+            "tool-search",
         ],
     ),
     (

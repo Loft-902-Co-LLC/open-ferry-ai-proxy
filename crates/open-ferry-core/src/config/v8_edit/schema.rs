@@ -76,7 +76,10 @@ static CONFIG_CLAUDE_CODE_CONFIG: Type = Type {
 
 static CONFIG_CLAUDE_CONFIG: Type = Type {
     name: "config.ClaudeConfig",
-    fields: &[("model-level-cooling", Field::Leaf)],
+    fields: &[
+        ("model-level-cooling", Field::Leaf),
+        ("tool-search", Field::Leaf),
+    ],
 };
 
 static CONFIG_CLAUDE_HEADER_DEFAULTS: Type = Type {
@@ -105,6 +108,7 @@ static CONFIG_CLAUDE_KEY: Type = Type {
         ("fingerprint-profile", Field::Leaf),
         ("headers", Field::Leaf),
         ("models", Field::List(&CONFIG_CLAUDE_MODEL)),
+        ("native-tool-search", Field::Leaf),
         ("prefix", Field::Leaf),
         ("priority", Field::Leaf),
         ("proxy-url", Field::Leaf),
@@ -451,6 +455,7 @@ static CONFIG_ROUTING_CONFIG: Type = Type {
     fields: &[
         ("quota", Field::Struct(&CONFIG_ROUTING_QUOTA)),
         ("session-affinity", Field::Leaf),
+        ("session-affinity-rebind-on", Field::Leaf),
         ("session-affinity-subagents", Field::Leaf),
         ("session-affinity-ttl", Field::Leaf),
         ("strategy", Field::Leaf),
@@ -478,6 +483,7 @@ static CONFIG_STREAMING_CONFIG: Type = Type {
     fields: &[
         ("bootstrap-retries", Field::Leaf),
         ("keepalive-seconds", Field::Leaf),
+        ("send-keepalive-before-ft", Field::Leaf),
     ],
 };
 
@@ -498,6 +504,7 @@ static CONFIG_VERTEX_COMPAT_KEY: Type = Type {
         ("disable-cooling", Field::Leaf),
         ("excluded-models", Field::Leaf),
         ("headers", Field::Leaf),
+        ("interactions", Field::Leaf),
         ("models", Field::List(&CONFIG_VERTEX_COMPAT_MODEL)),
         ("prefix", Field::Leaf),
         ("priority", Field::Leaf),
@@ -568,6 +575,7 @@ pub(super) static CONFIG_LEGACY_CONFIG: Type = Type {
         ("interactions-api-key", Field::List(&CONFIG_GEMINI_KEY)),
         ("logging-to-file", Field::Leaf),
         ("logs-max-total-size-mb", Field::Leaf),
+        ("max-request-body-bytes", Field::Leaf),
         ("max-retry-credentials", Field::Leaf),
         ("max-retry-interval", Field::Leaf),
         ("meta-api-key", Field::List(&CONFIG_CODEX_KEY)),

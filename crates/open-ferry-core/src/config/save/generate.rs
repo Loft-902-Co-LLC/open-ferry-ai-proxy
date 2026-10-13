@@ -124,6 +124,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
         )
         // The inlined SDKConfig.
         .put(
+            "max-request-body-bytes",
+            Value::Int(cfg.max_request_body_bytes),
+        )
+        .put(
             "client",
             Fields::default()
                 .put(
@@ -168,6 +172,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                 .omit_empty(
                     "bootstrap-retries",
                     Value::Int(cfg.streaming.bootstrap_retries),
+                )
+                .omit_empty(
+                    "send-keepalive-before-ft",
+                    Value::Bool(cfg.streaming.send_keepalive_before_ft),
                 )
                 .done(),
         )
@@ -295,6 +303,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                     Value::Bool(cfg.routing.session_affinity),
                 )
                 .omit_empty("session-affinity-ttl", s(&cfg.routing.session_affinity_ttl))
+                .omit_empty(
+                    "session-affinity-rebind-on",
+                    s(&cfg.routing.session_affinity_rebind_on),
+                )
                 .pointer(
                     "session-affinity-subagents",
                     cfg.routing.session_affinity_subagents.map(Value::Bool),
@@ -370,6 +382,7 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                     "model-level-cooling",
                     Value::Bool(cfg.claude.model_level_cooling),
                 )
+                .put("tool-search", Value::Bool(cfg.claude.tool_search))
                 .done(),
         )
         .put("claude-api-key", seq(&cfg.claude_api_key, claude_key))
@@ -667,6 +680,7 @@ fn claude_key(k: &ClaudeKey) -> Value {
             "rebuild-mid-system-message",
             Value::Bool(k.rebuild_mid_system_message),
         )
+        .omit_empty("native-tool-search", Value::Bool(k.native_tool_search))
         .pointer("disable-cooling", k.disable_cooling.map(Value::Bool))
         .pointer("request-retry", k.request_retry.map(Value::Int))
         .omit_empty(
@@ -767,6 +781,7 @@ fn vertex_key(k: &VertexCompatKey) -> Value {
         .omit_empty("excluded-models", strings(&k.excluded_models))
         .pointer("disable-cooling", k.disable_cooling.map(Value::Bool))
         .pointer("request-retry", k.request_retry.map(Value::Int))
+        .pointer("interactions", k.interactions.map(Value::Bool))
         .done()
 }
 

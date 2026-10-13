@@ -40,6 +40,11 @@ server:
   # Server port
   port: 8317
 
+  # Maximum allowed size (in bytes) for incoming HTTP request bodies.
+  # Requests exceeding this limit are rejected with HTTP 413 Payload Too Large.
+  # Default is 0 (disabled / no limit); values <= 0 disable the limit.
+  max-request-body-bytes: 0
+
   # Token for requests to GitHub's API: the management API's check for the latest release.
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
   # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.
@@ -132,6 +137,15 @@ routing:
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
 
+  # Controls which credential failures rebind an established session to the failover credential.
+  # Supported values:
+  #   - "any" (default): any credential-attributed failure unbinds and rebinds on failover.
+  #   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
+  #     request only while keeping the session bound to its original credential; quota and auth
+  #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+  # Ignored when routing.session-affinity is false.
+  session-affinity-rebind-on: "any"
+
   # open-ferry's own section, not CLIProxyAPI's (see docs/routing.md). CLIProxyAPI's loader
   # ignores it, and its management API's writes to a v8 config comment it out.
   # quota:
@@ -205,6 +219,7 @@ requests:
   # streaming:
   #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
   #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+  #   send-keepalive-before-ft: false # Default: false. When true and keepalive-seconds > 0, send SSE heartbeats before the first token.
 
   # Optional payload configuration
   # payload:
@@ -370,6 +385,15 @@ upstream:
     # the entire credential across all sibling models. Default is false.
     model-level-cooling: false
 
+    # When true, enable Codex client tool_search on Claude Responses routes. Credentials on
+    # api.anthropic.com (or keys with native-tool-search: true) receive it as Anthropic native
+    # tool search (defer_loading + tool_reference), which keeps the prompt-cache prefix stable
+    # across tool discoveries; other credentials fall back to the plain translation. The Codex
+    # model catalog advertises supports_search_tool for a Claude model only when every
+    # credential serving it supports native tool search.
+    # Default false keeps the translation and catalog behavior that predate tool_search support.
+    tool-search: false
+
   xai:
     # When true, inject the native x_search tool when the request does not declare it.
     # The injected tool is also added to tool_choice.allowed_tools when applicable.
@@ -501,6 +525,7 @@ upstream:
 #       base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #       proxy-url: "http://proxy.example.com:3128"  # optional per-key proxy override
 #       # proxy-url: "direct" # optional: explicit direct connect for this credential
+#       # interactions: true # optional: opt into native Vertex Interactions API routing (/v1beta1/interactions). For service account JSON files under auths/, add "interactions": true at the root of the file.
 #       headers:
 #         X-Custom-Header: "custom-value"
 #         # Values starting with "$" dynamically copy the header value from downstream client requests.
@@ -604,6 +629,7 @@ upstream:
 #       keys:
 #         - api-key: "sk-atSM..."
 #           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#           native-tool-search: false # optional: default is false; when true, trust this key's custom base-url with Anthropic native tool search (defer_loading + tool_reference) for Codex tool_search; requires upstream.claude.tool-search: true
 #
 #   # xAI API keys
 #   # Uses the native xAI executor, including its Responses namespace-tool handling.

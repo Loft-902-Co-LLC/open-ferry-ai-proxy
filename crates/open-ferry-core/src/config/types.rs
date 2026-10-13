@@ -49,6 +49,9 @@ pub const DEFAULT_PANEL_GITHUB_REPOSITORY: &str =
 pub struct Config {
     /// Where the model catalogs are read from.
     pub models: CatalogSources,
+    /// Most bytes an incoming HTTP request body may hold; `<= 0` disables
+    /// the limit.
+    pub max_request_body_bytes: i64,
     /// Client-facing compatibility behavior.
     pub client: ClientConfig,
     /// An optional proxy for outbound requests.
@@ -186,6 +189,7 @@ impl Default for Config {
     /// The values upstream sets before decoding.
     fn default() -> Self {
         Self {
+            max_request_body_bytes: 0,
             models: CatalogSources::default(),
             client: ClientConfig::default(),
             proxy_url: String::new(),
@@ -279,6 +283,7 @@ impl Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
+            .field("max_request_body_bytes", &self.max_request_body_bytes)
             .field("models", &self.models)
             .field("client", &self.client)
             .field("proxy_url", &Redacted(&self.proxy_url))
@@ -413,6 +418,9 @@ pub struct StreamingConfig {
     /// Retries of a streaming request before any bytes are sent; `<= 0`
     /// disables them.
     pub bootstrap_retries: i64,
+    /// Sends SSE heartbeats before the first token when keep-alives are
+    /// enabled. Defaults to false.
+    pub send_keepalive_before_ft: bool,
 }
 
 /// HTTPS server settings.
@@ -509,9 +517,24 @@ pub struct RoutingConfig {
     /// false, subagents spread across the credentials. Unset is true, and
     /// it does nothing without `session_affinity`.
     pub session_affinity_subagents: Option<bool>,
+    /// Which failures rebind a session: `any` (default) or `quota`.
+    /// Kept as written; see [`RoutingConfig::session_affinity_rebind_on`].
+    pub session_affinity_rebind_on: String,
     /// Routing by quota and the cap on long quota rests: open-ferry's own,
     /// which CLIProxyAPI ignores.
     pub quota: RoutingQuota,
+}
+
+impl RoutingConfig {
+    /// The effective rebind policy, as upstream normalizes it: only
+    /// `quota`, trimmed and case insensitive, opts out of `any`.
+    pub fn session_affinity_rebind_on(&self) -> &'static str {
+        if equal_fold(self.session_affinity_rebind_on.trim(), "quota") {
+            "quota"
+        } else {
+            "any"
+        }
+    }
 }
 
 /// open-ferry's own quota settings (`routing.quota`), which CLIProxyAPI
@@ -607,6 +630,9 @@ pub struct CodexHeaderDefaults {
 pub struct ClaudeConfig {
     /// Scopes quota cooldowns to the requested model.
     pub model_level_cooling: bool,
+    /// Enables Codex client tool search on Claude Responses routes and
+    /// native-search catalog advertising. Defaults to false.
+    pub tool_search: bool,
 }
 
 /// A Codex API key and its routing settings.
@@ -711,6 +737,10 @@ pub struct ClaudeKey {
     pub excluded_models: Vec<String>,
     /// Moves mid-conversation system messages into the top-level system field.
     pub rebuild_mid_system_message: bool,
+    /// Trusts a custom base URL with Anthropic native tool search
+    /// (`defer_loading` and `tool_reference`). Official API credentials
+    /// support native search without this flag. Defaults to false.
+    pub native_tool_search: bool,
     /// Overrides `disable-cooling` for this key.
     pub disable_cooling: Option<bool>,
     /// Overrides `request-retry`; negative means the global value.
@@ -722,6 +752,7 @@ pub struct ClaudeKey {
 impl fmt::Debug for ClaudeKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClaudeKey")
+            .field("native_tool_search", &self.native_tool_search)
             .field("api_key", &Redacted(&self.api_key))
             .field("priority", &self.priority)
             .field("weight", &self.weight)
@@ -1038,11 +1069,15 @@ pub struct VertexCompatKey {
     pub disable_cooling: Option<bool>,
     /// Overrides `request-retry`; negative means the global value.
     pub request_retry: Option<i64>,
+    /// Opts into native Vertex Interactions routing. Unset is disabled;
+    /// explicit false is retained, as upstream's optional boolean is.
+    pub interactions: Option<bool>,
 }
 
 impl fmt::Debug for VertexCompatKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VertexCompatKey")
+            .field("interactions", &self.interactions)
             .field("api_key", &Redacted(&self.api_key))
             .field("priority", &self.priority)
             .field("weight", &self.weight)

@@ -156,6 +156,10 @@ pub(super) fn config(config: &Config) -> Json {
                 .done(),
         )
         .with(
+            "max-request-body-bytes",
+            Json::Int(config.max_request_body_bytes),
+        )
+        .with(
             "client",
             Fields::new()
                 .with(
@@ -198,6 +202,10 @@ pub(super) fn config(config: &Config) -> Json {
             Fields::new()
                 .omit_empty("keepalive-seconds", Json::Int(streaming.keepalive_seconds))
                 .omit_empty("bootstrap-retries", Json::Int(streaming.bootstrap_retries))
+                .omit_empty(
+                    "send-keepalive-before-ft",
+                    Json::Bool(streaming.send_keepalive_before_ft),
+                )
                 .done(),
         )
         .omit_empty(
@@ -274,6 +282,10 @@ pub(super) fn config(config: &Config) -> Json {
                     "session-affinity-ttl",
                     string(&config.routing.session_affinity_ttl),
                 )
+                .omit_empty(
+                    "session-affinity-rebind-on",
+                    string(&config.routing.session_affinity_rebind_on),
+                )
                 .omit_nil(
                     "session-affinity-subagents",
                     config.routing.session_affinity_subagents.map(Json::Bool),
@@ -343,6 +355,7 @@ pub(super) fn config(config: &Config) -> Json {
                     "model-level-cooling",
                     Json::Bool(config.claude.model_level_cooling),
                 )
+                .with("tool-search", Json::Bool(config.claude.tool_search))
                 .done(),
         )
         .with(
@@ -521,6 +534,7 @@ pub(super) fn claude_key(key: &ClaudeKey, auth_index: &str) -> Json {
             "rebuild-mid-system-message",
             Json::Bool(key.rebuild_mid_system_message),
         )
+        .omit_empty("native-tool-search", Json::Bool(key.native_tool_search))
         .omit_nil("disable-cooling", key.disable_cooling.map(Json::Bool))
         .omit_nil("request-retry", key.request_retry.map(Json::Int))
         .omit_empty(
@@ -573,6 +587,7 @@ pub(super) fn vertex_key(key: &VertexCompatKey, auth_index: &str) -> Json {
         .omit_empty("excluded-models", strings(&key.excluded_models))
         .omit_nil("disable-cooling", key.disable_cooling.map(Json::Bool))
         .omit_nil("request-retry", key.request_retry.map(Json::Int))
+        .omit_nil("interactions", key.interactions.map(Json::Bool))
         .omit_empty("auth-index", string(auth_index))
         .done()
 }
@@ -824,4 +839,46 @@ fn model_setting(setting: &OAuthModelSetting) -> Json {
         .omit_empty("alias", string(&setting.alias))
         .omit_empty("max-context-length", Json::Int(setting.max_context_length))
         .done()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn new_config_keys_use_upstreams_json_names_and_omission_rules() {
+        let mut cfg = Config::default();
+        cfg.claude_api_key.push(ClaudeKey::default());
+        cfg.vertex_api_key.push(VertexCompatKey::default());
+        let value: Value = serde_json::from_str(&config(&cfg).encode()).expect("json");
+        assert_eq!(value["max-request-body-bytes"], 0);
+        assert_eq!(value["claude"]["tool-search"], false);
+        assert!(value["streaming"].get("send-keepalive-before-ft").is_none());
+        assert!(value["routing"].get("session-affinity-rebind-on").is_none());
+        assert!(
+            value["claude-api-key"][0]
+                .get("native-tool-search")
+                .is_none()
+        );
+        assert!(value["vertex-api-key"][0].get("interactions").is_none());
+
+        cfg.max_request_body_bytes = -1;
+        cfg.routing.session_affinity_rebind_on = "quota".into();
+        cfg.streaming.send_keepalive_before_ft = true;
+        cfg.claude.tool_search = true;
+        cfg.claude_api_key[0].native_tool_search = true;
+        cfg.vertex_api_key[0].interactions = Some(false);
+        let value: Value = serde_json::from_str(&config(&cfg).encode()).expect("json");
+        assert_eq!(value["max-request-body-bytes"], -1);
+        assert_eq!(value["routing"]["session-affinity-rebind-on"], "quota");
+        assert_eq!(value["streaming"]["send-keepalive-before-ft"], true);
+        assert_eq!(value["claude"]["tool-search"], true);
+        assert_eq!(value["claude-api-key"][0]["native-tool-search"], true);
+        assert_eq!(value["vertex-api-key"][0]["interactions"], false);
+        cfg.vertex_api_key[0].interactions = Some(true);
+        let vertex: Value =
+            serde_json::from_str(&vertex_key(&cfg.vertex_api_key[0], "").encode()).expect("json");
+        assert_eq!(vertex["interactions"], json!(true));
+    }
 }

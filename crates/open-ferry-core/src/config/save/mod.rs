@@ -59,6 +59,7 @@
 
 mod generate;
 mod merge;
+pub(crate) use merge::normalize_collection_node_styles;
 mod tree;
 mod v8;
 mod write;

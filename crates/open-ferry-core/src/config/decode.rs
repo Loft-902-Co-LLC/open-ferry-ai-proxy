@@ -100,9 +100,10 @@ pub(crate) fn decode<T: DeserializeOwned>(node: &Node) -> Result<T, YamlError> {
     }
 }
 
-/// The Go type of a collection field, for type errors.
+/// A field's Go type where the decoder needs a hint for type errors.
 fn field_hint(owner: &str, key: &str) -> &'static str {
     match (owner, key) {
+        ("config.legacyConfig", "max-request-body-bytes") => "int64",
         ("config.legacyConfig", "api-keys" | "trusted-proxies") => "[]string",
         ("config.legacyConfig", "codex-api-key") => "[]config.CodexKey",
         ("config.legacyConfig", "claude-api-key") => "[]config.ClaudeKey",
@@ -135,7 +136,7 @@ fn field_hint(owner: &str, key: &str) -> &'static str {
     }
 }
 
-/// A node being decoded, with the Go type a collection would have.
+/// A node being decoded, with a hint of its Go type.
 #[derive(Clone, Copy)]
 struct NodeDe<'a> {
     node: &'a Node,
@@ -206,7 +207,7 @@ impl<'a> NodeDe<'a> {
             // Go converts with int64(f) after checking f <= MaxInt64; NaN fails.
             Some(Scalar::Float(value)) if value <= i64::MAX as f64 => value as i64,
             _ => {
-                self.mismatch("int");
+                self.mismatch(if self.hint == "int64" { "int64" } else { "int" });
                 0
             }
         })

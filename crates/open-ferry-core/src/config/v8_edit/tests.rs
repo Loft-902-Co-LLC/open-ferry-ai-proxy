@@ -15,6 +15,92 @@ use super::*;
 use crate::config::testing::TempDir;
 use crate::config::v8::V8_CLIENT_PATHS;
 
+/// Ported from CLIProxyAPI internal/api/handlers/management/config_v8_test.go
+/// (v8.0.27, MIT), TestConfigV8SaveNormalizesCollectionStylesToBlockYAML.
+#[test]
+fn v8_saves_normalize_collection_styles_to_block_yaml() {
+    let dir = TempDir::new();
+    let path = dir.write(
+        "config.yaml",
+        r#"config-version: 8
+server:
+  port: 8317
+api-keys:
+  openai-compatibility:
+    - name: compat-provider
+      base-url: "https://api.example.com"
+      headers:
+        X-Upstream-Tag: "$X-Client-Tag"
+      models:
+        - alias: "coding"
+          name: "gpt-4o"
+      keys:
+        - api-key: "test-compat-1"
+"#,
+    );
+    Config::load(&path).expect("initial config");
+    let updates = [
+        edit(
+            V8Method::Put,
+            "api-keys/openai-compatibility",
+            r#"[{"name":"compat-provider","base-url":"https://api.example.com","headers":{"X-Upstream-Tag":"$X-Client-Tag"},"models":[{"alias":"coding","name":"gpt-4o"}],"keys":[{"api-key":"test-compat-1"}]}]"#,
+        ),
+        edit(
+            V8Method::Patch,
+            "",
+            r#"{"api-keys":{"openai-compatibility":[{"name":"compat-provider-2","base-url":"https://api.example2.com","headers":{"X-Upstream-Tag":"$X-Client-Tag-2"},"models":[{"alias":"coding-2","name":"gpt-4o-mini"}],"keys":[{"api-key":"test-compat-2"}]}]}}"#,
+        ),
+        edit(V8Method::Patch, "", r#"{"server":{"trusted-proxies":[]}}"#),
+        edit(
+            V8Method::Put,
+            "",
+            r#"{"config-version":8,"server":{"port":8317},"api-keys":{"openai-compatibility":[{"name":"compat-provider-root","base-url":"https://api.example3.com","headers":{"X-Upstream-Tag":"$X-Client-Tag-3"},"models":[{"alias":"coding-3","name":"gpt-4o"}],"keys":[{"api-key":"test-compat-3"}]}]}}"#,
+        ),
+    ];
+    for (index, update) in updates.iter().enumerate() {
+        edit_v8(&path, update).expect("save");
+        let saved = fs::read_to_string(&path).expect("read");
+        for flow in ["[{", "headers: {", "models: [{"] {
+            assert!(!saved.contains(flow), "{flow}: {saved}");
+        }
+        for quoted in [
+            "\"name\":",
+            "\"base-url\":",
+            "\"config-version\":",
+            "\"server\":",
+            "\"api-keys\":",
+        ] {
+            assert!(!saved.contains(quoted), "{quoted}: {saved}");
+        }
+        for block in ["openai-compatibility:", "- name:", "base-url:"] {
+            assert!(saved.contains(block), "{block}: {saved}");
+        }
+        if index == 2 {
+            assert!(saved.contains("trusted-proxies: []"), "{saved}");
+        }
+    }
+    let loaded = Config::load(&path).expect("final config");
+    assert_eq!(loaded.openai_compatibility.len(), 1);
+    assert_eq!(loaded.openai_compatibility[0].name, "compat-provider-root");
+    assert_eq!(
+        loaded.openai_compatibility[0].headers["X-Upstream-Tag"],
+        "$X-Client-Tag-3"
+    );
+}
+
+#[test]
+fn v8_normalization_preserves_scalar_and_single_quoted_key_styles() {
+    let update = put_yaml(
+        "config-version: 8\nplugins:\n  configs:\n    'single': {\"plain\": \"value\", \"true\": \"quoted\", \"list\": [], \"map\": {}}\n",
+    );
+    let out = rendered("config-version: 8\n", &update).expect("put");
+    assert!(out.contains("'single':"), "{out}");
+    assert!(out.contains("plain: \"value\""), "{out}");
+    assert!(out.contains("\"true\": \"quoted\""), "{out}");
+    assert!(out.contains("list: []"), "{out}");
+    assert!(out.contains("map: {}"), "{out}");
+}
+
 /// A `method` edit of the keys of `path` split on `/` (the whole config
 /// when empty), with the JSON `body`.
 fn edit(method: V8Method, path: &str, body: &str) -> V8Edit {
