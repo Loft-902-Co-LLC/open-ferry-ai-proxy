@@ -24,6 +24,8 @@ fn env() -> Environment {
         management_password: false,
         run_config_programs: true,
         updates: super::self_update::Updates {
+            refusal: None,
+            machine_hint: None,
             mode_env: None,
             trusts_key: true,
             install: open_ferry_update::Install::SelfUpdating {
