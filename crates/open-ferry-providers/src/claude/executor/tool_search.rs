@@ -40,7 +40,7 @@ pub fn model_lacks_tool_search(model: &str) -> bool {
 
 /// A credential's support with a caller-pinned switch. A custom base URL
 /// requires the credential attribute or its matching configured key's flag.
-pub fn supports_native_tool_search(
+fn supports_native_tool_search(
     config: Option<&Config>,
     enabled: bool,
     auth: &Auth,
