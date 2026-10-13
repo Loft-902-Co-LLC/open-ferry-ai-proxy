@@ -30,9 +30,6 @@
 //! here is logged.
 //!
 //! Deviations from upstream:
-//! - A body over the configured limit gets 413, before the 1 MB check, and
-//!   a body that fails to read gets a 400 in the shape the other routes
-//!   use, where upstream's starts "Invalid request:".
 //! - A body that isn't UTF-8 is read as if each bad sequence were U+FFFD,
 //!   so its text's length and the body written may differ from upstream's.
 

@@ -1181,19 +1181,23 @@ async fn image_keepalives_after_first_payload_do_not_need_the_pre_first_token_sw
             vec![Outcome::Hang(HeaderMap::new(), vec![Ok(first.clone())])],
         );
         let payload = format!(r#"{{"model":"{model}","prompt":"cat","stream":true}}"#);
-        let response = app.oneshot(post_json(GENERATIONS, &payload)).await.unwrap();
-        let mut body = response.into_body();
-        assert_eq!(
-            body.frame().await.unwrap().unwrap().into_data().unwrap(),
-            first
-        );
-        for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let response = app.oneshot(post_json(GENERATIONS, &payload)).await.unwrap();
+            let mut body = response.into_body();
             assert_eq!(
                 body.frame().await.unwrap().unwrap().into_data().unwrap(),
-                ": keep-alive\n\n"
+                first
             );
-        }
-        drop(body);
+            for _ in 0..2 {
+                assert_eq!(
+                    body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                    ": keep-alive\n\n"
+                );
+            }
+            drop(body);
+        })
+        .await
+        .expect("image payload and two keepalives arrive before the timeout");
         assert_eq!(dispatcher.live_streams(), 0);
     }
 }

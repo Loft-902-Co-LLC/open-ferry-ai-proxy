@@ -21,11 +21,11 @@
 //! upstream's, it has no usage record.
 //!
 //! Deviations from upstream:
-//! - A payload over 16 MiB (or the configured body limit, when lower) gets
-//!   413 with `{"error":"Failed to read search request"}`, and one that
-//!   fails to arrive gets the proxy's usual 400.
-//!   Upstream sends the first 16 MiB on, and answers a failed read with
-//!   `{"error":"Failed to read search request"}`.
+//! - A payload over 16 MiB gets 413 with
+//!   `{"error":"Failed to read search request"}`; upstream sends the first
+//!   16 MiB on when the configured body limit permits it.
+//! - A non-413 body read failure gets the proxy's usual 400; upstream
+//!   answers with `{"error":"Failed to read search request"}`.
 //! - An answer without a `Content-Type` goes out without one, where Go's
 //!   server sniffs one from the body.
 //!

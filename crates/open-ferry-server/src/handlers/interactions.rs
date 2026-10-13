@@ -29,6 +29,8 @@
 //! Nothing marks a stream that ends well.
 //!
 //! Deviations from upstream:
+//! - A non-413 body read error's message starts with `Invalid request: `,
+//!   where upstream sends the read error's message without that prefix.
 //! - There is no model router or plugin executor to send an `agent`
 //!   elsewhere, so upstream's 400 "agent is only supported for native
 //!   interactions execution" comes from the manager, when the providers a

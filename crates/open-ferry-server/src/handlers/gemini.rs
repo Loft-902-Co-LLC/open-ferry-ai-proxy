@@ -34,8 +34,6 @@
 //!   answers a path holding one with 400.
 //! - A model name that isn't valid UTF-8 once decoded has each bad sequence
 //!   replaced with U+FFFD.
-//! - A body over the configured limit gets 413, and one that fails to read
-//!   gets 400. Upstream reads any size and ignores read errors.
 //! - The 400 upstream gives when the route has no action isn't ported: the
 //!   router always has one.
 //! - Home mode's model list (`handleHomeGeminiModels`) isn't ported.
