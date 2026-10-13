@@ -249,6 +249,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_data_directory_chain_and_lock_are_not_writable_by_others_with_default_acl() {
+        use crate::journal::creation_tests::{assert_acl_mode, with_default_acl};
+        with_default_acl(
+            "data_dir::tests::the_data_directory_chain_and_lock_are_not_writable_by_others_with_default_acl",
+            |root| {
+                let data = DataDir::at(root.join("parent/data"));
+                let _lock = data.try_lock().unwrap().unwrap();
+                assert_acl_mode(&root.join("parent"), 0o755);
+                assert_acl_mode(data.root(), 0o755);
+                assert_acl_mode(&data.root().join(LOCK_FILE), 0o600);
+                let installed = root.join("installed");
+                let _install_lock =
+                    crate::install_lock::InstallLock::try_acquire(&installed).unwrap();
+                assert_acl_mode(
+                    &crate::install_lock::InstallLock::path_for(&installed).unwrap(),
+                    0o600,
+                );
+            },
+        );
+    }
+
     #[test]
     fn an_update_lock_link_to_a_missing_target_is_refused_without_creating_the_target() {
         let dir = tempfile::tempdir().unwrap();

@@ -230,7 +230,8 @@ fn check_chain(path: &Path, rules: &TrustRules, below: Option<&Path>) -> Result<
 fn check_one(path: &Path, rules: &TrustRules, tier: Tier) -> Result<(), TrustError> {
     let name = wide(path.as_os_str());
     // Share DELETE as well as READ and WRITE so a short trust check does not block
-    // other processes' renames. Both reads still describe this one opened object.
+    // atomic replacements. Root-first owner/DACL checks protect the namespace;
+    // both reads still describe this one opened object.
     // SAFETY: `name` is NUL-terminated; the optional pointers are null.
     let handle = unsafe {
         CreateFileW(

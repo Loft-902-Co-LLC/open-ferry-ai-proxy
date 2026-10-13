@@ -369,7 +369,7 @@ fn verify_copy(copy: &Path, expected: Option<&str>) -> io::Result<()> {
 
 /// Copies `from` beside `to` into a temporary file this call creates (it
 /// never opens one that exists, so a crashed run's partial file is left
-/// alone), keeping `from`'s permissions, written to disk.
+/// alone), keeping `from`'s permissions capped at 0755 on Unix, written to disk.
 fn copy_to_temp(from: &Path, to: &Path, root: &Path) -> io::Result<PathBuf> {
     let dir = to.parent().unwrap_or_else(|| Path::new("."));
     crate::publication::create_dir_all_durable(dir, root)?;
@@ -378,7 +378,7 @@ fn copy_to_temp(from: &Path, to: &Path, root: &Path) -> io::Result<PathBuf> {
 
 /// Creates `<to><suffix>` (or `<to><suffix>.<n>`: the first that doesn't
 /// exist) and copies `from` into it: contents, then permissions
-/// (`executable` for 0o755 on Unix, else `from`'s), then `sync_all`. On an
+/// (`executable` for 0o755 on Unix, else `from`'s capped at 0755), then `sync_all`. On an
 /// error only the file made here is removed.
 fn copy_beside(from: &Path, to: &Path, suffix: &str, executable: bool) -> io::Result<PathBuf> {
     let mut source = fs::File::open(from)?;
@@ -399,6 +399,11 @@ fn copy_beside_open(
                 executable_permissions(source.metadata()?.permissions())
             } else {
                 source.metadata()?.permissions()
+            };
+            #[cfg(unix)]
+            let permissions = {
+                use std::os::unix::fs::PermissionsExt;
+                fs::Permissions::from_mode(permissions.mode() & 0o755)
             };
             file.set_permissions(permissions)
         })
@@ -1272,6 +1277,56 @@ pub fn cleanup_stale_prev_with(
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_binaries_never_restore_write_for_others_with_umask_zero() {
+        use crate::journal::creation_tests::{assert_mode, with_umask_zero};
+        with_umask_zero(
+            "switch::tests::copied_binaries_never_restore_write_for_others_with_umask_zero",
+            |root| {
+                use std::os::unix::fs::PermissionsExt;
+                let source = root.join("source");
+                fs::write(&source, b"binary").unwrap();
+                for mode in [0o777, 0o775] {
+                    fs::set_permissions(&source, fs::Permissions::from_mode(mode)).unwrap();
+                    let to = root.join(format!("data/{mode:o}/kept"));
+                    let kept = copy_to_temp(&source, &to, root).unwrap();
+                    assert_mode(&kept, 0o755);
+                    let executable = copy_beside(&source, &to, ".new", true).unwrap();
+                    assert_mode(&executable, 0o755);
+                    let (file, private) = create_unique(&to, ".private").unwrap();
+                    assert_mode(&private, 0o700);
+                    drop(file);
+                }
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_binaries_never_restore_write_for_others_with_default_acl() {
+        use crate::journal::creation_tests::{assert_acl_mode, with_default_acl};
+        with_default_acl(
+            "switch::tests::copied_binaries_never_restore_write_for_others_with_default_acl",
+            |root| {
+                use std::os::unix::fs::PermissionsExt;
+                let source = root.join("source");
+                fs::write(&source, b"binary").unwrap();
+                for mode in [0o777, 0o775] {
+                    fs::set_permissions(&source, fs::Permissions::from_mode(mode)).unwrap();
+                    let to = root.join(format!("data/{mode:o}/kept"));
+                    let kept = copy_to_temp(&source, &to, root).unwrap();
+                    assert_acl_mode(&kept, 0o755);
+                    let executable = copy_beside(&source, &to, ".new", true).unwrap();
+                    assert_acl_mode(&executable, 0o755);
+                    let (file, private) = create_unique(&to, ".private").unwrap();
+                    assert_acl_mode(&private, 0o700);
+                    drop(file);
+                }
+            },
+        );
+    }
     use std::collections::VecDeque;
     use std::sync::Mutex;
 

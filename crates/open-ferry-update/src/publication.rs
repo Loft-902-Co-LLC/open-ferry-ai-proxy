@@ -575,6 +575,25 @@ mod tests {
             },
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_directories_are_not_writable_by_others_with_default_acl() {
+        use crate::journal::creation_tests::{assert_acl_mode, with_default_acl};
+        with_default_acl(
+            "publication::tests::publication_directories_are_not_writable_by_others_with_default_acl",
+            |root| {
+                let direct = root.join("direct");
+                RealFs.create_dir(&direct).unwrap();
+                assert_acl_mode(&direct, 0o755);
+                let chain = root.join("data/a/b");
+                create_dir_all_durable(&chain, &root.join("data")).unwrap();
+                for path in [root.join("data"), root.join("data/a"), chain] {
+                    assert_acl_mode(&path, 0o755);
+                }
+            },
+        );
+    }
     use std::cell::{Cell, RefCell};
     use std::fs;
     use std::path::PathBuf;

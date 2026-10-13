@@ -272,6 +272,26 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_write_probe_is_private_at_creation_with_default_acl() {
+        use crate::journal::creation_tests::{assert_acl_mode, with_default_acl};
+        with_default_acl(
+            "install::tests::the_write_probe_is_private_at_creation_with_default_acl",
+            |root| {
+                let probe = root.join("probe");
+                let _file = create_write_probe(&probe).unwrap();
+                assert_acl_mode(&probe, 0o600);
+                assert!(RealSystem { write_probe: true }.dir_writable(root));
+                assert!(
+                    !root
+                        .join(format!(".open-ferry-write-test.{}", std::process::id()))
+                        .exists()
+                );
+            },
+        );
+    }
+
     /// A machine whose running binary is somewhere that matches nothing.
     struct Fake {
         exe: PathBuf,

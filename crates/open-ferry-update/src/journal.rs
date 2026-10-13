@@ -1026,6 +1026,70 @@ pub(crate) mod creation_tests {
         assert_eq!(mode, expected, "{}", path.display());
     }
 
+    pub(crate) fn with_default_acl(test: &str, check: impl FnOnce(&Path)) {
+        with_umask_zero(test, |root| {
+            use std::process::Command;
+            // SAFETY: getgid only reads this process's group identity.
+            let gid = unsafe { libc::getgid() };
+            let acl = format!("d:g:{gid}:rwx,d:m::rwx");
+            let result = Command::new("setfacl")
+                .args(["-m", &acl])
+                .arg(root)
+                .output();
+            match result {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("skipping default-ACL test: setfacl is not installed");
+                    return;
+                }
+                Err(error) => panic!("setfacl: {error}"),
+                Ok(output) if !output.status.success() => {
+                    eprintln!(
+                        "skipping default-ACL test: filesystem refused default ACL: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    return;
+                }
+                Ok(_) => {}
+            }
+            match Command::new("getfacl").arg("--version").output() {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("skipping default-ACL test: getfacl is not installed");
+                    return;
+                }
+                Err(error) => panic!("getfacl: {error}"),
+                Ok(output) => assert!(output.status.success(), "{output:?}"),
+            }
+            check(root);
+        });
+    }
+
+    pub(crate) fn assert_acl_mode(path: &Path, expected: u32) {
+        assert_mode(path, expected);
+        let output = std::process::Command::new("getfacl")
+            .args(["-c", "-p", "-n"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let acl = String::from_utf8(output.stdout).unwrap();
+        // SAFETY: getgid only reads this process's group identity.
+        let named = format!("group:{}:", unsafe { libc::getgid() });
+        assert!(
+            acl.lines().any(|line| line.starts_with(&named)),
+            "{} did not inherit the named group: {acl}",
+            path.display()
+        );
+        let mask = acl
+            .lines()
+            .find_map(|line| line.strip_prefix("mask::"))
+            .expect("an inherited named entry has an access mask");
+        assert!(
+            !mask.contains('w'),
+            "{} grants effective named-group write: {acl}",
+            path.display()
+        );
+    }
+
     pub(crate) fn with_umask_zero(test: &str, check: impl FnOnce(&Path)) {
         if let Some(root) = std::env::var_os("OFP_CREATION_TEST_ROOT") {
             // SAFETY: the parent selects only this test in an isolated child.
@@ -1088,6 +1152,35 @@ mod tests {
                 let mut saw_temp = false;
                 let failure = atomic_write_removing(&path, b"three", false, &mut |temp| {
                     assert_mode(temp, 0o644);
+                    saw_temp = true;
+                    fs::remove_file(temp)
+                });
+                assert!(failure.is_err());
+                assert!(
+                    saw_temp,
+                    "the failed publication left a temporary file to check"
+                );
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_records_and_their_directories_are_not_writable_by_others_with_default_acl() {
+        use super::creation_tests::{assert_acl_mode, with_default_acl};
+        with_default_acl(
+            "journal::tests::atomic_records_and_their_directories_are_not_writable_by_others_with_default_acl",
+            |root| {
+                let path = root.join("data/records/record.json");
+                atomic_write(&path, b"one", false).unwrap();
+                assert_acl_mode(&root.join("data"), 0o755);
+                assert_acl_mode(&root.join("data/records"), 0o755);
+                assert_acl_mode(&path, 0o644);
+                atomic_write(&path, b"two", true).unwrap();
+                assert_acl_mode(&path, 0o644);
+                let mut saw_temp = false;
+                let failure = atomic_write_removing(&path, b"three", false, &mut |temp| {
+                    assert_acl_mode(temp, 0o644);
                     saw_temp = true;
                     fs::remove_file(temp)
                 });
