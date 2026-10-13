@@ -18,10 +18,11 @@
 //! itself (it has an install receipt; see [`Updating`]): the definition
 //! starts `-supervise -config <path> -data-dir <path>`, with the data
 //! directory pinned so that the service and `open-ferry update` agree on it.
-//! Otherwise, and always with `-system`, it runs the server plainly. `install`
-//! says which, and why. A user install also writes `service.json` in the data
-//! directory, which `uninstall` removes, and which names the directory when
-//! the definition can't.
+//! A system service also runs supervised for an explicit machine install on
+//! Linux or Windows. Otherwise it runs the server plainly. `install` says
+//! which, and why. A user install, and a supervised system install, write
+//! `service.json` in the data directory, removed after a complete uninstall.
+//! A user record also names the directory when the definition can't.
 //!
 //! With `-dry-run`, `install` and `uninstall` print what they would write
 //! and run, and change nothing. `service` exits with 0 when it did what it
@@ -80,7 +81,7 @@ use open_ferry_update::install::{self as update_install, Install};
 use open_ferry_update::receipt::Receipt;
 
 use crate::flags::{self, FlagError, Kind};
-use crate::installed;
+use crate::{installed, scope};
 
 /// The subcommand's name: the first argument that runs it.
 pub const NAME: &str = "service";
@@ -119,11 +120,18 @@ where
             return ExitCode::FAILURE;
         }
     };
-    // Looked at only for a user install, which is the one that chooses.
-    let updating = if request.action == Action::Install && !request.system {
-        Updating::assess(&context)
+    let updating = if request.action == Action::Install {
+        if request.system {
+            Updating::assess_system(
+                &scope::Host,
+                &update_install::RealSystem::default(),
+                &context,
+            )
+        } else {
+            Updating::assess(&context)
+        }
     } else {
-        Updating::plain(data_dir(&context), SYSTEM_PLAIN)
+        Updating::plain(data_dir(&context), "no install was requested")
     };
     let mut out = io::stdout().lock();
     match execute(&mut Host, &context, &request, &updating, &mut out) {
@@ -725,10 +733,6 @@ pub(crate) trait System {
     /// (`trust::check_file`).
     fn trusted_file(&self, path: &str) -> Result<(), String>;
     /// Waits `time`, between looks at what a service manager says.
-    #[allow(
-        dead_code,
-        reason = "2c-2b contract: the parts that follow call it; the last removes this"
-    )]
     fn pause(&mut self, time: Duration);
 }
 
@@ -1191,7 +1195,15 @@ fn stop_checked(
 
 /// Prints what `plan` would do.
 pub(crate) fn describe(plan: &Plan, out: &mut dyn Write) {
-    for step in &plan.steps {
+    describe_steps(&plan.steps, out);
+    for path in &plan.cleanup {
+        say(out, format_args!("Would remove {path} afterwards"));
+    }
+    say(out, format_args!("Dry run: nothing was changed."));
+}
+
+fn describe_steps(steps: &[Step], out: &mut dyn Write) {
+    for step in steps {
         match step {
             Step::CreateDir(dir) => say(out, format_args!("Would create {dir}")),
             Step::Write { path, text, utf16 } => {
@@ -1222,10 +1234,6 @@ pub(crate) fn describe(plan: &Plan, out: &mut dyn Write) {
             ),
         }
     }
-    for path in &plan.cleanup {
-        say(out, format_args!("Would remove {path} afterwards"));
-    }
-    say(out, format_args!("Dry run: nothing was changed."));
 }
 
 /// Prints a line; a closed standard output doesn't stop the work.
@@ -1411,8 +1419,9 @@ pub(crate) struct Definition {
     pub(crate) data_dir: Option<String>,
 }
 
-/// Why `-system` services always run plain.
-const SYSTEM_PLAIN: &str = "a system service isn't supervised in this version";
+const NO_MACHINE_INSTALL: &str = "no machine-wide install of this binary: install it with install.sh --system / install.ps1 -System";
+const MACOS_SYSTEM_PLAIN: &str =
+    "machine-wide installs on macOS come later; install and update open-ferry as the user";
 
 /// The data directory `open-ferry update` would use for the service's
 /// account, from the starting environment of `context` (before any `.env`),
@@ -1436,7 +1445,7 @@ pub(crate) fn data_dir(context: &Context) -> Result<String, String> {
     Ok(platform.clean(&root))
 }
 
-/// Whether a user service runs supervised or plain, and the data directory
+/// Whether a service runs supervised or plain, and the data directory
 /// it pins. It is decided once, from the real machine ([`Updating::assess`]),
 /// and handed to the pure builders as an input, so the tests cover both
 /// forms.
@@ -1510,6 +1519,38 @@ impl Updating {
         Updating::from_install(data_dir, &install)
     }
 
+    /// A system service supervises only the machine install of this binary.
+    /// Lookup checks its receipt and trust; authorization also checks the
+    /// update records before assessment reads the receipt again.
+    fn assess_system(
+        probe: &dyn scope::Probe,
+        machine: &dyn update_install::System,
+        context: &Context,
+    ) -> Updating {
+        let unavailable = |why: String| Updating::plain(Err(why.clone()), why);
+        if context.platform == Platform::MacOs {
+            return unavailable(MACOS_SYSTEM_PLAIN.to_owned());
+        }
+        let home = match scope::lookup(probe, &context.exe) {
+            Ok(home) if home.scope == scope::Scope::Machine => home,
+            Ok(_) => return unavailable(NO_MACHINE_INSTALL.to_owned()),
+            Err(why) => return unavailable(why.to_string()),
+        };
+        let root = home.data.root().to_string_lossy().into_owned();
+        if let Err(why) = scope::authorize(probe, &root) {
+            return unavailable(why.to_string());
+        }
+        let receipt_path = context
+            .platform
+            .join(&root, open_ferry_update::data_dir::RECEIPT_FILE);
+        let install = update_install::assess_for(
+            machine,
+            probe.receipt(&receipt_path),
+            Path::new(&context.exe),
+        );
+        Updating::from_install(Ok(root), &install)
+    }
+
     /// Says which form is installed, and why.
     fn form(&self) -> String {
         match (&self.why_plain, &self.data_dir) {
@@ -1522,6 +1563,15 @@ impl Updating {
                     .as_deref()
                     .unwrap_or("there is no data directory")
             ),
+        }
+    }
+
+    fn system_form(&self) -> String {
+        match self.pinned() {
+            Some(dir) => format!(
+                "Installing the supervised form: this binary has a machine-wide install and can update itself. Its data directory is {dir}. Stop the system service before running `open-ferry update` in this version."
+            ),
+            None => self.form(),
         }
     }
 }
@@ -1569,9 +1619,16 @@ fn install(
         request.dry_run,
         updating,
     )?;
-    if !target.system() {
-        say(out, format_args!("{}", updating.form()));
-    }
+    let form = if target.system() {
+        if target == Target::LaunchDaemon {
+            Updating::plain(updating.data_dir.clone(), MACOS_SYSTEM_PLAIN).form()
+        } else {
+            updating.system_form()
+        }
+    } else {
+        updating.form()
+    };
+    say(out, format_args!("{form}"));
     if request.dry_run {
         describe(&plan, out);
         if target.system() && !account.privileged() {
@@ -1645,7 +1702,7 @@ pub(crate) fn prepare_install(
     prepare_install_with(system, context, target, config, dir, dry_run, &updating)
 }
 
-/// [`prepare_install`], with the form `updating` chose for a user service.
+/// [`prepare_install`], with the form `updating` chose for the service.
 pub(crate) fn prepare_install_with(
     system: &mut dyn System,
     context: &Context,
@@ -1695,7 +1752,24 @@ pub(crate) fn prepare_install_with(
         .map_err(|error| format!("The config at {config} doesn't load: {error}"))?;
     let definition = if target.system() {
         check_auth_dir(platform, &loaded)?;
-        protected(system, context, &config, dir)?
+        let mut definition = protected(system, context, &config, dir)?;
+        // Check the paths as given too: resolving a link in `protected`
+        // must not hide it from the real system trust check.
+        for path in [&context.exe, &config] {
+            system.trusted_file(path).map_err(|why| {
+                format!("Refusing the system service: {path} failed the system trust check: {why}")
+            })?;
+        }
+        let working = dir
+            .map(str::to_owned)
+            .unwrap_or_else(|| platform.parent(&config).unwrap_or_else(|| config.clone()));
+        system.trusted_dir(&working).map_err(|why| {
+            format!("Refusing the system service: {working} failed the system trust check: {why}")
+        })?;
+        if platform != Platform::MacOs {
+            definition.data_dir = updating.pinned().map(str::to_owned);
+        }
+        definition
     } else {
         Definition {
             exe: context.exe.clone(),
@@ -1864,11 +1938,10 @@ fn unprotected(
     Ok(None)
 }
 
-/// The record of a user install, in the data directory.
+/// The service install's record, in its data directory.
 pub(crate) const RECORD_FILE: &str = "service.json";
 
-/// `service.json`'s text for a user service: what `uninstall` needs to find
-/// the data directory when the definition can't say.
+/// `service.json`'s text: the definition's binary, config and data directory.
 #[derive(serde::Serialize)]
 struct ServiceRecord<'a> {
     format: u32,
@@ -1885,14 +1958,15 @@ fn manager_name(target: Target) -> &'static str {
     match target {
         Target::SystemdUser | Target::SystemdSystem => "systemd",
         Target::LaunchAgent | Target::LaunchDaemon => "launchd",
-        Target::ScheduledTask | Target::WindowsService => "task",
+        Target::ScheduledTask => "task",
+        Target::WindowsService => "scm",
     }
 }
 
 fn record_text(target: Target, definition: &Definition, data_dir: &str) -> String {
     let record = ServiceRecord {
         format: 1,
-        kind: "user",
+        kind: if target.system() { "system" } else { "user" },
         manager: manager_name(target),
         supervised: definition.data_dir.is_some(),
         data_dir,
@@ -1904,9 +1978,9 @@ fn record_text(target: Target, definition: &Definition, data_dir: &str) -> Strin
     text
 }
 
-/// The steps that install `definition` as `target`. A user service's last
-/// step records the install in `record`, the data directory, once the
-/// definition is in place and the service is started.
+/// The steps that install `definition` as `target`. A user service, or a
+/// supervised system service, records the install in `record` last, once
+/// the definition is in place and the service is started.
 fn install_plan(
     system: &mut dyn System,
     context: &Context,
@@ -1957,7 +2031,7 @@ fn install_plan(
                 .extend(windows::service_install_steps(definition));
         }
     }
-    if !target.system()
+    if (!target.system() || definition.data_dir.is_some())
         && let Some(data_dir) = record
     {
         plan.steps.push(Step::WriteAtomic {
@@ -2014,7 +2088,37 @@ pub(crate) fn uninstall(
         Target::ScheduledTask => windows::task_uninstall_steps(),
         Target::WindowsService => windows::service_uninstall_steps(),
     };
-    let mut stop_check = None;
+    let mut stop_check = match target {
+        Target::SystemdSystem => Some(systemd::stop_check(true)),
+        Target::LaunchDaemon => Some(launchd::stop_check("system")),
+        _ => None,
+    };
+    let mut wait_for_scm = false;
+    if target.system() {
+        let found = find_system_install(system, context, target);
+        if let Some(why) = &found.ignored {
+            say(out, format_args!("{why}"));
+        }
+        wait_for_scm = target == Target::WindowsService && found.stop;
+        if let Some(dir) = found.data_dir {
+            say(
+                out,
+                format_args!("The service's data directory is {dir} ({}).", found.source),
+            );
+            if wait_for_scm {
+                steps.insert(
+                    0,
+                    Step::StopSupervisor {
+                        data_dir: dir,
+                        kind: ServiceKind::System,
+                    },
+                );
+            }
+        }
+        if let Some(record) = found.record {
+            steps.push(Step::Remove(record));
+        }
+    }
     if !target.system() {
         let found = find_install(system, context, target);
         if let Some(why) = &found.ignored {
@@ -2079,7 +2183,21 @@ pub(crate) fn uninstall(
         cleanup: Vec::new(),
     };
     if dry_run {
-        describe(&plan, out);
+        if wait_for_scm {
+            let before_delete = scm_delete_index(&plan.steps);
+            describe_steps(&plan.steps[..before_delete], out);
+            say(
+                out,
+                format_args!(
+                    "Would wait up to {} s for sc.exe query open-ferry to say STOPPED",
+                    scm_stop_budget().as_secs()
+                ),
+            );
+            describe_steps(&plan.steps[before_delete..], out);
+            say(out, format_args!("Dry run: nothing was changed."));
+        } else {
+            describe(&plan, out);
+        }
         return Ok(());
     }
     if let Some(check) = &stop_check {
@@ -2087,6 +2205,13 @@ pub(crate) fn uninstall(
         plan.steps
             .retain(|step| *step != Step::TryRun(check.stop.clone()));
         stop_checked(system, check, out)?;
+    }
+    if wait_for_scm {
+        let before_delete = scm_delete_index(&plan.steps);
+        for step in plan.steps.drain(..before_delete) {
+            apply_step(system, &step, out)?;
+        }
+        wait_service_stopped(system, out)?;
     }
     apply(system, &plan, out).map_err(|failed| failed.message)?;
     say(
@@ -2099,7 +2224,45 @@ pub(crate) fn uninstall(
     Ok(())
 }
 
-/// What an installed user service's definition says of how it runs.
+fn scm_delete_index(steps: &[Step]) -> usize {
+    steps.iter().position(|step| matches!(step, Step::Run(cmd) if cmd.program == "sc.exe" && cmd.args.first().is_some_and(|arg| arg == "delete"))).unwrap_or(steps.len())
+}
+
+fn scm_stop_budget() -> Duration {
+    STOP_BUDGET + Duration::from_secs(10)
+}
+
+/// SCM's stop command only asks: keep the service and record until its
+/// query positively says STOPPED. The accounted pauses bound fake runs too.
+fn wait_service_stopped(system: &mut dyn System, out: &mut dyn Write) -> Result<(), String> {
+    let started = Instant::now();
+    let budget = scm_stop_budget();
+    let mut waited = Duration::ZERO;
+    loop {
+        let cmd = windows::query_service();
+        let state = match system.run(&cmd) {
+            Ok(answer) => windows_service_state(&cmd, &answer),
+            Err(error) => ServiceState::Unknown(error.to_string()),
+        };
+        let elapsed = started.elapsed().max(waited);
+        if state == ServiceState::Stopped && elapsed <= budget {
+            say(out, format_args!("The Windows service is STOPPED."));
+            return Ok(());
+        }
+        if elapsed >= budget {
+            return Err(format!(
+                "Uninstall incomplete: the Windows service is {} after {} s; the service and service.json were kept. Stop it by hand, then run the uninstall again.",
+                state.describe(),
+                budget.as_secs()
+            ));
+        }
+        let pause = Duration::from_secs(1).min(budget - elapsed);
+        system.pause(pause);
+        waited += pause;
+    }
+}
+
+/// What an installed service's definition says of how it runs.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Flagged {
     /// Whether it runs the supervisor.
@@ -2143,8 +2306,12 @@ struct Record {
 /// The record in `bytes`, if it is a user service's. Its paths are as
 /// written; `record_rejected` says whether they are full paths.
 fn parse_record(bytes: &[u8]) -> Option<Record> {
+    parse_record_kind(bytes, "user")
+}
+
+fn parse_record_kind(bytes: &[u8], kind: &str) -> Option<Record> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    if value["format"].as_u64() != Some(1) || value["kind"].as_str() != Some("user") {
+    if value["format"].as_u64() != Some(1) || value["kind"].as_str() != Some(kind) {
         return None;
     }
     Some(Record {
@@ -2222,8 +2389,8 @@ fn record_rejected(
     None
 }
 
-/// What the installed user service's own definition says: the unit, the
-/// plist, or the task's XML as the scheduler gives it back.
+/// What the installed service's own definition says: the unit, the plist,
+/// the task's XML, or SCM's registered command line.
 enum Installed {
     /// There is none to read: no unit or plist file, or a kind that isn't
     /// looked at.
@@ -2250,8 +2417,8 @@ fn installed_flags(system: &mut dyn System, context: &Context, target: Target) -
         })
     }
     let (words, exe) = match target {
-        Target::SystemdUser => {
-            let path = systemd::unit_path(context, false);
+        Target::SystemdUser | Target::SystemdSystem => {
+            let path = systemd::unit_path(context, target.system());
             // A drop-in directory beside the unit can change its `ExecStart`.
             let drop_in = path
                 .as_ref()
@@ -2269,8 +2436,8 @@ fn installed_flags(system: &mut dyn System, context: &Context, target: Target) -
             let exe = words.first().cloned();
             (words, exe)
         }
-        Target::LaunchAgent => {
-            let text = match file(system, launchd::plist_path(context, false)) {
+        Target::LaunchAgent | Target::LaunchDaemon => {
+            let text = match file(system, launchd::plist_path(context, target.system())) {
                 None => return Installed::Absent,
                 Some(text) => text,
             };
@@ -2297,8 +2464,19 @@ fn installed_flags(system: &mut dyn System, context: &Context, target: Target) -
             };
             definition
         }
-        Target::SystemdSystem | Target::LaunchDaemon | Target::WindowsService => {
-            return Installed::Absent;
+        Target::WindowsService => {
+            let Ok(answer) = system.run(&windows::service_config_query()) else {
+                return Installed::Unreadable;
+            };
+            let Some(words) = answer
+                .success()
+                .then(|| windows::service_definition(&answer.stdout))
+                .flatten()
+            else {
+                return Installed::Unreadable;
+            };
+            let exe = words.first().cloned();
+            (words, exe)
         }
     };
     Installed::Read(flagged(&words, exe))
@@ -2320,6 +2498,59 @@ struct Found {
     record: Option<String>,
     /// What to say of a `service.json` that is there and isn't.
     ignored: Option<String>,
+}
+
+/// System uninstalls use only the directory their definition pins, never
+/// the environment or an unchecked record. Check trust before looking in it.
+fn find_system_install(system: &mut dyn System, context: &Context, target: Target) -> Found {
+    let mut found = Found {
+        data_dir: None,
+        source: "from its definition".to_owned(),
+        stop: true,
+        missing: None,
+        record: None,
+        ignored: None,
+    };
+    let Installed::Read(defined) = installed_flags(system, context, target) else {
+        return found;
+    };
+    found.stop = defined.supervised;
+    let Some(dir) = &defined.data_dir else {
+        return found;
+    };
+    let trust = if context.platform.is_absolute(dir) {
+        system.trusted_dir(dir)
+    } else {
+        Err("it isn't a full path".to_owned())
+    };
+    if let Err(why) = trust {
+        found.ignored = Some(format!(
+            "Not using the service's data directory {dir}: {why}. Its records are left alone and no supervisor is asked to stop through it."
+        ));
+        return found;
+    }
+    found.data_dir = Some(dir.clone());
+    let path = context.platform.join(dir, RECORD_FILE);
+    if !system.exists(&path) {
+        return found;
+    }
+    let checked = system.trusted_file(&path).and_then(|()| {
+        let bytes = system.read(&path).map_err(|error| error.to_string())?;
+        let record = parse_record_kind(&bytes, "system")
+            .ok_or("it isn't a system service's record in format 1")?;
+        if let Some(why) = record_rejected(context.platform, &record, dir, target, Some(&defined)) {
+            return Err(why);
+        }
+        if !record.supervised || !defined.supervised {
+            return Err("it isn't the supervised service's record".to_owned());
+        }
+        Ok(())
+    });
+    match checked {
+        Ok(()) => found.record = Some(path),
+        Err(why) => found.ignored = Some(format!("Leaving {path} alone and not using it: {why}.")),
+    }
+    found
 }
 
 /// Finds the data directory of the installed user service: the `-data-dir`

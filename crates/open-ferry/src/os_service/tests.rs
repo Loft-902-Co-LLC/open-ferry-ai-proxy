@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::*;
 
@@ -11,6 +12,8 @@ struct Fake {
     owners: BTreeMap<String, Owner>,
     links: BTreeMap<String, String>,
     answers: BTreeMap<String, Output>,
+    queued: BTreeMap<String, VecDeque<Output>>,
+    reads: RefCell<Vec<String>>,
     events: Vec<String>,
     /// What `stop_supervisor` answers; `NotRunning` when not set.
     stop: Option<StopOutcome>,
@@ -92,6 +95,18 @@ impl Fake {
             path.strip_prefix(top)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
         };
+        if let Some(top) = self.links.keys().find(|top| below(top)) {
+            return Err(format!("{path} is not safe: {top} is a link"));
+        }
+        if let Some((top, _)) = self
+            .owners
+            .iter()
+            .find(|(top, owner)| below(top) && (owner.uid != 0 || owner.mode & 0o022 != 0))
+        {
+            return Err(format!(
+                "{path} is not safe: {top} is writable by another account or not owned by root"
+            ));
+        }
         match self.untrusted.iter().find(|top| below(top)) {
             Some(top) => Err(format!("{path} is not safe: {top} is untrusted")),
             None => Ok(()),
@@ -102,6 +117,13 @@ impl Fake {
 impl System for Fake {
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
         self.events.push(format!("run {cmd}"));
+        if let Some(answer) = self
+            .queued
+            .get_mut(&cmd.to_string())
+            .and_then(VecDeque::pop_front)
+        {
+            return Ok(answer);
+        }
         Ok(self.answer_for(cmd))
     }
 
@@ -115,6 +137,7 @@ impl System for Fake {
     }
 
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        self.reads.borrow_mut().push(path.to_owned());
         self.files
             .get(path)
             .cloned()
@@ -1058,21 +1081,24 @@ fn a_system_service_refuses_files_others_can_change() {
         system_install(&mut fake, "/usr/local/bin/open-ferry"),
         refused("/home/me is owned by user 1000")
     );
-    // Root's group may write, and a sticky directory protects root's files.
+    // The real trust check also refuses root-group writes and sticky dirs.
     let mut fake = base()
         .owner("/etc/open-ferry", 0, 0, 0o775, true)
         .owner("/srv", 0, 0, 0o1777, true)
         .dir("/etc/systemd/system");
-    assert_eq!(system_install(&mut fake, "/srv/open-ferry"), Ok(()));
+    assert!(
+        system_install(&mut fake, "/srv/open-ferry")
+            .unwrap_err()
+            .contains("/srv is writable by another account")
+    );
 }
 
 #[test]
 fn installs_a_systemd_system_unit() {
-    // Not upstream's: `install -system` on Linux runs what links point to.
+    // Not upstream's: the plain system definition stays the same.
     let mut fake = Fake::default()
         .uid(0)
         .file("/etc/open-ferry/config.yaml", SYSTEM_CONFIG)
-        .link("/usr/local/bin/open-ferry", "/opt/open-ferry/open-ferry")
         .dir("/etc/systemd/system");
     assert_eq!(
         system_install(&mut fake, "/usr/local/bin/open-ferry"),
@@ -1089,7 +1115,7 @@ fn installs_a_systemd_system_unit() {
     );
     let definition = Definition {
         data_dir: None,
-        exe: "/opt/open-ferry/open-ferry".to_owned(),
+        exe: "/usr/local/bin/open-ferry".to_owned(),
         config: "/etc/open-ferry/config.yaml".to_owned(),
         dir: "/etc/open-ferry".to_owned(),
     };
@@ -1576,7 +1602,21 @@ fn uninstalls_a_windows_service() {
     // Not upstream's: `uninstall -system` on Windows stops the service, then
     // deletes it.
     let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
-    let mut fake = fake.answer("sc.exe query open-ferry", 0, "STATE : 4 RUNNING");
+    let mut fake = fake
+        .answer("sc.exe query open-ferry", 0, "STATE : 4 RUNNING")
+        .answer(
+            "sc.exe qc open-ferry",
+            0,
+            &format!(
+                "BINARY_PATH_NAME : {}",
+                windows::service_command(&Definition {
+                    exe: PROGRAM_FILES_EXE.to_owned(),
+                    config: PROGRAM_FILES_CONFIG.to_owned(),
+                    dir: r"C:\Program Files\open-ferry".to_owned(),
+                    data_dir: None
+                })
+            ),
+        );
     let (result, _) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
     assert_eq!(result, Ok(()));
     assert_eq!(
@@ -1584,6 +1624,7 @@ fn uninstalls_a_windows_service() {
         [
             "run sc.exe query open-ferry",
             "run whoami.exe /groups /fo csv /nh",
+            "run sc.exe qc open-ferry",
             "run sc.exe stop open-ferry",
             "run sc.exe delete open-ferry",
         ]
@@ -3778,5 +3819,911 @@ fn the_host_stops_a_system_supervisor_only_through_a_trusted_directory() {
     assert_eq!(
         Host.stop_supervisor(path, Duration::from_secs(1), ServiceKind::System),
         StopOutcome::Refused(reason)
+    );
+}
+
+const MACHINE_DATA: &str = "/var/lib/open-ferry";
+const SYSTEM_UNIT: &str = "/etc/systemd/system/open-ferry.service";
+const MACHINE_CONFIG: &str = "/etc/open-ferry/config.yaml";
+const MACHINE_EXE: &str = "/usr/local/bin/open-ferry";
+const SCM_DATA: &str = r"C:\ProgramData\open-ferry";
+
+fn machine_definition(supervised: bool) -> Definition {
+    Definition {
+        exe: MACHINE_EXE.to_owned(),
+        config: MACHINE_CONFIG.to_owned(),
+        dir: "/etc/open-ferry".to_owned(),
+        data_dir: supervised.then(|| MACHINE_DATA.to_owned()),
+    }
+}
+
+fn machine_context() -> Context {
+    context(Platform::Linux, MACHINE_EXE, "/root", &[("HOME", "/root")])
+}
+
+fn scm_definition(supervised: bool) -> Definition {
+    Definition {
+        exe: PROGRAM_FILES_EXE.to_owned(),
+        config: PROGRAM_FILES_CONFIG.to_owned(),
+        dir: r"C:\Program Files\open-ferry".to_owned(),
+        data_dir: supervised.then(|| SCM_DATA.to_owned()),
+    }
+}
+
+#[test]
+fn writes_a_supervised_systemd_system_unit() {
+    assert_eq!(systemd::unit(&machine_definition(true), true),
+        "# Installed by `open-ferry service install -system`; `open-ferry service uninstall -system` removes it.
+[Unit]
+Description=open-ferry AI proxy
+Documentation=https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=\"/usr/local/bin/open-ferry\" -supervise -system -config \"/etc/open-ferry/config.yaml\" -data-dir \"/var/lib/open-ferry\"
+WorkingDirectory=/etc/open-ferry
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
+");
+}
+
+#[test]
+fn writes_a_supervised_scm_service() {
+    let definition = scm_definition(true);
+    assert_eq!(
+        windows::service_command(&definition),
+        r#""C:\Program Files\open-ferry\open-ferry.exe" service run -system -supervise -config "C:\Program Files\open-ferry\config.yaml" -data-dir "C:\ProgramData\open-ferry""#
+    );
+    let commands: Vec<String> = windows::service_install_steps(&definition)
+        .iter()
+        .map(|step| {
+            let Step::Run(cmd) = step else {
+                panic!("expected a command")
+            };
+            cmd.to_string()
+        })
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            r#"sc.exe create open-ferry binPath= "\"C:\Program Files\open-ferry\open-ferry.exe\" service run -system -supervise -config \"C:\Program Files\open-ferry\config.yaml\" -data-dir \"C:\ProgramData\open-ferry\"" start= auto DisplayName= open-ferry"#,
+            r#"sc.exe description open-ferry "open-ferry AI proxy""#,
+            "sc.exe failure open-ferry reset= 86400 actions= restart/5000",
+            "sc.exe failureflag open-ferry 1",
+            "sc.exe start open-ferry",
+        ]
+    );
+    // No obj= means SCM's default LocalSystem account.
+}
+
+#[test]
+fn writes_a_plain_launchd_daemon_plist() {
+    assert_eq!(
+        launchd::plist(
+            &machine_definition(false),
+            "/Library/Logs/open-ferry.log",
+            true
+        ),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Installed by `open-ferry service install -system`; `open-ferry service uninstall -system` removes it. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.loft-902-co-llc.open-ferry</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/open-ferry</string>
+		<string>-config</string>
+		<string>/etc/open-ferry/config.yaml</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/etc/open-ferry</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/open-ferry.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/open-ferry.log</string>
+</dict>
+</plist>
+"#
+    );
+}
+
+#[test]
+fn every_system_form_requires_real_trust_of_the_exe_config_and_working_directory() {
+    for supervised in [false, true] {
+        for platform in [Platform::Linux, Platform::Windows] {
+            let (base, context, config, dir) = if platform == Platform::Windows {
+                let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
+                (
+                    fake,
+                    context,
+                    PROGRAM_FILES_CONFIG,
+                    r"C:\Program Files\open-ferry\work",
+                )
+            } else {
+                (
+                    Fake::default().uid(0).file(MACHINE_CONFIG, SYSTEM_CONFIG),
+                    machine_context(),
+                    MACHINE_CONFIG,
+                    "/srv/work",
+                )
+            };
+            for path in [&context.exe, config, dir] {
+                let mut fake = Fake {
+                    untrusted: BTreeSet::from([path.to_owned()]),
+                    ..Fake::default()
+                };
+                fake.files = base.files.clone();
+                fake.answers = base.answers.clone();
+                let updating = if supervised {
+                    Updating::supervised(MACHINE_DATA)
+                } else {
+                    Updating::plain(Ok(MACHINE_DATA.to_owned()), "no machine install")
+                };
+                let error = prepare_install_with(
+                    &mut fake,
+                    &context,
+                    Target::new(platform, true),
+                    config,
+                    Some(dir),
+                    false,
+                    &updating,
+                )
+                .err()
+                .unwrap();
+                assert_eq!(
+                    error,
+                    format!(
+                        "Refusing the system service: {path} failed the system trust check: {path} is not safe: {path} is untrusted"
+                    )
+                );
+                assert!(!fake.events.iter().any(|event| event.starts_with("write ")
+                    || event.starts_with("write_atomic ")
+                    || event.contains("create open-ferry")));
+            }
+        }
+    }
+}
+
+#[test]
+fn real_trust_refuses_the_sticky_group_writable_and_link_paths_protected_accepted() {
+    for (path, owner) in [("/srv", 0o1777), ("/usr/local/bin", 0o775)] {
+        let exe = format!("{path}/open-ferry");
+        let mut fake = Fake::default()
+            .uid(0)
+            .file(MACHINE_CONFIG, SYSTEM_CONFIG)
+            .owner(path, 0, 0, owner, true);
+        let context = context(Platform::Linux, &exe, "/root", &[("HOME", "/root")]);
+        assert!(protected(&mut fake, &context, MACHINE_CONFIG, None).is_ok());
+        assert!(
+            system_install(&mut fake, &exe)
+                .unwrap_err()
+                .contains("failed the system trust check")
+        );
+    }
+    let mut fake = Fake::default()
+        .uid(0)
+        .file(MACHINE_CONFIG, SYSTEM_CONFIG)
+        .link(MACHINE_EXE, "/opt/open-ferry");
+    assert!(protected(&mut fake, &machine_context(), MACHINE_CONFIG, None).is_ok());
+    assert!(
+        system_install(&mut fake, MACHINE_EXE)
+            .unwrap_err()
+            .contains("is a link")
+    );
+}
+
+struct ScopeFake {
+    platform: Platform,
+    receipt_binary: Option<String>,
+    refused: Option<String>,
+    bad_child: bool,
+}
+
+impl ScopeFake {
+    fn root(&self) -> &'static str {
+        if self.platform == Platform::Windows {
+            SCM_DATA
+        } else {
+            MACHINE_DATA
+        }
+    }
+}
+
+impl Default for ScopeFake {
+    fn default() -> Self {
+        Self {
+            platform: Platform::Linux,
+            receipt_binary: Some(MACHINE_EXE.to_owned()),
+            refused: None,
+            bad_child: false,
+        }
+    }
+}
+
+impl scope::Probe for ScopeFake {
+    fn platform(&self) -> Platform {
+        self.platform
+    }
+    fn privileged(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn account_dir(&self) -> Result<String, String> {
+        Ok(if self.platform == Platform::Windows {
+            r"C:\Users\root\AppData\Local\open-ferry"
+        } else {
+            "/root/.local/share/open-ferry"
+        }
+        .to_owned())
+    }
+    fn program_data(&self) -> Result<String, String> {
+        Ok(r"C:\ProgramData".to_owned())
+    }
+    fn state(&self, path: &str) -> scope::State {
+        if path.ends_with(open_ferry_update::data_dir::RECEIPT_FILE) {
+            if path.starts_with(self.root()) && self.receipt_binary.is_some() {
+                scope::State::File
+            } else {
+                scope::State::Missing
+            }
+        } else if path.ends_with("untrusted-child") {
+            scope::State::Other
+        } else {
+            scope::State::Directory
+        }
+    }
+    fn entries(&self, dir: &str, _limit: usize) -> io::Result<Vec<String>> {
+        if dir == self.root() && self.bad_child {
+            Ok(vec!["untrusted-child".to_owned()])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+    fn trusted_dir(&self, path: &str) -> Result<(), String> {
+        match &self.refused {
+            Some(why) if path == self.root() => Err(why.clone()),
+            _ => Ok(()),
+        }
+    }
+    fn trusted_file(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn receipt(
+        &self,
+        path: &str,
+    ) -> Result<Option<Receipt>, open_ferry_update::receipt::ReceiptError> {
+        Ok(self
+            .receipt_binary
+            .as_ref()
+            .filter(|_| path.starts_with(self.root()))
+            .map(|binary| Receipt {
+                binary: binary.clone(),
+                ..Receipt::default()
+            }))
+    }
+    fn canonical(&self, path: &str) -> io::Result<String> {
+        Ok(path.to_owned())
+    }
+    fn create_machine_dir(&mut self, _path: &str) -> io::Result<()> {
+        panic!("assessment never provisions")
+    }
+}
+
+#[derive(Default)]
+struct InstallFake {
+    container: bool,
+    read_only: bool,
+}
+
+impl update_install::System for InstallFake {
+    fn current_exe(&self) -> io::Result<std::path::PathBuf> {
+        panic!("assessment takes the service binary")
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<std::path::PathBuf> {
+        // Forward slashes let assessment read a Windows binary's name on
+        // Unix too; these fixtures contain no Unix backslashes.
+        Ok(path.to_string_lossy().replace('\\', "/").into())
+    }
+    fn in_container(&self) -> bool {
+        self.container
+    }
+    fn dir_writable(&self, _dir: &Path) -> bool {
+        !self.read_only
+    }
+}
+
+#[test]
+fn a_system_service_chooses_only_a_trusted_self_updating_machine_install() {
+    let context = machine_context();
+    let machine = InstallFake::default();
+    let updating = Updating::assess_system(&ScopeFake::default(), &machine, &context);
+    assert_eq!(updating, Updating::supervised(MACHINE_DATA));
+    for receipt_binary in [None, Some("/another/open-ferry".to_owned())] {
+        let probe = ScopeFake {
+            receipt_binary,
+            ..ScopeFake::default()
+        };
+        assert_eq!(
+            Updating::assess_system(&probe, &machine, &context)
+                .why_plain
+                .as_deref(),
+            Some(NO_MACHINE_INSTALL)
+        );
+    }
+    let probe = ScopeFake {
+        refused: Some("the machine directory is unsafe".to_owned()),
+        ..ScopeFake::default()
+    };
+    let refusal = scope::lookup(&probe, &context.exe).unwrap_err().to_string();
+    assert_eq!(
+        Updating::assess_system(&probe, &machine, &context).why_plain,
+        Some(refusal)
+    );
+    let probe = ScopeFake {
+        bad_child: true,
+        ..ScopeFake::default()
+    };
+    assert!(
+        Updating::assess_system(&probe, &machine, &context)
+            .why_plain
+            .unwrap()
+            .contains("untrusted-child")
+    );
+    for machine in [
+        InstallFake {
+            container: true,
+            read_only: false,
+        },
+        InstallFake {
+            container: false,
+            read_only: true,
+        },
+    ] {
+        let install = update_install::assess_for(
+            &machine,
+            Ok(Some(Receipt {
+                binary: MACHINE_EXE.to_owned(),
+                ..Receipt::default()
+            })),
+            Path::new(MACHINE_EXE),
+        );
+        assert_eq!(
+            Updating::assess_system(&ScopeFake::default(), &machine, &context).why_plain,
+            Some(install.why_not().unwrap().to_string())
+        );
+    }
+    let probe = ScopeFake {
+        platform: Platform::MacOs,
+        ..ScopeFake::default()
+    };
+    let mut context = context;
+    context.platform = Platform::MacOs;
+    assert_eq!(
+        Updating::assess_system(&probe, &machine, &context)
+            .why_plain
+            .as_deref(),
+        Some(MACOS_SYSTEM_PLAIN)
+    );
+}
+
+#[test]
+fn a_windows_system_service_pins_the_known_machine_directory() {
+    let (_, mut context) = windows_admin(PROGRAM_FILES_EXE);
+    // ProgramData from the environment is deliberately not an input.
+    context
+        .env
+        .insert("ProgramData".to_owned(), r"D:\untrusted".to_owned());
+    let probe = ScopeFake {
+        platform: Platform::Windows,
+        receipt_binary: Some(PROGRAM_FILES_EXE.to_owned()),
+        ..ScopeFake::default()
+    };
+    assert_eq!(
+        Updating::assess_system(&probe, &InstallFake::default(), &context),
+        Updating::supervised(SCM_DATA)
+    );
+}
+
+#[test]
+fn system_records_are_atomic_after_install_and_only_for_the_supervised_form() {
+    for supervised in [false, true] {
+        for platform in [Platform::Linux, Platform::Windows, Platform::MacOs] {
+            let (mut fake, mut context, config, data) = if platform == Platform::Windows {
+                let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
+                (fake, context, PROGRAM_FILES_CONFIG, SCM_DATA)
+            } else {
+                (
+                    Fake::default().uid(0).file(MACHINE_CONFIG, SYSTEM_CONFIG),
+                    machine_context(),
+                    MACHINE_CONFIG,
+                    MACHINE_DATA,
+                )
+            };
+            context.platform = platform;
+            let updating = if supervised {
+                Updating::supervised(data)
+            } else {
+                Updating::plain(Ok(data.to_owned()), "no machine install")
+            };
+            let (result, _) = execute_updating(
+                &mut fake,
+                &context,
+                &["install", "-system", "-config", config],
+                &updating,
+            );
+            assert_eq!(result, Ok(()));
+            let path = platform.join(data, RECORD_FILE);
+            if supervised && platform != Platform::MacOs {
+                let record: serde_json::Value = serde_json::from_slice(&fake.files[&path]).unwrap();
+                assert_eq!(record["format"], 1);
+                assert_eq!(record["kind"], "system");
+                assert_eq!(
+                    record["manager"],
+                    if platform == Platform::Linux {
+                        "systemd"
+                    } else {
+                        "scm"
+                    }
+                );
+                assert_eq!(record["supervised"], true);
+                assert_eq!(record["data_dir"], data);
+                assert_eq!(fake.events.last(), Some(&format!("write_atomic {path}")));
+            } else {
+                assert!(!fake.files.contains_key(&path));
+            }
+        }
+    }
+}
+
+fn scm_fake() -> (Fake, Context) {
+    let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
+    let definition = scm_definition(true);
+    let fake = fake
+        .answer("sc.exe query open-ferry", 0, "STATE : 1 STOPPED")
+        .answer(
+            "sc.exe qc open-ferry",
+            0,
+            &format!(
+                "BINARY_PATH_NAME : {}",
+                windows::service_command(&definition)
+            ),
+        )
+        .file(
+            &Platform::Windows.join(SCM_DATA, RECORD_FILE),
+            &record_text(Target::WindowsService, &definition, SCM_DATA),
+        );
+    (fake, context)
+}
+
+fn scm_states(fake: &mut Fake, states: &[&str]) {
+    fake.queued.insert(
+        "sc.exe query open-ferry".to_owned(),
+        states
+            .iter()
+            .map(|stdout| Output {
+                code: Some(0),
+                stdout: (*stdout).to_owned(),
+                stderr: String::new(),
+            })
+            .collect(),
+    );
+}
+
+#[test]
+fn scm_uninstall_stops_the_system_supervisor_then_waits_before_delete_and_record_removal() {
+    for stop in [
+        StopOutcome::Stopped,
+        StopOutcome::NotRunning,
+        StopOutcome::Refused("unavailable".to_owned()),
+        StopOutcome::TimedOut("pending".to_owned()),
+    ] {
+        let (mut fake, context) = scm_fake();
+        fake.stop = Some(stop);
+        scm_states(
+            &mut fake,
+            &[
+                "STATE : 4 RUNNING",
+                "STATE : 3 STOP_PENDING",
+                "STATE : 1 STOPPED",
+            ],
+        );
+        let (result, _) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            events(&fake),
+            [
+                "run sc.exe query open-ferry",
+                "run whoami.exe /groups /fo csv /nh",
+                "run sc.exe qc open-ferry",
+                r"stop_supervisor C:\ProgramData\open-ferry 50s system",
+                "run sc.exe stop open-ferry",
+                "run sc.exe query open-ferry",
+                "pause 1s",
+                "run sc.exe query open-ferry",
+                "run sc.exe delete open-ferry",
+                r"remove C:\ProgramData\open-ferry\service.json",
+            ]
+        );
+    }
+}
+
+#[test]
+fn scm_uninstall_keeps_the_service_and_record_when_running_or_unknown_at_the_deadline() {
+    for answer in ["STATE : 3 STOP_PENDING", "unrecognized"] {
+        let (mut fake, context) = scm_fake();
+        fake.answers.insert(
+            "sc.exe query open-ferry".to_owned(),
+            Output {
+                code: Some(0),
+                stdout: answer.to_owned(),
+                stderr: String::new(),
+            },
+        );
+        let (result, _) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+        let error = result.unwrap_err();
+        assert!(error.starts_with("Uninstall incomplete:"), "{error}");
+        assert!(error.contains("after 60 s"), "{error}");
+        assert_eq!(
+            fake.events
+                .iter()
+                .filter(|event| event.starts_with("pause "))
+                .count(),
+            60
+        );
+        assert_eq!(
+            fake.events
+                .iter()
+                .filter(|event| *event == "run sc.exe query open-ferry")
+                .count(),
+            62
+        );
+        assert!(
+            !fake.events.iter().any(
+                |event| event == "run sc.exe delete open-ferry" || event.starts_with("remove ")
+            )
+        );
+        assert!(
+            fake.files
+                .contains_key(&Platform::Windows.join(SCM_DATA, RECORD_FILE))
+        );
+    }
+}
+
+#[test]
+fn scm_uninstall_checks_stopped_even_when_sc_stop_fails() {
+    let (fake, context) = scm_fake();
+    let mut fake = fake.fail("sc.exe stop open-ferry", 1062, "not running");
+    let (result, out) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+    assert_eq!(result, Ok(()));
+    assert!(out.contains("not running; going on"));
+    assert!(
+        fake.events
+            .iter()
+            .any(|event| event == "run sc.exe delete open-ferry")
+    );
+}
+
+#[test]
+fn a_failed_scm_delete_keeps_the_system_record() {
+    let (fake, context) = scm_fake();
+    let mut fake = fake.fail("sc.exe delete open-ferry", 5, "access denied");
+    let (result, _) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+    assert!(result.unwrap_err().contains("access denied"));
+    assert!(
+        fake.files
+            .contains_key(&Platform::Windows.join(SCM_DATA, RECORD_FILE))
+    );
+    assert!(!fake.events.iter().any(|event| event.starts_with("remove ")));
+}
+
+#[test]
+fn scm_definitions_are_read_from_one_complete_binary_path_line() {
+    let definition = scm_definition(true);
+    let command = windows::service_command(&definition);
+    let output = format!(
+        "[SC] QueryServiceConfig SUCCESS\r\n\r\nSERVICE_NAME: open-ferry\r\n        BINARY_PATH_NAME   : {command}\r\n        SERVICE_START_NAME : LocalSystem\r\n"
+    );
+    let words = windows::service_definition(&output).unwrap();
+    assert_eq!(
+        flagged(&words, words.first().cloned()),
+        Flagged {
+            supervised: true,
+            data_dir: Some(SCM_DATA.to_owned()),
+            exe: Some(PROGRAM_FILES_EXE.to_owned()),
+            config: Some(PROGRAM_FILES_CONFIG.to_owned()),
+        }
+    );
+    for bad in [
+        "no command".to_owned(),
+        "BINARY_PATH_NAME : ".to_owned(),
+        "BINARY_PATH_NAME : \"\"".to_owned(),
+        format!("{output}\n BINARY_PATH_NAME: {command}"),
+        "BINARY_PATH_NAME : \"unfinished".to_owned(),
+    ] {
+        assert_eq!(windows::service_definition(&bad), None);
+    }
+}
+
+#[test]
+fn a_missing_or_unqueryable_scm_state_is_never_taken_for_stopped() {
+    for code in [5, 1060] {
+        let (mut fake, context) = scm_fake();
+        scm_states(&mut fake, &["STATE : 4 RUNNING"]);
+        fake = fake.fail("sc.exe query open-ferry", code, "query failed");
+        let (result, _) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+        assert!(result.unwrap_err().starts_with("Uninstall incomplete:"));
+        assert!(
+            !fake
+                .events
+                .iter()
+                .any(|event| event == "run sc.exe delete open-ferry")
+        );
+        assert!(
+            fake.files
+                .contains_key(&Platform::Windows.join(SCM_DATA, RECORD_FILE))
+        );
+    }
+}
+
+fn system_unit_fake() -> Fake {
+    Fake::default()
+        .uid(0)
+        .file(SYSTEM_UNIT, &systemd::unit(&machine_definition(true), true))
+        .file(
+            &format!("{MACHINE_DATA}/{RECORD_FILE}"),
+            &record_text(
+                Target::SystemdSystem,
+                &machine_definition(true),
+                MACHINE_DATA,
+            ),
+        )
+}
+
+#[test]
+fn every_system_unit_has_a_checked_stop_and_keeps_its_record_until_complete() {
+    for supervised in [false, true] {
+        for active in ["active", "activating", "", "inactive", "failed", "unknown"] {
+            let mut fake = system_unit_fake()
+                .file(
+                    SYSTEM_UNIT,
+                    &systemd::unit(&machine_definition(supervised), true),
+                )
+                .fail(
+                    "systemctl disable --now open-ferry.service",
+                    1,
+                    "stop failed",
+                )
+                .answer("systemctl is-active open-ferry.service", 3, active);
+            let (result, _) =
+                execute_with(&mut fake, &machine_context(), &["uninstall", "-system"]);
+            let ended = matches!(active, "inactive" | "failed" | "unknown");
+            assert_eq!(result.is_ok(), ended, "{active}: {result:?}");
+            assert_eq!(fake.files.contains_key(SYSTEM_UNIT), !ended);
+            assert_eq!(
+                fake.files
+                    .contains_key(&format!("{MACHINE_DATA}/{RECORD_FILE}")),
+                !ended || !supervised
+            );
+            let mut expected = vec![
+                "run id -u",
+                "run systemctl disable --now open-ferry.service",
+                "run systemctl is-active open-ferry.service",
+            ];
+            if ended {
+                expected.extend([
+                    "remove /etc/systemd/system/open-ferry.service",
+                    "run systemctl daemon-reload",
+                ]);
+                if supervised {
+                    expected.push("remove /var/lib/open-ferry/service.json");
+                }
+            }
+            assert_eq!(events(&fake), expected);
+        }
+    }
+    let mut fake = system_unit_fake().fail("systemctl daemon-reload", 1, "reload failed");
+    assert!(
+        execute_with(&mut fake, &machine_context(), &["uninstall", "-system"])
+            .0
+            .is_err()
+    );
+    assert!(
+        fake.files
+            .contains_key(&format!("{MACHINE_DATA}/{RECORD_FILE}"))
+    );
+}
+
+#[test]
+fn a_plain_daemon_is_kept_when_bootout_fails_unless_print_proves_it_is_not_loaded() {
+    let mut context = machine_context();
+    context.platform = Platform::MacOs;
+    let path = launchd::plist_path(&context, true).unwrap();
+    for (code, stdout, removed) in [
+        (0, "loaded", false),
+        (1, "error", false),
+        (113, "", true),
+        (1, "Could not find service", true),
+    ] {
+        let mut fake = Fake::default()
+            .uid(0)
+            .file(
+                &path,
+                &launchd::plist(
+                    &machine_definition(false),
+                    "/Library/Logs/open-ferry.log",
+                    true,
+                ),
+            )
+            .fail(
+                "launchctl bootout system/io.github.loft-902-co-llc.open-ferry",
+                1,
+                "bootout failed",
+            )
+            .answer(
+                "launchctl print system/io.github.loft-902-co-llc.open-ferry",
+                code,
+                stdout,
+            );
+        let (result, _) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+        assert_eq!(result.is_ok(), removed);
+        assert_eq!(fake.files.contains_key(&path), !removed);
+        assert_eq!(
+            fake.events[1..3],
+            [
+                "run launchctl bootout system/io.github.loft-902-co-llc.open-ferry",
+                "run launchctl print system/io.github.loft-902-co-llc.open-ferry"
+            ]
+        );
+    }
+}
+
+#[test]
+fn untrusted_system_data_is_never_read_stopped_through_or_removed() {
+    for windows in [false, true] {
+        let (mut fake, context, dir) = if windows {
+            let (fake, context) = scm_fake();
+            (fake, context, SCM_DATA)
+        } else {
+            (system_unit_fake(), machine_context(), MACHINE_DATA)
+        };
+        fake.untrusted.insert(dir.to_owned());
+        let (result, out) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+        assert_eq!(result, Ok(()));
+        assert!(out.contains(&format!("Not using the service's data directory {dir}")));
+        assert!(!fake.reads.borrow().iter().any(|path| path.starts_with(dir)));
+        assert!(
+            !fake
+                .events
+                .iter()
+                .any(|event| event.starts_with("stop_supervisor ")
+                    || event == &format!("remove {}", context.platform.join(dir, RECORD_FILE)))
+        );
+        assert!(
+            fake.files
+                .contains_key(&context.platform.join(dir, RECORD_FILE))
+        );
+    }
+}
+
+#[test]
+fn system_uninstall_never_uses_the_environment_or_an_invalid_record_as_its_data_directory() {
+    let (mut fake, context) = scm_fake();
+    let command = windows::service_command(&scm_definition(true)).replace(SCM_DATA, "relative");
+    fake = fake.answer(
+        "sc.exe qc open-ferry",
+        0,
+        &format!("BINARY_PATH_NAME : {command}"),
+    );
+    let (result, out) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+    assert_eq!(result, Ok(()));
+    assert!(out.contains("it isn't a full path"));
+    assert!(stopped(&fake).is_empty());
+    for record in [
+        "{}".to_owned(),
+        record_text(Target::ScheduledTask, &scm_definition(true), SCM_DATA),
+        record_text(
+            Target::WindowsService,
+            &Definition {
+                exe: r"C:\other.exe".to_owned(),
+                ..scm_definition(true)
+            },
+            SCM_DATA,
+        ),
+    ] {
+        let (fake, context) = scm_fake();
+        let path = Platform::Windows.join(SCM_DATA, RECORD_FILE);
+        let mut fake = fake.file(&path, &record);
+        let (result, out) = execute_with(&mut fake, &context, &["uninstall", "-system"]);
+        assert_eq!(result, Ok(()));
+        assert!(out.contains("Leaving "));
+        assert!(fake.files.contains_key(&path));
+    }
+    let (fake, context) = scm_fake();
+    let mut fake = fake.fail("sc.exe qc open-ferry", 5, "access denied");
+    assert_eq!(
+        execute_with(&mut fake, &context, &["uninstall", "-system"]).0,
+        Ok(())
+    );
+    assert!(stopped(&fake).is_empty());
+    assert!(
+        fake.files
+            .contains_key(&Platform::Windows.join(SCM_DATA, RECORD_FILE))
+    );
+}
+
+#[test]
+fn system_dry_runs_describe_both_forms_and_the_wait_without_changing_anything() {
+    for supervised in [false, true] {
+        for windows in [false, true] {
+            let (mut fake, context, config, data) = if windows {
+                let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
+                (fake, context, PROGRAM_FILES_CONFIG, SCM_DATA)
+            } else {
+                (
+                    Fake::default().uid(0).file(MACHINE_CONFIG, SYSTEM_CONFIG),
+                    machine_context(),
+                    MACHINE_CONFIG,
+                    MACHINE_DATA,
+                )
+            };
+            let updating = if supervised {
+                Updating::supervised(data)
+            } else {
+                Updating::plain(Ok(data.to_owned()), NO_MACHINE_INSTALL)
+            };
+            let (result, out) = execute_updating(
+                &mut fake,
+                &context,
+                &["install", "-system", "-dry-run", "-config", config],
+                &updating,
+            );
+            assert_eq!(result, Ok(()));
+            assert!(out.contains(if windows {
+                "Would run: sc.exe create open-ferry"
+            } else {
+                "Would write /etc/systemd/system/open-ferry.service:"
+            }));
+            assert_eq!(out.contains("-supervise"), supervised);
+            assert_eq!(out.contains("service.json:"), supervised);
+            assert!(out.contains("Dry run: nothing was changed."));
+            assert!(
+                !fake
+                    .events
+                    .iter()
+                    .any(|event| event.starts_with("write") || event.contains(" create "))
+            );
+        }
+    }
+    let (mut fake, context) = scm_fake();
+    let (result, out) = execute_with(&mut fake, &context, &["uninstall", "-system", "-dry-run"]);
+    assert_eq!(result, Ok(()));
+    let before = out.find("Would ask the supervisor").unwrap();
+    let stop = out.find("Would run: sc.exe stop").unwrap();
+    let wait = out.find("Would wait up to 60 s").unwrap();
+    let delete = out.find("Would run: sc.exe delete").unwrap();
+    let remove = out.find("Would remove C:").unwrap();
+    assert!(before < stop && stop < wait && wait < delete && delete < remove);
+    assert_eq!(
+        events(&fake),
+        [
+            "run sc.exe query open-ferry",
+            "run whoami.exe /groups /fo csv /nh",
+            "run sc.exe qc open-ferry"
+        ]
     );
 }

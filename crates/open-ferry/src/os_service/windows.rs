@@ -113,13 +113,13 @@ fn quote(word: &str) -> String {
 
 /// `service run`'s arguments for `definition`. A supervised task runs
 /// `service run -supervise -config <path> -data-dir <path>`, and the wrapper
-/// starts `open-ferry -supervise ...` as its child; a Windows service is
-/// never supervised.
+/// starts `open-ferry -supervise ...` as its child; a system service runs
+/// the supervisor in the SCM wrapper itself.
 fn run_arguments(definition: &Definition, system: bool) -> String {
     let flag = if system { " -system" } else { "" };
-    let mut arguments = match (&definition.data_dir, system) {
-        (Some(data_dir), false) => format!(
-            "service run -supervise -config {} -data-dir {}",
+    let mut arguments = match &definition.data_dir {
+        Some(data_dir) => format!(
+            "service run{flag} -supervise -config {} -data-dir {}",
             quote(&definition.config),
             quote(data_dir)
         ),
@@ -175,6 +175,9 @@ fn split_command_line(line: &str) -> Option<Vec<String>> {
                 }
             }
         }
+    }
+    if quoted {
+        return None;
     }
     word.extend(std::iter::repeat_n('\\', backslashes));
     if started || backslashes > 0 {
@@ -437,6 +440,29 @@ pub(super) fn task_uninstall_steps() -> Vec<Step> {
 /// Succeeds when the service exists, and says how it is.
 pub(super) fn query_service() -> Cmd {
     sc(&["query", SERVICE_NAME])
+}
+
+/// The registered service's command line, as SCM reports it.
+pub(super) fn service_config_query() -> Cmd {
+    sc(&["qc", SERVICE_NAME])
+}
+
+pub(super) fn service_definition(output: &str) -> Option<Vec<String>> {
+    let mut lines = output.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("BINARY_PATH_NAME")?
+            .trim_start()
+            .strip_prefix(':')
+    });
+    let command = lines.next()?.trim();
+    if lines.next().is_some() {
+        return None;
+    }
+    let words = split_command_line(command)?;
+    if words.first().is_none_or(String::is_empty) {
+        return None;
+    }
+    Some(words)
 }
 
 /// The service's command line.
