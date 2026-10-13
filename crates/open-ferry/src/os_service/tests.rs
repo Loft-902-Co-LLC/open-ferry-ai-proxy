@@ -5,12 +5,13 @@ use super::*;
 
 /// A system that records what is done to it, and answers commands as the
 /// test says; a command it wasn't told of succeeds and prints nothing.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Fake {
     files: BTreeMap<String, Vec<u8>>,
     dirs: BTreeSet<String>,
     owners: BTreeMap<String, Owner>,
     links: BTreeMap<String, String>,
+    resolved_paths: BTreeMap<String, String>,
     answers: BTreeMap<String, Output>,
     queued: BTreeMap<String, VecDeque<Output>>,
     reads: RefCell<Vec<String>>,
@@ -148,6 +149,7 @@ impl System for Fake {
         Ok(self
             .links
             .get(path)
+            .or_else(|| self.resolved_paths.get(path))
             .cloned()
             .unwrap_or_else(|| path.to_owned()))
     }
@@ -212,6 +214,10 @@ impl System for Fake {
 
     fn trusted_file(&self, path: &str) -> Result<(), String> {
         self.trust(path)
+    }
+
+    fn machine_root(&self, platform: Platform) -> Result<Option<String>, String> {
+        scope::machine_root(&crate::update::scope_probe::Fake::new(platform, true))
     }
 
     fn pause(&mut self, time: Duration) {
@@ -284,7 +290,7 @@ fn windows() -> Context {
 const CONFIG: &str = "port: 8317\nauth-dir: \"~/.cli-proxy-api\"\n";
 
 /// A config for a system service: its auth directory is a full path.
-const SYSTEM_CONFIG: &str = "port: 8317\nauth-dir: /var/lib/open-ferry\n";
+const SYSTEM_CONFIG: &str = "port: 8317\nauth-dir: /var/lib/open-ferry/auth\n";
 
 const LINUX_CONFIG: &str = "/home/me/.config/open-ferry/config.yaml";
 const LINUX_UNIT: &str = "/home/me/.config/systemd/user/open-ferry.service";
@@ -1361,6 +1367,7 @@ fn installs_a_scheduled_task() {
     assert_eq!(
         events(&fake),
         [
+            "run whoami.exe /groups /fo csv /nh",
             "run schtasks.exe /query /tn open-ferry",
             "run schtasks.exe /query /fo csv /nh",
             "run whoami.exe /user /fo csv /nh",
@@ -1452,6 +1459,7 @@ fn uninstalls_a_scheduled_task() {
         events(&fake),
         [
             "run schtasks.exe /query /tn open-ferry",
+            "run whoami.exe /groups /fo csv /nh",
             "run schtasks.exe /query /tn open-ferry /xml",
             "run schtasks.exe /end /tn open-ferry",
             "run schtasks.exe /delete /tn open-ferry /f",
@@ -2112,6 +2120,7 @@ fn uninstalls_a_task_by_asking_its_supervisor_to_stop_first() {
         assert_eq!(result, Ok(()), "{outcome:?}");
         let expected = [
             "run schtasks.exe /query /tn open-ferry".to_owned(),
+            "run whoami.exe /groups /fo csv /nh".to_owned(),
             format!("run {XML_QUERY}"),
             format!("stop_supervisor {WINDOWS_DATA} 50s"),
             "run schtasks.exe /end /tn open-ferry".to_owned(),
@@ -2629,6 +2638,7 @@ fn a_relative_data_dir_in_the_definition_is_never_a_stop_target() {
         fake.events,
         [
             "run schtasks.exe /query /tn open-ferry".to_owned(),
+            "run whoami.exe /groups /fo csv /nh".to_owned(),
             format!("run {XML_QUERY}"),
             "run schtasks.exe /end /tn open-ferry".to_owned(),
             "run schtasks.exe /delete /tn open-ferry /f".to_owned(),
@@ -4841,4 +4851,129 @@ fn system_dry_runs_describe_both_forms_and_the_wait_without_changing_anything() 
             "run sc.exe qc open-ferry"
         ]
     );
+}
+#[test]
+fn elevated_windows_account_installs_are_refused_before_any_plan_or_config_read() {
+    for dry_run in [false, true] {
+        let mut fake = windows_user().answer(
+            "whoami.exe /groups /fo csv /nh",
+            0,
+            "\"Mandatory Label\\High Mandatory Level\",\"Label\",\"S-1-16-12288\",\"\"\r\n",
+        );
+        let mut args = vec!["install"];
+        if dry_run {
+            args.push("-dry-run");
+        }
+        let (result, _) = execute_with(&mut fake, &windows(), &args);
+        let error = result.unwrap_err();
+        assert!(error.contains("This terminal is elevated"), "{error}");
+        assert!(error.contains("add -system"), "{error}");
+        assert_eq!(events(&fake), ["run whoami.exe /groups /fo csv /nh"]);
+        assert!(fake.reads.borrow().is_empty());
+        assert!(!fake.files.contains_key(TASK_FILE));
+    }
+}
+
+#[test]
+fn elevated_windows_account_services_can_still_be_removed_or_shown() {
+    for action in ["uninstall", "status"] {
+        let mut fake =
+            Fake::default().answer("whoami.exe /groups /fo csv /nh", 0, "\"S-1-16-16384\"\r\n");
+        assert_eq!(execute_with(&mut fake, &windows(), &[action]).0, Ok(()));
+        let expected = if action == "uninstall" {
+            "run schtasks.exe /delete /tn open-ferry /f"
+        } else {
+            "show schtasks.exe /query /tn open-ferry /fo list /v"
+        };
+        assert!(events(&fake).contains(&expected));
+    }
+}
+
+#[test]
+fn system_installs_keep_auth_files_out_of_machine_records() {
+    for (platform, auth, accepted) in [
+        (Platform::Linux, "/var/lib/open-ferry", false),
+        (Platform::Linux, "/var/lib/open-ferry/versions", false),
+        (Platform::Linux, "/var/lib/open-ferry/auth", true),
+        (Platform::Linux, "/srv/credentials", true),
+        (Platform::Linux, "../../var/lib/open-ferry/versions", false),
+        (Platform::Windows, r"C:\ProgramData\open-ferry\logs", false),
+        (Platform::Windows, r"C:\ProgramData\open-ferry\auth", true),
+        (Platform::Windows, r"D:\credentials", true),
+    ] {
+        let (mut fake, context, config) = if platform == Platform::Linux {
+            let mut context = linux();
+            context.exe = "/usr/local/bin/open-ferry".into();
+            (
+                Fake::default().uid(0),
+                context,
+                "/etc/open-ferry/config.yaml",
+            )
+        } else {
+            let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
+            (fake, context, PROGRAM_FILES_CONFIG)
+        };
+        fake = fake.file(config, &format!("auth-dir: '{auth}'\n"));
+        let (result, _) = execute_with(
+            &mut fake,
+            &context,
+            &["install", "-system", "-config", config, "-dry-run"],
+        );
+        if accepted {
+            assert_eq!(result, Ok(()), "{auth}");
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("credential files among the machine's records"),
+                "{auth}: {error}"
+            );
+        }
+        assert!(
+            !events(&fake)
+                .iter()
+                .any(|event| event.starts_with("write "))
+        );
+    }
+}
+
+#[test]
+fn an_untrusted_system_config_is_never_read_as_given_or_resolved() {
+    for platform in [Platform::Linux, Platform::Windows] {
+        let (fake, context, config) = if platform == Platform::Linux {
+            let mut context = linux();
+            context.exe = "/usr/local/bin/open-ferry".into();
+            (
+                Fake::default().uid(0),
+                context,
+                "/etc/open-ferry/config.yaml",
+            )
+        } else {
+            let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
+            (fake, context, PROGRAM_FILES_CONFIG)
+        };
+        for resolved in [false, true] {
+            let mut fake = fake.clone();
+            fake = fake.file(config, "not: [valid YAML");
+            let bad = if resolved && platform == Platform::Linux {
+                let destination = "/etc/open-ferry/unsafe.yaml";
+                fake.resolved_paths
+                    .insert(config.to_owned(), destination.to_owned());
+                fake = fake.file(destination, "not: [valid YAML");
+                destination
+            } else {
+                config
+            };
+            fake.untrusted.insert(bad.to_owned());
+            let (result, _) = execute_with(
+                &mut fake,
+                &context,
+                &["install", "-system", "-config", config, "-dry-run"],
+            );
+            assert!(result.is_err());
+            assert!(
+                fake.reads.borrow().is_empty(),
+                "{platform:?}: read before refusal"
+            );
+        }
+    }
 }

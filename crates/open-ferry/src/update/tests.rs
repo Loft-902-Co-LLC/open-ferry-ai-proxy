@@ -31,13 +31,13 @@ mod command_scope {
             probe.dir(&account).untrust(&account);
             for request in REQUESTS {
                 assert_eq!(
-                    command_home(&probe, BINARY, request).unwrap().scope,
+                    command_home(&probe, BINARY, request, "").unwrap().scope,
                     Scope::Account
                 );
             }
             probe.privileged = Ok(true);
             for request in REQUESTS {
-                let message = command_home(&probe, BINARY, request)
+                let message = command_home(&probe, BINARY, request, "")
                     .unwrap_err()
                     .to_string();
                 assert!(
@@ -60,7 +60,7 @@ mod command_scope {
             probe.dir(&account);
             for request in REQUESTS {
                 assert_eq!(
-                    command_home(&probe, BINARY, request).unwrap().scope,
+                    command_home(&probe, BINARY, request, "").unwrap().scope,
                     Scope::Account
                 );
             }
@@ -83,7 +83,7 @@ mod command_scope {
                         .file("foreign-binary");
                 }
                 let request = Request::Mode(SelfUpdateMode::Off);
-                let home = command_home(&probe, BINARY, request).unwrap();
+                let home = command_home(&probe, BINARY, request, "").unwrap();
                 assert_eq!(home.scope, Scope::Account);
                 let dir = tempfile::tempdir().unwrap();
                 let config = dir.path().join("config.yaml");
@@ -100,7 +100,7 @@ mod command_scope {
                 let (mut out, mut err) = (Vec::new(), Vec::new());
                 let mut console = Console::new(false, &mut out, &mut err);
                 assert_eq!(
-                    set_mode(&path, SelfUpdateMode::Off, None, &mut console).code,
+                    set_mode(&probe, &path, SelfUpdateMode::Off, None, &mut console).code,
                     0
                 );
                 assert!(
@@ -109,7 +109,7 @@ mod command_scope {
                         .contains("mode: off")
                 );
                 probe.privileged = Ok(true);
-                assert!(command_home(&probe, BINARY, request).is_err());
+                assert!(command_home(&probe, BINARY, request, "").is_err());
             }
         }
     }
@@ -137,11 +137,11 @@ mod command_scope {
             let machine = scope::machine_root(&probe).unwrap().unwrap();
             let binary = platform.join(&machine, "open-ferry");
             probe.file(&binary).with_receipt(&machine, &binary);
-            let home = command_home(&probe, &binary, Request::Check).unwrap();
+            let home = command_home(&probe, &binary, Request::Check, "").unwrap();
             assert_eq!(home.scope, Scope::Machine);
             assert_eq!(home.kind, ServiceKind::System);
             for request in &REQUESTS[1..] {
-                let message = command_home(&probe, &binary, *request)
+                let message = command_home(&probe, &binary, *request, "")
                     .unwrap_err()
                     .to_string();
                 assert!(
@@ -156,7 +156,7 @@ mod command_scope {
             probe.privileged = Ok(true);
             for request in REQUESTS {
                 assert_eq!(
-                    command_home(&probe, &binary, request).unwrap().scope,
+                    command_home(&probe, &binary, request, "").unwrap().scope,
                     Scope::Machine
                 );
             }
@@ -173,6 +173,7 @@ mod command_scope {
             &probe,
             "C:/Program Files/open-ferry/open-ferry.exe",
             Request::Check,
+            "",
         )
         .unwrap();
         for json in [false, true] {
@@ -197,7 +198,7 @@ mod command_scope {
             let machine = scope::machine_root(&probe).unwrap().unwrap();
             let receipt = platform.join(&machine, open_ferry_update::data_dir::RECEIPT_FILE);
             probe.node(&receipt, Node::Unreadable);
-            let home = command_home(&probe, BINARY, Request::Update).unwrap();
+            let home = command_home(&probe, BINARY, Request::Update, "").unwrap();
             for json in [false, true] {
                 let (mut out, mut err) = (Vec::new(), Vec::new());
                 let mut console = Console::new(json, &mut out, &mut err);
@@ -238,14 +239,29 @@ mod command_scope {
             let binary = platform.join(&machine, "open-ferry");
             probe.file(&binary).with_receipt(&machine, &binary);
             let request = Request::Mode(SelfUpdateMode::Off);
-            let home = command_home(&probe, &binary, request).unwrap();
+            let home = command_home(&probe, &binary, request, "").unwrap();
             let choose = |probe: &Fake, flag| {
-                command_config(probe, &home, request, flag, Path::new("working"), None)
+                command_config(
+                    probe,
+                    &home,
+                    request,
+                    flag,
+                    Path::new(if platform == Platform::Windows {
+                        "C:/working"
+                    } else {
+                        "/working"
+                    }),
+                    None,
+                )
             };
             assert!(choose(&probe, "").unwrap_err().contains("pass -config"));
             assert_eq!(
                 choose(&probe, "explicit.yaml").unwrap(),
-                Path::new("explicit.yaml")
+                Path::new(if platform == Platform::Windows {
+                    "C:/working/explicit.yaml"
+                } else {
+                    "/working/explicit.yaml"
+                })
             );
             let config = scope::machine_config(&probe).unwrap().unwrap();
             probe.file(&config);
@@ -1015,7 +1031,13 @@ fn mode(
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut console = Console::new(false, &mut out, &mut err);
-    let outcome = set_mode(path, mode, env, &mut console);
+    let outcome = set_mode(
+        &scope_probe::Fake::new(crate::os_service::Platform::HOST.unwrap(), false),
+        path,
+        mode,
+        env,
+        &mut console,
+    );
     let (code, result) = (outcome.code, outcome.result);
     let _ = console.finish(outcome);
     (
@@ -1123,7 +1145,7 @@ fn the_config_is_the_flag_then_the_working_directory_then_the_installed_one() {
 
     assert_eq!(
         config_path("given.yaml", &work, Some(installed.clone())),
-        PathBuf::from("given.yaml")
+        work.join("given.yaml")
     );
     assert_eq!(
         config_path("", &work, Some(installed.clone())),
@@ -1331,4 +1353,120 @@ async fn an_install_that_is_notify_only_is_refused_before_any_replacement_and_ch
     assert_eq!(snapshot(dir.path()), before);
     // No install lock was taken either.
     drop(InstallLock::try_acquire(&installed).unwrap());
+}
+
+#[test]
+fn an_explicit_mode_config_does_not_require_privilege_for_machine_records() {
+    use crate::os_service::Platform;
+    for platform in [Platform::Linux, Platform::Windows] {
+        let probe = &mut scope_probe::Fake::new(platform, false);
+        let root = scope::machine_root(probe).unwrap().unwrap();
+        let binary = platform.join(&root, "open-ferry");
+        probe.file(&binary).with_receipt(&root, &binary);
+        let request = Request::Mode(SelfUpdateMode::Off);
+        assert!(command_home(probe, &binary, request, "").is_err());
+        assert_eq!(
+            command_home(probe, &binary, request, "chosen.yaml")
+                .unwrap()
+                .scope,
+            scope::Scope::Machine
+        );
+        for request in [Request::Update, Request::Rollback] {
+            assert!(command_home(probe, &binary, request, "chosen.yaml").is_err());
+        }
+        probe.privileged = Ok(true);
+        assert!(command_home(probe, &binary, request, "").is_ok());
+    }
+}
+
+#[test]
+fn update_refuses_an_untrusted_config_before_reading_or_writing_it() {
+    use crate::os_service::Platform;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    let text = "not: [valid YAML";
+    std::fs::write(&path, text).unwrap();
+    let mut probe = scope_probe::Fake::new(Platform::HOST.unwrap(), true);
+    probe
+        .file(path.to_str().unwrap())
+        .untrust(dir.path().to_str().unwrap());
+    let expected = scope::authorize_file(&probe, &path)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(load_config(&probe, &path).err().unwrap(), expected);
+    let account = scope::Probe::account_dir(&probe).unwrap();
+    probe.dir(&account);
+    for request in [Request::Check, Request::Update, Request::Rollback] {
+        for json in [false, true] {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let mut console = Console::new(json, &mut out, &mut err);
+            let home = command_home(&probe, BINARY, request, "").unwrap();
+            let outcome = manual(
+                &probe,
+                request,
+                &path,
+                &Options::default(),
+                home,
+                &mut console,
+            );
+            assert_eq!(outcome.code, 1);
+            console.finish(outcome);
+            let printed = format!(
+                "{}{}",
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap()
+            );
+            assert!(printed.contains("Refusing to load"), "{printed}");
+        }
+    }
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut console = Console::new(false, &mut out, &mut err);
+    let outcome = set_mode(&probe, &path, SelfUpdateMode::Off, None, &mut console);
+    assert_eq!(outcome.code, 1);
+    console.finish(outcome);
+    assert!(String::from_utf8(err).unwrap().contains(&expected));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn a_missing_authorized_config_keeps_the_no_config_behavior() {
+    use crate::os_service::Platform;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    std::fs::write(&path, "port: 18000\n").unwrap();
+    let probe = scope_probe::Fake::new(Platform::HOST.unwrap(), true);
+    assert!(load_config(&probe, &path).unwrap().is_none());
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut console = Console::new(false, &mut out, &mut err);
+    assert_eq!(
+        set_mode(&probe, &path, SelfUpdateMode::Off, None, &mut console).code,
+        1
+    );
+    assert!(String::from_utf8(err).unwrap().contains("doesn't exist"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "port: 18000\n");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn trusted_and_unprivileged_configs_still_load_and_change_mode() {
+    use crate::os_service::Platform;
+    for privileged in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "port: 18000\n").unwrap();
+        let mut probe = scope_probe::Fake::new(Platform::HOST.unwrap(), privileged);
+        probe.file(path.to_str().unwrap());
+        if !privileged {
+            probe.untrust(dir.path().to_str().unwrap());
+        }
+        assert_eq!(load_config(&probe, &path).unwrap().unwrap().port, 18000);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut console = Console::new(false, &mut out, &mut err);
+        assert_eq!(
+            set_mode(&probe, &path, SelfUpdateMode::Off, None, &mut console).code,
+            0
+        );
+        assert_eq!(Config::load(&path).unwrap().self_update.mode, "off");
+    }
 }
