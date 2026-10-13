@@ -96,6 +96,9 @@ struct Fake {
     stuck: BTreeSet<String>,
     /// open-ferry's own binary.
     own: String,
+    /// What the trust check sees: an unprivileged process unless a test
+    /// says otherwise, whoever runs the tests.
+    trust: crate::update::scope_probe::Fake,
 }
 
 impl Fake {
@@ -131,6 +134,7 @@ impl Fake {
             no_real: BTreeSet::new(),
             stuck: BTreeSet::new(),
             own: context.exe.clone(),
+            trust: crate::update::scope_probe::Fake::new(context.platform, false),
         };
         fake.file(&context.exe, OPEN_FERRY);
         fake.dir(&context.cwd);
@@ -897,6 +901,10 @@ impl Machine for Fake {
     fn ask(&mut self, question: &str) -> bool {
         self.questions.push(question.to_owned());
         self.replies.pop_front().unwrap_or(false)
+    }
+
+    fn trust_probe(&self) -> &dyn crate::scope::Probe {
+        &self.trust
     }
 }
 
@@ -1846,6 +1854,34 @@ fn does_not_switch_twice() {
         "migrate: open-ferry already answers on http://127.0.0.1:8317, so nothing was changed. Is CLIProxyAPI already switched?",
     );
     read_only(&fake);
+}
+
+// Not upstream's: a privileged run reads CLIProxyAPI's config only when
+// the trust check passes it, and then as an unprivileged run does.
+#[test]
+fn a_privileged_run_reads_only_a_trusted_config() {
+    let (mut fake, context) = systemd_user();
+    fake.trust = crate::update::scope_probe::Fake::new(context.platform, true);
+    fake.trust.file(SYSTEMD_CONFIG).untrust("/home/me");
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.out, "Blockers:");
+    has(
+        &ran.out,
+        "Refusing to load /home/me/cpa/config.yaml: /home/me/cpa/config.yaml is not safe: /home/me is untrusted.",
+    );
+    has(&ran.out, "The switch is blocked: nothing was changed.");
+    read_only(&fake);
+
+    let (mut fake, context) = systemd_user();
+    let unprivileged = migrate(&mut fake, &context, &["-yes"]);
+    let (mut fake, context) = systemd_user();
+    fake.trust = crate::update::scope_probe::Fake::new(context.platform, true);
+    fake.trust.file(SYSTEMD_CONFIG);
+    let trusted = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(trusted.code, unprivileged.code, "{}", trusted.all());
+    assert_eq!(trusted.out, unprivileged.out);
+    assert_eq!(trusted.err, unprivileged.err);
 }
 
 // Not upstream's: what about the config, its environment and its auth
