@@ -10,8 +10,11 @@
 //! bodies or credential values. Shared refresh requests survive cancelled
 //! waiters and time out after 30 seconds. Successful rotations are reused for
 //! up to ten minutes in a bounded cache. Sets known spent by this process become
-//! tombstones, including for outstanding waiters. Runtime shutdown permits one
-//! retry only before sending; after sending it fails closed. A full cache of
+//! tombstones, including for outstanding waiters. Removing a successful entry
+//! retires its outstanding waiters too. Lost tasks are detected without waiters.
+//! Runtime shutdown permits one retry only before sending; shutdown or panic
+//! after the conservative send mark (before connecting) fails closed for up to
+//! ten minutes or until eviction, then a new request is sent. A full cache of
 //! in-flight requests refuses new refreshes rather than duplicating them.
 
 use std::collections::HashMap;
@@ -170,6 +173,9 @@ impl std::error::Error for Error {}
 pub struct SiwcAuth {
     client: reqwest::Client,
     endpoints: Endpoints,
+    // Test seam: false panics before sending, true after the response arrives.
+    #[cfg(test)]
+    panic_after_send: Option<bool>,
 }
 
 impl fmt::Debug for SiwcAuth {
@@ -185,6 +191,8 @@ impl SiwcAuth {
         Self {
             client,
             endpoints: Endpoints::default(),
+            #[cfg(test)]
+            panic_after_send: None,
         }
     }
 
@@ -193,6 +201,8 @@ impl SiwcAuth {
         Self {
             client: Clients::new(proxy_url).get(""),
             endpoints: Endpoints::default(),
+            #[cfg(test)]
+            panic_after_send: None,
         }
     }
 
@@ -285,8 +295,12 @@ impl SiwcAuth {
     /// Successful rotations are reused for up to ten minutes (at most 256
     /// entries). Once this process rotates their successor or observes its
     /// reused-token error, outstanding and later waiters get a local error
-    /// until eviction or expiry. A task lost to runtime shutdown is retried once
-    /// only before sending; after sending it fails closed. If all entries are
+    /// until eviction or expiry. Removing a successful entry also retires its
+    /// outstanding waiters. Tasks lost to runtime shutdown are retried once only
+    /// before sending. Shutdown or panic after the conservative send mark (before
+    /// connecting) fails closed for later callers too, for up to ten minutes or
+    /// until eviction; after that a new request is sent. Pre-send panics and
+    /// ordinary transport errors remain retryable. If all entries are
     /// in flight, new refreshes fail locally with a retryable error. Callers must run
     /// refresh-then-persist in a task that a client disconnect cannot cancel,
     /// checking the persisted token baseline so an older result cannot replace
@@ -317,11 +331,7 @@ impl SiwcAuth {
         let mut data = loop {
             let (shared, superseded) = {
                 let mut refreshes = cache.lock().unwrap_or_else(PoisonError::into_inner);
-                refreshes.retain(|_, entry| {
-                    entry
-                        .completed
-                        .is_none_or(|at| at.elapsed() < REFRESH_GRACE)
-                });
+                prune_refreshes(&mut refreshes);
                 match refreshes.get(&key) {
                     Some(entry) => {
                         if entry.superseded.load(Ordering::SeqCst) {
@@ -358,11 +368,15 @@ impl SiwcAuth {
                             finish_refresh_in_cache(cache, key, &task_id, successor, spent);
                             result
                         });
-                        let shared = shared_refresh_in_cache(task, key, id.clone(), started, cache);
+                        let task_handle = task.abort_handle();
+                        let shared =
+                            shared_refresh_in_cache(task, key, id.clone(), started.clone(), cache);
                         refreshes.insert(
                             key,
                             RefreshEntry {
                                 shared: shared.clone(),
+                                task: Some(task_handle),
+                                started,
                                 id,
                                 superseded: superseded.clone(),
                                 completed: None,
@@ -429,6 +443,10 @@ impl SiwcAuth {
         require_id_token: bool,
         started: Option<&AtomicBool>,
     ) -> Result<SiwcTokenData, Error> {
+        #[cfg(test)]
+        if self.panic_after_send == Some(false) {
+            panic!("fake pre-send panic");
+        }
         let request = self
             .client
             .post(&self.endpoints.token_url)
@@ -444,6 +462,10 @@ impl SiwcAuth {
             started.store(true, Ordering::SeqCst);
         }
         let response = request.send().await.map_err(send_error)?;
+        #[cfg(test)]
+        if self.panic_after_send == Some(true) {
+            panic!("fake post-send panic");
+        }
         let status = response.status().as_u16();
         if status != 200 {
             let (body, _) = read_body_prefix(response, MAX_RESPONSE_BYTES).await;
@@ -483,6 +505,8 @@ static REFRESHES: LazyLock<Mutex<HashMap<[u8; 32], RefreshEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct RefreshEntry {
+    task: Option<tokio::task::AbortHandle>,
+    started: Arc<AtomicBool>,
     shared: SharedRefresh,
     id: Arc<()>,
     superseded: Arc<AtomicBool>,
@@ -501,8 +525,47 @@ fn refresh_key(endpoint: &str, client: &str, token: &str) -> [u8; 32] {
         .into()
 }
 
+// Finished tasks must not occupy in-flight capacity just because no waiter polled.
+fn reap_lost_refreshes(map: &mut HashMap<[u8; 32], RefreshEntry>) {
+    map.retain(|_, entry| {
+        if entry.completed.is_none() && entry.task.as_ref().is_some_and(|task| task.is_finished()) {
+            if !entry.started.load(Ordering::SeqCst) {
+                return false;
+            }
+            entry.completed = Some(tokio::time::Instant::now());
+            entry.shared =
+                futures_util::future::ready(Err(RefreshError::Request(interrupted_refresh())))
+                    .boxed()
+                    .shared();
+        }
+        true
+    });
+}
+
+fn retire_refresh(entry: &RefreshEntry) {
+    if entry.successor.is_some() {
+        entry.superseded.store(true, Ordering::SeqCst);
+    }
+}
+
+fn prune_refreshes(map: &mut HashMap<[u8; 32], RefreshEntry>) {
+    reap_lost_refreshes(map);
+    map.retain(|_, entry| {
+        let keep = entry
+            .completed
+            .is_none_or(|at| at.elapsed() < REFRESH_GRACE);
+        if !keep {
+            retire_refresh(entry);
+        }
+        keep
+    });
+}
+
 // The caller prunes expired entries once before lookup/insertion, under this lock.
 fn reserve_refresh(map: &mut HashMap<[u8; 32], RefreshEntry>, limit: usize) -> Result<(), Error> {
+    if map.len() >= limit {
+        reap_lost_refreshes(map);
+    }
     if map.len() >= limit {
         let oldest = map
             .iter()
@@ -510,7 +573,9 @@ fn reserve_refresh(map: &mut HashMap<[u8; 32], RefreshEntry>, limit: usize) -> R
             .min_by_key(|(_, at)| *at)
             .map(|(key, _)| key)
             .ok_or_else(|| Error::new("SIWC token refresh cache is full; retry later"))?;
-        map.remove(&oldest);
+        if let Some(entry) = map.remove(&oldest) {
+            retire_refresh(&entry);
+        }
     }
     Ok(())
 }
@@ -527,11 +592,7 @@ fn insert_refresh_with_limit(
     entry: RefreshEntry,
     limit: usize,
 ) -> Result<(), Error> {
-    map.retain(|_, entry| {
-        entry
-            .completed
-            .is_none_or(|at| at.elapsed() < REFRESH_GRACE)
-    });
+    prune_refreshes(map);
     reserve_refresh(map, limit)?;
     map.insert(key, entry);
     Ok(())
@@ -590,13 +651,15 @@ fn shared_refresh_in_cache(
             .map_err(|error| {
                 // Also covers a task dropped before its first poll. The identity
                 // check avoids removing a replacement after eviction or failure.
-                if error.is_cancelled() && started.load(Ordering::SeqCst) {
+                if started.load(Ordering::SeqCst) {
                     // Keep the interruption for the grace window: replay is unsafe.
                     let mut map = cache.lock().unwrap_or_else(PoisonError::into_inner);
                     if let Some(entry) = map.get_mut(&key)
                         && Arc::ptr_eq(&entry.id, &id)
                     {
-                        entry.completed = Some(tokio::time::Instant::now());
+                        entry
+                            .completed
+                            .get_or_insert_with(tokio::time::Instant::now);
                     }
                     RefreshError::Request(interrupted_refresh())
                 } else if error.is_cancelled() {
