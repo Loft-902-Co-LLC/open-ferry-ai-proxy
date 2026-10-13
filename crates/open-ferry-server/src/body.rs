@@ -4,8 +4,8 @@
 //! Request bodies.
 //!
 //! Deviations from upstream:
-//! - A body over the configured limit, before or after decoding, gets a 413.
-//!   Upstream reads bodies of any size.
+//! - A non-positive configured limit keeps the 64 MiB default; upstream
+//!   disables its limit. Both raw and decoded bodies are bounded.
 //! - `gzip` is decoded as well as `zstd`.
 //! - The text of a zstd decoding error differs.
 //! - A JSON body with 128 or more arrays and objects inside one another is
@@ -344,5 +344,21 @@ mod tests {
         let mut declared = HeaderMap::new();
         declared.insert(header::CONTENT_LENGTH, "11".parse().unwrap());
         assert_eq!(read(b"", declared, 10).await.unwrap_err().status(), 413);
+    }
+
+    // TestServerMaxRequestBodyBytesRejectsContentLengthAndChunkedBodies:
+    // a MaxInt64 configured cap must not overflow the decoded reader.
+    #[tokio::test]
+    async fn the_largest_configured_limit_accepts_small_decoded_bodies() {
+        for (encoding, input) in [("zstd", zstd_frame(b"{}")), ("gzip", gzip(b"{}"))] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_ENCODING, encoding.parse().unwrap());
+            assert_eq!(
+                read_decoded(&headers, Body::from(input), i64::MAX as usize)
+                    .await
+                    .unwrap(),
+                "{}"
+            );
+        }
     }
 }
