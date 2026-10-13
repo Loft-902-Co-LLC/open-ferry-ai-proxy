@@ -16,6 +16,11 @@
 //! location for its project with a bearer token from that account (see
 //! [`super::token`]).
 //!
+//! An Interactions client with an explicit `interactions` credential opt-in
+//! calls Vertex's native `/v1beta1/interactions` API instead. Global service
+//! accounts call its project-scoped endpoint with a bearer token; regional
+//! service accounts keep the Gemini bridge. See [`interactions`].
+//!
 //! Imagen models (any model whose name contains `imagen`) are called with
 //! `predict`. With a service account, the client's request becomes an
 //! Imagen request (its first text as the prompt) and Imagen's pictures come
@@ -49,6 +54,8 @@ use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::json::exact;
 use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
 use serde_json::{Map, Value, json};
+
+mod interactions;
 
 use super::stream::Lines;
 use super::token::{ServiceAccount, TokenCache, service_account};
@@ -261,6 +268,9 @@ impl VertexExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         reject_compact(options)?;
+        if interactions::should_execute_native(auth, options) {
+            return self.execute_interactions(auth, request, options).await;
+        }
         let target = target(auth)?;
         let base = base_model(&request.model);
         // Only a service account calls Imagen with its own request.
@@ -306,6 +316,11 @@ impl VertexExecutor {
         options: &Options,
     ) -> Result<StreamResponse, ExecError> {
         reject_compact(options)?;
+        if interactions::should_execute_native(auth, options) {
+            return self
+                .execute_interactions_stream(auth, request, options)
+                .await;
+        }
         let target = target(auth)?;
         let base = base_model(&request.model);
         let body = self.prepare(request, options, true)?;
