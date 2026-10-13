@@ -41,7 +41,7 @@ const LINUX_MACHINE_CONFIG: &str = "/etc/open-ferry/config.yaml";
 const MACHINE_DIR_NAME: &str = "open-ferry";
 /// The auth directory's name in the machine data directory.
 const AUTH_DIR: &str = "auth";
-/// The machine config's name beside the binary, on Windows.
+/// The machine config's name in the protected machine data directory on Windows.
 const CONFIG_FILE: &str = "config.yaml";
 /// LocalSystem's SID.
 #[cfg(windows)]
@@ -364,7 +364,7 @@ pub(crate) fn lookup(probe: &dyn Probe, binary: &str) -> Result<Home, Refusal> {
 /// Makes the machine data directory, or finds the one an earlier or a
 /// concurrent install made, and [`authorize`]s it: one somebody else could
 /// change is refused, never repaired or adopted. For `install-self -system`
-/// only; needs privilege.
+/// and Windows `init -system`; needs privilege.
 pub(crate) fn provision(probe: &mut dyn Probe) -> Result<Home, Refusal> {
     let platform = probe.platform();
     if platform == Platform::MacOs {
@@ -466,15 +466,14 @@ pub(crate) fn machine_auth_dir(probe: &dyn Probe) -> Result<String, Refusal> {
 }
 
 /// A machine install's config: `/etc/open-ferry/config.yaml` on Linux,
-/// `config.yaml` beside the machine's `binary` on Windows, where the install
+/// `config.yaml` in the protected machine data directory on Windows, where the install
 /// scripts put it; none on macOS.
-pub(crate) fn machine_config(platform: Platform, binary: &str) -> Option<String> {
+pub(crate) fn machine_config(probe: &dyn Probe) -> Result<Option<String>, String> {
+    let platform = probe.platform();
     match platform {
-        Platform::Linux => Some(LINUX_MACHINE_CONFIG.to_owned()),
-        Platform::Windows => platform
-            .parent(binary)
-            .map(|dir| platform.join(&dir, CONFIG_FILE)),
-        Platform::MacOs => None,
+        Platform::Linux => Ok(Some(LINUX_MACHINE_CONFIG.to_owned())),
+        Platform::Windows => Ok(machine_root(probe)?.map(|dir| platform.join(&dir, CONFIG_FILE))),
+        Platform::MacOs => Ok(None),
     }
 }
 

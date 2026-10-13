@@ -545,6 +545,12 @@ pub fn supervise(flags: &Flags) -> ExitCode {
     let dotenv = std::env::current_dir()
         .ok()
         .map(|dir| crate::load_dotenv(&dir.join(".env")));
+    if let Some(Err(error)) = &dotenv
+        && error.is_refused()
+    {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
     let log = logging::init_stderr();
     if let Some(Err(error)) = dotenv
         && !error.is_not_found()

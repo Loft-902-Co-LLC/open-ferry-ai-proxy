@@ -746,7 +746,21 @@ fn inherited_output(handle: HANDLE) -> io::Result<OwnedHandle> {
     if handle.is_null() || handle == INVALID_HANDLE_VALUE {
         open_nul()
     } else {
-        inheritable_handle(handle)
+        output_or_nul(inheritable_handle(handle))
+    }
+}
+
+/// A stale standard handle must not prevent a detached worker from starting.
+fn output_or_nul(output: io::Result<OwnedHandle>) -> io::Result<OwnedHandle> {
+    match output {
+        Ok(output) => Ok(output),
+        Err(error) => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!("failed to inherit worker output: {error}; using NUL")
+            });
+            open_nul()
+        }
     }
 }
 
@@ -846,6 +860,19 @@ mod tests {
         let mut line = Vec::new();
         push_arg(&mut line, OsStr::new(arg), false).unwrap();
         String::from_utf16(&line).unwrap()
+    }
+
+    #[test]
+    fn a_failed_output_duplicate_falls_back_to_an_inheritable_nul_handle() {
+        let handle = output_or_nul(Err(io::Error::other("injected duplicate failure"))).unwrap();
+        let copy = inheritable_handle(handle.as_raw_handle()).unwrap();
+        let mut file = File::from(copy);
+        use std::io::Write as _;
+        file.write_all(b"discarded").unwrap();
+        let handle = output_or_nul(Ok(handle)).unwrap();
+        assert!(!handle.as_raw_handle().is_null());
+        assert!(inherited_output(null_mut()).is_ok());
+        assert!(inherited_output(INVALID_HANDLE_VALUE).is_ok());
     }
 
     #[test]

@@ -68,6 +68,53 @@ mod command_scope {
     }
 
     #[test]
+    fn unprivileged_mode_changes_use_account_records_beside_foreign_or_unusable_machine_receipts() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            for unusable in [false, true] {
+                let mut probe = Fake::new(platform, false);
+                let account = probe.account_dir().unwrap();
+                let machine = scope::machine_root(&probe).unwrap().unwrap();
+                probe.dir(&account).untrust(&account);
+                if unusable {
+                    probe.file(&platform.join(&machine, open_ferry_update::data_dir::RECEIPT_FILE));
+                } else {
+                    probe
+                        .with_receipt(&machine, "foreign-binary")
+                        .file("foreign-binary");
+                }
+                let request = Request::Mode(SelfUpdateMode::Off);
+                let home = command_home(&probe, BINARY, request).unwrap();
+                assert_eq!(home.scope, Scope::Account);
+                let dir = tempfile::tempdir().unwrap();
+                let config = dir.path().join("config.yaml");
+                std::fs::write(&config, "port: 8317\n").unwrap();
+                let path = command_config(
+                    &probe,
+                    &home,
+                    request,
+                    config.to_str().unwrap(),
+                    dir.path(),
+                    None,
+                )
+                .unwrap();
+                let (mut out, mut err) = (Vec::new(), Vec::new());
+                let mut console = Console::new(false, &mut out, &mut err);
+                assert_eq!(
+                    set_mode(&path, SelfUpdateMode::Off, None, &mut console).code,
+                    0
+                );
+                assert!(
+                    std::fs::read_to_string(&config)
+                        .unwrap()
+                        .contains("mode: off")
+                );
+                probe.privileged = Ok(true);
+                assert!(command_home(&probe, BINARY, request).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn check_assesses_writability_without_creating_a_probe_file() {
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir
@@ -193,22 +240,14 @@ mod command_scope {
             let request = Request::Mode(SelfUpdateMode::Off);
             let home = command_home(&probe, &binary, request).unwrap();
             let choose = |probe: &Fake, flag| {
-                command_config(
-                    probe,
-                    &home,
-                    Path::new(&binary),
-                    request,
-                    flag,
-                    Path::new("working"),
-                    None,
-                )
+                command_config(probe, &home, request, flag, Path::new("working"), None)
             };
             assert!(choose(&probe, "").unwrap_err().contains("pass -config"));
             assert_eq!(
                 choose(&probe, "explicit.yaml").unwrap(),
                 Path::new("explicit.yaml")
             );
-            let config = scope::machine_config(platform, &binary).unwrap();
+            let config = scope::machine_config(&probe).unwrap().unwrap();
             probe.file(&config);
             assert_eq!(choose(&probe, "").unwrap(), Path::new(&config));
         }

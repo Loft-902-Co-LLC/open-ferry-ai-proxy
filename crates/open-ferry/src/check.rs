@@ -143,6 +143,10 @@ where
     if let Err(error) = crate::load_dotenv(&dotenv)
         && !error.is_not_found()
     {
+        if error.is_refused() {
+            eprintln!("{NAME}: {error}");
+            return ExitCode::FAILURE;
+        }
         findings.push(Finding::warning(
             ".env",
             format!(

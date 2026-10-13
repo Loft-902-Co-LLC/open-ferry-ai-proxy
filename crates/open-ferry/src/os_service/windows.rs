@@ -493,7 +493,7 @@ pub(super) fn service_install_steps(definition: &Definition) -> Vec<Step> {
             "reset=",
             "86400",
             "actions=",
-            "restart/5000",
+            "restart/5000/restart/60000/restart/60000",
         ])),
         // Counts an exit with an error as a failure, not only a crash.
         Step::Run(sc(&["failureflag", SERVICE_NAME, "1"])),
