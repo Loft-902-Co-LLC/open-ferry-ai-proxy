@@ -163,6 +163,7 @@ use open_ferry_core::config::{
 };
 use open_ferry_core::gate::{ActivationKey, ActiveGate, Operation};
 use open_ferry_core::manager::{Manager, Settings};
+use open_ferry_core::models::{ModelCatalog, ModelInfo};
 use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::{CatalogRuntime, ModelRegistry, RegistrationRules};
 use open_ferry_dashboard::Ledger;
@@ -798,6 +799,7 @@ struct Service {
     store: Arc<FileStore>,
     manager: Manager,
     registry: Arc<ModelRegistry>,
+    executor_catalog: Arc<ExecutorCatalog>,
     state: AppState,
     management: ManagementState,
     /// The log directory, the request logger and the usage statistics the
@@ -848,6 +850,47 @@ struct Service {
     directory_apply_hook: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     #[cfg(test)]
     shutdown_hooks: Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)>,
+}
+
+// Credential-backed model capabilities use the same immutable Claude
+// executor snapshot that the service registers at startup and on reload.
+struct ExecutorCatalog {
+    registry: Arc<ModelRegistry>,
+    manager: Manager,
+    claude: std::sync::RwLock<Option<Arc<ClaudeExecutor>>>,
+}
+
+impl ModelCatalog for ExecutorCatalog {
+    fn model_providers(&self, model: &str) -> Vec<String> {
+        self.registry.model_providers(model)
+    }
+
+    fn first_available_model(&self) -> Option<String> {
+        self.registry.first_available_model()
+    }
+
+    fn available_models(&self) -> Vec<ModelInfo> {
+        self.registry.available_models()
+    }
+
+    fn model_info(&self, model: &str, provider: &str) -> Option<ModelInfo> {
+        self.registry.model_info(model, provider)
+    }
+
+    fn supports_native_tool_search(&self, model: &str) -> bool {
+        let executor = self
+            .claude
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        executor.is_some_and(|executor| {
+            self.manager
+                .supports_native_tool_search_for_model(model, &|auth, upstream| {
+                    go::equal_fold(auth.provider.trim(), "claude")
+                        && executor.supports_native_tool_search(auth, upstream)
+                })
+        })
+    }
 }
 
 impl Service {
@@ -907,10 +950,15 @@ impl Service {
         let observability = observability::build(&config, &config_path, log_level.file_log());
         manager.set_gate(gate.clone());
         manager.set_error_events(observability.usage.error_events());
+        let executor_catalog = Arc::new(ExecutorCatalog {
+            registry: Arc::clone(&registry),
+            manager: manager.clone(),
+            claude: std::sync::RwLock::new(None),
+        });
         let state = AppState::new(
             ServerConfig::from(&*config),
             Arc::new(manager.clone()),
-            Arc::clone(&registry) as _,
+            Arc::clone(&executor_catalog) as _,
         )
         .with_observability(observability.clone());
         let (requests, sync_requests) = mpsc::channel(SYNC_QUEUE);
@@ -950,6 +998,7 @@ impl Service {
             store,
             manager,
             registry,
+            executor_catalog,
             state,
             management,
             observability,
@@ -1386,12 +1435,7 @@ impl Service {
         let proxy_url = self.config.proxy_url.clone();
         self.register_codex_executor();
         self.register_meta_executor();
-        self.manager.register_executor(Arc::new(
-            ClaudeExecutor::new(proxy_url.clone())
-                .with_config(Arc::clone(&self.config))
-                .with_models(Arc::clone(&self.registry) as _)
-                .with_model_level_cooling(self.config.claude.model_level_cooling),
-        ));
+        self.register_claude_executor();
         // It sends nothing itself, so takes no proxy.
         self.manager.register_executor(Arc::new(
             ClaudeCliExecutor::new()
@@ -1414,6 +1458,22 @@ impl Service {
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _),
         ));
+    }
+
+    /// Registers Claude and publishes the same snapshot to its model catalog.
+    fn register_claude_executor(&self) {
+        let executor = Arc::new(
+            ClaudeExecutor::new(self.config.proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _)
+                .with_model_level_cooling(self.config.claude.model_level_cooling),
+        );
+        self.manager.register_executor(Arc::clone(&executor) as _);
+        *self
+            .executor_catalog
+            .claude
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(executor);
     }
 
     /// Registers the Codex executor for the current config.
@@ -2007,7 +2067,9 @@ impl Service {
         {
             self.register_native_executors();
         } else if previous != config {
-            // The Codex, Meta and xAI executors follow the whole config.
+            // Claude's switch, native key flags and payload rules follow the
+            // whole config, alongside the Codex, Meta and xAI executors.
+            self.register_claude_executor();
             self.register_codex_executor();
             self.register_meta_executor();
             self.register_xai_executor();
@@ -4444,6 +4506,125 @@ port: {port}
             dir.path().read_dir().unwrap().next().is_none(),
             "a file was saved"
         );
+    }
+
+    // Ported from server_claude_tool_search_test.go and
+    // codex_client_models_tool_search_test.go (v8.0.27, MIT).
+    #[tokio::test]
+    async fn claude_search_reload_changes_the_catalog_and_the_sent_tools() {
+        use axum::body::Bytes;
+        use open_ferry_core::exec::Format;
+        use serde_json::{Value, json};
+        use tower_service::Service as _;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, mut seen) = mpsc::unbounded_channel();
+        let upstream = axum::Router::new().fallback(move |body: Bytes| {
+            let sent = sent.clone();
+            async move {
+                sent.send(serde_json::from_slice::<Value>(&body).unwrap())
+                    .unwrap();
+                let events = [
+                    json!({"type":"message_start","message":{"id":"msg","type":"message",
+                        "model":"claude-sonnet-4-5","role":"assistant","content":[],
+                        "usage":{"input_tokens":1,"output_tokens":0}}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{
+                        "type":"tool_use","id":"search-call","name":"tool_search","input":{}}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{
+                        "type":"input_json_delta","partial_json":"{\"query\":\"calendar\"}"}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
+                    json!({"type":"message_stop"}),
+                ].map(|event| format!("data: {event}\n\n")).join("");
+                ([(axum::http::header::CONTENT_TYPE, "text/event-stream")], events)
+            }
+        });
+        let serving = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let keys = format!(
+            "proxy-url: direct\nclaude-api-key:\n  - api-key: test-search-key\n    base-url: http://{address}\n    native-tool-search: true\n    models:\n      - name: claude-sonnet-4-5\n        alias: search-model\n"
+        );
+        let mut service = service(dir.path(), &format!("{keys}claude:\n  tool-search: true\n"));
+        service.sync_config_auths();
+        let auth = service.manager.list().pop().unwrap();
+        let mut previous = None;
+        for enabled in [true, false, true] {
+            if enabled != service.config.claude.tool_search {
+                reload(
+                    &mut service,
+                    dir.path(),
+                    &format!("{keys}claude:\n  tool-search: {enabled}\n"),
+                )
+                .await;
+            }
+            let mut app = open_ferry_server::router(service.state.clone());
+            let answer = app
+                .call(
+                    axum::http::Request::builder()
+                        .uri("/v1/models?client_version=0.153.4")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(answer.status(), axum::http::StatusCode::OK);
+            let bytes = axum::body::to_bytes(answer.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let catalog: Value = serde_json::from_slice(&bytes).unwrap();
+            let model = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["slug"] == "search-model")
+                .unwrap();
+            assert_eq!(model["supports_search_tool"], enabled);
+            let request = Request {
+                model: "claude-sonnet-4-5".into(),
+                payload: json!({"input":"hello", "tools":[
+                    {"type":"tool_search","execution":"client"},
+                    {"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object"}}
+                ]}).to_string().into(),
+            };
+            let mut options = Options::new(Format::OPENAI_RESPONSE);
+            options.original_request = request.payload.clone();
+            let current = service.manager.executor("claude").unwrap();
+            let mut snapshots = vec![(current.clone(), enabled)];
+            if let Some(previous) = previous.replace((current, enabled)) {
+                snapshots.push(previous);
+            }
+            // An already selected executor retains both translations' value
+            // after reload; a new manager selection gets the new snapshot.
+            for (executor, expected) in snapshots {
+                let response = executor
+                    .execute(auth.clone(), request.clone(), options.clone())
+                    .await
+                    .unwrap();
+                let response: Value = serde_json::from_slice(&response.payload).unwrap();
+                assert_eq!(
+                    response["output"][0]["type"],
+                    if expected {
+                        "tool_search_call"
+                    } else {
+                        "function_call"
+                    }
+                );
+                let body = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    body["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| tool["name"] == "tool_search"),
+                    expected
+                );
+            }
+        }
+        serving.abort();
     }
 
     /// Reloads `service` with a config over `dir` holding `extra`.

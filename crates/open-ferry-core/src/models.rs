@@ -91,4 +91,10 @@ pub trait ModelCatalog: Send + Sync + 'static {
     fn model_info(&self, _model: &str, _provider: &str) -> Option<ModelInfo> {
         None
     }
+
+    /// Whether every enabled serving credential and its executor support
+    /// native Claude tool search. Catalogs without credential evidence fail closed.
+    fn supports_native_tool_search(&self, _model: &str) -> bool {
+        false
+    }
 }
