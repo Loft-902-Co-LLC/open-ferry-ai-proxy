@@ -47,6 +47,17 @@ const CONFIG_FILE: &str = "config.yaml";
 #[cfg(windows)]
 const SYSTEM_SID: &str = "S-1-5-18";
 
+/// The files that tell a container, for [`Probe::in_container`].
+#[allow(
+    dead_code,
+    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
+)]
+const CONTAINER_MARKERS: [&str; 3] = [
+    "/.dockerenv",
+    "/run/.containerenv",
+    "/var/run/secrets/kubernetes.io",
+];
+
 /// The most entries [`authorize`] looks at below a data directory.
 pub(crate) const MAX_ENTRIES: usize = 10_000;
 /// The most levels [`authorize`] goes below a data directory.
@@ -179,6 +190,18 @@ pub(crate) trait Probe {
     /// administrators; its parent must exist. An existing directory is left
     /// as it is: on Windows that is an `AlreadyExists` error.
     fn create_machine_dir(&mut self, path: &str) -> io::Result<()>;
+    /// Whether this is a container, as files only root could have made say:
+    /// `/.dockerenv` (Docker), `/run/.containerenv` (Podman) or
+    /// `/var/run/secrets/kubernetes.io` (a Kubernetes pod with its service
+    /// account). The environment isn't asked, since whoever starts a
+    /// privileged process may have chosen it. Never on Windows.
+    #[allow(
+        dead_code,
+        reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
+    )]
+    fn in_container(&self) -> bool {
+        false
+    }
 }
 
 /// This machine.
@@ -298,6 +321,13 @@ impl Probe for Host {
 
     fn create_machine_dir(&mut self, path: &str) -> io::Result<()> {
         create_machine_dir(Path::new(path))
+    }
+
+    fn in_container(&self) -> bool {
+        cfg!(unix)
+            && CONTAINER_MARKERS
+                .iter()
+                .any(|path| fs::symlink_metadata(path).is_ok())
     }
 }
 
@@ -588,6 +618,90 @@ fn names(probe: &dyn Probe, path: &str, binary: &str) -> Result<bool, ReceiptErr
     )
 }
 
+/// Checks a file a process is about to take settings from, such as its
+/// `.env` or its config, before anything in it is read: `Ok(true)` to read
+/// it, `Ok(false)` when nothing is there, so there is nothing to read. A
+/// privileged process reads only a file, named by a full path without `.` or
+/// `..`, that passes the trust check with every directory above it; on macOS
+/// it refuses any, since the check doesn't read ACLs yet. An unprivileged
+/// process, or one in a container ([`Probe::in_container`]), reads the file
+/// as it is.
+#[allow(
+    dead_code,
+    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
+)]
+pub(crate) fn authorize_file(probe: &dyn Probe, path: &Path) -> Result<bool, Refusal> {
+    let platform = probe.platform();
+    let refuse = |reason: String| Refusal {
+        reason: format!("Refusing to load {}: {reason}", path.display()),
+        remedy: Some(file_remedy(platform)),
+    };
+    let privileged = probe.privileged().map_err(|error| {
+        refuse(format!(
+            "failed to tell whether this process is privileged: {error}"
+        ))
+    })?;
+    if !privileged || probe.in_container() {
+        return Ok(true);
+    }
+    let text = path
+        .to_str()
+        .ok_or_else(|| refuse("the path isn't valid Unicode".to_owned()))?;
+    let full = platform.is_absolute(text)
+        && !text
+            .split(|c| platform.is_separator(c))
+            .any(|part| part == "." || part == "..");
+    if !full {
+        return Err(refuse(
+            "it isn't a full path without `.` or `..`".to_owned(),
+        ));
+    }
+    match probe.state(text) {
+        State::Missing => Ok(false),
+        _ if platform == Platform::MacOs => {
+            let macos = macos_refusal();
+            Err(Refusal {
+                reason: format!("Refusing to load {}: {}", path.display(), macos.reason),
+                remedy: macos.remedy,
+            })
+        }
+        _ => probe.trusted_file(text).map(|()| true).map_err(refuse),
+    }
+}
+
+/// Refuses an auth directory among the machine's records: the machine data
+/// directory `machine_root`, a directory holding it, or one inside it other
+/// than its `auth` directory and those below that. Credential files are
+/// written to the auth directory, the management API's among them, so there
+/// they could pass for records a privileged process trusts. Both are full
+/// paths.
+#[allow(
+    dead_code,
+    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
+)]
+pub(crate) fn check_auth_dir_placement(
+    platform: Platform,
+    machine_root: &str,
+    auth_dir: &str,
+) -> Result<(), Refusal> {
+    let root = platform.clean(machine_root);
+    let auth = platform.join(&root, AUTH_DIR);
+    let among = platform.is_within(&root, auth_dir)
+        || (platform.is_within(auth_dir, &root) && !platform.is_within(auth_dir, &auth));
+    if !among {
+        return Ok(());
+    }
+    Err(Refusal {
+        reason: format!(
+            "The auth directory {} would put credential files among the machine's records in {root}",
+            platform.clean(auth_dir)
+        ),
+        remedy: Some(format!(
+            "Set auth-dir to {auth}, or to a directory outside {root}."
+        )),
+    })
+}
+
 /// [`authorize`], given whose directory `root` is.
 fn check(probe: &dyn Probe, root: &str, whose: Whose) -> Result<(), Refusal> {
     if !privileged(probe)? {
@@ -740,6 +854,18 @@ fn remedy(platform: Platform, whose: Whose, root: &str) -> String {
             "Stop the open-ferry service, then as root fix what is named, or move {root} aside and install again with {}; keep its auth directory private, since it holds the machine's credentials.",
             machine_install(platform)
         ),
+    }
+}
+
+/// What to do about a settings file [`authorize_file`] refuses.
+#[allow(
+    dead_code,
+    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
+)]
+fn file_remedy(platform: Platform) -> String {
+    match platform {
+        Platform::Windows => "As an administrator, make it and every folder above it writable only by administrators, or run open-ferry in a terminal not opened as administrator.".to_owned(),
+        Platform::Linux | Platform::MacOs => "As root, make it and every directory above it writable only by root, or run open-ferry without sudo.".to_owned(),
     }
 }
 
