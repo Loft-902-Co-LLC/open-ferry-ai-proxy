@@ -17,6 +17,8 @@
 //! host (`format_url`), so no user information, path or query.
 //!
 //! Deviations from upstream:
+//! - The compatibility-only `codex.signin-with-chatgpt-identifier` gets
+//!   an `updated` line without either value; upstream has no diff line.
 //! - The new body-limit, pre-first-token keepalive, affinity rebind and
 //!   Vertex Interactions settings get change lines too. Upstream reloads
 //!   those settings but does not give them individual diff lines.
@@ -190,7 +192,7 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         old.codex.orphan_delegation_compatibility,
         new.codex.orphan_delegation_compatibility,
     );
-    changes.trimmed(
+    changes.secret(
         "codex.signin-with-chatgpt-identifier",
         &old.codex.signin_with_chatgpt_identifier,
         &new.codex.signin_with_chatgpt_identifier,
