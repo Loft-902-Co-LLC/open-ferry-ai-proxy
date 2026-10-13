@@ -307,4 +307,4 @@ jobs:
           docker run --rm --network none -v "$GITHUB_WORKSPACE:/src:ro" \
             -v "$RUNNER_TEMP/ofp-scratch:/scratch" -e OFP_TEST_SCRATCH=/scratch \
             -e OFP_INSTALL_TESTS_STRICT \
-            python:3.12-bookworm python -I /src/tests/install/test_install.py -v
+            python:3.12-bookworm python -I /src/tests/install/test_root_install.py -v
