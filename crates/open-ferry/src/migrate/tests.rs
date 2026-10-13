@@ -254,7 +254,26 @@ impl Fake {
             self.fail("schtasks.exe /query /tn open-ferry", 1, "ERROR");
         }
         if line.starts_with("sc.exe create open-ferry ") {
-            self.answer("sc.exe query open-ferry", 0, "");
+            self.answer(
+                "sc.exe query open-ferry",
+                0,
+                "SERVICE_NAME: open-ferry\r\n        STATE              : 1  STOPPED\r\n",
+            );
+            if let Some((_, definition)) = line.split_once("binPath= ") {
+                let definition = definition.split(" start= ").next().unwrap();
+                // Cmd's display quotes the whole argument and escapes its
+                // inner quotes; SCM's qc prints the command line itself.
+                let definition = definition
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or(definition)
+                    .replace("\\\"", "\"");
+                self.answer(
+                    "sc.exe qc open-ferry",
+                    0,
+                    &format!("BINARY_PATH_NAME   : {definition}\r\n"),
+                );
+            }
         }
         if line == "sc.exe delete open-ferry" {
             self.fail("sc.exe query open-ferry", 1060, "");
@@ -295,7 +314,7 @@ impl Fake {
             ["sc.exe", action, name] => (*action, *name, format!("sc.exe query {name}")),
             _ => return,
         };
-        if unit == "open-ferry.service" || unit == "open-ferry" {
+        if unit == "open-ferry.service" {
             return;
         }
         let up = match action {
