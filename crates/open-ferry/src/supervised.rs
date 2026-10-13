@@ -276,7 +276,8 @@ impl Host for SupervisedHost {
     }
 
     fn effective_mode(&self) -> ModeSnapshot {
-        let read = crate::settings::load(&crate::scope::Host, &self.config_path)
+        // Quietly: this runs every supervisor tick while switching.
+        let read = crate::settings::load_quietly(&crate::scope::Host, &self.config_path)
             .map(|config| Settings::resolve(&config.self_update, (self.env)().as_deref()).mode)
             .map(|mode| mode == SelfUpdateMode::Off);
         let mut state = self.mode.lock().unwrap_or_else(|e| e.into_inner());
