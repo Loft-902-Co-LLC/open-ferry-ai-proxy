@@ -3,6 +3,10 @@
 //! [`oauth`] signs in and refreshes tokens; [`CodexExecutor`] calls Codex
 //! with a credential of provider `codex`: a ChatGPT sign-in, or an API key
 //! in the `api_key` attribute with an optional `base_url`.
+//! [`siwc`] implements the separate Sign in with ChatGPT dynamic-client
+//! registration, exchange and refresh for direct API access. It always
+//! names itself open-ferry; its device UUID is sent only in the browser's
+//! authorization URL, then kept in the nested credential.
 //!
 //! The executor translates the client's request to Codex's Responses
 //! format, applies the thinking setting of a model suffix such as
@@ -51,6 +55,7 @@ pub(crate) mod reasoning;
 pub(crate) mod replay;
 mod replay_cache;
 pub(crate) mod request;
+pub mod siwc;
 pub(crate) mod stream;
 pub(crate) mod terminal;
 pub mod thinking;
