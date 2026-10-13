@@ -74,6 +74,7 @@ use crate::xai::XaiExecutor;
 mod compaction;
 mod ids;
 mod lifecycle;
+mod lifecycle_cleanup;
 mod secrets;
 mod tools;
 

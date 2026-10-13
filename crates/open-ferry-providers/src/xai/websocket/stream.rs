@@ -123,7 +123,10 @@ pub(in crate::xai) async fn execute_stream(
     } else {
         session_id.clone()
     };
-    let state = sessions.ids.get(&state_id);
+    let state = session_id
+        .is_empty()
+        .then(|| sessions.ids.get(&state_id))
+        .flatten();
     // Calls of one prompt cache outside a WebSocket session go one at a
     // time.
     let state_guard = match &state {
@@ -135,6 +138,13 @@ pub(in crate::xai) async fn execute_stream(
         let _session_guard = match sessions.store.get_or_create(&session_id) {
             Some(session) => Some(session.lock_requests().await),
             None => None,
+        };
+        #[cfg(test)]
+        sessions.wait_before_id_state().await;
+        let state = if session_id.is_empty() {
+            state
+        } else {
+            sessions.ids.get(&state_id)
         };
         let mapper = state.map(|state| Mapper::new(state, &client));
         let result =
@@ -166,6 +176,14 @@ pub(in crate::xai) async fn execute_stream(
             (session, false, Some(guard))
         }
         None => (sessions.store.ephemeral(), true, None),
+    };
+    // Like upstream, acquire execution-session ID state only after reqMu.
+    #[cfg(test)]
+    sessions.wait_before_id_state().await;
+    let state = if ephemeral {
+        state
+    } else {
+        sessions.ids.get(&state_id)
     };
     let proxy = executor.proxy_for(auth);
     let reuse_proxy = session.effective_proxy(&auth.id, &auth.proxy_url, proxy.clone());
