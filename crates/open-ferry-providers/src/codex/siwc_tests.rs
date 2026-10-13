@@ -783,6 +783,7 @@ fn refresh_cache_never_exceeds_its_bound_and_evicts_the_oldest() {
                 id: Arc::new(()),
                 created: now + Duration::from_nanos(index as u64),
                 completed: Some(now),
+                successor: None,
             },
         );
         assert!(map.len() <= MAX_REFRESHES);
@@ -792,6 +793,135 @@ fn refresh_cache_never_exceeds_its_bound_and_evicts_the_oldest() {
         assert!(!map.contains_key(&refresh_key("test-bound", "client", &index.to_string())));
     }
     assert!(map.contains_key(&refresh_key("test-bound", "client", "5")));
+}
+
+#[tokio::test]
+async fn cached_rotations_are_reused_until_the_successor_is_rotated() {
+    let mut first = grant();
+    first["refresh_token"] = json!("fake-successor");
+    let mut second = grant();
+    second["refresh_token"] = json!("fake-successor-after-rotation");
+    let mut fake = Fake::start(
+        vec![
+            (StatusCode::OK, first.to_string()),
+            (StatusCode::OK, second.to_string()),
+            (StatusCode::BAD_REQUEST, "refresh_token_reused".into()),
+        ],
+        None,
+    )
+    .await;
+    let original = previous();
+    let rotated = fake.auth.refresh_tokens(&original).await.unwrap();
+    fake.request().await;
+    assert_eq!(fake.auth.refresh_tokens(&original).await.unwrap(), rotated);
+    assert!(fake.captured.is_empty());
+    let latest = fake.auth.refresh_tokens(&rotated).await.unwrap();
+    assert_eq!(latest.refresh_token, "fake-successor-after-rotation");
+    assert!(
+        fake.request()
+            .await
+            .body
+            .contains("refresh_token=fake-successor&")
+    );
+    let error = fake.auth.refresh_tokens(&original).await.unwrap_err();
+    assert!(error.is_non_retryable());
+    assert_eq!(error.status(), 400);
+    assert!(
+        fake.request()
+            .await
+            .body
+            .contains("refresh_token=fake-siwc-refresh&")
+    );
+    assert_eq!(fake.auth.refresh_tokens(&rotated).await.unwrap(), latest);
+    assert!(fake.captured.is_empty());
+}
+
+#[tokio::test]
+async fn failed_successor_refreshes_keep_the_predecessors_cached_rotation() {
+    let mut first = grant();
+    first["refresh_token"] = json!("fake-successor");
+    let mut fake = Fake::start(
+        vec![
+            (StatusCode::OK, first.to_string()),
+            (StatusCode::SERVICE_UNAVAILABLE, "temporary".into()),
+        ],
+        None,
+    )
+    .await;
+    let original = previous();
+    let rotated = fake.auth.refresh_tokens(&original).await.unwrap();
+    fake.request().await;
+    assert!(fake.auth.refresh_tokens(&rotated).await.is_err());
+    fake.request().await;
+    assert_eq!(fake.auth.refresh_tokens(&original).await.unwrap(), rotated);
+    assert!(fake.captured.is_empty());
+}
+
+#[test]
+fn refresh_cache_prunes_expired_then_completed_entries_before_in_flight_entries() {
+    let now = tokio::time::Instant::now();
+    let entry = |index, completed| RefreshEntry {
+        shared: futures_util::future::ready(Ok(previous())).boxed().shared(),
+        id: Arc::new(()),
+        created: now + Duration::from_nanos(index),
+        completed,
+        successor: None,
+    };
+    let mut map = HashMap::new();
+    // The oldest entry is in flight; a newer completed entry goes first.
+    insert_refresh_with_limit(&mut map, [0; 32], entry(0, None), 3);
+    insert_refresh_with_limit(&mut map, [1; 32], entry(1, Some(now)), 3);
+    insert_refresh_with_limit(&mut map, [2; 32], entry(2, Some(now)), 3);
+    insert_refresh_with_limit(&mut map, [3; 32], entry(3, None), 3);
+    assert!(map.contains_key(&[0; 32]));
+    assert!(!map.contains_key(&[1; 32]));
+    assert!(map.contains_key(&[2; 32]));
+    // Expiration wins over creation order.
+    map.get_mut(&[3; 32]).unwrap().completed = Some(now - REFRESH_GRACE);
+    insert_refresh_with_limit(&mut map, [4; 32], entry(4, None), 3);
+    assert!(!map.contains_key(&[3; 32]));
+    assert!(map.contains_key(&[2; 32]));
+    insert_refresh_with_limit(&mut map, [5; 32], entry(5, None), 3);
+    assert!(!map.contains_key(&[2; 32]));
+    assert!(map.contains_key(&[0; 32]));
+    // At the hard bound with every entry in flight, tracking the oldest is lost.
+    insert_refresh_with_limit(&mut map, [6; 32], entry(6, None), 3);
+    assert!(!map.contains_key(&[0; 32]));
+    assert_eq!(map.len(), 3);
+}
+
+#[tokio::test]
+async fn panicked_refresh_tasks_return_an_error_without_retrying() {
+    let mut fake = Fake::start(vec![(StatusCode::OK, grant().to_string())], None).await;
+    let key = refresh_key(&fake.auth.endpoints.token_url, "oaiapp_issued", REFRESH);
+    let task = tokio::spawn(async { panic!("fake refresh task panic") });
+    let id = Arc::new(());
+    insert_refresh(
+        &mut REFRESHES.lock().unwrap(),
+        key,
+        RefreshEntry {
+            shared: shared_refresh(task, key, id.clone()),
+            id,
+            created: tokio::time::Instant::now(),
+            completed: None,
+            successor: None,
+        },
+    );
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        fake.auth.refresh_tokens(&previous()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(
+        error.message(),
+        "SIWC token refresh failed: invalid single-flight result"
+    );
+    assert!(fake.captured.is_empty());
+    assert!(!REFRESHES.lock().unwrap().contains_key(&key));
+    assert!(fake.auth.refresh_tokens(&previous()).await.is_ok());
+    fake.request().await;
 }
 
 #[tokio::test]
@@ -816,15 +946,23 @@ async fn an_unpolled_refresh_task_does_not_poison_the_key_or_remove_a_replacemen
             id: id.clone(),
             created: tokio::time::Instant::now(),
             completed: None,
+            successor: None,
         },
     );
-    assert!(fake.auth.refresh_tokens(&previous()).await.is_err());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            fake.auth.refresh_tokens(&previous())
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
     assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(!REFRESHES.lock().unwrap().contains_key(&key));
-    assert!(fake.auth.refresh_tokens(&previous()).await.is_ok());
     fake.request().await;
-    finish_refresh(key, &id, false);
+    finish_refresh(key, &id, None);
     assert!(REFRESHES.lock().unwrap().contains_key(&key));
+    assert!(fake.captured.is_empty());
 }
 
 #[tokio::test]
