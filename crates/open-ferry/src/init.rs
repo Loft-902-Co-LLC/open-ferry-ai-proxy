@@ -21,7 +21,7 @@
 //! file is replaced only with `-force`, and then kept as `<file name>.bak`.
 //! With `-system`, the default is the machine config. Its data directory must
 //! be trusted; on Windows a missing one is created with a protected DACL.
-//! its auth directory replaces the template's, and existing configs stay.
+//! Its auth directory replaces the template's, and existing configs stay.
 //! The file is written by the config writer
 //! ([`write_as_is`](open_ferry_core::config::save::write_as_is)): checked
 //! to load, atomically, and readable by its owner only on Unix (0600). On

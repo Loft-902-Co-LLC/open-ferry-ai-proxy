@@ -26,7 +26,7 @@ To keep the proxy running in the background instead, run `open-ferry service ins
 ## `open-ferry init`
 
 ```
-open-ferry init [-config PATH] [-host HOST] [-port N] [-force]
+open-ferry init [-config PATH] [-host HOST] [-port N] [-force] [-system]
 ```
 
 | Flag | What it does |
@@ -35,6 +35,7 @@ open-ferry init [-config PATH] [-host HOST] [-port N] [-force]
 | `-host HOST` | The host the proxy listens on. By default `127.0.0.1`, so only this machine can reach it. `-host ""` listens on every interface |
 | `-port N` | The port the proxy listens on, from 1 to 65535. By default 8317, the template's |
 | `-force` | Replace an existing config. The old file is kept as `<file name>.bak` |
+| `-system` | Write the machine's config, for [a service for the whole machine](#a-service-for-the-whole-machine): `/etc/open-ferry/config.yaml` on Linux, `C:\ProgramData\open-ferry\config.yaml` on Windows, with `auth-dir` set to the machine's auth directory. It needs root or an administrator, and isn't on macOS yet. On Windows it creates a missing machine data directory, private to SYSTEM and Administrators. It never replaces an existing config, even with `-force` |
 
 The installed config path is:
 
@@ -100,7 +101,7 @@ The keys are printed only here, once. To see them again, read the config file. T
 | Code | When |
 |---|---|
 | 0 | The config was written, or `-h` was asked for |
-| 1 | It couldn't be written: the file exists and `-force` wasn't given, there is no installed config path (`APPDATA` or `HOME` isn't set), or a write failed. A line on standard error starting `init:` says why |
+| 1 | It couldn't be written: the file exists and `-force` wasn't given (with `-system`, the file exists at all), there is no installed config path (`APPDATA` or `HOME` isn't set), or a write failed. A line on standard error starting `init:` says why |
 | 2 | Bad usage: an unknown flag, an argument that isn't a flag, a host with characters a host can't have, or a port outside 1 to 65535. The usage follows on standard error |
 
 ## `open-ferry check`
@@ -210,7 +211,7 @@ The service runs the binary that ran `install`, by its full path, as `open-ferry
 | Windows | A scheduled task, `open-ferry`, that runs as you when you log on | A Windows service, `open-ferry`, that runs as LocalSystem from boot |
 | Its output | `journalctl --user -u open-ferry`; `~/Library/Logs/open-ferry.log`; `service.log` beside the config | `journalctl -u open-ferry`; `/Library/Logs/open-ferry.log`; `service.log` beside the config, and the System event log |
 
-Every service runs open-ferry in the config's directory, so the `.env` file there is loaded. When open-ferry fails, systemd and the Windows service start it again after 5 seconds, and launchd no sooner than 10 seconds after it last started it. The scheduled task waits 5 seconds too, then longer, up to a minute, while open-ferry keeps failing soon after it starts. An open-ferry that exits cleanly isn't started again.
+Every service runs open-ferry in the config's directory, so the `.env` file there is loaded. When open-ferry fails, systemd starts it again after 5 seconds, the Windows service after 5 seconds the first time and 60 seconds after that, and launchd no sooner than 10 seconds after it last started it. The scheduled task waits 5 seconds too, then longer, up to a minute, while open-ferry keeps failing soon after it starts. An open-ferry that exits cleanly isn't started again.
 
 **On Linux**, a user unit runs while you are logged in. To start it at boot and keep it running after you log out, run `loginctl enable-linger` once. `systemctl --user` needs your user session's bus: over `su` or `sudo -u`, it may fail with "Failed to connect to bus"; log in as that user instead.
 
@@ -234,11 +235,12 @@ As the service runs with root's rights, `install -system` asks more of the confi
 - **Only root, or the administrators, may change the binary and the config.** Otherwise anyone who could change them could run code as root.
   - On Linux and macOS, the binary and the config, after following links, and every directory above them, must be owned by root and writable by no other user or group (a directory with the sticky bit, such as `/tmp`, doesn't count). `/usr/local/bin/open-ferry` and `/etc/open-ferry/config.yaml` will do on most systems. On an Intel Mac with Homebrew, `/usr/local/bin` is yours, so use a directory such as `/opt/open-ferry`; on systems where `/usr/local` is writable by the `staff` group, likewise.
   - On Windows, the binary normally goes under `C:\Program Files\open-ferry`. The machine config is `C:\ProgramData\open-ferry\config.yaml`, inside the machine data directory created by `install.ps1 -System` with a protected DACL allowing only SYSTEM and Administrators. Its auth directory inherits that protection too. An existing machine directory is checked, never repaired or adopted when another account can change it. Keep the config there: saving it replaces the file, so it must inherit private permissions from its directory. A config beside the binary in Program Files would inherit read access for Users.
+- **So must the `.env` file.** Run as root or an administrator, as the service or from `sudo` or an elevated terminal, open-ferry and its commands load `.env` only when the file and every directory above it pass the same check as the config. Otherwise they refuse, and say which file and what to change.
 - **Run as root, you get no service of your own.** On Linux and macOS, `install` without `-system`, run as root, is refused: run it as the user the service is for, or add `-system`.
 
 Use `sudo sh install.sh --system` on Linux, or `.\install.ps1 -System` from an elevated Windows terminal, to create the machine binary, data directory and starting config. The starting config's `auth-dir` is `/var/lib/open-ferry/auth` or `C:\ProgramData\open-ferry\auth`. An existing config is kept. `-InstallDir` and `-ConfigPath` choose explicit Windows paths; inherited download and path overrides are ignored under elevation. Account installers run without sudo or elevation, except that root inside a Linux container may install for its own account.
 
-On Windows, `install -system` creates the service with `sc.exe`, to start at boot and again 5 seconds after any failure, an exit with an error included. The service writes to `service.log` beside the config, and the service manager logs its starts and stops in the System event log.
+On Windows, `install -system` creates the service with `sc.exe`, to start at boot and again after any failure, an exit with an error included: 5 seconds after the first, and 60 seconds after each one that follows, until a day passes without one. The service writes to `service.log` beside the config, and the service manager logs its starts and stops in the System event log.
 
 ### The service's environment
 
@@ -277,7 +279,7 @@ Installs the latest release of open-ferry in place of this one, rolls back, or s
 | `-check` | Only say whether a newer release is out, and whether a restart is needed to run the installed version. It changes nothing, not even the update state |
 | `-rollback` | Put back the version before the last update, from the copy kept in the data directory. Nothing is downloaded |
 | `-mode MODE` | Write `self-update.mode: MODE` into the config, as the management API writes it: the new file must load, its comments are kept, and the old one is kept as `<file name>.bak`. A running server that reads the config follows at once. `MODE` is `off`, `notify` or `auto` |
-| `-config PATH` | The config to read, and that `-mode` writes. By default `config.yaml` in the working directory, else the installed config, where `init` writes one |
+| `-config PATH` | The config to read, and that `-mode` writes. By default `config.yaml` in the working directory, else the installed config, where `init` writes one. For an install for the whole machine, `-mode` writes the machine's config, `/etc/open-ferry/config.yaml` or `C:\ProgramData\open-ferry\config.yaml`, and needs root or an administrator |
 | `-yes` | Install or roll back without asking |
 | `-json` | Print one JSON object instead of lines of text. It asks nothing, so it installs or rolls back only with `-yes` |
 

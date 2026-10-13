@@ -12,7 +12,7 @@ Each of these turns automatic updates off. Only you turn them back on.
   open-ferry update -mode off
   ```
 
-  It writes `self-update.mode: off` into the config: the one given with `-config`, else `config.yaml` in the working directory, else the installed config, where `open-ferry init` writes one. It writes the file as the management API does: the new file must load first, its comments are kept, the old one is kept as `<file name>.bak`, and it is replaced in one step. A running server that reads that config follows the change at once, with no restart. `-mode notify` keeps the check but installs nothing, and `-mode auto` turns updates back on.
+  It writes `self-update.mode: off` into the config: the one given with `-config`, else `config.yaml` in the working directory, else the installed config, where `open-ferry init` writes one. For an install for the whole machine, it is the machine's config instead, `/etc/open-ferry/config.yaml` on Linux or `C:\ProgramData\open-ferry\config.yaml` on Windows, and changing it needs root or an administrator. It writes the file as the management API does: the new file must load first, its comments are kept, the old one is kept as `<file name>.bak`, and it is replaced in one step. A running server that reads that config follows the change at once, with no restart. `-mode notify` keeps the check but installs nothing, and `-mode auto` turns updates back on.
 - **The config.** The setting lives in the config, at the top level in both layouts:
 
   ```yaml
