@@ -8,6 +8,130 @@ use super::*;
 use crate::codex::openai::chat_completions::convert_codex_response_to_openai_chat_completions_non_stream;
 use crate::json::bool_of;
 
+#[test]
+fn over_length_call_ids_are_shortened_consistently() {
+    let prefix = "a".repeat(70);
+    let ids = [
+        format!("{prefix}_A"),
+        format!("{prefix}_B"),
+        "short_id".into(),
+    ];
+    for custom in [false, true] {
+        let calls: Vec<_> = ids.iter().enumerate().map(|(i, id)| {
+            if custom {
+                json!({"id": id, "type": "custom", "custom": {"name": format!("tool_{i}"), "input": "{}"}})
+            } else {
+                json!({"id": id, "type": "function", "function": {"name": format!("tool_{i}"), "arguments": "{}"}})
+            }
+        }).collect();
+        let mut messages = vec![
+            json!({"role": "user", "content": "Multi-tool"}),
+            json!({"role": "assistant", "content": null, "tool_calls": calls}),
+        ];
+        messages.extend(
+            ids.iter()
+                .map(|id| json!({"role": "tool", "tool_call_id": id, "content": "result"})),
+        );
+        let out = convert_openai_chat_completions_request_to_codex(
+            "m",
+            &json!({"messages": messages}),
+            true,
+        );
+        let items = out["input"].as_array().unwrap();
+        let calls: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                item["type"]
+                    == if custom {
+                        "custom_tool_call"
+                    } else {
+                        "function_call"
+                    }
+            })
+            .collect();
+        let outputs: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                item["type"]
+                    == if custom {
+                        "custom_tool_call_output"
+                    } else {
+                        "function_call_output"
+                    }
+            })
+            .collect();
+        assert_eq!(calls.len(), 3, "{out}");
+        assert_eq!(outputs.len(), 3, "{out}");
+        for (call, output) in calls.iter().zip(outputs) {
+            assert!(call["call_id"].as_str().unwrap().len() <= 64);
+            assert_eq!(call["call_id"], output["call_id"]);
+        }
+        assert_ne!(calls[0]["call_id"], calls[1]["call_id"]);
+        assert_eq!(calls[2]["call_id"], "short_id");
+    }
+}
+
+#[test]
+fn shortened_call_id_collision_keeps_results_matched() {
+    let long = format!("{}_A", "a".repeat(70));
+    let legal = shorten_call_id_if_needed(&long);
+    let retry = shorten_call_id_if_needed(&format!("{long}_1"));
+    let out = convert_openai_chat_completions_request_to_codex(
+        "m",
+        &json!({"messages": [
+            {"role": "user", "content": "Multi-tool"},
+            {"role": "assistant", "tool_calls": [
+                {"id": long, "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+                {"id": legal, "type": "function", "function": {"name": "tool_b", "arguments": "{}"}},
+                {"id": retry, "type": "function", "function": {"name": "tool_c", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": legal, "content": "res_b"},
+            {"role": "tool", "tool_call_id": long, "content": "res_a"},
+            {"role": "tool", "tool_call_id": retry, "content": "res_c"}
+        ]}),
+        true,
+    );
+    let items = out["input"].as_array().unwrap();
+    let call_ids: HashMap<_, _> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .map(|item| (item["name"].as_str().unwrap(), &item["call_id"]))
+        .collect();
+    let output_ids: HashMap<_, _> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .map(|item| (item["output"].as_str().unwrap(), &item["call_id"]))
+        .collect();
+    assert_eq!(call_ids.len(), 3);
+    assert_eq!(output_ids.len(), 3);
+    assert_eq!(call_ids["tool_b"], &legal);
+    assert_eq!(call_ids["tool_c"], &retry);
+    assert_eq!(
+        call_ids["tool_a"],
+        &shorten_call_id_if_needed(&format!("{long}_2"))
+    );
+    for (tool, result) in [
+        ("tool_a", "res_a"),
+        ("tool_b", "res_b"),
+        ("tool_c", "res_c"),
+    ] {
+        assert_eq!(call_ids[tool], output_ids[result], "{out}");
+    }
+}
+
+#[test]
+fn shortened_call_id_matches_upstream_hash_and_preserves_utf8() {
+    assert_eq!(
+        shorten_call_id_if_needed(&"a".repeat(65)),
+        format!("{}_635361c48bb9eab1", "a".repeat(47))
+    );
+    let unicode = "é".repeat(40);
+    let short = shorten_call_id_if_needed(&unicode);
+    assert_eq!(short.len(), 63);
+    assert!(short.starts_with(&"é".repeat(23)));
+    assert_eq!(short, shorten_call_id_if_needed(&unicode));
+}
+
 /// [`super::convert_openai_chat_completions_request_to_codex`], for requests
 /// it doesn't refuse.
 fn convert_openai_chat_completions_request_to_codex(

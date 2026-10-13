@@ -15,6 +15,22 @@ use super::*;
 use crate::json::{bool_of, str_of};
 use crate::models::ModelCatalog;
 
+#[test]
+fn omitted_or_null_max_output_tokens_uses_registered_limit() {
+    for (model, limit) in [("claude-opus-5-5", 128000), ("claude-sonnet-4-6", 64000)] {
+        for null in [false, true] {
+            let mut request = json!({"model": model, "input": "hello"});
+            if null {
+                request["max_output_tokens"] = Value::Null;
+            }
+            let out = convert(model, &request);
+            assert_eq!(out["max_tokens"], limit, "{out}");
+        }
+    }
+    let out = convert("unregistered-model", &json!({"input": "hello"}));
+    assert_eq!(out["max_tokens"], 32000);
+}
+
 /// What a strict apply_patch tool description must explain.
 const PATCH_INSTRUCTIONS: [&str; 10] = [
     "*** Begin Patch",

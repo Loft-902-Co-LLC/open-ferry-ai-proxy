@@ -39,6 +39,43 @@ use serde_json::{Value, json};
 
 use super::*;
 
+#[test]
+fn removes_dependent_keywords_but_keeps_same_named_properties() {
+    let keywords = ["dependentRequired", "dependentSchemas", "dependencies"];
+    let mut nested = json!({"type": "object", "properties": {"threshold": {"type": "number"}, "diff_color": {"type": "string"}}});
+    for keyword in keywords {
+        nested[keyword] = json!({"threshold": ["diff_color"]});
+    }
+    let mut schema = json!({"type": "object", "properties": {
+        "baseline_url": {"type": "string"}, "candidate_url": {"type": "string"},
+        "options": nested.clone(),
+        "dependentRequired": {"type": "string", "description": "Legitimate property"},
+        "dependentSchemas": nested.clone(),
+        "dependencies": {"type": "string", "description": "Legitimate property"},
+        "list": {"type": "array", "items": nested.clone()}
+    }, "additionalProperties": nested});
+    for keyword in keywords {
+        schema[keyword] = json!({"baseline_url": ["candidate_url"]});
+    }
+    let out = clean_json_schema_for_gemini_json_schema(&schema);
+    for keyword in keywords {
+        for node in [
+            &out,
+            &out["properties"]["options"],
+            &out["properties"]["dependentSchemas"],
+            &out["properties"]["list"]["items"],
+            &out["additionalProperties"],
+        ] {
+            assert!(node.get(keyword).is_none(), "{keyword}: {out}");
+        }
+        assert!(out["properties"].get(keyword).is_some(), "{keyword}: {out}");
+    }
+    assert_eq!(
+        out["properties"]["options"]["properties"]["threshold"]["type"],
+        "number"
+    );
+}
+
 fn clean(text: &str) -> Value {
     let schema: Value = serde_json::from_str(text).expect("test schema is JSON");
     clean_json_schema_for_gemini_json_schema(&schema)
