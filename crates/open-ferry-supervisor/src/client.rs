@@ -988,10 +988,12 @@ mod tests {
         let dirs = Dirs::new();
         let _supervisor = SupervisorLock::try_acquire(dirs.data()).unwrap();
         let began = Instant::now();
+        // Room for at least one full pass (ask, then check the lock) on a
+        // loaded machine; a 900 ms deadline could end inside the first check.
         let outcome = stop(
             dirs.data(),
             &identity(),
-            Instant::now() + Duration::from_millis(900),
+            Instant::now() + Duration::from_secs(3),
         )
         .await;
         let StopOutcome::TimedOut(seen) = outcome else {
@@ -999,7 +1001,7 @@ mod tests {
         };
         assert!(seen.contains("not reachable"), "{seen}");
         assert!(
-            began.elapsed() < Duration::from_secs(5),
+            began.elapsed() < Duration::from_secs(10),
             "{:?}",
             began.elapsed()
         );

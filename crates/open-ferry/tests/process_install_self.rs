@@ -392,12 +392,16 @@ fn with_no_supervisor_the_install_replaces_the_binary_and_a_later_supervisor_run
         open_ferry_update::staging::hash_file(&fx.installed()).unwrap(),
         "the kept copy is not the installed file's bytes"
     );
-    let active: Vec<Ev> = fx
-        .events()
-        .into_iter()
-        .filter(|event| event.event == "active")
-        .collect();
-    assert!(!active.is_empty(), "no active worker\n{}", fx.dump());
+    // The supervisor can report its active worker before that worker's own
+    // event is written.
+    let active: Vec<Ev> = fx.wait_for("the active worker's event", || {
+        let active: Vec<Ev> = fx
+            .events()
+            .into_iter()
+            .filter(|event| event.event == "active")
+            .collect();
+        (!active.is_empty()).then_some(active)
+    });
     assert!(
         active.iter().all(|event| event.marker == "B"),
         "a worker ran the old binary: {active:?}\n{}",
