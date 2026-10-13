@@ -1204,7 +1204,7 @@ fn switches_a_systemd_user_service_and_back() {
     has(out, "The management key (MANAGEMENT_PASSWORD).");
     has(
         out,
-        "Stop and disable the systemd user service cliproxyapi.service, keeping its definition: `systemctl --user stop cliproxyapi.service`, `systemctl --user disable cliproxyapi.service`. Wait up to 20 seconds for CLIProxyAPI (process 4242) to exit.",
+        "Stop and disable the systemd user service cliproxyapi.service, keeping its definition: `systemctl --user stop cliproxyapi.service`, `systemctl --user disable cliproxyapi.service`. Wait up to 75 seconds for CLIProxyAPI (process 4242) to exit.",
     );
     has(
         out,
@@ -1603,7 +1603,7 @@ fn rolls_back_when_cliproxyapi_does_not_stop() {
     assert_eq!(ran.code, 1, "{}", ran.all());
     has(
         &ran.err,
-        "CLIProxyAPI didn't stop: process 4242 still runs 20 seconds after its service was stopped",
+        "CLIProxyAPI didn't stop: process 4242 still runs 75 seconds after its service was stopped",
     );
     assert!(!happened(&fake, &format!("write {USER_UNIT}")));
 }
@@ -4378,7 +4378,7 @@ fn does_not_start_cliproxyapi_beside_an_open_ferry_that_stays() {
     assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.err,
-        "open-ferry hasn't ended 20 seconds after it was stopped (open-ferry still answers on http://127.0.0.1:8317), so CLIProxyAPI is not started beside it",
+        "open-ferry hasn't ended 75 seconds after it was stopped (open-ferry still answers on http://127.0.0.1:8317), so CLIProxyAPI is not started beside it",
     );
     assert!(
         !fake.events[events..]
@@ -5013,7 +5013,7 @@ fn undo_waits_for_the_service_and_times_out_clearly() {
     assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.err,
-        "open-ferry hasn't ended 20 seconds after it was stopped (its service is still deactivating), so CLIProxyAPI is not started beside it.",
+        "open-ferry hasn't ended 75 seconds after it was stopped (its service is still deactivating), so CLIProxyAPI is not started beside it.",
     );
     has(&undo.err, "The record stays open");
     assert!(
@@ -5924,4 +5924,589 @@ fn undo_never_replaces_a_file_that_appears_at_the_binary() {
     assert_eq!(fake.data(OPT_CPA), b"put there by someone");
     assert_eq!(fake.data(OPT_MOVED), CLIPROXYAPI);
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+}
+
+// --- open-ferry under the blue-green supervisor ---
+
+const LINUX_OF_CONFIG: &str = "/home/me/.config/open-ferry/config.yaml";
+const LINUX_OF_DATA: &str = "/home/me/.local/share/open-ferry";
+
+/// A process of open-ferry.
+fn of_process(pid: u32, name: &str, exe: &str, args: &[&str]) -> Proc {
+    Proc {
+        pid,
+        name: name.to_owned(),
+        exe: Some(exe.to_owned()),
+        args: strings(args),
+        cwd: None,
+        env: None,
+        parent: None,
+        started: Some(1000 + u64::from(pid)),
+    }
+}
+
+/// A supervisor, running the installed binary.
+fn of_supervisor(pid: u32, config: &str) -> Proc {
+    of_process(
+        pid,
+        "open-ferry",
+        "/home/me/.local/bin/open-ferry",
+        &["-supervise", "-config", config, "-data-dir", LINUX_OF_DATA],
+    )
+}
+
+/// A worker, running its version directory's copy.
+fn of_worker(pid: u32, version: &str, config: &str) -> Proc {
+    of_process(
+        pid,
+        "open-ferry",
+        &format!("{LINUX_OF_DATA}/versions/{version}/open-ferry"),
+        &["-worker", "-config", config, "-worker-control", "3"],
+    )
+}
+
+/// The pids `service_runners` takes on `fake`.
+fn runner_pids(fake: &mut Fake, context: &Context, exe: &str, config: &str) -> Vec<u32> {
+    let mut pids: Vec<u32> = switch::service_runners(fake, context, exe, config)
+        .unwrap()
+        .iter()
+        .map(|process| process.pid)
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+fn with_processes(context: &Context, processes: Vec<Proc>) -> Fake {
+    let mut fake = Fake::new(context);
+    for process in processes {
+        fake.procs.insert(process.pid, process);
+    }
+    fake
+}
+
+#[test]
+fn a_supervisor_and_its_workers_in_version_directories_are_runners() {
+    let context = linux();
+    let mut fake = with_processes(
+        &context,
+        vec![
+            of_supervisor(100, LINUX_OF_CONFIG),
+            of_worker(101, "1.0.0", LINUX_OF_CONFIG),
+        ],
+    );
+    assert_eq!(
+        runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
+        [100, 101]
+    );
+}
+
+#[test]
+fn standby_and_draining_workers_are_runners() {
+    let context = linux();
+    let mut fake = with_processes(
+        &context,
+        vec![
+            of_supervisor(100, LINUX_OF_CONFIG),
+            of_worker(101, "1.0.0", LINUX_OF_CONFIG),
+            of_worker(102, "1.1.0", LINUX_OF_CONFIG),
+            of_worker(103, "1.2.0", LINUX_OF_CONFIG),
+        ],
+    );
+    assert_eq!(
+        runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
+        [100, 101, 102, 103]
+    );
+}
+
+#[test]
+fn a_worker_whose_supervisor_died_is_still_a_runner() {
+    let context = linux();
+    let mut orphan = of_worker(101, "1.0.0", LINUX_OF_CONFIG);
+    orphan.parent = Some(Parent { pid: 1, name: None });
+    let mut fake = with_processes(&context, vec![orphan]);
+    assert_eq!(
+        runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
+        [101]
+    );
+}
+
+#[test]
+fn a_worker_without_a_config_or_with_another_is_not_a_runner() {
+    let context = linux();
+    let mut bare = of_worker(101, "1.0.0", LINUX_OF_CONFIG);
+    bare.args = strings(&["-worker", "-worker-control", "3"]);
+    // Even the installed binary's own path doesn't make it one.
+    let mut installed = of_worker(102, "1.0.0", "/home/me/other/config.yaml");
+    installed.exe = Some(context.exe.clone());
+    let other = of_worker(103, "1.0.0", "/home/me/other/config.yaml");
+    let mut fake = with_processes(&context, vec![bare, installed, other]);
+    assert!(runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG).is_empty());
+}
+
+#[test]
+fn a_worker_flag_in_a_process_of_another_name_keeps_the_older_rules() {
+    // The service's open-ferry is run under another name, so processes of
+    // that name are asked for. Its `-worker` from a version directory isn't
+    // a worker by the argument rules, and its path isn't the installed one.
+    let mut context = linux();
+    context.exe = "/home/me/.local/bin/ofp".to_owned();
+    let alias_worker = of_process(
+        101,
+        "ofp",
+        &format!("{LINUX_OF_DATA}/versions/1.0.0/ofp"),
+        &[
+            "-worker",
+            "-config",
+            LINUX_OF_CONFIG,
+            "-worker-control",
+            "3",
+        ],
+    );
+    let alias_installed = of_process(
+        102,
+        "ofp",
+        "/home/me/.local/bin/ofp",
+        &["-supervise", "-config", LINUX_OF_CONFIG],
+    );
+    let mut fake = with_processes(&context, vec![alias_worker, alias_installed]);
+    assert_eq!(
+        runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
+        [102]
+    );
+}
+
+#[test]
+fn a_supervisor_with_another_config_is_not_a_runner() {
+    let context = linux();
+    let mut fake = with_processes(
+        &context,
+        vec![
+            of_supervisor(100, "/home/me/other/config.yaml"),
+            of_supervisor(104, LINUX_OF_CONFIG),
+        ],
+    );
+    assert_eq!(
+        runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
+        [104]
+    );
+}
+
+#[test]
+fn a_wrapper_with_another_config_is_not_a_runner_and_neither_is_its_child() {
+    let context = windows();
+    let exe = &context.exe;
+    let other = r"C:\Users\me\other\config.yaml";
+    let config = r"C:\Users\me\AppData\Roaming\open-ferry\config.yaml";
+    let wrapper = |pid: u32, config: &str| {
+        of_process(
+            pid,
+            "open-ferry.exe",
+            exe,
+            &["service", "run", "-supervise", "-config", config],
+        )
+    };
+    // The child of the other service's wrapper names no config at all.
+    let mut child = of_process(201, "open-ferry.exe", exe, &["-serve"]);
+    child.parent = Some(Parent {
+        pid: 200,
+        name: Some("open-ferry.exe".to_owned()),
+    });
+    let mut ours = of_process(301, "open-ferry.exe", exe, &["-serve"]);
+    ours.parent = Some(Parent {
+        pid: 300,
+        name: Some("open-ferry.exe".to_owned()),
+    });
+    let mut fake = with_processes(
+        &context,
+        vec![wrapper(200, other), child, wrapper(300, config), ours],
+    );
+    assert_eq!(runner_pids(&mut fake, &context, exe, config), [300, 301]);
+}
+
+#[test]
+fn a_wrapper_and_its_workers_are_runners_on_windows() {
+    let context = windows();
+    let exe = &context.exe;
+    let config = r"C:\Users\me\AppData\Roaming\open-ferry\config.yaml";
+    let versions = r"C:\Users\me\AppData\Local\open-ferry\versions\1.0.0\open-ferry.exe";
+    let wrapper = of_process(
+        200,
+        "open-ferry.exe",
+        exe,
+        &["service", "run", "-supervise", "-config", config],
+    );
+    let supervisor = of_process(
+        201,
+        "open-ferry.exe",
+        exe,
+        &["-supervise", "-config", config],
+    );
+    // Windows names a process after its file, in any case.
+    let worker = of_process(
+        202,
+        "Open-Ferry.EXE",
+        versions,
+        &[
+            "--worker",
+            "--config=C:/Users/me/AppData/Roaming/open-ferry/config.yaml",
+        ],
+    );
+    let mut fake = with_processes(&context, vec![wrapper, supervisor, worker]);
+    assert_eq!(
+        runner_pids(&mut fake, &context, exe, config),
+        [200, 201, 202]
+    );
+}
+
+#[test]
+fn on_linux_the_canonical_name_is_case_sensitive() {
+    let context = linux();
+    // Not named `open-ferry`: it is decided by the older rules, and its
+    // version directory isn't the installed path.
+    let worker = of_process(
+        101,
+        "Open-Ferry",
+        &format!("{LINUX_OF_DATA}/versions/1.0.0/open-ferry"),
+        &[
+            "-worker",
+            "-config",
+            LINUX_OF_CONFIG,
+            "-worker-control",
+            "3",
+        ],
+    );
+    let mut fake = with_processes(&context, vec![worker]);
+    assert!(runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG).is_empty());
+}
+
+// The recorded executable and this CLI are both aliases (links to a copy
+// named otherwise), the supervisor was started through one of them, and its
+// workers run under the canonical name from version directories. Only
+// asking for the canonical name finds the workers.
+#[test]
+fn an_aliased_recorded_executable_and_cli_still_find_the_canonical_workers() {
+    const ALIAS: &str = "/usr/local/bin/ofp";
+    const CLI: &str = "/usr/local/bin/of";
+    const REAL: &str = "/opt/open-ferry/bin/open-ferry-1.0";
+    let mut context = linux();
+    context.exe = CLI.to_owned();
+    // A kernel names the process after the path it was started with and
+    // reports the file it leads to.
+    let supervisor = of_process(
+        100,
+        "ofp",
+        REAL,
+        &["-supervise", "-config", LINUX_OF_CONFIG],
+    );
+    let worker = of_worker(101, "1.0.0", LINUX_OF_CONFIG);
+    let mut fake = with_processes(&context, vec![supervisor, worker]);
+    fake.file(REAL, OPEN_FERRY);
+    fake.links.insert(ALIAS.to_owned(), REAL.to_owned());
+    fake.links.insert(CLI.to_owned(), REAL.to_owned());
+    assert_eq!(
+        runner_pids(&mut fake, &context, ALIAS, LINUX_OF_CONFIG),
+        [100, 101]
+    );
+}
+
+#[test]
+fn a_process_of_another_service_is_left_alone() {
+    let context = linux();
+    let mut unrelated = of_process(100, "open-ferry", "/opt/other/open-ferry", &["-serve"]);
+    unrelated.parent = Some(Parent { pid: 1, name: None });
+    let mut fake = with_processes(&context, vec![unrelated]);
+    assert!(runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG).is_empty());
+}
+
+#[test]
+fn a_process_whose_arguments_cant_be_read_stops_the_undo_as_before() {
+    let context = linux();
+    let mut blind = of_supervisor(100, LINUX_OF_CONFIG);
+    blind.args.clear();
+    let mut fake = with_processes(&context, vec![blind]);
+    let error =
+        switch::service_runners(&mut fake, &context, &context.exe, LINUX_OF_CONFIG).unwrap_err();
+    has(
+        &error,
+        "the arguments of open-ferry (process 100) can't be read",
+    );
+}
+
+// The switch back waits for the supervisor and for the workers the
+// supervisor leaves, longer than for a plain process, and says what it waits
+// for.
+#[test]
+fn undo_names_and_waits_for_a_supervisor_and_its_workers() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let config = r"C:\Users\me\cpa\config.yaml";
+    let versions = r"C:\Users\me\AppData\Local\open-ferry\versions\1.0.0\open-ferry.exe";
+    fake.procs.get_mut(&9001).unwrap().args = strings(&["-supervise", "-config", config]);
+    let supervisor = fake.procs.get(&9001).unwrap().clone();
+    let worker = Proc {
+        pid: 9100,
+        started: Some(12000),
+        exe: Some(versions.to_owned()),
+        args: strings(&["-worker", "-config", config, "-worker-control", "3"]),
+        ..supervisor
+    };
+    fake.procs.insert(9100, worker);
+    fake.effects.remove("schtasks.exe /end /tn open-ferry");
+    fake.on("schtasks.exe /end /tn open-ferry", Effect::End(9001));
+
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.out,
+        "open-ferry runs with the supervisor (process 9001) and its workers (process 9100); waiting for them to end.",
+    );
+    has(&undo.all(), "process 9100 still runs");
+    has(&undo.all(), "75 seconds after it was stopped");
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+
+    fake.end(9100);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+/// Whether a supervisor and a worker of open-ferry that name `given` as
+/// their `-config` are taken as the service installed with `config`.
+fn taken_with_config(context: &Context, config: &str, given: &str) -> bool {
+    let exe = &context.exe;
+    let name = file_name(context.platform, exe);
+    let supervisor = of_process(100, &name, exe, &["-supervise", "-config", given]);
+    let worker = of_process(
+        101,
+        &name,
+        &format!("{exe}.versions/open-ferry"),
+        &[
+            "-worker",
+            &format!("--config={given}"),
+            "-worker-control",
+            "3",
+        ],
+    );
+    let mut fake = with_processes(context, vec![supervisor, worker]);
+    let pids = runner_pids(&mut fake, context, exe, config);
+    assert!(pids.is_empty() || pids == [100, 101], "{given}: {pids:?}");
+    !pids.is_empty()
+}
+
+// A relative -config is another process's, even if cleaning it from the
+// root gives the installed path: `home/me/config.yaml` run from /tmp is not
+// /home/me/config.yaml.
+#[test]
+fn a_relative_config_that_cleans_to_the_installed_path_is_not_ours() {
+    let cases: [(Context, &[&str], &[&str]); 3] = [
+        (
+            linux(),
+            &[
+                "config.yaml",
+                "./config.yaml",
+                "home/me/.config/open-ferry/config.yaml",
+                "./home/me/.config/open-ferry/config.yaml",
+            ],
+            &[
+                "/home/me/.config/open-ferry/config.yaml",
+                "/home/me/./.config/open-ferry/config.yaml",
+            ],
+        ),
+        (
+            macos(),
+            &[
+                "config.yaml",
+                "./config.yaml",
+                "Users/me/.config/open-ferry/config.yaml",
+            ],
+            &[
+                "/Users/me/.config/open-ferry/config.yaml",
+                "/users/me/.config/open-ferry/config.yaml",
+            ],
+        ),
+        (
+            windows(),
+            &[
+                "config.yaml",
+                r".\config.yaml",
+                r"Users\me\AppData\Roaming\open-ferry\config.yaml",
+                r"\Users\me\AppData\Roaming\open-ferry\config.yaml",
+            ],
+            &[
+                r"C:\Users\me\AppData\Roaming\open-ferry\config.yaml",
+                "c:/users/me/appdata/roaming/open-ferry/config.yaml",
+            ],
+        ),
+    ];
+    for (context, relative, absolute) in cases {
+        let config = context.installed_config.clone().unwrap();
+        for given in relative {
+            assert!(
+                !taken_with_config(&context, &config, given),
+                "{given} was taken"
+            );
+        }
+        for given in absolute {
+            assert!(
+                taken_with_config(&context, &config, given),
+                "{given} wasn't taken"
+            );
+        }
+    }
+}
+
+// The older rule for the installed binary knows the process's working
+// directory, so a relative -config is resolved against it.
+#[test]
+fn the_installed_binary_with_a_relative_config_is_taken_by_its_directory() {
+    let context = linux();
+    let run = |cwd: Option<&str>| {
+        let mut process = of_process(
+            100,
+            "open-ferry",
+            &context.exe,
+            &["-serve", "-config", "config.yaml"],
+        );
+        process.cwd = cwd.map(str::to_owned);
+        let mut fake = with_processes(&context, vec![process]);
+        runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG)
+    };
+    assert_eq!(run(Some("/home/me/.config/open-ferry")), [100]);
+    assert!(run(Some("/tmp")).is_empty());
+    assert!(run(None).is_empty());
+}
+
+/// Whether a supervisor and a worker that name `given` as their `-config`,
+/// from the working directory `cwd`, are taken as the service installed with
+/// `config`: the argument-only rules.
+fn argument_only_taken(context: &Context, config: &str, given: &str, cwd: Option<&str>) -> bool {
+    let exe = &context.exe;
+    let name = file_name(context.platform, exe);
+    let mut supervisor = of_process(100, &name, exe, &["-supervise", "-config", given]);
+    supervisor.cwd = cwd.map(str::to_owned);
+    let mut worker = of_process(
+        101,
+        &name,
+        &format!("{exe}.versions/open-ferry"),
+        &["-worker", "-config", given, "-worker-control", "3"],
+    );
+    worker.cwd = cwd.map(str::to_owned);
+    let mut fake = with_processes(context, vec![supervisor, worker]);
+    !runner_pids(&mut fake, context, exe, config).is_empty()
+}
+
+/// Whether the installed binary run with `given` as its `-config` from `cwd`
+/// is taken as the service installed with `config`: rule 4.
+fn installed_taken(context: &Context, config: &str, given: &str, cwd: Option<&str>) -> bool {
+    let exe = &context.exe;
+    let name = file_name(context.platform, exe);
+    let mut process = of_process(100, &name, exe, &["-serve", "-config", given]);
+    process.cwd = cwd.map(str::to_owned);
+    let mut fake = with_processes(context, vec![process]);
+    !runner_pids(&mut fake, context, exe, config).is_empty()
+}
+
+// A drive-relative path (`C:Users\...`) is relative to a drive's current
+// directory, which isn't known: it is never the installed config.
+#[test]
+fn a_drive_relative_config_is_never_the_installed_one() {
+    let context = windows();
+    let config = context.installed_config.clone().unwrap();
+    let given = r"C:Users\me\AppData\Roaming\open-ferry\config.yaml";
+    for cwd in [None, Some(r"C:\Users\me"), Some(r"D:\work")] {
+        assert!(
+            !argument_only_taken(&context, &config, given, cwd),
+            "{cwd:?}"
+        );
+        assert!(!installed_taken(&context, &config, given, cwd), "{cwd:?}");
+    }
+}
+
+// Only rule 4 trusts the working directory. A supervisor or worker is
+// handed the absolute path, so a relative one is another process's even when
+// its directory would resolve it to the installed config.
+#[test]
+fn the_argument_only_rules_reject_a_relative_config_whatever_the_directory() {
+    let cases = [
+        (
+            linux(),
+            "config.yaml",
+            "/home/me/.config/open-ferry",
+            "../open-ferry/config.yaml",
+        ),
+        (
+            macos(),
+            "config.yaml",
+            "/Users/me/.config/open-ferry",
+            "../open-ferry/config.yaml",
+        ),
+        (
+            windows(),
+            "config.yaml",
+            r"C:\Users\me\AppData\Roaming\open-ferry",
+            r"..\open-ferry\config.yaml",
+        ),
+    ];
+    for (context, relative, cwd, parent_relative) in cases {
+        let config = context.installed_config.clone().unwrap();
+        for given in [relative, parent_relative] {
+            assert!(
+                !argument_only_taken(&context, &config, given, Some(cwd)),
+                "{given} from {cwd} was taken by the argument rules"
+            );
+        }
+        // The same spelling and directory do count for the installed binary.
+        assert!(
+            installed_taken(&context, &config, relative, Some(cwd)),
+            "{relative} from {cwd} wasn't taken by rule 4"
+        );
+    }
+}
+
+#[test]
+fn the_installed_binary_with_a_parent_relative_config_is_taken() {
+    let context = linux();
+    let config = context.installed_config.clone().unwrap();
+    let given = "../open-ferry/config.yaml";
+    assert!(installed_taken(
+        &context,
+        &config,
+        given,
+        Some("/home/me/.config/other")
+    ));
+    assert!(!installed_taken(
+        &context,
+        &config,
+        given,
+        Some("/tmp/other")
+    ));
+}
+
+#[test]
+fn the_installed_binary_with_a_root_relative_config_on_windows_needs_the_same_drive() {
+    let context = windows();
+    let config = context.installed_config.clone().unwrap();
+    let given = r"\Users\me\AppData\Roaming\open-ferry\config.yaml";
+    assert!(installed_taken(
+        &context,
+        &config,
+        given,
+        Some(r"C:\Users\me")
+    ));
+    assert!(!installed_taken(&context, &config, given, Some(r"D:\work")));
+    assert!(!installed_taken(&context, &config, given, None));
+}
+
+#[test]
+fn a_unc_config_is_compared_as_an_absolute_path() {
+    let context = windows();
+    let config = r"\\srv\share\open-ferry\config.yaml";
+    let given = "//SRV/share/open-ferry/config.yaml";
+    // No directory is needed, and none changes the answer.
+    for cwd in [None, Some(r"D:\work")] {
+        assert!(argument_only_taken(&context, config, given, cwd), "{cwd:?}");
+        assert!(installed_taken(&context, config, given, cwd), "{cwd:?}");
+    }
+    let other = "//srv/other/open-ferry/config.yaml";
+    assert!(!argument_only_taken(&context, config, other, None));
 }

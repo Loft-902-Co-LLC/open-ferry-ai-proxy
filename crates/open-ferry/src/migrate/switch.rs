@@ -34,8 +34,9 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the address is asked.
 const POLL: Duration = Duration::from_millis(500);
 
-/// How long a stopped service's process has to exit.
-const EXIT_WAIT: Duration = Duration::from_secs(20);
+/// How long a stopped service's process has to exit. A supervisor stops its
+/// workers within its own stop budget (50 s), so this is longer.
+const EXIT_WAIT: Duration = Duration::from_secs(75);
 
 /// How long a launcher has to start the binary again after it is stopped,
 /// before `migrate` starts it.
@@ -1439,8 +1440,18 @@ fn turn_theirs_on(
     start_theirs(machine, theirs, out)
 }
 
-/// Whether `args` give `-config` the value `config`.
-fn runs_with_config(platform: Platform, args: &[String], config: &str) -> bool {
+/// Whether `args` give `-config` the value `config`, an absolute path. A
+/// relative value counts only when `cwd`, the process's working directory, is
+/// known to resolve it against: cleaning one without a directory would turn
+/// `home/me/config.yaml` into `/home/me/config.yaml` and join another
+/// service's process to this one.
+///
+/// The comparison is lexical for a relative spelling as for an absolute one:
+/// links aren't followed, so `other/../config.yaml` through a link to
+/// somewhere else can match. That errs to the safe side (the undo waits
+/// for, and doesn't restart CLIProxyAPI beside, a process that isn't ours),
+/// where refusing `..` would miss a real parent-relative spelling.
+fn runs_with_config(platform: Platform, args: &[String], cwd: Option<&str>, config: &str) -> bool {
     args.iter().enumerate().any(|(at, arg)| {
         let value = match arg.as_str() {
             "-config" | "--config" => args.get(at + 1).map(String::as_str),
@@ -1448,30 +1459,133 @@ fn runs_with_config(platform: Platform, args: &[String], config: &str) -> bool {
                 .strip_prefix("-config=")
                 .or_else(|| arg.strip_prefix("--config=")),
         };
-        value.is_some_and(|value| discover::same_path(platform, value, config))
+        value.is_some_and(|value| {
+            let full = if platform.is_absolute(value) {
+                Some(value.to_owned())
+            } else {
+                cwd.and_then(|cwd| platform.absolute(cwd, value).ok())
+            };
+            full.is_some_and(|full| discover::same_path(platform, &full, config))
+        })
     })
+}
+
+/// open-ferry's own file name: what a version directory's binary and the
+/// installed one are called, whatever an alias to either is.
+fn canonical_name(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Windows => "open-ferry.exe",
+        Platform::Linux | Platform::MacOs => "open-ferry",
+    }
+}
+
+/// Whether a process is named `open-ferry[.exe]`, in the platform's case
+/// rules.
+fn is_canonical(platform: Platform, name: &str) -> bool {
+    let canonical = canonical_name(platform);
+    match platform {
+        Platform::Windows | Platform::MacOs => name.eq_ignore_ascii_case(canonical),
+        Platform::Linux => name == canonical,
+    }
+}
+
+/// Whether `args` hold the boolean flag `name` (`-name`, `--name`, or either
+/// with `=true`).
+fn has_flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|arg| {
+        let flag = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-'));
+        flag.is_some_and(|flag| flag == name || flag.strip_prefix(name) == Some("=true"))
+    })
+}
+
+/// Whether `args` are the Windows task wrapper's: `service run ...`.
+fn is_wrapper(args: &[String]) -> bool {
+    args.first().map(String::as_str) == Some("service")
+        && args.get(1).map(String::as_str) == Some("run")
+}
+
+/// What a blue-green process of open-ferry is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Supervisor,
+    Worker,
+}
+
+/// The blue-green role `process` claims by its arguments, if it is named
+/// `open-ferry[.exe]`. Under a supervisor the workers run from version
+/// directories (`<data dir>/versions/<version>/open-ferry`), so neither the
+/// path nor the parent says whose they are; only the arguments do. A
+/// process of another name (an alias) claims nothing here: it keeps the
+/// executable and parent rules.
+fn role_of(platform: Platform, process: &Proc) -> Option<Role> {
+    if !is_canonical(platform, &process.name) {
+        return None;
+    }
+    // A worker is a worker even if it also carries `-supervise`.
+    if has_flag(&process.args, "worker") {
+        Some(Role::Worker)
+    } else if has_flag(&process.args, "supervise") {
+        Some(Role::Supervisor)
+    } else {
+        None
+    }
+}
+
+/// Whether `process` runs open-ferry's service installed with `config`, or
+/// `None` when its arguments don't say and the older rules decide. In this
+/// order:
+///
+/// 1. The argument rules apply only to a process named `open-ferry[.exe]`
+///    ([`role_of`]). Any other name keeps rule 4.
+/// 2. A `-worker` is decided by its `-config` alone: equal to `config`
+///    matches, whatever its executable path; none, or another, doesn't.
+/// 3. A `-supervise` (also behind `service run`) is decided the same way.
+/// 4. Everything else: the caller's rules (the installed executable, and
+///    the parent and children of a supervisor).
+///
+/// The config comparison stays lexical (cleaned strings in the platform's
+/// case rules, as [`discover::same_path`] does): a process's `-config` may be
+/// relative to a working directory this can't trust, and a link or case
+/// rule resolved here could join two services that are really apart, so a
+/// spelling that differs is not matched. The service definition pins the
+/// absolute path it was installed with, and the supervisor hands the same
+/// text on to its workers.
+fn decided_by_arguments(platform: Platform, process: &Proc, config: &str) -> Option<bool> {
+    role_of(platform, process)?;
+    // The supervisor hands its workers the absolute path it was given, so
+    // a relative one is another process's, whatever its directory.
+    Some(runs_with_config(platform, &process.args, None, config))
 }
 
 /// The processes that run open-ferry's service, which a removed service or
 /// task leaves running until they are told to stop: the supervisors
-/// (`service run`), the servers they started (a task's supervisor ends at
-/// `/end` and may leave its server), and any open-ferry that runs with the
-/// installed `config`. This process is left out. An open-ferry process whose
-/// arguments can't be read could be any of them: then nothing is known, and
-/// the error says so.
-fn service_runners(
+/// (`service run`, or `-supervise`), the servers and workers they started (a
+/// task's supervisor ends at `/end` and may leave its server), and any
+/// open-ferry that runs with the installed `config`. This process is left
+/// out. An open-ferry process whose arguments can't be read could be any of
+/// them: then nothing is known, and the error says so.
+pub(crate) fn service_runners(
     machine: &mut dyn Machine,
     context: &Context,
     exe: &str,
     config: &str,
 ) -> Result<Vec<Proc>, String> {
     let platform = context.platform;
-    // `exe` is the service's open-ferry; this one may be another copy.
+    // `exe` is the service's open-ferry; this one may be another copy. Both
+    // may be aliases, and a supervisor's workers run under the canonical
+    // name from its version directories: so that is always asked for too.
     let name = discover::file_name(platform, exe);
     let mut names = vec![name.as_str()];
     let mine = discover::file_name(platform, &context.exe);
     if !mine.eq_ignore_ascii_case(&name) {
         names.push(mine.as_str());
+    }
+    let canonical = canonical_name(platform);
+    if !names
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(canonical))
+    {
+        names.push(canonical);
     }
     let own = std::process::id();
     let all: Vec<Proc> = machine
@@ -1486,12 +1600,13 @@ fn service_runners(
             process.pid
         ));
     }
+    // The wrappers whose children are taken with them; a `-supervise`
+    // wrapper with another config is another service's, and so are its
+    // children.
     let supervisors: Vec<(u32, Option<u64>)> = all
         .iter()
-        .filter(|process| {
-            process.args.first().map(String::as_str) == Some("service")
-                && process.args.get(1).map(String::as_str) == Some("run")
-        })
+        .filter(|process| is_wrapper(&process.args))
+        .filter(|process| decided_by_arguments(platform, process, config).unwrap_or(true))
         .map(|process| (process.pid, process.started))
         .collect();
     // A process names the file it runs, after links; `exe` may be a link
@@ -1506,6 +1621,9 @@ fn service_runners(
     Ok(all
         .into_iter()
         .filter(|process| {
+            if let Some(decided) = decided_by_arguments(platform, process, config) {
+                return decided;
+            }
             let supervisor = supervisors.iter().any(|(pid, _)| *pid == process.pid);
             let child = process.parent.as_ref().is_some_and(|parent| {
                 supervisors.iter().any(|(pid, started)| {
@@ -1517,10 +1635,34 @@ fn service_runners(
                 })
             });
             let installed = process.exe.as_deref().is_none_or(runs_exe)
-                && runs_with_config(platform, &process.args, config);
+                && runs_with_config(platform, &process.args, process.cwd.as_deref(), config);
             supervisor || child || installed
         })
         .collect())
+}
+
+/// Names the supervisors and workers among `runners`, for the person who is
+/// about to have them stopped; `None` when there are none of either.
+fn describe_blue_green(platform: Platform, runners: &[Proc]) -> Option<String> {
+    let pids = |want: Role| {
+        runners
+            .iter()
+            .filter(|process| role_of(platform, process) == Some(want))
+            .map(|process| process.pid.to_string())
+            .collect::<Vec<_>>()
+    };
+    let (supervisors, workers) = (pids(Role::Supervisor), pids(Role::Worker));
+    let mut parts = Vec::new();
+    if !supervisors.is_empty() {
+        parts.push(format!(
+            "the supervisor (process {})",
+            supervisors.join(", ")
+        ));
+    }
+    if !workers.is_empty() {
+        parts.push(format!("its workers (process {})", workers.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join(" and "))
 }
 
 /// The message of runners that can't be told: nothing is turned on.
@@ -3200,6 +3342,12 @@ pub(crate) fn undo(
             // they can't be told.
             let runners = service_runners(machine, context, &ours_exe, &record.cliproxyapi.config)
                 .map_err(|error| format!("{}. Nothing was changed", unknown_runners(&error)))?;
+            if let Some(found) = describe_blue_green(platform, &runners) {
+                say(
+                    out,
+                    format_args!("open-ferry runs with {found}; waiting for them to end."),
+                );
+            }
             if target.installed(machine, context)? {
                 os_service::uninstall(machine, context, target, false, out)?;
             } else {
