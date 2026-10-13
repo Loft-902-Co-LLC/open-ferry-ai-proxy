@@ -125,6 +125,7 @@ fn open_capsule(content: &str) -> Result<Capsule, ExecError> {
 fn contains_compaction(raw: &[u8]) -> bool {
     raw.windows(b"compaction".len())
         .any(|window| window == b"compaction")
+        || raw.windows(2).any(|window| window == b"\\u")
 }
 
 fn expand_payload(raw: &Bytes) -> Result<Bytes, ExecError> {
@@ -473,6 +474,49 @@ mod tests {
     fn requests_without_compaction_pass_through_untouched() {
         let raw = Bytes::from_static(br#"{ "input" : [ {"type":"message", "content":"hi"} ] }"#);
         assert!(!contains_compaction(&raw));
+        assert!(!has_trigger(&raw));
+        let expanded = expand_payload(&raw).unwrap();
+        assert_eq!(expanded, raw);
+        assert_eq!(expanded.as_ptr(), raw.as_ptr());
+    }
+
+    #[test]
+    fn escaped_compaction_types_expand_and_trigger_like_plain_types() {
+        let plain = Bytes::from(
+            json!({"input":[{"type":"compaction","encrypted_content":GO_CAPSULE}]}).to_string(),
+        );
+        let escaped = Bytes::from(
+            String::from_utf8(plain.to_vec())
+                .unwrap()
+                .replace("\"compaction\"", "\"\\u0063ompaction\""),
+        );
+        assert!(
+            !escaped
+                .windows(b"compaction".len())
+                .any(|w| w == b"compaction")
+        );
+        assert_eq!(
+            expand_payload(&escaped).unwrap(),
+            expand_payload(&plain).unwrap()
+        );
+        let expanded: Value = serde_json::from_slice(&expand_payload(&escaped).unwrap()).unwrap();
+        assert_eq!(expanded["input"][0]["role"], "developer");
+        assert_eq!(
+            expanded["input"][0]["content"][0]["text"],
+            "Context summary from previous turns:\nGo fixture summary.\n日本語"
+        );
+        let plain = br#"{"input":[{"type":"compaction_trigger"}]}"#;
+        let escaped = "{\"input\":[{\"type\":\"\\u0063ompaction_trigger\"}]}";
+        assert!(has_trigger(plain));
+        assert_eq!(has_trigger(escaped.as_bytes()), has_trigger(plain));
+    }
+
+    #[test]
+    fn unicode_escape_without_compaction_passes_through_untouched() {
+        let raw = Bytes::from_static(
+            b"{ \"input\" : [{\"type\":\"message\",\"content\":\"\\u0068i\"}] }",
+        );
+        assert!(contains_compaction(&raw));
         assert!(!has_trigger(&raw));
         let expanded = expand_payload(&raw).unwrap();
         assert_eq!(expanded, raw);

@@ -596,6 +596,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn routing_keys_follow_upstreams_field_order() {
+        let mut cfg = Config::default();
+        cfg.routing.strategy = "round-robin".into();
+        cfg.routing.session_affinity = true;
+        cfg.routing.session_affinity_ttl = "1h".into();
+        cfg.routing.session_affinity_subagents = Some(false);
+        cfg.routing.session_affinity_rebind_on = "quota".into();
+        let generated = generated_root(&cfg).expect("generate");
+        let routing = yaml_path(&generated, "routing").expect("routing");
+        let keys: Vec<_> = routing
+            .content
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|entry| entry[0].value.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "strategy",
+                "session-affinity",
+                "session-affinity-ttl",
+                "session-affinity-subagents",
+                "session-affinity-rebind-on"
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_save_unquotes_mapping_keys_and_keeps_value_quotes() {
+        let raw = br#""port": 8317
+"custom": {"label": "quoted value", "true": "quoted boolean"}
+"#;
+        let cfg = Config::parse(raw).expect("parse");
+        let dir = TempDir::new();
+        let path = dir.write("config.yaml", raw);
+        save_preserving_comments(&path, &cfg, false).expect("save");
+        let saved = fs::read_to_string(path).expect("read");
+        assert!(saved.contains("port: 8317\n"), "{saved}");
+        assert!(
+            saved.contains("custom:\n  label: \"quoted value\"\n  \"true\": \"quoted boolean\"\n"),
+            "{saved}"
+        );
+        assert!(!saved.contains("config-version:"), "{saved}");
+        assert!(!saved.contains('{'), "{saved}");
+    }
+
+    #[test]
+    fn new_keys_are_inserted_at_their_v8_paths() {
+        let raw = b"config-version: 8\nserver: {port: 8317}\napi-keys:\n  claude: [{keys: [{api-key: test}]}]\n  vertex: [{keys: [{api-key: test}]}]\n";
+        let mut cfg = Config::parse(raw).expect("parse");
+        cfg.max_request_body_bytes = 1048576;
+        cfg.routing.session_affinity_rebind_on = "quota".into();
+        cfg.streaming.send_keepalive_before_ft = true;
+        cfg.claude.tool_search = true;
+        cfg.claude_api_key[0].native_tool_search = true;
+        cfg.vertex_api_key[0].interactions = Some(false);
+        let dir = TempDir::new();
+        let path = dir.write("config.yaml", raw);
+        save_preserving_comments(&path, &cfg, false).expect("save");
+        let saved = fs::read(path).expect("read");
+        assert_valid_v8(&saved);
+        let root = root(&saved);
+        for (path, value) in [
+            ("server.max-request-body-bytes", "1048576"),
+            ("routing.session-affinity-rebind-on", "quota"),
+            ("requests.streaming.send-keepalive-before-ft", "true"),
+            ("upstream.claude.tool-search", "true"),
+        ] {
+            assert_eq!(scalar(&root, path), Some(value), "{path}");
+        }
+        for (provider, key, value) in [
+            ("claude", "native-tool-search", "true"),
+            ("vertex", "interactions", "false"),
+        ] {
+            let group = &yaml_path(&root, &format!("api-keys.{provider}"))
+                .expect("provider")
+                .content[0];
+            let key_node = &yaml_path(group, "keys").expect("keys").content[0];
+            assert_eq!(scalar(key_node, key), Some(value), "{provider}.{key}");
+        }
+        for legacy in [
+            "max-request-body-bytes",
+            "streaming",
+            "claude",
+            "claude-api-key",
+            "vertex-api-key",
+        ] {
+            assert!(yaml_path(&root, legacy).is_none(), "{legacy}");
+        }
+        let mut reloaded = Config::parse(&saved).expect("reload");
+        // Completing the v8 layout moves ws-auth into oauth.providers,
+        // recomputing layout metadata without changing setting values.
+        reloaded.oauth_only_fields.clear();
+        cfg.oauth_only_fields.clear();
+        assert_eq!(reloaded, cfg);
+    }
+
     // Ports TestV8MovedCommentsSurviveV0Saves (config_v8_comments_test.go).
     #[test]
     fn v8_moved_comments_survive_v0_saves() {

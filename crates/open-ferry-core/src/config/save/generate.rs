@@ -35,7 +35,7 @@
 //! - open-ferry's `remote-management.separate-address` follows `base-url`.
 //!   Like `secret-key`, an empty one isn't added to a file without it, and
 //!   clears the file's.
-//! - open-ferry's `routing.quota` follows `session-affinity-subagents`,
+//! - open-ferry's `routing.quota` follows `session-affinity-rebind-on`,
 //!   each of its fields left out when zero, and the section when all are.
 //! - open-ferry's `self-update` follows `claude-cli` the same way.
 
@@ -303,13 +303,13 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                     Value::Bool(cfg.routing.session_affinity),
                 )
                 .omit_empty("session-affinity-ttl", s(&cfg.routing.session_affinity_ttl))
-                .omit_empty(
-                    "session-affinity-rebind-on",
-                    s(&cfg.routing.session_affinity_rebind_on),
-                )
                 .pointer(
                     "session-affinity-subagents",
                     cfg.routing.session_affinity_subagents.map(Value::Bool),
+                )
+                .omit_empty(
+                    "session-affinity-rebind-on",
+                    s(&cfg.routing.session_affinity_rebind_on),
                 )
                 // open-ferry's own.
                 .omit_empty(
