@@ -77,6 +77,7 @@ pub(crate) struct RoutingState {
     /// Whether subagents may take their parent's credential: yes unless
     /// session affinity is on and says no.
     pub(crate) session_affinity_subagents: bool,
+    pub(crate) session_affinity_rebind_on: &'static str,
 }
 
 impl RoutingState {
@@ -95,6 +96,16 @@ impl RoutingState {
                 Duration::from_secs(60 * 60)
             } else {
                 ttl.max(Duration::from_secs(1))
+            },
+            session_affinity_rebind_on: if settings.session_affinity
+                && settings
+                    .session_affinity_rebind_on
+                    .trim()
+                    .eq_ignore_ascii_case("quota")
+            {
+                "quota"
+            } else {
+                "any"
             },
             session_affinity_subagents: !settings.session_affinity
                 || settings.session_affinity_subagents.unwrap_or(true),
@@ -206,6 +217,10 @@ pub struct Settings {
     /// yes; read only with session affinity on
     /// (`routing.session-affinity-subagents`).
     pub session_affinity_subagents: Option<bool>,
+    /// When to move a session binding: `quota` preserves it across transient
+    /// failures; anything else is `any` (the default). Read only with affinity on
+    /// (`routing.session-affinity-rebind-on`).
+    pub session_affinity_rebind_on: String,
     /// The longest a quota rest lasts before one request is let through to
     /// check, or zero to rest until the provider's reset, as upstream does
     /// (`routing.quota.check-after`, open-ferry's own; see `quota_check`).
@@ -377,6 +392,7 @@ impl From<&Config> for Settings {
             session_affinity: config.routing.session_affinity,
             session_affinity_ttl: affinity_ttl(&config.routing.session_affinity_ttl),
             session_affinity_subagents: config.routing.session_affinity_subagents,
+            session_affinity_rebind_on: config.routing.session_affinity_rebind_on().into(),
             quota_check_after: affinity_ttl(&config.routing.quota.check_after),
             refresh_workers: count(config.auth_auto_refresh_workers),
             oauth_model_alias: config
