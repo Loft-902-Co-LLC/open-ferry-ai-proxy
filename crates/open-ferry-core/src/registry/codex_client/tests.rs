@@ -64,7 +64,7 @@ fn validate_codex_client_models_json_rejects_incomplete_catalogs() {
     let mut unsupported_default = test_model("gpt-5.5", 1);
     unsupported_default["default_reasoning_level"] = json!("high");
 
-    let cases: [(&str, Vec<u8>, &str); 8] = [
+    let cases: [(&str, Vec<u8>, &str); 7] = [
         (
             "malformed",
             br#"{"models":"#.to_vec(),
@@ -84,11 +84,6 @@ fn validate_codex_client_models_json_rejects_incomplete_catalogs() {
             "duplicate slug",
             test_catalog(&[valid_default.clone(), valid_default.clone()]),
             r#"Codex client model catalog contains duplicate slug "gpt-5.5""#,
-        ),
-        (
-            "missing default",
-            test_catalog(std::slice::from_ref(&valid_other)),
-            r#"Codex client model catalog is missing default template "gpt-5.5""#,
         ),
         (
             "missing required field",
@@ -201,4 +196,24 @@ fn validation_checks_numbers_and_levels() {
     let mut model = test_model("gpt-5.5", 1);
     model["priority"] = serde_json::from_str("4.0").unwrap();
     validate_codex_client_models_json(&test_catalog(&[model])).unwrap();
+}
+
+#[test]
+fn catalogs_without_gpt_5_5_use_the_first_entry() {
+    let raw = test_catalog(&[test_model("gpt-6-sol", 20), test_model("gpt-6-astra", 1)]);
+    validate_codex_client_models_json(&raw).unwrap();
+    let catalog = CodexClientCatalog::from_json(&raw).unwrap();
+    assert_eq!(catalog.default_template()["slug"], "gpt-6-sol");
+    assert!(catalog.template("gpt-6-astra").is_some());
+}
+
+#[test]
+fn gpt_5_5_takes_precedence_over_the_first_entry() {
+    let raw = test_catalog(&[
+        test_model("gpt-6-sol", 1),
+        test_model("gpt-5.5", 20),
+        test_model("gpt-6-astra", 2),
+    ]);
+    let catalog = CodexClientCatalog::from_json(&raw).unwrap();
+    assert_eq!(catalog.default_template()["slug"], "gpt-5.5");
 }
