@@ -44,6 +44,8 @@ use api_key::{ApiKeyEntry, ApiKeyProvider, api_key_auth, validate_api_key_weight
 /// `SynthesisContext`).
 #[derive(Clone, Debug)]
 pub struct SynthesisContext {
+    /// Optional authorization before credential files are read.
+    pub file_guard: Option<super::file_guard::FileGuard>,
     /// The auth directory; file credential IDs are relative to it.
     pub auth_dir: PathBuf,
     /// The time to stamp new records with.
@@ -57,6 +59,7 @@ impl SynthesisContext {
     /// A context over `auth_dir` at `now`, with no excluded models.
     pub fn new(auth_dir: impl Into<PathBuf>, now: Timestamp) -> Self {
         Self {
+            file_guard: None,
             auth_dir: auth_dir.into(),
             now,
             oauth_excluded_models: BTreeMap::new(),

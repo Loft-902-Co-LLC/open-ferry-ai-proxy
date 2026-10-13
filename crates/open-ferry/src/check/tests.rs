@@ -687,3 +687,84 @@ async fn checks_use_the_injected_probe_before_loading_a_valid_config() {
     assert_eq!(findings[0].level, Level::Error);
     assert!(findings[0].message.contains("Refusing to load"));
 }
+
+#[test]
+fn a_trusted_config_with_an_untrusted_auth_directory_never_reads_credentials() {
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+    let dir = crate::scope::runtime_test_probe::scratch_dir();
+    let scratch_path = open_ferry_core::auth::path::clean(dir.path());
+    let auth_dir = scratch_path.join("auth");
+    fs::create_dir(&auth_dir).unwrap();
+    fs::write(auth_dir.join("unsafe.json"), b"secret invalid JSON").unwrap();
+    let path = scratch_path.join("config.yaml");
+    fs::write(&path, format!("auth-dir: '{}'\n", auth_dir.display())).unwrap();
+    let platform = if cfg!(windows) {
+        Platform::Windows
+    } else {
+        Platform::Linux
+    };
+    let mut probe = Fake::new(platform, true);
+    probe
+        .file(path.to_str().unwrap())
+        .dir(auth_dir.to_str().unwrap())
+        .untrust(auth_dir.to_str().unwrap());
+    let mut findings = Vec::new();
+    let config = check_config_with_probe(&probe, &path, &mut findings).unwrap();
+    let reads = std::cell::Cell::new(0);
+    assert!(
+        check_auth_dir_with_reader(&probe, &config, now(), &mut findings, |_| {
+            reads.set(reads.get() + 1);
+            Ok(Vec::new())
+        })
+        .is_empty()
+    );
+    assert_eq!(reads.get(), 0);
+    let finding = findings
+        .iter()
+        .find(|f| f.check == "auth directory")
+        .unwrap();
+    assert_eq!(finding.level, Level::Error);
+    assert!(finding.message.contains("untrusted"));
+    assert!(finding.fix.contains("not writable by others"));
+}
+
+#[test]
+fn check_reports_an_untrusted_credential_without_reading_or_parsing_it() {
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+    let dir = crate::scope::runtime_test_probe::scratch_dir();
+    let scratch_path = open_ferry_core::auth::path::clean(dir.path());
+    let unsafe_path = scratch_path.join("unsafe.json");
+    let trusted = scratch_path.join("trusted.json");
+    fs::write(&unsafe_path, b"secret invalid JSON").unwrap();
+    fs::write(&trusted, br#"{"type":"codex"}"#).unwrap();
+    let platform = if cfg!(windows) {
+        Platform::Windows
+    } else {
+        Platform::Linux
+    };
+    let mut probe = Fake::new(platform, true);
+    probe
+        .file(unsafe_path.to_str().unwrap())
+        .file(trusted.to_str().unwrap())
+        .untrust(unsafe_path.to_str().unwrap());
+    let mut config = Config::default();
+    config.auth_dir = scratch_path.to_string_lossy().into_owned();
+    let mut findings = Vec::new();
+    let reads = std::cell::RefCell::new(Vec::new());
+    let auths = check_auth_dir_with_reader(&probe, &config, now(), &mut findings, |path| {
+        reads.borrow_mut().push(path.to_path_buf());
+        read_capped(path)
+    });
+    assert_eq!(auths.len(), 1);
+    assert_eq!(*reads.borrow(), vec![trusted]);
+    let finding = findings
+        .iter()
+        .find(|f| f.check == "credential unsafe.json")
+        .unwrap();
+    assert_eq!(finding.level, Level::Error);
+    assert!(finding.message.contains("untrusted"));
+    assert!(!finding.message.contains("JSON"));
+    assert!(!finding.fix.is_empty());
+}

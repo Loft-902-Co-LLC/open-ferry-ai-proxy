@@ -94,6 +94,7 @@ pub const MAX_AUTH_FILE_SIZE: u64 = 8 << 20;
 #[derive(Debug, Default)]
 pub struct FileStore {
     base_dir: RwLock<PathBuf>,
+    file_guard: Option<super::file_guard::FileGuard>,
     /// Counts the binds of `base_dir`; see `binding_generation`.
     binding_generation: AtomicU64,
     save_lock: Mutex<()>,
@@ -110,6 +111,35 @@ impl FileStore {
         let store = Self::default();
         store.bind_base_dir(base_dir.as_ref());
         store
+    }
+
+    /// Sets authorization for every credential read and save target.
+    pub fn with_file_guard(mut self, guard: Option<super::file_guard::FileGuard>) -> Self {
+        self.file_guard = guard;
+        self
+    }
+
+    /// The credential check and warning history shared with other readers.
+    pub fn file_guard(&self) -> Option<super::file_guard::FileGuard> {
+        self.file_guard.clone()
+    }
+
+    fn check_file(&self, path: &Path) -> io::Result<()> {
+        if let Some(guard) = &self.file_guard {
+            guard
+                .check(path)
+                .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
+        }
+        Ok(())
+    }
+
+    fn check_read(&self, path: &Path) -> io::Result<()> {
+        if let Some(guard) = &self.file_guard {
+            guard
+                .check_read(path)
+                .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
+        }
+        Ok(())
     }
 
     /// Not upstream's: puts the store under `gate`, which every writer of
@@ -246,7 +276,9 @@ impl FileStore {
         if target.is_empty() {
             return Ok(None);
         }
-        let raw = read(&join(&dir, Path::new(target)))?;
+        let path = join(&dir, Path::new(target));
+        self.check_read(&path)?;
+        let raw = read(&path)?;
         if raw.is_empty() {
             return Ok(None);
         }
@@ -282,8 +314,8 @@ impl FileStore {
     /// renamed over the target, so the watcher and readers see the old file
     /// or the new one. A new file gets mode 0600 and an existing one keeps
     /// its mode (on Unix). A symlink at `name` is written through to its
-    /// target, and a dangling one is replaced by the file; callers that must
-    /// not follow links check with [`fs::symlink_metadata`] first. Writes
+    /// target, and a dangling one is replaced by the file, unless a file
+    /// guard is configured, which refuses links before any write. Writes
     /// and saves of this store take turns.
     pub fn write_file(&self, name: &str, data: &[u8]) -> io::Result<PathBuf> {
         let path = self.file_path(name)?;
@@ -292,11 +324,13 @@ impl FileStore {
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.check_file(&path)?;
         if let Some(parent) = path.parent() {
             create_dir_all(parent)
                 .map_err(|err| wrap(&err, "auth filestore: create dir failed"))?;
         }
-        write_atomic(&path, data).map_err(|err| wrap(&err, "auth filestore: write file failed"))?;
+        write_atomic(&path, data, self.file_guard.is_none())
+            .map_err(|err| wrap(&err, "auth filestore: write file failed"))?;
         Ok(path)
     }
 
@@ -332,6 +366,8 @@ impl FileStore {
             return Err(invalid("auth filestore: path is not valid UTF-8"));
         };
 
+        self.check_file(&path)?;
+
         // A runtime save must not bring back a disabled credential whose
         // file was deliberately removed.
         if auth.disabled
@@ -347,6 +383,7 @@ impl FileStore {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
 
+        self.check_file(&path)?;
         if let Some(parent) = path.parent() {
             create_dir_all(parent)
                 .map_err(|err| wrap(&err, "auth filestore: create dir failed"))?;
@@ -364,16 +401,16 @@ impl FileStore {
         match read_capped(&path) {
             Ok(existing) => {
                 if !json_equal(&existing, raw.as_bytes()) {
-                    write_atomic(&path, raw.as_bytes())
+                    write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
                         .map_err(|err| wrap(&err, "auth filestore: write existing failed"))?;
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                write_atomic(&path, raw.as_bytes())
+                write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
                     .map_err(|err| wrap(&err, "auth filestore: write file failed"))?;
             }
             Err(err) if err.kind() == io::ErrorKind::FileTooLarge => {
-                write_atomic(&path, raw.as_bytes())
+                write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
                     .map_err(|err| wrap(&err, "auth filestore: write existing failed"))?;
             }
             Err(err) => return Err(wrap(&err, "auth filestore: read existing failed")),
@@ -472,6 +509,13 @@ impl FileStore {
     }
 
     fn list_file(&self, path: &Path, base_dir: &Path, out: &mut Vec<Auth>) {
+        if self
+            .file_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.allows_read(path))
+        {
+            return;
+        }
         match read_auth_file(path, base_dir) {
             Ok(Some(auth)) => out.push(auth),
             Ok(None) => {}
@@ -521,6 +565,7 @@ impl AuthStore for FileStore {
     fn read_back(&self, auth: &Auth) -> io::Result<Option<Auth>> {
         let path = self.resolve_auth_path(auth)?;
         let base_dir = self.base_dir();
+        self.check_read(&path)?;
         match read_auth_file(&path, &base_dir) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             other => other,
@@ -699,9 +744,9 @@ pub fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
 /// Replaces the file at `path` with `data` through a temporary file in the
 /// same directory, so readers see the old file or the new one, never a
 /// partial write.
-fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+fn write_atomic(path: &Path, data: &[u8], follow_links: bool) -> io::Result<()> {
     let target = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+        Ok(meta) if follow_links && meta.file_type().is_symlink() => {
             fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
         }
         _ => path.to_path_buf(),
@@ -764,6 +809,92 @@ fn at(err: &io::Error, op: &str, path: &Path) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    fn guarded_scratch() -> tempfile::TempDir {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
+        fs::create_dir_all(&root).unwrap();
+        tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn a_file_guard_refuses_existing_reads_and_saves_but_allows_new_and_trusted_files() {
+        use super::super::file_guard::FileGuard;
+        let dir = guarded_scratch();
+        let unsafe_path = dir.path().join("unsafe.json");
+        fs::write(&unsafe_path, br#"{"type":"codex"}"#).unwrap();
+        fs::write(dir.path().join("trusted.json"), br#"{"type":"codex"}"#).unwrap();
+        let store = FileStore::new(dir.path()).with_file_guard(Some(FileGuard::new(|path| {
+            if path.file_name().unwrap() == "unsafe.json" {
+                Err("untrusted owner".to_owned())
+            } else {
+                Ok(())
+            }
+        })));
+        assert_eq!(store.list().unwrap().len(), 1);
+        let mut auth = Auth {
+            id: "unsafe.json".into(),
+            metadata: meta(json!({"type":"codex", "n":1})),
+            ..Auth::default()
+        };
+        let reads = std::cell::Cell::new(0);
+        assert!(
+            store
+                .read_existing_metadata(&auth, |_| {
+                    reads.set(reads.get() + 1);
+                    Ok(Vec::new())
+                })
+                .is_err()
+        );
+        assert_eq!(reads.get(), 0);
+        assert!(store.read_back(&auth).is_err());
+        assert!(store.save_auth(&mut auth).is_err());
+        assert!(store.save_new_auth(&mut auth).is_err());
+        assert!(store.write_file("unsafe.json", b"{}").is_err());
+        assert_eq!(fs::read(&unsafe_path).unwrap(), br#"{"type":"codex"}"#);
+        auth.id = "new.json".into();
+        store.save_new_auth(&mut auth).unwrap();
+        store.write_file("trusted.json", b"{}").unwrap();
+        assert!(dir.path().join("new.json").exists());
+        FileStore::new(dir.path())
+            .write_file("unsafe.json", b"{}")
+            .unwrap();
+        assert_eq!(fs::read(&unsafe_path).unwrap(), b"{}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_guard_never_loads_or_saves_through_a_link() {
+        use super::super::file_guard::FileGuard;
+        let dir = guarded_scratch();
+        let auth_dir = dir.path().join("auth");
+        fs::create_dir(&auth_dir).unwrap();
+        let target = dir.path().join("target.json");
+        fs::write(&target, br#"{"type":"codex"}"#).unwrap();
+        let link = auth_dir.join("link.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let store = FileStore::new(&auth_dir).with_file_guard(Some(FileGuard::new(|_| Ok(()))));
+        assert!(store.list().unwrap().is_empty());
+        assert!(store.write_file("link.json", b"{}").is_err());
+        let mut auth = Auth {
+            id: "link.json".into(),
+            metadata: meta(json!({"type":"codex", "n":1})),
+            ..Auth::default()
+        };
+        assert!(store.save_new_auth(&mut auth).is_err());
+        assert_eq!(fs::read(&target).unwrap(), br#"{"type":"codex"}"#);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(&auth_dir).unwrap().count(), 1);
+        FileStore::new(&auth_dir)
+            .write_file("link.json", b"{}")
+            .unwrap();
+        assert_eq!(fs::read(target).unwrap(), b"{}");
+    }
+
     use super::*;
     use serde_json::json;
     use std::time::{Duration, Instant};

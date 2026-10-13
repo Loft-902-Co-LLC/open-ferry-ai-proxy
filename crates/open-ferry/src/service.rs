@@ -339,10 +339,11 @@ pub async fn run(
         }
     }
 
-    let mut events = match ConfigWatcher::start_guarded(
+    let mut events = match start_watcher(
         &config_path,
         &config,
-        Some(config_read_guard(Arc::clone(&service.probe))),
+        Arc::clone(&service.probe),
+        service.store.file_guard(),
     ) {
         Ok((watcher, events)) => {
             service.watcher = Some(watcher);
@@ -893,7 +894,10 @@ impl Service {
         let directory_probe = Arc::clone(&probe);
         let auth_dir = absolute_dir(auth_dir);
         let registry = Arc::new(ModelRegistry::new());
-        let store = Arc::new(FileStore::new(&auth_dir));
+        let store = Arc::new(
+            FileStore::new(&auth_dir)
+                .with_file_guard(crate::scope::credential_file_guard(Arc::clone(&probe))),
+        );
         store.set_gate(gate.clone());
         let manager = Manager::new(
             Settings::from(&*config),
@@ -912,6 +916,8 @@ impl Service {
         let (requests, sync_requests) = mpsc::channel(SYNC_QUEUE);
         let (reloads, reload_requests) = mpsc::channel(RELOAD_QUEUE);
         let (catalog_sender, catalog_changes) = mpsc::unbounded_channel();
+        let config_writer = Arc::new(FileConfigWriter::new(config_path).with_gate(gate.clone()));
+        let checked_config_path = config_writer.path().to_path_buf();
         let management = ManagementState::new(
             Arc::clone(&config),
             manager.clone(),
@@ -920,11 +926,9 @@ impl Service {
         )
         .with_store(Arc::clone(&store))
         .with_sync(Arc::new(SyncSender { requests }))
-        .with_config_writer(Arc::new(
-            FileConfigWriter::new(config_path.clone()).with_gate(gate.clone()),
-        ))
+        .with_config_writer(config_writer)
         .with_config_reload(Arc::new(ReloadSender { requests: reloads }))
-        .with_config_path(config_path)
+        .with_config_path(checked_config_path)
         .with_config_read_check(move |path| {
             crate::scope::authorize_file(read_probe.as_ref(), path)
                 .map_err(|error| error.to_string())
@@ -1499,6 +1503,7 @@ impl Service {
 
     fn synthesis_context(&self) -> SynthesisContext {
         let mut ctx = SynthesisContext::new(&self.auth_dir, Utc::now());
+        ctx.file_guard = self.store.file_guard();
         ctx.oauth_excluded_models = self.config.oauth_excluded_models.clone();
         ctx
     }
@@ -2036,10 +2041,11 @@ impl Service {
                     // The new watcher reports every file in the new directory.
                     self.applied_reload = None;
                     self.watcher = None;
-                    match ConfigWatcher::start_guarded(
+                    match start_watcher(
                         config_path,
                         &config,
-                        Some(config_read_guard(Arc::clone(&self.probe))),
+                        Arc::clone(&self.probe),
+                        self.store.file_guard(),
                     ) {
                         Ok((watcher, events)) => {
                             if let Some(hash) = &applied_hash {
@@ -2158,6 +2164,16 @@ fn authorize_resolved_auth_dir(
         )),
         Err(_) => Ok(()),
     }
+}
+
+/// The shared factory for initial, restarted and supervised watchers.
+fn start_watcher(
+    path: &Path,
+    config: &Config,
+    probe: crate::scope::RuntimeProbe,
+    file_guard: Option<open_ferry_core::auth::file_guard::FileGuard>,
+) -> Result<(ConfigWatcher, mpsc::Receiver<WatchEvent>), open_ferry_core::config::WatchError> {
+    ConfigWatcher::start_with_guards(path, config, Some(config_read_guard(probe)), file_guard)
 }
 
 /// The watcher's check before each read of the config file: the trust check
@@ -2296,11 +2312,20 @@ mod config_trust_tests {
     fn privileged_without_a_config(trusted: bool) -> (tempfile::TempDir, PathBuf, Service) {
         use crate::scope::runtime_test_probe::{RuntimeFake, scratch_dir};
         let dir = scratch_dir();
-        let path = dir.path().join("config.yaml");
+        // The scratch helper's fallback contains ../..; only the test-generated
+        // path is cleaned before the fake privileged policy sees it.
+        let scratch_path = absolute_dir(dir.path().join("."));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&scratch_path, std::fs::Permissions::from_mode(0o777))
+                .unwrap();
+        }
+        let path = scratch_path.join("config.yaml");
         let old = Arc::new(
             Config::parse(format!(
                 "auth-dir: '{}'\nremote-management:\n  secret-key: test-key\n",
-                dir.path().display()
+                scratch_path.display()
             ))
             .unwrap(),
         );
@@ -2310,15 +2335,15 @@ mod config_trust_tests {
             Platform::Linux
         };
         let mut fake = Fake::new(platform, true);
-        fake.dir(dir.path().to_str().unwrap());
+        fake.dir(scratch_path.to_str().unwrap());
         if !trusted {
-            fake.untrust(dir.path().to_str().unwrap());
+            fake.untrust(scratch_path.to_str().unwrap());
         }
         let probe: crate::scope::RuntimeProbe = Arc::new(RuntimeFake::new(fake));
         let mut service = Service::with_probe(
             old,
             path.clone(),
-            dir.path().to_owned(),
+            scratch_path,
             LogLevel::detached(),
             ActiveGate::open(),
             probe,
@@ -2330,14 +2355,17 @@ mod config_trust_tests {
 
     #[tokio::test]
     async fn an_injected_privileged_probe_writes_a_new_config_only_in_a_trusted_directory() {
-        use axum::body::Body;
+        use axum::body::{Body, to_bytes};
         use axum::http::StatusCode;
         use tower_service::Service as _;
         for trusted in [true, false] {
-            let (dir, path, mut service) = privileged_without_a_config(trusted);
+            let (_dir, path, mut service) = privileged_without_a_config(trusted);
             service.management = service.management.clone().with_local_password("test-key");
             let mut app = open_ferry_management::api_router(service.management.clone());
-            let body = format!("auth-dir: '{}'\napi-keys: [new]\n", dir.path().display());
+            let body = format!(
+                "auth-dir: '{}'\napi-keys: [new]\n",
+                service.auth_dir.display()
+            );
             let mut request = axum::http::Request::builder()
                 .method("PUT")
                 .uri("/v0/management/config.yaml")
@@ -2353,7 +2381,10 @@ mod config_trust_tests {
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            assert_eq!(answer.status(), status, "trusted: {trusted}");
+            let actual = answer.status();
+            let body = to_bytes(answer.into_body(), 4096).await.unwrap();
+            let response = String::from_utf8_lossy(&body).replace("test-key", "[redacted]");
+            assert_eq!(actual, status, "trusted: {trusted}; response: {response}");
             assert_eq!(path.exists(), trusted, "trusted: {trusted}");
         }
     }
@@ -2407,31 +2438,79 @@ mod config_trust_tests {
         assert!(authorize_resolved_auth_dir(&probe, Err("HOME is unset".into())).is_err());
     }
 
-    #[test]
-    fn all_three_production_watcher_starts_keep_the_read_guard() {
-        // These are wiring assertions; the core watcher test observes the reader.
-        let service = include_str!("service.rs");
-        let production = service
-            .split("#[cfg(test)]\nmod config_trust_tests")
-            .next()
+    #[tokio::test]
+    async fn the_shared_watcher_factory_refuses_config_and_credential_reads() {
+        use crate::scope::runtime_test_probe::{RuntimeFake, scratch_dir};
+        let dir = scratch_dir();
+        let scratch_path = absolute_dir(dir.path().to_path_buf());
+        let path = scratch_path.join("config.yaml");
+        let credential = scratch_path.join("unsafe.json");
+        std::fs::write(&path, "port: 9292\n").unwrap();
+        std::fs::write(&credential, br#"{"type":"codex"}"#).unwrap();
+        let mut config = Config::default();
+        config.auth_dir = scratch_path.to_string_lossy().into_owned();
+        let platform = if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        };
+        let mut fake = Fake::new(platform, true);
+        fake.file(path.to_str().unwrap())
+            .file(credential.to_str().unwrap())
+            .untrust(path.to_str().unwrap())
+            .untrust(credential.to_str().unwrap());
+        let probe: crate::scope::RuntimeProbe = Arc::new(RuntimeFake::new(fake));
+        let (watcher, mut events) = start_watcher(
+            &path,
+            &config,
+            Arc::clone(&probe),
+            crate::scope::credential_file_guard(probe),
+        )
+        .unwrap();
+        watcher.force_reload_config(7);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
             .unwrap();
-        assert_eq!(
-            production.matches("ConfigWatcher::start_guarded(").count(),
-            2
-        );
-        assert!(!production.contains("ConfigWatcher::start("));
-        let worker = include_str!("service/worker.rs");
-        assert_eq!(worker.matches("ConfigWatcher::start_guarded(").count(), 1);
-        assert!(!worker.contains("ConfigWatcher::start("));
-        for source in [production, worker] {
-            for call in source.split("ConfigWatcher::start_guarded(").skip(1) {
-                let call = call.chars().take(300).collect::<String>();
-                assert!(
-                    call.contains("Some(config_read_guard(Arc::clone(")
-                        || call.contains("Some(super::config_read_guard(Arc::clone(")
-                );
-            }
+        assert!(matches!(event, WatchEvent::Reloaded(7)), "{event:?}");
+        // Initial auth events and a forced config snapshot would precede this barrier.
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_privileged_service_loads_only_trusted_credential_leaves() {
+        use crate::scope::runtime_test_probe::{RuntimeFake, scratch_dir};
+        let dir = scratch_dir();
+        let scratch_path = absolute_dir(dir.path().to_path_buf());
+        let trusted = scratch_path.join("trusted.json");
+        let unsafe_path = scratch_path.join("unsafe.json");
+        for path in [&trusted, &unsafe_path] {
+            std::fs::write(path, br#"{"type":"codex"}"#).unwrap();
         }
+        let platform = if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        };
+        let mut fake = Fake::new(platform, true);
+        fake.file(trusted.to_str().unwrap())
+            .file(unsafe_path.to_str().unwrap())
+            .untrust(unsafe_path.to_str().unwrap());
+        let mut config = Config::default();
+        config.auth_dir = scratch_path.to_string_lossy().into_owned();
+        let config = Arc::new(config);
+        let mut service = Service::with_probe(
+            config,
+            scratch_path.join("config.yaml"),
+            scratch_path.clone(),
+            LogLevel::detached(),
+            ActiveGate::open(),
+            Arc::new(RuntimeFake::new(fake)),
+        );
+        service.load_file_auths();
+        assert_eq!(service.file_auths.len(), 1);
+        assert!(service.store.write_file("unsafe.json", b"{}").is_err());
+        service.store.write_file("new.json", b"{}").unwrap();
     }
 
     #[test]

@@ -237,6 +237,16 @@ impl ConfigWatcher {
         config: &Config,
         guard: Option<ReadGuard>,
     ) -> Result<(Self, mpsc::Receiver<WatchEvent>), WatchError> {
+        Self::start_with_guards(config_path, config, guard, None)
+    }
+
+    /// Starts with independent authorization for config and credential reads.
+    pub fn start_with_guards(
+        config_path: impl AsRef<Path>,
+        config: &Config,
+        guard: Option<ReadGuard>,
+        file_guard: Option<crate::auth::file_guard::FileGuard>,
+    ) -> Result<(Self, mpsc::Receiver<WatchEvent>), WatchError> {
         let config_path = absolute(config_path.as_ref(), "config file")?;
         if let Err(error) = fs::metadata(&config_path) {
             return Err(WatchError::new(format!(
@@ -282,6 +292,7 @@ impl ConfigWatcher {
         let aliases = Aliases::new(&dirs);
         let mut state = WatchState::new(config_path.clone(), auth_dir.clone());
         state.read_guard = guard;
+        state.file_guard = file_guard;
         let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
         let stopped = Arc::new(AtomicBool::new(false));
         let thread_stopped = Arc::clone(&stopped);
@@ -459,6 +470,8 @@ struct WatchState {
     /// The check before each config read, if any.
     read_guard: Option<ReadGuard>,
     config_reader: Arc<ConfigReader>,
+    file_guard: Option<crate::auth::file_guard::FileGuard>,
+    auth_reader: Arc<ConfigReader>,
 }
 
 impl WatchState {
@@ -473,6 +486,8 @@ impl WatchState {
             remove_times: HashMap::new(),
             read_guard: None,
             config_reader: Arc::new(|path| fs::read(path)),
+            file_guard: None,
+            auth_reader: Arc::new(read_capped),
         }
     }
 
@@ -529,7 +544,14 @@ impl WatchState {
     /// folded in so the file is read once.
     fn add_or_update(&mut self, path: &Path, key: String) -> Step {
         let revision = next_revision();
-        let data = match read_capped(path) {
+        if self
+            .file_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.allows_read(path))
+        {
+            return Step::Nothing;
+        }
+        let data = match (self.auth_reader)(path) {
             Ok(data) => data,
             Err(error) => {
                 error!(file = %file_name(path), %error, "failed to read auth file");
@@ -652,7 +674,14 @@ impl WatchState {
         for name in names {
             let path = self.auth_dir.join(&name);
             let revision = next_revision();
-            let data = match read_capped(&path) {
+            if self
+                .file_guard
+                .as_ref()
+                .is_some_and(|guard| !guard.allows_read(&path))
+            {
+                continue;
+            }
+            let data = match (self.auth_reader)(&path) {
                 Ok(data) if !data.is_empty() => data,
                 _ => continue,
             };
@@ -1094,6 +1123,42 @@ mod tests {
         allow.store(true, Ordering::SeqCst);
         assert_eq!(config_of(state.reload_config_if_changed()).port, 9292);
         assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_file_guard_skips_initial_and_changed_credentials_before_reading() {
+        use crate::auth::file_guard::FileGuard;
+        let fixture = Fixture::new();
+        let unsafe_path = fixture.auth_dir.join("unsafe.json");
+        let trusted_path = fixture.auth_dir.join("trusted.json");
+        fs::write(&unsafe_path, DEMO).unwrap();
+        fs::write(&trusted_path, DEMO).unwrap();
+        let mut state = fixture.state();
+        state.file_guard = Some(FileGuard::new(|path| {
+            if path.file_name().unwrap() == "unsafe.json" {
+                Err("untrusted owner".to_owned())
+            } else {
+                Ok(())
+            }
+        }));
+        let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let counted = reads.clone();
+        state.auth_reader = Arc::new(move |path| {
+            counted.lock().unwrap().push(path.to_path_buf());
+            read_capped(path)
+        });
+        assert_eq!(state.initial_scan().len(), 1);
+        assert_eq!(
+            state.add_or_update(&unsafe_path, path_key(&unsafe_path)),
+            Step::Nothing
+        );
+        assert_eq!(*reads.lock().unwrap(), vec![trusted_path]);
+        state.file_guard = None;
+        assert!(matches!(
+            state.add_or_update(&unsafe_path, path_key(&unsafe_path)),
+            Step::Send(WatchEvent::AuthAdded(..))
+        ));
+        assert_eq!(reads.lock().unwrap().len(), 2);
     }
 
     #[test]
