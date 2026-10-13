@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use open_ferry_supervisor::client::StopOutcome;
+use open_ferry_supervisor::endpoint::ServiceKind;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::check::{self, Finding};
@@ -280,8 +281,25 @@ impl System for Host {
         self.system.write_atomic(path, data)
     }
 
-    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
-        self.system.stop_supervisor(data_dir, budget)
+    fn stop_supervisor(
+        &mut self,
+        data_dir: &str,
+        budget: Duration,
+        kind: ServiceKind,
+    ) -> StopOutcome {
+        self.system.stop_supervisor(data_dir, budget, kind)
+    }
+
+    fn trusted_dir(&self, path: &str) -> Result<(), String> {
+        self.system.trusted_dir(path)
+    }
+
+    fn trusted_file(&self, path: &str) -> Result<(), String> {
+        self.system.trusted_file(path)
+    }
+
+    fn pause(&mut self, time: Duration) {
+        self.system.pause(time)
     }
 }
 

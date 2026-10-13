@@ -571,7 +571,7 @@ fn supervised_message(running: &Running) -> String {
     }
     format!(
         "{who}, so the binary can't be replaced. Nothing was changed.\n{}",
-        hint::stop_and_retry("run the installer again")
+        hint::stop_and_retry(ServiceKind::User, "run the installer again")
     )
 }
 

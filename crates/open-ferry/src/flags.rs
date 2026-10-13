@@ -287,6 +287,16 @@ fn check_modes(flags: &Flags) -> Result<(), FlagError> {
     if !flags.supervise && (!flags.test_data_dir.is_empty() || !flags.test_endpoint.is_empty()) {
         return invalid("-test-data-dir and -test-endpoint need -supervise");
     }
+    // A system supervisor never finds its data directory in its
+    // environment, which root's or LocalSystem's service manager sets: the
+    // service definition names it.
+    #[cfg(feature = "blue-green-test")]
+    let data_dir_given = !flags.data_dir.is_empty() || !flags.test_data_dir.is_empty();
+    #[cfg(not(feature = "blue-green-test"))]
+    let data_dir_given = !flags.data_dir.is_empty();
+    if flags.system && !data_dir_given {
+        return invalid("-system needs -data-dir");
+    }
     // A supervised worker gets no local password in this version.
     if flags.supervise && !flags.password.0.is_empty() {
         return invalid("-password can't be used with -supervise");
@@ -502,7 +512,12 @@ mod tests {
         assert!(flags.worker && !flags.supervise);
         assert_eq!(flags.worker_control, "3");
         assert_eq!(flags.config, "/c.yaml");
-        let flags = parse_args(&["-supervise", "-system", "-config=/c.yaml"]).unwrap();
+        let data_dir = if cfg!(windows) {
+            "-data-dir=C:/d"
+        } else {
+            "-data-dir=/d"
+        };
+        let flags = parse_args(&["-supervise", "-system", "-config=/c.yaml", data_dir]).unwrap();
         assert!(flags.supervise && flags.system && !flags.worker);
         let flags = parse_args(&["-supervise"]).unwrap();
         assert!(flags.supervise && !flags.system);
@@ -524,6 +539,10 @@ mod tests {
             "-worker-control needs -worker"
         );
         assert_eq!(invalid(&["-system"]), "-system needs -supervise");
+        assert_eq!(
+            invalid(&["-supervise", "-system", "-config=/c.yaml"]),
+            "-system needs -data-dir"
+        );
         assert_eq!(
             invalid(&["-supervise", "-password", "pw"]),
             "-password can't be used with -supervise"

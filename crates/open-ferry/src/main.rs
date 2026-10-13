@@ -58,6 +58,11 @@ mod login;
 mod migrate;
 mod observability;
 mod os_service;
+#[allow(
+    dead_code,
+    reason = "2c-2b contract: the parts that follow call it; the last removes this"
+)]
+mod scope;
 #[cfg(feature = "blue-green-test")]
 mod seams;
 mod service;

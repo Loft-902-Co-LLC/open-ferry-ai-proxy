@@ -320,7 +320,7 @@ fn real_updater(data: Result<DataDir, NoDataDir>, proxy_url: &str) -> Result<Upd
 /// reason, when there is one, comes before the hint on stopping the service.
 async fn clear_to_replace_in(data: &Path, installed: &Path) -> Result<InstallLock, UpdateError> {
     let again = "run `open-ferry update` again";
-    let hint = || crate::os_service::hint::stop_and_retry(again);
+    let hint = || crate::os_service::hint::stop_and_retry(ServiceKind::User, again);
     let identity = Identity::current(ServiceKind::User).map_err(|error| {
         UpdateError::Supervised(format!(
             "could not tell whether an open-ferry supervisor runs: {error}\n{}",

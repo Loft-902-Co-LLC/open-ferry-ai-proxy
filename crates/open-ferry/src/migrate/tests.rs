@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeZone as _, Utc};
 use open_ferry_supervisor::client::StopOutcome;
+use open_ferry_supervisor::endpoint::ServiceKind;
 use serde_json::Value;
 
 use super::discover::file_name;
@@ -576,10 +577,35 @@ impl System for Fake {
         Ok(())
     }
 
-    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
-        self.events
-            .push(format!("stop_supervisor {data_dir} {}s", budget.as_secs()));
+    fn stop_supervisor(
+        &mut self,
+        data_dir: &str,
+        budget: Duration,
+        kind: ServiceKind,
+    ) -> StopOutcome {
+        // A user supervisor's stop is recorded as before; a system one says so.
+        let system = if kind == ServiceKind::System {
+            " system"
+        } else {
+            ""
+        };
+        self.events.push(format!(
+            "stop_supervisor {data_dir} {}s{system}",
+            budget.as_secs()
+        ));
         StopOutcome::NotRunning
+    }
+
+    fn trusted_dir(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn trusted_file(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn pause(&mut self, time: Duration) {
+        self.events.push(format!("pause {}s", time.as_secs()));
     }
 
     fn remove(&mut self, path: &str) -> io::Result<()> {
