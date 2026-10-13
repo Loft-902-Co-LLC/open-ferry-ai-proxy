@@ -225,7 +225,9 @@ Query: the filters, and:
       "credential": {"id": "codex-user@example.com.json", "auth_index": "3", "label": "user@example.com", "auth_type": "oauth"},
       "client_key": {"id": "ck_5f0a3c19e2b7d468", "masked": "sk-...9f3k"},
       "tokens": {"input": 12400, "cache_read": 9000, "cache_write": 0, "output": 830, "reasoning": 512, "total": 13230},
-      "cost": 0.0213
+      "cost": 0.0213,
+      "access_provider": "config-inline",
+      "is_native_key": true
     }
   ],
   "next_cursor": "eyJ0IjoxNzU5NjY1NDgyMTE0LCJpIjo0ODIxM30"
@@ -238,6 +240,7 @@ Query: the filters, and:
 - `ttft_ms` is `null` when there was no streamed first token; `cost` `null` when the model has no price.
 - `client_key` is `null` for a call without a client key. Its `id` is a keyed hash of the key, the same for every call with that key; `masked` shows a few characters of it. The key itself isn't kept.
 - `credential` is `null` for a call that had none.
+- `access_provider` names the client authentication provider; `is_native_key` says whether the client key is native to the proxy. Both are `null` when unknown (rows from before this version or written by an older binary). New anonymous rows use `""` and `false`.
 
 ### `GET /open-ferry/api/v1/usage/ledger`
 

@@ -670,10 +670,10 @@ fn authentication_metadata_is_written_and_queried_without_full_keys() {
     )
     .unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].access_provider, "");
-    assert!(!rows[0].is_native_key);
-    assert_eq!(rows[1].access_provider, "config-inline");
-    assert!(rows[1].is_native_key);
+    assert_eq!(rows[0].access_provider.as_deref(), Some(""));
+    assert_eq!(rows[0].is_native_key, Some(false));
+    assert_eq!(rows[1].access_provider.as_deref(), Some("config-inline"));
+    assert_eq!(rows[1].is_native_key, Some(true));
     let json = serde_json::to_string(&rows).unwrap();
     assert!(json.contains("config-inline"));
     assert!(!json.contains("sk-client-test-secret-1234"));
@@ -718,8 +718,43 @@ fn version_one_rows_migrate_with_unknown_authentication_metadata() {
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].model, "gpt-5");
-    assert_eq!(rows[0].access_provider, "");
-    assert!(!rows[0].is_native_key);
+    assert_eq!(rows[0].access_provider, None);
+    assert_eq!(rows[0].is_native_key, None);
+    let json = serde_json::to_value(&rows[0]).unwrap();
+    assert!(json["access_provider"].is_null());
+    assert!(json["is_native_key"].is_null());
     drop(connection);
     assert!(schema::open(&path).is_ok(), "migration is not repeated");
+}
+
+#[test]
+fn older_writer_leaves_authentication_metadata_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let connection = schema::open(&dir.path().join(LEDGER_FILE)).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO requests (ts, request_id, endpoint, provider, model, alias,
+         stream, failed, status, latency_ms, input_tokens, uncached_input_tokens,
+         cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+         unclassified_tokens, total_tokens)
+         VALUES (1, 'old-request', 'POST /v1/chat/completions', 'codex', 'gpt-5',
+         'gpt-5', 0, 0, 200, 10, 0, 0, 0, 0, 0, 0, 0, 0);",
+        )
+        .unwrap();
+    let (rows, _) = super::query::list_requests(
+        &connection,
+        &super::query::Filter {
+            to_ms: i64::MAX,
+            ..Default::default()
+        },
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].access_provider, None);
+    assert_eq!(rows[0].is_native_key, None);
+    let json = serde_json::to_value(&rows[0]).unwrap();
+    assert!(json["access_provider"].is_null());
+    assert!(json["is_native_key"].is_null());
 }

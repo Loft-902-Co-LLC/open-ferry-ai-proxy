@@ -451,8 +451,6 @@ pub(crate) struct RequestTokens {
 /// A call, as the API lists it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct RequestRow {
-    pub(crate) access_provider: String,
-    pub(crate) is_native_key: bool,
     pub(crate) id: i64,
     pub(crate) time: String,
     pub(crate) request_id: String,
@@ -469,6 +467,8 @@ pub(crate) struct RequestRow {
     pub(crate) client_key: Option<ClientKeyRef>,
     pub(crate) tokens: RequestTokens,
     pub(crate) cost: Option<f64>,
+    pub(crate) access_provider: Option<String>,
+    pub(crate) is_native_key: Option<bool>,
 }
 
 /// The calls `filter` reads, newest first, after `cursor`, at most
@@ -511,8 +511,6 @@ pub(crate) fn list_requests(
         let ts: i64 = row.get(1)?;
         last = Some(RequestCursor { t: ts, i: id });
         list.push(RequestRow {
-            access_provider: row.get(25)?,
-            is_native_key: row.get(26)?,
             id,
             time: format_time(ts),
             request_id: row.get(2)?,
@@ -536,6 +534,8 @@ pub(crate) fn list_requests(
                 total: row.get(23)?,
             },
             cost: row.get(24)?,
+            access_provider: row.get(25)?,
+            is_native_key: row.get(26)?,
         });
     }
     Ok((list, if more { last } else { None }))

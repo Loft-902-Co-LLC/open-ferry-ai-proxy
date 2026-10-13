@@ -147,11 +147,14 @@
 //!   failed, so where the bridge fails at an event before the terminal one
 //!   of an answer read whole, upstream's record has no counts and this one
 //!   has the terminal event's.
-//! - A stream's reading stops at its terminal line, not at the blank line
-//!   after it: an OpenAI-compatible stream at the `[DONE]` line, where
-//!   upstream's scanner leaves its loop at the next line, and Claude's at
-//!   the `message_stop` data line. Nothing else upstream reads between
-//!   those lines carries counts.
+//! - OpenAI-compatible model names and usage counts are read both from
+//!   individual lines and joined frames; upstream reads them only from
+//!   lines. JSON split over data lines can therefore report a model and
+//!   counts here where upstream reports neither. Token timing uses complete
+//!   frames and packet fallback uses the first non-empty body read, as
+//!   upstream does. Image streams retain first-byte timing.
+//! - Claude streams stop at the `message_stop` data line, rather than the
+//!   blank line after it; nothing between those lines carries counts.
 //! - A call canceled before its executor answered, whether the executor was
 //!   still dialing or waiting for the headers, is a failure with status 499
 //!   and the body `context canceled` in every stream mode, as upstream's
@@ -711,6 +714,8 @@ struct Call {
     chat_frame: Vec<u8>,
     chat_frame_overflow: bool,
     error_response: bool,
+    /// Image streams keep upstream's first-byte timing.
+    image_stream: bool,
     body: Vec<u8>,
     /// The answer outgrew [`BODY_BOUND`].
     body_overflow: bool,
@@ -756,6 +761,7 @@ impl Call {
             chat_frame: Vec::new(),
             chat_frame_overflow: false,
             error_response: false,
+            image_stream: false,
             body: Vec::new(),
             body_overflow: false,
             event_stream: false,
@@ -793,6 +799,8 @@ impl Call {
     /// Another attempt is sent: its answer starts afresh.
     fn attempt(&mut self, request: &AttemptRequest<'_>, client_key: &str, now: Instant) {
         self.mode = Mode::of(request.provider, request.kind, request.format);
+        self.image_stream = request.kind == AttemptKind::Stream
+            && request.format.as_str() == Format::OPENAI_IMAGE.as_str();
         self.provider = request.provider.to_owned();
         self.model = request.model.to_owned();
         self.executor_type = executor_type(request.provider, Some(request.kind));
@@ -861,8 +869,12 @@ impl Call {
             mode => {
                 if mode == Mode::CodexStream {
                     self.ttft.observe_token_event(false, now);
-                } else if mode != Mode::OpenAiStream || self.error_response {
+                } else if mode != Mode::OpenAiStream || self.error_response || self.image_stream {
                     self.ttft.mark_first_response_byte(now);
+                } else if !chunk.is_empty() {
+                    // Packet fallback starts on the first body read with data,
+                    // even a comment or an incomplete frame (usage_helpers.go).
+                    self.ttft.observe_token_event(false, now);
                 }
                 let mut lines = std::mem::take(&mut self.lines);
                 lines.feed(chunk, |line| self.line(line, now));
@@ -899,7 +911,7 @@ impl Call {
                 // joined frames also cover providers that split JSON over data lines.
                 self.response_model.observe(line, &self.provider);
                 self.buffer.observe_openai_stream(line);
-                if is_done(line) {
+                if self.image_stream && is_done(line) {
                     self.ttft.observe_token_event(true, now);
                     self.seen_done = true;
                     self.ended = true;
@@ -945,6 +957,11 @@ impl Call {
         let payload = std::mem::take(&mut self.chat_frame);
         let overflow = std::mem::take(&mut self.chat_frame_overflow);
         if overflow || payload.is_empty() || self.ended {
+            return;
+        }
+        // Upstream rejects a frame containing [DONE] alongside other data.
+        // Do not turn that malformed frame into a token or terminal marker.
+        if !is_done(&payload) && !go::json_valid(&payload) {
             return;
         }
         self.ttft

@@ -61,13 +61,15 @@ fn openai_stream_stops_at_done() {
     assert_eq!(int_at(&record, "/tokens/total_tokens"), 3);
     assert!(record.get("response_model").is_none(), "{record}");
 
-    // The `[DONE]` line is the end, without waiting for the blank line.
+    // Upstream reads model and usage lines until the frame ends. A data
+    // line after [DONE] without a blank separator still updates its usage;
+    // the joined frame is malformed, rather than a terminal [DONE] frame.
     let record = stream_record(
         "openai",
         "gpt-5.4",
         &[OPENAI_USAGE, "data: [DONE]\n", OPENAI_LATE],
     );
-    assert_eq!(int_at(&record, "/tokens/total_tokens"), 3);
+    assert_eq!(int_at(&record, "/tokens/total_tokens"), 99);
 
     // Without a `[DONE]`, the latest counts are the ones kept.
     let record = stream_record("openai", "gpt-5.4", &[OPENAI_USAGE, OPENAI_LATE]);
