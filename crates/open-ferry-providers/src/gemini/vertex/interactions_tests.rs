@@ -37,13 +37,13 @@ async fn api_key_execute_uses_native_interactions_with_opt_in() {
 }
 
 #[tokio::test]
-async fn service_account_execute_uses_global_native_interactions() {
+async fn api_key_with_project_uses_project_scoped_native_interactions() {
     let mock = Mock::start(Reply::json(ANSWER)).await;
-    let token = token_endpoint().await;
-    let mut auth = service_account_auth(&token.url, "global");
-    auth.metadata.insert("interactions".into(), true.into());
-    let response = executor()
-        .with_service_account_base_url(&mock.url)
+    let mut auth = Auth::clone(&auth(&mock));
+    auth.attributes.insert("interactions".into(), "true".into());
+    auth.metadata
+        .insert("project_id".into(), "proxy-test".into());
+    executor()
         .execute(
             Arc::new(auth),
             request("gemini-2.5-flash", INPUT),
@@ -56,14 +56,43 @@ async fn service_account_execute_uses_global_native_interactions() {
         seen.target(),
         "/v1beta1/projects/proxy-test/locations/global/interactions"
     );
-    assert_eq!(seen.header("authorization"), Some("Bearer sa-token"));
-    assert_eq!(seen.header("api-revision"), Some("2026-05-20"));
+    assert_eq!(seen.header("x-goog-api-key"), Some("test-vertex-key"));
     assert_eq!(seen.json()["input"], "hi vertex");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&response.payload).unwrap()["id"],
-        "interaction_vertex_1"
-    );
-    assert_eq!(token.last().target(), "/");
+}
+
+#[tokio::test]
+async fn service_account_execute_uses_global_native_interactions() {
+    let mock = Mock::start(Reply::json(ANSWER)).await;
+    let token = token_endpoint().await;
+    for location in [Some("global"), Some("europe-west1"), None] {
+        let mut auth = service_account_auth(&token.url, location.unwrap_or("global"));
+        if location.is_none() {
+            auth.metadata.remove("location");
+        }
+        auth.metadata.insert("interactions".into(), true.into());
+        let response = executor()
+            .with_service_account_base_url(&mock.url)
+            .execute(
+                Arc::new(auth),
+                request("gemini-2.5-flash", INPUT),
+                options(&Format::INTERACTIONS),
+            )
+            .await
+            .unwrap();
+        let seen = mock.last();
+        assert_eq!(
+            seen.target(),
+            "/v1beta1/projects/proxy-test/locations/global/interactions"
+        );
+        assert_eq!(seen.header("authorization"), Some("Bearer sa-token"));
+        assert_eq!(seen.header("api-revision"), Some("2026-05-20"));
+        assert_eq!(seen.json()["input"], "hi vertex");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&response.payload).unwrap()["id"],
+            "interaction_vertex_1"
+        );
+        assert_eq!(token.last().target(), "/");
+    }
 }
 
 #[tokio::test]
@@ -109,16 +138,14 @@ async fn native_stream_preserves_large_frames_and_requests_sse() {
 }
 
 #[tokio::test]
-async fn default_and_regional_credentials_use_the_existing_bridge() {
+async fn credentials_without_opt_in_use_the_existing_bridge() {
     let mock = Mock::start(Reply::json(OK_ANSWER)).await;
     let token = token_endpoint().await;
-    for (location, enabled) in [
-        ("global", false),
-        ("europe-west1", false),
-        ("europe-west1", true),
-    ] {
+    for (location, enabled) in [("global", Some(false)), ("europe-west1", None)] {
         let mut auth = service_account_auth(&token.url, location);
-        auth.metadata.insert("interactions".into(), enabled.into());
+        if let Some(enabled) = enabled {
+            auth.metadata.insert("interactions".into(), enabled.into());
+        }
         executor()
             .with_service_account_base_url(&mock.url)
             .execute(
