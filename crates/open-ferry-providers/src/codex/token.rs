@@ -77,11 +77,40 @@ impl SiwcTokenData {
         }
     }
 
-    /// Reads the nested `siwc` object, preserving absent optional fields.
+    /// Reads the nested `siwc` object. Non-string scalar fields are absent,
+    /// as in upstream's executor; `access` is a legacy access-token alias.
     /// Errors deliberately don't quote credential values.
     pub fn from_json(object: &Map<String, Value>) -> Result<Self, &'static str> {
-        serde_json::from_value(Value::Object(object.clone()))
-            .map_err(|_| "invalid SIWC credential object")
+        let mut object = object.clone();
+        for field in [
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "client_id",
+            "scope",
+            "expired",
+            "last_refresh",
+            "device_id",
+        ] {
+            if object.get(field).is_some_and(|value| !value.is_string()) {
+                object.remove(field);
+            }
+        }
+        if object
+            .get("access_token")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s.trim().is_empty())
+            && let Some(access) = object.get("access").and_then(Value::as_str)
+        {
+            object.insert("access_token".into(), Value::String(access.trim().into()));
+        }
+        if object.get("scopes").is_some_and(|value| !value.is_array()) {
+            object.remove("scopes");
+        }
+        if let Some(Value::Array(scopes)) = object.get_mut("scopes") {
+            scopes.retain(Value::is_string);
+        }
+        serde_json::from_value(Value::Object(object)).map_err(|_| "invalid SIWC credential object")
     }
 }
 
