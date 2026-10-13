@@ -64,22 +64,88 @@ impl<T> Socket for T where
 {
 }
 
-/// A socket's writing side, as a write needs it.
-type DynSink = dyn Sink<Message, Error = axum::Error> + Unpin + Send;
-
 /// What the connection writes to: the whole socket, or, with a reader
 /// task, the socket's writing half.
 enum Writer<S> {
+    #[cfg_attr(not(test), allow(dead_code))]
     Whole(S),
-    Split(SplitSink<S, Message>),
+    Split(Arc<tokio::sync::Mutex<SplitSink<S, Message>>>),
 }
 
 impl<S: Socket> Writer<S> {
-    fn sink(&mut self) -> &mut DynSink {
+    async fn send(&mut self, message: Message) -> Result<(), axum::Error> {
         match self {
-            Self::Whole(socket) => socket,
-            Self::Split(sink) => sink,
+            Self::Whole(socket) => socket.send(message).await,
+            Self::Split(sink) => sink.lock().await.send(message).await,
         }
+    }
+
+    async fn flush(&mut self) -> Result<(), axum::Error> {
+        match self {
+            Self::Whole(socket) => socket.flush().await,
+            Self::Split(sink) => sink.lock().await.flush().await,
+        }
+    }
+}
+
+/// Dropping a turn prevents an idle connection from accepting local cancellation.
+pub(super) struct LocalTurn(Arc<AtomicBool>);
+
+impl Drop for LocalTurn {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct Interrupt<S> {
+    dispatcher: Arc<dyn open_ferry_core::exec::Dispatcher>,
+    session_id: String,
+    sink: Arc<tokio::sync::Mutex<SplitSink<S, Message>>>,
+    active: Arc<AtomicBool>,
+    local: watch::Sender<Option<Bytes>>,
+}
+
+impl<S: Socket> Interrupt<S> {
+    async fn handle(&self, payload: &Bytes) -> Result<(), axum::Error> {
+        let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
+        let result = if !value
+            .get("response_id")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            Err(open_ferry_core::exec::ExecError::upstream(
+                400,
+                "response.interrupt requires response_id",
+            ))
+        } else {
+            self.dispatcher
+                .interrupt_execution_session(&self.session_id, payload)
+                .await
+        };
+        let error = match result {
+            Ok(true) => {
+                tracing::debug!(outcome = "handled", "responses websocket: interrupt");
+                return Ok(());
+            }
+            Ok(false) if self.active.load(Ordering::Acquire) => {
+                self.local.send_replace(Some(payload.clone()));
+                tracing::debug!(outcome = "local_http", "responses websocket: interrupt");
+                return Ok(());
+            }
+            Ok(false) => {
+                ErrorMessage::new(400, "no active upstream websocket for response.interrupt")
+            }
+            Err(error) => ErrorMessage::from_exec(error),
+        };
+        tracing::debug!(outcome = "rejected", "responses websocket: interrupt");
+        let payload = super::forward::error_payload(&error);
+        self.sink
+            .lock()
+            .await
+            .send(Message::Text(
+                String::from_utf8_lossy(&payload).into_owned().into(),
+            ))
+            .await
     }
 }
 
@@ -119,11 +185,12 @@ impl Reader {
 /// Reads the client's messages into `input` until the client goes or no
 /// one reads them, then marks it gone. Pings and pongs are skipped
 /// (`readResponsesWebsocketInput`).
-async fn read_input<R>(
+async fn read_input<R, S: Socket>(
     mut stream: R,
     input: mpsc::Sender<InputFrame>,
     client_closed: Arc<AtomicBool>,
     gone: watch::Sender<bool>,
+    interrupt: Interrupt<S>,
 ) where
     R: Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
@@ -138,6 +205,12 @@ async fn read_input<R>(
             }
             Err(_) => break,
         };
+        if json::valid(&payload) && crate::json::str_at(&payload, "type") == "response.interrupt" {
+            if interrupt.handle(&payload).await.is_err() {
+                break;
+            }
+            continue;
+        }
         if input.send(InputFrame::Payload(payload)).await.is_err() {
             break;
         }
@@ -159,26 +232,51 @@ pub(super) struct Conn<S> {
     reader: Option<Reader>,
     /// Whether the client sent a close frame, which needs its reply flushed.
     client_closed: bool,
+    local: Option<watch::Sender<Option<Bytes>>>,
+    active: Arc<AtomicBool>,
 }
 
 impl<S: Socket> Conn<S> {
+    #[cfg(test)]
     pub(super) fn new(socket: S) -> Self {
         Self {
             writer: Some(Writer::Whole(socket)),
             reader: None,
             client_closed: false,
+            local: None,
+            active: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// The connection with a task reading it all the time, for response
     /// steering: its messages queue for [`read`](Self::read) and for a
     /// call given [`input`](Self::input) (`readResponsesWebsocketInput`).
-    pub(super) fn split(socket: S) -> Self {
+    pub(super) fn split(
+        socket: S,
+        dispatcher: Arc<dyn open_ferry_core::exec::Dispatcher>,
+        session_id: String,
+    ) -> Self {
         let (sink, stream) = socket.split();
+        let sink = Arc::new(tokio::sync::Mutex::new(sink));
         let (input, rx) = mpsc::channel(INPUT_QUEUE);
         let (gone, gone_rx) = watch::channel(false);
         let client_closed = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(read_input(stream, input, Arc::clone(&client_closed), gone));
+        let active = Arc::new(AtomicBool::new(false));
+        let (local, _) = watch::channel(None);
+        let interrupt = Interrupt {
+            dispatcher,
+            session_id,
+            sink: sink.clone(),
+            active: active.clone(),
+            local: local.clone(),
+        };
+        let task = tokio::spawn(read_input(
+            stream,
+            input,
+            Arc::clone(&client_closed),
+            gone,
+            interrupt,
+        ));
         Self {
             writer: Some(Writer::Split(sink)),
             reader: Some(Reader {
@@ -188,6 +286,27 @@ impl<S: Socket> Conn<S> {
                 task,
             }),
             client_closed: false,
+            local: Some(local),
+            active,
+        }
+    }
+
+    pub(super) fn begin_turn(&self) -> LocalTurn {
+        if let Some(local) = &self.local {
+            local.send_replace(None);
+        }
+        self.active.store(true, Ordering::Release);
+        LocalTurn(self.active.clone())
+    }
+
+    pub(super) fn local_interrupt(&self) -> impl Future<Output = Bytes> + Send + 'static {
+        let local = self.local.as_ref().map(watch::Sender::subscribe);
+        async move {
+            let Some(mut local) = local else {
+                return std::future::pending().await;
+            };
+            let _ = local.wait_for(|payload| payload.is_some()).await;
+            local.borrow().clone().unwrap_or_default()
         }
     }
 
@@ -237,7 +356,7 @@ impl<S: Socket> Conn<S> {
 
     /// Writes `payload` as a text message (`writeResponsesWebsocketPayload`).
     pub(super) async fn write(&mut self, payload: &[u8]) -> Result<(), Closed> {
-        let socket = self.writer.as_mut().ok_or(Closed)?.sink();
+        let socket = self.writer.as_mut().ok_or(Closed)?;
         let text = match std::str::from_utf8(payload) {
             Ok(text) => Utf8Bytes::from(text),
             Err(_) => Utf8Bytes::from(String::from_utf8_lossy(payload).into_owned()),
@@ -247,7 +366,7 @@ impl<S: Socket> Conn<S> {
 
     /// Sends a ping (`writePing`).
     pub(super) async fn ping(&mut self) -> Result<(), Closed> {
-        let socket = self.writer.as_mut().ok_or(Closed)?.sink();
+        let socket = self.writer.as_mut().ok_or(Closed)?;
         socket
             .send(Message::Ping(Bytes::new()))
             .await
@@ -269,7 +388,7 @@ impl<S: Socket> Conn<S> {
             code,
             reason: Utf8Bytes::from(reason),
         };
-        if let Err(err) = writer.sink().send(Message::Close(Some(frame))).await {
+        if let Err(err) = writer.send(Message::Close(Some(frame))).await {
             tracing::debug!(error = %err, "responses websocket: close frame failed");
         }
         true
@@ -306,7 +425,7 @@ impl<S: Socket> Conn<S> {
         if let Some(mut writer) = self.writer.take()
             && client_closed
         {
-            let _ = writer.sink().flush().await;
+            let _ = writer.flush().await;
         }
     }
 }

@@ -103,13 +103,13 @@
 //!   or `aistudio`) an OpenAI-compatible executor keyed by that provider;
 //!   here such a credential has no executor, and isn't served.
 //! - Executors are made again on a reload only when the config changed:
-//!   the Codex, Meta and xAI ones on any change, which ends their WebSocket
-//!   sessions; the other native ones when `proxy-url`,
+//!   the Codex, Meta and xAI ones on any change; Codex and xAI keep their
+//!   shared WebSocket stores. The other native ones when `proxy-url`,
 //!   `claude.model-level-cooling`, `codex.orphan-delegation-compatibility`
 //!   or `client.codex.optimize-multi-agent-v2` changes; and the
 //!   OpenAI-compatible ones when `proxy-url`, `openai-compatibility` or
 //!   either of those Codex settings changes. Upstream makes them all again
-//!   on every reload, which ends their WebSocket sessions. Remaking the
+//!   on every reload, retaining shared WebSocket sessions. Remaking the
 //!   Vertex AI executor drops the access tokens it cached.
 //! - An OpenAI-compatible executor that no credential uses any more after a
 //!   reload is unregistered; upstream keeps it.
@@ -1418,11 +1418,13 @@ impl Service {
 
     /// Registers the Codex executor for the current config.
     fn register_codex_executor(&self) {
-        self.manager.register_executor(Arc::new(
-            CodexExecutor::new(self.config.proxy_url.clone())
-                .with_config(Arc::clone(&self.config))
-                .with_models(Arc::clone(&self.registry) as _),
-        ));
+        let mut executor = CodexExecutor::new(self.config.proxy_url.clone())
+            .with_config(Arc::clone(&self.config))
+            .with_models(Arc::clone(&self.registry) as _);
+        if let Some(previous) = self.manager.executor("codex") {
+            executor = executor.with_execution_sessions_from(&*previous);
+        }
+        self.manager.register_executor(Arc::new(executor));
     }
 
     /// Registers the Meta executor for the current config.
@@ -1436,11 +1438,13 @@ impl Service {
 
     /// Registers the xAI executor for the current config.
     fn register_xai_executor(&self) {
-        self.manager.register_executor(Arc::new(
-            XaiExecutor::new(self.config.proxy_url.clone())
-                .with_config(Arc::clone(&self.config))
-                .with_models(Arc::clone(&self.registry) as _),
-        ));
+        let mut executor = XaiExecutor::new(self.config.proxy_url.clone())
+            .with_config(Arc::clone(&self.config))
+            .with_models(Arc::clone(&self.registry) as _);
+        if let Some(previous) = self.manager.executor("xai") {
+            executor = executor.with_execution_sessions_from(&*previous);
+        }
+        self.manager.register_executor(Arc::new(executor));
     }
 
     /// Registers OpenAI-compatible executors made for the current config,
@@ -2793,6 +2797,24 @@ mod tests {
     /// `config`, from contents these tests don't keep.
     fn config_changed(config: Arc<Config>) -> WatchEvent {
         WatchEvent::ConfigChanged(config, String::new())
+    }
+
+    // Ported from sdk/cliproxy/service_codex_executor_binding_test.go (v8.0.27).
+    #[tokio::test]
+    async fn rebinding_codex_and_xai_keeps_their_shared_session_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "proxy-url: direct\n");
+        let codex = service.manager.executor("codex").unwrap();
+        let xai = service.manager.executor("xai").unwrap();
+        service.config = Arc::new(Config::parse("proxy-url: none\n").unwrap());
+        service.register_codex_executor();
+        service.register_xai_executor();
+        let next_codex = service.manager.executor("codex").unwrap();
+        let next_xai = service.manager.executor("xai").unwrap();
+        assert!(!Arc::ptr_eq(&codex, &next_codex));
+        assert!(!Arc::ptr_eq(&xai, &next_xai));
+        assert!(codex.shares_execution_sessions_with(&*next_codex));
+        assert!(xai.shares_execution_sessions_with(&*next_xai));
     }
 
     // Not upstream's: a client's connection has Nagle's algorithm off, as

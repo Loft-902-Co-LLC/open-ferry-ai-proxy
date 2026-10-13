@@ -70,7 +70,7 @@
 //! - Connections are logged at debug level.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +108,80 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    pub(crate) fn get(&self, id: &str) -> Option<Arc<Session>> {
+        self.sessions().get(id.trim()).cloned()
+    }
+
+    /// Closes only the sessions connected with the removed credential.
+    pub(crate) fn close_auth(&self, auth_id: &str) {
+        if auth_id.trim().is_empty() {
+            return;
+        }
+        let removed: Vec<_> = {
+            let mut sessions = self.sessions();
+            let ids: Vec<_> = sessions
+                .iter()
+                .filter(|(_, session)| session.state().auth_id == auth_id.trim())
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| sessions.remove(id)).collect()
+        };
+        for session in removed {
+            session.close("auth_removed");
+        }
+    }
+
+    pub(crate) async fn interrupt(
+        &self,
+        id: &str,
+        payload: &[u8],
+        auth_check: open_ferry_core::exec::AuthCheck,
+    ) -> Result<bool, open_ferry_core::exec::ExecError> {
+        let Some(session) = self.get(id) else {
+            return Ok(false);
+        };
+        let conn = session.state().conn.clone();
+        let Some(conn) = conn else { return Ok(false) };
+        let enabled = auth_check(&conn.target.auth_id);
+        let response_id = serde_json::from_slice::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|v| v.get("response_id")?.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        {
+            let state = session.state();
+            if !state
+                .conn
+                .as_ref()
+                .is_some_and(|current| current.id == conn.id)
+            {
+                return Ok(false);
+            }
+            if let Some((_, failure)) = state.terminal.as_ref().filter(|(id, _)| *id == conn.id) {
+                return Err(errors::error(failure));
+            }
+            if lock(&conn.terminal_responses).contains(&response_id) {
+                return Ok(true);
+            }
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.conn == conn.id)
+            {
+                return Ok(false);
+            }
+        }
+        if !enabled {
+            return Err(open_ferry_core::exec::ExecError::upstream(
+                400,
+                "websocket credential is no longer enabled",
+            ));
+        }
+        conn.send(String::from_utf8_lossy(payload).into_owned())
+            .await
+            .map_err(|failure| errors::error(&failure))?;
+        Ok(true)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -190,6 +264,9 @@ pub(crate) struct Target {
     /// What the handshake sends, the token among them, redacted from the
     /// connection's failures; not part of what the target is.
     secrets: Secrets,
+    /// The config snapshot stays alive with the connection. Routing reuses
+    /// the resolved dial proxy below, including constructor overrides.
+    _config: Option<Arc<open_ferry_core::config::Config>>,
 }
 
 impl PartialEq for Target {
@@ -211,12 +288,21 @@ impl Target {
             proxy: proxy.trim().to_owned(),
             token: token.to_owned(),
             secrets: Secrets::from_iter([token]),
+            _config: None,
         }
     }
 
     /// The target, its connection's failures also redacting `secrets`.
     pub(crate) fn with_secrets(mut self, secrets: &Secrets) -> Self {
         self.secrets.extend(secrets);
+        self
+    }
+
+    pub(crate) fn with_config(
+        mut self,
+        config: Option<Arc<open_ferry_core::config::Config>>,
+    ) -> Self {
+        self._config = config;
         self
     }
 }
@@ -249,6 +335,7 @@ pub(crate) struct Conn {
     disconnect: Mutex<Option<u16>>,
     /// The type of the last event read (`lastEventType`).
     last_event: Mutex<String>,
+    terminal_responses: Mutex<HashSet<String>>,
 }
 
 impl Conn {
@@ -260,6 +347,7 @@ impl Conn {
             closing: watch::Sender::new(false),
             disconnect: Mutex::new(None),
             last_event: Mutex::new(String::new()),
+            terminal_responses: Mutex::new(HashSet::new()),
         }
     }
 
@@ -355,6 +443,8 @@ struct Active {
 #[derive(Default)]
 struct State {
     conn: Option<Arc<Conn>>,
+    /// Kept after a disconnect so credential removal also forgets idle state.
+    auth_id: String,
     /// The connection on which a request renamed the collaboration
     /// namespace (`multiAgentV2OptimizedConn`).
     multi_agent: Option<u64>,
@@ -381,6 +471,36 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    /// A retained connection keeps the configuration it was opened with.
+    #[cfg(test)]
+    pub(crate) fn effective_config(
+        &self,
+        auth_id: &str,
+        fallback: Option<Arc<open_ferry_core::config::Config>>,
+    ) -> Option<Arc<open_ferry_core::config::Config>> {
+        self.state()
+            .conn
+            .as_ref()
+            .filter(|conn| conn.target.auth_id == auth_id.trim())
+            .map_or(fallback, |conn| conn.target._config.clone())
+    }
+
+    pub(crate) fn effective_proxy(
+        &self,
+        auth_id: &str,
+        auth_proxy: &str,
+        fallback: String,
+    ) -> String {
+        if !auth_proxy.trim().is_empty() {
+            return fallback;
+        }
+        self.state()
+            .conn
+            .as_ref()
+            .filter(|conn| conn.target.auth_id == auth_id.trim())
+            .map_or(fallback, |conn| conn.target.proxy.clone())
+    }
+
     fn new(id: &str, idle: Duration) -> Self {
         Self {
             id: id.to_owned(),
@@ -425,6 +545,7 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn set_conn(&self, conn: Arc<Conn>) {
         let mut state = self.state();
+        state.auth_id.clone_from(&conn.target.auth_id);
         state.conn = Some(conn);
         state.multi_agent = None;
     }
@@ -679,6 +800,7 @@ impl Session {
                 self.log_connected(&previous, true);
                 return Ok((previous, None));
             }
+            state.auth_id.clone_from(&conn.target.auth_id);
             state.conn = Some(Arc::clone(&conn));
             state.multi_agent = None;
             // resetTerminalError
@@ -789,6 +911,15 @@ async fn read_loop(
             && let Ok(Typed { kind: Some(kind) }) = serde_json::from_str::<Typed<'_>>(&payload)
         {
             conn.set_last_event(&kind);
+            if is_terminal_event(&kind)
+                && kind != "error"
+                && let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload)
+                && let Some(id) = event.pointer("/response/id").and_then(|id| id.as_str())
+                && !id.is_empty()
+            {
+                // Recorded before delivery, even if the call just released its hold.
+                lock(&conn.terminal_responses).insert(id.to_owned());
+            }
         }
         let Some((_, tx, mut done)) = session
             .upgrade()

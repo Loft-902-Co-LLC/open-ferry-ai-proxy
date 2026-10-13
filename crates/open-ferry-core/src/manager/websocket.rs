@@ -22,6 +22,10 @@
 //! [`Dispatcher`]: crate::exec::Dispatcher
 
 use super::credential::websockets_enabled;
+
+#[cfg(test)]
+#[path = "tests/lifecycle_sessions.rs"]
+mod lifecycle_sessions;
 use super::select::{ClientModels, lookup_executor};
 use super::text::{go_lower, parse_suffix};
 use super::{Manager, State};
@@ -29,6 +33,30 @@ use crate::auth::{Auth, Status, Timestamp};
 use crate::exec::{ProviderId, WebsocketAuth, WebsocketSupport};
 
 impl Manager {
+    /// Forwards an interrupt on the retained Codex connection, if active.
+    pub async fn interrupt_execution_session(
+        &self,
+        session_id: &str,
+        payload: &[u8],
+    ) -> Result<bool, crate::exec::ExecError> {
+        let Some(executor) = self.executor("codex") else {
+            return Ok(false);
+        };
+        // Credential lookups happen outside the provider's session locks.
+        let manager = self.clone();
+        executor
+            .interrupt_execution_session(
+                session_id,
+                payload,
+                std::sync::Arc::new(move |id| {
+                    manager.lock().auths.get(id).is_some_and(|entry| {
+                        !entry.auth.disabled && entry.auth.status != Status::Disabled
+                    })
+                }),
+            )
+            .await
+    }
+
     /// What the Responses WebSocket may rely on for `model` among
     /// `providers`, and what it needs to know about `auth_id`.
     pub(crate) fn websocket_support_for(

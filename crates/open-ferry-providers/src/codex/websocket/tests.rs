@@ -99,6 +99,7 @@ use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get, str_at};
 
 mod duplex;
+mod interrupts;
 mod observe;
 mod proxy;
 mod secrets;

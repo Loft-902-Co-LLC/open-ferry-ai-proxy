@@ -42,8 +42,9 @@
 //!   xAI's API, as a compact call is sent there; upstream dials the proxy,
 //!   which refuses the upgrade.
 //! - The execution lifecycle binding, `RequiredUpstreamWebsocket`,
-//!   `UpstreamDisconnectChan` and `CloseXAIWebsocketSessionsForAuthID`
-//!   aren't ported, as the server uses none of them (as for Codex).
+//!   and `UpstreamDisconnectChan` aren't ported, as the server uses none of
+//!   them (as for Codex). Credential removal closes that credential's
+//!   sessions through `ProviderExecutor::close_auth_execution_sessions`.
 //! - Every message xAI sends, a success or a failure, reaches the client
 //!   with the secrets its handshake sent redacted if they are of eight
 //!   bytes or more, as every client error is (see `Policy::Client` in the
@@ -113,6 +114,20 @@ pub(super) struct Sessions {
 }
 
 impl Sessions {
+    /// Closes only connections and transcript state belonging to `auth_id`.
+    pub(super) fn close_auth(&self, auth_id: &str) {
+        let ids: Vec<_> = self
+            .targets()
+            .iter()
+            .filter(|(_, target)| target.auth_id.trim() == auth_id.trim())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.close(&id);
+        }
+        self.store.close_auth(auth_id);
+    }
+
     pub(super) fn new() -> Self {
         Self {
             store: Store::new(),

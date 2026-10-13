@@ -73,6 +73,7 @@ use crate::xai::XaiExecutor;
 
 mod compaction;
 mod ids;
+mod lifecycle;
 mod secrets;
 mod tools;
 
@@ -760,7 +761,7 @@ async fn idle_connection_times_out() {
     })
     .await;
     let mut executor = executor();
-    executor.websockets = Sessions::with_idle(Duration::from_millis(200));
+    executor.websockets = Arc::new(Sessions::with_idle(Duration::from_millis(200)));
     let (_, error) = call(&executor, &auth(&server.url), HELLO, ws_options("idle")).await;
     let error = error.expect("no error");
     assert!(
