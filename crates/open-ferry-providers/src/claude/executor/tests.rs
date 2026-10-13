@@ -1080,12 +1080,11 @@ async fn compact_returns_a_sealed_summary_with_responses_usage() {
     assert_eq!(body["object"], "response.compaction");
     assert_eq!(body["output"].as_array().unwrap().len(), 1);
     assert_eq!(body["output"][0]["type"], "compaction");
-    assert!(
-        body["output"][0]["encrypted_content"]
-            .as_str()
-            .unwrap()
-            .starts_with("cpa-ag-compact-v1:")
-    );
+    let summary =
+        super::super::compaction::unseal(body["output"][0]["encrypted_content"].as_str().unwrap())
+            .unwrap();
+    assert_eq!(summary, "Build summary.");
+    assert!(!summary.contains("hidden"));
     assert_eq!(body["usage"]["input_tokens"], 114);
     assert_eq!(body["usage"]["output_tokens"], 7);
     assert_eq!(body["usage"]["total_tokens"], 121);
@@ -1383,6 +1382,135 @@ async fn tool_ids_are_repaired_in_execute_stream_and_count() {
         assert_eq!(id, "cpa_tid_v1_Y2FsbDpvbmU");
         assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], id);
     }
+}
+
+// issue6478_tool_ids_test.go: ClaudeToolIDRepairPrecedesPayloadRules and
+// issue6478_tool_ids_edges_test.go: ClaudeUpstreamCountTokensRepairBeforePayload.
+#[tokio::test]
+async fn tool_id_repair_precedes_final_payload_rules_on_all_paths() {
+    let rules = Arc::new(
+        Config::parse(
+            r#"
+payload:
+  override:
+    - models:
+        - name: '*'
+          exist: [messages.0.content.0.id]
+          not-match:
+            - messages.0.content.0.id: 'call:one'
+      params:
+        temperature: 0.25
+    - models:
+        - name: '*'
+      params:
+        messages.0.content.0.id: 'configured:id#override'
+        messages.1.content.0.tool_use_id: 'configured:id#override'
+  filter:
+    - models:
+        - name: '*'
+      params: [messages.0.content.1.id, messages.1.content.1.tool_use_id]
+"#,
+        )
+        .unwrap(),
+    );
+    let payload = json!({"messages":[
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"call:one","name":"check","input":{}},
+            {"type":"tool_use","id":"call:two","name":"check","input":{}}]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"call:one","content":"ok"},
+            {"type":"tool_result","tool_use_id":"call:two","content":"ok"}]}]});
+    for path in ["execute", "stream", "count"] {
+        let reply = match path {
+            "stream" => Reply::sse(SSE),
+            "count" => Reply::json(r#"{"input_tokens":42}"#),
+            _ => Reply::json(MESSAGE),
+        };
+        let mock = Mock::start(reply).await;
+        let executor = mock.executor().with_config(Arc::clone(&rules));
+        match path {
+            "stream" => {
+                assert!(
+                    collect(
+                        executor
+                            .execute_stream(
+                                api_key_auth(),
+                                request(payload.clone()),
+                                stream_options(Format::CLAUDE)
+                            )
+                            .await
+                            .unwrap()
+                    )
+                    .await
+                    .iter()
+                    .all(Result::is_ok)
+                );
+            }
+            "count" => {
+                executor
+                    .count_tokens(
+                        api_key_auth(),
+                        request(payload.clone()),
+                        options(Format::CLAUDE),
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                executor
+                    .execute(
+                        api_key_auth(),
+                        request(payload.clone()),
+                        options(Format::CLAUDE),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let body = mock.last().json();
+        assert_eq!(
+            body["temperature"], 0.25,
+            "{path}: condition must see repaired ID"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["id"], "configured:id#override",
+            "{path}"
+        );
+        assert_eq!(
+            body["messages"][1]["content"][0]["tool_use_id"], "configured:id#override",
+            "{path}"
+        );
+        assert!(
+            body["messages"][0]["content"][1].get("id").is_none(),
+            "{path}"
+        );
+        assert!(
+            body["messages"][1]["content"][1]
+                .get("tool_use_id")
+                .is_none(),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn compaction_usage_sums_saturate() {
+    let mock = Mock::start(Reply::json(r#"{"content":[{"type":"text","text":"summary"}],"usage":{"input_tokens":9223372036854775807,"cache_creation_input_tokens":3,"cache_read_input_tokens":100,"output_tokens":7}}"#)).await;
+    let response = mock
+        .executor()
+        .execute(
+            api_key_auth(),
+            request(json!({})),
+            Options {
+                alt: COMPACT_ALT.into(),
+                ..options(Format::OPENAI_RESPONSE)
+            },
+        )
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&response.payload).unwrap();
+    assert_eq!(body["usage"]["input_tokens"], i64::MAX);
+    assert_eq!(body["usage"]["total_tokens"], i64::MAX);
 }
 
 #[tokio::test]
