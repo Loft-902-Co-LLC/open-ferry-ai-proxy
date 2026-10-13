@@ -11,7 +11,7 @@
 //! conversation that ends with the model as if the user had said nothing,
 //! so an empty user turn goes before a first model turn and, for a request
 //! that generates content, after a last one, unless that last turn answers
-//! a function call. Vertex AI also rejects the call IDs of an OpenAI
+//! a function call without nested media. Vertex AI also rejects the call IDs of an OpenAI
 //! Responses client's function calls and results.
 //!
 //! Deviations from upstream: none.
@@ -40,7 +40,7 @@ pub(crate) fn ensure_leading_user(body: &mut Value, path: &str) {
 
 /// `EnsureGeminiTrailingUserContent`: puts an empty user turn after a last
 /// turn of the model's (`model` or `assistant`) in the array at `path`,
-/// unless that turn has a function response.
+/// unless that turn has a function response without nested media.
 pub(crate) fn ensure_trailing_user(body: &mut Value, path: &str) {
     let Some(Value::Array(contents)) = json::get_mut(body, path) else {
         return;
@@ -49,7 +49,9 @@ pub(crate) fn ensure_trailing_user(body: &mut Value, path: &str) {
         return;
     };
     let role = json::str_of(last.get("role"));
-    if (role != "model" && role != "assistant") || has_function_response(last) {
+    if (role != "model" && role != "assistant")
+        || (has_function_response(last) && !has_function_response_media(last))
+    {
         return;
     }
     contents.push(empty_user_turn());
@@ -69,6 +71,24 @@ fn has_function_response(content: &Value) -> bool {
             .any(|part| part.get("functionResponse").is_some()),
         _ => false,
     }
+}
+
+/// `contentHasFunctionResponseMedia`: nested media parts require a user
+/// turn after a model-role function response.
+fn has_function_response_media(content: &Value) -> bool {
+    let Some(Value::Array(parts)) = content.get("parts") else {
+        return false;
+    };
+    parts.iter().any(|part| {
+        let Some(Value::Array(nested)) = json::get(part, "functionResponse.parts") else {
+            return false;
+        };
+        nested.iter().any(|part| {
+            ["inlineData", "inline_data", "fileData", "file_data"]
+                .iter()
+                .any(|key| part.get(key).is_some())
+        })
+    })
 }
 
 /// `StripVertexOpenAIResponsesToolCallIDs`: for a request from an OpenAI

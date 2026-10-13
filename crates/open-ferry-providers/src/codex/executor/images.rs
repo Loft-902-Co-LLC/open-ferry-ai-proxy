@@ -27,10 +27,12 @@
 //!
 //! A call for one of the Image API's models (`gpt-image-1.5`,
 //! `gpt-image-2`, and `gpt-image-2.5` with its `-flare` and `-sunburst`
-//! variants, named by the body's `model` or else the call's, read without
+//! variants, named by the requested model metadata, body's `model` or else
+//! the call's, read without
 //! a thinking suffix or a `provider/` prefix and in any case) goes to
 //! `<base>/images/generations` or `<base>/images/edits` with the body as
-//! the client sent it: the model set, `"stream": true` for a stream and no
+//! the client sent it: the resolved upstream model set (configured names
+//! keep their case and prefix), `"stream": true` for a stream and no
 //! `stream` otherwise. A form edit goes as JSON, its images and mask as
 //! data URLs. Codex's answer, or its stream, goes back as it came.
 //!
@@ -80,7 +82,7 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::{HeaderValue, header};
 use open_ferry_core::auth::Auth;
-use open_ferry_core::config::Config;
+use open_ferry_core::config::{CodexKey, Config};
 use open_ferry_core::exec::{
     ChunkStream, ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
 };
@@ -183,10 +185,14 @@ fn direct(request: &Request, options: &Options) -> Option<(String, &'static str)
     let named = exact::from_slice(&request.payload)
         .map(|payload| str_at(&payload, "model"))
         .unwrap_or_default();
-    let model = [named.as_str(), request.model.as_str()]
-        .into_iter()
-        .map(image_base_model)
-        .find(|model| DIRECT_MODELS.contains(&model.as_str()))?;
+    let model = [
+        options.metadata.requested_model.as_str(),
+        named.as_str(),
+        request.model.as_str(),
+    ]
+    .into_iter()
+    .map(image_base_model)
+    .find(|model| DIRECT_MODELS.contains(&model.as_str()))?;
     let path = options.metadata.request_path.trim();
     let endpoint = if path.ends_with(GENERATIONS) {
         DIRECT_GENERATIONS
@@ -196,6 +202,86 @@ fn direct(request: &Request, options: &Options) -> Option<(String, &'static str)
         return None;
     };
     Some((model, endpoint))
+}
+
+/// The resolved upstream model of a direct image call. Configured names
+/// keep their prefix and case; legacy builtin route names are normalized.
+fn direct_upstream_model(
+    config: Option<&Config>,
+    auth: &Auth,
+    request: &Request,
+    route: &str,
+) -> String {
+    let model = base_model(&request.model).trim();
+    if model.is_empty() {
+        return route.to_owned();
+    }
+    if config
+        .and_then(|config| codex_key_config(config, auth))
+        .is_some_and(|entry| {
+            entry.models.iter().any(|configured| {
+                let name = if configured.name.trim().is_empty() {
+                    configured.alias.trim()
+                } else {
+                    configured.name.trim()
+                };
+                eq_fold(base_model(name).trim(), model)
+            })
+        })
+    {
+        return model.to_owned();
+    }
+    let base = image_base_model(model);
+    if DIRECT_MODELS.contains(&base.as_str()) {
+        base
+    } else {
+        model.to_owned()
+    }
+}
+
+/// `resolveCodexKeyConfig`, matching the credential's key and base URL.
+fn codex_key_config<'c>(config: &'c Config, auth: &Auth) -> Option<&'c CodexKey> {
+    let entries = &config.codex_api_key;
+    let (key, base) = (
+        auth.attribute("api_key").unwrap_or_default().trim(),
+        auth.attribute("base_url").unwrap_or_default().trim(),
+    );
+    if let Some(entry) = auth
+        .attribute("config_index")
+        .and_then(|index| index.trim().parse::<usize>().ok())
+        .and_then(|index| entries.get(index))
+    {
+        let (entry_key, entry_base) = (entry.api_key.trim(), entry.base_url.trim());
+        if (key.is_empty() || eq_fold(entry_key, key))
+            && (base.is_empty() || eq_fold(entry_base, base))
+        {
+            return Some(entry);
+        }
+    }
+    for entry in entries {
+        let (entry_key, entry_base) = (entry.api_key.trim(), entry.base_url.trim());
+        if !key.is_empty() && !base.is_empty() {
+            if eq_fold(entry_key, key) && eq_fold(entry_base, base) {
+                return Some(entry);
+            }
+            continue;
+        }
+        if !key.is_empty()
+            && eq_fold(entry_key, key)
+            && (entry_base.is_empty() || eq_fold(entry_base, base))
+        {
+            return Some(entry);
+        }
+        if key.is_empty() && !base.is_empty() && eq_fold(entry_base, base) {
+            return Some(entry);
+        }
+    }
+    if key.is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .find(|entry| eq_fold(entry.api_key.trim(), key))
 }
 
 /// An error of the request itself, which upstream returns as a plain error.
@@ -885,6 +971,8 @@ impl CodexExecutor {
         path: &str,
         stream: bool,
     ) -> Result<(reqwest::Response, Secrets), ExecError> {
+        let model = direct_upstream_model(self.config.as_deref(), auth, request, model);
+        let model = model.as_str();
         let (body, content_type) = direct_body(request, options, model, stream)?;
         let source = Options {
             source_format: Format::OPENAI_IMAGE,
@@ -1281,6 +1369,51 @@ mod tests {
         assert!(!is_image_request(&options("/v1/images/variations")));
     }
 
+    #[test]
+    fn direct_models_keep_explicit_aliases_and_use_the_matching_credential() {
+        use open_ferry_core::config::CodexModel;
+        let mut config = Config::default();
+        config.codex_api_key.extend([
+            CodexKey {
+                api_key: "other-key".into(),
+                models: vec![CodexModel {
+                    alias: "OpenAI/GPT-Image-2".into(),
+                    ..CodexModel::default()
+                }],
+                ..CodexKey::default()
+            },
+            CodexKey {
+                api_key: "image-key".into(),
+                models: vec![CodexModel {
+                    alias: "OpenAI/GPT-Image-2".into(),
+                    ..CodexModel::default()
+                }],
+                ..CodexKey::default()
+            },
+        ]);
+        let mut auth = Auth::default();
+        auth.attributes.insert("api_key".into(), "image-key".into());
+        auth.attributes.insert("config_index".into(), "0".into());
+        let request = Request {
+            model: "OpenAI/GPT-Image-2(high)".into(),
+            payload: Bytes::new(),
+        };
+        assert!(std::ptr::eq(
+            codex_key_config(&config, &auth).unwrap(),
+            &config.codex_api_key[1]
+        ));
+        assert_eq!(
+            direct_upstream_model(Some(&config), &auth, &request, "gpt-image-2"),
+            "OpenAI/GPT-Image-2"
+        );
+        auth.attributes
+            .insert("api_key".into(), "unmatched-key".into());
+        assert_eq!(
+            direct_upstream_model(Some(&config), &auth, &request, "gpt-image-2"),
+            "gpt-image-2"
+        );
+    }
+
     // Not upstream's: a form field sent more than once becomes an array, the
     // integer fields read as integers when they are, and the mask fields'
     // names become paths.
@@ -1324,5 +1457,236 @@ mod tests {
             &completed_frame(&call, Some(&json!({"images": 1})), "b64_json", "image_generation")[..],
             b"event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"usage\":{\"images\":1},\"b64_json\":\"BB==\"}\n\n"
         );
+    }
+    // TestCodexImageResolvedModelOnWire: the requested name selects the
+    // endpoint, while the resolved name reaches the upstream unchanged.
+    #[tokio::test]
+    async fn direct_images_send_the_resolved_model() {
+        use open_ferry_core::config::{
+            AnyValue, CodexModel, PayloadFilterRule, PayloadModelRule, PayloadRule,
+        };
+        use open_ferry_core::executor::ProviderExecutor;
+        use open_ferry_core::multipart::Writer;
+        use std::sync::Arc;
+
+        for (requested, resolved, configured, want) in [
+            (
+                "gpt-image-2",
+                "openai/gpt-image-2-cpr",
+                "openai/gpt-image-2-cpr",
+                "openai/gpt-image-2-cpr",
+            ),
+            (
+                "gpt-image-2",
+                "openai/gpt-image-2",
+                "openai/gpt-image-2",
+                "openai/gpt-image-2",
+            ),
+            (
+                "gpt-image-2",
+                "OpenAI/GPT-Image-2",
+                "OpenAI/GPT-Image-2",
+                "OpenAI/GPT-Image-2",
+            ),
+            (
+                "gpt-image-2",
+                "gpt-image-1.5",
+                "gpt-image-1.5",
+                "gpt-image-1.5",
+            ),
+            (
+                "gpt-image-2",
+                "codex/gpt-image-2",
+                "codex/gpt-image-2",
+                "codex/gpt-image-2",
+            ),
+            (
+                "openai/gpt-image-2",
+                "openai/gpt-image-2",
+                "openai/gpt-image-2",
+                "openai/gpt-image-2",
+            ),
+            (
+                "tenant/gpt-image-2(high)",
+                "OpenAI/GPT-Image-2(high)",
+                "OpenAI/GPT-Image-2",
+                "OpenAI/GPT-Image-2",
+            ),
+            (
+                "codex/gpt-image-1.5(high)",
+                "codex/gpt-image-1.5(high)",
+                "",
+                "gpt-image-1.5",
+            ),
+            (
+                "CODEX/GPT-Image-2(high)",
+                "CODEX/GPT-Image-2(high)",
+                "",
+                "gpt-image-2",
+            ),
+            (
+                "gpt-image-2",
+                "openai/gpt-image-2-cpr",
+                "",
+                "openai/gpt-image-2-cpr",
+            ),
+        ] {
+            for policy in ["", "override", "filter"] {
+                for format in ["generation", "edit", "multipart"] {
+                    for stream in [false, true] {
+                        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                        let app = axum::Router::new().fallback(move |uri: http::Uri, headers: http::HeaderMap, body: Bytes| {
+                        let tx = tx.clone();
+                        async move {
+                            tx.send((uri.path().to_owned(), headers, body)).await.unwrap();
+                            if stream {
+                                "event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"AA==\"}\n\n"
+                            } else {
+                                r#"{"created":1713833628,"data":[{"b64_json":"AA=="}]}"#
+                            }
+                        }
+                    });
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let url = format!("http://{}", listener.local_addr().unwrap());
+                        let server =
+                            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                        let mut config = Config::default();
+                        if !configured.is_empty() {
+                            config.codex_api_key.push(CodexKey {
+                                api_key: "image-test-key".into(),
+                                base_url: url.clone(),
+                                models: vec![CodexModel {
+                                    name: configured.into(),
+                                    alias: "gpt-image-2".into(),
+                                    ..CodexModel::default()
+                                }],
+                                ..CodexKey::default()
+                            });
+                        }
+                        let models = vec![PayloadModelRule {
+                            name: want.into(),
+                            protocol: "openai".into(),
+                            r#match: vec![
+                                [("model".to_owned(), AnyValue::Str(want.into()))]
+                                    .into_iter()
+                                    .collect(),
+                            ],
+                            ..PayloadModelRule::default()
+                        }];
+                        if policy == "override" {
+                            config.payload.r#override = vec![
+                                PayloadRule {
+                                    models: models.clone(),
+                                    params: vec![(
+                                        "model".into(),
+                                        AnyValue::Str("policy/image-model".into()),
+                                    )],
+                                },
+                                PayloadRule {
+                                    models: vec![PayloadModelRule {
+                                        name: "*".into(),
+                                        ..PayloadModelRule::default()
+                                    }],
+                                    params: vec![("audit.-1".into(), AnyValue::Str("once".into()))],
+                                },
+                            ];
+                        } else if policy == "filter" {
+                            config.payload.filter = vec![PayloadFilterRule {
+                                models,
+                                params: vec!["model".into()],
+                            }];
+                        }
+                        let mut auth = Auth::default();
+                        auth.attributes
+                            .insert("api_key".into(), "image-test-key".into());
+                        auth.attributes.insert("base_url".into(), url);
+                        let mut options = Options::new(Format::OPENAI_IMAGE);
+                        options.stream = stream;
+                        options.metadata.requested_model = requested.into();
+                        options.metadata.request_path = if format == "generation" {
+                            GENERATIONS
+                        } else {
+                            EDITS
+                        }
+                        .into();
+                        let mut request = Request {
+                            model: resolved.into(),
+                            payload: Bytes::from(
+                                json!({
+                                    "model": requested,
+                                    "prompt": "diagnostic",
+                                    "stream": !stream,
+                                    "images": [{"file_id": "source-image"}],
+                                })
+                                .to_string(),
+                            ),
+                        };
+                        if format == "multipart" {
+                            let mut writer = Writer::new();
+                            writer.write_field("model", requested.as_bytes());
+                            writer.write_field("prompt", b"diagnostic");
+                            writer.write_field("stream", b"true");
+                            writer.write_file("image", "source.png", b"png-data");
+                            options.headers.insert(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_str(&writer.form_data_content_type()).unwrap(),
+                            );
+                            request.payload = Bytes::from(writer.finish());
+                        }
+                        let executor = CodexExecutor::new("").with_config(Arc::new(config));
+                        if stream {
+                            let mut response = executor
+                                .execute_stream(Arc::new(auth), request, options)
+                                .await
+                                .unwrap();
+                            while let Some(chunk) = response.chunks.next().await {
+                                chunk.unwrap();
+                            }
+                        } else {
+                            executor
+                                .execute(Arc::new(auth), request, options)
+                                .await
+                                .unwrap();
+                        }
+                        let (path, headers, body) = rx.recv().await.unwrap();
+                        server.abort();
+                        assert_eq!(
+                            path,
+                            if format == "generation" {
+                                DIRECT_GENERATIONS
+                            } else {
+                                DIRECT_EDITS
+                            }
+                        );
+                        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+                        let body: Value = serde_json::from_slice(&body).unwrap();
+                        if policy == "override" {
+                            assert_eq!(body["model"], "policy/image-model");
+                            assert_eq!(body["audit"], json!(["once"]));
+                        } else if policy == "filter" {
+                            assert!(body.get("model").is_none());
+                        } else {
+                            assert_eq!(
+                                body["model"], want,
+                                "{format}, stream={stream}, {resolved}"
+                            );
+                        }
+                        assert_eq!(body["prompt"], "diagnostic");
+                        assert_eq!(body.get("stream").is_some(), stream);
+                        if stream {
+                            assert_eq!(body["stream"], true);
+                        }
+                        if format == "multipart" {
+                            assert_eq!(
+                                body["images"][0]["image_url"],
+                                "data:application/octet-stream;base64,cG5nLWRhdGE="
+                            );
+                        } else if format == "edit" {
+                            assert_eq!(body["images"][0]["file_id"], "source-image");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
