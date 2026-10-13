@@ -284,7 +284,7 @@ async fn config_v8_comments_unknown_legacy_sections_on_write() {
     let saved = assert_v8_file(&dir);
     assert_eq!(
         saved,
-        "server: {port: 8317}\nrequests:\n    proxy-url: \"direct\"\nconfig-version: 8\n\n# home: {enabled: true, host: ignored.example}\n# enable-gemini-cli-endpoint: false\n# former-feature: {mode: old}\n"
+        "server:\n    port: 8317\nrequests:\n    proxy-url: \"direct\"\nconfig-version: 8\n\n# home: {enabled: true, host: ignored.example}\n# enable-gemini-cli-endpoint: false\n# former-feature: {mode: old}\n"
     );
     for key in ["home", "enable-gemini-cli-endpoint", "former-feature"] {
         assert!(value_at(&dir, key).is_none(), "{key} is still a section");
@@ -320,7 +320,7 @@ async fn config_v8_comments_unknown_nested_fields_on_write() {
     let saved = assert_v8_file(&dir);
     assert_eq!(
         saved,
-        "server: {port: 8318}\noauth: {providers: {codex: {}}}\nupstream:\n    codex:\n        disable-codex-cloaking: true\nconfig-version: 8\n\n# oauth.providers.codex.retired-setting: false\n"
+        "server:\n    port: 8318\noauth:\n    providers:\n        codex: {}\nupstream:\n    codex:\n        disable-codex-cloaking: true\nconfig-version: 8\n\n# oauth.providers.codex.retired-setting: false\n"
     );
     assert_eq!(loaded(&api, &dir).port, 8318);
     let cloaking = at("upstream/codex/disable-codex-cloaking");
@@ -978,7 +978,7 @@ async fn config_v8_shared_upstream_round_trip() {
     let saved = read(&dir);
     assert_eq!(
         saved,
-        "oauth: {providers: {codex: {header-defaults: {user-agent: oauth-agent}}}, auth-auto-refresh-workers: 3}\nupstream:\n    codex:\n        stream-bootstrap-buffering: false\n    claude:\n        \"header-defaults\": {\"timezone\": \"Asia/Singapore\", \"stabilize-device-profile\": false}\nconfig-version: 8\n"
+        "oauth:\n    providers:\n        codex:\n            header-defaults:\n                user-agent: oauth-agent\n    auth-auto-refresh-workers: 3\nupstream:\n    codex:\n        stream-bootstrap-buffering: false\n    claude:\n        header-defaults:\n            timezone: \"Asia/Singapore\"\n            stabilize-device-profile: false\nconfig-version: 8\n"
     );
     let config = loaded(&api, &dir);
     assert!(
@@ -1434,7 +1434,7 @@ async fn config_v8_historical_null_container_patch() {
     request(&api, Method::PATCH, CONFIG, body, StatusCode::OK).await;
     assert_eq!(
         read(&dir),
-        "upstream: {claude: {model-level-cooling: true, header-defaults: {user-agent: null, timezone: null, stabilize-device-profile: null, package-version: null, runtime-version: null, os: null, arch: null, timeout: null}}}\nconfig-version: 8\n"
+        "upstream:\n    claude:\n        model-level-cooling: true\n        header-defaults:\n            user-agent: null\n            timezone: null\n            stabilize-device-profile: null\n            package-version: null\n            runtime-version: null\n            os: null\n            arch: null\n            timeout: null\nconfig-version: 8\n"
     );
     let config = loaded(&api, &dir);
     assert!(config.claude.model_level_cooling, "changed cooling");
