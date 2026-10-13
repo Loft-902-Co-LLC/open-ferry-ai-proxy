@@ -45,9 +45,11 @@
 //!   source" error can't happen.
 //! - Removing `generate` from a WebSocket fallback payload re-serializes the
 //!   JSON (keeping key order and numbers), where sjson edits it in place.
-//! - When the client drops a stream, its task stops reading at once and
-//!   marks no further result, as upstream's goroutine discards the rest
-//!   once its context ends. What the taps are told is in the next point.
+//! - When the client drops a stream, an already-ready source error wins
+//!   over the closed channel and is recorded, including a closed-session
+//!   failure without a cooldown. Otherwise the task stops reading without
+//!   a result. Upstream's `wrapStreamResult` also records an error before
+//!   checking cancellation. What the taps are told is in the next point.
 //! - Each executor call's end is reported to the request's taps here (see
 //!   [`CallReport`]), where upstream's executors publish their usage and
 //!   request-log records themselves. A stream's report is made before its

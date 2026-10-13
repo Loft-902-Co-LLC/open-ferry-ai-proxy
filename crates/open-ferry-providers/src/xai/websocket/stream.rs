@@ -167,12 +167,12 @@ pub(in crate::xai) async fn execute_stream(
         }
         None => (sessions.store.ephemeral(), true, None),
     };
-    let proxy = session.effective_proxy(&auth.id, &auth.proxy_url, executor.proxy_for(auth));
-    let global_proxy = session.effective_proxy(&auth.id, "", executor.global_proxy());
-    let target = Target {
+    let proxy = executor.proxy_for(auth);
+    let reuse_proxy = session.effective_proxy(&auth.id, &auth.proxy_url, proxy.clone());
+    let mut target = Target {
         auth_id: auth.id.clone(),
         url: url.clone(),
-        proxy: proxy.clone(),
+        proxy: reuse_proxy.clone(),
     };
     let mut mapper = state.map(|state| Mapper::new(state, &client));
     if let Some(mapper) = mapper.as_mut() {
@@ -198,12 +198,11 @@ pub(in crate::xai) async fn execute_stream(
     let mut secrets = observe_send::secrets(&url, &headers, &proxy, auth);
     let conn_target = session::Target::new(&auth.id, &url, &proxy, token(auth))
         .with_secrets(&secrets)
-        .with_global_proxy(global_proxy);
-    #[cfg(test)]
-    let conn_target = conn_target.with_config(executor.shared_config());
+        .with_global_proxy(executor.global_proxy());
+    let reuse_target = session::Target::new(&auth.id, &url, &reuse_proxy, token(auth));
     // A connection kept for the call was opened with the secrets of an
     // earlier one, which xAI may quote back too.
-    if let Some(kept) = session.kept_secrets(&conn_target) {
+    if let Some(kept) = session.kept_secrets(&reuse_target) {
         secrets.extend(&kept);
     }
     let log = Log {
@@ -231,13 +230,16 @@ pub(in crate::xai) async fn execute_stream(
         )
     });
     let connect = || dial::dial(&proxy, &url, &headers);
-    let (conn, mut response_headers) = match session.ensure_conn(conn_target.clone(), connect).await
+    let (conn, mut response_headers) = match session
+        .ensure_conn_with_reuse(conn_target.clone(), &reuse_target, connect)
+        .await
     {
         Ok(found) => found,
         Err(error) => return Err(dial_error(error, &secrets)),
     };
     secrets.extend(conn.secrets());
     if !ephemeral {
+        target.proxy = conn.proxy().to_owned();
         sessions.record_target(&session_id, &target);
     }
     let mut hold = Hold::new(Arc::clone(&session), ephemeral, guard, conn);
@@ -254,13 +256,17 @@ pub(in crate::xai) async fn execute_stream(
         }
         // Once more, on a new connection for the same session.
         let connect = || dial::dial(&proxy, &url, &headers);
-        let (conn, retry_headers) = match session.ensure_conn(conn_target, connect).await {
+        let (conn, retry_headers) = match session
+            .ensure_conn_with_reuse(conn_target, &reuse_target, connect)
+            .await
+        {
             Ok(found) => found,
             Err(error) => {
                 hold.release();
                 return Err(dial_error(error, &secrets));
             }
         };
+        target.proxy = conn.proxy().to_owned();
         sessions.record_target(&session_id, &target);
         secrets.extend(conn.secrets());
         hold.switch(conn);

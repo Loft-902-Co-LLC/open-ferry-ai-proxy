@@ -122,18 +122,17 @@ pub(super) async fn open(
         }
         None => (store.ephemeral(), true, None),
     };
-    let proxy = session.effective_proxy(&auth.id, &auth.proxy_url, executor.proxy_for(auth));
-    let global_proxy = session.effective_proxy(&auth.id, "", executor.global_proxy());
+    let proxy = executor.proxy_for(auth);
+    let reuse_proxy = session.effective_proxy(&auth.id, &auth.proxy_url, proxy.clone());
     let mut secrets = observe_send::secrets(&prepared.url, &prepared.headers, &proxy, auth);
     let token = crate::codex::request::credentials(auth).0;
     let target = Target::new(&auth.id, &prepared.url, &proxy, token)
         .with_secrets(&secrets)
-        .with_global_proxy(global_proxy);
-    #[cfg(test)]
-    let target = target.with_config(executor.shared_config());
+        .with_global_proxy(executor.global_proxy());
+    let reuse_target = Target::new(&auth.id, &prepared.url, &reuse_proxy, token);
     // A connection kept for the call was opened with the secrets of an
     // earlier one, which Codex may quote back too.
-    if let Some(kept) = session.kept_secrets(&target) {
+    if let Some(kept) = session.kept_secrets(&reuse_target) {
         secrets.extend(&kept);
     }
     // The handshake and the message, told once, before connecting.
@@ -162,7 +161,10 @@ pub(super) async fn open(
     let model_level_cooling = executor.model_level_cooling();
 
     let connect = || dial::dial(&proxy, &prepared.url, &prepared.headers);
-    let (conn, mut headers) = match session.ensure_conn(target.clone(), connect).await {
+    let (conn, mut headers) = match session
+        .ensure_conn_with_reuse(target.clone(), &reuse_target, connect)
+        .await
+    {
         Ok(found) => found,
         Err(DialError::Handshake { status: 426, .. }) if !options.downstream_websocket => {
             return Ok(Opened::Fallback);
@@ -188,7 +190,10 @@ pub(super) async fn open(
         }
         // Once more, on a new connection for the same session.
         let connect = || dial::dial(&proxy, &prepared.url, &prepared.headers);
-        let (conn, retry_headers) = match session.ensure_conn(target, connect).await {
+        let (conn, retry_headers) = match session
+            .ensure_conn_with_reuse(target, &reuse_target, connect)
+            .await
+        {
             Ok(found) => found,
             Err(error) => {
                 hold.release();
