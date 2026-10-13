@@ -12,9 +12,11 @@
 //! anchors and aliases, head, line and foot comments, comments at the
 //! wrong indent, blank lines, and document comments. A quarter of the
 //! files are in the style the writer itself writes (block collections;
-//! indent 2 with full-line comments at column 0, or indent 4 with them at
-//! their entries in the v8 layout), so that what it keeps can be checked
-//! byte for byte; each of those is first saved with a changed config.
+//! no double-quoted key that single quotes could write, as the writer
+//! drops a key's double quotes; indent 2 with full-line comments at column
+//! 0, or indent 4 with them at their entries in the v8 layout), so that
+//! what it keeps can be checked byte for byte; each of those is first
+//! saved with a changed config.
 //!
 //! The writes save the file as it stands or a changed config, with and
 //! without the move to the v8 layout; set a nested string, as `LoadConfig`
@@ -1043,13 +1045,16 @@ impl<'a> Style<'a> {
         }
     }
 
-    /// A mapping key: plain where it can be, or quoted.
+    /// A mapping key: plain where it can be, or quoted. In the writer's own
+    /// style, double quotes only where single quotes can't be used: the
+    /// writer writes a double-quoted key as it would a plain one (0a23627d),
+    /// which may be plain or single-quoted.
     fn key(&mut self, key: &str) -> String {
         // A plugin ID, in a block `plugins.configs` or a flow `plugins`.
         let id = self.plugins && matches!(key, "alpha" | "beta" | "gamma");
         if plain_ok(key, true) && (self.canonical || id || self.rng.chance(85)) {
             key.to_owned()
-        } else if single_ok(key) && self.rng.chance(50) {
+        } else if single_ok(key) && (self.rng.chance(50) || self.canonical) {
             single_quoted(key)
         } else {
             double_quoted(key)
