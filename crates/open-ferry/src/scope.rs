@@ -167,6 +167,10 @@ pub(crate) trait Probe {
     /// Refuses `path` unless it is a regular file, not a link, that passes
     /// the system service's trust check with every directory above it.
     fn trusted_file(&self, path: &str) -> Result<(), String>;
+    /// Opens `path` read-only without following a link or waiting on a special
+    /// file. Permission denied distinguishes an unreadable receipt from a
+    /// readable one the trust check refuses; success does not imply trust.
+    fn readable_file(&self, path: &str) -> io::Result<()>;
     /// The install receipt at `path`, if there is one.
     fn receipt(&self, path: &str) -> Result<Option<Receipt>, ReceiptError>;
     /// `path` with links resolved.
@@ -244,6 +248,36 @@ impl Probe for Host {
 
     fn trusted_file(&self, path: &str) -> Result<(), String> {
         os_service::Host.trusted_file(path)
+    }
+
+    fn readable_file(&self, path: &str) -> io::Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(io::Error::other("not a regular file"));
+            }
+        }
+        if !metadata.is_file() {
+            return Err(io::Error::other("not a regular file"));
+        }
+        Ok(())
     }
 
     fn receipt(&self, path: &str) -> Result<Option<Receipt>, ReceiptError> {
@@ -524,7 +558,10 @@ fn find_machine(probe: &dyn Probe, binary: &str) -> Machine {
         }
     }
     if let Err(reason) = probe.trusted_file(&receipt) {
-        return unusable(reason);
+        return match probe.readable_file(&receipt) {
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => unreadable(reason),
+            _ => unusable(reason),
+        };
     }
     match names(probe, &receipt, binary) {
         Ok(true) => Machine::Ours(root),
@@ -844,3 +881,66 @@ fn create_machine_dir(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod receipt_access_tests {
+    use super::*;
+    use crate::update::scope_probe::{Fake, Node};
+
+    #[test]
+    fn an_unreadable_receipt_keeps_the_machine_hint_but_an_untrusted_one_does_not() {
+        for platform in [Platform::Linux, Platform::Windows] {
+            let mut probe = Fake::new(platform, false);
+            let root = machine_root(&probe).unwrap().unwrap();
+            let receipt = platform.join(&root, RECEIPT_FILE);
+            probe.node(&receipt, Node::Unreadable);
+            assert!(matches!(
+                find_machine(&probe, "binary"),
+                Machine::Unreadable(_)
+            ));
+            assert!(lookup(&probe, "binary").unwrap().machine_hint.is_some());
+            assert!(probe.reads.borrow().iter().all(|path| path != &receipt));
+
+            probe.file(&receipt).untrust(&receipt);
+            assert!(matches!(
+                find_machine(&probe, "binary"),
+                Machine::Unusable(_)
+            ));
+            assert!(lookup(&probe, "binary").unwrap().machine_hint.is_none());
+            probe.privileged = Ok(true);
+            assert!(lookup(&probe, "binary").is_err());
+        }
+    }
+
+    #[test]
+    fn the_host_permission_probe_accepts_only_regular_files_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("receipt");
+        fs::write(&file, b"unchanged").unwrap();
+        Host.readable_file(file.to_str().unwrap()).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"unchanged");
+        assert!(Host.readable_file(dir.path().to_str().unwrap()).is_err());
+        assert!(
+            Host.readable_file(dir.path().join("missing").to_str().unwrap())
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_host_permission_probe_refuses_links_and_does_not_wait_on_a_fifo() {
+        use std::ffi::CString;
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("receipt");
+        fs::write(&file, b"unchanged").unwrap();
+        let link = dir.path().join("link");
+        symlink(&file, &link).unwrap();
+        assert!(Host.readable_file(link.to_str().unwrap()).is_err());
+        let fifo = dir.path().join("fifo");
+        let path = CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: `path` is NUL-terminated and names a path in this test's scratch directory.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(Host.readable_file(fifo.to_str().unwrap()).is_err());
+    }
+}

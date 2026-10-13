@@ -4103,6 +4103,10 @@ impl scope::Probe for ScopeFake {
     fn trusted_file(&self, _path: &str) -> Result<(), String> {
         Ok(())
     }
+    fn readable_file(&self, _path: &str) -> io::Result<()> {
+        Ok(())
+    }
+
     fn receipt(
         &self,
         path: &str,

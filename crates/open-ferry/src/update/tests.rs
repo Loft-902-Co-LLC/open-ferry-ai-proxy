@@ -143,6 +143,46 @@ mod command_scope {
         );
     }
 
+    #[tokio::test]
+    async fn an_unreadable_machine_receipt_keeps_the_hint_in_an_update_refusal() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            let mut probe = Fake::new(platform, false);
+            let machine = scope::machine_root(&probe).unwrap().unwrap();
+            let receipt = platform.join(&machine, open_ferry_update::data_dir::RECEIPT_FILE);
+            probe.node(&receipt, Node::Unreadable);
+            let home = command_home(&probe, BINARY, Request::Update).unwrap();
+            for json in [false, true] {
+                let (mut out, mut err) = (Vec::new(), Vec::new());
+                let mut console = Console::new(json, &mut out, &mut err);
+                say_machine_hint(&home, &mut console);
+                let fake = super::Fake::finding("0.2.0", "0.1.0").not_self_updating();
+                let mut prompt = Answer {
+                    answer: None,
+                    asked: Vec::new(),
+                };
+                let outcome = run(
+                    Request::Update,
+                    &fake,
+                    &settings("", None),
+                    true,
+                    &mut prompt,
+                    &mut console,
+                )
+                .await;
+                assert_eq!((outcome.code, outcome.result), (3, "cannot-update"));
+                let _ = console.finish(outcome);
+                let printed = String::from_utf8(out).unwrap();
+                assert!(printed.contains("whole machine"), "{printed}");
+                assert!(printed.contains(if platform == Platform::Windows {
+                    "administrator"
+                } else {
+                    "sudo"
+                }));
+                assert_eq!(fake.calls(), ["latest"]);
+            }
+        }
+    }
+
     #[test]
     fn machine_mode_uses_the_explicit_or_existing_machine_config() {
         for platform in [Platform::Windows, Platform::Linux] {

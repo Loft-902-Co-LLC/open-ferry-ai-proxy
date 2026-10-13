@@ -180,6 +180,10 @@ impl Probe for Fake {
         self.trust(path)
     }
 
+    fn readable_file(&self, _path: &str) -> io::Result<()> {
+        Ok(())
+    }
+
     fn receipt(&self, path: &str) -> Result<Option<Receipt>, ReceiptError> {
         let path = self.path(path);
         self.reads.borrow_mut().push(path.clone());

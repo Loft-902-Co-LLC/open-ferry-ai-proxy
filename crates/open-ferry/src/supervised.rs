@@ -880,6 +880,10 @@ mod tests {
         fn trusted_file(&self, _: &str) -> Result<(), String> {
             panic!("no files")
         }
+        fn readable_file(&self, _path: &str) -> io::Result<()> {
+            Ok(())
+        }
+
         fn receipt(
             &self,
             _: &str,
