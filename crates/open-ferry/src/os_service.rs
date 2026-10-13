@@ -708,7 +708,8 @@ pub(crate) trait System {
     fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()>;
     /// Asks the supervisor of the data directory `data_dir`, a user's or
     /// the system's as `kind` says, to stop, and waits up to `budget` for
-    /// it to end (`client::stop`).
+    /// it to end (`client::stop`). The system's is refused unless
+    /// `data_dir` passes [`System::trusted_dir`].
     fn stop_supervisor(
         &mut self,
         data_dir: &str,
@@ -906,6 +907,13 @@ impl System for Host {
         budget: Duration,
         kind: ServiceKind,
     ) -> StopOutcome {
+        // The system supervisor is found through its data directory: only
+        // one root or the administrators alone can change will do.
+        if kind == ServiceKind::System
+            && let Err(reason) = self.trusted_dir(data_dir)
+        {
+            return StopOutcome::Refused(reason);
+        }
         let identity = match Identity::current(kind) {
             Ok(identity) => identity,
             Err(error) => {

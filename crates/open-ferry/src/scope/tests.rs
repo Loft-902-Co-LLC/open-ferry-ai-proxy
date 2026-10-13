@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
@@ -31,6 +32,10 @@ struct Fake {
     untrusted: BTreeSet<String>,
     /// The receipts, by their paths: the binary each names.
     receipts: BTreeMap<String, String>,
+    /// What reading the receipts at these paths fails with.
+    receipt_errors: BTreeMap<String, ReceiptError>,
+    /// The receipts read, in order.
+    reads: RefCell<Vec<String>>,
     /// What creating a directory fails with.
     create: Option<io::ErrorKind>,
     created: Vec<String>,
@@ -49,11 +54,13 @@ impl Fake {
         Fake {
             platform,
             privileged: Ok(privileged),
-            account: Ok(account.to_owned()),
+            account: Ok(platform.clean(account)),
             program_data: Ok(platform.clean("C:/ProgramData")),
             nodes: BTreeMap::new(),
             untrusted: BTreeSet::new(),
             receipts: BTreeMap::new(),
+            receipt_errors: BTreeMap::new(),
+            reads: RefCell::new(Vec::new()),
             create: None,
             created: Vec::new(),
         }
@@ -93,6 +100,15 @@ impl Fake {
         let binary = self.path(binary);
         self.file(&path);
         self.receipts.insert(path, binary);
+        self
+    }
+
+    /// Puts a receipt that fails to read with `error` in the data directory
+    /// `dir`.
+    fn with_receipt_error(&mut self, dir: &str, error: ReceiptError) -> &mut Fake {
+        let path = self.platform.join(&self.path(dir), RECEIPT_FILE);
+        self.file(&path);
+        self.receipt_errors.insert(path, error);
         self
     }
 
@@ -166,6 +182,10 @@ impl Probe for Fake {
 
     fn receipt(&self, path: &str) -> Result<Option<Receipt>, ReceiptError> {
         let path = self.path(path);
+        self.reads.borrow_mut().push(path.clone());
+        if let Some(error) = self.receipt_errors.get(&path) {
+            return Err(error.clone());
+        }
         match (self.receipts.get(&path), self.nodes.contains_key(&path)) {
             (Some(binary), _) => Ok(Some(Receipt {
                 binary: binary.clone(),
@@ -219,8 +239,7 @@ fn root_of(home: &Home) -> String {
 
 const ACCOUNT_REMEDY: &str =
     "Run it without sudo, or install open-ferry for the whole machine with `install.sh --system`.";
-const MACHINE_REMEDY: &str =
-    "Remove /var/lib/open-ferry as root and install again with `install.sh --system`.";
+const MACHINE_REMEDY: &str = "Stop the open-ferry service, then as root fix what is named, or move /var/lib/open-ferry aside and install again with `install.sh --system`; keep its auth directory private, since it holds the machine's credentials.";
 
 #[test]
 fn an_unprivileged_process_uses_its_account_records_as_they_are() {
@@ -312,6 +331,11 @@ fn a_machine_receipt_the_trust_check_refuses_is_not_read() {
     let refusal = refused(lookup(&fake, BINARY));
     assert!(refusal.reason.contains("install-receipt.json"), "{refusal}");
     assert_eq!(refusal.remedy.as_deref(), Some(MACHINE_REMEDY));
+    let reads = fake.reads.borrow().clone();
+    assert!(
+        !reads.iter().any(|path| path.starts_with(MACHINE)),
+        "{reads:?}"
+    );
 
     // An unprivileged process just uses its own records.
     fake.privileged = Ok(false);
@@ -357,6 +381,117 @@ fn a_user_who_cannot_read_the_machine_directory_gets_a_hint() {
         .file(BINARY)
         .with_receipt(USER_ACCOUNT, BINARY);
     assert_eq!(found(lookup(&fake, BINARY)).machine_hint, None);
+}
+
+#[test]
+fn root_that_cannot_read_the_machine_directory_needs_a_trusted_account_naming_the_binary() {
+    let mut fake = Fake::new(Platform::Linux, true);
+    fake.node(MACHINE, Node::Hidden)
+        .file(BINARY)
+        .with_receipt(ROOT_ACCOUNT, BINARY)
+        .untrust("/root");
+    let refusal = refused(lookup(&fake, BINARY));
+    assert_eq!(
+        refusal.reason,
+        "/var/lib/open-ferry can't be looked at: access is denied"
+    );
+    assert_eq!(refusal.remedy.as_deref(), Some(MACHINE_REMEDY));
+    // The untrusted account's receipt isn't read.
+    assert!(fake.reads.borrow().is_empty(), "{:?}", fake.reads.borrow());
+
+    // A trusted account whose receipt names the binary is used.
+    fake.untrusted.clear();
+    let home = found(lookup(&fake, BINARY));
+    assert_eq!(home.scope, Scope::Account);
+    assert_eq!(root_of(&home), ROOT_ACCOUNT);
+    assert_eq!(home.machine_hint, None);
+
+    // One whose receipt names nothing isn't.
+    let mut fake = Fake::new(Platform::Linux, true);
+    fake.node(MACHINE, Node::Hidden)
+        .file(BINARY)
+        .dir(ROOT_ACCOUNT);
+    assert_eq!(refused(lookup(&fake, BINARY)), refusal);
+
+    // Nor is an account without a data directory.
+    fake.account = Err("HOME isn't set to an absolute path".to_owned());
+    assert_eq!(refused(lookup(&fake, BINARY)), refusal);
+}
+
+#[test]
+fn a_machine_receipt_that_cannot_be_read_or_is_not_valid_refuses_root() {
+    let receipt = "/var/lib/open-ferry/install-receipt.json";
+    let mut fake = Fake::new(Platform::Linux, true);
+    fake.node(receipt, Node::Hidden)
+        .file(BINARY)
+        .dir(ROOT_ACCOUNT);
+    let refusal = refused(lookup(&fake, BINARY));
+    assert_eq!(
+        refusal.reason,
+        format!("{receipt} can't be looked at: access is denied")
+    );
+    assert_eq!(refusal.remedy.as_deref(), Some(MACHINE_REMEDY));
+
+    let mut fake = Fake::new(Platform::Linux, true);
+    fake.with_receipt_error(MACHINE, ReceiptError::Unreadable("I/O error".to_owned()))
+        .file(BINARY)
+        .dir(ROOT_ACCOUNT);
+    let refusal = refused(lookup(&fake, BINARY));
+    assert_eq!(
+        refusal.reason,
+        format!("{receipt} can't be read: I/O error")
+    );
+    assert_eq!(refusal.remedy.as_deref(), Some(MACHINE_REMEDY));
+    // A user gets the hint, as for a machine directory it can't read.
+    fake.privileged = Ok(false);
+    fake.account = Ok(USER_ACCOUNT.to_owned());
+    assert!(found(lookup(&fake, BINARY)).machine_hint.is_some());
+
+    let mut fake = Fake::new(Platform::Linux, true);
+    fake.with_receipt_error(
+        MACHINE,
+        ReceiptError::Malformed("format 2 isn't 1".to_owned()),
+    )
+    .file(BINARY)
+    .dir(ROOT_ACCOUNT);
+    let refusal = refused(lookup(&fake, BINARY));
+    assert_eq!(
+        refusal.reason,
+        format!("{receipt} isn't a valid install receipt: format 2 isn't 1")
+    );
+    assert_eq!(refusal.remedy.as_deref(), Some(MACHINE_REMEDY));
+    // Unless the account's own receipt names the binary.
+    fake.with_receipt(ROOT_ACCOUNT, BINARY);
+    assert_eq!(found(lookup(&fake, BINARY)).scope, Scope::Account);
+    // A user just uses its own records.
+    fake.privileged = Ok(false);
+    let home = found(lookup(&fake, BINARY));
+    assert_eq!(home.scope, Scope::Account);
+    assert_eq!(home.machine_hint, None);
+}
+
+#[test]
+fn the_account_data_directory_is_used_as_it_is_given() {
+    // Unprivileged, as `DataDir::for_this_user` gives it.
+    let mut fake = Fake::new(Platform::Windows, false);
+    fake.account = Ok(WINDOWS_ACCOUNT.to_owned());
+    fake.file(WINDOWS_BINARY).dir("C:/ProgramData");
+    assert_eq!(
+        root_of(&found(lookup(&fake, WINDOWS_BINARY))),
+        WINDOWS_ACCOUNT
+    );
+
+    // Privileged, a `..` in it refuses rather than being folded away.
+    let account = "/root/.local/share/../share/open-ferry";
+    let mut fake = Fake::new(Platform::Linux, true);
+    fake.account = Ok(account.to_owned());
+    fake.file(BINARY).dir(ROOT_ACCOUNT);
+    let refusal = refused(lookup(&fake, BINARY));
+    assert_eq!(
+        refusal.reason,
+        format!("{account} is not a full path without `.` or `..`")
+    );
+    assert_eq!(refusal.remedy.as_deref(), Some(ACCOUNT_REMEDY));
 }
 
 #[test]
@@ -438,7 +573,7 @@ fn windows_machine_records_are_in_program_data() {
     assert_eq!(
         refusal.remedy,
         Some(format!(
-            "Remove {machine} as an administrator and install again with `install.ps1 -System`."
+            "Stop the open-ferry service, then as an administrator fix what is named, or move {machine} aside and install again with `install.ps1 -System`; keep its auth directory private, since it holds the machine's credentials."
         ))
     );
 

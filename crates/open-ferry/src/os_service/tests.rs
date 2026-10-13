@@ -3762,3 +3762,21 @@ fn parses_the_supervised_run() {
     }
     assert!(parse(args(&["install", "-supervise"])).is_err());
 }
+
+#[test]
+fn the_host_stops_a_system_supervisor_only_through_a_trusted_directory() {
+    // A directory another account can change: the test's own on Windows,
+    // and one anybody may write to on Unix.
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let path = dir.path().to_str().unwrap();
+    let reason = Host.trusted_dir(path).unwrap_err();
+    assert_eq!(
+        Host.stop_supervisor(path, Duration::from_secs(1), ServiceKind::System),
+        StopOutcome::Refused(reason)
+    );
+}
