@@ -427,6 +427,8 @@ async fn calls_are_listed_and_paged() {
             "client_key": {"id": key, "masked": "sk-...2222"},
             "tokens": {"input": 2000, "cache_read": 0, "cache_write": 0, "output": 300, "reasoning": 0, "total": 2300},
             "cost": null,
+            "access_provider": "",
+            "is_native_key": false,
         })
     );
 
