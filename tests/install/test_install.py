@@ -1180,8 +1180,8 @@ class InstallShTests(Case):
     def test_fake_privilege_requires_the_existing_recording_seam(self):
         requests = list(SERVER.httpd.requests)
         result = self.run_sh(
-            "--target", GNU, *self.install_args("--system"),
-            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_OPEN_FERRY_INSTALL_LOG=None,
+            "--target", GNU, *self.install_args("--system"), path_first=[FAKE_BIN],
+            FAKE_UNAME_S="Linux", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_OPEN_FERRY_INSTALL_LOG=None,
         )
         self.assertExit(result, 1)
         self.assertIn("needs root. Run it with sudo.", result.output)
@@ -2259,7 +2259,8 @@ class InstallPs1Cases:
 
     def run_file(self, *args, **extra):
         env = self.env(**extra)
-        return run([*self.shell_args(), "-File", INSTALL_PS1, *args, *self.seam_args(env)], env)
+        seam = [arg for arg in self.seam_args(env) if arg != "-TestElevated" or arg not in args]
+        return run([*self.shell_args(), "-File", INSTALL_PS1, *args, *seam], env)
 
     def run_command(self, command, **extra):
         env = self.env(**extra)
