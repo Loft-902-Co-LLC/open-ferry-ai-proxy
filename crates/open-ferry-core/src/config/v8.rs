@@ -327,12 +327,12 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
         "oauth.providers.codex.live-media-relay.ice-servers",
     ),
     (
-        "codex.signin-with-chatgpt-identifier",
-        "oauth.providers.codex.signin-with-chatgpt-identifier",
-    ),
-    (
         "codex.response-steering",
         "upstream.codex.response-steering",
+    ),
+    (
+        "codex.signin-with-chatgpt-identifier",
+        "oauth.providers.codex.signin-with-chatgpt-identifier",
     ),
     (
         "codex-header-defaults.user-agent",

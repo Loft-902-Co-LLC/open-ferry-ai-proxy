@@ -38,7 +38,8 @@
 //! open-ferry's own `routing.quota`),
 //! `ws-auth`, `force-model-prefix`,
 //! `video-result-auth-cache-ttl`, `client.codex`, `codex` (minus cloaking
-//! and the live media relay), `codex-header-defaults.beta-features`,
+//! and the live media relay; `signin-with-chatgpt-identifier` is compatibility-only),
+//! `codex-header-defaults.beta-features`,
 //! `claude.model-level-cooling`, `claude.tool-search`,
 //! `xai`, `gemini-api-key`, `interactions-api-key`, `codex-api-key`,
 //! `xai-api-key`, `meta-api-key`, `claude-api-key` (minus `cloak` and

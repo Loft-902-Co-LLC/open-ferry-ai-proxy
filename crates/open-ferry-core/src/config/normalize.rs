@@ -61,7 +61,7 @@ impl Config {
         }
         let mut filtered = self.clone();
         for field in &self.oauth_only_fields {
-            // The other OAuth-scoped settings belong to ignored sections.
+            // Other OAuth-scoped settings are ignored or compatibility-only.
             match field.as_str() {
                 "quota-exceeded.antigravity-credits" => {
                     filtered.quota_exceeded.antigravity_credits = false;
@@ -127,11 +127,6 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
         .signin_with_chatgpt_identifier
         .trim()
         .to_owned();
-    if !config.codex.signin_with_chatgpt_identifier.is_empty() {
-        tracing::warn!(
-            "signin-with-chatgpt-identifier is retained for configuration compatibility; open-ferry always names itself as open-ferry."
-        );
-    }
     sanitize_claude_keys(&mut config.claude_api_key);
     sanitize_claude_cli(&mut config.claude_cli);
     validate_claude_cli(&config.claude_cli)?;

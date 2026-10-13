@@ -565,7 +565,7 @@ pub struct XaiConfig {
 }
 
 /// Provider-wide Codex behavior.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, rename = "config.CodexConfig", rename_all = "kebab-case")]
 pub struct CodexConfig {
     /// Holds back stream frames that precede generation so an overloaded
@@ -588,6 +588,28 @@ pub struct CodexConfig {
     /// Retained for configuration compatibility only. Never used for requests;
     /// open-ferry always names itself as open-ferry, with no identity accessor.
     pub signin_with_chatgpt_identifier: String,
+}
+
+impl fmt::Debug for CodexConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodexConfig")
+            .field(
+                "stream_bootstrap_buffering",
+                &self.stream_bootstrap_buffering,
+            )
+            .field("stream_bootstrap_timeout", &self.stream_bootstrap_timeout)
+            .field(
+                "orphan_delegation_compatibility",
+                &self.orphan_delegation_compatibility,
+            )
+            .field("model_level_cooling", &self.model_level_cooling)
+            .field("response_steering", &self.response_steering)
+            .field(
+                "signin_with_chatgpt_identifier_set",
+                &!self.signin_with_chatgpt_identifier.is_empty(),
+            )
+            .finish()
+    }
 }
 
 impl CodexConfig {

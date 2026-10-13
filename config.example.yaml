@@ -874,11 +874,9 @@ oauth:
   # Codex OAuth provider settings.
   # providers:
   #   codex:
-  #     # Accepted for configuration compatibility only; never used for requests.
-  #     # open-ferry always identifies itself as open-ferry.
+  #     # Identifier (agent_name_hint and User-Agent prefix) for Sign in with ChatGPT (SIWC) OAuth and API requests in upstream.
+  #     # open-ferry ignores this setting and always identifies itself as open-ferry.
   #     signin-with-chatgpt-identifier: "CLIProxyAPI"
-  #     # Default headers for Codex OAuth model requests.
-  #     # header-defaults: {}
 
 # Image and video behavior.
 multimedia:

@@ -89,7 +89,13 @@ fn read(path: &Path) -> Result<Vec<u8>, ConfigError> {
 
 /// Loads a config file's contents, with [`Config::load`]'s error wording.
 pub(crate) fn load_bytes(data: &[u8]) -> Result<Config, ConfigError> {
-    from_bytes(data, "failed to parse config file: ")
+    let config = from_bytes(data, "failed to parse config file: ")?;
+    if !config.codex.signin_with_chatgpt_identifier.is_empty() {
+        tracing::warn!(
+            "signin-with-chatgpt-identifier is retained for configuration compatibility; open-ferry always names itself as open-ferry."
+        );
+    }
+    Ok(config)
 }
 
 /// The shared pipeline; `prefix` starts syntax and decode errors.
@@ -1521,7 +1527,7 @@ mod tests {
             "codex: {signin-with-chatgpt-identifier: '  CustomSIWCClient/2.0  '}\n",
             "oauth: {providers: {codex: {signin-with-chatgpt-identifier: '  CustomSIWCClient/2.0  '}}}\n",
         ] {
-            let (config, messages) = logged(|| parse(yaml));
+            let (config, messages) = logged(|| Config::load_bytes(yaml.as_bytes()).expect("load"));
             assert_eq!(
                 config.codex.signin_with_chatgpt_identifier,
                 "CustomSIWCClient/2.0"
@@ -1549,14 +1555,17 @@ mod tests {
             let out =
                 crate::config::save::render_preserving_comments(yaml.as_bytes(), &cleared, false)
                     .expect("clear and save");
-            assert!(
-                !String::from_utf8(out)
-                    .expect("utf-8")
-                    .contains("signin-with-chatgpt-identifier")
+            // Omitted generated keys survive the merge, as upstream's do.
+            let saved = String::from_utf8(out).expect("utf-8");
+            assert!(saved.contains("signin-with-chatgpt-identifier:"));
+            assert!(saved.contains("  CustomSIWCClient/2.0  "));
+            assert_eq!(
+                parse(&saved).codex.signin_with_chatgpt_identifier,
+                "CustomSIWCClient/2.0"
             );
             assert_eq!(
                 crate::config::diff::build_change_details(&Config::default(), &config),
-                ["codex.signin-with-chatgpt-identifier:  -> CustomSIWCClient/2.0"]
+                ["codex.signin-with-chatgpt-identifier: updated"]
             );
         }
         for yaml in [
@@ -1566,20 +1575,133 @@ mod tests {
             let (config, messages) = logged(|| parse(yaml));
             assert!(config.codex.signin_with_chatgpt_identifier.is_empty());
             assert!(messages.is_empty());
-            // A save omits the empty optional field.
+            // A save omits a new empty field but retains an existing key.
             let out =
                 crate::config::save::render_preserving_comments(yaml.as_bytes(), &config, true)
                     .expect("save");
-            assert!(
-                !String::from_utf8(out)
+            assert_eq!(
+                String::from_utf8(out)
                     .expect("utf-8")
-                    .contains("signin-with-chatgpt-identifier")
+                    .contains("signin-with-chatgpt-identifier"),
+                yaml.contains("signin-with-chatgpt-identifier")
             );
         }
         let config = parse(
             "codex: {signin-with-chatgpt-identifier: legacy}\noauth: {providers: {codex: {signin-with-chatgpt-identifier: canonical}}}\n",
         );
         assert_eq!(config.codex.signin_with_chatgpt_identifier, "canonical");
+    }
+
+    #[test]
+    fn signin_with_chatgpt_identifier_warns_once_per_load_and_not_on_management_parse() {
+        let dir = TempDir::new();
+        let path = dir.write(
+            "config.yaml",
+            "oauth: {providers: {codex: {signin-with-chatgpt-identifier: private_identifier}}}\n",
+        );
+        for hashed in [false, true, false] {
+            let (_, messages) = logged(|| {
+                if hashed {
+                    Config::load_with_sha256(&path).expect("reload").0
+                } else {
+                    Config::load(&path).expect("load")
+                }
+            });
+            assert_eq!(
+                messages,
+                [
+                    "signin-with-chatgpt-identifier is retained for configuration compatibility; open-ferry always names itself as open-ferry."
+                ]
+            );
+        }
+        // Management's set_auth_indexes uses this parse path on v8 GETs.
+        let (_, messages) =
+            logged(|| Config::parse(fs::read(&path).expect("read")).expect("management parse"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn signin_with_chatgpt_identifier_reload_logs_no_values() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+
+        struct Capture(Arc<Mutex<String>>);
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                struct Fields(String);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.push_str(&format!("{field}={value:?}\n"));
+                    }
+                }
+                let mut fields = Fields(String::new());
+                event.record(&mut fields);
+                self.0.lock().expect("capture").push_str(&fields.0);
+            }
+        }
+        crate::test_tracing::keep_every_callsite_open();
+        let dir = TempDir::new();
+        let path = dir.write(
+            "config.yaml",
+            "codex: {signin-with-chatgpt-identifier: old_private_identifier}\n",
+        );
+        let old = Config::load(&path).expect("startup");
+        fs::write(
+            &path,
+            "codex: {signin-with-chatgpt-identifier: new_private_identifier}\n",
+        )
+        .expect("change");
+        let output = Arc::new(Mutex::new(String::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&output)));
+        tracing::subscriber::with_default(subscriber, || {
+            let new = Config::load(&path).expect("reload");
+            crate::config::diff::log_changes(&old, &new);
+        });
+        let output = output.lock().expect("captured");
+        assert!(output.contains("codex.signin-with-chatgpt-identifier: updated"));
+        for value in [
+            "old_private_identifier",
+            "new_private_identifier",
+            "private_identifier",
+        ] {
+            assert!(!output.contains(value), "reload exposed a value");
+        }
+    }
+
+    #[test]
+    fn signin_with_chatgpt_identifier_debug_only_shows_whether_it_is_set() {
+        let mut config = Config::default();
+        assert!(format!("{config:?}").contains("signin_with_chatgpt_identifier_set: false"));
+        config.codex.signin_with_chatgpt_identifier = "private_debug_identifier".to_owned();
+        for output in [format!("{config:?}"), format!("{:?}", config.codex)] {
+            assert!(output.contains("signin_with_chatgpt_identifier_set: true"));
+            assert!(!output.contains("private_debug_identifier"));
+        }
+    }
+
+    #[test]
+    fn signin_with_chatgpt_identifier_save_inserts_after_response_steering() {
+        let original = b"codex: {response-steering: true}\n";
+        let mut config = Config::parse(original).expect("parse");
+        config.codex.signin_with_chatgpt_identifier = "compatibility_identifier".to_owned();
+        let out = crate::config::save::render_preserving_comments(original, &config, false)
+            .expect("save");
+        let saved = String::from_utf8(out).expect("utf-8");
+        assert!(
+            saved.find("response-steering:").expect("steering")
+                < saved
+                    .find("signin-with-chatgpt-identifier:")
+                    .expect("inserted")
+        );
+        assert_eq!(
+            parse(&saved).codex.signin_with_chatgpt_identifier,
+            "compatibility_identifier"
+        );
     }
 
     // config_v8_test.go
@@ -2015,7 +2137,7 @@ mod tests {
         routing: {strategy: fill-first}\nws-auth: true\nforce-model-prefix: true\n\
         codex: {stream-bootstrap-buffering: true, stream-bootstrap-timeout: 20s, \
         orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true, \
-        optimize-multi-agent-v2: true}\n\
+        optimize-multi-agent-v2: true, signin-with-chatgpt-identifier: ' compatibility '}\n\
         codex-header-defaults: {beta-features: ' b1,b2 '}\nclaude: {model-level-cooling: true}\n\
         codex-api-key:\n  - api-key: ck\n    priority: 2\n    weight: 5\n    prefix: /team/\n    \
         base-url: https://codex.invalid\n    websockets: true\n    proxy-url: direct\n    \
@@ -2050,7 +2172,7 @@ mod tests {
         panel-github-repository: ' https://example.invalid/panel '\n\
         oauth:\n    auth-dir: ~/auth\n    auth-auto-refresh-workers: 4\n    providers:\n        \
         antigravity:\n            antigravity-credits: true\n        aistudio:\n            \
-        ws-auth: true\n        codex:\n            header-defaults:\n                \
+        ws-auth: true\n        codex:\n            signin-with-chatgpt-identifier: ' compatibility '\n            header-defaults:\n                \
         beta-features: ' b1,b2 '\n    excluded-models: {Codex: [A, a]}\n    \
         model-alias: {codex: [{name: n, alias: al, fork: true}]}\n    \
         request-scoped-errors: {claude: [{status: 429, match: [rate], action: continue}]}\n    \
@@ -2083,6 +2205,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "codex-header-defaults.beta-features",
+                "codex.signin-with-chatgpt-identifier",
                 "quota-exceeded.antigravity-credits",
                 "ws-auth"
             ]
