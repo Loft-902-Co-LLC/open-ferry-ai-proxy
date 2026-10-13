@@ -131,6 +131,12 @@ fn main() -> ExitCode {
         .as_ref()
         .ok()
         .map(|dir| load_dotenv(&dir.join(".env")));
+    if let Some(Err(error)) = &dotenv
+        && error.is_refused()
+    {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
     serve(flags, working_dir, dotenv, service::shutdown_signal())
 }
 
@@ -177,6 +183,10 @@ fn serve(
 /// doesn't have, as upstream's `godotenv.Load` does. A file that doesn't
 /// parse sets none. Nothing from the file is logged.
 fn load_dotenv(path: &Path) -> Result<(), dotenv::Error> {
+    if !dotenv::authorize(&scope::Host, path)? {
+        // Don't reopen a missing file in an unchecked directory after the check.
+        return Err(dotenv::Error::Read(io::ErrorKind::NotFound.into()));
+    }
     let vars = dotenv::read(path)?;
     for (key, value) in dotenv::missing(vars, dotenv::in_environment) {
         // SAFETY: `main` calls this before it starts any thread (the log

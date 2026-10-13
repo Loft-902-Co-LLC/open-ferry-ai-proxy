@@ -10,7 +10,7 @@
 //! can't be looked at or resolved included); 2 usage (the arguments are wrong);
 //! 3 a supervisor runs; 4 whether one runs can't be told; 5 the wait ran
 //! out; 6 partly changed and the restore failed.
-//! Scope, privilege and destination trust refusals exit 1, before any lock
+//! Scope, privilege and source/destination trust refusals exit 1, before any lock
 //! or replacement. `-system` provisions the machine's update records.
 
 use std::fs;
@@ -169,7 +169,14 @@ fn run_for_real(options: &Options, system: bool) -> Exit {
             return Exit::Usage;
         }
     };
-    let home = match install_home(&mut scope::Host, destination, system) {
+    let source = match options.from.to_str() {
+        Some(source) => source,
+        None => {
+            eprintln!("{NAME}: -from isn't valid Unicode text. Nothing was changed.");
+            return Exit::Usage;
+        }
+    };
+    let home = match install_home(&mut scope::Host, source, destination, system) {
         Ok(home) => home,
         Err(error) => {
             eprintln!("{NAME}: {error}");
@@ -226,6 +233,7 @@ fn run_for_real(options: &Options, system: bool) -> Exit {
 /// Selects the destination's records before a lock, stop or replacement.
 fn install_home(
     probe: &mut dyn scope::Probe,
+    source: &str,
     destination: &str,
     system: bool,
 ) -> Result<scope::Home, scope::Refusal> {
@@ -240,6 +248,17 @@ fn install_home(
     {
         return scope::provision(probe);
     }
+    let source_trust = probe.trusted_file(source).and_then(|()| {
+        let parent = probe
+            .platform()
+            .parent(source)
+            .ok_or_else(|| format!("{source} has no source directory"))?;
+        probe.trusted_dir(&parent)
+    });
+    source_trust.map_err(|reason| scope::Refusal {
+        reason: format!("Refusing -from {source}: {reason}"),
+        remedy: Some("As root or an administrator, stage the installer binary in a directory writable only by root or administrators, then run it again with -system.".to_owned()),
+    })?;
     let trust = match probe.state(destination) {
         scope::State::Missing => match probe.platform().parent(destination) {
             Some(parent) => probe.trusted_dir(&parent),
@@ -248,8 +267,8 @@ fn install_home(
         _ => probe.trusted_file(destination),
     };
     trust.map_err(|reason| scope::Refusal {
-        reason,
-        remedy: Some("As root or an administrator, fix the destination's ownership and permissions, then run the installer again with -system.".to_owned()),
+        reason: format!("Refusing -to {destination}: {reason}"),
+        remedy: Some("As root or an administrator, fix the destination's ownership and permissions, or choose a trusted directory with --bin-dir / -InstallDir, then run the installer again with -system.".to_owned()),
     })?;
     let home = scope::provision(probe)?;
     home.require_privilege()?;
@@ -1355,12 +1374,12 @@ mod scope_tests {
         let mut probe = Fake::new(Platform::Windows, false);
         let machine = scope::machine_root(&probe).unwrap().unwrap();
         probe.file(DEST).with_receipt(&machine, DEST);
-        let refusal = install_home(&mut probe, DEST, false)
+        let refusal = install_home(&mut probe, "C:/secure/staged.exe", DEST, false)
             .unwrap_err()
             .to_string();
         assert!(refusal.contains("terminal opened as administrator"));
         probe.privileged = Ok(true);
-        let home = install_home(&mut probe, DEST, false).unwrap();
+        let home = install_home(&mut probe, "C:/secure/staged.exe", DEST, false).unwrap();
         assert_eq!(home.scope, Scope::Machine);
         assert_eq!(home.kind, ServiceKind::System);
         assert_eq!(home.data.root(), Path::new(&machine));
@@ -1374,11 +1393,13 @@ mod scope_tests {
             let account = probe.account_dir().unwrap();
             probe.dir(&account).untrust(&account);
             assert_eq!(
-                install_home(&mut probe, DEST, false).unwrap().scope,
+                install_home(&mut probe, "C:/secure/staged.exe", DEST, false)
+                    .unwrap()
+                    .scope,
                 Scope::Account
             );
             probe.privileged = Ok(true);
-            let refusal = install_home(&mut probe, DEST, false)
+            let refusal = install_home(&mut probe, "C:/secure/staged.exe", DEST, false)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -1396,12 +1417,12 @@ mod scope_tests {
     fn system_install_needs_privilege_and_macos_refuses_before_provisioning() {
         for platform in [Platform::Windows, Platform::Linux, Platform::MacOs] {
             let mut probe = Fake::new(platform, false);
-            assert!(install_home(&mut probe, DEST, true).is_err());
+            assert!(install_home(&mut probe, "C:/secure/staged.exe", DEST, true).is_err());
             assert!(probe.created.is_empty());
             if platform == Platform::MacOs {
                 probe.privileged = Ok(true);
                 assert!(
-                    install_home(&mut probe, DEST, true)
+                    install_home(&mut probe, "C:/secure/staged.exe", DEST, true)
                         .unwrap_err()
                         .to_string()
                         .contains("macOS")
@@ -1422,7 +1443,7 @@ mod scope_tests {
             } else {
                 probe.untrust(&parent);
             }
-            let refusal = install_home(&mut probe, DEST, true)
+            let refusal = install_home(&mut probe, "C:/secure/staged.exe", DEST, true)
                 .unwrap_err()
                 .to_string();
             assert!(refusal.contains("untrusted"), "{refusal}");
@@ -1431,15 +1452,49 @@ mod scope_tests {
     }
 
     #[test]
+    fn system_install_checks_the_source_file_and_directory_before_provisioning() {
+        for path in ["C:/secure/staged.exe", "C:/secure"] {
+            let mut probe = Fake::new(Platform::Windows, true);
+            probe.file(DEST).untrust(path);
+            let refusal = install_home(&mut probe, "C:/secure/staged.exe", DEST, true)
+                .unwrap_err()
+                .to_string();
+            assert!(refusal.contains("-from C:/secure/staged.exe"), "{refusal}");
+            assert!(
+                refusal.contains("writable only by root or administrators"),
+                "{refusal}"
+            );
+            assert!(probe.created.is_empty());
+        }
+    }
+
+    #[test]
+    fn root_may_install_to_its_own_trusted_account_without_system() {
+        let mut probe = Fake::new(Platform::Linux, true);
+        let account = probe.account_dir().unwrap();
+        probe.dir(&account);
+        let home = install_home(
+            &mut probe,
+            "/root/staged",
+            "/root/.local/bin/open-ferry",
+            false,
+        )
+        .unwrap();
+        assert_eq!(home.scope, Scope::Account);
+        assert_eq!(home.data.root(), Path::new(&account));
+        assert!(probe.created.is_empty());
+    }
+
+    #[test]
     fn system_provisioning_refusal_is_passed_through_and_success_uses_machine_receipts() {
         let mut probe = Fake::new(Platform::Windows, true);
         probe.file(DEST);
         probe.create = Some(io::ErrorKind::PermissionDenied);
-        let refusal = install_home(&mut probe, DEST, true).unwrap_err();
+        let refusal = install_home(&mut probe, "C:/secure/staged.exe", DEST, true).unwrap_err();
         let expected = scope::provision(&mut probe).unwrap_err();
         assert_eq!(refusal, expected);
         probe.create = None;
-        let home = install_home(&mut probe, DEST, true).unwrap();
+        let home = install_home(&mut probe, "C:/secure/staged.exe", DEST, true).unwrap();
         let root = scope::machine_root(&probe).unwrap().unwrap();
         assert_eq!(home.scope, Scope::Machine);
         assert_eq!(home.kind, ServiceKind::System);
@@ -1457,7 +1512,7 @@ mod scope_tests {
         let mut probe = Fake::new(Platform::Windows, false);
         let machine = scope::machine_root(&probe).unwrap().unwrap();
         probe.node(&machine, Node::Hidden);
-        let home = install_home(&mut probe, DEST, false).unwrap();
+        let home = install_home(&mut probe, "C:/secure/staged.exe", DEST, false).unwrap();
         assert!(home.machine_hint.unwrap().contains("whole machine"));
     }
 
@@ -1487,7 +1542,13 @@ mod scope_tests {
         probe.program_data = Ok(dir.path().join("ProgramData").to_str().unwrap().to_owned());
         probe.account = Ok(dir.path().join("account").to_str().unwrap().to_owned());
         probe.dir(bin.to_str().unwrap());
-        let home = install_home(&mut probe, to.to_str().unwrap(), true).unwrap();
+        let home = install_home(
+            &mut probe,
+            from.to_str().unwrap(),
+            to.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
         assert_eq!(home.kind, ServiceKind::System);
         assert!(home.data.root().starts_with(dir.path()));
         fs::create_dir_all(home.data.root()).unwrap();

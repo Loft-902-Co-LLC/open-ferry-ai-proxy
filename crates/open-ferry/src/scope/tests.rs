@@ -830,14 +830,30 @@ fn the_machine_auth_directory_is_in_the_machine_data_directory() {
 #[test]
 fn machine_configs_are_where_the_install_scripts_put_them() {
     assert_eq!(
-        machine_config(Platform::Linux, BINARY).as_deref(),
+        machine_config(&Fake::new(Platform::Linux, true))
+            .unwrap()
+            .as_deref(),
         Some("/etc/open-ferry/config.yaml")
     );
     assert_eq!(
-        machine_config(Platform::Windows, &Platform::Windows.clean(WINDOWS_BINARY)),
-        Some(Platform::Windows.clean("C:/Program Files/open-ferry/config.yaml"))
+        machine_config(&Fake::new(Platform::Windows, true)).unwrap(),
+        Some(Platform::Windows.clean("C:/ProgramData/open-ferry/config.yaml"))
     );
-    assert_eq!(machine_config(Platform::MacOs, BINARY), None);
+    assert_eq!(
+        machine_config(&Fake::new(Platform::MacOs, true)).unwrap(),
+        None
+    );
+    let mut probe = Fake::new(Platform::Windows, true);
+    probe.program_data = Ok("D:/MachineData".to_owned());
+    assert_eq!(
+        machine_config(&probe).unwrap(),
+        Some(Platform::Windows.clean("D:/MachineData/open-ferry/config.yaml"))
+    );
+    probe.program_data = Err("known folder unavailable".to_owned());
+    assert_eq!(
+        machine_config(&probe),
+        Err("known folder unavailable".to_owned())
+    );
 }
 
 #[test]

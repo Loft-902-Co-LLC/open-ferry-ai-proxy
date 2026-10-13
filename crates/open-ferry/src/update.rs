@@ -240,6 +240,14 @@ where
     if let Err(error) = crate::load_dotenv(&dotenv)
         && !error.is_not_found()
     {
+        if error.is_refused() {
+            let outcome = Outcome::new(
+                request.action(),
+                &Settings::resolve(&Default::default(), None),
+            )
+            .failed(&mut console, error.to_string());
+            return console.finish(outcome);
+        }
         eprintln!(
             "{NAME}: {} doesn't load, so none of it is set: {error}",
             dotenv.display()
@@ -248,7 +256,6 @@ where
     let path = match command_config(
         &scope::Host,
         &home,
-        &binary,
         request,
         &options.config,
         &working_dir,
@@ -295,7 +302,6 @@ fn say_machine_hint(home: &scope::Home, console: &mut Console<'_>) {
 fn command_config(
     probe: &dyn scope::Probe,
     home: &scope::Home,
-    binary: &Path,
     request: Request,
     flag: &str,
     working_dir: &Path,
@@ -303,9 +309,7 @@ fn command_config(
 ) -> Result<PathBuf, String> {
     if home.scope == scope::Scope::Machine && matches!(request, Request::Mode(_)) && flag.is_empty()
     {
-        if let Some(path) = binary
-            .to_str()
-            .and_then(|binary| scope::machine_config(probe.platform(), binary))
+        if let Some(path) = scope::machine_config(probe)?
             && probe.state(&path) == scope::State::File
         {
             return Ok(PathBuf::from(path));

@@ -10,6 +10,9 @@
 //! not have. The feature gate is the same on both sides.
 #![cfg(feature = "blue-green-test")]
 
+#[path = "support/privilege.rs"]
+mod privilege;
+
 #[path = "../../open-ferry-supervisor/tests/under_test/mod.rs"]
 mod under_test;
 
@@ -107,6 +110,12 @@ fn wait_answer(sup: &mut Sup, port: u16, dump: &dyn Fn() -> String) -> (u16, Opt
 
 #[test]
 fn the_real_supervisor_starts_serves_and_stops_through_its_endpoint() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped the_real_supervisor_starts_serves_and_stops_through_its_endpoint: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     assert_eq!(kind(), Kind::Real);
     let _permit = Permit::take();
     let dir = scratch();
@@ -180,6 +189,12 @@ fn the_real_supervisor_starts_serves_and_stops_through_its_endpoint() {
 #[cfg(unix)]
 #[test]
 fn a_terminate_signal_stops_the_supervisor_and_its_worker() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped a_terminate_signal_stops_the_supervisor_and_its_worker: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     assert_eq!(kind(), Kind::Real);
     let _permit = Permit::take();
     let dir = scratch();

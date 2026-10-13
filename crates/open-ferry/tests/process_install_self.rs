@@ -17,6 +17,9 @@
 //! `process_supervise.rs`).
 #![cfg(feature = "blue-green-test")]
 
+#[path = "support/privilege.rs"]
+mod privilege;
+
 #[path = "../../open-ferry-supervisor/tests/under_test/mod.rs"]
 mod under_test;
 
@@ -247,6 +250,12 @@ fn aside_files(fx: &Fx) -> Vec<String> {
 /// with exit 3, and nothing is changed or stopped.
 #[test]
 fn a_live_supervisor_refuses_the_install_with_exit_3_and_nothing_changes() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped a_live_supervisor_refuses_the_install_with_exit_3_and_nothing_changes: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     let fx = fixture();
     let staged = stage_installer(&fx);
     seed_receipt(&fx);
@@ -275,6 +284,12 @@ fn a_live_supervisor_refuses_the_install_with_exit_3_and_nothing_changes() {
 /// supervisor lock fails this test.
 #[test]
 fn a_held_supervisor_lock_with_no_supervisor_serving_refuses_the_install_with_exit_3() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped a_held_supervisor_lock_with_no_supervisor_serving_refuses_the_install_with_exit_3: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     let fx = fixture();
     let staged = stage_installer(&fx);
     seed_receipt(&fx);
@@ -297,6 +312,12 @@ fn a_held_supervisor_lock_with_no_supervisor_serving_refuses_the_install_with_ex
 /// above.
 #[test]
 fn a_supervisor_starting_while_the_install_waits_refuses_it_whoever_gets_the_update_lock() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped a_supervisor_starting_while_the_install_waits_refuses_it_whoever_gets_the_update_lock: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     let fx = fixture();
     let staged = stage_installer(&fx);
     let update = DataDir::at(fx.data())
@@ -334,6 +355,12 @@ fn a_supervisor_starting_while_the_install_waits_refuses_it_whoever_gets_the_upd
 /// wrong deadline would show.
 #[test]
 fn an_install_lock_held_elsewhere_is_waited_out_with_exit_5_in_the_wait() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped an_install_lock_held_elsewhere_is_waited_out_with_exit_5_in_the_wait: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     let fx = fixture();
     let staged = stage_installer(&fx);
     let held = InstallLock::try_acquire(&fx.installed()).unwrap();
@@ -358,6 +385,12 @@ fn an_install_lock_held_elsewhere_is_waited_out_with_exit_5_in_the_wait() {
 /// and a supervisor started afterwards runs the new bytes.
 #[test]
 fn with_no_supervisor_the_install_replaces_the_binary_and_a_later_supervisor_runs_it() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped with_no_supervisor_the_install_replaces_the_binary_and_a_later_supervisor_runs_it: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     let fx = fixture();
     fx.stage(B, "B");
     let staged = stage_installer(&fx);

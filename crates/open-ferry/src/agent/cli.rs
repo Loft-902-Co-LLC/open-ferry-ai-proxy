@@ -263,7 +263,11 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
             );
         }
     };
-    let _ = crate::load_dotenv(&working_dir.join(".env"));
+    if let Err(error) = crate::load_dotenv(&working_dir.join(".env"))
+        && error.is_refused()
+    {
+        return fail(&Failure::new("failed", error.to_string()), json);
+    }
     let flag = parsed.value("config").unwrap_or_default();
     let path = config_path(&flag, &working_dir, crate::installed::config_path());
     let key_file = parsed.value("management-key-file").map(PathBuf::from);

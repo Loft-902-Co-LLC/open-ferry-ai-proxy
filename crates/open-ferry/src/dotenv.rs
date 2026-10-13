@@ -57,6 +57,8 @@ const BACKSLASH: u8 = b'\\';
 /// Why a `.env` file wasn't loaded.
 #[derive(Debug)]
 pub enum Error {
+    /// A privileged process refused a file another account could change.
+    Refused(crate::scope::Refusal),
     /// The file couldn't be read.
     Read(io::Error),
     /// The file doesn't parse at `line`, counted from 1.
@@ -64,6 +66,11 @@ pub enum Error {
 }
 
 impl Error {
+    /// Whether loading was refused at the privilege boundary.
+    pub fn is_refused(&self) -> bool {
+        matches!(self, Error::Refused(_))
+    }
+
     /// Whether there is no file, which upstream doesn't warn about.
     pub fn is_not_found(&self) -> bool {
         matches!(self, Error::Read(error) if error.kind() == io::ErrorKind::NotFound)
@@ -73,6 +80,7 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::Refused(refusal) => refusal.fmt(f),
             Error::Read(error) => error.fmt(f),
             Error::Parse { line, problem } => write!(f, "{problem} on line {line}"),
         }
@@ -82,8 +90,68 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Error::Refused(_) => None,
             Error::Read(error) => Some(error),
             Error::Parse { .. } => None,
+        }
+    }
+}
+
+/// Checks a privileged process's file before anything from it is read or set.
+pub(crate) fn authorize(probe: &dyn crate::scope::Probe, path: &Path) -> Result<bool, Error> {
+    let refuse = |reason: String| {
+        Error::Refused(crate::scope::Refusal {
+        reason: format!("Refusing to load {}: {reason}", path.display()),
+        remedy: Some("As root or an administrator, make the file and its directories writable only by root or administrators, remove the file, or run without sudo / in a terminal not opened as administrator.".to_owned()),
+    })
+    };
+    let privileged = probe.privileged().map_err(refuse)?;
+    if !privileged {
+        return Ok(true);
+    }
+    let text = path
+        .to_str()
+        .ok_or_else(|| refuse("the path isn't valid Unicode".to_owned()))?;
+    if probe.state(text) == crate::scope::State::Missing {
+        return Ok(false);
+    }
+    probe.trusted_file(text).map(|()| true).map_err(refuse)
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+
+    #[test]
+    fn privileged_dotenv_loading_requires_a_trusted_file_and_names_the_remedy() {
+        for platform in [Platform::Linux, Platform::Windows, Platform::MacOs] {
+            let path = if platform == Platform::Windows {
+                "C:/work/.env"
+            } else {
+                "/work/.env"
+            };
+            let mut probe = Fake::new(platform, true);
+            // A missing file is never reopened in an unchecked directory.
+            probe.untrust(path);
+            assert!(!authorize(&probe, Path::new(path)).unwrap());
+            probe.file(path);
+            let error = authorize(&probe, Path::new(path)).unwrap_err();
+            assert!(error.is_refused());
+            assert!(error.to_string().contains(path));
+            assert!(error.to_string().contains("remove the file"));
+            assert!(!error.is_not_found());
+            probe.untrusted.clear();
+            assert!(authorize(&probe, Path::new(path)).unwrap());
+            let parent = platform.parent(path).unwrap();
+            probe.untrust(&parent);
+            assert!(authorize(&probe, Path::new(path)).unwrap_err().is_refused());
+            probe.privileged = Ok(false);
+            assert!(authorize(&probe, Path::new(path)).unwrap());
+            probe.privileged = Err("no token".to_owned());
+            assert!(authorize(&probe, Path::new(path)).unwrap_err().is_refused());
+            assert!(probe.reads.borrow().is_empty());
         }
     }
 }

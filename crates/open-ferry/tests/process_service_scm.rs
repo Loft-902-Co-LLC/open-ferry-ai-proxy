@@ -72,9 +72,10 @@ fn a_hand_run_system_supervisor_refuses_before_starting_any_worker() {
         "{output}"
     );
     assert!(!data.exists(), "startup touched the data directory");
+    let log = fs::read_to_string(root.path().join("service.log")).unwrap();
     assert!(
-        !root.path().join("service.log").exists(),
-        "the service started"
+        log.contains("a system supervisor runs only as the system service"),
+        "{log}"
     );
 }
 

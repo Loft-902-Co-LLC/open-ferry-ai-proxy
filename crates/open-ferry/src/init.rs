@@ -19,7 +19,8 @@
 //! The config goes to `-config`, else to the installed config path (see
 //! [`installed`]), and its directory is made. An existing
 //! file is replaced only with `-force`, and then kept as `<file name>.bak`.
-//! With `-system`, the machine install must already exist and be trusted;
+//! With `-system`, the default is the machine config. Its data directory must
+//! be trusted; on Windows a missing one is created with a protected DACL.
 //! its auth directory replaces the template's, and existing configs stay.
 //! The file is written by the config writer
 //! ([`write_as_is`](open_ferry_core::config::save::write_as_is)): checked
@@ -86,7 +87,7 @@ impl Default for Options {
 const DEFINITIONS: [Definition<Options>; 5] = [
     Definition {
         name: "config",
-        usage: "Write the config to this path (default: the installed config path, shown below)",
+        usage: "Write the config to this path (default: the installed config path, or the machine config with -system)",
         kind: Kind::String(|options, value| options.config = value),
     },
     Definition {
@@ -106,7 +107,7 @@ const DEFINITIONS: [Definition<Options>; 5] = [
     },
     Definition {
         name: "system",
-        usage: "Use the machine's auth directory; needs a trusted machine install and root or an administrator",
+        usage: "Use the machine's config and auth directory; needs root or an administrator (creates a missing protected machine directory on Windows)",
         kind: Kind::Bool(|options, value| options.system = value),
     },
 ];
@@ -151,18 +152,20 @@ where
         Ok(listen) => listen,
         Err(message) => return usage_error(program, &message),
     };
-    let path = if options.config.is_empty() {
-        match installed::config_path() {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("{NAME}: {error}");
-                return ExitCode::FAILURE;
-            }
+    let path = match config_path(&options, &scope::Host) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("{NAME}: {error}");
+            return ExitCode::FAILURE;
         }
-    } else {
-        PathBuf::from(&options.config)
     };
-    match init_scoped(&path, &listen, options.force, options.system, &scope::Host) {
+    match init_scoped(
+        &path,
+        &listen,
+        options.force,
+        options.system,
+        &mut scope::Host,
+    ) {
         Ok(written) => {
             print!("{}", report(program, &written));
             ExitCode::SUCCESS
@@ -172,6 +175,22 @@ where
             ExitCode::FAILURE
         }
     }
+}
+
+/// Explicit config, else the config for the requested scope.
+fn config_path(options: &Options, probe: &dyn scope::Probe) -> Result<PathBuf, String> {
+    if !options.config.is_empty() {
+        return Ok(PathBuf::from(&options.config));
+    }
+    if options.system {
+        return scope::machine_config(probe)?
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                "machine-wide installs on macOS come in a later version; run init without -system"
+                    .to_owned()
+            });
+    }
+    installed::config_path()
 }
 
 /// Shows `message` and the usage, for bad usage.
@@ -252,10 +271,16 @@ fn init_scoped(
     listen: &Listen,
     force: bool,
     system: bool,
-    probe: &dyn scope::Probe,
+    probe: &mut dyn scope::Probe,
 ) -> Result<Written, String> {
     if !system {
         return init(path, listen, force);
+    }
+    if probe.platform() == crate::os_service::Platform::Windows
+        && let Some(root) = scope::machine_root(probe)?
+        && probe.state(&root) == scope::State::Missing
+    {
+        scope::provision(probe).map_err(|refusal| refusal.to_string())?;
     }
     let auth_dir = scope::machine_auth_dir(probe).map_err(|refusal| refusal.to_string())?;
     if fs::symlink_metadata(path).is_ok() {
@@ -569,6 +594,8 @@ mod tests {
         state: scope::State,
         trust: Result<(), String>,
         program_data: String,
+        created: Vec<String>,
+        create_error: Option<io::ErrorKind>,
     }
 
     impl Fake {
@@ -579,6 +606,8 @@ mod tests {
                 state: scope::State::Directory,
                 trust: Ok(()),
                 program_data: r"C:\ProgramData".into(),
+                created: Vec::new(),
+                create_error: None,
             }
         }
     }
@@ -618,8 +647,13 @@ mod tests {
         fn canonical(&self, _path: &str) -> io::Result<String> {
             panic!("init does not resolve the installed binary")
         }
-        fn create_machine_dir(&mut self, _path: &str) -> io::Result<()> {
-            panic!("init must not provision the machine directory")
+        fn create_machine_dir(&mut self, path: &str) -> io::Result<()> {
+            if let Some(error) = self.create_error {
+                return Err(error.into());
+            }
+            self.created.push(path.to_owned());
+            self.state = scope::State::Directory;
+            Ok(())
         }
     }
 
@@ -636,7 +670,7 @@ mod tests {
                 &listen(DEFAULT_HOST, None),
                 false,
                 true,
-                &Fake::new(platform),
+                &mut Fake::new(platform),
             ));
             let config = Config::load(&path).unwrap();
             assert_eq!(config.auth_dir, expected);
@@ -645,6 +679,60 @@ mod tests {
             assert!(!config.auth_dir.is_empty());
             assert!(!config.auth_dir.starts_with('~'));
         }
+    }
+
+    #[test]
+    fn system_init_defaults_to_the_machine_config_and_keeps_an_explicit_path() {
+        let mut options = Options {
+            system: true,
+            ..Options::default()
+        };
+        for (platform, expected) in [
+            (Platform::Linux, "/etc/open-ferry/config.yaml"),
+            (Platform::Windows, r"C:\ProgramData\open-ferry\config.yaml"),
+        ] {
+            assert_eq!(
+                config_path(&options, &Fake::new(platform)).unwrap(),
+                Path::new(expected)
+            );
+        }
+        assert!(
+            config_path(&options, &Fake::new(Platform::MacOs))
+                .unwrap_err()
+                .contains("macOS")
+        );
+        options.config = "explicit.yaml".to_owned();
+        assert_eq!(
+            config_path(&options, &Fake::new(Platform::Windows)).unwrap(),
+            Path::new("explicit.yaml")
+        );
+    }
+
+    #[test]
+    fn windows_system_init_creates_a_missing_machine_directory_through_the_scope_probe() {
+        for privileged in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            let mut probe = Fake::new(Platform::Windows);
+            probe.state = scope::State::Missing;
+            probe.privileged = Ok(privileged);
+            let result = init_scoped(&path, &listen(DEFAULT_HOST, None), false, true, &mut probe);
+            if privileged {
+                written_or_panic(result);
+                assert_eq!(probe.created, [r"C:\ProgramData\open-ferry"]);
+            } else {
+                assert!(result.is_err());
+                assert!(probe.created.is_empty());
+                assert!(!path.exists());
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut probe = Fake::new(Platform::Windows);
+        probe.state = scope::State::Missing;
+        probe.create_error = Some(io::ErrorKind::PermissionDenied);
+        assert!(init_scoped(&path, &listen(DEFAULT_HOST, None), false, true, &mut probe).is_err());
+        assert!(!path.exists());
     }
 
     #[test]
@@ -658,7 +746,7 @@ mod tests {
             &listen(DEFAULT_HOST, None),
             false,
             true,
-            &fake,
+            &mut fake,
         ));
         assert_eq!(
             Config::load(&path).unwrap().auth_dir,
@@ -682,6 +770,9 @@ mod tests {
                 scope::State::Inaccessible("access denied".into()),
             ] {
                 let mut fake = Fake::new(platform);
+                if platform == Platform::Windows && state == scope::State::Missing {
+                    continue;
+                }
                 fake.state = state;
                 cases.push(fake);
             }
@@ -689,11 +780,12 @@ mod tests {
             untrusted.trust = Err("machine directory is writable by another account".into());
             cases.push(untrusted);
         }
-        for fake in cases {
+        for mut fake in cases {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("new").join("config.yaml");
             let expected = scope::machine_auth_dir(&fake).unwrap_err().to_string();
-            let Err(error) = init_scoped(&path, &listen(DEFAULT_HOST, None), false, true, &fake)
+            let Err(error) =
+                init_scoped(&path, &listen(DEFAULT_HOST, None), false, true, &mut fake)
             else {
                 panic!("wrote a config despite a scope refusal");
             };
@@ -713,7 +805,7 @@ mod tests {
                 &listen(DEFAULT_HOST, None),
                 force,
                 true,
-                &Fake::new(Platform::Linux),
+                &mut Fake::new(Platform::Linux),
             ) else {
                 panic!("system init rewrote an existing config");
             };

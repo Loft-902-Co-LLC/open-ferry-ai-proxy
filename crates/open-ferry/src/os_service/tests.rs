@@ -241,6 +241,9 @@ fn context(platform: Platform, exe: &str, cwd: &str, env: &[(&str, &str)]) -> Co
         cwd: cwd.to_owned(),
         env,
         installed_config,
+        machine_config: scope::machine_config(&crate::update::scope_probe::Fake::new(
+            platform, true,
+        )),
     }
 }
 
@@ -1504,7 +1507,7 @@ fn installs_a_windows_service() {
             "run sc.exe query open-ferry",
             r#"run sc.exe create open-ferry binPath= "\"C:\Program Files\open-ferry\open-ferry.exe\" service run -system -config \"C:\Program Files\open-ferry\config.yaml\"" start= auto DisplayName= open-ferry"#,
             r#"run sc.exe description open-ferry "open-ferry AI proxy""#,
-            "run sc.exe failure open-ferry reset= 86400 actions= restart/5000",
+            "run sc.exe failure open-ferry reset= 86400 actions= restart/5000/restart/60000/restart/60000",
             "run sc.exe failureflag open-ferry 1",
             "run sc.exe start open-ferry",
         ]
@@ -1550,6 +1553,8 @@ fn a_windows_service_needs_an_administrator_and_protected_files() {
 
     let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
     let mut fake = fake.file(r"C:\ProgramData\open-ferry\config.yaml", SYSTEM_CONFIG);
+    fake.untrusted
+        .insert(r"C:\ProgramData\open-ferry\config.yaml".to_owned());
     fake.events.clear();
     let (result, _) = execute_with(
         &mut fake,
@@ -1564,7 +1569,7 @@ fn a_windows_service_needs_an_administrator_and_protected_files() {
     assert!(
         result
             .unwrap_err()
-            .contains(r"; C:\ProgramData\open-ferry\config.yaml isn't."),
+            .contains(r"C:\ProgramData\open-ferry\config.yaml failed the system trust check"),
     );
 }
 
@@ -3809,6 +3814,18 @@ fn the_host_stops_a_system_supervisor_only_through_a_trusted_directory() {
     // A directory another account can change: the test's own on Windows,
     // and one anybody may write to on Unix.
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("icacls.exe")
+            .arg(dir.path())
+            .args(["/grant", "*S-1-1-0:(W)"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "failed to grant scratch write access"
+        );
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3839,6 +3856,30 @@ fn machine_definition(supervised: bool) -> Definition {
 
 fn machine_context() -> Context {
     context(Platform::Linux, MACHINE_EXE, "/root", &[("HOME", "/root")])
+}
+
+#[test]
+fn a_system_service_defaults_to_the_machine_config() {
+    let mut fake = Fake::default().uid(0).file(MACHINE_CONFIG, SYSTEM_CONFIG);
+    assert_eq!(
+        execute_with(&mut fake, &machine_context(), &["install", "-system"]).0,
+        Ok(())
+    );
+    assert!(text(&fake, SYSTEM_UNIT).contains("-config \"/etc/open-ferry/config.yaml\""));
+
+    let (fake, context) = windows_admin(PROGRAM_FILES_EXE);
+    let config = r"C:\ProgramData\open-ferry\config.yaml";
+    let mut fake = fake.file(config, r"auth-dir: 'C:\ProgramData\open-ferry\auth'");
+    assert_eq!(
+        execute_with(&mut fake, &context, &["install", "-system"]).0,
+        Ok(())
+    );
+    assert!(
+        fake.events
+            .iter()
+            .any(|event| event.starts_with("run sc.exe create")
+                && event.contains(r"C:\ProgramData\open-ferry\config.yaml"))
+    );
 }
 
 fn scm_definition(supervised: bool) -> Definition {
@@ -3895,7 +3936,7 @@ fn writes_a_supervised_scm_service() {
         [
             r#"sc.exe create open-ferry binPath= "\"C:\Program Files\open-ferry\open-ferry.exe\" service run -system -supervise -config \"C:\Program Files\open-ferry\config.yaml\" -data-dir \"C:\ProgramData\open-ferry\"" start= auto DisplayName= open-ferry"#,
             r#"sc.exe description open-ferry "open-ferry AI proxy""#,
-            "sc.exe failure open-ferry reset= 86400 actions= restart/5000",
+            "sc.exe failure open-ferry reset= 86400 actions= restart/5000/restart/60000/restart/60000",
             "sc.exe failureflag open-ferry 1",
             "sc.exe start open-ferry",
         ]
@@ -4341,6 +4382,7 @@ fn scm_uninstall_stops_the_system_supervisor_then_waits_before_delete_and_record
         scm_states(
             &mut fake,
             &[
+                // target.installed consumes RUNNING; the wait starts at STOP_PENDING.
                 "STATE : 4 RUNNING",
                 "STATE : 3 STOP_PENDING",
                 "STATE : 1 STOPPED",
@@ -4364,6 +4406,75 @@ fn scm_uninstall_stops_the_system_supervisor_then_waits_before_delete_and_record
             ]
         );
     }
+}
+
+#[test]
+fn scm_stopped_on_the_last_poll_counts_when_the_clock_overshoots() {
+    let (mut fake, _) = scm_fake();
+    scm_states(&mut fake, &["STATE : 3 STOP_PENDING", "STATE : 1 STOPPED"]);
+    let ticks = RefCell::new(VecDeque::from([
+        Duration::ZERO,
+        scm_stop_budget() + Duration::from_millis(5),
+    ]));
+    let mut out = Vec::new();
+    assert_eq!(
+        wait_service_stopped_with_clock(&mut fake, &mut out, || ticks
+            .borrow_mut()
+            .pop_front()
+            .unwrap()),
+        Ok(())
+    );
+    assert_eq!(
+        events(&fake),
+        [
+            "run sc.exe query open-ferry",
+            "pause 1s",
+            "run sc.exe query open-ferry"
+        ]
+    );
+}
+
+#[test]
+fn a_system_service_refuses_an_untrusted_dotenv_in_its_working_directory() {
+    let fake = Fake::default().uid(0).file(MACHINE_CONFIG, SYSTEM_CONFIG);
+    let context = machine_context();
+    let dotenv = "/etc/open-ferry/.env";
+    let mut fake = fake.file(dotenv, "unused");
+    fake.untrusted.insert(dotenv.to_owned());
+    let (result, _) = execute_with(
+        &mut fake,
+        &context,
+        &[
+            "install",
+            "-system",
+            "-config",
+            "/etc/open-ferry/config.yaml",
+        ],
+    );
+    let error = result.unwrap_err();
+    assert!(error.contains(dotenv), "{error}");
+    assert!(error.contains("remove it"), "{error}");
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.starts_with("write ") || event.starts_with("mkdir "))
+    );
+    fake.untrusted.clear();
+    assert_eq!(
+        execute_with(
+            &mut fake,
+            &context,
+            &[
+                "install",
+                "-system",
+                "-config",
+                "/etc/open-ferry/config.yaml"
+            ]
+        )
+        .0,
+        Ok(())
+    );
 }
 
 #[test]

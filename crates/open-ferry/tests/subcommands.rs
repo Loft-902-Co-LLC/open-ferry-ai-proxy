@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+#[path = "support/privilege.rs"]
+mod privilege;
+
 const OPEN_FERRY: &str = env!("CARGO_BIN_EXE_open-ferry");
 
 /// Runs open-ferry with `args` in `dir`, which has no `.env`. Its data
@@ -30,12 +33,36 @@ fn run(dir: &Path, args: &[&str]) -> Output {
         .env_remove("OPEN_FERRY_SELF_UPDATE")
         .env("LOCALAPPDATA", &data)
         .env("XDG_DATA_HOME", &data)
+        .env("HOME", dir)
+        .env("APPDATA", dir)
+        .env("USERPROFILE", dir)
         .output()
         .unwrap()
 }
 
 fn code(output: &Output) -> Option<i32> {
     output.status.code()
+}
+
+/// Makes the privilege-boundary assertion independent of CI's inherited ACLs.
+fn untrust(dir: &Path) {
+    #[cfg(windows)]
+    {
+        let output = Command::new("icacls.exe")
+            .arg(dir)
+            .args(["/grant", "*S-1-1-0:(W)"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "failed to grant scratch write access"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
 }
 
 /// A port on 127.0.0.1 that nothing listens on, while the socket lives.
@@ -51,6 +78,7 @@ fn closed_port() -> (tokio::net::TcpSocket, u16) {
 #[test]
 fn init_writes_a_config_that_check_passes() {
     let dir = tempfile::tempdir().unwrap();
+    untrust(dir.path());
     let (_socket, port) = closed_port();
     let path = dir.path().join("conf").join("config.yaml");
     let shown = path.display().to_string();
@@ -90,11 +118,30 @@ fn init_writes_a_config_that_check_passes() {
     std::fs::write(&path, text).unwrap();
 
     let check = run(dir.path(), &["check", "-config", &shown, "-json"]);
-    assert_eq!(code(&check), Some(0));
+    assert_eq!(
+        code(&check),
+        Some(if privilege::privileged() { 1 } else { 0 })
+    );
     let out = String::from_utf8(check.stdout).unwrap();
     assert!(!out.contains(&client_key) && !out.contains(&management_key));
     let report: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(report["errors"], 0, "{report:#}");
+    assert_eq!(
+        report["errors"],
+        if privilege::privileged() { 1 } else { 0 },
+        "{report:#}"
+    );
+    if privilege::privileged() {
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["check"] == "self-update"
+                    && finding["message"].as_str().is_some_and(
+                        |message| message.contains("safe") || message.contains("macOS")
+                    ))
+        );
+    }
     assert_eq!(report["config"], shown.as_str());
     let checks: Vec<&str> = report["findings"]
         .as_array()
@@ -117,10 +164,22 @@ fn init_writes_a_config_that_check_passes() {
     );
 
     let check = run(dir.path(), &["check", "-config", &shown]);
-    assert_eq!(code(&check), Some(0));
+    assert_eq!(
+        code(&check),
+        Some(if privilege::privileged() { 1 } else { 0 })
+    );
     let out = String::from_utf8(check.stdout).unwrap();
     assert!(out.starts_with(&format!("ok      config: {shown} loads\n")));
-    assert!(out.lines().last().unwrap().starts_with("no errors, "));
+    assert!(
+        out.lines()
+            .last()
+            .unwrap()
+            .starts_with(if privilege::privileged() {
+                "1 error, "
+            } else {
+                "no errors, "
+            })
+    );
 
     let again = run(dir.path(), &["init", "-config", &shown]);
     assert_eq!(code(&again), Some(1));
@@ -656,6 +715,7 @@ fn mcp_serves_on_stdio() {
 #[test]
 fn update_shows_its_usage_and_sets_the_mode() {
     let dir = tempfile::tempdir().unwrap();
+    untrust(dir.path());
     let help = run(dir.path(), &["update", "-h"]);
     assert_eq!(code(&help), Some(0));
     let err = String::from_utf8(help.stderr).unwrap();
@@ -694,6 +754,19 @@ fn update_shows_its_usage_and_sets_the_mode() {
     std::fs::write(&path, "# Mine.\nport: 8317\n").unwrap();
     let shown = path.display().to_string();
     let set = run(dir.path(), &["update", "-mode", "off", "-config", &shown]);
+    if privilege::privileged() {
+        assert_eq!(code(&set), Some(1));
+        let error = String::from_utf8(set.stderr).unwrap();
+        assert!(
+            error.contains("administrator") || error.contains("without sudo"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# Mine.\nport: 8317\n"
+        );
+        return;
+    }
     assert_eq!(code(&set), Some(0));
     let out = String::from_utf8(set.stdout).unwrap();
     assert!(
@@ -703,4 +776,33 @@ fn update_shows_its_usage_and_sets_the_mode() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("# Mine.\n"), "{text}");
     assert!(text.contains("self-update:\n  mode: off\n"), "{text}");
+}
+
+#[test]
+fn privileged_entries_refuse_an_untrusted_dotenv_before_reading_config_or_running_commands() {
+    if !privilege::privileged() {
+        eprintln!(
+            "skipped privileged_entries_refuse_an_untrusted_dotenv_before_reading_config_or_running_commands: this test needs a privileged process; fake unit tests cover the gate on unprivileged runners"
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    untrust(dir.path());
+    std::fs::write(dir.path().join(".env"), "OFP_DOTENV_TEST=unused\n").unwrap();
+    for args in [
+        &["-config", "missing.yaml"][..],
+        &["check", "-config", "missing.yaml"][..],
+        &["config", "get", "--config", "missing.yaml"][..],
+    ] {
+        let output = run(dir.path(), args);
+        assert_eq!(code(&output), Some(1));
+        let errors = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(errors.contains("Refusing to load"), "{errors}");
+        assert!(errors.contains(".env"), "{errors}");
+        assert!(errors.contains("remove the file"), "{errors}");
+    }
 }

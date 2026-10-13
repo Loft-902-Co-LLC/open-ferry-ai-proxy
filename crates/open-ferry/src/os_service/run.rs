@@ -81,12 +81,6 @@ pub(super) fn main(
     system: bool,
     supervised: Option<&str>,
 ) -> ExitCode {
-    if system
-        && supervised.is_some()
-        && let Err(message) = crate::supervised::require_system_account()
-    {
-        return refuse_for_service_manager(message);
-    }
     let config = PathBuf::from(config);
     let dir = match (dir, config.parent()) {
         (Some(dir), _) if Path::new(dir).is_absolute() => PathBuf::from(dir),
@@ -109,6 +103,12 @@ pub(super) fn main(
         return ExitCode::FAILURE;
     }
     let log = dir.join(LOG_FILE);
+    if system
+        && supervised.is_some()
+        && let Err(message) = crate::supervised::require_system_account()
+    {
+        return refuse_for_service_manager(&log, message);
+    }
     if system {
         serve_for_service_manager(config, log, supervised.map(PathBuf::from))
     } else {
@@ -328,7 +328,8 @@ static EXITED: Mutex<Option<ExitCode>> = Mutex::new(None);
 /// Stopped with a service-specific failure. A hand run prints the same refusal.
 static REFUSED: Mutex<Option<String>> = Mutex::new(None);
 
-fn refuse_for_service_manager(message: String) -> ExitCode {
+fn refuse_for_service_manager(log: &Path, message: String) -> ExitCode {
+    note(log, &message);
     if let Ok(mut refused) = REFUSED.lock() {
         *refused = Some(message.clone());
     }
@@ -359,6 +360,11 @@ fn serve_for_service_manager(
         .as_ref()
         .ok()
         .map(|dir| crate::load_dotenv(&dir.join(".env")));
+    if let Some(Err(error)) = &dotenv
+        && error.is_refused()
+    {
+        return refuse_for_service_manager(&log, error.to_string());
+    }
     if let Ok(mut prepared) = PREPARED.lock() {
         *prepared = Some(Prepared {
             config,
@@ -481,6 +487,7 @@ impl StatusSequence {
         if self.exited {
             return None;
         }
+        let mut elapsed = Duration::ZERO;
         let (state, exit_code, checkpoint) = match event {
             StatusEvent::Started if self.stopping.is_none() => {
                 (ServiceState::Running, ServiceExitCode::Win32(0), 0)
@@ -491,7 +498,7 @@ impl StatusSequence {
                 (ServiceState::StopPending, ServiceExitCode::Win32(0), 1)
             }
             StatusEvent::Tick(now) => {
-                let elapsed = now.checked_sub(self.stopping?)?;
+                elapsed = now.checked_sub(self.stopping?)?;
                 if elapsed >= SUPERVISED_STOP_WAIT {
                     return None;
                 }
@@ -533,6 +540,8 @@ impl StatusSequence {
             checkpoint,
             wait_hint: if state == ServiceState::StopPending {
                 SUPERVISED_STOP_WAIT
+                    .saturating_sub(elapsed)
+                    .max(CHECKPOINT_EVERY * 2)
             } else {
                 Duration::ZERO
             },
@@ -584,15 +593,17 @@ fn supervise_as_service(prepared: Prepared) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let mut sequence = StatusSequence::default();
+    rotate(&prepared.log);
+    let _ = redirect_output(&prepared.log);
+    // Defence in depth: the entry point checked the account before dispatch.
     if let Err(message) = crate::supervised::require_system_account() {
+        note(&prepared.log, &message);
         eprintln!("{message}");
         if let Some(report) = sequence.event(StatusEvent::Exited(false)) {
             let _ = status.set_service_status(report);
         }
         return ExitCode::FAILURE;
     }
-    rotate(&prepared.log);
-    let _ = redirect_output(&prepared.log);
     if let Some(report) = sequence.event(StatusEvent::Started) {
         let _ = status.set_service_status(report);
     }
@@ -625,7 +636,11 @@ fn supervise_as_service(prepared: Prepared) -> ExitCode {
         config: prepared.config.to_string_lossy().into_owned(),
         system: true,
         supervise: true,
-        data_dir: prepared.supervised.unwrap().to_string_lossy().into_owned(),
+        data_dir: prepared
+            .supervised
+            .expect("serve_as_service selects this path only with a supervisor data directory")
+            .to_string_lossy()
+            .into_owned(),
         ..Flags::default()
     };
     let code = crate::supervised::supervise_service(&flags, prepared.dotenv, stopped);
@@ -743,7 +758,10 @@ mod tests {
         for (index, status) in pending.iter().enumerate() {
             assert_eq!(status.current_state, ServiceState::StopPending);
             assert_eq!(status.checkpoint, u32::try_from(index).unwrap() + 1);
-            assert_eq!(status.wait_hint, Duration::from_secs(60));
+            assert_eq!(
+                status.wait_hint,
+                Duration::from_secs((60 - index as u64 * 5).max(10))
+            );
             assert!(status.controls_accepted.is_empty());
         }
         reporter.event(StatusEvent::Exited(true));
@@ -949,6 +967,18 @@ mod tests {
                 .unwrap()
                 .len(),
             MAX_LOG + 1
+        );
+    }
+
+    #[test]
+    fn an_scm_refusal_is_written_to_the_service_log_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join(LOG_FILE);
+        note(&log, "a system supervisor runs only as the system service");
+        assert!(
+            fs::read_to_string(log)
+                .unwrap()
+                .contains("a system supervisor runs only as the system service")
         );
     }
 }

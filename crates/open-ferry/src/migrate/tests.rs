@@ -918,6 +918,9 @@ fn context(
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect(),
         installed_config: Ok(installed.to_owned()),
+        machine_config: crate::scope::machine_config(&crate::update::scope_probe::Fake::new(
+            platform, true,
+        )),
     }
 }
 

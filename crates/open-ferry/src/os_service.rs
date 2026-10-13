@@ -545,6 +545,8 @@ pub(crate) struct Context {
     /// The installed config path, or why there is none: the config when
     /// `-config` isn't given.
     pub(crate) installed_config: Result<String, String>,
+    /// The machine config from the platform's known location, never its environment.
+    pub(crate) machine_config: Result<Option<String>, String>,
 }
 
 /// The environment variables `service` and `migrate` read.
@@ -598,6 +600,7 @@ impl Context {
             cwd,
             env,
             installed_config: installed_config(),
+            machine_config: scope::machine_config(&scope::Host),
         })
     }
 
@@ -1604,6 +1607,11 @@ fn install(
     let platform = context.platform;
     let config = match &request.config {
         Some(path) => platform.absolute(&context.cwd, path)?,
+        None if target.system() && platform != Platform::MacOs => context
+            .machine_config
+            .as_ref()?
+            .clone()
+            .ok_or("there is no machine config: pass -config")?,
         None => platform.absolute(&context.cwd, context.installed_config.as_ref()?)?,
     };
     let Prepared {
@@ -1766,6 +1774,12 @@ pub(crate) fn prepare_install_with(
         system.trusted_dir(&working).map_err(|why| {
             format!("Refusing the system service: {working} failed the system trust check: {why}")
         })?;
+        let dotenv = platform.join(&working, ".env");
+        if system.exists(&dotenv) {
+            system.trusted_file(&dotenv).map_err(|why| {
+                format!("Refusing the system service: {dotenv} failed the system trust check: {why}. As root or an administrator, make the file and its directories writable only by root or administrators, or remove it.")
+            })?;
+        }
         if platform != Platform::MacOs {
             definition.data_dir = updating.pinned().map(str::to_owned);
         }
@@ -1850,7 +1864,7 @@ fn protected(
     let platform = context.platform;
     let (exe, config, dir) = match platform {
         Platform::Windows => {
-            let roots: Vec<&str> = [
+            let mut roots: Vec<&str> = [
                 "ProgramFiles",
                 "ProgramFiles(x86)",
                 "ProgramW6432",
@@ -1860,6 +1874,15 @@ fn protected(
             .filter_map(|name| context.var(name))
             .filter(|dir| platform.is_absolute(dir))
             .collect();
+            let machine_dir = context
+                .machine_config
+                .as_ref()
+                .ok()
+                .and_then(|config| config.as_deref())
+                .and_then(|config| platform.parent(config));
+            if let Some(dir) = machine_dir.as_deref() {
+                roots.push(dir);
+            }
             let program_files = context.var("ProgramFiles").unwrap_or(r"C:\Program Files");
             for path in [Some(context.exe.as_str()), Some(config), dir]
                 .into_iter()
@@ -2236,6 +2259,14 @@ fn scm_stop_budget() -> Duration {
 /// query positively says STOPPED. The accounted pauses bound fake runs too.
 fn wait_service_stopped(system: &mut dyn System, out: &mut dyn Write) -> Result<(), String> {
     let started = Instant::now();
+    wait_service_stopped_with_clock(system, out, || started.elapsed())
+}
+
+fn wait_service_stopped_with_clock(
+    system: &mut dyn System,
+    out: &mut dyn Write,
+    elapsed: impl Fn() -> Duration,
+) -> Result<(), String> {
     let budget = scm_stop_budget();
     let mut waited = Duration::ZERO;
     loop {
@@ -2244,8 +2275,8 @@ fn wait_service_stopped(system: &mut dyn System, out: &mut dyn Write) -> Result<
             Ok(answer) => windows_service_state(&cmd, &answer),
             Err(error) => ServiceState::Unknown(error.to_string()),
         };
-        let elapsed = started.elapsed().max(waited);
-        if state == ServiceState::Stopped && elapsed <= budget {
+        let elapsed = elapsed().max(waited);
+        if state == ServiceState::Stopped {
             say(out, format_args!("The Windows service is STOPPED."));
             return Ok(());
         }

@@ -13,6 +13,9 @@
 //! `process_supervise.rs` does.
 #![cfg(feature = "blue-green-test")]
 
+#[path = "support/privilege.rs"]
+mod privilege;
+
 #[path = "../../open-ferry-supervisor/tests/under_test/mod.rs"]
 mod under_test;
 
@@ -165,6 +168,12 @@ fn management_status(dotenv: Option<&str>) -> u16 {
 
 #[test]
 fn a_setting_only_the_dotenv_has_reaches_the_worker() {
+    if privilege::privileged() {
+        eprintln!(
+            "skipped a_setting_only_the_dotenv_has_reaches_the_worker: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+        );
+        return;
+    }
     assert_eq!(kind(), Kind::Real);
     // Without the file the management API is off; with it, on: the worker
     // read nothing itself, it has the supervisor's environment.
@@ -229,6 +238,12 @@ mod wrapper {
 
     #[test]
     fn the_wrapper_runs_the_supervisor_and_ends_it_with_itself() {
+        if privilege::privileged() {
+            eprintln!(
+                "skipped the_wrapper_runs_the_supervisor_and_ends_it_with_itself: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+            );
+            return;
+        }
         assert_eq!(kind(), Kind::Real);
         let _permit = Permit::take();
         let dir = scratch();
@@ -269,6 +284,12 @@ mod wrapper {
 
     #[test]
     fn the_uninstall_stop_ends_the_wrappers_supervisor_and_the_wrapper_with_it() {
+        if privilege::privileged() {
+            eprintln!(
+                "skipped the_uninstall_stop_ends_the_wrappers_supervisor_and_the_wrapper_with_it: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+            );
+            return;
+        }
         assert_eq!(kind(), Kind::Real);
         let _permit = Permit::take();
         let dir = scratch();
@@ -365,6 +386,12 @@ mod wrapper {
 
     #[test]
     fn the_wrapper_works_inside_an_outer_job() {
+        if privilege::privileged() {
+            eprintln!(
+                "skipped the_wrapper_works_inside_an_outer_job: this test needs an unprivileged account; the real CLI refuses user-writable scratch when privileged"
+            );
+            return;
+        }
         assert_eq!(kind(), Kind::Real);
         let _permit = Permit::take();
         // This process joins a job of its own with no limits, so the wrapper

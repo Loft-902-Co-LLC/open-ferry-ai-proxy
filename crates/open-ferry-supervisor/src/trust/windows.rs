@@ -965,11 +965,11 @@ mod tests {
 
     #[test]
     fn a_host_ancestor_with_untrusted_writers_is_refused_by_the_public_check() {
-        // Not upstream's: the public API walks to the volume root, so a directory under a
-        // temp dir whose parents the system rules don't trust (this user owns them) is refused.
+        // Explicit foreign writers keep this assertion true with an elevated CI token too.
         let tree = Tree::new();
-        let target = tree.dir("pub", "");
-        let err = check_dirs(&[&target], &TrustRules::system()).unwrap_err();
+        tree.dir("foreign", "(A;;FA;;;WD)");
+        let target = tree.dir("foreign\\pub", "");
+        let err = check_dirs(&[&target], &tree.rules).unwrap_err();
         assert!(!err.reason.is_empty(), "{err}");
         assert!(
             !err.path.starts_with(&target),
