@@ -436,6 +436,7 @@ enum Step {
 }
 
 type Hash = [u8; 32];
+type ConfigReader = dyn Fn(&Path) -> std::io::Result<Vec<u8>> + Send + Sync;
 
 fn sha256(data: &[u8]) -> Hash {
     Sha256::digest(data).into()
@@ -457,6 +458,7 @@ struct WatchState {
     remove_times: HashMap<String, Instant>,
     /// The check before each config read, if any.
     read_guard: Option<ReadGuard>,
+    config_reader: Arc<ConfigReader>,
 }
 
 impl WatchState {
@@ -470,6 +472,7 @@ impl WatchState {
             auth_hashes: HashMap::new(),
             remove_times: HashMap::new(),
             read_guard: None,
+            config_reader: Arc::new(|path| fs::read(path)),
         }
     }
 
@@ -593,7 +596,7 @@ impl WatchState {
             error!(%reason, "config file not read");
             return None;
         }
-        let data = match fs::read(&self.config_path) {
+        let data = match (self.config_reader)(&self.config_path) {
             Ok(data) => data,
             Err(error) => {
                 error!(%error, "failed to read config file for hash check");
@@ -1074,8 +1077,15 @@ mod tests {
             }
         }));
         fixture.write_config("port: 9292\n");
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = reads.clone();
+        state.config_reader = Arc::new(move |path| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            fs::read(path)
+        });
         assert_eq!(state.reload_config_if_changed(), None);
         assert_eq!(state.reload_config_file(true), None);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(state.last_config_hash, None);
         assert_eq!(
             *checked.lock().unwrap(),
@@ -1083,6 +1093,7 @@ mod tests {
         );
         allow.store(true, Ordering::SeqCst);
         assert_eq!(config_of(state.reload_config_if_changed()).port, 9292);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
     #[test]

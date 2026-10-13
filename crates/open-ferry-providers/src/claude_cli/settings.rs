@@ -104,7 +104,7 @@ impl Entry {
 
     /// The config directory, with a leading `~` made the home directory;
     /// `None` when the entry has none.
-    pub(crate) fn config_dir_path(&self) -> Option<PathBuf> {
+    pub fn config_dir_path(&self) -> Option<PathBuf> {
         (!self.config_dir.is_empty()).then(|| expand_home(&self.config_dir))
     }
 
@@ -128,7 +128,7 @@ impl Entry {
 
     /// The name of the entry's directory under a work root: its name, made
     /// safe, and a hash of its name and config directory.
-    pub(crate) fn dir_name(&self) -> String {
+    pub fn dir_name(&self) -> String {
         let mut safe: String = self
             .name
             .chars()
@@ -155,6 +155,13 @@ impl Entry {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         format!("{safe}-{hex}")
+    }
+
+    /// The entry's directory and its empty working directory under `root`.
+    pub fn work_dirs(&self, root: &Path) -> (PathBuf, PathBuf) {
+        let dir = root.join(self.dir_name());
+        let work = dir.join("work");
+        (dir, work)
     }
 
     /// Makes the entry's directory under `root` and the empty working

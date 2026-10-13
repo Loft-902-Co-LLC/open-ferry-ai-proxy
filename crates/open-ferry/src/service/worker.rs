@@ -2052,7 +2052,7 @@ async fn activate_unless_cancelled(
         .await;
         return Err(format!("failed to resume accepting: {error}").into());
     }
-    claude_cli::warn_outdated(&config.claude_cli);
+    claude_cli::warn_outdated_guarded(&config.claude_cli, service.claude_guard.clone());
     if launch == Launch::First {
         handles.start_background().await;
     }

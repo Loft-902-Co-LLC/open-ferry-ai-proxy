@@ -63,10 +63,29 @@ impl std::error::Error for StatusError {}
 /// `authMethod`. Claude Code exits with an error when it isn't signed in;
 /// its answer counts all the same.
 pub async fn auth_status(entry: &Entry, work_root: &Path) -> Result<AuthStatus, StatusError> {
+    auth_status_guarded(entry, work_root, None).await
+}
+
+/// Applies the application's spawn check before asking Claude Code for status.
+pub async fn auth_status_guarded(
+    entry: &Entry,
+    work_root: &Path,
+    guard: Option<&super::SpawnGuard>,
+) -> Result<AuthStatus, StatusError> {
     let program = entry.program().map_err(StatusError::Run)?;
+    if let Some(guard) = guard {
+        guard
+            .authorize(entry, &program, work_root)
+            .map_err(StatusError::Run)?;
+    }
     let (_, work) = entry.dirs(work_root).map_err(|error| {
         StatusError::Run(format!("couldn't make the entry's directory: {error}"))
     })?;
+    if let Some(guard) = guard {
+        guard
+            .authorize(entry, &program, work_root)
+            .map_err(StatusError::Run)?;
+    }
     let mut command = Command::new(&program);
     command
         .args(["auth", "status", "--json"])
@@ -108,6 +127,25 @@ fn parse(stdout: &[u8]) -> Result<AuthStatus, StatusError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_refused_status_check_never_creates_directories_or_spawns() {
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let root = dir.path().join("entries");
+        let entry = Entry {
+            command: "./never-run-claude".into(),
+            ..Entry::from_auth(&open_ferry_core::auth::Auth::default())
+        };
+        let guard = super::super::SpawnGuard::new(|_, _, _| Err("private refusal reason".into()));
+        let error = auth_status_guarded(&entry, &root, Some(&guard))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("execution refused"));
+        assert!(!error.contains("private refusal reason"));
+        assert!(!root.exists());
+    }
 
     #[test]
     fn keeps_two_fields() {

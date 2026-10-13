@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use super::*;
 
@@ -42,6 +43,7 @@ pub(crate) struct Fake {
     created: Vec<String>,
     /// Whether it is a container.
     pub(crate) container: bool,
+    aliases: BTreeMap<String, String>,
 }
 
 impl Fake {
@@ -68,6 +70,7 @@ impl Fake {
             create: None,
             created: Vec::new(),
             container: false,
+            aliases: BTreeMap::new(),
         }
     }
 
@@ -131,6 +134,13 @@ impl Fake {
                 rest.is_empty() || rest.starts_with(|c| self.platform.is_separator(c))
             })
         };
+        if self
+            .nodes
+            .iter()
+            .any(|(top, node)| matches!(node, Node::Link) && below(top))
+        {
+            return Err(format!("{path} has a link in its path"));
+        }
         match self.untrusted.iter().find(|top| below(top)) {
             Some(top) => Err(format!("{path} is not safe: {top} is untrusted")),
             None => Ok(()),
@@ -209,7 +219,7 @@ impl Probe for Fake {
     fn canonical(&self, path: &str) -> io::Result<String> {
         let path = self.path(path);
         if self.nodes.contains_key(&path) {
-            Ok(path)
+            Ok(self.aliases.get(&path).cloned().unwrap_or(path))
         } else {
             Err(io::ErrorKind::NotFound.into())
         }
@@ -1073,6 +1083,7 @@ fn runtime_auth_placement_checks_privilege_and_the_known_machine_root() {
         (Platform::Windows, "C:/ProgramData/open-ferry"),
     ] {
         let mut probe = Fake::new(platform, true);
+        probe.dir(root);
         refused(authorize_auth_dir(&probe, Path::new(root)));
         assert_eq!(
             authorize_auth_dir(&probe, Path::new(&platform.join(root, "auth/team"))),
@@ -1088,8 +1099,11 @@ fn runtime_auth_placement_checks_privilege_and_the_known_machine_root() {
     let mut probe = Fake::new(Platform::Windows, true);
     probe.program_data = Err("no known folder".to_owned());
     refused(authorize_auth_dir(&probe, Path::new("D:/auth")));
-    let probe = Fake::new(Platform::MacOs, true);
+    let mut probe = Fake::new(Platform::MacOs, true);
+    probe.dir("/srv/auth");
     assert_eq!(authorize_auth_dir(&probe, Path::new("/srv/auth")), Ok(()));
+    probe.untrust("/srv");
+    assert!(authorize_auth_dir(&probe, Path::new("/srv/auth")).is_err());
 }
 
 #[test]
@@ -1100,4 +1114,253 @@ fn a_container_has_no_exemption_for_record_trees_or_machine_installs() {
     refused(authorize(&probe, ROOT_ACCOUNT));
     probe.dir(MACHINE).untrust(MACHINE);
     refused(provision(&mut probe));
+}
+
+#[test]
+fn privileged_auth_directories_require_trusted_ancestry_and_resolved_placement() {
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe.dir("/srv/auth").untrust("/srv");
+    for path in [
+        "/srv/auth",
+        "/srv/missing/auth",
+        "/srv/./auth",
+        "/srv/../auth",
+    ] {
+        assert!(
+            authorize_auth_dir(&probe, Path::new(path)).is_err(),
+            "{path}"
+        );
+    }
+    probe.container = true;
+    assert!(authorize_auth_dir(&probe, Path::new("/srv/auth")).is_ok());
+    probe.container = false;
+    probe.untrusted.clear();
+    probe.node("/srv/auth", Node::Link);
+    assert!(authorize_auth_dir(&probe, Path::new("/srv/auth/team")).is_err());
+    probe.node("/srv/auth", Node::File);
+    assert!(authorize_auth_dir(&probe, Path::new("/srv/auth")).is_err());
+    probe.node("/srv/auth", Node::Dir);
+    assert!(authorize_auth_dir(&probe, Path::new("/srv/auth")).is_ok());
+    probe.dir(MACHINE);
+    assert!(authorize_auth_dir(&probe, Path::new("/var/lib/open-ferry/auth")).is_ok());
+    probe.privileged = Ok(false);
+    probe.untrust("/srv");
+    assert!(authorize_auth_dir(&probe, Path::new("/srv/auth")).is_ok());
+
+    let mut probe = Fake::new(Platform::Windows, true);
+    probe.dir("C:/PROGRA~3");
+    probe
+        .aliases
+        .insert(probe.path("C:/PROGRA~3"), probe.path("C:/ProgramData"));
+    assert!(
+        authorize_auth_dir(
+            &probe,
+            Path::new("C:/PROGRA~3/open-ferry/versions/credentials")
+        )
+        .is_err()
+    );
+    probe
+        .aliases
+        .insert(probe.path("C:/PROGRA~3"), r"\\?\C:\ProgramData".to_owned());
+    assert!(
+        authorize_auth_dir(
+            &probe,
+            Path::new("C:/PROGRA~3/open-ferry/versions/credentials")
+        )
+        .is_err()
+    );
+    probe.dir("c:/programdata/OPEN-FERRY/versions");
+    assert!(
+        authorize_auth_dir(&probe, Path::new("c:/programdata/OPEN-FERRY/versions/auth")).is_err()
+    );
+    probe.program_data = Ok("C:/PROGRA~3".to_owned());
+    probe.dir("C:/ProgramData/open-ferry/versions");
+    assert!(
+        authorize_auth_dir(&probe, Path::new("C:/ProgramData/open-ferry/versions/auth")).is_err()
+    );
+    probe.dir("D:/trusted/auth");
+    assert!(authorize_auth_dir(&probe, Path::new("D:/trusted/auth")).is_ok());
+}
+
+#[test]
+fn privileged_claude_spawns_check_every_runtime_path() {
+    use open_ferry_providers::claude_cli::Entry;
+    let entry = Entry {
+        config_dir: "/srv/account".into(),
+        ..Entry::from_auth(&open_ferry_core::auth::Auth::default())
+    };
+    let program = Path::new("/srv/bin/claude");
+    let root = Path::new("/srv/entries");
+    let dir = PathBuf::from(format!("/srv/entries/{}", entry.dir_name()));
+    let work = dir.to_string_lossy().to_string() + "/work";
+    let work = PathBuf::from(work);
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe
+        .file("/srv/bin/claude")
+        .dir("/srv/account")
+        .dir(work.to_str().unwrap());
+    assert!(authorize_claude_spawn(&probe, &entry, program, root, None, None, None).is_ok());
+    for path in [
+        program,
+        Path::new("/srv/account"),
+        root,
+        dir.as_path(),
+        work.as_path(),
+    ] {
+        probe.untrust(path.to_str().unwrap());
+        assert!(
+            authorize_claude_spawn(&probe, &entry, program, root, None, None, None).is_err(),
+            "{}",
+            path.display()
+        );
+        probe.untrusted.clear();
+    }
+    probe.untrust("/srv/account");
+    let missing_account = Entry {
+        config_dir: "/srv/account/missing".into(),
+        ..entry.clone()
+    };
+    assert!(
+        authorize_claude_spawn(&probe, &missing_account, program, root, None, None, None).is_err()
+    );
+    probe.untrusted.clear();
+    probe.node("/srv/account", Node::Link);
+    assert!(authorize_claude_spawn(&probe, &entry, program, root, None, None, None).is_err());
+    probe.node("/srv/account", Node::Dir);
+    let default = Entry {
+        config_dir: String::new(),
+        ..entry.clone()
+    };
+    assert!(
+        authorize_claude_spawn(&probe, &default, program, root, None, None, None)
+            .unwrap_err()
+            .contains("set config-dir")
+    );
+    probe.dir("/root");
+    assert!(
+        authorize_claude_spawn(
+            &probe,
+            &default,
+            program,
+            root,
+            Some(Path::new("/root")),
+            None,
+            None
+        )
+        .is_ok()
+    );
+    probe.untrust("/root");
+    assert!(
+        authorize_claude_spawn(
+            &probe,
+            &default,
+            program,
+            root,
+            Some(Path::new("/root")),
+            None,
+            None
+        )
+        .is_err()
+    );
+    probe.untrusted.clear();
+    probe.dir("/srv/inherited").untrust("/srv/inherited");
+    assert!(
+        authorize_claude_spawn(
+            &probe,
+            &default,
+            program,
+            root,
+            Some(Path::new("/root")),
+            Some(Path::new("/srv/inherited")),
+            None
+        )
+        .is_err()
+    );
+    let temp = std::env::temp_dir().join("open-ferry-claude-cli");
+    assert!(
+        authorize_claude_spawn(&probe, &entry, program, &temp, None, None, None)
+            .unwrap_err()
+            .contains("temporary directory")
+    );
+    probe.platform = Platform::MacOs;
+    assert!(
+        authorize_claude_spawn(&probe, &entry, program, root, None, None, None)
+            .unwrap_err()
+            .contains("macOS")
+    );
+    probe.privileged = Ok(false);
+    assert!(authorize_claude_spawn(&probe, &default, program, &temp, None, None, None).is_ok());
+    probe.privileged = Ok(true);
+    probe.container = true;
+    assert!(authorize_claude_spawn(&probe, &default, program, &temp, None, None, None).is_ok());
+}
+
+#[test]
+fn unrecognised_containers_get_an_actionable_settings_remedy() {
+    let probe = Fake::new(Platform::Linux, true);
+    let refusal = authorize_file(&probe, Path::new("relative.yaml")).unwrap_err();
+    let remedy = refusal.remedy.unwrap();
+    assert!(remedy.contains("container open-ferry doesn't recognise"));
+    assert!(remedy.contains("user other than root"));
+    assert!(remedy.contains("root's"));
+}
+
+#[test]
+fn windows_default_claude_accounts_require_a_home_and_a_trusted_profile() {
+    use open_ferry_providers::claude_cli::Entry;
+    let entry = Entry::from_auth(&open_ferry_core::auth::Auth::default());
+    let program = Path::new("C:/trusted/bin/claude.exe");
+    let root = Path::new("C:/trusted/entries");
+    let home = Path::new("C:/trusted/home");
+    let profile = Path::new("D:/account");
+    let mut probe = Fake::new(Platform::Windows, true);
+    probe
+        .file("C:/trusted/bin/claude.exe")
+        .dir("C:/trusted/entries")
+        .dir("C:/trusted/home")
+        .dir("D:/account")
+        .untrust("D:/account");
+    assert!(
+        authorize_claude_spawn(
+            &probe,
+            &entry,
+            program,
+            root,
+            Some(home),
+            None,
+            Some(profile)
+        )
+        .is_err()
+    );
+    probe.untrusted.clear();
+    assert!(
+        authorize_claude_spawn(
+            &probe,
+            &entry,
+            program,
+            root,
+            Some(home),
+            None,
+            Some(profile)
+        )
+        .is_ok()
+    );
+    assert!(
+        authorize_claude_spawn(&probe, &entry, program, root, None, None, Some(profile))
+            .unwrap_err()
+            .contains("set config-dir")
+    );
+    assert!(
+        authorize_claude_spawn(&probe, &entry, program, root, Some(home), None, None)
+            .unwrap_err()
+            .contains("set config-dir")
+    );
+    probe.untrust("D:/account").dir("C:/trusted/account");
+    let explicit = Entry {
+        config_dir: "C:/trusted/account".into(),
+        ..entry
+    };
+    assert!(
+        authorize_claude_spawn(&probe, &explicit, program, root, None, None, Some(profile)).is_ok()
+    );
 }

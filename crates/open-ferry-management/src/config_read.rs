@@ -90,7 +90,6 @@ mod config_json;
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::rejection::PathRejection;
@@ -229,12 +228,7 @@ async fn get_config(State(state): State<ManagementState>) -> Response {
 /// `GET /v0/management/config.yaml` (upstream's `GetConfigYAML`): the file
 /// as it is.
 async fn get_config_yaml(State(state): State<ManagementState>) -> Response {
-    let path = state.config_path().map(PathBuf::from);
-    let read = run_blocking(move || match path {
-        Some(path) => std::fs::read(path),
-        None => Err(ErrorKind::NotFound.into()),
-    })
-    .await;
+    let read = run_blocking(move || state.read_config_file()).await;
     match read {
         Ok(data) => {
             let mut response = yaml_response(data);
@@ -561,10 +555,9 @@ enum V8Read {
 
 /// Reads the config file in the v8 layout and answers `read`.
 async fn read_v8(state: &ManagementState, read: V8Read) -> Response {
-    let path = state.config_path().map(PathBuf::from);
     let state = state.clone();
     run_blocking(move || {
-        let Some(data) = path.and_then(|path| std::fs::read(path).ok()) else {
+        let Ok(data) = state.read_config_file() else {
             return json::error(StatusCode::INTERNAL_SERVER_ERROR, "read_failed");
         };
         let mut document = match V8Document::migrate(&data) {
@@ -718,6 +711,59 @@ fn write_any(out: &mut String, value: &AnyValue) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn both_config_read_handlers_authorize_before_reading() {
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "api-keys: [secret-file-content]\n").unwrap();
+        let registry = Arc::new(open_ferry_core::registry::ModelRegistry::new());
+        let manager = open_ferry_core::manager::Manager::new(
+            open_ferry_core::manager::Settings::default(),
+            registry.clone(),
+            None,
+        );
+        let state = ManagementState::new(Arc::new(Config::default()), manager, registry, None)
+            .with_config_path(path);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let checked = calls.clone();
+        let refused = state.clone().with_config_read_check(move |_| {
+            checked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("test refusal".into())
+        });
+        for response in [
+            get_config_yaml(State(refused.clone())).await,
+            read_v8(&refused, V8Read::Yaml).await,
+        ] {
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("secret-file-content"));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            refused
+                .read_config_file_with(|_| panic!("refused file must not be read"))
+                .is_err()
+        );
+        let missing = state.clone().with_config_read_check(|_| Ok(false));
+        assert!(
+            missing
+                .read_config_file_with(|_| panic!("missing file must not be read"))
+                .is_err()
+        );
+        assert_eq!(
+            get_config_yaml(State(missing.clone())).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            read_v8(&missing, V8Read::Yaml).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(get_config_yaml(State(state)).await.status(), StatusCode::OK);
+    }
 
     /// Ported from upstream's config_basic_weight_test.go
     /// (TestNormalizeRoutingStrategyWeightedRoundRobin), with the other

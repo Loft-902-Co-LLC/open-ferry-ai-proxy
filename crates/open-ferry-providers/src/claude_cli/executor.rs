@@ -70,6 +70,7 @@ fn slots(auth: &Auth, entry: &Entry) -> Arc<Semaphore> {
 pub struct ClaudeCliExecutor {
     config: Option<Arc<Config>>,
     work_root: PathBuf,
+    spawn_guard: Option<super::SpawnGuard>,
 }
 
 impl Default for ClaudeCliExecutor {
@@ -84,6 +85,7 @@ impl ClaudeCliExecutor {
         Self {
             config: None,
             work_root: default_work_root(),
+            spawn_guard: None,
         }
     }
 
@@ -98,6 +100,12 @@ impl ClaudeCliExecutor {
     /// `root`.
     pub fn with_work_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.work_root = root.into();
+        self
+    }
+
+    /// Checks every invocation before Claude Code runs.
+    pub fn with_spawn_guard(mut self, guard: Option<super::SpawnGuard>) -> Self {
+        self.spawn_guard = guard;
         self
     }
 
@@ -198,9 +206,11 @@ impl ClaudeCliExecutor {
             thinking_budget: prepared.thinking_budget,
             input: prepared.input,
         };
-        let running = process::spawn(&self.work_root, invocation, slot).map_err(|error| {
-            ExecError::upstream(502, format!("claude-cli {}: {error}", run.name))
-        })?;
+        let running =
+            process::spawn_guarded(&self.work_root, invocation, slot, self.spawn_guard.as_ref())
+                .map_err(|error| {
+                    ExecError::upstream(502, format!("claude-cli {}: {error}", run.name))
+                })?;
         run.running = Some(running);
         Ok((run, translation))
     }

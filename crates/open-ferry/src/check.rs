@@ -856,7 +856,12 @@ fn check_clock(env: &Environment, auths: &[(String, Auth)], findings: &mut Vec<F
 
 /// Each enabled `claude-cli` entry's Claude Code, once for each command.
 async fn check_claude_cli(config: &Config, findings: &mut Vec<Finding>) {
-    for (names, check) in claude_cli::check_versions(&config.claude_cli).await {
+    for (names, check) in claude_cli::check_versions_guarded(
+        &config.claude_cli,
+        crate::scope::claude_spawn_guard().as_ref(),
+    )
+    .await
+    {
         findings.push(claude_cli_finding(&names, check));
     }
 }

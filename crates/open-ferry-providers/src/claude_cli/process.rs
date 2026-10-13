@@ -144,16 +144,23 @@ impl fmt::Debug for Running {
 /// Starts Claude Code for `invocation` in the entry's directories under
 /// `root`, holding `slot` while it runs, and starts writing its standard
 /// input.
-pub(crate) fn spawn(
+pub(crate) fn spawn_guarded(
     root: &Path,
     invocation: Invocation<'_>,
     slot: OwnedSemaphorePermit,
+    guard: Option<&super::SpawnGuard>,
 ) -> Result<Running, String> {
     let entry = invocation.entry;
     let program = entry.program()?;
+    if let Some(guard) = guard {
+        guard.authorize(entry, &program, root)?;
+    }
     let (dir, work) = entry
         .dirs(root)
         .map_err(|error| format!("couldn't make the entry's directory: {error}"))?;
+    if let Some(guard) = guard {
+        guard.authorize(entry, &program, root)?;
+    }
     let prompt = PromptFile::create(&dir, invocation.system)
         .map_err(|error| format!("couldn't write the system prompt file: {error}"))?;
     let mut command = Command::new(&program);
@@ -371,6 +378,83 @@ fn trim_line_end(mut line: Vec<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_refused_request_never_creates_directories_or_spawns() {
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let root = dir.path().join("entries");
+        let entry = Entry {
+            command: "./never-run-claude".into(),
+            ..Entry::from_auth(&open_ferry_core::auth::Auth::default())
+        };
+        let guard = super::super::SpawnGuard::new(|_, _, _| Err("private refusal reason".into()));
+        let slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+            .acquire_owned()
+            .await
+            .unwrap();
+        let error = spawn_guarded(
+            &root,
+            Invocation {
+                entry: &entry,
+                model: "claude",
+                system: "",
+                effort: None,
+                max_output_tokens: None,
+                thinking_budget: None,
+                input: Vec::new(),
+            },
+            slot,
+            Some(&guard),
+        )
+        .unwrap_err();
+        assert!(error.contains("execution refused"));
+        assert!(!error.contains("private refusal reason"));
+        assert!(!root.exists());
+    }
+
+    #[tokio::test]
+    async fn newly_created_working_directories_are_checked_before_spawning() {
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let root = dir.path().join("entries");
+        let entry = Entry {
+            command: "./never-run-claude".into(),
+            ..Entry::from_auth(&open_ferry_core::auth::Auth::default())
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let guard = super::super::SpawnGuard::new(move |entry, _, root| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if entry.work_dirs(root).1.exists() {
+                Err("new directory refused".into())
+            } else {
+                Ok(())
+            }
+        });
+        let slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+            .acquire_owned()
+            .await
+            .unwrap();
+        let error = spawn_guarded(
+            &root,
+            Invocation {
+                entry: &entry,
+                model: "claude",
+                system: "",
+                effort: None,
+                max_output_tokens: None,
+                thinking_budget: None,
+                input: Vec::new(),
+            },
+            slot,
+            Some(&guard),
+        )
+        .unwrap_err();
+        assert!(error.contains("execution refused"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(entry.work_dirs(&root).1.is_dir());
+    }
 
     #[test]
     fn passes_the_flags_the_brief_names() {
