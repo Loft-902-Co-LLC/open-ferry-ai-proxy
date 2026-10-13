@@ -1932,7 +1932,11 @@ async fn activate_unless_cancelled(
             }
             Arc::new(config)
         };
-        ConfigWatcher::start(watcher_path, &watcher_config)
+        ConfigWatcher::start_guarded(
+            &watcher_path,
+            &watcher_config,
+            Some(super::config_read_guard()),
+        )
     })
     .await
     .map_err(|error| format!("watcher task failed: {error}"));

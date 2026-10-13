@@ -48,10 +48,6 @@ const CONFIG_FILE: &str = "config.yaml";
 const SYSTEM_SID: &str = "S-1-5-18";
 
 /// The files that tell a container, for [`Probe::in_container`].
-#[allow(
-    dead_code,
-    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
-)]
 const CONTAINER_MARKERS: [&str; 3] = [
     "/.dockerenv",
     "/run/.containerenv",
@@ -195,10 +191,6 @@ pub(crate) trait Probe {
     /// `/var/run/secrets/kubernetes.io` (a Kubernetes pod with its service
     /// account). The environment isn't asked, since whoever starts a
     /// privileged process may have chosen it. Never on Windows.
-    #[allow(
-        dead_code,
-        reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
-    )]
     fn in_container(&self) -> bool {
         false
     }
@@ -626,10 +618,6 @@ fn names(probe: &dyn Probe, path: &str, binary: &str) -> Result<bool, ReceiptErr
 /// it refuses any, since the check doesn't read ACLs yet. An unprivileged
 /// process, or one in a container ([`Probe::in_container`]), reads the file
 /// as it is.
-#[allow(
-    dead_code,
-    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
-)]
 pub(crate) fn authorize_file(probe: &dyn Probe, path: &Path) -> Result<bool, Refusal> {
     let platform = probe.platform();
     let refuse = |reason: String| Refusal {
@@ -675,10 +663,6 @@ pub(crate) fn authorize_file(probe: &dyn Probe, path: &Path) -> Result<bool, Ref
 /// written to the auth directory, the management API's among them, so there
 /// they could pass for records a privileged process trusts. Both are full
 /// paths.
-#[allow(
-    dead_code,
-    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
-)]
 pub(crate) fn check_auth_dir_placement(
     platform: Platform,
     machine_root: &str,
@@ -903,10 +887,6 @@ fn remedy(platform: Platform, whose: Whose, root: &str) -> String {
 }
 
 /// What to do about a settings file [`authorize_file`] refuses.
-#[allow(
-    dead_code,
-    reason = "2c-2b fix contract: RS and RO call it; the lead removes this at integration"
-)]
 fn file_remedy(platform: Platform) -> String {
     match platform {
         Platform::Windows => "As an administrator, make it and every folder above it writable only by administrators, or run open-ferry in a terminal not opened as administrator.".to_owned(),

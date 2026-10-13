@@ -63,7 +63,7 @@ Staging a release downloads one more, this system's archive: `https://github.com
 - Every request is HTTPS, and so is every redirect, of which it follows at most 10 (GitHub sends each file from its file host). Plain HTTP is allowed only to `127.0.0.1`, `::1` and `localhost`, for testing.
 - It goes through the config's `proxy-url` when that is an `http` or `https` proxy, and never through a proxy from the environment, as the rest of open-ferry. A SOCKS proxy is refused, so with one the check fails.
 - It sends the User-Agent `open-ferry/<version>`, and nothing about your setup. GitHub sees it as it sees any download.
-- `OPEN_FERRY_UPDATE_BASE_URL` replaces `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases`, for a mirror with GitHub's layout, as `OPEN_FERRY_INSTALL_BASE_URL` does for the install scripts. A mirror can't change what is installed: the signature is still checked.
+- `OPEN_FERRY_UPDATE_BASE_URL` replaces `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases`, for a mirror with GitHub's layout, as `OPEN_FERRY_INSTALL_BASE_URL` does for an unprivileged run of the install scripts (a privileged one ignores it). A mirror can't change what is installed: the signature is still checked.
 - A build that trusts no release key ([below](#signed-releases)) makes no request at all.
 
 ## How a release is checked

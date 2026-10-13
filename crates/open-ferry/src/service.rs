@@ -158,7 +158,9 @@ use open_ferry_core::auth::synthesizer::{
     StableIdGenerator, SynthesisContext, synthesize_config_auths,
 };
 use open_ferry_core::auth::{Auth, FileStore, Status};
-use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent, next_revision};
+use open_ferry_core::config::{
+    AuthFile, Config, ConfigWatcher, ReadGuard, WatchEvent, next_revision,
+};
 use open_ferry_core::gate::{ActivationKey, ActiveGate, Operation};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::observe::Observability;
@@ -337,19 +339,20 @@ pub async fn run(
         }
     }
 
-    let mut events = match ConfigWatcher::start(&config_path, &config) {
-        Ok((watcher, events)) => {
-            service.watcher = Some(watcher);
-            Some(events)
-        }
-        Err(error) => {
-            tracing::error!("failed to create watcher: {error}");
-            service.close_sync();
-            service.close_reloads();
-            shut_down(&service, &stop_server, server).await;
-            return ExitCode::FAILURE;
-        }
-    };
+    let mut events =
+        match ConfigWatcher::start_guarded(&config_path, &config, Some(config_read_guard())) {
+            Ok((watcher, events)) => {
+                service.watcher = Some(watcher);
+                Some(events)
+            }
+            Err(error) => {
+                tracing::error!("failed to create watcher: {error}");
+                service.close_sync();
+                service.close_reloads();
+                shut_down(&service, &stop_server, server).await;
+                return ExitCode::FAILURE;
+            }
+        };
     tracing::info!("file watcher started for config and auth directory changes");
 
     let shutdown = async {
@@ -1965,7 +1968,11 @@ impl Service {
                     // The new watcher reports every file in the new directory.
                     self.applied_reload = None;
                     self.watcher = None;
-                    match ConfigWatcher::start(config_path, &config) {
+                    match ConfigWatcher::start_guarded(
+                        config_path,
+                        &config,
+                        Some(config_read_guard()),
+                    ) {
                         Ok((watcher, events)) => {
                             if let Some(hash) = &applied_hash {
                                 // Seed from the applied snapshot, not a fresh
@@ -2076,6 +2083,22 @@ fn authorize_config_auth_dir(
     Ok(())
 }
 
+/// The watcher's check before each read of the config file: the trust check
+/// the first load passed, so a privileged process never reads a config file
+/// it wouldn't start from.
+fn config_read_guard() -> ReadGuard {
+    Arc::new(|path: &Path| authorize_config_read(&crate::scope::Host, path))
+}
+
+/// [`config_read_guard`]'s check with `probe`.
+fn authorize_config_read(probe: &dyn crate::scope::Probe, path: &Path) -> Result<(), String> {
+    match crate::scope::authorize_file(probe, path) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("config file {} doesn't exist", path.display())),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Checks a watcher snapshot again before any of its settings are applied.
 fn authorize_reloaded_config(
     probe: &dyn crate::scope::Probe,
@@ -2126,6 +2149,28 @@ mod config_trust_tests {
         assert!(Arc::ptr_eq(&old, &service.config));
         assert_eq!(service.auth_dir, dir.path());
         assert_eq!(service.config_applies, 0);
+    }
+
+    #[test]
+    fn the_watcher_reads_only_a_config_file_the_trust_check_passes() {
+        let mut probe = Fake::new(Platform::Linux, true);
+        let path = Path::new("/work/config.yaml");
+        assert!(
+            authorize_config_read(&probe, path)
+                .unwrap_err()
+                .contains("doesn't exist")
+        );
+        probe.file("/work/config.yaml");
+        assert!(authorize_config_read(&probe, path).is_ok());
+        probe.untrust("/work");
+        assert!(
+            authorize_config_read(&probe, path)
+                .unwrap_err()
+                .contains("Refusing to load")
+        );
+        assert!(authorize_config_read(&probe, Path::new("/work/../config.yaml")).is_err());
+        probe.privileged = Ok(false);
+        assert!(authorize_config_read(&probe, path).is_ok());
     }
 
     #[test]
