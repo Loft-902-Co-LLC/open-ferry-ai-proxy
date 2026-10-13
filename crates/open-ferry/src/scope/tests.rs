@@ -1364,3 +1364,34 @@ fn windows_default_claude_accounts_require_a_home_and_a_trusted_profile() {
         authorize_claude_spawn(&probe, &explicit, program, root, None, None, Some(profile)).is_ok()
     );
 }
+
+#[test]
+fn canonical_verbatim_paths_compare_auth_and_machine_roots_in_the_same_namespace() {
+    for (root, verbatim) in [
+        (
+            "C:/ProgramData/open-ferry",
+            r"\\?\C:\ProgramData\open-ferry",
+        ),
+        (
+            "//server/share/open-ferry",
+            r"\\?\UNC\server\share\open-ferry",
+        ),
+    ] {
+        let mut probe = Fake::new(Platform::Windows, true);
+        probe.program_data = Ok(probe.platform.parent(root).unwrap());
+        probe.dir(root).dir("D:/alias");
+        probe.aliases.insert(probe.path(root), verbatim.into());
+        let auth = probe.platform.join(root, "auth");
+        probe.dir(&auth);
+        probe
+            .aliases
+            .insert(probe.path(&auth), format!("{verbatim}\\auth"));
+        assert!(authorize_auth_dir(&probe, Path::new(&auth)).is_ok());
+        probe.aliases.insert(probe.path("D:/alias"), root.into());
+        assert!(authorize_auth_dir(&probe, Path::new("D:/alias")).is_err());
+        probe
+            .aliases
+            .insert(probe.path("D:/alias"), verbatim.into());
+        assert!(authorize_auth_dir(&probe, Path::new("D:/alias/versions")).is_err());
+    }
+}

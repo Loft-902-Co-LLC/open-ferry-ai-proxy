@@ -43,6 +43,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
@@ -240,6 +241,8 @@ impl Finding {
 
 /// What the checks read besides the config.
 pub(crate) struct Environment {
+    /// The runtime file and subprocess policy.
+    pub(crate) probe: crate::scope::RuntimeProbe,
     /// The system time.
     pub(crate) now: DateTime<Utc>,
     /// When this binary was built, when the build said
@@ -259,7 +262,9 @@ pub(crate) struct Environment {
 
 impl Environment {
     pub(crate) fn current() -> Self {
+        let probe = crate::scope::runtime_probe();
         Self {
+            probe: Arc::clone(&probe),
             now: Utc::now(),
             build_date: option_env!("OPEN_FERRY_BUILD_DATE").and_then(|date| {
                 DateTime::parse_from_rfc3339(date)
@@ -270,7 +275,7 @@ impl Environment {
             management_password: open_ferry_management::management_password_from_env()
                 .is_some_and(|password| !password.is_empty()),
             run_config_programs: true,
-            updates: self_update::Updates::current(),
+            updates: self_update::Updates::current(probe.as_ref()),
         }
     }
 }
@@ -279,7 +284,7 @@ impl Environment {
 /// that is the only finding.
 pub(crate) async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let Some(config) = check_config(path, &mut findings) else {
+    let Some(config) = check_config_with_probe(env.probe.as_ref(), path, &mut findings) else {
         return findings;
     };
     check_client_keys(&config, &mut findings);
@@ -291,7 +296,7 @@ pub(crate) async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
     check_dashboard(&config, env, &mut findings);
     check_clock(env, &auths, &mut findings);
     if env.run_config_programs {
-        check_claude_cli(&config, &mut findings).await;
+        check_claude_cli(&config, Arc::clone(&env.probe), &mut findings).await;
     } else {
         skip_claude_cli(&config, &mut findings);
     }
@@ -300,10 +305,6 @@ pub(crate) async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
 }
 
 /// The config exists and loads.
-fn check_config(path: &Path, findings: &mut Vec<Finding>) -> Option<Config> {
-    check_config_with_probe(&crate::scope::Host, path, findings)
-}
-
 fn check_config_with_probe(
     probe: &dyn crate::scope::Probe,
     path: &Path,
@@ -855,10 +856,14 @@ fn check_clock(env: &Environment, auths: &[(String, Auth)], findings: &mut Vec<F
 }
 
 /// Each enabled `claude-cli` entry's Claude Code, once for each command.
-async fn check_claude_cli(config: &Config, findings: &mut Vec<Finding>) {
+async fn check_claude_cli(
+    config: &Config,
+    probe: crate::scope::RuntimeProbe,
+    findings: &mut Vec<Finding>,
+) {
     for (names, check) in claude_cli::check_versions_guarded(
         &config.claude_cli,
-        crate::scope::claude_spawn_guard().as_ref(),
+        crate::scope::claude_spawn_guard(probe).as_ref(),
     )
     .await
     {

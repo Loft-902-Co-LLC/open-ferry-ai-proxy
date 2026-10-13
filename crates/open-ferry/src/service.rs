@@ -339,20 +339,23 @@ pub async fn run(
         }
     }
 
-    let mut events =
-        match ConfigWatcher::start_guarded(&config_path, &config, Some(config_read_guard())) {
-            Ok((watcher, events)) => {
-                service.watcher = Some(watcher);
-                Some(events)
-            }
-            Err(error) => {
-                tracing::error!("failed to create watcher: {error}");
-                service.close_sync();
-                service.close_reloads();
-                shut_down(&service, &stop_server, server).await;
-                return ExitCode::FAILURE;
-            }
-        };
+    let mut events = match ConfigWatcher::start_guarded(
+        &config_path,
+        &config,
+        Some(config_read_guard(Arc::clone(&service.probe))),
+    ) {
+        Ok((watcher, events)) => {
+            service.watcher = Some(watcher);
+            Some(events)
+        }
+        Err(error) => {
+            tracing::error!("failed to create watcher: {error}");
+            service.close_sync();
+            service.close_reloads();
+            shut_down(&service, &stop_server, server).await;
+            return ExitCode::FAILURE;
+        }
+    };
     tracing::info!("file watcher started for config and auth directory changes");
 
     let shutdown = async {
@@ -407,8 +410,12 @@ async fn in_scope<T>(operation: Option<Operation>, work: impl FnOnce() -> T) -> 
 /// A supervised worker passes the data directory its supervisor named
 /// (`welcome.installation.data_dir`); an ordinary run takes the user's from
 /// the environment.
-fn prepare_update_checks(config: &Config, data_dir: Option<&Path>) -> Option<UpdateService> {
-    let data = match update_check_data(&crate::scope::Host, data_dir) {
+fn prepare_update_checks(
+    probe: &dyn crate::scope::Probe,
+    config: &Config,
+    data_dir: Option<&Path>,
+) -> Option<UpdateService> {
+    let data = match update_check_data(probe, data_dir) {
         Ok(data) => data,
         Err(error) => {
             tracing::warn!("update checks don't run: {error}");
@@ -776,6 +783,7 @@ struct ReloadRequest {
 /// state, and what was registered from the config and the auth directory.
 struct Service {
     config: Arc<Config>,
+    probe: crate::scope::RuntimeProbe,
     claude_guard: Option<claude_cli::SpawnGuard>,
     auth_dir: PathBuf,
     log_level: LogLevel,
@@ -855,6 +863,7 @@ impl Service {
     }
 
     /// As `Service::new` (test-only), with every writer sharing `gate`.
+    #[cfg(test)]
     fn with_gate(
         config: Arc<Config>,
         config_path: PathBuf,
@@ -862,6 +871,25 @@ impl Service {
         log_level: LogLevel,
         gate: ActiveGate,
     ) -> Self {
+        Self::with_probe(
+            config,
+            config_path,
+            auth_dir,
+            log_level,
+            gate,
+            crate::scope::runtime_probe(),
+        )
+    }
+
+    fn with_probe(
+        config: Arc<Config>,
+        config_path: PathBuf,
+        auth_dir: PathBuf,
+        log_level: LogLevel,
+        gate: ActiveGate,
+        probe: crate::scope::RuntimeProbe,
+    ) -> Self {
+        let read_probe = Arc::clone(&probe);
         let auth_dir = absolute_dir(auth_dir);
         let registry = Arc::new(ModelRegistry::new());
         let store = Arc::new(FileStore::new(&auth_dir));
@@ -896,15 +924,16 @@ impl Service {
         ))
         .with_config_reload(Arc::new(ReloadSender { requests: reloads }))
         .with_config_path(config_path)
-        .with_config_read_check(|path| {
-            crate::scope::authorize_file(&crate::scope::Host, path)
+        .with_config_read_check(move |path| {
+            crate::scope::authorize_file(read_probe.as_ref(), path)
                 .map_err(|error| error.to_string())
         })
         .with_observability(observability.clone())
         .with_gate(gate.clone());
         Self {
             config,
-            claude_guard: crate::scope::claude_spawn_guard(),
+            claude_guard: crate::scope::claude_spawn_guard(Arc::clone(&probe)),
+            probe,
             auth_dir,
             log_level,
             gate,
@@ -951,7 +980,27 @@ impl Service {
         options: &Options,
         gate: ActiveGate,
     ) -> Self {
-        let mut service = Self::with_gate(config, config_path, auth_dir, log_level, gate);
+        Self::prepared_with_probe(
+            config,
+            config_path,
+            auth_dir,
+            log_level,
+            options,
+            gate,
+            crate::scope::runtime_probe(),
+        )
+    }
+
+    fn prepared_with_probe(
+        config: Arc<Config>,
+        config_path: PathBuf,
+        auth_dir: PathBuf,
+        log_level: LogLevel,
+        options: &Options,
+        gate: ActiveGate,
+        probe: crate::scope::RuntimeProbe,
+    ) -> Self {
+        let mut service = Self::with_probe(config, config_path, auth_dir, log_level, gate, probe);
         service.management = service
             .management
             .clone()
@@ -974,7 +1023,7 @@ impl Service {
     /// Attaches the updater before any router clones the management state.
     /// `data_dir` is the supervised worker's; `None` is the user's.
     fn prepare_update_checks(&mut self, data_dir: Option<&Path>) {
-        if let Some(updates) = prepare_update_checks(&self.config, data_dir) {
+        if let Some(updates) = prepare_update_checks(self.probe.as_ref(), &self.config, data_dir) {
             self.management = self.management.clone().with_updates(updates);
         }
     }
@@ -999,17 +1048,17 @@ impl Service {
         config_path: &Path,
         events: &mut Option<mpsc::Receiver<WatchEvent>>,
     ) {
-        self.reload_from_disk_with_probe(config_path, events, &crate::scope::Host)
-            .await;
+        let loaded = load_config_with_probe(self.probe.as_ref(), config_path);
+        self.reload_from_loaded(config_path, events, loaded).await;
     }
 
-    async fn reload_from_disk_with_probe<P: crate::scope::Probe>(
+    async fn reload_from_loaded(
         &mut self,
         config_path: &Path,
         events: &mut Option<mpsc::Receiver<WatchEvent>>,
-        probe: &P,
+        loaded: Result<Option<(Config, String, Vec<u8>)>, String>,
     ) {
-        match load_config_with_probe(probe, config_path) {
+        match loaded {
             Ok(Some((config, sha256, _))) => {
                 let watching = self
                     .apply_config(Arc::new(config), Some(sha256), config_path)
@@ -1091,7 +1140,8 @@ impl Service {
     /// The config file can't be read or doesn't load. An empty file keeps
     /// the current config.
     fn reload_standby(&mut self, config_path: &Path) -> Result<(), String> {
-        let Some((config, sha256, _)) = load_config(config_path)? else {
+        let Some((config, sha256, _)) = load_config_with_probe(self.probe.as_ref(), config_path)?
+        else {
             return Ok(());
         };
         if let Ok(dir) = config.resolve_auth_dir() {
@@ -1304,7 +1354,12 @@ impl Service {
     /// `extra` beside them.
     fn app_with(&self, extra: axum::Router) -> axum::Router {
         let management = open_ferry_management::router(self.management.clone());
-        let dashboard = open_ferry_dashboard::router(self.management.clone(), self.ledger.clone());
+        let dashboard = open_ferry_dashboard::router_for_guarded(
+            self.management.clone(),
+            self.ledger.clone(),
+            open_ferry_dashboard::Listener::Shared,
+            self.claude_guard.clone(),
+        );
         router_with(self.state.clone(), management.merge(dashboard).merge(extra))
     }
 
@@ -1668,7 +1723,7 @@ impl Service {
             self.pending_reloads.push_back((self.last_reload, request));
             return Watching::Same;
         }
-        let watching = match load_config(config_path) {
+        let watching = match load_config_with_probe(self.probe.as_ref(), config_path) {
             Ok(Some((config, sha256, contents))) => {
                 let watching = self
                     .apply_config(Arc::new(config), Some(sha256), config_path)
@@ -1858,7 +1913,7 @@ impl Service {
         sha256: Option<String>,
         config_path: &Path,
     ) -> Watching {
-        if let Err(error) = authorize_reloaded_config(&crate::scope::Host, config_path, &config) {
+        if let Err(error) = authorize_reloaded_config(self.probe.as_ref(), config_path, &config) {
             tracing::error!("failed to reload config: {error}; keeping the current one");
             return Watching::Same;
         }
@@ -1979,7 +2034,7 @@ impl Service {
                     match ConfigWatcher::start_guarded(
                         config_path,
                         &config,
-                        Some(config_read_guard()),
+                        Some(config_read_guard(Arc::clone(&self.probe))),
                     ) {
                         Ok((watcher, events)) => {
                             if let Some(hash) = &applied_hash {
@@ -2053,10 +2108,6 @@ fn ask_reload(watcher: &ConfigWatcher, ticket: u64, force: bool) {
 /// The config file at `path`, loaded as the watcher loads it after a
 /// change: with its `auth-dir` resolved, and the SHA-256 of the contents it
 /// loaded from; `None` when the file is empty, which the watcher skips.
-fn load_config(path: &Path) -> Result<Option<(Config, String, Vec<u8>)>, String> {
-    load_config_with_probe(&crate::scope::Host, path)
-}
-
 fn load_config_with_probe(
     probe: &dyn crate::scope::Probe,
     path: &Path,
@@ -2107,8 +2158,8 @@ fn authorize_resolved_auth_dir(
 /// The watcher's check before each read of the config file: the trust check
 /// the first load passed, so a privileged process never reads a config file
 /// it wouldn't start from.
-fn config_read_guard() -> ReadGuard {
-    Arc::new(|path: &Path| authorize_config_read(&crate::scope::Host, path))
+fn config_read_guard(probe: crate::scope::RuntimeProbe) -> ReadGuard {
+    Arc::new(move |path: &Path| authorize_config_read(probe.as_ref(), path))
 }
 
 /// [`config_read_guard`]'s check with `probe`.
@@ -2134,6 +2185,107 @@ fn authorize_reloaded_config(
 
 #[cfg(test)]
 mod config_trust_tests {
+    fn refused_runtime() -> (tempfile::TempDir, PathBuf, Service) {
+        use crate::scope::runtime_test_probe::{RuntimeFake, scratch_dir};
+        let dir = scratch_dir();
+        let path = dir.path().join("config.yaml");
+        let old = Arc::new(
+            Config::parse(format!(
+                "auth-dir: '{}'\napi-keys: [old]\nremote-management:\n  secret-key: test-key\n",
+                dir.path().display()
+            ))
+            .unwrap(),
+        );
+        std::fs::write(
+            &path,
+            format!("auth-dir: '{}'\napi-keys: [new]\n", dir.path().display()),
+        )
+        .unwrap();
+        let platform = if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        };
+        let mut fake = Fake::new(platform, true);
+        fake.file(path.to_str().unwrap())
+            .dir(dir.path().to_str().unwrap())
+            .untrust(path.to_str().unwrap());
+        let probe: crate::scope::RuntimeProbe = Arc::new(RuntimeFake::new(fake));
+        let service = Service::with_probe(
+            old,
+            path.clone(),
+            dir.path().to_owned(),
+            LogLevel::detached(),
+            ActiveGate::open(),
+            probe,
+        );
+        (dir, path, service)
+    }
+
+    #[test]
+    fn an_injected_privileged_probe_refuses_the_startup_load() {
+        let (_dir, path, service) = refused_runtime();
+        assert!(
+            load_config_with_probe(service.probe.as_ref(), &path)
+                .unwrap_err()
+                .contains("Refusing to load")
+        );
+        assert!(
+            crate::settings::load_with_sha256(service.probe.as_ref(), &path)
+                .unwrap_err()
+                .contains("Refusing to load")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_injected_privileged_probe_refuses_disk_reloads() {
+        let (_dir, path, mut service) = refused_runtime();
+        let old = service.config.clone();
+        service.reload_from_disk(&path, &mut None).await;
+        assert!(Arc::ptr_eq(&old, &service.config));
+        assert_eq!(service.config_applies, 0);
+    }
+
+    #[tokio::test]
+    async fn an_injected_privileged_probe_refuses_snapshot_applies() {
+        let (dir, path, mut service) = refused_runtime();
+        let old = service.config.clone();
+        let incoming = Arc::new(
+            Config::parse(format!(
+                "auth-dir: '{}'\napi-keys: [new]\n",
+                dir.path().display()
+            ))
+            .unwrap(),
+        );
+        service.apply_config(incoming, None, &path).await;
+        assert!(Arc::ptr_eq(&old, &service.config));
+        assert_eq!(service.config_applies, 0);
+    }
+
+    #[tokio::test]
+    async fn an_injected_privileged_probe_refuses_management_config_reads() {
+        use axum::body::{Body, to_bytes};
+        use tower_service::Service as _;
+        let (_dir, _path, mut service) = refused_runtime();
+        service.management = service.management.clone().with_local_password("test-key");
+        let mut app = open_ferry_management::api_router(service.management.clone());
+        let mut request = axum::http::Request::builder()
+            .uri("/v0/management/config.yaml")
+            .header("authorization", "Bearer test-key")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let answer = app.call(request).await.unwrap();
+        assert_eq!(
+            answer.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = to_bytes(answer.into_body(), usize::MAX).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("api-keys"));
+    }
+
     use super::*;
     use crate::os_service::Platform;
     use crate::update::scope_probe::Fake;
@@ -2157,7 +2309,7 @@ mod config_trust_tests {
             .untrust(path.to_str().unwrap());
         std::fs::write(&path, "auth-dir: C:/ProgramData/open-ferry/auth\n").unwrap();
         service
-            .reload_from_disk_with_probe(&path, &mut None, &probe)
+            .reload_from_loaded(&path, &mut None, load_config_with_probe(&probe, &path))
             .await;
         assert!(Arc::ptr_eq(&old, &service.config));
         assert_eq!(service.auth_dir, dir.path());
@@ -2165,7 +2317,7 @@ mod config_trust_tests {
         probe.untrusted.clear();
         std::fs::write(&path, "auth-dir: C:/ProgramData/open-ferry/versions\n").unwrap();
         service
-            .reload_from_disk_with_probe(&path, &mut None, &probe)
+            .reload_from_loaded(&path, &mut None, load_config_with_probe(&probe, &path))
             .await;
         assert!(Arc::ptr_eq(&old, &service.config));
         assert_eq!(service.auth_dir, dir.path());
@@ -2203,8 +2355,8 @@ mod config_trust_tests {
             for call in source.split("ConfigWatcher::start_guarded(").skip(1) {
                 let call = call.chars().take(300).collect::<String>();
                 assert!(
-                    call.contains("Some(config_read_guard())")
-                        || call.contains("Some(super::config_read_guard())")
+                    call.contains("Some(config_read_guard(Arc::clone(")
+                        || call.contains("Some(super::config_read_guard(Arc::clone(")
                 );
             }
         }

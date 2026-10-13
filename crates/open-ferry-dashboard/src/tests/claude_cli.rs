@@ -341,3 +341,33 @@ async fn entries_pass_other_errors_on_and_need_the_key() {
         .await
         .error(StatusCode::UNAUTHORIZED, "missing_management_key");
 }
+
+#[tokio::test]
+async fn a_refusing_spawn_guard_blocks_status_and_sanitizes_its_reason() {
+    use open_ferry_providers::claude_cli::SpawnGuard;
+    let dir = super::scratch_dir();
+    let command = script(dir.path(), "status-guard", SIGNED_IN, 0);
+    let mut dash = Dash::with_config(config(&[("guarded", &command)]));
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    dash.state.claude_guard = Some(SpawnGuard::new(move |_, _, _| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err("private-token C:/private/account".into())
+    }));
+    dash.router = crate::router_from(dash.state.clone());
+    let answer = dash.get(&format!("{STATUS}?name=guarded")).await;
+    assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
+    assert!(answer.body.contains("execution refused"));
+    assert!(!answer.body.contains("private-token"));
+    assert!(!answer.body.contains("C:/private/account"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!dash.state.claude_cli_root.exists());
+    dash.state.claude_guard = None;
+    dash.router = crate::router_from(dash.state.clone());
+    assert_eq!(
+        dash.get(&format!("{STATUS}?name=guarded"))
+            .await
+            .json(StatusCode::OK),
+        json!({"loggedIn": true, "authMethod": "claude.ai"})
+    );
+}

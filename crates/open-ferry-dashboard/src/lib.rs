@@ -86,7 +86,18 @@ pub fn router(management: ManagementState, ledger: Ledger) -> Router {
 /// The dashboard's routes as [`router`] gives them, for the listener
 /// `listener`. The paths are the same on each; only the answers differ.
 pub fn router_for(management: ManagementState, ledger: Ledger, listener: Listener) -> Router {
+    router_for_guarded(management, ledger, listener, None)
+}
+
+/// Dashboard routes with the application's Claude Code spawn policy.
+pub fn router_for_guarded(
+    management: ManagementState,
+    ledger: Ledger,
+    listener: Listener,
+    claude_guard: Option<open_ferry_providers::claude_cli::SpawnGuard>,
+) -> Router {
     router_from(DashboardState {
+        claude_guard,
         management,
         ledger,
         assets: Assets::embedded(),
@@ -128,6 +139,8 @@ pub(crate) struct DashboardState {
     /// Where `claude-cli` entries keep their working directories, as the
     /// executor does.
     pub(crate) claude_cli_root: PathBuf,
+    /// The application's policy before a status subprocess runs.
+    pub(crate) claude_guard: Option<open_ferry_providers::claude_cli::SpawnGuard>,
     /// The listener the routes are served on.
     pub(crate) listener: Listener,
 }

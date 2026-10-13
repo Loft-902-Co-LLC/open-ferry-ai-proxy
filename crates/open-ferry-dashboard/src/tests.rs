@@ -18,7 +18,7 @@ mod update;
 mod usage;
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -179,7 +179,7 @@ impl Dash {
     /// With `config`, `assets`, and an open ledger if `ledger`, else one
     /// that is unavailable.
     pub(crate) fn build(config: Config, assets: Assets, ledger: bool) -> Self {
-        let logs = tempfile::tempdir().unwrap();
+        let logs = scratch_dir();
         let registry = Arc::new(ModelRegistry::new());
         let manager = Manager::new(Settings::default(), Arc::clone(&registry) as _, None);
         let usage = Usage::new(&config);
@@ -202,6 +202,7 @@ impl Dash {
             management,
             ledger,
             assets,
+            claude_guard: None,
             claude_cli_root: logs.path().join("claude-cli"),
             listener: Listener::Shared,
         };
@@ -314,4 +315,14 @@ impl Answer {
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(|value| value.to_str().unwrap())
     }
+}
+
+fn scratch_dir() -> tempfile::TempDir {
+    let root = std::env::var_os("OFP_TEST_SCRATCH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+        });
+    std::fs::create_dir_all(&root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
 }

@@ -22,6 +22,25 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
+
+#[cfg(test)]
+pub(crate) mod runtime_test_probe;
+
+/// The probe shared by runtime guards.
+pub(crate) type RuntimeProbe = Arc<dyn Probe + Send + Sync>;
+
+/// Builds the binary's runtime probe; unit tests use an unprivileged fake.
+pub(crate) fn runtime_probe() -> RuntimeProbe {
+    #[cfg(not(test))]
+    {
+        Arc::new(Host)
+    }
+    #[cfg(test)]
+    {
+        Arc::new(runtime_test_probe::RuntimeFake::current())
+    }
+}
 
 #[cfg(windows)]
 use open_ferry_supervisor::endpoint::Identity;
@@ -808,19 +827,21 @@ fn trusted_existing_dir(probe: &dyn Probe, path: &str) -> Result<String, String>
 }
 
 /// The binary's policy for each Claude Code invocation.
-pub(crate) fn claude_spawn_guard() -> Option<open_ferry_providers::claude_cli::SpawnGuard> {
-    if matches!(Host.privileged(), Ok(false))
-        || (Host.privileged() == Ok(true) && Host.in_container())
+pub(crate) fn claude_spawn_guard(
+    probe: RuntimeProbe,
+) -> Option<open_ferry_providers::claude_cli::SpawnGuard> {
+    if matches!(probe.privileged(), Ok(false))
+        || (probe.privileged() == Ok(true) && probe.in_container())
     {
         return None;
     }
     Some(open_ferry_providers::claude_cli::SpawnGuard::new(
-        |entry, program, root| {
+        move |entry, program, root| {
             let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
             let profile = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty());
             let inherited = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty());
             authorize_claude_spawn(
-                &Host,
+                probe.as_ref(),
                 entry,
                 program,
                 root,
