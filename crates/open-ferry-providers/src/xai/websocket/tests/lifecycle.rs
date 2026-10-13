@@ -145,10 +145,10 @@ async fn clearing_an_xai_credential_proxy_redials_and_forgets_the_previous_respo
 }
 
 #[tokio::test]
-async fn removing_the_previous_xai_credential_preserves_pending_replacement_ownership() {
+async fn removing_the_previous_xai_credential_closes_a_pending_replacement() {
     let (release, gate) = watch::channel(false);
     let server = Server::start(move |n| {
-        if n == 0 {
+        if n != 1 {
             Answer::accept(|mut peer| async move {
                 peer.recv().await.unwrap();
                 peer.send(COMPLETED).await;
@@ -169,7 +169,6 @@ async fn removing_the_previous_xai_credential_preserves_pending_replacement_owne
     let b = auth_as("xai-b", API_KEY, &server.url);
     streamed(&executor, &a, HELLO, ws_options("replacement")).await;
     let session = executor.websockets.store.get("replacement").unwrap();
-    let state = executor.websockets.ids.get("replacement").unwrap();
     let task = tokio::spawn({
         let executor = executor.clone();
         let b = b.clone();
@@ -183,25 +182,6 @@ async fn removing_the_previous_xai_credential_preserves_pending_replacement_owne
         .wait_for("B's pending handshake", |r| r.handshakes.len() == 2)
         .await;
     executor.close_auth_execution_sessions(&a.id);
-    assert!(Arc::ptr_eq(
-        &session,
-        &executor.websockets.store.get("replacement").unwrap()
-    ));
-    assert!(Arc::ptr_eq(
-        &state,
-        &executor.websockets.ids.get("replacement").unwrap()
-    ));
-    assert_eq!(
-        executor
-            .websockets
-            .targets()
-            .get("replacement")
-            .unwrap()
-            .auth_id,
-        a.id
-    );
-    assert!(!task.is_finished());
-    executor.close_auth_execution_sessions(&b.id);
     assert!(
         tokio::time::timeout(WAIT, task)
             .await
@@ -210,14 +190,19 @@ async fn removing_the_previous_xai_credential_preserves_pending_replacement_owne
             .is_err()
     );
     assert!(executor.websockets.store.get("replacement").is_none());
-    assert!(!Arc::ptr_eq(
-        &state,
-        &executor.websockets.ids.get("replacement").unwrap()
-    ));
+    assert!(!executor.websockets.ids.contains("replacement"));
     assert!(!executor.websockets.targets().contains_key("replacement"));
     release.send_replace(true);
     server.wait_closed(2).await;
     assert_eq!(server.record().messages.len(), 1);
+    streamed(&executor, &b, HELLO, ws_options("replacement")).await;
+    assert!(!Arc::ptr_eq(
+        &session,
+        &executor.websockets.store.get("replacement").unwrap()
+    ));
+    assert!(executor.websockets.ids.contains("replacement"));
+    assert!(executor.websockets.targets().contains_key("replacement"));
+    executor.close_execution_session("replacement");
 }
 
 #[tokio::test]
