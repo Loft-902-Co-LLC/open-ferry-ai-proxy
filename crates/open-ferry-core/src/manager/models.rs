@@ -1014,7 +1014,8 @@ impl super::Manager {
         }
         !selected.is_empty()
             && selected.into_iter().all(|auth| {
-                self.executor(&auth.provider).is_some()
+                self.executor(&auth.provider)
+                    .is_some_and(|executor| executor.id() == "claude")
                     && supports(auth, &self.resolve_execution_model(auth, model))
             })
     }
@@ -1025,11 +1026,11 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    struct SearchExecutor;
+    struct SearchExecutor(&'static str);
 
     impl crate::executor::ProviderExecutor for SearchExecutor {
         fn id(&self) -> &str {
-            "claude"
+            self.0
         }
         fn execute(
             &self,
@@ -1096,7 +1097,7 @@ mod tests {
             auth.id == "a"
         };
         assert!(!manager.supports_native_tool_search_for_model("public", &supports));
-        manager.register_executor(std::sync::Arc::new(SearchExecutor));
+        manager.register_executor(std::sync::Arc::new(SearchExecutor("claude")));
         assert!(manager.supports_native_tool_search_for_model("public", &supports));
         assert!(manager.supports_native_tool_search_for_model("team/public", &supports));
         assert!(!manager.supports_native_tool_search_for_model("unknown", &supports));
@@ -1116,6 +1117,41 @@ mod tests {
         second.disabled = true;
         manager.register(second).unwrap();
         assert!(manager.supports_native_tool_search_for_model("public", &supports));
+    }
+
+    #[test]
+    fn native_tool_search_does_not_resolve_non_claude_model_pools() {
+        let registry = std::sync::Arc::new(crate::registry::ModelRegistry::new());
+        let mut settings = Settings::default();
+        settings.openai_compatibility.push(OpenAiCompat {
+            name: "pool".into(),
+            models: vec![alias("m1", "public", false), alias("m2", "public", false)],
+            ..OpenAiCompat::default()
+        });
+        let manager = super::super::Manager::new(settings, registry.clone(), None);
+        let mut auth = oauth_auth("pool");
+        auth.id = "pool-key".into();
+        auth.attributes.insert("api_key".into(), "k".into());
+        auth.attributes.insert("compat_name".into(), "pool".into());
+        manager.register(auth.clone()).unwrap();
+        registry.register_client(
+            &auth.id,
+            "pool",
+            &[crate::models::ModelInfo {
+                id: "public".into(),
+                ..crate::models::ModelInfo::default()
+            }],
+        );
+        // A registered executor whose identity isn't Claude's must fail before
+        // resolve_execution_model advances this credential's pool cursor.
+        manager.register_executor(std::sync::Arc::new(SearchExecutor("pool")));
+        assert!(
+            !manager.supports_native_tool_search_for_model("public", &|_, _| panic!(
+                "non-Claude support check"
+            ))
+        );
+        assert!(manager.lock().pool_offsets.is_empty());
+        assert_eq!(manager.resolve_execution_model(&auth, "public"), "m1");
     }
 
     fn alias(name: &str, alias: &str, force: bool) -> ModelAlias {

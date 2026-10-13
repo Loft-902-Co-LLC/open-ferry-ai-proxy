@@ -350,11 +350,19 @@ fn truncated_or_missing_search_arguments_are_incomplete() {
             json!({"type":"message_delta","delta":{"stop_reason":stop},"usage":{"output_tokens":1}}),
             json!({"type":"message_stop"})].map(|event| Value::String(format!("data: {event}")));
         let events = stream(&request, true, &chunks);
-        for (_, event) in events.iter().filter(|(name, _)| {
-            name == "response.output_item.done"
-                || name == "response.completed"
-                || name == "response.incomplete"
-        }) {
+        let matching: Vec<_> = events
+            .iter()
+            .filter(|(name, _)| {
+                name == "response.output_item.done"
+                    || name == "response.completed"
+                    || name == "response.incomplete"
+            })
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "missing completed search item or response: {events:?}"
+        );
+        for (_, event) in matching {
             let item = event.get("item").unwrap_or(&event["response"]["output"][0]);
             assert_eq!(item["status"], "incomplete");
             assert_eq!(item["arguments"], want_arguments);

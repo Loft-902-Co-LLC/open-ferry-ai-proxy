@@ -195,9 +195,7 @@ impl ClaudeExecutor {
         if *format != Format::OPENAI_RESPONSE || !self.tool_search_enabled() {
             return None;
         }
-        Some(responses::registry_with_tool_search(
-            self.tool_search_enabled(),
-        ))
+        Some(responses::registry_with_tool_search(true))
     }
 
     /// The Messages body for Claude, from the client's request.
@@ -261,6 +259,24 @@ impl ClaudeExecutor {
         stream: bool,
         body: &mut Value,
     ) {
+        let registry = self.response_registry(&options.source_format);
+        let translate = registry.as_ref().map(|registry| {
+            move |mut payload| {
+                compat::before_translation(
+                    self.config.as_deref(),
+                    options,
+                    &Format::CLAUDE,
+                    &mut payload,
+                );
+                registry.translate_request(
+                    &options.source_format,
+                    &Format::CLAUDE,
+                    base_model,
+                    payload,
+                    stream,
+                )
+            }
+        });
         let target = payload::Target {
             executor: "claude",
             protocol: &Format::CLAUDE,
@@ -268,7 +284,9 @@ impl ClaudeExecutor {
             root: "",
             stream,
             tracked: &[],
-            translate: None,
+            translate: translate
+                .as_ref()
+                .map(|translate| translate as &dyn Fn(Value) -> Value),
         };
         payload::apply(self.config.as_deref(), &target, request, options, body);
     }
