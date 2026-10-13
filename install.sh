@@ -14,11 +14,15 @@
 # config at $XDG_CONFIG_HOME/open-ferry/config.yaml
 # (~/.config/open-ferry/config.yaml when XDG_CONFIG_HOME isn't an absolute
 # path), it writes one with `open-ferry init`. It edits no shell profile
-# and no PATH.
+# and no saved PATH.
 # With --system (Linux, as root), the binary goes to /usr/local/bin and
 # init -system writes /etc/open-ferry/config.yaml with the machine auth dir.
 # It skips migration; account installs must run without sudo, except for
 # root installing its own account inside a Linux container.
+# Real root ignores GH, BASE_URL, TEST_PRIVILEGED and every FAKE_* setting,
+# uses a fixed tool PATH, and checks the install directory and its ancestors
+# for root ownership, no links and no group/other write before downloading.
+# Download and unpacking use a checked root-owned directory with mode 0700.
 #
 # Run `sh install.sh --help` for the options. Environment:
 #   OPEN_FERRY_INSTALL_BASE_URL  where releases are downloaded from, in
@@ -98,6 +102,32 @@ usage_error() {
 has() {
   command -v "$1" >/dev/null 2>&1
 }
+
+# Use trusted tools to discover real privilege, before any external command.
+caller_path=${PATH:-}
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+if [ -x /usr/bin/id ]; then
+  real_uid=$(/usr/bin/id -u) || die "couldn't tell whether this process is privileged"
+else
+  real_uid=$(/bin/id -u) || die "couldn't tell whether this process is privileged"
+fi
+if [ "$real_uid" = 0 ]; then
+  # Environment names contain no whitespace.
+  # shellcheck disable=SC2046
+  for name in OPEN_FERRY_INSTALL_GH OPEN_FERRY_INSTALL_BASE_URL OPEN_FERRY_INSTALL_TEST_PRIVILEGED $(env | sed -n 's/^\(FAKE_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    if printenv "$name" >/dev/null 2>&1; then
+      say "Ignoring $name when running as root."
+      unset "$name"
+    fi
+  done
+  unset CDPATH
+else
+  PATH=$caller_path
+  export PATH
+fi
+uid=$real_uid
+test_mode=0
 
 # --- Options -----------------------------------------------------------------
 
@@ -194,18 +224,18 @@ fi
 # Refuse before downloading or creating any directory.
 os=$(uname -s)
 in_container=0
-if [ -e /.dockerenv ] || [ -e /run/.containerenv ] || [ -n "${container:-}" ] || [ -n "${KUBERNETES_SERVICE_HOST:-}" ]; then
+if [ -e /.dockerenv ] || [ -e /run/.containerenv ] || [ -e /var/run/secrets/kubernetes.io ]; then
   in_container=1
 fi
-uid=$(id -u) || die "couldn't tell whether this process is privileged"
 # Only the fake-release suite's existing loopback and recording seam
 # may pretend to be root; a normal run uses the effective uid.
 case ${OPEN_FERRY_INSTALL_BASE_URL:-} in
   http://127.0.0.1:*)
-    if [ -n "${FAKE_OPEN_FERRY_INSTALL_LOG:-}" ]; then
+    if [ "$real_uid" != 0 ] && [ -n "${FAKE_OPEN_FERRY_INSTALL_LOG:-}" ]; then
+      test_mode=1
       case ${FAKE_CONTAINER_MARKER:-} in
-        none) in_container=0 ;;
-        dockerenv | containerenv) in_container=1 ;;
+        dockerenv | containerenv | kubernetes) in_container=1 ;;
+        *) in_container=0 ;;
       esac
       case ${OPEN_FERRY_INSTALL_TEST_PRIVILEGED:-} in
         0) uid=1 ;;
@@ -256,6 +286,56 @@ case $config in
   /*) ;;
   *) config=$(pwd)/$config ;;
 esac
+
+# Walk from / before creating anything, so even an intermediate link is refused.
+# In the loopback suite, the test account stands in for root.
+check_directory() (
+  directory=$1
+  [ ! -L "$directory" ] && [ -d "$directory" ] ||
+    die "refusing $directory: use a real directory, not a link or file"
+  metadata=$(LC_ALL=C ls -ldn "$directory") || die "couldn't examine $directory"
+  read -r mode _links owner _rest <<EOF
+$metadata
+EOF
+  case $owner in
+    0) ;;
+    *)
+      [ "$test_mode" = 1 ] && [ "$owner" = "$real_uid" ] ||
+        die "refusing $directory: make it owned by root, or choose a root-owned --bin-dir"
+      ;;
+  esac
+  case $mode in
+    d????????*) ;;
+    *) die "refusing $directory: couldn't read its directory permissions" ;;
+  esac
+  case $mode in
+    ?????w????* | ????????w?*)
+      die "refusing $directory: remove group and other write permission (chmod go-w), or choose a protected --bin-dir"
+      ;;
+  esac
+)
+
+prepare_directory() (
+  directory=$1
+  if [ "$directory" != / ]; then
+    parent=${directory%/*}
+    [ -n "$parent" ] || parent=/
+    prepare_directory "$parent" || exit 1
+  fi
+  if [ ! -e "$directory" ] && [ ! -L "$directory" ]; then
+    (umask 022 && mkdir -m 755 "$directory") || die "couldn't make $directory"
+  fi
+  check_directory "$directory"
+)
+
+if [ "$uid" = 0 ]; then
+  case $bin_dir/ in
+    */../* | */./* | *//*) die "choose an absolute --bin-dir without . or .. components or repeated slashes: $bin_dir" ;;
+  esac
+  bin_dir=${bin_dir%/}
+  [ -n "$bin_dir" ] || bin_dir=/
+  prepare_directory "$bin_dir" || exit 1
+fi
 
 # A version is MAJOR.MINOR.PATCH with an optional pre-release part, as the
 # release workflow requires; a leading v is allowed.
@@ -374,7 +454,11 @@ sha256_of() {
 
 has tar || die "unpacking the download needs tar"
 
-tmp=$(mktemp -d 2>/dev/null || mktemp -d -t open-ferry-install)
+if [ "$uid" = 0 ]; then
+  tmp=$(umask 077 && mktemp -d "$bin_dir/.open-ferry-install.XXXXXXXX")
+else
+  tmp=$(mktemp -d 2>/dev/null || mktemp -d -t open-ferry-install)
+fi
 [ -n "$tmp" ] && [ -d "$tmp" ] || die "couldn't make a temporary directory"
 cleanup() {
   rm -rf "$tmp"
@@ -382,6 +466,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [ "$uid" = 0 ]; then
+  chmod 700 "$tmp" || die "couldn't protect $tmp"
+  check_directory "$tmp" || exit 1
+fi
 
 # --- The release -------------------------------------------------------------
 
@@ -461,7 +549,7 @@ status=0
 # so a version this script can name has it: no fallback, no probe.
 set -- install-self -from "$staged" -to "$installed" -installer install.sh
 if [ "$system" = 1 ]; then set -- "$@" -system; fi
-"$staged" "$@" </dev/null || status=$?
+(cd / && "$staged" "$@" </dev/null) || status=$?
 case $status in
   0) ;;
   3)
@@ -527,7 +615,7 @@ if [ "$system" = 1 ]; then
   say "Skipping the migrate offer for a machine install. To migrate CLIProxyAPI, run: sudo open-ferry migrate"
 fi
 if [ "$migrate" != no ]; then
-  search=$("$installed" migrate -json </dev/null 2>/dev/null || true)
+  search=$(cd / && "$installed" migrate -json </dev/null 2>/dev/null || true)
   case $search in
     '{"found":true,'*) found_cpa=1 ;;
     '{"found":false}')
@@ -586,7 +674,7 @@ if [ "$found_cpa" = 1 ]; then
   esac
   if [ "$switch_now" = 1 ]; then
     say ""
-    if "$installed" migrate -yes </dev/null; then
+    if (cd / && "$installed" migrate -yes </dev/null); then
       switched=1
     else
       switch_failed="the switch from CLIProxyAPI didn't finish: see what open-ferry migrate said above"
@@ -616,7 +704,7 @@ else
   say ""
   set -- init -config "$config"
   if [ "$system" = 1 ]; then set -- init -system -config "$config"; fi
-  "$installed" "$@" || die "open-ferry init couldn't write $config"
+  (cd / && "$installed" "$@") || die "open-ferry init couldn't write $config"
   say ""
 fi
 
@@ -627,12 +715,16 @@ fi
 mode_config=$config
 if [ "$switched" = 1 ]; then
   mode_config=$cpa_config
+  case $mode_config in
+    /*) ;;
+    *) die "CLIProxyAPI returned a config path that isn't absolute: $mode_config" ;;
+  esac
 elif [ "$skipped_init" = 1 ]; then
   mode_config=
 fi
 if [ -n "$self_update" ]; then
   if [ -n "$mode_config" ]; then
-    "$installed" update -mode "$self_update" -config "$mode_config" ||
+    (cd / && "$installed" update -mode "$self_update" -config "$mode_config") ||
       die "open-ferry update couldn't set self-update.mode to $self_update in $mode_config"
   else
     say "There's no config yet to set self-update.mode to $self_update in. Once open-ferry runs on one, run: $command update -mode $self_update -config <config>"

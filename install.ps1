@@ -66,6 +66,10 @@
 # Under an elevated -System run, BASE_URL, GH, DIR and CONFIG above are
 # ignored. Use -InstallDir and -ConfigPath to choose machine paths; downloads
 # always come from GitHub and staging stays inside the install directory.
+# Real elevation also ignores every FAKE_* setting and refuses Test* parameters.
+# Before downloading it checks ownership, write ACLs and reparse points on
+# the install directory and its ancestors, and creates protected staging.
+# External tools use full paths in trusted machine directories.
 #
 # The new open-ferry.exe installs itself (`open-ferry install-self`): it waits
 # for any other install or update, refuses to replace a binary a background
@@ -155,6 +159,7 @@ function Install-OpenFerry {
     # Same rule as scope::Host: TokenElevation, or the SYSTEM SID. A failure
     # to read the token refuses before downloads or directory creation.
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $testSid = $identity.User.Value
     $elevation = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
     $size = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
     $tokenOut = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
@@ -180,6 +185,9 @@ function Install-OpenFerry {
     $privileged = $reallyPrivileged
     $testMode = $false
     if ($TestBaseUrl -or $TestPrivilege -or $TestElevated -or $TestProgramFiles -or $TestProgramData -or $TestGh) {
+        if ($reallyPrivileged) {
+            throw 'Installer test parameters cannot run in a genuinely elevated terminal. Run the tests unelevated.'
+        }
         $testUrl = $null
         if (-not [Uri]::TryCreate($TestBaseUrl, [UriKind]::Absolute, [ref]$testUrl) -or
             $testUrl.Scheme -ne 'http' -or $testUrl.Host -ne '127.0.0.1' -or $testUrl.UserInfo -or
@@ -189,12 +197,22 @@ function Install-OpenFerry {
         $testMode = $true
         if ($TestPrivilege) { $privileged = $TestPrivilege -eq '1' }
     } elseif (-not $reallyPrivileged -and $env:OPEN_FERRY_INSTALL_BASE_URL -like 'http://127.0.0.1:*' -and $env:FAKE_OPEN_FERRY_INSTALL_LOG) {
+        $testMode = $true
+        $TestBaseUrl = $env:OPEN_FERRY_INSTALL_BASE_URL
         switch ($env:OPEN_FERRY_INSTALL_TEST_PRIVILEGED) {
             '0' { $privileged = $false }
             '1' { $privileged = $true }
         }
     }
     $hardened = $System -and ($reallyPrivileged -or $TestElevated)
+    if ($reallyPrivileged) {
+        foreach ($name in [Environment]::GetEnvironmentVariables('Process').Keys) {
+            if ($name -like 'FAKE_*') {
+                Write-Host "Ignoring $name in an elevated run."
+                [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            }
+        }
+    }
     if ($hardened) {
         foreach ($option in @(
             @('OPEN_FERRY_INSTALL_BASE_URL', '-Version to choose an official GitHub release'),
@@ -351,10 +369,13 @@ function Install-OpenFerry {
     # Runs a native command with its output on the console, and returns its
     # exit code. Its standard error isn't taken for a PowerShell error, as
     # Windows PowerShell may when its own output is redirected.
-    function Invoke-Native([scriptblock]$Command) {
+    function Invoke-Native([scriptblock]$Command, [string]$Directory = $InstallDir) {
         $ErrorActionPreference = 'Continue'
-        & $Command | Out-Host
-        return $LASTEXITCODE
+        Push-Location -LiteralPath $Directory -ErrorAction Stop
+        try {
+            & $Command | Out-Host
+            return $LASTEXITCODE
+        } finally { Pop-Location }
     }
 
     # SHA256SUMS lines are "<hash>  <name>", or "<hash> *<name>" in binary
@@ -369,19 +390,111 @@ function Install-OpenFerry {
         return $sums
     }
 
-    if ($System) {
-        # Inherit Program Files' protection before any download or unpack.
-        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    # The same owner, ACE kinds and write masks as trust/windows.rs. Ancestors
+    # may allow adding unrelated children, but never replacing existing ones.
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    if ($testMode) { $trustedSids += $testSid }
+    function Assert-TrustedEntry([string]$Path, [bool]$Full, [bool]$Directory) {
+        $remedy = 'Fix its ownership and permissions as an administrator, or choose a protected -InstallDir.'
+        $item = Get-Item -LiteralPath $Path -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.PSIsContainer -ne $Directory) {
+            throw "Refusing ${Path}: it is a link or the wrong file type. $remedy"
+        }
+        $acl = Get-Acl -LiteralPath $Path
+        $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+        if (-not $descriptor.Owner -or $descriptor.Owner.Value -notin $trustedSids) {
+            throw "Refusing ${Path}: its owner is not a trusted account. $remedy"
+        }
+        if ($null -eq $descriptor.DiscretionaryAcl) {
+            throw "Refusing ${Path}: it has no DACL, so everyone can write to it. $remedy"
+        }
+        $mask = 0x500d0040
+        if ($Full) { $mask = 0x500d0156 }
+        foreach ($ace in $descriptor.DiscretionaryAcl) {
+            $inheritOnly = ([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0
+            if ($inheritOnly -and -not $Full) { continue }
+            if ([int]$ace.AceType -in 0, 4, 5, 9, 11) {
+                if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed) {
+                    throw "Refusing ${Path}: its DACL has an allow entry this check can't read. $remedy"
+                }
+                $sid = $ace.SecurityIdentifier.Value
+                if ($sid -in $trustedSids -or ($inheritOnly -and $sid -eq 'S-1-3-0')) { continue }
+                if (($ace.AccessMask -band $mask) -ne 0) {
+                    throw "Refusing ${Path}: $sid is allowed to write to it. $remedy"
+                }
+            }
+        }
+    }
+    function Assert-TrustedDirectory([string]$Path) {
+        $chain = @()
+        $directory = [IO.DirectoryInfo]::new($Path)
+        while ($null -ne $directory) {
+            $chain += $directory.FullName
+            $directory = $directory.Parent
+        }
+        [Array]::Reverse($chain)
+        for ($index = 0; $index -lt $chain.Count; $index++) {
+            Assert-TrustedEntry $chain[$index] ($index -eq $chain.Count - 1) $true
+        }
+    }
+    function New-ProtectedDirectory([string]$Path) {
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        $owner = 'S-1-5-32-544'
+        if ($testMode) { $owner = $testSid }
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new($owner))
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', $owner) | Select-Object -Unique) {
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+        }
+        $bytes = $acl.GetSecurityDescriptorBinaryForm()
+        $descriptor = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+        $pointerOffset = [IntPtr]::Size
+        $length = 3 * [IntPtr]::Size
+        $attributes = [Runtime.InteropServices.Marshal]::AllocHGlobal($length)
+        try {
+            [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $descriptor, $bytes.Length)
+            [Runtime.InteropServices.Marshal]::WriteInt32($attributes, 0, $length)
+            [Runtime.InteropServices.Marshal]::WriteIntPtr($attributes, $pointerOffset, $descriptor)
+            [Runtime.InteropServices.Marshal]::WriteInt32($attributes, 2 * $pointerOffset, 0)
+            if (-not [OpenFerryInstallerNative]::CreateDirectoryW($Path, $attributes)) {
+                throw "Couldn't create a new protected directory at $Path"
+            }
+        } finally {
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($attributes)
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($descriptor)
+        }
+    }
+    function Initialize-InstallDirectory([string]$Path) {
+        if ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path)) {
+            Assert-TrustedDirectory $Path
+            return
+        }
+        $parent = [IO.DirectoryInfo]::new($Path).Parent
+        if ($null -eq $parent) { throw "Couldn't find an existing parent of $Path" }
+        Initialize-InstallDirectory $parent.FullName
+        New-ProtectedDirectory $Path
+        Assert-TrustedDirectory $Path
+    }
+
+    if ($privileged) {
+        Initialize-InstallDirectory $InstallDir
+        $destination = Join-Path $InstallDir 'open-ferry.exe'
+        if (Test-Path -LiteralPath $destination) { Assert-TrustedEntry $destination $true $false }
         $stagingRoot = $InstallDir
     } else {
         $stagingRoot = [IO.Path]::GetTempPath()
     }
     $tmp = Join-Path $stagingRoot ('open-ferry-install-' + [Guid]::NewGuid().ToString('N'))
     # Create-new, including if another process races us; never adopt a directory.
-    if (-not [OpenFerryInstallerNative]::CreateDirectoryW($tmp, [IntPtr]::Zero)) {
+    if ($privileged) {
+        New-ProtectedDirectory $tmp
+    } elseif (-not [OpenFerryInstallerNative]::CreateDirectoryW($tmp, [IntPtr]::Zero)) {
         throw "Couldn't create a new staging directory at $tmp"
     }
     try {
+        if ($privileged) { Assert-TrustedDirectory $tmp }
         $sumsPath = Join-Path $tmp 'SHA256SUMS'
         $suffix = "-$target.zip"
         if (-not $Version) {
@@ -431,9 +544,13 @@ function Install-OpenFerry {
         if (-not $gh) { $gh = 'gh' }
         if ($NoAttestation) {
             Write-Host 'Not checking the build provenance attestation (-NoAttestation).'
-        } elseif (Get-Command $gh -ErrorAction SilentlyContinue) {
+        } elseif (Get-Command $gh -CommandType Application -ErrorAction SilentlyContinue) {
+            if ($reallyPrivileged) {
+                Assert-TrustedDirectory ([IO.Path]::GetDirectoryName($gh))
+                Assert-TrustedEntry $gh $true $false
+            }
             Write-Host 'Checking the build provenance attestation with gh...'
-            if ((Invoke-Native { & $gh attestation verify $archivePath --repo $repo }) -ne 0) {
+            if ((Invoke-Native { & $gh attestation verify $archivePath --repo $repo } $tmp) -ne 0) {
                 throw "gh couldn't verify ${archive}'s attestation: not installing it. If gh isn't signed in, run 'gh auth login' and try again, or pass -NoAttestation to rely on the SHA256SUMS check alone."
             }
         } else {
@@ -487,6 +604,7 @@ function Install-OpenFerry {
             # an extension that isn't .exe.
             $info = New-Object System.Diagnostics.ProcessStartInfo
             $info.FileName = $staged
+            $info.WorkingDirectory = $InstallDir
             $info.UseShellExecute = $false
             $installArgs = @('install-self', '-from', $staged, '-to', $exe, '-installer', 'install.ps1')
             if ($System) { $installArgs += '-system' }
@@ -551,8 +669,11 @@ function Install-OpenFerry {
             [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
         } catch { }
         try {
-            $lines = & $Exe @Arguments 2>$null
-            return (@($lines) -join "`n").Trim()
+            Push-Location -LiteralPath $InstallDir -ErrorAction Stop
+            try {
+                $lines = & $Exe @Arguments 2>$null
+                return (@($lines) -join "`n").Trim()
+            } finally { Pop-Location }
         } catch {
             return ''
         } finally {
@@ -675,6 +796,9 @@ function Install-OpenFerry {
     $modeConfig = $ConfigPath
     if ($switched) {
         $modeConfig = [string]$cpa.config
+        if (-not [IO.Path]::IsPathRooted($modeConfig) -or $modeConfig -notmatch '^(?:[A-Za-z]:\\|\\\\)') {
+            throw "CLIProxyAPI returned a config path that isn't absolute: $modeConfig"
+        }
     } elseif ($skippedInit) {
         $modeConfig = $null
     }
