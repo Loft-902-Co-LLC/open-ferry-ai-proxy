@@ -46,10 +46,10 @@ pub(super) struct Updates {
 impl Updates {
     /// This process's: its environment, its build and its install. It
     /// writes nothing.
-    pub(super) fn current() -> Self {
+    pub(super) fn current(probe: &dyn scope::Probe) -> Self {
         let system = RealSystem { write_probe: false };
         let (install, refusal, machine_hint) = match std::env::current_exe() {
-            Ok(binary) => installation(&scope::Host, &system, &binary),
+            Ok(binary) => installation(probe, &system, &binary),
             Err(error) => (
                 Install::NotifyOnly(NotSelfUpdating::UnknownBinary(error.to_string())),
                 None,
@@ -213,6 +213,7 @@ mod scope_tests {
         let (install, refusal, machine_hint) =
             installation(probe, &ReadOnlySystem, Path::new(binary));
         let env = Environment {
+            probe: scope::runtime_probe(),
             now: chrono::Utc::now(),
             build_date: None,
             dashboard_built: true,
@@ -257,6 +258,22 @@ mod scope_tests {
                 "refused records aren't read"
             );
             assert!(probe.created.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_untrusted_installation_is_refused_before_receipt_assessment() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            let mut probe = Fake::new(platform, true);
+            let account = probe.account.clone().unwrap();
+            let binary = platform.join(&account, "open-ferry");
+            probe
+                .file(&binary)
+                .with_receipt(&account, &binary)
+                .untrust(&account);
+            let (_, refusal, _) = installation(&probe, &ReadOnlySystem, Path::new(&binary));
+            assert!(refusal.is_some());
+            assert!(probe.reads.borrow().is_empty());
         }
     }
 

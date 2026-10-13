@@ -92,11 +92,21 @@ pub(super) fn apps(service: &Service, extra: Router) -> (Router, Router) {
     let management = &service.management;
     let ledger = &service.ledger;
     let closed = open_ferry_management::pages_router(management.clone()).merge(
-        open_ferry_dashboard::router_for(management.clone(), ledger.clone(), Listener::Closed),
+        open_ferry_dashboard::router_for_guarded(
+            management.clone(),
+            ledger.clone(),
+            Listener::Closed,
+            service.claude_guard.clone(),
+        ),
     );
     let main = router_with(service.state.clone(), closed.merge(extra));
     let served = open_ferry_management::api_router(management.clone()).merge(
-        open_ferry_dashboard::router_for(management.clone(), ledger.clone(), Listener::Separate),
+        open_ferry_dashboard::router_for_guarded(
+            management.clone(),
+            ledger.clone(),
+            Listener::Separate,
+            service.claude_guard.clone(),
+        ),
     );
     let separate = router_without_proxy(service.state.clone(), served);
     (main, separate)

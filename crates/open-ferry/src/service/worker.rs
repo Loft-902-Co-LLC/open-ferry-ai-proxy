@@ -1663,13 +1663,14 @@ fn prepare(
     standby: bool,
     context: Context,
 ) -> Result<Prepared, String> {
-    let (config, sha256) = crate::settings::load_with_sha256(&crate::scope::Host, config_path)
+    let probe = crate::scope::runtime_probe();
+    let (config, sha256) = crate::settings::load_with_sha256(probe.as_ref(), config_path)
         .map_err(|error| format!("failed to load config: {error}"))?;
     log_level.set_debug(config.debug);
     let auth_dir = config
         .resolve_auth_dir()
         .map_err(|error| format!("failed to resolve auth directory: {error}"))?;
-    crate::scope::authorize_auth_dir(&crate::scope::Host, &auth_dir)
+    crate::scope::authorize_auth_dir(probe.as_ref(), &auth_dir)
         .map_err(|error| error.to_string())?;
     if config.has_example_api_keys() {
         tracing::error!(
@@ -1690,13 +1691,14 @@ fn prepare(
     options.config_sha256 = Some(sha256);
     let (gate, key) = ActiveGate::standby();
     let config = Arc::new(config);
-    let mut service = Service::prepared(
+    let mut service = Service::prepared_with_probe(
         Arc::clone(&config),
         config_path.to_path_buf(),
         auth_dir,
         log_level,
         &options,
         gate,
+        probe,
     );
     if standby {
         service.hold_cooldown_store();
@@ -1923,6 +1925,7 @@ async fn activate_unless_cancelled(
     let wedge = timing.wedge_watcher.clone();
     #[cfg(test)]
     let watcher_control = control.clone();
+    let probe = Arc::clone(&service.probe);
     let watcher = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let watcher_config = {
@@ -1935,7 +1938,7 @@ async fn activate_unless_cancelled(
         ConfigWatcher::start_guarded(
             &watcher_path,
             &watcher_config,
-            Some(super::config_read_guard()),
+            Some(super::config_read_guard(Arc::clone(&probe))),
         )
     })
     .await

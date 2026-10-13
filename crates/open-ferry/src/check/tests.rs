@@ -35,6 +35,7 @@ fn now() -> DateTime<Utc> {
 
 fn env() -> Environment {
     Environment {
+        probe: crate::scope::runtime_probe(),
         now: now(),
         build_date: None,
         dashboard_built: true,
@@ -653,4 +654,36 @@ fn lists_its_flags_and_turns_down_bad_usage() {
     assert_eq!(run(&["-config", "x.yaml", "extra"]), ExitCode::from(2));
     assert_eq!(run(&["-json=maybe"]), ExitCode::from(2));
     assert_eq!(run(&["-h"]), ExitCode::SUCCESS);
+}
+
+#[tokio::test]
+async fn checks_use_the_injected_probe_before_loading_a_valid_config() {
+    use crate::scope::runtime_test_probe::RuntimeFake;
+    use crate::update::scope_probe::Fake;
+    let dir = crate::scope::runtime_test_probe::scratch_dir();
+    let path = dir.path().join("config.yaml");
+    let (_socket, port) = closed_port();
+    std::fs::write(
+        &path,
+        format!(
+            "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys: [test-key]\n",
+            dir.path().display()
+        ),
+    )
+    .unwrap();
+    let platform = if cfg!(windows) {
+        crate::os_service::Platform::Windows
+    } else {
+        crate::os_service::Platform::Linux
+    };
+    let mut fake = Fake::new(platform, true);
+    fake.file(path.to_str().unwrap())
+        .untrust(path.to_str().unwrap());
+    let mut environment = env();
+    environment.probe = Arc::new(RuntimeFake::new(fake));
+    let findings = run(&path, &environment).await;
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].check, "config");
+    assert_eq!(findings[0].level, Level::Error);
+    assert!(findings[0].message.contains("Refusing to load"));
 }

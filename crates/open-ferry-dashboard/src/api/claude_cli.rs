@@ -22,7 +22,7 @@ use open_ferry_core::auth::synthesizer::claude_cli::CLAUDE_CLI_PROVIDER;
 use open_ferry_core::auth::{Auth, AuthError};
 use open_ferry_core::config::ClaudeCli;
 use open_ferry_management::{ManagementState, credential_entry};
-use open_ferry_providers::claude_cli::{Entry, StatusError, auth_status};
+use open_ferry_providers::claude_cli::{Entry, StatusError, auth_status_guarded};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -156,7 +156,7 @@ pub(super) async fn auth_status_route(
                 format!("no claude-cli entry is named {name:?}"),
             )
         })?;
-    match auth_status(&entry, &state.claude_cli_root).await {
+    match auth_status_guarded(&entry, &state.claude_cli_root, state.claude_guard.as_ref()).await {
         Ok(status) => Ok(ok(&status)),
         Err(error @ StatusError::Timeout) => Err(ApiError::new(
             StatusCode::GATEWAY_TIMEOUT,
