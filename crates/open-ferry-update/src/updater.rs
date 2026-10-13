@@ -630,10 +630,7 @@ impl Updater {
         let staging = StagingDir::create(&self.data.versions())
             .map_err(io_error("make the staging directory"))?;
         let staged = staging.0.join(self.binary_name());
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)
+        let mut file = crate::staging::create_staged_file(&staged)
             .map_err(io_error("write the staged binary"))?;
         file.write_all(&binary)
             .map_err(io_error("write the staged binary"))?;
@@ -1356,4 +1353,29 @@ pub struct Status {
     pub trusts_release_key: bool,
     /// Notes on the settings.
     pub notes: Vec<String>,
+}
+
+#[cfg(all(test, unix))]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn the_staged_binary_and_directories_are_safe_at_creation_with_umask_zero() {
+        use crate::journal::creation_tests::{assert_mode, with_umask_zero};
+        with_umask_zero(
+            "updater::creation_tests::the_staged_binary_and_directories_are_safe_at_creation_with_umask_zero",
+            |root| {
+                let versions = root.join("data/versions");
+                let staging = StagingDir::create(&versions).unwrap();
+                for path in [root.join("data"), versions, staging.0.clone()] {
+                    assert_mode(&path, 0o755);
+                }
+                let staged = staging.0.join("open-ferry");
+                let _file = crate::staging::create_staged_file(&staged).unwrap();
+                assert_mode(&staged, 0o700);
+                make_executable(&staged).unwrap();
+                assert_mode(&staged, 0o755);
+            },
+        );
+    }
 }

@@ -91,7 +91,14 @@ impl Fs for RealFs {
     }
 
     fn create_dir(&self, path: &Path) -> io::Result<()> {
-        std::fs::create_dir(path)
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o755);
+        }
+        builder.create(path)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -549,6 +556,25 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_directories_are_not_writable_by_others_with_umask_zero() {
+        use crate::journal::creation_tests::{assert_mode, with_umask_zero};
+        with_umask_zero(
+            "publication::tests::publication_directories_are_not_writable_by_others_with_umask_zero",
+            |root| {
+                let direct = root.join("direct");
+                RealFs.create_dir(&direct).unwrap();
+                assert_mode(&direct, 0o755);
+                let chain = root.join("data/a/b");
+                create_dir_all_durable(&chain, &root.join("data")).unwrap();
+                for path in [root.join("data"), root.join("data/a"), chain] {
+                    assert_mode(&path, 0o755);
+                }
+            },
+        );
+    }
     use std::cell::{Cell, RefCell};
     use std::fs;
     use std::path::PathBuf;

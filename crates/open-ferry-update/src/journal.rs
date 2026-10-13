@@ -958,7 +958,14 @@ fn atomic_write_in(
     let mut opened = None;
     for _ in 0..TEMP_TRIES {
         let temp = dir.join(temp_name(&name, tag, next_counter()));
-        match OpenOptions::new().write(true).create_new(true).open(&temp) {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o644);
+        }
+        match options.open(&temp) {
             Ok(file) => {
                 opened = Some((temp, file));
                 break;
@@ -1007,11 +1014,91 @@ fn atomic_write_in(
     })
 }
 
+#[cfg(all(test, unix))]
+pub(crate) mod creation_tests {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    pub(crate) fn assert_mode(path: &Path, expected: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode & 0o022, 0, "{} is writable by others", path.display());
+        assert_eq!(mode, expected, "{}", path.display());
+    }
+
+    pub(crate) fn with_umask_zero(test: &str, check: impl FnOnce(&Path)) {
+        if let Some(root) = std::env::var_os("OFP_CREATION_TEST_ROOT") {
+            // SAFETY: the parent selects only this test in an isolated child.
+            unsafe { libc::umask(0) };
+            let root = Path::new(&root);
+            check(root);
+            std::fs::write(root.join("completed"), b"completed").unwrap();
+            return;
+        }
+        // Plain cargo test also keeps its scratch inside the workspace's target directory.
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+            });
+        std::fs::create_dir_all(&scratch).unwrap();
+        let root = tempfile::tempdir_in(&scratch).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1"])
+            .env("OFP_CREATION_TEST_ROOT", root.path())
+            .env("OFP_TEST_SCRATCH", &scratch)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "creation-mode child: {status}");
+                assert!(root.path().join("completed").is_file(), "child did not run");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("creation-mode child exceeded its watchdog");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pins::Pin;
 
+    #[cfg(unix)]
+    #[test]
+    fn atomic_records_and_their_directories_are_not_writable_by_others_with_umask_zero() {
+        use super::creation_tests::{assert_mode, with_umask_zero};
+        with_umask_zero(
+            "journal::tests::atomic_records_and_their_directories_are_not_writable_by_others_with_umask_zero",
+            |root| {
+                let path = root.join("data/records/record.json");
+                atomic_write(&path, b"one", false).unwrap();
+                assert_mode(&root.join("data"), 0o755);
+                assert_mode(&root.join("data/records"), 0o755);
+                assert_mode(&path, 0o644);
+                atomic_write(&path, b"two", true).unwrap();
+                assert_mode(&path, 0o644);
+                let mut saw_temp = false;
+                let failure = atomic_write_removing(&path, b"three", false, &mut |temp| {
+                    assert_mode(temp, 0o644);
+                    saw_temp = true;
+                    fs::remove_file(temp)
+                });
+                assert!(failure.is_err());
+                assert!(
+                    saw_temp,
+                    "the failed publication left a temporary file to check"
+                );
+            },
+        );
+    }
     pub(crate) fn artifact(version: &str) -> Artifact {
         Artifact {
             version: version.to_owned(),

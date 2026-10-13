@@ -12,10 +12,12 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -23,7 +25,10 @@ use windows_sys::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    OPEN_EXISTING, READ_CONTROL,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -224,19 +229,40 @@ fn check_chain(path: &Path, rules: &TrustRules, below: Option<&Path>) -> Result<
 
 fn check_one(path: &Path, rules: &TrustRules, tier: Tier) -> Result<(), TrustError> {
     let name = wide(path.as_os_str());
-    // SAFETY: `name` is NUL-terminated.
-    let attributes = unsafe { GetFileAttributesW(name.as_ptr()) };
-    if attributes == INVALID_FILE_ATTRIBUTES {
+    // Share DELETE as well as READ and WRITE so a short trust check does not block
+    // other processes' renames. Both reads still describe this one opened object.
+    // SAFETY: `name` is NUL-terminated; the optional pointers are null.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
         let e = io::Error::last_os_error();
         return Err(TrustError::new(path, format!("it can't be examined: {e}")));
     }
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    // SAFETY: the freshly opened handle has no other owner and is valid until dropped.
+    let _handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    // SAFETY: an all-zero information buffer is valid for the API to fill.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `handle` is live and `info` is a valid out-pointer.
+    if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+        let e = io::Error::last_os_error();
+        return Err(TrustError::new(path, format!("it can't be examined: {e}")));
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(TrustError::new(
             path,
             "it is a reparse point (a link, junction or mount point)",
         ));
     }
-    let descriptor = read_descriptor(&name).map_err(|why| TrustError::new(path, why))?;
+    let descriptor = read_descriptor(handle).map_err(|why| TrustError::new(path, why))?;
     judge(&descriptor, rules, tier).map_err(|why| TrustError::new(path, why))
 }
 
@@ -315,14 +341,14 @@ fn judge(descriptor: &Descriptor, rules: &TrustRules, tier: Tier) -> Result<(), 
     Ok(())
 }
 
-fn read_descriptor(name: &[u16]) -> Result<Descriptor, String> {
+fn read_descriptor(handle: HANDLE) -> Result<Descriptor, String> {
     let mut owner: PSID = ptr::null_mut();
     let mut dacl: *mut ACL = ptr::null_mut();
     let mut security: *mut c_void = ptr::null_mut();
-    // SAFETY: `name` is NUL-terminated and the out-pointers are valid for the call.
+    // SAFETY: `handle` remains live in `check_one` and the out-pointers are valid.
     let rc = unsafe {
-        GetNamedSecurityInfoW(
-            name.as_ptr(),
+        GetSecurityInfo(
+            handle,
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &mut owner,
@@ -339,7 +365,7 @@ fn read_descriptor(name: &[u16]) -> Result<Descriptor, String> {
         ));
     }
     let _guard = LocalGuard(security);
-    // SAFETY: the pointers were filled in by `GetNamedSecurityInfoW` and stay valid while
+    // SAFETY: the pointers were filled in by `GetSecurityInfo` and stay valid while
     // `_guard` holds the descriptor.
     unsafe { describe(owner, dacl, !dacl.is_null()) }
 }
@@ -607,6 +633,38 @@ mod tests {
     }
 
     const CLEAN: &str = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
+    #[test]
+    fn the_opened_junction_is_refused_before_its_target_descriptor_is_read() {
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("OFP_TEST_SCRATCH is set");
+        let root = tempfile::tempdir_in(scratch).expect("scratch dir");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("target");
+        let link = root.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .expect("cmd");
+        assert!(made.status.success(), "{made:?}");
+        let err = check_one(&link, &TrustRules::system(), Tier::Full).unwrap_err();
+        assert_eq!(err.path, link);
+        assert_eq!(
+            err.reason,
+            "it is a reparse point (a link, junction or mount point)"
+        );
+    }
+
+    #[test]
+    fn an_open_that_cannot_find_the_path_reports_it_cannot_be_examined() {
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("OFP_TEST_SCRATCH is set");
+        let root = tempfile::tempdir_in(scratch).expect("scratch dir");
+        let missing = root.path().join("missing");
+        let err = check_one(&missing, &TrustRules::system(), Tier::Full).unwrap_err();
+        assert_eq!(err.path, missing);
+        assert!(err.reason.starts_with("it can't be examined: "), "{err}");
+    }
 
     #[test]
     fn create_private_dir_makes_a_directory_and_accepts_an_existing_one_but_not_a_file() {

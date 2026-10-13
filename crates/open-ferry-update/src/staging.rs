@@ -310,7 +310,7 @@ pub async fn stage_exclusive_checked(
 
 type CheckedOpen<'a> = &'a (dyn Fn(&Path) -> Result<File, String> + Sync);
 
-fn create_staged_file(path: &Path) -> io::Result<File> {
+pub(crate) fn create_staged_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
