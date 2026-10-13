@@ -11,8 +11,8 @@
 //! conversation that ends with the model as if the user had said nothing,
 //! so an empty user turn goes before a first model turn and, for a request
 //! that generates content, after a last one, unless that last turn answers
-//! a function call without nested media. Vertex AI also rejects the call IDs of an OpenAI
-//! Responses client's function calls and results.
+//! a function call without nested media. Vertex AI also rejects the call
+//! IDs of an OpenAI Responses client's function calls and results.
 //!
 //! Deviations from upstream: none.
 
@@ -80,14 +80,16 @@ fn has_function_response_media(content: &Value) -> bool {
         return false;
     };
     parts.iter().any(|part| {
-        let Some(Value::Array(nested)) = json::get(part, "functionResponse.parts") else {
-            return false;
-        };
-        nested.iter().any(|part| {
+        let has_media = |part: &Value| {
             ["inlineData", "inline_data", "fileData", "file_data"]
                 .iter()
                 .any(|key| part.get(key).is_some())
-        })
+        };
+        match json::get(part, "functionResponse.parts") {
+            Some(Value::Array(nested)) => nested.iter().any(has_media),
+            Some(nested) => has_media(nested),
+            None => false,
+        }
     })
 }
 

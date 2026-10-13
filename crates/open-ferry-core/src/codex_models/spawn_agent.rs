@@ -242,3 +242,43 @@ fn map_int(values: &Map<String, Value>, key: &str) -> i64 {
         .and_then(Value::as_f64)
         .map_or(0, |number| number as i64)
 }
+
+#[cfg(test)]
+mod fallback_template_tests {
+    use super::*;
+    use serde_json::json;
+
+    // TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata's first-template fallback.
+    #[test]
+    fn models_without_gpt_5_5_inherit_the_first_templates_reasoning() {
+        let mut raw: Value =
+            serde_json::from_slice(crate::registry::codex_client::EMBEDDED_CATALOG).unwrap();
+        raw["models"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["slug"] != "gpt-5.5");
+        raw["models"][0]["default_reasoning_level"] = json!("high");
+        raw["models"][0]["supported_reasoning_levels"] = json!([
+            {"effort":"low"}, {"effort":"high"}
+        ]);
+        for entry in raw["models"].as_array_mut().unwrap().iter_mut().skip(1) {
+            entry["default_reasoning_level"] = json!("medium");
+            entry["supported_reasoning_levels"] = json!([{"effort":"medium"}]);
+        }
+        let templates = CodexClientCatalog::from_json(raw.to_string().as_bytes()).unwrap();
+        let models = models_from_templates(
+            &[ModelInfo {
+                id: "third-party-model".into(),
+                ..ModelInfo::default()
+            }],
+            |slug| templates.template(slug),
+            templates.default_template(),
+            |_| None,
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "third-party-model");
+        assert_eq!(models[0].default_reasoning_effort, "high");
+        assert_eq!(models[0].reasoning_efforts, ["low", "high"]);
+        assert!(models[0].service_tiers.is_empty());
+    }
+}

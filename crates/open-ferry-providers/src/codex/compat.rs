@@ -289,7 +289,7 @@ fn config_index(auth: &Auth) -> Option<usize> {
 /// key and none, or for a credential without a key with its base URL; else
 /// the first with its key. Keys and URLs compare trimmed and regardless of
 /// case.
-fn codex_key_config<'c>(config: &'c Config, auth: &Auth) -> Option<&'c CodexKey> {
+pub(super) fn codex_key_config<'c>(config: &'c Config, auth: &Auth) -> Option<&'c CodexKey> {
     let entries = &config.codex_api_key;
     let (key, base) = (attribute(auth, "api_key"), attribute(auth, "base_url"));
     if let Some(entry) = config_index(auth).and_then(|index| entries.get(index)) {

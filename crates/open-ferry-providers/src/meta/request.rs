@@ -17,8 +17,8 @@
 //! custom `apply_patch` tool is declared as a function (see
 //! [`crate::apply_patch_responses`]), `instructions` is filled in, and
 //! reasoning items (keeping foreign encrypted content), `web_search` tools
-//! and a Codex client's tool parameter
-//! types are made fit for Meta. The payload rules apply last, to the body
+//! and a Codex client's tool parameter types are made fit for Meta. The
+//! payload rules apply last, to the body
 //! as it is sent, so a field a rule writes is sent even if it is one of
 //! those dropped.
 //!
@@ -692,6 +692,7 @@ mod tests {
         let on = prepare(None, None, &request, &options, true).unwrap();
         assert_eq!(on.body["stream"], true);
     }
+
     #[test]
     fn prepare_preserves_foreign_reasoning_without_enabling_compat() {
         let foreign = "opaque-encrypted-reasoning-token-xyz";
@@ -723,6 +724,103 @@ mod tests {
                 assert!(item.get("encrypted_content").is_none());
                 assert!(item.get("id").is_none());
             }
+        }
+    }
+
+    #[test]
+    fn codex_prepare_drops_foreign_reasoning_without_compat() {
+        use crate::codex::request::{Context, Kind, prepare_body};
+
+        let request = Request {
+            model: "gpt-5.4".into(),
+            payload: Bytes::from(
+                json!({"store":false,"input":[
+                    {"type":"reasoning","id":"rs_foreign",
+                     "encrypted_content":"opaque-encrypted-reasoning-token-xyz",
+                     "content":[{"type":"reasoning_text","text":"thinking"}],"summary":[]},
+                    {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+                ]})
+                .to_string(),
+            ),
+        };
+        let options = Options::new(Format::OPENAI_RESPONSE);
+        for kind in [Kind::Execute, Kind::Stream] {
+            let prepared = prepare_body(kind, Context::default(), &request, &options).unwrap();
+            let reasoning = &prepared.body["input"][0];
+            assert_eq!(reasoning["type"], "reasoning");
+            assert!(reasoning.get("encrypted_content").is_none());
+            assert!(reasoning.get("id").is_none());
+            assert_eq!(reasoning["content"], json!([]));
+            assert_eq!(
+                reasoning["summary"],
+                json!([{"type":"summary_text","text":"thinking"}])
+            );
+        }
+    }
+
+    // Pin the shared Chat Completions translator's custom-tool collision retry
+    // alongside the Responses request regressions, without changing Part C's files.
+    #[test]
+    fn custom_tool_call_id_collisions_retry_and_keep_results_matched() {
+        use open_ferry_translate::codex::openai::chat_completions::convert_openai_chat_completions_request_to_codex;
+
+        let convert = |ids: &[String]| {
+            let calls: Vec<_> = ids.iter().enumerate().map(|(i, id)| json!({
+                "id":id,"type":"custom","custom":{"name":format!("tool_{i}"),"input":"patch"}
+            })).collect();
+            let mut messages = vec![json!({"role":"assistant","tool_calls":calls})];
+            messages.extend(ids.iter().enumerate().rev().map(|(i, id)| {
+                json!({
+                    "role":"tool","tool_call_id":id,"content":format!("result_{i}")
+                })
+            }));
+            let (body, error) = convert_openai_chat_completions_request_to_codex(
+                "m",
+                &json!({"messages":messages}),
+                false,
+            );
+            assert!(error.is_none());
+            body
+        };
+        let shortened = |id: &str| {
+            let out = convert(&[id.to_owned()]);
+            out["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["type"] == "custom_tool_call")
+                .unwrap()["call_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let long = format!("{}_A", "a".repeat(70));
+        let legal = shortened(&long);
+        let retry = shortened(&format!("{long}_1"));
+        let expected = shortened(&format!("{long}_2"));
+        let out = convert(&[long, legal.clone(), retry.clone()]);
+        let items = out["input"].as_array().unwrap();
+        let calls: Vec<_> = items
+            .iter()
+            .filter(|item| item["type"] == "custom_tool_call")
+            .collect();
+        let outputs: Vec<_> = items
+            .iter()
+            .filter(|item| item["type"] == "custom_tool_call_output")
+            .collect();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(outputs.len(), 3);
+        for (i, want) in [expected, legal, retry].iter().enumerate() {
+            let call = calls
+                .iter()
+                .find(|item| item["name"] == format!("tool_{i}"))
+                .unwrap();
+            let output = outputs
+                .iter()
+                .find(|item| item["output"] == format!("result_{i}"))
+                .unwrap();
+            assert_eq!(call["call_id"], *want);
+            assert_eq!(output["call_id"], *want);
         }
     }
 }
