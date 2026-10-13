@@ -118,13 +118,14 @@ impl Store {
 
     /// Closes connected and pending sessions owned by the removed credential.
     pub(crate) fn close_auth(&self, auth_id: &str) {
-        self.close_auth_sessions(auth_id);
+        self.close_auth_sessions_with(auth_id, |_| {});
     }
 
-    /// Returns the IDs whose current or pending ownership matched.
-    pub(crate) fn close_auth_sessions(&self, auth_id: &str) -> Vec<String> {
+    /// Cleans up each removed ID while holding the store lock. The cleanup
+    /// must not take a session's state lock or reenter this store.
+    pub(crate) fn close_auth_sessions_with(&self, auth_id: &str, mut cleanup: impl FnMut(&str)) {
         if auth_id.trim().is_empty() {
-            return Vec::new();
+            return;
         }
         // Never nest the store lock with a session's state lock. Ownership
         // publication and the decision to close share the state lock.
@@ -133,7 +134,6 @@ impl Store {
             .iter()
             .map(|(id, session)| (id.clone(), session.clone()))
             .collect();
-        let mut removed = Vec::new();
         for (id, session) in candidates {
             if let Some((detached, active)) = session.detach_for_auth(auth_id.trim()) {
                 let mut sessions = self.sessions();
@@ -142,13 +142,12 @@ impl Store {
                     .is_some_and(|current| Arc::ptr_eq(current, &session))
                 {
                     sessions.remove(&id);
-                    removed.push(id);
+                    cleanup(&id);
                 }
                 drop(sessions);
                 session.finish_close("auth_removed", detached, active);
             }
         }
-        removed
     }
 
     pub(crate) async fn interrupt(
@@ -522,6 +521,9 @@ struct State {
     conn: Option<Arc<Conn>>,
     /// Kept after a disconnect so credential removal also forgets idle state.
     auth_id: String,
+    successful_auth_id: String,
+    next_claim: u64,
+    pending_claim: Option<u64>,
     /// The connection on which a request renamed the collaboration
     /// namespace (`multiAgentV2OptimizedConn`).
     multi_agent: Option<u64>,
@@ -545,6 +547,23 @@ pub(crate) struct Session {
     /// Set once the session is closed, after its state says so, for a
     /// handshake under way.
     closed: watch::Sender<bool>,
+}
+
+/// A failed or dropped handshake restores ownership only if its claim is
+/// still current; a later dial or successful connection owns its own state.
+struct PendingOwnership {
+    session: Arc<Session>,
+    claim: u64,
+}
+
+impl Drop for PendingOwnership {
+    fn drop(&mut self) {
+        let mut state = self.session.state();
+        if state.pending_claim == Some(self.claim) {
+            state.auth_id = state.successful_auth_id.clone();
+            state.pending_claim = None;
+        }
+    }
 }
 
 impl Session {
@@ -827,15 +846,17 @@ impl Session {
             .await
     }
 
-    /// The session's connection for `target`, connecting with `dial` when
-    /// there is none (`ensureUpstreamConn`). A connection for another
-    /// target is closed first, and one already closed is let go. The
-    /// handshake's headers come back for a new connection.
+    /// Keeps the connection matching `reuse_target`, or connects to `target`
+    /// with `dial` (`ensureUpstreamConn`). A mismatched or closed connection
+    /// is let go first. The handshake's headers come back for a new connection.
     ///
     /// A closed session fails. One that closes during the handshake
     /// abandons it, and one that closed as it finished drops the new
     /// connection.
-    /// Compares the saved route for reuse, but records the current dial target.
+    ///
+    /// Pending ownership is published before dialing so credential removal
+    /// closes the handshake. Failure or cancellation restores the last
+    /// successful owner if this dial's claim is still current.
     pub(crate) async fn ensure_conn_with_reuse<F, Fut>(
         self: &Arc<Self>,
         target: Target,
@@ -847,15 +868,14 @@ impl Session {
         Fut: Future<Output = Result<Dialed, DialError>>,
     {
         // detachMismatchedWebsocketSessionConn
-        let stale = {
+        let (stale, ownership) = {
             let mut state = self.state();
             if state.closed {
                 return Err(closed_session());
             }
             // Publish before awaiting the handshake. Targeted removal takes
             // this same lock and closes pending ownership as well.
-            state.auth_id.clone_from(&target.auth_id);
-            if state
+            let stale = if state
                 .conn
                 .as_ref()
                 .is_some_and(|conn| conn.target != *reuse_target || conn.is_closed())
@@ -864,7 +884,20 @@ impl Session {
                 state.conn.take()
             } else {
                 None
-            }
+            };
+            let ownership = if state.conn.is_none() {
+                state.next_claim += 1;
+                let claim = state.next_claim;
+                state.pending_claim = Some(claim);
+                state.auth_id.clone_from(&target.auth_id);
+                Some(PendingOwnership {
+                    session: Arc::clone(self),
+                    claim,
+                })
+            } else {
+                None
+            };
+            (stale, ownership)
         };
         if let Some(stale) = stale {
             let reason = if stale.target == *reuse_target {
@@ -905,7 +938,14 @@ impl Session {
                 self.log_connected(&previous, true);
                 return Ok((previous, None));
             }
-            state.auth_id.clone_from(&conn.target.auth_id);
+            state.successful_auth_id.clone_from(&conn.target.auth_id);
+            if ownership
+                .as_ref()
+                .is_some_and(|owner| state.pending_claim == Some(owner.claim))
+            {
+                state.auth_id.clone_from(&conn.target.auth_id);
+                state.pending_claim = None;
+            }
             state.conn = Some(Arc::clone(&conn));
             state.multi_agent = None;
             // resetTerminalError

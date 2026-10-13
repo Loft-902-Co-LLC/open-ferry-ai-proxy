@@ -45,6 +45,10 @@
 //!   and `UpstreamDisconnectChan` aren't ported, as the server uses none of
 //!   them (as for Codex). Credential removal closes that credential's
 //!   sessions through `ProviderExecutor::close_auth_execution_sessions`.
+//! - Ownership is published before dialing so removal during a pending
+//!   handshake closes it; upstream sets authID only after a successful dial.
+//!   A failed or cancelled dial restores the last successful owner if its
+//!   pending claim is still current.
 //! - Every message xAI sends, a success or a failure, reaches the client
 //!   with the secrets its handshake sent redacted if they are of eight
 //!   bytes or more, as every client error is (see `Policy::Client` in the
@@ -111,6 +115,8 @@ pub(super) struct Sessions {
     /// Where each session's connection last went, kept when it closes
     /// (upstream's session `authID`, `wsURL` and `proxyURL`).
     targets: Mutex<HashMap<String, Target>>,
+    #[cfg(test)]
+    id_state_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl Sessions {
@@ -118,10 +124,12 @@ impl Sessions {
     pub(super) fn close_auth(&self, auth_id: &str) {
         // The connection store publishes ownership before dialing. The last
         // successful target can still name the previous credential here.
-        for id in self.store.close_auth_sessions(auth_id) {
-            self.ids.delete(&id);
-            self.targets().remove(&id);
-        }
+        // Lock order: store -> ids -> targets; neither metadata store may
+        // reenter the connection store while holding its lock.
+        self.store.close_auth_sessions_with(auth_id, |id| {
+            self.ids.delete(id);
+            self.targets().remove(id);
+        });
     }
 
     pub(super) fn new() -> Self {
@@ -129,6 +137,8 @@ impl Sessions {
             store: Store::new(),
             ids: ids::Store::default(),
             targets: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            id_state_gate: Mutex::new(None),
         }
     }
 
@@ -143,6 +153,15 @@ impl Sessions {
 
     fn targets(&self) -> MutexGuard<'_, HashMap<String, Target>> {
         self.targets.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Gates tests after reqMu, before acquiring the ID state.
+    #[cfg(test)]
+    async fn wait_before_id_state(&self) {
+        let gate = self.id_state_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.await.unwrap();
+        }
     }
 
     /// Closes the session `id` names and forgets what it remembered, or
