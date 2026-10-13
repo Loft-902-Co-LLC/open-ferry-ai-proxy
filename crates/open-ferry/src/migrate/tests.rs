@@ -58,6 +58,8 @@ struct Fake {
     private: BTreeSet<String>,
     /// What commands print, by their command line or its start.
     answers: BTreeMap<String, Output>,
+    /// Commands that can't be started, with the reason given by the helper resolver.
+    run_errors: BTreeMap<String, (io::ErrorKind, String)>,
     procs: BTreeMap<u32, Proc>,
     /// What answers on the port: the first holds it.
     serving: Vec<(u32, Answer)>,
@@ -112,6 +114,7 @@ impl Fake {
             unreadable: BTreeSet::new(),
             private: BTreeSet::new(),
             answers: BTreeMap::new(),
+            run_errors: BTreeMap::new(),
             procs: BTreeMap::new(),
             serving: Vec::new(),
             effects: BTreeMap::new(),
@@ -521,9 +524,16 @@ impl System for Fake {
         crate::scope::Probe::privileged(&self.trust)
     }
 
+    fn machine_root(&self, platform: Platform) -> Result<Option<String>, String> {
+        crate::scope::machine_root(&crate::update::scope_probe::Fake::new(platform, true))
+    }
+
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
         let line = cmd.to_string();
         self.events.push(format!("run {line}"));
+        if let Some((kind, message)) = self.run_errors.get(cmd.program) {
+            return Err(io::Error::new(*kind, message.clone()));
+        }
         let output = self.lookup(&line).unwrap_or(Output {
             code: Some(0),
             stdout: String::new(),
@@ -995,6 +1005,20 @@ fn windows_program_files() -> Context {
 }
 
 // --- Helpers ---
+
+#[test]
+fn the_fake_machine_root_follows_its_simulated_platform() {
+    for context in [linux(), macos(), windows()] {
+        let fake = Fake::new(&context);
+        let expected = match context.platform {
+            Platform::Linux => Some("/var/lib/open-ferry".to_owned()),
+            Platform::MacOs => None,
+            Platform::Windows => Some(r"C:\ProgramData\open-ferry".to_owned()),
+        };
+        assert_eq!(fake.machine_root(context.platform).unwrap(), expected);
+        read_only(&fake);
+    }
+}
 
 /// What `migrate` did: its exit code and what it printed.
 struct Ran {
@@ -3797,6 +3821,122 @@ fn blocks_switching_a_stopped_launch_daemon() {
 // --- Containers ---
 
 const DOCKER_PS: &str = r#"{"Command":"\"./CLIProxyAPI\"","Image":"eceasy/cli-proxy-api:latest","Labels":"com.docker.compose.project=cpa,com.docker.compose.service=cli-proxy-api,com.docker.compose.project.working_dir=/home/me/cpa,com.docker.compose.project.config_files=/home/me/cpa/docker-compose.yml","Names":"cli-proxy-api","Ports":"0.0.0.0:8317->8317/tcp"}"#;
+
+#[test]
+fn says_containers_werent_checked_when_docker_cant_start() {
+    for context in [linux(), macos(), windows()] {
+        for reason in [
+            "no helper docker on PATH",
+            "no system helper docker in the system directories",
+        ] {
+            let mut fake = Fake::new(&context);
+            fake.run_errors.insert(
+                "docker".to_owned(),
+                (io::ErrorKind::NotFound, reason.to_owned()),
+            );
+            for args in [&[][..], &["-json"][..]] {
+                let ran = migrate(&mut fake, &context, args);
+                assert_eq!(ran.code, 1, "{}", ran.all());
+                has(&ran.all(), "Containers weren't checked:");
+                has(&ran.all(), reason);
+                lacks(
+                    &ran.all(),
+                    "no service, scheduled task or container of it is set up",
+                );
+                if args == ["-json"] {
+                    let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+                    has(
+                        json["error"].as_str().unwrap(),
+                        "Containers weren't checked:",
+                    );
+                }
+                read_only(&fake);
+            }
+        }
+    }
+}
+
+#[test]
+fn says_containers_werent_checked_when_docker_ps_fails() {
+    let context = macos();
+    let mut fake = Fake::new(&context);
+    fake.fail(
+        "docker ps",
+        1,
+        "Cannot connect to the Docker daemon\nStart Docker first",
+    );
+    let ran = migrate(&mut fake, &context, &[]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.all(), "Containers weren't checked:");
+    has(&ran.all(), "Cannot connect to the Docker daemon");
+    assert_eq!(ran.err.lines().count(), 1, "{}", ran.all());
+    has(&ran.err, "Start Docker first");
+    read_only(&fake);
+}
+
+#[test]
+fn says_containers_werent_checked_when_docker_prints_invalid_json() {
+    let context = windows();
+    let mut fake = Fake::new(&context);
+    fake.answer("docker ps", 0, "{}\nnot JSON\n");
+    let ran = migrate(&mut fake, &context, &[]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        "Containers weren't checked: `docker ps` printed an unreadable container record",
+    );
+    assert_eq!(ran.err.lines().count(), 1);
+    read_only(&fake);
+}
+
+#[test]
+fn keeps_a_running_container_and_reports_why_docker_couldnt_check_it() {
+    let context = linux();
+    for missing in [false, true] {
+        let mut fake = Fake::new(&context);
+        fake.process(Proc {
+            pid: 2020,
+            started: Some(1000),
+            name: "CLIProxyAPI".to_owned(),
+            exe: Some("/CLIProxyAPI/CLIProxyAPI".to_owned()),
+            args: Vec::new(),
+            cwd: Some("/CLIProxyAPI".to_owned()),
+            env: None,
+            parent: None,
+        });
+        fake.file(
+            "/proc/2020/cgroup",
+            "0::/system.slice/docker-0123abcd.scope\n",
+        );
+        let reason = if missing {
+            "no helper docker on PATH"
+        } else {
+            "Cannot connect to the Docker daemon"
+        };
+        if missing {
+            fake.run_errors.insert(
+                "docker".to_owned(),
+                (io::ErrorKind::NotFound, reason.to_owned()),
+            );
+        } else {
+            fake.fail("docker ps", 1, reason);
+        }
+        let ran = migrate(&mut fake, &context, &[]);
+        has(&ran.out, "a container");
+        has(&ran.out, "Containers weren't checked:");
+        has(&ran.out, reason);
+        let ran = migrate(&mut fake, &context, &["-json"]);
+        let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|note| note.as_str().unwrap().contains(reason))
+        );
+        read_only(&fake);
+    }
+}
 
 // Not upstream's: a container is never changed: its steps are shown.
 #[test]

@@ -244,6 +244,10 @@ impl Host {
 }
 
 impl System for Host {
+    fn machine_root(&self, platform: os_service::Platform) -> Result<Option<String>, String> {
+        self.system.machine_root(platform)
+    }
+
     fn privileged(&self) -> Result<bool, String> {
         self.system.privileged()
     }

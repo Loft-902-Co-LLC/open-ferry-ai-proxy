@@ -294,6 +294,8 @@ jobs:
   install-scripts-root:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      OFP_INSTALL_TESTS_STRICT: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -304,4 +306,5 @@ jobs:
           chmod 755 "$RUNNER_TEMP/ofp-scratch"
           docker run --rm --network none -v "$GITHUB_WORKSPACE:/src:ro" \
             -v "$RUNNER_TEMP/ofp-scratch:/scratch" -e OFP_TEST_SCRATCH=/scratch \
+            -e OFP_INSTALL_TESTS_STRICT \
             python:3.12-bookworm python -I /src/tests/install/test_install.py -v

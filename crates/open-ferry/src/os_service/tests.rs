@@ -5192,7 +5192,7 @@ fn auth_directory_trust_and_aliases_are_checked_at_install() {
 fn helper_paths_do_not_search_the_working_directory_or_path() {
     #[cfg(windows)]
     for name in ["whoami.exe", "schtasks.exe", "sc.exe"] {
-        let path = helper_path(name).unwrap();
+        let path = system_helper_path(name).unwrap();
         assert!(path.is_absolute());
         assert_eq!(path.file_name().unwrap(), name);
         assert!(
@@ -5207,14 +5207,129 @@ fn helper_paths_do_not_search_the_working_directory_or_path() {
     }
     #[cfg(unix)]
     {
-        let path = helper_path("id").unwrap();
+        let path = system_helper_path("id").unwrap();
         assert!(
             ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
                 .iter()
                 .any(|dir| path.parent().unwrap() == Path::new(dir))
         );
-        assert!(helper_path("open-ferry-missing-test-helper").is_err());
+        assert!(system_helper_path("open-ferry-missing-test-helper").is_err());
     }
+}
+
+#[test]
+fn helpers_search_path_only_for_an_unprivileged_probe() {
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let name = format!("open-ferry-fake-helper{}", std::env::consts::EXE_SUFFIX);
+    let helper = dir.path().join(&name);
+    std::fs::write(&helper, "fake helper: never executed").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths([
+        Path::new(""),
+        Path::new("."),
+        Path::new("relative"),
+        dir.path(),
+    ])
+    .unwrap();
+    let mut probe = crate::update::scope_probe::Fake::new(Platform::HOST.unwrap(), false);
+    assert_eq!(
+        helper_path_with(&name, &probe, Some(&path), None).unwrap(),
+        helper
+    );
+    for privilege in [Ok(true), Err("can't determine privilege".to_owned())] {
+        probe.privileged = privilege;
+        let found = helper_path_with(&name, &probe, Some(&path), None);
+        #[cfg(windows)]
+        assert_eq!(found.unwrap(), system_helper_path(&name).unwrap());
+        #[cfg(unix)]
+        assert_eq!(found.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+}
+
+#[test]
+fn unprivileged_helpers_ignore_missing_empty_and_relative_path_entries() {
+    let probe = crate::update::scope_probe::Fake::new(Platform::HOST.unwrap(), false);
+    let path = std::env::join_paths(["", ".", "relative"]).unwrap();
+    for path in [None, Some(path.as_os_str())] {
+        // Cargo.toml exists in the test's working directory, but must never be found there.
+        assert_eq!(
+            helper_path_with("Cargo.toml", &probe, path, None)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn unprivileged_helpers_use_pathext_and_path_order() {
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    for path in [
+        first.join("docker"),
+        first.join("docker.CMD"),
+        first.join("docker.EXE"),
+        second.join("docker.COM"),
+    ] {
+        std::fs::write(path, "fake: never executed").unwrap();
+    }
+    let path = std::env::join_paths([&first, &second]).unwrap();
+    let probe = crate::update::scope_probe::Fake::new(Platform::Windows, false);
+    assert_eq!(
+        helper_path_with(
+            "docker",
+            &probe,
+            Some(&path),
+            Some(std::ffi::OsStr::new(".EXE;.CMD"))
+        )
+        .unwrap(),
+        first.join("docker.EXE")
+    );
+    assert_eq!(
+        helper_path_with("docker", &probe, Some(&path), None).unwrap(),
+        first.join("docker.EXE")
+    );
+    assert_eq!(
+        helper_path_with("docker.CMD", &probe, Some(&path), None).unwrap(),
+        first.join("docker.CMD")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unprivileged_helpers_skip_files_without_execute_permission() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let helper = dir.path().join("docker");
+    std::fs::write(&helper, "fake: never executed").unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    let probe = crate::update::scope_probe::Fake::new(Platform::Linux, false);
+    assert_eq!(
+        helper_path_with("docker", &probe, Some(&path), None)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        helper_path_with("docker", &probe, Some(&path), None).unwrap(),
+        helper
+    );
 }
 
 #[test]

@@ -9,13 +9,65 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "install.sh"
 
 
-@unittest.skipUnless(os.name == "posix" and os.geteuid() == 0, "requires real root")
+def root_available():
+    return os.name == "posix" and os.geteuid() == 0
+
+
+def require_root():
+    if not root_available():
+        if os.environ.get("OFP_INSTALL_TESTS_STRICT") == "1":
+            raise RuntimeError("root installer suite requires real root; strict mode forbids skipping")
+        raise unittest.SkipTest("requires real root")
+
+
+def helper_prefix(script):
+    prefix, heading, _ = script.partition("# --- Options")
+    if not heading:
+        raise ValueError("install.sh is missing '# --- Options'; refusing to execute the installer body")
+    return prefix
+
+
+class RootHarnessTests(unittest.TestCase):
+    def test_strict_mode_refuses_a_root_suite_skip(self):
+        with patch.dict(globals(), root_available=lambda: False):
+            with patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="1"):
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "strict mode forbids skipping"):
+                        RootInstallTests.setUpClass()
+                except unittest.SkipTest:
+                    self.fail("strict mode skipped the root suite")
+            with patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="0"):
+                with self.assertRaises(unittest.SkipTest):
+                    RootInstallTests.setUpClass()
+        with patch.dict(globals(), root_available=lambda: True):
+            with patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="1"):
+                RootInstallTests.setUpClass()
+
+    def test_helper_prefix_refuses_a_missing_options_heading(self):
+        with self.assertRaisesRegex(ValueError, "missing '# --- Options'"):
+            helper_prefix("bootstrap\ninstaller body\n")
+        self.assertEqual(helper_prefix("bootstrap\n# --- Options\ninstaller body\n"), "bootstrap\n")
+        self.assertNotIn("# --- Options", helper_prefix(SCRIPT.read_text()))
+        test = RootInstallTests()
+        script = Mock()
+        script.read_text.return_value = "bootstrap\ninstaller body\n"
+        with patch.dict(globals(), SCRIPT=script), patch.object(test, "shell") as shell:
+            with self.assertRaisesRegex(ValueError, "refusing to execute the installer body"):
+                test.helper("never run")
+            shell.assert_not_called()
+
+
 class RootInstallTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        require_root()
+
     def setUp(self):
         scratch = Path(os.environ["OFP_TEST_SCRATCH"])
         # The container mount is supplied by the runner, but belongs to root
@@ -65,7 +117,7 @@ class RootInstallTests(unittest.TestCase):
     def helper(self, code):
         # Execute the actual bootstrap/helper definitions, not a test-only
         # privileged seam. No installer body or network request runs here.
-        prefix = SCRIPT.read_text().split("# --- Options", 1)[0]
+        prefix = helper_prefix(SCRIPT.read_text())
         return self.shell(prefix + "\n" + code)
 
     def test_root_names_dropped_variables_and_tools_receive_only_allow_list(self):
@@ -141,3 +193,7 @@ class RootInstallTests(unittest.TestCase):
         self.assertNotIn("from http://127.0.0.1:1/untrusted", result.stdout)
         self.assertEqual(list(directory.iterdir()), [])
         self.assertFalse((self.work / "config.yaml").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
