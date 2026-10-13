@@ -417,6 +417,9 @@ fn disabled_executor_bodies_match_upstream_golden_without_cloaking() {
             // These recording-only fields are client disguise. Native search
             // must not reintroduce tool aliases, a synthetic date reminder,
             // billing fingerprints, CLI prompts, or diagnostics identities.
+            // Cloaking also adds the 1h cache TTL, moves the automatic tool
+            // cache marker away from tools[2], and changes tool_search's
+            // type through OAuth aliasing. Undo those recording side effects.
             expected.as_object_mut().unwrap().remove("system");
             expected.as_object_mut().unwrap().remove("diagnostics");
             if !count {
@@ -462,4 +465,40 @@ fn disabled_executor_bodies_match_upstream_golden_without_cloaking() {
         };
         assert_eq!(actual, expected, "{name}");
     }
+}
+
+// The default rule checks the original with the same search-aware tool order
+// as the sent request; search-off translation omits the unnamed search tool.
+#[test]
+fn payload_defaults_see_the_search_aware_original_tool_list() {
+    let config = Config::parse(
+        r#"
+claude:
+  tool-search: true
+payload:
+  default:
+    - models:
+        - name: '*'
+          protocol: claude
+      params:
+        tools.1.description: default description
+"#,
+    )
+    .unwrap();
+    let executor = ClaudeExecutor::new("direct").with_config(Arc::new(config));
+    let request = request(json!({"input":"hello", "tools":[
+        {"type":"tool_search", "execution":"client"},
+        {"type":"function", "name":"lookup",
+         "description":"caller description", "parameters":{"type":"object"}}
+    ]}));
+    let mut options = options(Format::OPENAI_RESPONSE);
+    options.original_request = request.payload.clone();
+    let prepared = executor
+        .prepare_messages(&request, &options, "claude-sonnet-4-5", true, true, false)
+        .unwrap();
+    assert_eq!(prepared.upstream["tools"][1]["name"], "lookup");
+    assert_eq!(
+        prepared.upstream["tools"][1]["description"],
+        "caller description"
+    );
 }
