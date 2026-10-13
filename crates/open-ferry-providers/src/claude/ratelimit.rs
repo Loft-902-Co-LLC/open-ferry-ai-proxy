@@ -19,8 +19,6 @@
 //!   `Content-Encoding`, `Content-Length` and `Transfer-Encoding`; upstream
 //!   keeps headers only on a fast-mode request's error.
 //! - The rejected-window log lines are debug-level.
-//! - A deadline more than about 292 years ahead (Go's longest duration) is
-//!   kept as a very long wait, where Go's arithmetic overflows.
 //! - HTTP dates don't have their weekday checked; Go checks only that it's a
 //!   weekday name.
 
@@ -64,7 +62,7 @@ pub(crate) fn unified_rejection(headers: &HeaderMap) -> bool {
         return false;
     }
     let status_7d_oi = lower_header(headers, "anthropic-ratelimit-unified-7d_oi-status");
-    !overage_only_rejection(headers, &status_5h, &status_7d, &status_7d_oi)
+    !overage_only_rejection(headers, &unified, &status_5h, &status_7d, &status_7d_oi)
 }
 
 fn window_allowed(status: &str) -> bool {
@@ -75,6 +73,7 @@ fn window_allowed(status: &str) -> bool {
 /// shared windows are healthy (`isOverageOrFableOnlyRejection`).
 fn overage_only_rejection(
     headers: &HeaderMap,
+    unified: &str,
     status_5h: &str,
     status_7d: &str,
     status_7d_oi: &str,
@@ -111,12 +110,28 @@ fn overage_only_rejection(
     {
         return true;
     }
-    allowed_5h
+    if allowed_5h
         && status_7d.is_empty()
         && utilization_healthy(&header_value(
             headers,
             "anthropic-ratelimit-unified-7d-utilization",
         ))
+    {
+        return true;
+    }
+    unified == "rejected"
+        && status_5h.is_empty()
+        && status_7d.is_empty()
+        && claim.contains("overage")
+        && [
+            "anthropic-ratelimit-unified-5h-utilization",
+            "anthropic-ratelimit-unified-7d-utilization",
+        ]
+        .iter()
+        .all(|name| {
+            let raw = header_value(headers, name);
+            raw.trim().is_empty() || utilization_healthy(&raw)
+        })
 }
 
 fn utilization_healthy(raw: &str) -> bool {
@@ -145,7 +160,8 @@ fn rate_limit_reset_with_fuzz(
     let status_5h = lower_header(headers, "anthropic-ratelimit-unified-5h-status");
     let status_7d = lower_header(headers, "anthropic-ratelimit-unified-7d-status");
     let status_7d_oi = lower_header(headers, "anthropic-ratelimit-unified-7d_oi-status");
-    let overage_only = overage_only_rejection(headers, &status_5h, &status_7d, &status_7d_oi);
+    let overage_only =
+        overage_only_rejection(headers, &unified, &status_5h, &status_7d, &status_7d_oi);
 
     let mut deadlines: Vec<DateTime<Utc>> = Vec::new();
     let mut rejected: Vec<&str> = Vec::new();
@@ -203,13 +219,30 @@ fn rate_limit_reset_with_fuzz(
             if !rejected.contains(&"unified") {
                 rejected.push("unified");
             }
-            if let Some(when) = parse_unix_or_timestamp(&raw).filter(|when| *when > now) {
+            let billing_reset =
+                lower_header(headers, "anthropic-ratelimit-unified-representative-claim")
+                    .contains("overage")
+                    && parse_unix_or_timestamp(&raw).is_some_and(|when| {
+                        Some(when)
+                            == parse_unix_or_timestamp(&header_value(
+                                headers,
+                                "anthropic-ratelimit-unified-overage-reset",
+                            ))
+                    });
+            if let Some(when) =
+                parse_unix_or_timestamp(&raw).filter(|when| *when > now && !billing_reset)
+            {
                 deadlines.push(when);
             }
         }
     }
 
-    let Some(latest) = deadlines.into_iter().max() else {
+    // Seven days is the longest recovery window; later dates are billing boundaries.
+    let Some(latest) = deadlines
+        .into_iter()
+        .filter(|when| *when > now && *when - now <= chrono::TimeDelta::hours(7 * 24 + 1))
+        .max()
+    else {
         if !rejected.is_empty() {
             tracing::debug!(
                 rejected_windows = rejected.join(","),
@@ -406,6 +439,118 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
 
+    #[test]
+    fn overage_claim_without_shared_windows_does_not_adopt_billing_reset() {
+        for utilization in [
+            None,
+            Some("0.00"),
+            Some("0.69"),
+            Some("1.0"),
+            Some("invalid"),
+        ] {
+            let billing = unix(48 * 3600);
+            let mut pairs = vec![
+                ("anthropic-ratelimit-unified-status", "rejected"),
+                (
+                    "anthropic-ratelimit-unified-representative-claim",
+                    "overage",
+                ),
+                ("anthropic-ratelimit-unified-reset", billing.as_str()),
+                (
+                    "anthropic-ratelimit-unified-overage-reset",
+                    billing.as_str(),
+                ),
+                ("retry-after", "60"),
+            ];
+            if let Some(utilization) = utilization {
+                pairs.push(("anthropic-ratelimit-unified-5h-utilization", utilization));
+            }
+            let healthy = matches!(utilization, None | Some("0.00" | "0.69"));
+            assert_eq!(unified_rejection(&headers(&pairs)), !healthy);
+            assert_eq!(
+                reset(&pairs),
+                if healthy {
+                    None
+                } else {
+                    Some(Duration::from_secs(60))
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn billing_reset_does_not_override_a_short_retry_with_one_missing_window() {
+        let billing = unix(48 * 3600);
+        let pairs = [
+            ("anthropic-ratelimit-unified-status", "rejected"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "overage",
+            ),
+            ("anthropic-ratelimit-unified-7d-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.69"),
+            ("anthropic-ratelimit-unified-reset", billing.as_str()),
+            (
+                "anthropic-ratelimit-unified-overage-reset",
+                billing.as_str(),
+            ),
+            ("retry-after", "60"),
+        ];
+        assert!(unified_rejection(&headers(&pairs)));
+        assert_eq!(reset(&pairs), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn deadlines_beyond_seven_days_and_one_hour_are_ignored() {
+        let five_hours = unix(5 * 3600);
+        let monthly = unix(30 * 24 * 3600);
+        assert_eq!(
+            reset(&[
+                ("anthropic-ratelimit-unified-5h-status", "rejected"),
+                ("anthropic-ratelimit-unified-5h-reset", &five_hours),
+                ("anthropic-ratelimit-unified-reset", &monthly),
+            ]),
+            Some(Duration::from_secs(5 * 3600))
+        );
+        assert_eq!(
+            reset(&[("retry-after", "608400")]),
+            Some(Duration::from_secs(608400))
+        );
+        assert_eq!(reset(&[("retry-after", "608401")]), None);
+        assert_eq!(reset(&[("retry-after", "2034192")]), None);
+    }
+
+    #[test]
+    fn non_rejected_overage_claims_and_non_overage_claims_keep_retry_after() {
+        for status in ["allowed", ""] {
+            assert_eq!(
+                reset(&[
+                    ("anthropic-ratelimit-unified-status", status),
+                    (
+                        "anthropic-ratelimit-unified-representative-claim",
+                        "overage"
+                    ),
+                    ("retry-after", "30"),
+                ]),
+                Some(Duration::from_secs(30))
+            );
+        }
+        let pairs = [
+            ("anthropic-ratelimit-unified-status", "rejected"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-disabled-reason",
+                "org_level_disabled",
+            ),
+            ("retry-after", "10800"),
+        ];
+        assert!(unified_rejection(&headers(&pairs)));
+        assert_eq!(reset(&pairs), Some(Duration::from_secs(10800)));
+    }
+
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (name, value) in pairs {
@@ -499,10 +644,7 @@ mod tests {
             let _ = rate_limit_reset(&headers(&[("retry-after", raw)]), now());
         }
         assert_eq!(reset(&[("retry-after", "1e300")]), None);
-        assert_eq!(
-            reset(&[("retry-after", "9223372036")]),
-            Some(Duration::from_secs(9_223_372_036))
-        );
+        assert_eq!(reset(&[("retry-after", "9223372036")]), None);
     }
 
     #[test]

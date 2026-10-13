@@ -266,6 +266,7 @@ pub(crate) fn sanitize_for_upstream(body: &mut Value, base_model: &str) {
         }
     }
     sanitize_web_search_domains(body);
+    super::tool_call_ids::normalize(body);
 }
 
 /// `sanitizeClaudeWebSearchDomains`: Claude rejects an empty
@@ -315,7 +316,11 @@ fn marked_text_block(text: &str) -> Value {
 }
 
 fn has_cache_control(block: &Value) -> bool {
-    block.get("cache_control").is_some()
+    block.get("cache_control").is_some_and(valid_cache_control)
+}
+
+fn valid_cache_control(value: &Value) -> bool {
+    value.is_object() && value.get("type").and_then(Value::as_str) == Some("ephemeral")
 }
 
 fn array_at<'v>(body: &'v Value, key: &str) -> Option<&'v Vec<Value>> {
@@ -482,6 +487,9 @@ fn strip_cache_controls(blocks: &mut [Value], keep: Option<usize>, excess: &mut 
         if Some(index) == keep {
             continue;
         }
+        if !has_cache_control(block) {
+            continue;
+        }
         if let Some(block) = block.as_object_mut()
             && block.shift_remove("cache_control").is_some()
         {
@@ -549,6 +557,9 @@ pub(crate) fn normalize_cache_control_ttl(body: &mut Value) {
         let Some(cache_control) = block.get_mut("cache_control") else {
             return;
         };
+        if !valid_cache_control(cache_control) {
+            return;
+        }
         let one_hour = cache_control.get("ttl").and_then(Value::as_str) == Some("1h");
         match cache_control {
             Value::Object(cache_control) if one_hour => {
@@ -620,6 +631,62 @@ pub(crate) fn payload_has_1h_ttl(body: &Value) -> bool {
 mod tests {
     use super::*;
     use open_ferry_core::models::ModelInfo;
+
+    #[test]
+    fn invalid_cache_controls_do_not_count_normalize_or_suppress_injection() {
+        for invalid in [
+            Value::Null,
+            json!(false),
+            json!("ephemeral"),
+            json!([]),
+            json!({}),
+            json!({"type":"other"}),
+            json!({"type":1}),
+        ] {
+            let mut body = json!({"system":[
+                {"type":"text","text":"invalid","cache_control":invalid},
+                {"type":"text","text":"valid","cache_control":{"type":"ephemeral","ttl":"1h"}}
+            ],"messages":[{"role":"user","content":[
+                {"type":"text","text":"valid","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":"invalid","cache_control":invalid}
+            ]}]});
+            assert_eq!(count_cache_controls(&body), 2);
+            normalize_cache_control_ttl(&mut body);
+            assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
+            enforce_cache_control_limit(&mut body, 1);
+            assert_eq!(count_cache_controls(&body), 1);
+            assert_eq!(body["system"][0]["cache_control"], invalid);
+            assert_eq!(body["messages"][0]["content"][1]["cache_control"], invalid);
+            let mut tools = json!({"tools":[{"name":"check","cache_control":invalid}]});
+            inject_tools_cache_control(&mut tools);
+            assert_eq!(count_cache_controls(&tools), 1);
+            let mut system =
+                json!({"system":[{"type":"text","text":"hi","cache_control":invalid}]});
+            inject_system_cache_control(&mut system);
+            assert_eq!(count_cache_controls(&system), 1);
+            let mut messages = json!({"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":invalid}]}]});
+            inject_messages_cache_control(&mut messages);
+            assert_eq!(count_cache_controls(&messages), 1);
+        }
+    }
+
+    #[test]
+    fn cache_limit_preserves_last_valid_markers_and_ignores_null_slots() {
+        let mut body = json!({
+            "tools":[{"name":"t1","cache_control":{"type":"ephemeral"}},
+                {"name":"t2","cache_control":null},{"name":"t3","cache_control":{"type":"ephemeral"}}],
+            "system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}},{"type":"text","text":"s2","cache_control":null}],
+            "messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":"u2","cache_control":null},{"type":"text","text":"u3","cache_control":{"type":"ephemeral"}}]}]
+        });
+        assert_eq!(count_cache_controls(&body), 5);
+        enforce_cache_control_limit(&mut body, 4);
+        assert_eq!(count_cache_controls(&body), 4);
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][2]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][1].get("cache_control").unwrap().is_null());
+    }
 
     fn auth(attributes: &[(&str, &str)], metadata: Value) -> Auth {
         Auth {
