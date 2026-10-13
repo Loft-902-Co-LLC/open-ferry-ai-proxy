@@ -1378,4 +1378,24 @@ mod creation_tests {
             },
         );
     }
+
+    #[test]
+    fn the_staged_binary_and_directories_are_safe_at_creation_with_default_acl() {
+        use crate::journal::creation_tests::{assert_acl_mode, with_default_acl};
+        with_default_acl(
+            "updater::creation_tests::the_staged_binary_and_directories_are_safe_at_creation_with_default_acl",
+            |root| {
+                let versions = root.join("data/versions");
+                let staging = StagingDir::create(&versions).unwrap();
+                for path in [root.join("data"), versions, staging.0.clone()] {
+                    assert_acl_mode(&path, 0o755);
+                }
+                let staged = staging.0.join("open-ferry");
+                let _file = crate::staging::create_staged_file(&staged).unwrap();
+                assert_acl_mode(&staged, 0o700);
+                make_executable(&staged).unwrap();
+                assert_acl_mode(&staged, 0o755);
+            },
+        );
+    }
 }
