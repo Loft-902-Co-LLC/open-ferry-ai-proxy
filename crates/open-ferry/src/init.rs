@@ -608,6 +608,10 @@ mod tests {
         fn trusted_file(&self, _path: &str) -> Result<(), String> {
             panic!("the fake machine directory is empty")
         }
+        fn readable_file(&self, _path: &str) -> io::Result<()> {
+            Ok(())
+        }
+
         fn receipt(&self, _path: &str) -> Result<Option<Receipt>, ReceiptError> {
             panic!("init does not read receipts")
         }

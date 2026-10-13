@@ -12,6 +12,8 @@ use std::io;
 pub(crate) enum Node {
     Dir,
     File,
+    /// A regular file whose permissions deny a read-only open.
+    Unreadable,
     /// Something this process can't look at.
     Hidden,
 }
@@ -141,7 +143,7 @@ impl Probe for Fake {
         match self.nodes.get(&self.path(path)) {
             None => State::Missing,
             Some(Node::Dir) => State::Directory,
-            Some(Node::File) => State::File,
+            Some(Node::File | Node::Unreadable) => State::File,
             Some(Node::Hidden) => State::Inaccessible("access is denied".to_owned()),
         }
     }
@@ -163,7 +165,19 @@ impl Probe for Fake {
     }
 
     fn trusted_file(&self, path: &str) -> Result<(), String> {
-        self.trust(path)
+        if matches!(self.nodes.get(&self.path(path)), Some(Node::Unreadable)) {
+            Err(format!("{path} can't be examined: access is denied"))
+        } else {
+            self.trust(path)
+        }
+    }
+
+    fn readable_file(&self, path: &str) -> io::Result<()> {
+        if matches!(self.nodes.get(&self.path(path)), Some(Node::Unreadable)) {
+            Err(io::ErrorKind::PermissionDenied.into())
+        } else {
+            Ok(())
+        }
     }
 
     fn receipt(&self, path: &str) -> Result<Option<Receipt>, ReceiptError> {

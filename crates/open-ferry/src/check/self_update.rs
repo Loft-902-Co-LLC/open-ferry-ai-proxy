@@ -288,7 +288,8 @@ mod scope_tests {
         for platform in [Platform::Windows, Platform::Linux] {
             let mut probe = Fake::new(platform, false);
             let machine = scope::machine_root(&probe).unwrap().unwrap();
-            probe.node(&machine, Node::Hidden);
+            let receipt = platform.join(&machine, open_ferry_update::data_dir::RECEIPT_FILE);
+            probe.node(&receipt, Node::Unreadable);
             let binary = platform.join(&machine, "open-ferry");
             let found = findings(&probe, &binary);
             assert_eq!(found.len(), 2);
