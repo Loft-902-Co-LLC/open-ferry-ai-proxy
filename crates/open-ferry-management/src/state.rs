@@ -99,6 +99,7 @@ struct Parts {
     sync: Option<Arc<dyn CredentialSync>>,
     config_path: Option<PathBuf>,
     config_read_check: Option<Arc<ConfigReadCheck>>,
+    config_directory_check: Option<Arc<ConfigReadCheck>>,
     config_writer: Option<Arc<dyn ConfigWriter>>,
     config_reload: Option<Arc<dyn ConfigReload>>,
     observability: Observability,
@@ -205,6 +206,52 @@ impl ManagementState {
     ) -> Self {
         Arc::make_mut(&mut self.parts).config_read_check = Some(Arc::new(check));
         self
+    }
+
+    /// Checks the existing parent before a checked writer creates files
+    /// beside the config. Without this check, a missing config is refused.
+    #[must_use]
+    pub fn with_config_directory_check(
+        mut self,
+        check: impl Fn(&Path) -> Result<bool, String> + Send + Sync + 'static,
+    ) -> Self {
+        Arc::make_mut(&mut self.parts).config_directory_check = Some(Arc::new(check));
+        self
+    }
+
+    pub(crate) fn authorize_config_write(&self) -> Result<(), String> {
+        let Some(check) = &self.parts.config_read_check else {
+            return Ok(());
+        };
+        let authorize = || {
+            let path = self.config_path().ok_or("config path unavailable")?;
+            let exists = check(path)?;
+            if !exists || self.parts.config_directory_check.is_some() {
+                let parent = path.parent().ok_or("config parent unavailable")?;
+                let trusted = self
+                    .parts
+                    .config_directory_check
+                    .as_ref()
+                    .ok_or("config parent authorization unavailable")?(
+                    parent
+                )?;
+                if !trusted {
+                    return Err("config parent authorization refused".to_owned());
+                }
+            }
+            // Core opens the lock and hash record and may read the backup.
+            // Missing siblings will be created in the authorized directory.
+            for suffix in [".bak", ".lock", ".sha256"] {
+                let mut name = path.file_name().unwrap_or_default().to_os_string();
+                name.push(suffix);
+                check(&path.with_file_name(name))?;
+            }
+            Ok(())
+        };
+        authorize().map_err(|reason| {
+            tracing::warn!(%reason, "management config file not written");
+            "config file authorization refused".to_owned()
+        })
     }
 
     pub(crate) fn read_config_file(&self) -> std::io::Result<Vec<u8>> {
@@ -476,8 +523,13 @@ impl ManagementState {
     }
 
     /// The config writer, if the service set one.
-    pub(crate) fn config_writer(&self) -> Option<&Arc<dyn ConfigWriter>> {
-        self.parts.config_writer.as_ref()
+    pub(crate) fn config_writer(&self) -> Option<Arc<dyn ConfigWriter>> {
+        self.parts.config_writer.as_ref().map(|writer| {
+            Arc::new(crate::config_write::CheckedConfigWriter {
+                state: self.clone(),
+                writer: Arc::clone(writer),
+            }) as Arc<dyn ConfigWriter>
+        })
     }
 
     /// The way to reload the running service's config, if it set one.
