@@ -890,6 +890,7 @@ impl Service {
         probe: crate::scope::RuntimeProbe,
     ) -> Self {
         let read_probe = Arc::clone(&probe);
+        let directory_probe = Arc::clone(&probe);
         let auth_dir = absolute_dir(auth_dir);
         let registry = Arc::new(ModelRegistry::new());
         let store = Arc::new(FileStore::new(&auth_dir));
@@ -926,6 +927,10 @@ impl Service {
         .with_config_path(config_path)
         .with_config_read_check(move |path| {
             crate::scope::authorize_file(read_probe.as_ref(), path)
+                .map_err(|error| error.to_string())
+        })
+        .with_config_directory_check(move |path| {
+            crate::scope::authorize_dir(directory_probe.as_ref(), path)
                 .map_err(|error| error.to_string())
         })
         .with_observability(observability.clone())
@@ -2284,6 +2289,73 @@ mod config_trust_tests {
         );
         let body = to_bytes(answer.into_body(), usize::MAX).await.unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("api-keys"));
+    }
+
+    /// A privileged service whose config isn't there yet, in a directory
+    /// the probe trusts when `trusted`.
+    fn privileged_without_a_config(trusted: bool) -> (tempfile::TempDir, PathBuf, Service) {
+        use crate::scope::runtime_test_probe::{RuntimeFake, scratch_dir};
+        let dir = scratch_dir();
+        let path = dir.path().join("config.yaml");
+        let old = Arc::new(
+            Config::parse(format!(
+                "auth-dir: '{}'\nremote-management:\n  secret-key: test-key\n",
+                dir.path().display()
+            ))
+            .unwrap(),
+        );
+        let platform = if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        };
+        let mut fake = Fake::new(platform, true);
+        fake.dir(dir.path().to_str().unwrap());
+        if !trusted {
+            fake.untrust(dir.path().to_str().unwrap());
+        }
+        let probe: crate::scope::RuntimeProbe = Arc::new(RuntimeFake::new(fake));
+        let mut service = Service::with_probe(
+            old,
+            path.clone(),
+            dir.path().to_owned(),
+            LogLevel::detached(),
+            ActiveGate::open(),
+            probe,
+        );
+        // Nothing runs the loop, so a write's reload mustn't wait for it.
+        service.reload_requests.close();
+        (dir, path, service)
+    }
+
+    #[tokio::test]
+    async fn an_injected_privileged_probe_writes_a_new_config_only_in_a_trusted_directory() {
+        use axum::body::Body;
+        use axum::http::StatusCode;
+        use tower_service::Service as _;
+        for trusted in [true, false] {
+            let (dir, path, mut service) = privileged_without_a_config(trusted);
+            service.management = service.management.clone().with_local_password("test-key");
+            let mut app = open_ferry_management::api_router(service.management.clone());
+            let body = format!("auth-dir: '{}'\napi-keys: [new]\n", dir.path().display());
+            let mut request = axum::http::Request::builder()
+                .method("PUT")
+                .uri("/v0/management/config.yaml")
+                .header("authorization", "Bearer test-key")
+                .body(Body::from(body))
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let answer = app.call(request).await.unwrap();
+            let status = if trusted {
+                StatusCode::OK
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            assert_eq!(answer.status(), status, "trusted: {trusted}");
+            assert_eq!(path.exists(), trusted, "trusted: {trusted}");
+        }
     }
 
     use super::*;

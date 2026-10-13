@@ -973,6 +973,60 @@ fn macos_refuses_every_settings_file_a_privileged_process_finds() {
 }
 
 #[test]
+fn a_privileged_process_writes_settings_only_in_a_trusted_directory() {
+    for (platform, path) in [(Platform::Linux, "/work"), (Platform::Windows, "C:/work")] {
+        let mut probe = Fake::new(platform, true);
+        let dir = Path::new(path);
+        // Nothing there: nowhere to write.
+        assert_eq!(authorize_dir(&probe, dir), Ok(false));
+        probe.dir(path);
+        assert_eq!(authorize_dir(&probe, dir), Ok(true));
+        probe.untrust(path);
+        let refusal = refused(authorize_dir(&probe, dir));
+        assert!(
+            refusal.reason.starts_with("Refusing to write in"),
+            "{refusal}"
+        );
+        assert!(refusal.reason.contains(path), "{refusal}");
+        assert!(refusal.remedy.is_some());
+        probe.untrusted.clear();
+        probe.privileged = Err("no token".to_owned());
+        refused(authorize_dir(&probe, dir));
+        probe.privileged = Ok(false);
+        probe.untrust(path);
+        assert_eq!(authorize_dir(&probe, dir), Ok(true));
+    }
+}
+
+#[test]
+fn a_privileged_process_writes_settings_only_in_a_full_plain_directory() {
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe.file("/work/config.yaml");
+    let refusal = refused(authorize_dir(&probe, Path::new("/work/config.yaml")));
+    assert!(refusal.reason.contains("isn't a directory"), "{refusal}");
+    for path in ["work", "/work/.", "/x/../work"] {
+        let refusal = refused(authorize_dir(&probe, Path::new(path)));
+        assert!(refusal.reason.contains("full path"), "{refusal}");
+    }
+    probe.untrust("/work");
+    probe.container = true;
+    assert_eq!(authorize_dir(&probe, Path::new("/work")), Ok(true));
+}
+
+#[test]
+fn macos_refuses_every_directory_a_privileged_process_would_write_in() {
+    let mut probe = Fake::new(Platform::MacOs, true);
+    let dir = Path::new("/work");
+    assert_eq!(authorize_dir(&probe, dir), Ok(false));
+    probe.dir("/work");
+    let refusal = refused(authorize_dir(&probe, dir));
+    assert!(refusal.reason.contains("/work"), "{refusal}");
+    assert!(refusal.reason.contains("macOS"), "{refusal}");
+    probe.privileged = Ok(false);
+    assert_eq!(authorize_dir(&probe, dir), Ok(true));
+}
+
+#[test]
 fn the_auth_directory_stays_out_of_the_machine_records() {
     let linux = Platform::Linux;
     for auth in [

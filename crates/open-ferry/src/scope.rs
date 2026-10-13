@@ -641,15 +641,72 @@ pub(crate) fn authorize_file(probe: &dyn Probe, path: &Path) -> Result<bool, Ref
     let platform = probe.platform();
     let refuse = |reason: String| Refusal {
         reason: format!("Refusing to load {}: {reason}", path.display()),
-        remedy: Some(file_remedy(platform)),
+        remedy: Some(trust_remedy(platform, "the file")),
     };
+    let Some(text) = privileged_path(probe, path, &refuse)? else {
+        return Ok(true);
+    };
+    match probe.state(text) {
+        State::Missing => Ok(false),
+        _ if platform == Platform::MacOs => {
+            let macos = macos_refusal();
+            Err(Refusal {
+                reason: format!("Refusing to load {}: {}", path.display(), macos.reason),
+                remedy: macos.remedy,
+            })
+        }
+        _ => probe.trusted_file(text).map(|()| true).map_err(refuse),
+    }
+}
+
+/// Checks a directory a process is about to make settings files in, such as
+/// the config's when the management API writes a config that isn't there
+/// yet: `Ok(true)` to write there, `Ok(false)` when nothing is there. A
+/// privileged process writes only in a directory, named by a full path
+/// without `.` or `..`, that passes the trust check with every directory
+/// above it; on macOS it refuses any, as [`authorize_file`] does. An
+/// unprivileged process, or one in a container, writes where it is told.
+pub(crate) fn authorize_dir(probe: &dyn Probe, path: &Path) -> Result<bool, Refusal> {
+    let platform = probe.platform();
+    let refuse = |reason: String| Refusal {
+        reason: format!("Refusing to write in {}: {reason}", path.display()),
+        remedy: Some(trust_remedy(platform, "the directory")),
+    };
+    let Some(text) = privileged_path(probe, path, &refuse)? else {
+        return Ok(true);
+    };
+    match probe.state(text) {
+        State::Missing => Ok(false),
+        _ if platform == Platform::MacOs => {
+            let macos = macos_refusal();
+            Err(Refusal {
+                reason: format!("Refusing to write in {}: {}", path.display(), macos.reason),
+                remedy: macos.remedy,
+            })
+        }
+        State::Directory => probe.trusted_dir(text).map(|()| true).map_err(refuse),
+        _ => Err(refuse("it isn't a directory".to_owned())),
+    }
+}
+
+/// The full path a privileged process checks before it uses `path`, or
+/// `None` when the process isn't privileged or is in a container
+/// ([`Probe::in_container`]), so uses `path` as it is. A path that isn't
+/// full, or has `.` or `..` in it, is refused with `refuse`, as is a failure
+/// to tell whether the process is privileged.
+fn privileged_path<'a>(
+    probe: &dyn Probe,
+    path: &'a Path,
+    refuse: &dyn Fn(String) -> Refusal,
+) -> Result<Option<&'a str>, Refusal> {
+    let platform = probe.platform();
     let privileged = probe.privileged().map_err(|error| {
         refuse(format!(
             "failed to tell whether this process is privileged: {error}"
         ))
     })?;
     if !privileged || probe.in_container() {
-        return Ok(true);
+        return Ok(None);
     }
     let text = path
         .to_str()
@@ -663,17 +720,7 @@ pub(crate) fn authorize_file(probe: &dyn Probe, path: &Path) -> Result<bool, Ref
             "it isn't a full path without `.` or `..`".to_owned(),
         ));
     }
-    match probe.state(text) {
-        State::Missing => Ok(false),
-        _ if platform == Platform::MacOs => {
-            let macos = macos_refusal();
-            Err(Refusal {
-                reason: format!("Refusing to load {}: {}", path.display(), macos.reason),
-                remedy: macos.remedy,
-            })
-        }
-        _ => probe.trusted_file(text).map(|()| true).map_err(refuse),
-    }
+    Ok(Some(text))
 }
 
 /// Refuses an auth directory among the machine's records: the machine data
@@ -1093,11 +1140,12 @@ fn remedy(platform: Platform, whose: Whose, root: &str) -> String {
     }
 }
 
-/// What to do about a settings file [`authorize_file`] refuses.
-fn file_remedy(platform: Platform) -> String {
+/// What to do about `what`, a settings file [`authorize_file`] refuses or a
+/// directory [`authorize_dir`] does.
+fn trust_remedy(platform: Platform, what: &str) -> String {
     match platform {
         Platform::Windows => "As an administrator, make it and every folder above it writable only by administrators, or run open-ferry in a terminal not opened as administrator.".to_owned(),
-        Platform::Linux | Platform::MacOs => "As root, make the file and every directory above it root's and writable only by root, or run open-ferry as a user other than root. This also applies in a container open-ferry doesn't recognise (LXC, systemd-nspawn, or a Kubernetes pod without a service-account token).".to_owned(),
+        Platform::Linux | Platform::MacOs => format!("As root, make {what} and every directory above it root's and writable only by root, or run open-ferry as a user other than root. This also applies in a container open-ferry doesn't recognise (LXC, systemd-nspawn, or a Kubernetes pod without a service-account token)."),
     }
 }
 
