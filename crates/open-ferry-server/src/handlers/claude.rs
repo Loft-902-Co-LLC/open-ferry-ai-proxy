@@ -22,7 +22,10 @@ use crate::body;
 use crate::errors::{ErrorMessage, claude_error_json, claude_error_response};
 use crate::exec::{Call, ClientRequest, Started};
 use crate::state::AppState;
-use crate::stream::{Peeked, StreamWriter, forward, json_response, keep_alive, peek, sse_response};
+use crate::stream::{
+    Peeked, StreamWriter, forward, json_response, keep_alive, peek, pre_first_token,
+    pre_first_token_interval, sse_response,
+};
 
 /// `POST /v1/messages`. The body goes on as it came, without decoding a
 /// `Content-Encoding`.
@@ -36,6 +39,7 @@ pub(crate) async fn messages(
     let limit = settings.config.body_limit;
     let nonstream_keepalive = settings.config.nonstream_keepalive;
     let keepalive = settings.config.streaming.keepalive;
+    let pre_ft = pre_first_token_interval(&settings.config.streaming);
     drop(settings);
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,
@@ -70,18 +74,31 @@ pub(crate) async fn messages(
         .await;
     }
 
-    let started = match Call::new(&state, &client, Format::CLAUDE, &model, raw, "", true) {
-        Ok(call) => call.stream().await,
-        Err(error) => Started::failed(error),
+    let call = Call::new(&state, &client, Format::CLAUDE, &model, raw, "", true);
+    let first = async move {
+        let started = match call {
+            Ok(call) => call.stream().await,
+            Err(error) => Started::failed(error),
+        };
+        (started.headers, peek(started.items).await)
     };
-    match peek(started.items).await {
-        Peeked::Failed(error) => claude_error_response(&error, passthrough),
-        Peeked::Closed => sse_response(&started.headers, Body::empty()),
-        Peeked::First(first, rest) => {
-            let items = stream::iter([Ok(first)]).chain(rest).boxed();
-            sse_response(&started.headers, forward(items, ClaudeWriter, keepalive))
-        }
-    }
+    pre_first_token(
+        pre_ft,
+        first,
+        move |(headers, peeked), committed| match peeked {
+            Peeked::Failed(error) if committed => {
+                let items = stream::iter([Err(error)]).boxed();
+                sse_response(&headers, forward(items, ClaudeWriter, None))
+            }
+            Peeked::Failed(error) => claude_error_response(&error, passthrough),
+            Peeked::Closed => sse_response(&headers, Body::empty()),
+            Peeked::First(first, rest) => {
+                let items = stream::iter([Ok(first)]).chain(rest).boxed();
+                sse_response(&headers, forward(items, ClaudeWriter, keepalive))
+            }
+        },
+    )
+    .await
 }
 
 /// `POST /v1/messages/count_tokens`.

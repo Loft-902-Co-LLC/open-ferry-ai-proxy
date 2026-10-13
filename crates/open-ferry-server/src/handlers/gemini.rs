@@ -147,6 +147,7 @@ pub(crate) async fn action(
     let limit = settings.config.body_limit;
     let nonstream_keepalive = settings.config.nonstream_keepalive;
     let keepalive = settings.config.streaming.keepalive;
+    let pre_ft = crate::stream::pre_first_token_interval(&settings.config.streaming);
     drop(settings);
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,
@@ -156,27 +157,40 @@ pub(crate) async fn action(
     let alt = client.alt.clone();
 
     if method == Method::Stream {
-        let started = match Call::new(&state, &client, Format::GEMINI, &model, raw, &alt, true) {
-            Ok(call) => call.stream().await,
-            Err(error) => Started::failed(error),
-        };
         let sse = alt.is_empty();
-        return match peek(started.items).await {
-            Peeked::Failed(error) => openai_error_response(&error, passthrough),
-            Peeked::Closed if sse => sse_response(&started.headers, Body::empty()),
-            Peeked::Closed => raw_response(&started.headers, None, Body::empty()),
-            Peeked::First(first, rest) if sse => {
-                let items = stream::iter([Ok(first)]).chain(rest).boxed();
-                let body = forward(items, GeminiWriter { sse }, keepalive);
-                sse_response(&started.headers, body)
-            }
-            Peeked::First(first, rest) => {
-                let sniffed = sniff::detect_content_type(&first);
-                let items = stream::iter([Ok(first)]).chain(rest).boxed();
-                let body = forward(items, GeminiWriter { sse }, None);
-                raw_response(&started.headers, Some(sniffed), body)
-            }
+        let call = Call::new(&state, &client, Format::GEMINI, &model, raw, &alt, true);
+        let first = async move {
+            let started = match call {
+                Ok(call) => call.stream().await,
+                Err(error) => Started::failed(error),
+            };
+            (started.headers, peek(started.items).await)
         };
+        return crate::stream::pre_first_token(
+            pre_ft.filter(|_| sse),
+            first,
+            move |(headers, peeked), committed| match peeked {
+                Peeked::Failed(error) if committed => {
+                    let items = stream::iter([Err(error)]).boxed();
+                    sse_response(&headers, forward(items, GeminiWriter { sse }, None))
+                }
+                Peeked::Failed(error) => openai_error_response(&error, passthrough),
+                Peeked::Closed if sse => sse_response(&headers, Body::empty()),
+                Peeked::Closed => raw_response(&headers, None, Body::empty()),
+                Peeked::First(first, rest) if sse => {
+                    let items = stream::iter([Ok(first)]).chain(rest).boxed();
+                    let body = forward(items, GeminiWriter { sse }, keepalive);
+                    sse_response(&headers, body)
+                }
+                Peeked::First(first, rest) => {
+                    let sniffed = sniff::detect_content_type(&first);
+                    let items = stream::iter([Ok(first)]).chain(rest).boxed();
+                    let body = forward(items, GeminiWriter { sse }, None);
+                    raw_response(&headers, Some(sniffed), body)
+                }
+            },
+        )
+        .await;
     }
 
     let call = match Call::new(&state, &client, Format::GEMINI, &model, raw, &alt, false) {

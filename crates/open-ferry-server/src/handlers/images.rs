@@ -40,16 +40,17 @@
 //! `disable-image-generation: true` takes both endpoints away: they answer
 //! 404 with no body.
 //!
-//! A stream writes an SSE comment every `streaming.keepalive-seconds` while
-//! it waits for its first payload, which starts the response; an error
-//! after that is written as an `error` event, with secrets taken out.
+//! With `streaming.send-keepalive-before-ft` on, a stream writes an SSE
+//! comment every `streaming.keepalive-seconds` while it waits for its first
+//! payload, which starts the response; an error after that is written as
+//! an `error` event, with secrets taken out.
 //!
 //! Deviations from upstream:
 //! - Upstream would make a request whose model none of the three serve a
 //!   Responses call with the `image_generation` tool, but turns such a
 //!   request away first, so that fallback can never run. It isn't ported.
-//! - A form is held to the body limit, a 413 past it, and kept in memory;
-//!   upstream has no limit and writes files past 32 MiB to temporary files.
+//! - A form is kept in memory, bounded by the body limit; upstream writes
+//!   files past 32 MiB to temporary files.
 //! - A form written again has its fields, then its files, in name order;
 //!   upstream's maps give them in random order.
 //! - An error in the request's query isn't reported once a form has been
@@ -498,6 +499,8 @@ struct Timing {
     nonstream: Option<Duration>,
     /// The keep-alive interval of a stream.
     keepalive: Option<Duration>,
+    /// The gated interval while waiting for the first payload.
+    pre_ft: Option<Duration>,
 }
 
 impl Timing {
@@ -507,6 +510,7 @@ impl Timing {
             passthrough: settings.config.passthrough_headers,
             nonstream: settings.config.nonstream_keepalive,
             keepalive: settings.config.streaming.keepalive,
+            pre_ft: crate::stream::pre_first_token_interval(&settings.config.streaming),
         }
     }
 }
@@ -611,7 +615,7 @@ async fn collect(call: Call, timing: Timing, format: String) -> Response {
 /// with no payload writes a newline, or nothing for `compat`.
 async fn stream_raw(call: Call, timing: Timing, compat: bool) -> Response {
     let keepalive = timing.keepalive.filter(|interval| !interval.is_zero());
-    let mut waiting = keepalive.map(ticker);
+    let mut waiting = timing.pre_ft.map(ticker);
     match until_tick(&mut waiting, Box::pin(first_payload(call))).await {
         Waited::Done((_, Peeked::Failed(error))) => {
             openai_error_response(&error, timing.passthrough)
@@ -650,7 +654,7 @@ fn raw_body(peeked: Peeked, keepalive: Option<Duration>, compat: bool) -> Body {
 /// `<prefix>.completed` events (upstream's `streamImagesWithModel`).
 async fn stream_xai(call: Call, timing: Timing, format: String, prefix: &'static str) -> Response {
     let mut waiting = timing
-        .keepalive
+        .pre_ft
         .filter(|interval| !interval.is_zero())
         .map(ticker);
     match until_tick(&mut waiting, Box::pin(call.execute())).await {

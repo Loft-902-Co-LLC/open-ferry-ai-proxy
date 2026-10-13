@@ -27,6 +27,7 @@ use futures_util::stream;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
+use crate::config::StreamingConfig;
 use crate::errors::ErrorMessage;
 use crate::exec::HandlerStream;
 use crate::headers::write_upstream_headers;
@@ -173,6 +174,82 @@ pub(crate) async fn peek(mut items: HandlerStream) -> Peeked {
     }
 }
 
+/// Pre-first-token ticks require both the switch and a positive interval
+/// (upstream's `NewPreFirstTokenKeepAliveTicker`).
+pub(crate) fn pre_first_token_interval(config: &StreamingConfig) -> Option<Duration> {
+    config
+        .keepalive
+        .filter(|period| config.keepalive_before_first_token && !period.is_zero())
+}
+
+/// Waits for bootstrap and the first payload. A tick commits SSE without
+/// upstream headers; later failures are answered by `respond` in-stream.
+/// The waiting future lives in the body, so dropping it cancels bootstrap
+/// directly rather than leaving a spawned task to join.
+pub(crate) async fn pre_first_token<T, F, R>(
+    interval: Option<Duration>,
+    call: F,
+    respond: R,
+) -> Response
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+    R: FnOnce(T, bool) -> Response + Send + 'static,
+{
+    let Some(period) = interval.filter(|period| !period.is_zero()) else {
+        return respond(call.await, false);
+    };
+    let mut call = Box::pin(call);
+    let mut ticker = ticker(period);
+    tokio::select! {
+        biased;
+        result = &mut call => return respond(result, false),
+        _ = ticker.tick() => {}
+    }
+    let phase = Phase::Waiting {
+        call,
+        ticker,
+        respond: move |result| respond(result, true),
+        tick_due: true,
+    };
+    let body = stream::unfold(phase, |phase| async move {
+        match phase {
+            Phase::Waiting {
+                mut call,
+                mut ticker,
+                respond,
+                tick_due,
+            } => {
+                if !tick_due {
+                    tokio::select! {
+                        biased;
+                        result = &mut call => {
+                            let mut body = respond(result).into_body().into_data_stream();
+                            let item = body.next().await?;
+                            return Some((item, Phase::Body(body)));
+                        }
+                        _ = ticker.tick() => {}
+                    }
+                }
+                Some((
+                    Ok(Bytes::from_static(b": keep-alive\n\n")),
+                    Phase::Waiting {
+                        call,
+                        ticker,
+                        respond,
+                        tick_due: false,
+                    },
+                ))
+            }
+            Phase::Body(mut body) => {
+                let item = body.next().await?;
+                Some((item, Phase::Body(body)))
+            }
+        }
+    });
+    sse_response(&HeaderMap::new(), Body::from_stream(body))
+}
+
 /// A 200 event stream: the SSE headers, then the provider's headers that
 /// don't clash, then `body`.
 pub(crate) fn sse_response(upstream: &HeaderMap, body: Body) -> Response {
@@ -290,9 +367,11 @@ enum Phase<F, R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use http_body_util::BodyExt;
+
+    pub(crate) mod pre_first_token;
 
     struct Lines;
 
