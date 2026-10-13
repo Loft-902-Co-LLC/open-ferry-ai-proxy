@@ -244,6 +244,14 @@ impl Host {
 }
 
 impl System for Host {
+    fn privileged(&self) -> Result<bool, String> {
+        self.system.privileged()
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        self.system.is_dir(path)
+    }
+
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
         self.system.run(cmd)
     }

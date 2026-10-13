@@ -172,7 +172,6 @@ impl Fake {
                     0,
                     "\"pc\\me\",\"S-1-5-21-1-2-3-1001\"\r\n",
                 );
-                fake.answer("whoami.exe /groups /fo csv /nh", 0, USER_GROUPS);
                 fake.answer("schtasks.exe /query /xml ONE", 0, "<Tasks></Tasks>\r\n");
             }
         }
@@ -509,11 +508,6 @@ fn plain(path: &str) -> String {
     }
 }
 
-const USER_GROUPS: &str =
-    "\"Mandatory Label\\Medium Mandatory Level\",\"Label\",\"S-1-16-8192\",\"\"\r\n";
-const ADMIN_GROUPS: &str =
-    "\"Mandatory Label\\High Mandatory Level\",\"Label\",\"S-1-16-12288\",\"\"\r\n";
-
 fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "access denied")
 }
@@ -523,6 +517,10 @@ fn not_found() -> io::Error {
 }
 
 impl System for Fake {
+    fn privileged(&self) -> Result<bool, String> {
+        crate::scope::Probe::privileged(&self.trust)
+    }
+
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
         let line = cmd.to_string();
         self.events.push(format!("run {line}"));
@@ -1857,31 +1855,34 @@ fn does_not_switch_twice() {
 }
 
 // Not upstream's: a privileged run reads CLIProxyAPI's config only when
-// the trust check passes it, and then as an unprivileged run does.
+// the trust check passes it.
 #[test]
 fn a_privileged_run_reads_only_a_trusted_config() {
-    let (mut fake, context) = systemd_user();
-    fake.trust = crate::update::scope_probe::Fake::new(context.platform, true);
-    fake.trust.file(SYSTEMD_CONFIG).untrust("/home/me");
+    const CONFIG: &str = "/etc/cliproxyapi/config.yaml";
+    let root = |trusted: bool| {
+        let (mut fake, context) = system_unit(linux_root(), false);
+        fake.answer("id -u", 0, "0\n");
+        fake.trust = crate::update::scope_probe::Fake::new(context.platform, true);
+        fake.trust.file(CONFIG);
+        if !trusted {
+            fake.trust.untrust("/etc/cliproxyapi");
+        }
+        (fake, context)
+    };
+    let (mut fake, context) = root(false);
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 1, "{}", ran.all());
     has(&ran.out, "Blockers:");
     has(
         &ran.out,
-        "Refusing to load /home/me/cpa/config.yaml: /home/me/cpa/config.yaml is not safe: /home/me is untrusted.",
+        "Refusing to load /etc/cliproxyapi/config.yaml: /etc/cliproxyapi/config.yaml is not safe: /etc/cliproxyapi is untrusted.",
     );
     has(&ran.out, "The switch is blocked: nothing was changed.");
     read_only(&fake);
 
-    let (mut fake, context) = systemd_user();
-    let unprivileged = migrate(&mut fake, &context, &["-yes"]);
-    let (mut fake, context) = systemd_user();
-    fake.trust = crate::update::scope_probe::Fake::new(context.platform, true);
-    fake.trust.file(SYSTEMD_CONFIG);
-    let trusted = migrate(&mut fake, &context, &["-yes"]);
-    assert_eq!(trusted.code, unprivileged.code, "{}", trusted.all());
-    assert_eq!(trusted.out, unprivileged.out);
-    assert_eq!(trusted.err, unprivileged.err);
+    let (mut fake, context) = root(true);
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
 }
 
 // Not upstream's: what about the config, its environment and its auth
@@ -3490,7 +3491,8 @@ const NSSM_CPA: &str = r"C:\Program Files\CLIProxyAPI\cli-proxy-api.exe";
 fn nssm_service(context: Context, admin: bool) -> (Fake, Context) {
     let mut fake = Fake::new(&context);
     if admin {
-        fake.answer("whoami.exe /groups /fo csv /nh", 0, ADMIN_GROUPS);
+        fake.trust = crate::update::scope_probe::Fake::new(context.platform, true);
+        fake.trust.file(r"C:\Program Files\CLIProxyAPI\config.yaml");
     }
     fake.file(NSSM_CPA, CLIPROXYAPI);
     fake.file(
@@ -3744,9 +3746,10 @@ fn switches_brew_services_and_back() {
 }
 
 // Not upstream's: a launch daemon that isn't loaded is read from its plist,
-// disabled, and only enabled again by -undo.
+// but open-ferry can't yet check who may change its files on macOS, so it
+// doesn't switch to a launchd daemon.
 #[test]
-fn switches_a_stopped_launch_daemon_and_back() {
+fn blocks_switching_a_stopped_launch_daemon() {
     let context = macos_root();
     let mut fake = Fake::new(&context);
     fake.answer("id -u", 0, "0\n");
@@ -3773,17 +3776,8 @@ fn switches_a_stopped_launch_daemon_and_back() {
             &[("DEPLOY", "local")],
         ),
     );
-    let daemon = "/Library/LaunchDaemons/io.github.loft-902-co-llc.open-ferry.plist";
-    fake.on(
-        &format!("launchctl bootstrap system {daemon}"),
-        Effect::Launch(context.exe.clone()),
-    );
-    fake.on(
-        "launchctl bootout system/io.github.loft-902-co-llc.open-ferry",
-        Effect::Exit(context.exe.clone()),
-    );
     let ran = migrate(&mut fake, &context, &["-yes"]);
-    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(ran.code, 1, "{}", ran.all());
     has(
         &ran.out,
         "the launchd job com.example.cliproxyapi (/Library/LaunchDaemons/com.example.cliproxyapi.plist)",
@@ -3794,33 +3788,10 @@ fn switches_a_stopped_launch_daemon_and_back() {
     );
     has(
         &ran.out,
-        "The switch (a service switch, to a launchd daemon):",
+        "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root.",
     );
-    has(&ran.out, "The variables its service sets (DEPLOY)");
-    in_order(
-        &fake.events,
-        &[
-            "run launchctl disable system/com.example.cliproxyapi",
-            &format!("write {daemon}"),
-            &format!("run launchctl bootstrap system {daemon}"),
-        ],
-    );
-    assert!(!happened(
-        &fake,
-        "run launchctl bootout system/com.example.cliproxyapi"
-    ));
-
-    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
-    assert_eq!(undo.code, 0, "{}", undo.all());
-    assert!(happened(
-        &fake,
-        "run launchctl enable system/com.example.cliproxyapi"
-    ));
-    assert!(!happened(
-        &fake,
-        "run launchctl bootstrap system /Library/LaunchDaemons/com.example.cliproxyapi.plist"
-    ));
-    assert!(!fake.exists(daemon));
+    has(&ran.out, "The switch is blocked: nothing was changed.");
+    read_only(&fake);
 }
 
 // --- Containers ---
