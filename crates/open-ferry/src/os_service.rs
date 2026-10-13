@@ -74,6 +74,7 @@ use open_ferry_core::config::{Config, DEFAULT_AUTH_DIR};
 use open_ferry_supervisor::client::{self, StopOutcome};
 use open_ferry_supervisor::endpoint::{Identity, ServiceKind};
 use open_ferry_supervisor::timings::STOP_BUDGET;
+use open_ferry_supervisor::trust;
 use open_ferry_update::DataDir;
 use open_ferry_update::install::{self as update_install, Install};
 use open_ferry_update::receipt::Receipt;
@@ -288,11 +289,6 @@ where
         return Err(FlagError::Invalid(format!("unexpected argument: {arg}")));
     }
     if action == Action::Run {
-        if options.supervise && options.system {
-            return Err(FlagError::Invalid(
-                "-supervise is for the scheduled task, not the Windows service".to_owned(),
-            ));
-        }
         if options.supervise && options.data_dir.is_empty() {
             return Err(FlagError::Invalid("-supervise needs -data-dir".to_owned()));
         }
@@ -710,9 +706,29 @@ pub(crate) trait System {
     /// Writes `data` to `path` through a temporary file beside it, so a
     /// reader finds the old file or the new one, never part of one.
     fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()>;
-    /// Asks the user's supervisor of the data directory `data_dir` to stop,
-    /// and waits up to `budget` for it to end (`client::stop`).
-    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome;
+    /// Asks the supervisor of the data directory `data_dir`, a user's or
+    /// the system's as `kind` says, to stop, and waits up to `budget` for
+    /// it to end (`client::stop`).
+    fn stop_supervisor(
+        &mut self,
+        data_dir: &str,
+        budget: Duration,
+        kind: ServiceKind,
+    ) -> StopOutcome;
+    /// Whether the directory `path` and every directory above it pass the
+    /// supervisor's trust check with the system rules: nothing another
+    /// account can change (`trust::check_dirs`). A link anywhere in it is
+    /// refused, so give a real path. The error says why.
+    fn trusted_dir(&self, path: &str) -> Result<(), String>;
+    /// Whether the file `path` and its directories pass the same check
+    /// (`trust::check_file`).
+    fn trusted_file(&self, path: &str) -> Result<(), String>;
+    /// Waits `time`, between looks at what a service manager says.
+    #[allow(
+        dead_code,
+        reason = "2c-2b contract: the parts that follow call it; the last removes this"
+    )]
+    fn pause(&mut self, time: Duration);
 }
 
 /// A command's output as text. Windows tools such as `schtasks /xml` may
@@ -884,11 +900,18 @@ impl System for Host {
         open_ferry_update::journal::atomic_write(Path::new(path), data, true)
     }
 
-    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
-        let identity = match Identity::current(ServiceKind::User) {
+    fn stop_supervisor(
+        &mut self,
+        data_dir: &str,
+        budget: Duration,
+        kind: ServiceKind,
+    ) -> StopOutcome {
+        let identity = match Identity::current(kind) {
             Ok(identity) => identity,
             Err(error) => {
-                return StopOutcome::Refused(format!("failed to find this user: {error}"));
+                return StopOutcome::Refused(format!(
+                    "failed to find the service's account: {error}"
+                ));
             }
         };
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -903,6 +926,28 @@ impl System for Host {
         let deadline = Instant::now() + budget;
         runtime.block_on(client::stop(Path::new(data_dir), &identity, deadline))
     }
+
+    fn trusted_dir(&self, path: &str) -> Result<(), String> {
+        trust::check_dirs(&[Path::new(path)], &system_trust_rules()?)
+            .map_err(|error| error.to_string())
+    }
+
+    fn trusted_file(&self, path: &str) -> Result<(), String> {
+        trust::check_file(Path::new(path), &system_trust_rules()?)
+            .map_err(|error| error.to_string())
+    }
+
+    fn pause(&mut self, time: Duration) {
+        std::thread::sleep(time);
+    }
+}
+
+/// The trust check's rules for what the system's service may run: owned
+/// by root, or SYSTEM and Administrators, and changed by no one else.
+pub(crate) fn system_trust_rules() -> Result<trust::TrustRules, String> {
+    Identity::current(ServiceKind::System)
+        .map(|identity| trust::TrustRules::for_identity(&identity))
+        .map_err(|error| format!("failed to find the system service's account: {error}"))
 }
 
 /// Runs `cmd`, and fails unless it succeeds.
@@ -938,11 +983,13 @@ pub(crate) enum Step {
         path: String,
         text: String,
     },
-    /// Asks the supervisor of a data directory to stop, waiting up to
-    /// `STOP_BUDGET`, before the service manager ends the service. How that
-    /// went is said, and doesn't stop the rest.
+    /// Asks the supervisor of a data directory, a user's or the system's as
+    /// `kind` says, to stop, waiting up to `STOP_BUDGET`, before the service
+    /// manager ends the service. How that went is said, and doesn't stop the
+    /// rest.
     StopSupervisor {
         data_dir: String,
+        kind: ServiceKind,
     },
 }
 
@@ -1084,21 +1131,23 @@ fn apply_step(system: &mut dyn System, step: &Step, out: &mut dyn Write) -> Resu
                 .map_err(|error| format!("failed to write {path}: {error}"))?;
             say(out, format_args!("Wrote {path}"));
         }
-        Step::StopSupervisor { data_dir } => match system.stop_supervisor(data_dir, STOP_BUDGET) {
-            StopOutcome::Stopped => say(out, format_args!("Stopped the supervisor")),
-            StopOutcome::NotRunning => say(out, format_args!("No supervisor was running")),
-            StopOutcome::TimedOut(seen) => say(
-                out,
-                format_args!(
-                    "The supervisor didn't stop within {} s ({seen}); going on",
-                    STOP_BUDGET.as_secs()
+        Step::StopSupervisor { data_dir, kind } => {
+            match system.stop_supervisor(data_dir, STOP_BUDGET, *kind) {
+                StopOutcome::Stopped => say(out, format_args!("Stopped the supervisor")),
+                StopOutcome::NotRunning => say(out, format_args!("No supervisor was running")),
+                StopOutcome::TimedOut(seen) => say(
+                    out,
+                    format_args!(
+                        "The supervisor didn't stop within {} s ({seen}); going on",
+                        STOP_BUDGET.as_secs()
+                    ),
                 ),
-            ),
-            StopOutcome::Refused(why) => say(
-                out,
-                format_args!("Failed to ask the supervisor to stop ({why}); going on"),
-            ),
-        },
+                StopOutcome::Refused(why) => say(
+                    out,
+                    format_args!("Failed to ask the supervisor to stop ({why}); going on"),
+                ),
+            }
+        }
     }
     Ok(())
 }
@@ -1156,7 +1205,7 @@ pub(crate) fn describe(plan: &Plan, out: &mut dyn Write) {
                     say(out, format_args!("    {line}"));
                 }
             }
-            Step::StopSupervisor { data_dir } => say(
+            Step::StopSupervisor { data_dir, .. } => say(
                 out,
                 format_args!(
                     "Would ask the supervisor of {data_dir} to stop, and wait up to {} s",
@@ -1994,6 +2043,7 @@ pub(crate) fn uninstall(
                 0,
                 Step::StopSupervisor {
                     data_dir: dir.clone(),
+                    kind: ServiceKind::User,
                 },
             );
         }

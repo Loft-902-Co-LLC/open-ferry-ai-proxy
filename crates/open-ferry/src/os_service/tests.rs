@@ -14,6 +14,8 @@ struct Fake {
     events: Vec<String>,
     /// What `stop_supervisor` answers; `NotRunning` when not set.
     stop: Option<StopOutcome>,
+    /// Paths the trust check refuses, with everything below them.
+    untrusted: BTreeSet<String>,
 }
 
 impl Fake {
@@ -82,6 +84,19 @@ impl Fake {
                 ..Output::default()
             })
     }
+
+    /// What the trust check says of `path`: refused when it, or a directory
+    /// above it, was marked untrusted.
+    fn trust(&self, path: &str) -> Result<(), String> {
+        let below = |top: &str| {
+            path.strip_prefix(top)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
+        };
+        match self.untrusted.iter().find(|top| below(top)) {
+            Some(top) => Err(format!("{path} is not safe: {top} is untrusted")),
+            None => Ok(()),
+        }
+    }
 }
 
 impl System for Fake {
@@ -149,10 +164,35 @@ impl System for Fake {
         Ok(())
     }
 
-    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
-        self.events
-            .push(format!("stop_supervisor {data_dir} {}s", budget.as_secs()));
+    fn stop_supervisor(
+        &mut self,
+        data_dir: &str,
+        budget: Duration,
+        kind: ServiceKind,
+    ) -> StopOutcome {
+        // A user supervisor's stop is recorded as before; a system one says so.
+        let system = if kind == ServiceKind::System {
+            " system"
+        } else {
+            ""
+        };
+        self.events.push(format!(
+            "stop_supervisor {data_dir} {}s{system}",
+            budget.as_secs()
+        ));
         self.stop.clone().unwrap_or(StopOutcome::NotRunning)
+    }
+
+    fn trusted_dir(&self, path: &str) -> Result<(), String> {
+        self.trust(path)
+    }
+
+    fn trusted_file(&self, path: &str) -> Result<(), String> {
+        self.trust(path)
+    }
+
+    fn pause(&mut self, time: Duration) {
+        self.events.push(format!("pause {}s", time.as_secs()));
     }
 }
 
@@ -3661,7 +3701,8 @@ fn refuses_a_data_directory_a_definition_cannot_hold() {
 #[test]
 fn parses_the_supervised_run() {
     // Not upstream's: `service run -supervise` needs the data directory the
-    // definition pins, and `-data-dir` goes with nothing else.
+    // definition pins, and `-data-dir` goes with nothing else. The task and
+    // the Windows service (`-system`) each have a supervised form.
     let data = std::env::temp_dir().to_string_lossy().into_owned();
     let config = std::env::temp_dir()
         .join("c.yaml")
@@ -3678,6 +3719,18 @@ fn parses_the_supervised_run() {
     .unwrap();
     assert!(run.supervise);
     assert_eq!(run.data_dir.as_deref(), Some(data.as_str()));
+    let system = parse(args(&[
+        "run",
+        "-system",
+        "-supervise",
+        "-config",
+        &config,
+        "-data-dir",
+        &data,
+    ]))
+    .unwrap();
+    assert!(system.system && system.supervise);
+    assert_eq!(system.data_dir.as_deref(), Some(data.as_str()));
     let cases: [(Vec<&str>, &str); 4] = [
         (vec!["run", "-supervise", "-config", &config], "-data-dir"),
         (
@@ -3685,16 +3738,8 @@ fn parses_the_supervised_run() {
             "-supervise",
         ),
         (
-            vec![
-                "run",
-                "-supervise",
-                "-system",
-                "-config",
-                &config,
-                "-data-dir",
-                &data,
-            ],
-            "Windows service",
+            vec!["run", "-supervise", "-system", "-config", &config],
+            "-data-dir",
         ),
         (
             vec![
