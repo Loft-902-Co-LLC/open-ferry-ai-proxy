@@ -835,8 +835,13 @@ fn linux_process(
         .unwrap_or(Group::Other);
     match group {
         Group::Container => {
-            let container = docker_container(machine).unwrap_or_default();
-            Ok(Found::from_process(process, Starter::Container(container)))
+            let (container, note) = match docker_container(machine) {
+                Ok(container) => (container.unwrap_or_default(), None),
+                Err(error) => (Container::default(), Some(error)),
+            };
+            let mut found = Found::from_process(process, Starter::Container(container));
+            found.notes.extend(note);
+            Ok(found)
         }
         Group::Unit { unit, user } => {
             if let Some(owner) = user {
@@ -2057,13 +2062,25 @@ fn windows_not_running(
 
 // --- Docker ---
 
-/// A running container from CLIProxyAPI's image, asked of Docker. `None`
-/// when Docker isn't there or runs none.
-fn docker_container(machine: &mut dyn Machine) -> Option<Container> {
+/// A running container from CLIProxyAPI's image, or why Docker couldn't check.
+fn docker_container(machine: &mut dyn Machine) -> Result<Option<Container>, String> {
     let cmd = Cmd::new("docker", &["ps", "--no-trunc", "--format", "{{json .}}"]);
-    let output = machine.run(&cmd).ok().filter(|output| output.success())?;
-    output.stdout.lines().find_map(|line| {
-        let value: Value = serde_json::from_str(line).ok()?;
+    let output = run_checked(machine, &cmd).map_err(|error| {
+        format!(
+            "Containers weren't checked: {}",
+            error.replace(['\r', '\n'], " ")
+        )
+    })?;
+    let records: Vec<Value> = output
+        .stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).map_err(|error| {
+                format!("Containers weren't checked: `docker ps` printed an unreadable container record: {error}")
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(records.iter().find_map(|value| {
         let field = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_owned);
         let image = field("Image").unwrap_or_default();
         let name = field("Names").unwrap_or_default();
@@ -2085,7 +2102,7 @@ fn docker_container(machine: &mut dyn Machine) -> Option<Container> {
             working_dir: label("com.docker.compose.project.working_dir"),
             files: label("com.docker.compose.project.config_files"),
         })
-    })
+    }))
 }
 
 /// When no process runs: the service definitions, then Docker.
@@ -2098,7 +2115,7 @@ fn not_running(machine: &mut dyn Machine, context: &Context) -> Result<Option<Fo
     if found.is_some() {
         return Ok(found);
     }
-    Ok(docker_container(machine).map(|container| Found::new(Starter::Container(container))))
+    Ok(docker_container(machine)?.map(|container| Found::new(Starter::Container(container))))
 }
 
 #[cfg(test)]

@@ -765,10 +765,8 @@ pub(crate) trait System {
     /// (`trust::check_file`).
     fn trusted_file(&self, path: &str) -> Result<(), String>;
     /// The machine data directory for an install's auth-directory check.
-    /// Fakes may supply the location for their simulated platform.
-    fn machine_root(&self, _platform: Platform) -> Result<Option<String>, String> {
-        scope::machine_root(&scope::Host)
-    }
+    /// Each implementation supplies the location for its own platform.
+    fn machine_root(&self, platform: Platform) -> Result<Option<String>, String>;
     /// Waits `time`, between looks at what a service manager says.
     fn pause(&mut self, time: Duration);
 }
@@ -888,8 +886,83 @@ fn resolve_auth_placement_path(
     Ok(actual)
 }
 
-/// Resolves native helpers without searching PATH or the current directory.
+/// Resolves helpers on PATH only when the runtime probe says we aren't privileged.
 fn helper_path(program: &str) -> io::Result<std::path::PathBuf> {
+    helper_path_with(
+        program,
+        scope::runtime_probe().as_ref(),
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+}
+
+fn helper_path_with(
+    program: &str,
+    probe: &dyn scope::Probe,
+    path: Option<&std::ffi::OsStr>,
+    _extensions: Option<&std::ffi::OsStr>,
+) -> io::Result<std::path::PathBuf> {
+    if !matches!(probe.privileged(), Ok(false)) {
+        return system_helper_path(program);
+    }
+    #[cfg(not(windows))]
+    let names = [OsString::from(program)];
+    #[cfg(windows)]
+    let mut names = vec![OsString::from(program)];
+    #[cfg(windows)]
+    if Path::new(program).extension().is_none() {
+        names.clear();
+        for extension in _extensions
+            .unwrap_or_else(|| std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD"))
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| extension.starts_with('.') && !extension.contains(['/', '\\']))
+        {
+            names.push(OsString::from(format!("{program}{extension}")));
+        }
+    }
+    for dir in path.into_iter().flat_map(std::env::split_paths) {
+        // Empty and relative entries would make the working directory a helper source.
+        if !dir.is_absolute() {
+            continue;
+        }
+        for name in &names {
+            let candidate = dir.join(name);
+            if helper_is_executable(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no helper {program} on PATH (only absolute directories are searched)"),
+    ))
+}
+
+fn helper_is_executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: path is a NUL-terminated string, valid for this call.
+        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Resolves privileged helpers without searching PATH or the current directory.
+fn system_helper_path(program: &str) -> io::Result<std::path::PathBuf> {
     #[cfg(windows)]
     {
         #[link(name = "kernel32")]
@@ -998,6 +1071,10 @@ const MAX_READ: u64 = 8 * 1024 * 1024;
 pub(crate) struct Host;
 
 impl System for Host {
+    fn machine_root(&self, _platform: Platform) -> Result<Option<String>, String> {
+        scope::machine_root(&scope::Host)
+    }
+
     fn is_dir(&self, path: &str) -> bool {
         std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
     }
