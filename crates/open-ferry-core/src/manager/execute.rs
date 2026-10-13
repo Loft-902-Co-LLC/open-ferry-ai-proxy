@@ -477,6 +477,11 @@ struct BootstrapCooldown<'a> {
 
 impl Drop for BootstrapCooldown<'_> {
     fn drop(&mut self) {
+        // Polling a stream or writing storage can panic; doing either while
+        // unwinding could cause a second panic and abort the process.
+        if std::thread::panicking() {
+            return;
+        }
         let Some(chunks) = self.chunks.as_mut() else {
             return;
         };
@@ -1723,5 +1728,43 @@ mod tests {
         let chosen = preferred(fallback, Some(upstream));
         assert_eq!(chosen.err.status, 500);
         assert!(chosen.attempted);
+    }
+
+    #[test]
+    fn bootstrap_cooldown_does_not_poll_during_unwinding() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(crate::registry::ModelRegistry::new()),
+            None,
+        );
+        let auth = Arc::new(Auth::default());
+        let attempt = Attempt {
+            provider: "codex",
+            route_model: "model",
+            result_model: "model".to_owned(),
+            session: None,
+        };
+        let polls = Arc::new(AtomicUsize::new(0));
+        let count = polls.clone();
+        let chunks = futures_util::stream::poll_fn(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let mut error = ExecError::upstream(429, "limited");
+            error.retry_after = Some(Duration::from_secs(600));
+            std::task::Poll::Ready(Some(Err(error)))
+        })
+        .boxed();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = BootstrapCooldown {
+                manager: &manager,
+                auth,
+                attempt: &attempt,
+                chunks: Some(chunks),
+            };
+            panic!("trigger unwinding");
+        }));
+        assert!(result.is_err());
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
     }
 }

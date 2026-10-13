@@ -1048,3 +1048,26 @@ fn build_additional_model_record_skips_zero_tokens() {
         }
     }
 }
+
+#[test]
+fn authentication_fields_serialize_in_upstream_order() {
+    for provider in ["", "config-inline"] {
+        let record = Record {
+            api_key: "test-client".to_owned(),
+            is_native_key: true,
+            access_provider: provider.to_owned(),
+            ..Record::default()
+        }
+        .encode();
+        let api_key = record.find("\"api_key\":").unwrap();
+        let native = record.find("\"is_native_key\":").unwrap();
+        let request = record.find("\"request_id\":").unwrap();
+        assert!(api_key < native && native < request);
+        if provider.is_empty() {
+            assert!(!record.contains("\"access_provider\":"));
+        } else {
+            let provider = record.find("\"access_provider\":").unwrap();
+            assert!(native < provider && provider < request);
+        }
+    }
+}

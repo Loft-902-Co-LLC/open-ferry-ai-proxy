@@ -94,6 +94,8 @@ fn openai_compat_ttft_uses_complete_frames_and_keeps_packet_fallback() {
             &auth("a", "0", "openai"),
         );
         h.advance_ms(10);
+        // The first non-empty body read sets packet fallback at 10 ms;
+        // only a complete token frame can replace it (at 40 ms).
         driver.chunk(": keepalive\n\n");
         h.advance_ms(10);
         driver.chunk("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n");
@@ -107,7 +109,66 @@ fn openai_compat_ttft_uses_complete_frames_and_keeps_packet_fallback() {
         driver.fail(&ExecError::upstream(502, "read failed"));
         assert_eq!(
             int_at(&h.record(), "/ttft_ms"),
-            if with_token { 40 } else { 20 }
+            if with_token { 40 } else { 10 }
         );
+    }
+}
+
+#[test]
+fn image_streams_keep_first_byte_timing() {
+    for provider in ["codex", "openai"] {
+        let h = Harness::new();
+        let mut call = ClientCall::new("gpt-image-2").stream();
+        call.options.source_format = Format::OPENAI_IMAGE;
+        let driver = call.tap(&h);
+        driver.attempt_with(
+            AttemptKind::Stream,
+            provider,
+            "gpt-image-2",
+            &Format::OPENAI_IMAGE,
+            &auth("a", "0", provider),
+            &[],
+            "{}",
+        );
+        h.advance_ms(10);
+        driver.chunk(": keepalive\n\n");
+        h.advance_ms(20);
+        driver.chunk("data: {\"data\":[{\"b64_json\":\"image\"}]}\n\n");
+        h.advance_ms(20);
+        driver.chunk("data: [DONE]\n\n");
+        driver.finish(Outcome::Completed);
+        let record = h.record();
+        assert_eq!(int_at(&record, "/ttft_ms"), 10, "{provider}");
+        assert!(!bool_at(&record, "/failed"), "{provider}");
+    }
+}
+
+#[test]
+fn done_after_unfinished_frame_keeps_packet_fallback() {
+    for partial in [
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n",
+        "data: {\"choices\":[\n",
+    ] {
+        let h = Harness::new();
+        let driver = ClientCall::new("glm").stream().tap(&h);
+        driver.attempt(
+            AttemptKind::Stream,
+            "openai",
+            "glm",
+            &auth("a", "0", "openai"),
+        );
+        h.advance_ms(10);
+        driver.chunk(partial);
+        h.advance_ms(20);
+        // No blank line separated the data: upstream joins these lines and
+        // rejects the frame instead of treating [DONE] as a terminal event.
+        driver.chunk("data: [DONE]\n\n");
+        driver.fail(&ExecError::upstream(
+            502,
+            "upstream stream ended with incomplete data before [DONE]",
+        ));
+        let record = h.record();
+        assert_eq!(int_at(&record, "/ttft_ms"), 10);
+        assert!(bool_at(&record, "/failed"));
     }
 }

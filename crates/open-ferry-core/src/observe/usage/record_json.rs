@@ -339,8 +339,8 @@ impl Record {
         object.str("endpoint", self.endpoint.trim());
         object.str("auth_type", auth_type);
         object.str("api_key", self.api_key.trim());
-        object.str_omitempty("access_provider", self.access_provider.trim());
         object.bool("is_native_key", self.is_native_key);
+        object.str_omitempty("access_provider", self.access_provider.trim());
         object.str("request_id", request_id);
         object.str_omitempty("execution_id", execution_id);
         object.str_omitempty("trace_id", trace_id);

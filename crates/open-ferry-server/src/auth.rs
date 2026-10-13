@@ -281,12 +281,14 @@ mod tests {
         use std::sync::Arc;
         use tower::ServiceExt;
 
-        for (name, uri) in [
-            (Some("authorization"), "/"),
-            (Some("x-api-key"), "/"),
-            (Some("x-goog-api-key"), "/"),
-            (None, "/?key=test-key"),
-            (None, "/?auth_token=test-key"),
+        for (name, value, uri) in [
+            // extractBearerToken accepts both a bare value and Bearer.
+            (Some("authorization"), "test-key", "/"),
+            (Some("authorization"), "Bearer test-key", "/"),
+            (Some("x-api-key"), "test-key", "/"),
+            (Some("x-goog-api-key"), "test-key", "/"),
+            (None, "", "/?key=test-key"),
+            (None, "", "/?auth_token=test-key"),
         ] {
             for enabled in [true, false] {
                 let dispatcher = FakeDispatcher::new(vec![]);
@@ -315,7 +317,7 @@ mod tests {
                 if let Some(name) = name {
                     request
                         .headers_mut()
-                        .insert(name, HeaderValue::from_static("test-key"));
+                        .insert(name, HeaderValue::from_static(value));
                 }
                 let context = Arc::new(RequestContext::new(Method::GET, "/".to_owned()));
                 request.extensions_mut().insert(context);

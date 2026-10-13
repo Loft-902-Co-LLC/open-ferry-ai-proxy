@@ -77,8 +77,8 @@ CREATE INDEX requests_request_id ON requests (request_id);
 
 /// Schema version 2 adds metadata without changing how older readers read rows.
 const V2: &str = "
-ALTER TABLE requests ADD COLUMN access_provider TEXT NOT NULL DEFAULT '';
-ALTER TABLE requests ADD COLUMN is_native_key INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN access_provider TEXT;
+ALTER TABLE requests ADD COLUMN is_native_key INTEGER;
 ";
 
 /// Opens the ledger at `path`, making it and its directory if need be, and
@@ -177,6 +177,10 @@ impl From<rusqlite::Error> for MigrateError {
 /// leaves it; one that does not raises it.
 const MIN_READER_SCHEMA: &str = "min_reader_schema";
 
+// Version 2 only adds nullable columns; version 1 readers name their columns
+// on reads and writes, so they can keep using the ledger.
+const MIN_READER: i64 = 1;
+
 /// The floor a ledger of a newer schema declares, or `None` when it
 /// declares none, or none that can be read (no settings table, no value or
 /// a value that isn't a number).
@@ -233,7 +237,7 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrateError> {
         }
     }
     let defaults = [
-        (MIN_READER_SCHEMA, "1".to_owned()),
+        (MIN_READER_SCHEMA, MIN_READER.to_string()),
         (RETENTION_DAYS, DEFAULT_RETENTION_DAYS.to_string()),
         (MAX_ROWS, DEFAULT_MAX_ROWS.to_string()),
         (CURRENCY, DEFAULT_CURRENCY.to_owned()),

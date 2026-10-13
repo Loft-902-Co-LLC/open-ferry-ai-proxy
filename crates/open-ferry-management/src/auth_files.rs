@@ -46,8 +46,9 @@
 //! current `wait_seconds`. An entry without any has no `quota_checks`.
 //!
 //! Deviations from upstream:
-//! - The plugin host isn't ported: `supports_quota` and `quota_provider`
-//!   come only from a `quota_probe` in the metadata, exposed on v0 only.
+//! - The plugin host isn't ported: `supports_quota` comes only from a
+//!   `quota_probe` in the metadata, exposed on v0 only. `quota_provider`
+//!   is absent because upstream sets it only for plugin quota providers.
 //! - Quota observations are shown only for Claude and Codex; upstream's
 //!   include Devin's, which isn't ported.
 //! - Without a credential manager upstream lists the auth directory from
@@ -128,24 +129,8 @@ async fn list_version(state: ManagementState, raw: Option<String>, v8: bool) -> 
     };
     let manager = state.manager().clone();
     // Listing reads each credential's file metadata.
-    let mut body = run_blocking(move || list_body(&manager, &filter, pagination, Utc::now())).await;
-    if v8 {
-        hide_declarative_quota(&mut body);
-    }
+    let body = run_blocking(move || list_body(&manager, &filter, pagination, Utc::now(), v8)).await;
     json::response(StatusCode::OK, &body)
-}
-
-fn hide_declarative_quota(body: &mut Json) {
-    if let Json::Map(body) = body
-        && let Some(Json::Array(files)) = body.get_mut("files")
-    {
-        for file in files {
-            if let Json::Map(entry) = file {
-                entry.remove("quota_probe");
-                entry.remove("supports_quota");
-            }
-        }
-    }
 }
 
 /// Runs `f` on the blocking pool, passing a panic on. Inside an
@@ -252,7 +237,13 @@ impl Filter {
 }
 
 /// The listing's body.
-fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Timestamp) -> Json {
+fn list_body(
+    manager: &Manager,
+    filter: &Filter,
+    pagination: Pagination,
+    now: Timestamp,
+    v8: bool,
+) -> Json {
     let auths = manager.list();
     if pagination.enabled {
         let mut matching: Vec<_> = auths
@@ -264,7 +255,7 @@ fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Ti
         let (start, end) = pagination.bounds(total);
         let files = matching[start..end]
             .iter()
-            .filter_map(|auth| listed_entry(manager, auth, now))
+            .filter_map(|auth| listed_entry(manager, auth, now, v8))
             .collect();
         let has_more = end < total;
         return Json::map([
@@ -280,7 +271,7 @@ fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Ti
         .iter()
         .filter(|auth| filter.matches(auth))
         .filter_map(|auth| {
-            let entry = listed_entry(manager, auth, now)?;
+            let entry = listed_entry(manager, auth, now, v8)?;
             Some((to_lower(&entry_name(auth)), entry))
         })
         .collect();
@@ -295,8 +286,13 @@ fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Ti
 }
 
 /// A credential's entry with its cooldowns, or `None` when it is hidden.
-fn listed_entry(manager: &Manager, auth: &Auth, now: Timestamp) -> Option<Json> {
-    Some(with_cooldowns(manager, build_entry(auth, now)?, auth, now))
+fn listed_entry(manager: &Manager, auth: &Auth, now: Timestamp, v8: bool) -> Option<Json> {
+    Some(with_cooldowns(
+        manager,
+        build_entry(auth, now, v8)?,
+        auth,
+        now,
+    ))
 }
 
 /// The credential with ID `id`, and the entry the listing would show for
@@ -314,7 +310,7 @@ pub fn credential_entry(
 ) -> Option<(Arc<Auth>, Value)> {
     let manager = state.manager();
     let auth = manager.get(id)?;
-    let entry = with_cooldowns(manager, entry_fields(&auth, now)?, &auth, now);
+    let entry = with_cooldowns(manager, entry_fields(&auth, now, false)?, &auth, now);
     let value = serde_json::from_str(&entry.encode()).ok()?;
     Some((auth, value))
 }
@@ -457,7 +453,7 @@ fn is_listable(auth: &Auth) -> bool {
 
 /// A credential's entry, or `None` when it is hidden (upstream's
 /// `buildAuthFileEntryLocked`).
-fn build_entry(auth: &Auth, now: Timestamp) -> Option<Entry> {
+fn build_entry(auth: &Auth, now: Timestamp, v8: bool) -> Option<Entry> {
     let runtime_only = is_runtime_only(auth);
     if runtime_only && is_disabled(auth) {
         return None;
@@ -465,13 +461,13 @@ fn build_entry(auth: &Auth, now: Timestamp) -> Option<Entry> {
     if attribute(auth, "path").trim().is_empty() && !runtime_only {
         return None;
     }
-    entry_fields(auth, now)
+    entry_fields(auth, now, v8)
 }
 
 /// A credential's entry, whatever its source, or `None` when its file is
 /// gone after it was disabled or removed (the rest of upstream's
 /// `buildAuthFileEntryLocked`).
-fn entry_fields(auth: &Auth, now: Timestamp) -> Option<Entry> {
+fn entry_fields(auth: &Auth, now: Timestamp, v8: bool) -> Option<Entry> {
     let index = auth_index(auth);
     let runtime_only = is_runtime_only(auth);
     let path = attribute(auth, "path").trim();
@@ -513,7 +509,7 @@ fn entry_fields(auth: &Auth, now: Timestamp) -> Option<Entry> {
     if !model_quotas.is_empty() {
         set("model_quotas", Json::Map(model_quotas));
     }
-    if let Some(probe) = auth.metadata.get("quota_probe").filter(|v| !v.is_null()) {
+    if !v8 && let Some(probe) = auth.metadata.get("quota_probe").filter(|v| !v.is_null()) {
         set("supports_quota", Json::Bool(true));
         set("quota_probe", Json::Any(probe.clone()));
     }
