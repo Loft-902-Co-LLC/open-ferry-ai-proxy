@@ -12,8 +12,9 @@
 # docs/migrating-from-cliproxyapi.md). When it doesn't, and there is no
 # config at %APPDATA%\open-ferry\config.yaml, it writes one with
 # `open-ferry init`. It changes neither PATH nor any profile.
-# With -System, in an administrator terminal, the binary and config go to
-# C:\Program Files\open-ferry; init -system uses the machine auth directory.
+# With -System, in an administrator terminal, the binary goes to
+# C:\Program Files\open-ferry and the config to C:\ProgramData\open-ferry\config.yaml.
+# init -system uses the protected machine data and auth directory.
 # It skips migration; account installs use a terminal not opened as administrator.
 #
 # Runs in Windows PowerShell 5.1 and PowerShell 7. To pass options through
@@ -30,7 +31,7 @@
 #                      with -System: C:\Program Files\open-ferry)
 #   -ConfigPath PATH   the config to keep, or to write when there is none
 #                      (default: %APPDATA%\open-ferry\config.yaml;
-#                      with -System: config.yaml beside the machine binary)
+#                      with -System: C:\ProgramData\open-ferry\config.yaml)
 #   -NoAttestation     don't check the build provenance attestation, even
 #                      when gh is installed; the SHA256SUMS check still runs
 #   -NoAutoUpdate      turn automatic updates off (self-update.mode: off in
@@ -47,7 +48,8 @@
 # Environment:
 #   OPEN_FERRY_INSTALL_SYSTEM    yes: as -System; no: an account install
 #   OPEN_FERRY_INSTALL_TEST_PRIVILEGED  0 or 1: fake privilege only with a
-#                                loopback base URL and FAKE_OPEN_FERRY_INSTALL_LOG
+#                                loopback base URL and FAKE_OPEN_FERRY_INSTALL_LOG;
+#                                ignored in an elevated terminal
 #   OPEN_FERRY_INSTALL_DIR       the install directory, when -InstallDir
 #                                isn't given
 #   OPEN_FERRY_INSTALL_CONFIG    the config path, when -ConfigPath isn't
@@ -60,6 +62,10 @@
 #   OPEN_FERRY_INSTALL_GH        the GitHub CLI command (default: gh)
 #   OPEN_FERRY_INSTALL_SELF_UPDATE  off, notify or auto: set self-update.mode
 #                                in the config (-NoAutoUpdate is off)
+#
+# Under an elevated -System run, BASE_URL, GH, DIR and CONFIG above are
+# ignored. Use -InstallDir and -ConfigPath to choose machine paths; downloads
+# always come from GitHub and staging stays inside the install directory.
 #
 # The new open-ferry.exe installs itself (`open-ferry install-self`): it waits
 # for any other install or update, refuses to replace a binary a background
@@ -77,7 +83,15 @@ param(
     [switch]$NoAutoUpdate,
     [switch]$Migrate,
     [switch]$NoMigrate,
-    [switch]$System
+    [switch]$System,
+    # The fake-release suite passes these explicitly, never through HKCU's
+    # inherited environment. They require its loopback server and recorder.
+    [string]$TestBaseUrl,
+    [ValidateSet('', '0', '1')][string]$TestPrivilege,
+    [switch]$TestElevated,
+    [string]$TestProgramFiles,
+    [string]$TestProgramData,
+    [string]$TestGh
 )
 
 # Everything runs in this function, which ends by returning or throwing,
@@ -92,7 +106,13 @@ function Install-OpenFerry {
         [bool]$NoAutoUpdate,
         [bool]$Migrate,
         [bool]$NoMigrate,
-        [bool]$System
+        [bool]$System,
+        [string]$TestBaseUrl,
+        [string]$TestPrivilege,
+        [bool]$TestElevated,
+        [string]$TestProgramFiles,
+        [string]$TestProgramData,
+        [string]$TestGh
     )
 
     $ErrorActionPreference = 'Stop'
@@ -108,20 +128,84 @@ function Install-OpenFerry {
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         throw "install.ps1 is for Windows. On Linux and macOS, use install.sh: curl -fsSL https://github.com/$repo/releases/latest/download/install.sh | sh"
     }
-    # Refuse before downloading or creating any directory.
+    # Emit the small native wrapper in memory: Add-Type can invoke a compiler
+    # using the account's TEMP on PowerShell 5.1, even in an elevated terminal.
+    if (-not ('OpenFerryInstallerNative' -as [type])) {
+        $name = New-Object Reflection.AssemblyName 'OpenFerryInstallerNative'
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($name, 'Run')
+        } else {
+            $assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly($name, 'Run')
+        }
+        $module = $assembly.DefineDynamicModule($name.Name)
+        $type = $module.DefineType($name.Name, 'Public, Abstract, Sealed')
+        $methods = @(
+            @('GetTokenInformation', 'advapi32.dll', [type[]]@([IntPtr], [uint32], [IntPtr], [uint32], [IntPtr])),
+            @('CreateDirectoryW', 'kernel32.dll', [type[]]@([string], [IntPtr])),
+            @('OpenProcessToken', 'advapi32.dll', [type[]]@([IntPtr], [uint32], [IntPtr])),
+            @('CloseHandle', 'kernel32.dll', [type[]]@([IntPtr]))
+        )
+        foreach ($method in $methods) {
+            $native = $type.DefinePInvokeMethod($method[0], $method[1], 'Public, Static, PinvokeImpl',
+                'Standard', [bool], $method[2], 'Winapi', 'Unicode')
+            $native.SetImplementationFlags('PreserveSig')
+        }
+        $type.CreateType() | Out-Null
+    }
+    # Same rule as scope::Host: TokenElevation, or the SYSTEM SID. A failure
+    # to read the token refuses before downloads or directory creation.
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $elevation = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
+    $size = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
+    $tokenOut = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
+    [Runtime.InteropServices.Marshal]::WriteIntPtr($tokenOut, [IntPtr]::Zero)
     try {
-        $principal = New-Object Security.Principal.WindowsPrincipal $identity
-        $privileged = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or $identity.User.Value -eq 'S-1-5-18'
+        # -1 is GetCurrentProcess's pseudo-handle; TOKEN_QUERY is 8.
+        if (-not [OpenFerryInstallerNative]::OpenProcessToken([IntPtr](-1), 8, $tokenOut)) {
+            throw 'Could not open this process''s token.'
+        }
+        $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
+        if (-not [OpenFerryInstallerNative]::GetTokenInformation($token, 20, $elevation, 4, $size)) {
+            throw 'Could not read whether this process is elevated.'
+        }
+        $reallyPrivileged = [Runtime.InteropServices.Marshal]::ReadInt32($elevation) -ne 0 -or $identity.User.Value -eq 'S-1-5-18'
     } finally {
+        $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
+        if ($token -ne [IntPtr]::Zero) { [OpenFerryInstallerNative]::CloseHandle($token) | Out-Null }
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($tokenOut)
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($size)
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($elevation)
         $identity.Dispose()
     }
-    # Only the fake-release suite's existing loopback and recording seam
-    # may pretend to be elevated; a normal run uses the actual token.
-    if ($env:OPEN_FERRY_INSTALL_BASE_URL -like 'http://127.0.0.1:*' -and $env:FAKE_OPEN_FERRY_INSTALL_LOG) {
+    $privileged = $reallyPrivileged
+    $testMode = $false
+    if ($TestBaseUrl -or $TestPrivilege -or $TestElevated -or $TestProgramFiles -or $TestProgramData -or $TestGh) {
+        $testUrl = $null
+        if (-not [Uri]::TryCreate($TestBaseUrl, [UriKind]::Absolute, [ref]$testUrl) -or
+            $testUrl.Scheme -ne 'http' -or $testUrl.Host -ne '127.0.0.1' -or $testUrl.UserInfo -or
+            -not $env:FAKE_OPEN_FERRY_INSTALL_LOG) {
+            throw 'Installer test parameters need an http://127.0.0.1 loopback base URL and FAKE_OPEN_FERRY_INSTALL_LOG.'
+        }
+        $testMode = $true
+        if ($TestPrivilege) { $privileged = $TestPrivilege -eq '1' }
+    } elseif (-not $reallyPrivileged -and $env:OPEN_FERRY_INSTALL_BASE_URL -like 'http://127.0.0.1:*' -and $env:FAKE_OPEN_FERRY_INSTALL_LOG) {
         switch ($env:OPEN_FERRY_INSTALL_TEST_PRIVILEGED) {
             '0' { $privileged = $false }
             '1' { $privileged = $true }
+        }
+    }
+    $hardened = $System -and ($reallyPrivileged -or $TestElevated)
+    if ($hardened) {
+        foreach ($option in @(
+            @('OPEN_FERRY_INSTALL_BASE_URL', '-Version to choose an official GitHub release'),
+            @('OPEN_FERRY_INSTALL_GH', '-NoAttestation to skip the optional check'),
+            @('OPEN_FERRY_INSTALL_DIR', '-InstallDir'),
+            @('OPEN_FERRY_INSTALL_CONFIG', '-ConfigPath'),
+            @('OPEN_FERRY_INSTALL_TEST_PRIVILEGED', 'explicit installer test parameters')
+        )) {
+            if ([Environment]::GetEnvironmentVariable($option[0])) {
+                Write-Host "Ignoring $($option[0]) in an elevated -System run; use $($option[1]) instead."
+            }
         }
     }
     if ($System -and -not $privileged) {
@@ -148,21 +232,34 @@ function Install-OpenFerry {
     if ($selfUpdate -and $selfUpdate -cnotin 'off', 'notify', 'auto') {
         throw "OPEN_FERRY_INSTALL_SELF_UPDATE is '$selfUpdate': use off, notify or auto"
     }
-    if (-not $InstallDir) { $InstallDir = $env:OPEN_FERRY_INSTALL_DIR }
+    $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+    if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        $machine = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+        try {
+            $currentVersion = $machine.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion')
+            try { $programFiles = [string]$currentVersion.GetValue('ProgramFilesDir') }
+            finally { if ($currentVersion) { $currentVersion.Dispose() } }
+        } finally { $machine.Dispose() }
+    }
+    $programData = [Environment]::GetFolderPath('CommonApplicationData')
+    if ($testMode -and $TestProgramFiles) { $programFiles = $TestProgramFiles }
+    if ($testMode -and $TestProgramData) { $programData = $TestProgramData }
+    if (-not $InstallDir -and -not $hardened) { $InstallDir = $env:OPEN_FERRY_INSTALL_DIR }
     if (-not $InstallDir) {
         if ($System) {
-            if (-not $env:ProgramFiles) { throw 'ProgramFiles is not set: pass -InstallDir' }
-            $InstallDir = Join-Path $env:ProgramFiles 'open-ferry'
+            if (-not $programFiles) { throw 'Could not find Program Files: pass -InstallDir' }
+            $InstallDir = Join-Path $programFiles 'open-ferry'
         } else {
             if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: pass -InstallDir' }
             $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\open-ferry'
         }
     }
-    if (-not $ConfigPath) { $ConfigPath = $env:OPEN_FERRY_INSTALL_CONFIG }
+    if (-not $ConfigPath -and -not $hardened) { $ConfigPath = $env:OPEN_FERRY_INSTALL_CONFIG }
     if (-not $ConfigPath) {
         # Where open-ferry init writes by default.
         if ($System) {
-            $ConfigPath = Join-Path $InstallDir 'config.yaml'
+            if (-not $programData) { throw 'Could not find ProgramData: pass -ConfigPath' }
+            $ConfigPath = Join-Path $programData 'open-ferry\config.yaml'
         } else {
             if (-not $env:APPDATA) { throw 'APPDATA is not set: pass -ConfigPath' }
             $ConfigPath = Join-Path $env:APPDATA 'open-ferry\config.yaml'
@@ -203,7 +300,9 @@ function Install-OpenFerry {
         if ($Version -notmatch $versionPattern) { throw "Not a version: $Version (such as 0.1.0)" }
     }
 
-    $baseUrl = $env:OPEN_FERRY_INSTALL_BASE_URL
+    $baseUrl = $null
+    if (-not $hardened) { $baseUrl = $env:OPEN_FERRY_INSTALL_BASE_URL }
+    if ($testMode) { $baseUrl = $TestBaseUrl }
     if (-not $baseUrl) { $baseUrl = "https://github.com/$repo/releases" }
     $baseUrl = $baseUrl.TrimEnd('/')
 
@@ -270,8 +369,18 @@ function Install-OpenFerry {
         return $sums
     }
 
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('open-ferry-install-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tmp | Out-Null
+    if ($System) {
+        # Inherit Program Files' protection before any download or unpack.
+        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+        $stagingRoot = $InstallDir
+    } else {
+        $stagingRoot = [IO.Path]::GetTempPath()
+    }
+    $tmp = Join-Path $stagingRoot ('open-ferry-install-' + [Guid]::NewGuid().ToString('N'))
+    # Create-new, including if another process races us; never adopt a directory.
+    if (-not [OpenFerryInstallerNative]::CreateDirectoryW($tmp, [IntPtr]::Zero)) {
+        throw "Couldn't create a new staging directory at $tmp"
+    }
     try {
         $sumsPath = Join-Path $tmp 'SHA256SUMS'
         $suffix = "-$target.zip"
@@ -312,7 +421,13 @@ function Install-OpenFerry {
         }
         Write-Host "Checked $archive against SHA256SUMS."
 
-        $gh = $env:OPEN_FERRY_INSTALL_GH
+        $gh = $null
+        if ($hardened) {
+            $gh = Join-Path $programFiles 'GitHub CLI\gh.exe'
+        } else {
+            $gh = $env:OPEN_FERRY_INSTALL_GH
+        }
+        if ($testMode -and $TestGh) { $gh = $TestGh }
         if (-not $gh) { $gh = 'gh' }
         if ($NoAttestation) {
             Write-Host 'Not checking the build provenance attestation (-NoAttestation).'
@@ -606,10 +721,12 @@ function Install-OpenFerry {
             Write-Host "  Switch over:         $command migrate"
         }
         if (-not $skippedInit) {
-            Write-Host "  Start it:            $command -config $quotedConfig"
             if ($System) {
+                Write-Host '  Run these commands from an elevated terminal:'
+                Write-Host "  Start it:            $command -config $quotedConfig"
                 Write-Host "  Run it at boot:      $command service install -system -config $quotedConfig"
             } else {
+                Write-Host "  Start it:            $command -config $quotedConfig"
                 Write-Host "  Or run it at login:  $command service install -config $quotedConfig"
             }
             if ($wroteConfig) {
@@ -651,7 +768,7 @@ try {
             default { throw "OPEN_FERRY_INSTALL_SYSTEM is yes or no, not $env:OPEN_FERRY_INSTALL_SYSTEM" }
         }
     }
-    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent -System $System.IsPresent
+    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent -System $System.IsPresent -TestBaseUrl $TestBaseUrl -TestPrivilege $TestPrivilege -TestElevated $TestElevated.IsPresent -TestProgramFiles $TestProgramFiles -TestProgramData $TestProgramData -TestGh $TestGh
 } catch {
     Write-Host "install.ps1: error: $($_.Exception.Message)" -ForegroundColor Red
     # Run as a file, the script exits with 1. Run from irm, it only returns,

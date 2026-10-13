@@ -263,15 +263,27 @@ jobs:
           install.sh .github/scripts/*.sh
 
       - name: Test
-        run: ${{ matrix.python }} tests/install/test_install.py -v
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/target/ofp-scratch"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export OFP_TEST_SCRATCH="$(cygpath -w "$GITHUB_WORKSPACE/target/ofp-scratch")"
+          else
+            export OFP_TEST_SCRATCH="$GITHUB_WORKSPACE/target/ofp-scratch"
+          fi
+          ${{ matrix.python }} -I tests/install/test_install.py -v
 
       # Alpine's sh and wget are BusyBox's, and its libc is musl, so this is
       # where install.sh must pick a musl build.
       - name: Test on Alpine
         if: runner.os == 'Linux'
         run: >-
-          docker run --rm -v "$PWD:/src:ro" -w /src
+          docker run --rm -v "$PWD:/src:ro"
           -e INSTALL_TEST_DEFAULT_PATHS=1
           -e INSTALL_TEST_EXPECT_TARGET=x86_64-unknown-linux-musl
           alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
-          sh -c 'apk add --no-cache python3 && python3 tests/install/test_install.py -v'
+          sh -c 'apk add --no-cache python3 &&
+          adduser -D installer && mkdir /work && cp -a /src/. /work/ &&
+          chown -R installer:installer /work &&
+          su -s /bin/sh -c "cd /work &&
+          export OFP_TEST_SCRATCH=/work/target/ofp-scratch &&
+          python3 -I tests/install/test_install.py -v" installer'
