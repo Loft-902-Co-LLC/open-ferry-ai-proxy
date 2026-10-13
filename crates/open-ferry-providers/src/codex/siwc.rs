@@ -8,11 +8,12 @@
 //! and the nested credential, never in token forms or logs. Endpoints are
 //! injectable, response bodies are bounded, and errors don't quote remote
 //! bodies or credential values. Shared refresh requests survive cancelled
-//! waiters and time out after 30 seconds.
+//! waiters and time out after 30 seconds. Successful rotations remain in a
+//! bounded in-memory cache for ten minutes so a later waiter can persist them.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use chrono::{DateTime, Local, SecondsFormat, TimeDelta};
@@ -21,7 +22,7 @@ use futures_util::future::{BoxFuture, Shared};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::client::{Clients, read_body};
+use super::client::{Clients, read_body, read_body_prefix};
 pub use super::token::SiwcTokenData;
 use crate::json;
 use crate::oauth::Pkce;
@@ -54,6 +55,8 @@ pub const REFRESH_LEAD: Duration = Duration::from_secs(5 * 60);
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 1 << 20;
+const REFRESH_GRACE: Duration = Duration::from_secs(10 * 60);
+const MAX_REFRESHES: usize = 256;
 
 /// The identity used for every SIWC token, API and websocket request.
 pub fn user_agent() -> String {
@@ -138,6 +141,11 @@ impl Error {
     pub fn status(&self) -> u16 {
         self.status
     }
+
+    /// Whether retrying this refresh cannot recover the credential.
+    pub fn is_non_retryable(&self) -> bool {
+        self.non_retryable
+    }
 }
 
 impl fmt::Display for Error {
@@ -149,6 +157,11 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Calls SIWC's dynamic-client endpoints with the existing proxy-aware clients.
+/// Arbitrary clients cannot be supplied by production callers:
+/// ```compile_fail
+/// use open_ferry_providers::codex::siwc::SiwcAuth;
+/// let auth = SiwcAuth::new(reqwest::Client::new());
+/// ```
 #[derive(Clone)]
 pub struct SiwcAuth {
     client: reqwest::Client,
@@ -162,8 +175,9 @@ impl fmt::Debug for SiwcAuth {
 }
 
 impl SiwcAuth {
-    /// Uses the real SIWC endpoints with `client`.
-    pub fn new(client: reqwest::Client) -> Self {
+    /// Test seam; production clients must have clean defaults and safe redirects.
+    #[cfg(test)]
+    pub(crate) fn new(client: reqwest::Client) -> Self {
         Self {
             client,
             endpoints: Endpoints::default(),
@@ -172,7 +186,10 @@ impl SiwcAuth {
 
     /// Uses an environment, direct, or HTTP(S) proxy setting as Codex does.
     pub fn with_proxy_url(proxy_url: &str) -> Self {
-        Self::new(Clients::new(proxy_url).get(""))
+        Self {
+            client: Clients::new(proxy_url).get(""),
+            endpoints: Endpoints::default(),
+        }
     }
 
     /// Uses injectable endpoints instead.
@@ -261,6 +278,9 @@ impl SiwcAuth {
     /// Refreshes the nested credential. Concurrent requests for the same
     /// endpoint, issued client ID and refresh token share a bounded task.
     /// Each waiter keeps its own device UUID and previous ID token.
+    /// Successful rotations remain available for ten minutes (at most 256
+    /// entries). Callers must run refresh-then-persist in a task that a client
+    /// disconnect cannot cancel, so every rotation reaches durable storage.
     pub async fn refresh_tokens(&self, previous: &SiwcTokenData) -> Result<SiwcTokenData, Error> {
         let token = previous.refresh_token.trim();
         let client_id = previous.client_id.trim();
@@ -272,18 +292,16 @@ impl SiwcAuth {
                 "Stored OpenAI OAuth credential does not contain an issued client ID; reconnect ChatGPT",
             ));
         }
-        let key: [u8; 32] = Sha256::new()
-            .chain_update(self.endpoints.token_url.as_bytes())
-            .chain_update([0])
-            .chain_update(client_id.as_bytes())
-            .chain_update([0])
-            .chain_update(token.as_bytes())
-            .finalize()
-            .into();
+        let key = refresh_key(&self.endpoints.token_url, client_id, token);
         let shared = {
             let mut refreshes = REFRESHES.lock().unwrap_or_else(PoisonError::into_inner);
+            refreshes.retain(|_, entry| {
+                entry
+                    .completed
+                    .is_none_or(|at| at.elapsed() < REFRESH_GRACE)
+            });
             match refreshes.get(&key) {
-                Some(shared) => shared.clone(),
+                Some(entry) => entry.shared.clone(),
                 None => {
                     let auth = self.clone();
                     let form = encode_form(&[
@@ -292,20 +310,24 @@ impl SiwcAuth {
                         ("refresh_token", token),
                         ("resource", RESOURCE),
                     ]);
+                    let id = Arc::new(());
+                    let task_id = id.clone();
                     let task = tokio::spawn(async move {
-                        let _cleanup = RefreshCleanup(key);
-                        auth.request_token(form, false).await
+                        let result = auth.request_token(form, false).await;
+                        finish_refresh(key, &task_id, result.is_ok());
+                        result
                     });
-                    let shared = async move {
-                        task.await.unwrap_or_else(|_| {
-                            Err(Error::new(
-                                "SIWC token refresh failed: invalid single-flight result",
-                            ))
-                        })
-                    }
-                    .boxed()
-                    .shared();
-                    refreshes.insert(key, shared.clone());
+                    let shared = shared_refresh(task, key, id.clone());
+                    insert_refresh(
+                        &mut refreshes,
+                        key,
+                        RefreshEntry {
+                            shared: shared.clone(),
+                            id,
+                            created: tokio::time::Instant::now(),
+                            completed: None,
+                        },
+                    );
                     shared
                 }
             }
@@ -322,6 +344,8 @@ impl SiwcAuth {
     /// Tries at least once and at most `max_retries` times, waiting one
     /// second more before each retry, as upstream actually does. Reused
     /// refresh tokens aren't retried. Cancelling a waiter stops its retries.
+    /// Run this call and persistence together in a task that survives a client
+    /// disconnect, just as for [`Self::refresh_tokens`].
     pub async fn refresh_tokens_with_retry(
         &self,
         previous: &SiwcTokenData,
@@ -364,12 +388,10 @@ impl SiwcAuth {
             .body(form)
             .send()
             .await
-            .map_err(|_| Error::new("SIWC token request failed"))?;
+            .map_err(send_error)?;
         let status = response.status().as_u16();
-        let body = read_body(response, MAX_RESPONSE_BYTES)
-            .await
-            .map_err(|_| Error::new("failed to read SIWC token response"))?;
         if status != 200 {
+            let (body, _) = read_body_prefix(response, MAX_RESPONSE_BYTES).await;
             // Upstream's non-retryable marker is retained without quoting
             // the body: it may echo tokens, device IDs or callback values.
             let non_retryable = String::from_utf8_lossy(&body)
@@ -388,22 +410,101 @@ impl SiwcAuth {
                 non_retryable,
             });
         }
+        let body = read_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|_| Error::new("failed to read SIWC token response"))?;
         decode_token_response(&body, require_id_token, Local::now())
     }
 }
 
 type SharedRefresh = Shared<BoxFuture<'static, Result<SiwcTokenData, Error>>>;
-static REFRESHES: LazyLock<Mutex<HashMap<[u8; 32], SharedRefresh>>> =
+static REFRESHES: LazyLock<Mutex<HashMap<[u8; 32], RefreshEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-struct RefreshCleanup([u8; 32]);
-impl Drop for RefreshCleanup {
-    fn drop(&mut self) {
-        REFRESHES
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.0);
+struct RefreshEntry {
+    shared: SharedRefresh,
+    id: Arc<()>,
+    created: tokio::time::Instant,
+    completed: Option<tokio::time::Instant>,
+}
+
+fn refresh_key(endpoint: &str, client: &str, token: &str) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(endpoint)
+        .chain_update([0])
+        .chain_update(client)
+        .chain_update([0])
+        .chain_update(token)
+        .finalize()
+        .into()
+}
+
+fn insert_refresh(map: &mut HashMap<[u8; 32], RefreshEntry>, key: [u8; 32], entry: RefreshEntry) {
+    if map.len() >= MAX_REFRESHES
+        && let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, entry)| entry.created)
+            .map(|(key, _)| *key)
+    {
+        map.remove(&oldest);
     }
+    map.insert(key, entry);
+}
+
+fn finish_refresh(key: [u8; 32], id: &Arc<()>, success: bool) {
+    let mut map = REFRESHES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(entry) = map.get_mut(&key)
+        && Arc::ptr_eq(&entry.id, id)
+    {
+        if success {
+            entry.completed = Some(tokio::time::Instant::now());
+        } else {
+            map.remove(&key);
+        }
+    }
+}
+
+fn shared_refresh(
+    task: tokio::task::JoinHandle<Result<SiwcTokenData, Error>>,
+    key: [u8; 32],
+    id: Arc<()>,
+) -> SharedRefresh {
+    async move {
+        task.await.unwrap_or_else(|_| {
+            // Also covers a task dropped before its first poll. The identity
+            // check avoids removing a replacement after eviction or failure.
+            finish_refresh(key, &id, false);
+            Err(Error::new(
+                "SIWC token refresh failed: invalid single-flight result",
+            ))
+        })
+    }
+    .boxed()
+    .shared()
+}
+
+fn send_error(error: reqwest::Error) -> Error {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if is_tls_error(&error) {
+        "TLS"
+    } else if error.is_connect() {
+        "connect"
+    } else {
+        "other"
+    };
+    Error::new(format!("SIWC token request failed ({kind})"))
+}
+
+fn is_tls_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    // Hyper can nest I/O errors; source() skips the wrapped error itself.
+    // Inspect each wrapped value without echoing its text or credential URL.
+    error.is::<rustls::Error>()
+        || error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .is_some_and(|inner| is_tls_error(inner))
+        || error.source().is_some_and(is_tls_error)
 }
 
 fn redirect_or_default(redirect: &str) -> &str {

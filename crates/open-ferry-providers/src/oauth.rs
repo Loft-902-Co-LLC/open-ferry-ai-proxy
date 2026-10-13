@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/auth/codex/pkce.go and oauth_server.go,
-// which internal/auth/claude repeats (v8.0.20, MIT).
+// which internal/auth/claude repeats (v8.0.20, MIT), and parse_oauth_callback
+// from internal/misc/oauth.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What every OAuth login needs: PKCE codes, a `state` value, and a local
@@ -134,7 +135,8 @@ pub struct OAuthCallback {
     pub client_id: String,
     /// The provider's error, or empty on success.
     pub error: String,
-    /// The provider's error description, when supplied.
+    /// The provider's error description, when supplied. Untrusted provider
+    /// text: callers must not log it unfiltered.
     pub error_description: String,
 }
 
@@ -185,6 +187,9 @@ pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, Callba
     };
     let url = url::Url::parse(&candidate).map_err(|_| CallbackParseError::InvalidUrl)?;
     let query: Vec<_> = url.query_pairs().collect();
+    // Deliberate deviation from internal/misc/oauth.go:84-101: decode the
+    // fragment once, retaining parseable fields beside malformed pairs.
+    // Upstream decodes twice and drops the entire fragment on a query error.
     let fragment: Vec<_> =
         url::form_urlencoded::parse(url.fragment().unwrap_or("").as_bytes()).collect();
     let field = |name| {
@@ -651,7 +656,7 @@ async fn callback(
             state: query.state.unwrap_or_default(),
             client_id: extra("client_id").trim().to_owned(),
             error,
-            error_description: extra("error_description"),
+            error_description: extra("error_description").trim().to_owned(),
         });
     }
     response
@@ -776,6 +781,42 @@ pub(crate) mod tests {
             .unwrap();
         assert!(callback.code == "c1" && callback.state == "s1" && callback.client_id == "issued");
         assert!(callback.error.is_empty());
+    }
+
+    #[test]
+    fn pasted_fragments_decode_once_and_keep_good_fields_beside_malformed_pairs() {
+        for (input, code) in [
+            ("#code=c%252B&state=s&client_id=issued", "c%2B"),
+            ("#code=c%2B&state=s&client_id=issued", "c+"),
+            ("#code=c%2B&bad=%ZZ&state=s&client_id=issued", "c+"),
+            ("#code=c%2B&bad=a;b&state=s&client_id=issued", "c+"),
+        ] {
+            let callback = parse_oauth_callback(input).unwrap().unwrap();
+            assert_eq!(callback.code, code);
+            assert_eq!(callback.state, "s");
+            assert_eq!(callback.client_id, "issued");
+        }
+    }
+
+    #[tokio::test]
+    async fn richer_callback_trims_the_untrusted_error_description() {
+        let mut server = CallbackServer::start(0, "/callback", "s1", "ChatGPT")
+            .await
+            .unwrap();
+        assert_eq!(
+            fetch(
+                server.port(),
+                "/callback?error=denied&state=s1&error_description=%20untrusted%20"
+            )
+            .await
+            .status,
+            400
+        );
+        let callback = server
+            .wait_for_callback(Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(callback.error_description, "untrusted");
     }
 
     #[tokio::test]

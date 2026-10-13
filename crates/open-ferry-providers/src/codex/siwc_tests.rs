@@ -103,15 +103,8 @@ impl Fake {
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        // An injected caller UA must still be replaced by the fixed SIWC UA.
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .user_agent("caller-override")
-            .redirect(crate::redirect::policy())
-            .build()
-            .unwrap();
         Self {
-            auth: SiwcAuth::new(client).with_endpoints(Endpoints::with_base(&base)),
+            auth: SiwcAuth::with_proxy_url("direct").with_endpoints(Endpoints::with_base(&base)),
             captured: receiver,
             task,
         }
@@ -255,11 +248,18 @@ fn assert_request(request: &Captured, expected: &[(&str, &str)]) {
                 "originator",
                 "x-client-id",
                 "session_id",
+                "session-id",
+                "conversation_id",
+                "conversation-id",
+                "device_id",
+                "device-id",
                 "x-client-request-id",
                 "chatgpt-account-id"
             ]
             .contains(&name.as_str())
         );
+        assert!(!name.as_str().starts_with("x-stainless-"));
+        assert!(!name.as_str().starts_with("x-codex-"));
     }
 }
 
@@ -543,8 +543,15 @@ async fn concurrent_refreshes_share_one_request_and_keep_each_waiters_local_fiel
     tokio::pin!(second);
     assert!(futures_util::poll!(&mut second).is_pending());
     release.add_permits(1);
-    let first = first.await.unwrap().unwrap();
-    let second = second.await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(first.id_token == ID && first.device_id == DEVICE.to_ascii_lowercase());
     assert!(second.id_token == "fake-other-id" && second.device_id == "other-local-device");
     assert!(fake.captured.is_empty());
@@ -568,7 +575,14 @@ async fn cancelling_the_first_waiter_does_not_cancel_a_shared_refresh() {
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
     release.add_permits(1);
-    assert!(second.await.unwrap().access_token == ACCESS);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .access_token
+            == ACCESS
+    );
     assert!(fake.captured.is_empty());
 }
 
@@ -593,6 +607,368 @@ fn nested_credentials_are_sparse_and_debug_is_redacted() {
         assert!(!sparse.contains_key(field));
     }
     let invalid = json!({"access_token":{"secret":ACCESS}});
-    let error = SiwcTokenData::from_json(invalid.as_object().unwrap()).unwrap_err();
-    assert!(!error.contains(ACCESS));
+    assert!(
+        SiwcTokenData::from_json(invalid.as_object().unwrap())
+            .unwrap()
+            .access_token
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn production_transport_refuses_cross_origin_307_and_308_token_redirects() {
+    for status in [
+        StatusCode::TEMPORARY_REDIRECT,
+        StatusCode::PERMANENT_REDIRECT,
+    ] {
+        for refresh in [false, true] {
+            let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let location = format!("http://{}/leak", target.local_addr().unwrap());
+            let router = Router::new().route(
+                "/api/accounts/oauth/token",
+                post(move || async move {
+                    (
+                        status,
+                        [(http::header::LOCATION, location)],
+                        "remote-secret-body",
+                    )
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let auth =
+                SiwcAuth::with_proxy_url("direct").with_endpoints(Endpoints::with_base(&base));
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                if refresh {
+                    auth.refresh_tokens(&previous()).await
+                } else {
+                    auth.exchange_code_for_tokens("secret-code", "issued", "", DEVICE, &pkce())
+                        .await
+                }
+            })
+            .await
+            .unwrap();
+            let error = result.unwrap_err();
+            for secret in [
+                "secret-code",
+                "test-verifier",
+                REFRESH,
+                "remote-secret-body",
+                &base,
+            ] {
+                assert!(!format!("{error} {error:?}").contains(secret));
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), target.accept())
+                    .await
+                    .is_err()
+            );
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_client_user_agent_is_replaced_by_the_fixed_identity() {
+    let mut fake = Fake::start(vec![(StatusCode::OK, grant().to_string())], None).await;
+    fake.auth = SiwcAuth::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .user_agent("caller-override")
+            .build()
+            .unwrap(),
+    )
+    .with_endpoints(fake.auth.endpoints.clone());
+    fake.auth
+        .exchange_code_for_tokens("code", "issued", "", DEVICE, &pkce())
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.request().await.headers[http::header::USER_AGENT],
+        user_agent()
+    );
+}
+
+#[tokio::test]
+async fn sole_cancelled_waiters_rotation_is_cached_until_the_grace_window_expires() {
+    let release = Arc::new(Semaphore::new(0));
+    let mut rotated = grant();
+    rotated["refresh_token"] = json!("fake-rotated-refresh");
+    rotated.as_object_mut().unwrap().remove("id_token");
+    let mut fake = Fake::start(
+        vec![(StatusCode::OK, rotated.to_string()); 2],
+        Some(release.clone()),
+    )
+    .await;
+    let key = refresh_key(&fake.auth.endpoints.token_url, "oaiapp_issued", REFRESH);
+    let auth = fake.auth.clone();
+    let waiter = tokio::spawn(async move { auth.refresh_tokens(&previous()).await });
+    fake.request().await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    release.add_permits(1);
+    // Observe completion without a live refresh waiter: the task must still run.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if REFRESHES
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|entry| entry.completed.is_some())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut other = previous();
+    other.id_token = "late-waiter-id".into();
+    other.device_id = "late-waiter-device".into();
+    let tokens = tokio::time::timeout(Duration::from_secs(5), fake.auth.refresh_tokens(&other))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tokens.refresh_token, "fake-rotated-refresh");
+    assert_eq!(tokens.id_token, other.id_token);
+    assert_eq!(tokens.device_id, other.device_id);
+    assert!(fake.captured.is_empty());
+    // Advance just this entry's clock; no real ten-minute sleep or global time change.
+    REFRESHES.lock().unwrap().get_mut(&key).unwrap().completed =
+        Some(tokio::time::Instant::now() - REFRESH_GRACE);
+    release.add_permits(1);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        fake.auth.refresh_tokens(&previous()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    fake.request().await;
+    assert!(fake.captured.is_empty());
+}
+
+#[tokio::test]
+async fn completed_failed_refreshes_are_never_cached() {
+    let mut fake = Fake::start(
+        vec![
+            (StatusCode::BAD_REQUEST, "refresh_token_reused".into()),
+            (StatusCode::OK, grant().to_string()),
+        ],
+        None,
+    )
+    .await;
+    let error = fake.auth.refresh_tokens(&previous()).await.unwrap_err();
+    assert!(error.is_non_retryable());
+    assert_eq!(error.status(), 400);
+    fake.request().await;
+    assert!(fake.auth.refresh_tokens(&previous()).await.is_ok());
+    fake.request().await;
+    assert!(fake.captured.is_empty());
+}
+
+#[test]
+fn refresh_cache_never_exceeds_its_bound_and_evicts_the_oldest() {
+    let mut map = HashMap::new();
+    let now = tokio::time::Instant::now();
+    for index in 0..(MAX_REFRESHES + 5) {
+        let key = refresh_key("test-bound", "client", &index.to_string());
+        insert_refresh(
+            &mut map,
+            key,
+            RefreshEntry {
+                shared: futures_util::future::ready(Ok(previous())).boxed().shared(),
+                id: Arc::new(()),
+                created: now + Duration::from_nanos(index as u64),
+                completed: Some(now),
+            },
+        );
+        assert!(map.len() <= MAX_REFRESHES);
+    }
+    assert_eq!(map.len(), MAX_REFRESHES);
+    for index in 0..5 {
+        assert!(!map.contains_key(&refresh_key("test-bound", "client", &index.to_string())));
+    }
+    assert!(map.contains_key(&refresh_key("test-bound", "client", "5")));
+}
+
+#[tokio::test]
+async fn an_unpolled_refresh_task_does_not_poison_the_key_or_remove_a_replacement() {
+    let mut fake = Fake::start(vec![(StatusCode::OK, grant().to_string())], None).await;
+    let key = refresh_key(&fake.auth.endpoints.token_url, "oaiapp_issued", REFRESH);
+    let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = polled.clone();
+    let task = tokio::spawn(async move {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(previous())
+    });
+    // This current-thread runtime cannot poll the spawned task before abort.
+    task.abort();
+    let id = Arc::new(());
+    let shared = shared_refresh(task, key, id.clone());
+    insert_refresh(
+        &mut REFRESHES.lock().unwrap(),
+        key,
+        RefreshEntry {
+            shared,
+            id: id.clone(),
+            created: tokio::time::Instant::now(),
+            completed: None,
+        },
+    );
+    assert!(fake.auth.refresh_tokens(&previous()).await.is_err());
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!REFRESHES.lock().unwrap().contains_key(&key));
+    assert!(fake.auth.refresh_tokens(&previous()).await.is_ok());
+    fake.request().await;
+    finish_refresh(key, &id, false);
+    assert!(REFRESHES.lock().unwrap().contains_key(&key));
+}
+
+#[tokio::test]
+async fn oversized_error_responses_keep_the_status_and_non_retryable_marker() {
+    let mut fake = Fake::start(
+        vec![(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "refresh_token_reused {REFRESH}{}",
+                "x".repeat(MAX_RESPONSE_BYTES)
+            ),
+        )],
+        None,
+    )
+    .await;
+    let error = fake.auth.refresh_tokens(&previous()).await.unwrap_err();
+    assert_eq!(error.status(), 400);
+    assert!(error.is_non_retryable());
+    assert!(!format!("{error} {error:?}").contains(REFRESH));
+    fake.request().await;
+}
+
+#[tokio::test]
+async fn send_errors_keep_the_connect_kind_without_echoing_the_url() {
+    // Bound but non-listening, so nobody can race to take a "closed" port.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let base = format!("http://{}", socket.local_addr().unwrap());
+    let auth = SiwcAuth::with_proxy_url("direct").with_endpoints(Endpoints::with_base(&base));
+    let error = tokio::time::timeout(Duration::from_secs(5), auth.refresh_tokens(&previous()))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.message(), "SIWC token request failed (connect)");
+    assert_eq!(error.status(), 0);
+    assert!(!format!("{error} {error:?}").contains(&base));
+}
+
+#[test]
+fn nested_credentials_treat_non_strings_as_absent_and_accept_the_access_alias() {
+    for invalid in [
+        Value::Null,
+        json!(123),
+        json!(false),
+        json!({"secret":ACCESS}),
+        json!([ACCESS]),
+    ] {
+        let mut object = previous().to_json();
+        for field in [
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "client_id",
+            "scope",
+            "expired",
+            "last_refresh",
+            "device_id",
+        ] {
+            object.insert(field.into(), invalid.clone());
+        }
+        object.insert("scopes".into(), Value::Null);
+        let tokens = SiwcTokenData::from_json(&object).unwrap();
+        assert_eq!(tokens, SiwcTokenData::default());
+        object.insert("access".into(), json!(" alias-token "));
+        assert_eq!(
+            SiwcTokenData::from_json(&object).unwrap().access_token,
+            "alias-token"
+        );
+    }
+    for access in [Value::Null, json!(17), json!(" ")] {
+        let object = json!({"access_token":access,"access":"alias"});
+        assert_eq!(
+            SiwcTokenData::from_json(object.as_object().unwrap())
+                .unwrap()
+                .access_token,
+            "alias"
+        );
+    }
+    let object = json!({"access_token":"preferred","access":"alias"});
+    assert_eq!(
+        SiwcTokenData::from_json(object.as_object().unwrap())
+            .unwrap()
+            .access_token,
+        "preferred"
+    );
+    let object = json!({"scopes":["openid",null,17]});
+    assert_eq!(
+        SiwcTokenData::from_json(object.as_object().unwrap())
+            .unwrap()
+            .scopes,
+        ["openid"]
+    );
+}
+
+#[tokio::test]
+async fn send_errors_distinguish_timeout_tls_and_other_without_remote_text() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/private-credential",
+        listener.local_addr().unwrap()
+    );
+    let error = client
+        .get(&url)
+        .timeout(Duration::from_millis(20))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        send_error(error).message(),
+        "SIWC token request failed (timeout)"
+    );
+    drop(listener);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "https://{}/private-credential",
+        listener.local_addr().unwrap()
+    );
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut hello = [0; 1024];
+        assert!(stream.read(&mut hello).await.unwrap() > 0);
+        stream
+            .write_all(b"HTTP/1.1 400 private-remote-text\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let error = tokio::time::timeout(Duration::from_secs(5), client.get(&url).send())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        send_error(error).message(),
+        "SIWC token request failed (TLS)"
+    );
+    server.await.unwrap();
+    let error = client
+        .get("invalid-url-with-private-credential")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        send_error(error).message(),
+        "SIWC token request failed (other)"
+    );
 }
