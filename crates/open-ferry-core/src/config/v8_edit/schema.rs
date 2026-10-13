@@ -166,6 +166,7 @@ static CONFIG_CODEX_CONFIG: Type = Type {
         ("model-level-cooling", Field::Leaf),
         ("orphan-delegation-compatibility", Field::Leaf),
         ("response-steering", Field::Leaf),
+        ("signin-with-chatgpt-identifier", Field::Leaf),
         ("stream-bootstrap-buffering", Field::Leaf),
         ("stream-bootstrap-timeout", Field::Leaf),
     ],

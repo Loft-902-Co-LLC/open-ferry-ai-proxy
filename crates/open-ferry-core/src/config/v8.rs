@@ -327,6 +327,10 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
         "oauth.providers.codex.live-media-relay.ice-servers",
     ),
     (
+        "codex.signin-with-chatgpt-identifier",
+        "oauth.providers.codex.signin-with-chatgpt-identifier",
+    ),
+    (
         "codex.response-steering",
         "upstream.codex.response-steering",
     ),
@@ -843,7 +847,7 @@ mod tests {
     #[test]
     fn paths_table_matches_upstream_shape() {
         // Upstream's, and open-ferry's management.separate-address.
-        assert_eq!(V8_PATHS.len(), 117 + 1);
+        assert_eq!(V8_PATHS.len(), 118 + 1);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();

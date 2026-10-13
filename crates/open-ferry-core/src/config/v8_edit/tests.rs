@@ -482,16 +482,7 @@ fn errors_name_the_answer() {
 // `super::super::load`.)
 #[test]
 fn v8_example_is_valid() {
-    // v8.0.27 adds `signin-with-chatgpt-identifier`, which the v8 schema
-    // doesn't accept yet, so omit it from validation while keeping the
-    // fixture identical to upstream. TODO: the Sign in with ChatGPT port
-    // keeps the key for configuration compatibility; drop this then.
-    let example = include_str!("../testdata/config.example.yaml")
-        .replace("\r\n", "\n")
-        .replace(
-            "      signin-with-chatgpt-identifier: \"CLIProxyAPI\"\n",
-            "",
-        );
+    let example = include_str!("../testdata/config.example.yaml").replace("\r\n", "\n");
     assert_valid(&example);
     let text = example;
     let (_, block) = text
@@ -644,4 +635,32 @@ fn model_catalog_sources_validate() {
         assert_valid(raw);
     }
     assert!(validate_v8_config(b"models: {catalog: [a]}\n").is_err());
+}
+
+#[test]
+fn signin_with_chatgpt_identifier_accepts_put_and_patch() {
+    for method in [V8Method::Put, V8Method::Patch] {
+        let (out, config) = render(
+            include_bytes!("../testdata/config.example.yaml"),
+            &edit(
+                method,
+                "oauth/providers/codex",
+                r#"{"signin-with-chatgpt-identifier":"  retained-agent  "}"#,
+            ),
+        )
+        .expect("edit example");
+        let yaml = String::from_utf8(out).expect("utf-8");
+        assert_valid(&yaml);
+        assert_eq!(
+            config.codex.signin_with_chatgpt_identifier,
+            "retained-agent"
+        );
+        assert_eq!(
+            Config::parse(&yaml)
+                .expect("reload")
+                .codex
+                .signin_with_chatgpt_identifier,
+            "retained-agent"
+        );
+    }
 }

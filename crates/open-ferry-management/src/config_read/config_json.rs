@@ -337,6 +337,10 @@ pub(super) fn config(config: &Config) -> Json {
                 )
                 .with("model-level-cooling", Json::Bool(codex.model_level_cooling))
                 .with("response-steering", Json::Bool(codex.response_steering))
+                .omit_empty(
+                    "signin-with-chatgpt-identifier",
+                    string(&codex.signin_with_chatgpt_identifier),
+                )
                 .done(),
         )
         .with(
@@ -845,6 +849,23 @@ fn model_setting(setting: &OAuthModelSetting) -> Json {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn signin_with_chatgpt_identifier_uses_legacy_json_and_omits_empty() {
+        let mut cfg = Config::default();
+        let value: Value = serde_json::from_str(&config(&cfg).encode()).expect("json");
+        assert!(
+            value["codex"]
+                .get("signin-with-chatgpt-identifier")
+                .is_none()
+        );
+        cfg.codex.signin_with_chatgpt_identifier = "retained-agent".into();
+        let value: Value = serde_json::from_str(&config(&cfg).encode()).expect("json");
+        assert_eq!(
+            value["codex"]["signin-with-chatgpt-identifier"],
+            "retained-agent"
+        );
+    }
 
     #[test]
     fn routing_keys_follow_upstreams_field_order() {

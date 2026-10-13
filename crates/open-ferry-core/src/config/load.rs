@@ -1511,12 +1511,84 @@ mod tests {
         }
     }
 
+    // Ported from codex_websocket_header_defaults_test.go:91 (7b0319fb),
+    // with compatibility-only identity, plus save/diff/warning coverage.
+    #[test]
+    fn signin_with_chatgpt_identifier_is_retained_for_compatibility() {
+        use crate::config::testing::logged;
+        let warning = "signin-with-chatgpt-identifier is retained for configuration compatibility; open-ferry always names itself as open-ferry.";
+        for yaml in [
+            "codex: {signin-with-chatgpt-identifier: '  CustomSIWCClient/2.0  '}\n",
+            "oauth: {providers: {codex: {signin-with-chatgpt-identifier: '  CustomSIWCClient/2.0  '}}}\n",
+        ] {
+            let (config, messages) = logged(|| parse(yaml));
+            assert_eq!(
+                config.codex.signin_with_chatgpt_identifier,
+                "CustomSIWCClient/2.0"
+            );
+            assert_eq!(messages, [warning]);
+            for migrate in [false, true] {
+                let out = crate::config::save::render_preserving_comments(
+                    yaml.as_bytes(),
+                    &config,
+                    migrate,
+                )
+                .expect("save");
+                let saved = String::from_utf8(out).expect("utf-8");
+                assert!(saved.contains("signin-with-chatgpt-identifier:"));
+                if migrate || yaml.starts_with("oauth:") {
+                    assert!(saved.contains("oauth:"));
+                }
+                assert_eq!(
+                    parse(&saved).codex.signin_with_chatgpt_identifier,
+                    "CustomSIWCClient/2.0"
+                );
+            }
+            let mut cleared = config.clone();
+            cleared.codex.signin_with_chatgpt_identifier.clear();
+            let out =
+                crate::config::save::render_preserving_comments(yaml.as_bytes(), &cleared, false)
+                    .expect("clear and save");
+            assert!(
+                !String::from_utf8(out)
+                    .expect("utf-8")
+                    .contains("signin-with-chatgpt-identifier")
+            );
+            assert_eq!(
+                crate::config::diff::build_change_details(&Config::default(), &config),
+                ["codex.signin-with-chatgpt-identifier:  -> CustomSIWCClient/2.0"]
+            );
+        }
+        for yaml in [
+            "port: 8317\n",
+            "codex: {signin-with-chatgpt-identifier: '   '}\n",
+        ] {
+            let (config, messages) = logged(|| parse(yaml));
+            assert!(config.codex.signin_with_chatgpt_identifier.is_empty());
+            assert!(messages.is_empty());
+            // A save omits the empty optional field.
+            let out =
+                crate::config::save::render_preserving_comments(yaml.as_bytes(), &config, true)
+                    .expect("save");
+            assert!(
+                !String::from_utf8(out)
+                    .expect("utf-8")
+                    .contains("signin-with-chatgpt-identifier")
+            );
+        }
+        let config = parse(
+            "codex: {signin-with-chatgpt-identifier: legacy}\noauth: {providers: {codex: {signin-with-chatgpt-identifier: canonical}}}\n",
+        );
+        assert_eq!(config.codex.signin_with_chatgpt_identifier, "canonical");
+    }
+
     // config_v8_test.go
 
     #[test]
     fn v8_example_loads() {
         let example = include_str!("testdata/config.example.yaml");
         let active = parse(example);
+        assert_eq!(active.codex.signin_with_chatgpt_identifier, "CLIProxyAPI");
         assert_eq!(active.port, 8317);
         assert_eq!(active.api_keys.len(), 3);
         assert_eq!(active.request_retry, 3);
