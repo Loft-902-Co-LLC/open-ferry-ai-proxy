@@ -32,12 +32,13 @@ TestPrivilege and TestProgramFiles/TestProgramData parameters exercise the
 privileged paths only on unelevated runners. TestElevated exercises the
 hardened path without elevating. Machine folders are passed as test
 parameters pointing into scratch. The suite skips root and elevated Windows
-script runs: neither inherited environment nor explicit parameters may
+fake script runs; root instead runs isolated offline hardening tests. Neither inherited environment nor explicit parameters may
 turn on the seam under real privilege.
 The fakes refuse writes outside FAKE_OPEN_FERRY_SCRATCH, set to each case's
 scratch directory, even if a shell restores HOME after it was unset.
 
 Environment:
+  OFP_INSTALL_TESTS_STRICT    1: privilege-caused skips fail the suite
   INSTALL_TEST_EXPECT_TARGET  also run install.sh with this system's own
                               detection, and expect this target
   INSTALL_TEST_DEFAULT_PATHS  1: also run the scripts with neither an install
@@ -65,6 +66,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -989,6 +991,18 @@ def scratch_inside_target(scratch):
         return False
 
 
+class StrictPrivilegeSkipTests(unittest.TestCase):
+    def test_strict_mode_turns_privilege_skip_into_failure(self):
+        from unittest.mock import patch
+        case = unittest.TestCase()
+        with patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="1"):
+            with self.assertRaisesRegex(AssertionError, "privilege-caused skip forbidden"):
+                privilege_skip(case, "elevated runner")
+        with patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="0"):
+            with self.assertRaisesRegex(unittest.SkipTest, "elevated runner"):
+                privilege_skip(case, "elevated runner")
+
+
 class ScratchPathTests(unittest.TestCase):
     def test_scratch_must_stay_in_this_checkout_target(self):
         self.assertTrue(scratch_inside_target(os.path.join(ROOT, "target", "scratch")))
@@ -1001,12 +1015,20 @@ class ScratchPathTests(unittest.TestCase):
             self.assertFalse(scratch_inside_target(drive + r"\scratch"))
 
 
+def privilege_skip(case, reason):
+    if os.environ.get("OFP_INSTALL_TESTS_STRICT") == "1":
+        case.fail("privilege-caused skip forbidden: " + reason)
+    case.skipTest(reason)
+
+
 def setUpModule():
     global BASE, BASE_SH, SERVER, FAKE_BIN, FAKE_GH, ELEVATED
     if WINDOWS:
         import ctypes
         ELEVATED = bool(ctypes.windll.shell32.IsUserAnAdmin())
         if ELEVATED and REAL_BINARY:
+            if os.environ.get("OFP_INSTALL_TESTS_STRICT") == "1":
+                raise RuntimeError("privilege-caused skip forbidden: elevated runner")
             raise unittest.SkipTest("real binary install tests must not run in an elevated terminal")
     elif os.geteuid() == 0:
         raise unittest.SkipTest("real root ignores the loopback seam; install tests must run as an ordinary user")
@@ -1278,7 +1300,7 @@ class InstallShTests(Case):
 
     def setUp(self):
         if WINDOWS and ELEVATED:
-            self.skipTest("installer fakes must run in an unelevated process")
+            privilege_skip(self, "installer fakes must run in an unelevated process")
         self.work = self.make_work()
         self.home = os.path.join(self.work, "home")
         self.tmp = os.path.join(self.work, "tmp")
@@ -2179,7 +2201,7 @@ class InstallPs1Cases:
     def test_pipeline_seam_can_exercise_the_hardened_path_without_elevation(self):
         from unittest.mock import patch
         # Select the explicit script-block route without changing the token.
-        with patch.dict(globals(), ELEVATED=True):
+        with patch.dict(globals(), ELEVATED=True), patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="0"):
             result = self.run_command(
                 f"irm {self.script_url()} | iex; Write-Host 'The session goes on.'",
                 OPEN_FERRY_INSTALL_DIR=self.install_dir, OPEN_FERRY_INSTALL_CONFIG=self.config,
@@ -2282,6 +2304,37 @@ class InstallPs1Cases:
         for path in ("wrong temp", "wrong tmp"):
             self.assertEqual(os.listdir(os.path.join(self.work, path)), [])
 
+    def test_hardened_system_install_ignores_user_module_search_folders(self):
+        modules = os.path.join(self.work, "caller modules")
+        marker = os.path.join(self.work, "module-loaded")
+        for module in ("Microsoft.PowerShell.Archive", "Microsoft.PowerShell.Utility"):
+            write_file(os.path.join(modules, module, module + ".psm1"),
+                       f"[IO.File]::WriteAllText({ps_quote(marker)}, 'loaded')\n"
+                       "function Expand-Archive { throw 'caller archive module' }\n"
+                       "function Get-FileHash { throw 'caller hash module' }\n"
+                       "function Write-Host { throw 'caller error module' }\n"
+                       "function Get-PSCallStack { throw 'caller stack module' }\n")
+        # Force the early-error path to resolve its reporting commands afresh.
+        # The URL is rejected before any download or fake-privilege activation.
+        error_env = self.env(INSTALL_TEST_NO_PARAMETERS="1", PSModulePath=modules)
+        error_command = "Remove-Module Microsoft.PowerShell.Utility -Force -ErrorAction SilentlyContinue; & " + ps_quote(INSTALL_PS1)
+        error_command += " -TestBaseUrl 'http://localhost:1' -TestPrivilege 1"
+        requests = list(SERVER.httpd.requests)
+        error = run([*self.shell_args(), "-Command", error_command], error_env)
+        self.assertExit(error, 1)
+        self.assertIn("test parameters need an http://127.0.0.1", error.output)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(SERVER.httpd.requests, requests)
+        env = self.env(OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", INSTALL_TEST_HARDENED="1", PSModulePath=modules)
+        args = [*self.install_args("-System"), *self.seam_args(env)]
+        command = "& " + ps_quote(INSTALL_PS1) + " " + " ".join(
+            arg if arg.startswith("-") else ps_quote(arg) for arg in args)
+        command += f"; if ($env:PSModulePath.Contains({ps_quote(modules)})) {{ throw 'caller module path survived' }}"
+        result = run([*self.shell_args(), "-Command", command], env)
+        self.assertExit(result, 0)
+        self.assertInstalled(LATEST)
+        self.assertFalse(os.path.exists(marker))
+
     def test_system_staging_is_cleaned_when_download_verification_attestation_or_install_fails(self):
         cases = (
             (dict(OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("absent")), "Couldn't download"),
@@ -2313,7 +2366,7 @@ class InstallPs1Cases:
 
     def test_elevated_system_install_does_not_accept_environment_fake_privilege(self):
         if ELEVATED:
-            self.skipTest("refusal of a genuinely unelevated token is exercised on unelevated runners")
+            privilege_skip(self, "refusal of a genuinely unelevated token is exercised on unelevated runners")
         requests = list(SERVER.httpd.requests)
         result = self.run_file(
             *self.install_args("-System"), "-TestBaseUrl", SERVER.url("good"), "-TestElevated",
@@ -2359,7 +2412,7 @@ class InstallPs1Cases:
         if not WINDOWS:
             self.skipTest("install.ps1 runs on Windows")
         if ELEVATED:
-            self.skipTest("real elevation disables the loopback test seam; run installer cases unelevated")
+            privilege_skip(self, "real elevation disables the loopback test seam; run installer cases unelevated")
         if not self.shell:
             self.skipTest("not installed")
         self.work = self.make_work()
@@ -3262,7 +3315,7 @@ class PowerShell7Tests(InstallPs1Cases, Case):
 class InstallerPrivilegeGuardTests(unittest.TestCase):
     def test_elevated_runners_skip_every_installer_seam(self):
         from unittest.mock import patch
-        with patch.dict(globals(), ELEVATED=True):
+        with patch.dict(globals(), ELEVATED=True), patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="0"):
             for case in (InstallShTests, WindowsPowerShellTests, PowerShell7Tests):
                 with self.subTest(case=case.__name__):
                     with self.assertRaisesRegex(unittest.SkipTest, "unelevated"):
@@ -3284,7 +3337,7 @@ class RealBinaryTests(Case):
         if WINDOWS and not (POWERSHELL or PWSH):
             self.skipTest("no PowerShell")
         if WINDOWS and ELEVATED:
-            self.skipTest("real binary installer tests must run unelevated")
+            privilege_skip(self, "real binary installer tests must run unelevated")
         if not WINDOWS and not SH:
             self.skipTest("no sh")
         self.work = self.make_work()
@@ -3431,4 +3484,17 @@ class InstallPs1ElsewhereTests(Case):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    # Root has no fake-privilege seam. Run its isolated, offline tests instead.
+    if not WINDOWS and os.geteuid() == 0:
+        if os.environ.get("OFP_INSTALL_TESTS_STRICT") == "1":
+            raise RuntimeError("unprivileged installer suite unexpectedly running as root")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("root_install", os.path.join(ROOT, "tests", "install", "test_root_install.py"))
+        root_tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(root_tests)
+        suite = unittest.defaultTestLoader.loadTestsFromModule(root_tests)
+    else:
+        suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    result = unittest.TextTestRunner(verbosity=2 if "-v" in sys.argv else 1).run(suite)
+    print(f"Installer tests: ran={result.testsRun}, passed={result.testsRun - len(result.skipped) - len(result.failures) - len(result.errors)}, skipped={len(result.skipped)}")
+    sys.exit(not result.wasSuccessful())

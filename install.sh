@@ -20,7 +20,9 @@
 # It skips migration; account installs must run without sudo, except for
 # root installing its own account inside a Linux container.
 # Real root ignores GH, BASE_URL, TEST_PRIVILEGED and every FAKE_* setting,
-# uses a fixed tool PATH, and checks the install directory and its ancestors
+# drops tool configuration settings, runs tools with a clean allow-listed
+# environment and a PATH excluding /usr/local. It checks the install directory
+# and its ancestors
 # for root ownership, no links and no group/other write before downloading.
 # Download and unpacking use a checked root-owned directory with mode 0700.
 #
@@ -50,7 +52,7 @@ REPO=Loft-902-Co-LLC/open-ferry-ai-proxy
 GLIBC_FLOOR=2.31
 
 usage() {
-  cat <<'EOF'
+  run cat <<'EOF'
 Installs open-ferry from a GitHub release.
 
 Usage: install.sh [options]
@@ -103,25 +105,53 @@ has() {
   command -v "$1" >/dev/null 2>&1
 }
 
-# Use trusted tools to discover real privilege, before any external command.
+# Discover privilege in a subshell before any external command sees loader hooks.
 caller_path=${PATH:-}
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-if [ -x /usr/bin/id ]; then
-  real_uid=$(/usr/bin/id -u) || die "couldn't tell whether this process is privileged"
-else
-  real_uid=$(/bin/id -u) || die "couldn't tell whether this process is privileged"
-fi
-if [ "$real_uid" = 0 ]; then
-  # Environment names contain no whitespace.
-  # shellcheck disable=SC2046
-  for name in OPEN_FERRY_INSTALL_GH OPEN_FERRY_INSTALL_BASE_URL OPEN_FERRY_INSTALL_TEST_PRIVILEGED $(env | sed -n 's/^\(FAKE_[A-Za-z0-9_]*\)=.*/\1/p'); do
-    if printenv "$name" >/dev/null 2>&1; then
-      say "Ignoring $name when running as root."
-      unset "$name"
+real_uid=$(
+  unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CDPATH GLOBIGNORE
+  IFS=$(printf ' \t\nx')
+  IFS=${IFS%x}
+  /usr/bin/env -i PATH="$PATH" LC_ALL=C id -u
+) || die "couldn't tell whether this process is privileged"
+
+# Every privileged external command shares this allow-list, including children
+# tar starts to decompress an archive. Never pass caller HOME to a root tool.
+run() (
+  if [ "$real_uid" != 0 ]; then
+    "$@"
+    exit $?
+  fi
+  for proxy in http_proxy https_proxy HTTPS_PROXY no_proxy NO_PROXY all_proxy ALL_PROXY; do
+    eval "present=\${$proxy+x}"
+    if [ "$present" = x ]; then
+      eval "value=\${$proxy}"
+      set -- "$proxy=$value" "$@"
     fi
   done
-  unset CDPATH
+  /usr/bin/env -i PATH="$PATH" HOME="$HOME" LC_ALL=C "$@"
+)
+if [ "$real_uid" = 0 ]; then
+  unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CDPATH GLOBIGNORE
+  IFS=$(printf ' \t\nx')
+  IFS=${IFS%x}
+  # Resolve root's home from the machine account database, not caller HOME.
+  HOME=/root
+  HOME=$(run awk -F: '$3 == 0 { print $6; exit }' /etc/passwd)
+  [ -n "$HOME" ] || die "couldn't find root's home in /etc/passwd"
+  export HOME
+  # Only names are printed; values may contain credentials or newlines.
+  names=$(export -p | run sed -n "s/^export \([A-Za-z_][A-Za-z0-9_]*\).*$/\1/p")
+  for name in $names; do
+    case $name in
+      OPEN_FERRY_INSTALL_SELF_UPDATE | OPEN_FERRY_INSTALL_SYSTEM | OPEN_FERRY_INSTALL_MIGRATE) continue ;;
+      OPEN_FERRY_INSTALL_* | FAKE_* | TAR_OPTIONS | CURL_HOME | WGETRC | SSL_CERT_FILE | SSL_CERT_DIR | CURL_CA_BUNDLE | PERL5OPT | PERL5LIB | OPENSSL_CONF | GH_*)
+        say "Ignoring $name when running as root."
+        unset "$name"
+        ;;
+    esac
+  done
 else
   PATH=$caller_path
   export PATH
@@ -222,7 +252,7 @@ if [ -z "$system" ]; then
 fi
 
 # Refuse before downloading or creating any directory.
-os=$(uname -s)
+os=$(run uname -s)
 in_container=0
 if [ -e /.dockerenv ] || [ -e /run/.containerenv ] || [ -e /var/run/secrets/kubernetes.io ]; then
   in_container=1
@@ -293,7 +323,7 @@ check_directory() (
   directory=$1
   [ ! -L "$directory" ] && [ -d "$directory" ] ||
     die "refusing $directory: use a real directory, not a link or file"
-  metadata=$(LC_ALL=C ls -ldn "$directory") || die "couldn't examine $directory"
+  metadata=$(LC_ALL=C run ls -ldn "$directory") || die "couldn't examine $directory"
   read -r mode _links owner _rest <<EOF
 $metadata
 EOF
@@ -323,7 +353,7 @@ prepare_directory() (
     prepare_directory "$parent" || exit 1
   fi
   if [ ! -e "$directory" ] && [ ! -L "$directory" ]; then
-    (umask 022 && mkdir -m 755 "$directory") || die "couldn't make $directory"
+    (umask 022 && run mkdir -m 755 "$directory") || die "couldn't make $directory"
   fi
   check_directory "$directory"
 )
@@ -340,7 +370,7 @@ fi
 # A version is MAJOR.MINOR.PATCH with an optional pre-release part, as the
 # release workflow requires; a leading v is allowed.
 valid_version() {
-  printf '%s\n' "$1" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?'
+  printf '%s\n' "$1" | run grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?'
 }
 
 if [ -n "$version" ]; then
@@ -352,7 +382,7 @@ fi
 
 # Whether version $1 is at least $2, comparing up to three numeric parts.
 version_at_least() {
-  awk -v a="$1" -v b="$2" 'BEGIN {
+  run awk -v a="$1" -v b="$2" 'BEGIN {
     split(a, x, "."); split(b, y, ".")
     for (i = 1; i <= 3; i++) {
       if (x[i] + 0 > y[i] + 0) exit 0
@@ -364,8 +394,8 @@ version_at_least() {
 
 target_note=
 detect_target() {
-  os=$(uname -s)
-  arch=$(uname -m)
+  os=$(run uname -s)
+  arch=$(run uname -m)
   case $arch in
     x86_64 | amd64) arch=x86_64 ;;
     aarch64 | arm64) arch=aarch64 ;;
@@ -376,7 +406,7 @@ detect_target() {
       # glibc reports its version through getconf; musl doesn't. The glibc
       # builds need glibc $GLIBC_FLOOR or newer; the musl builds are static
       # and run on any Linux.
-      libc_version=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+      libc_version=$(run getconf GNU_LIBC_VERSION 2>/dev/null || true)
       case $libc_version in
         "glibc "*)
           libc_version=${libc_version#glibc }
@@ -395,7 +425,7 @@ detect_target() {
       ;;
     Darwin)
       # A shell running under Rosetta reports x86_64 on Apple silicon.
-      if [ "$arch" = x86_64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+      if [ "$arch" = x86_64 ] && [ "$(run sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
         arch=aarch64
         target_note="This shell runs under Rosetta, so this is the Apple silicon build."
       fi
@@ -426,15 +456,23 @@ esac
 base_url=${OPEN_FERRY_INSTALL_BASE_URL:-https://github.com/$REPO/releases}
 base_url=${base_url%/}
 
+run_curl() {
+  if [ "$real_uid" = 0 ]; then run curl -q "$@"; else run curl "$@"; fi
+}
+
 download() {
   if has curl; then
     case $1 in
       # Never follow a redirect off HTTPS.
-      https://*) curl --fail --silent --show-error --location --retry 3 --proto =https --proto-redir =https --output "$2" "$1" ;;
-      *) curl --fail --silent --show-error --location --retry 3 --output "$2" "$1" ;;
+      https://*) run_curl --fail --silent --show-error --location --retry 3 --proto =https --proto-redir =https --output "$2" "$1" ;;
+      *) run_curl --fail --silent --show-error --location --retry 3 --output "$2" "$1" ;;
     esac
   elif has wget; then
-    wget -q -O "$2" "$1"
+    if [ "$real_uid" = 0 ] && run wget --help 2>&1 | run grep -q -- --no-config; then
+      run wget --no-config -q -O "$2" "$1"
+    else
+      run wget -q -O "$2" "$1"
+    fi
   else
     die "downloading needs curl or wget; install one of them"
   fi
@@ -442,11 +480,11 @@ download() {
 
 sha256_of() {
   if has sha256sum; then
-    sha256sum "$1" | awk '{ print tolower($1) }'
+    run sha256sum "$1" | run awk '{ print tolower($1) }'
   elif has shasum; then
-    shasum -a 256 "$1" | awk '{ print tolower($1) }'
+    run shasum -a 256 "$1" | run awk '{ print tolower($1) }'
   elif has openssl; then
-    openssl dgst -sha256 -r "$1" | awk '{ print tolower($1) }'
+    run openssl dgst -sha256 -r "$1" | run awk '{ print tolower($1) }'
   else
     die "checking the download needs sha256sum, shasum or openssl"
   fi
@@ -455,19 +493,19 @@ sha256_of() {
 has tar || die "unpacking the download needs tar"
 
 if [ "$uid" = 0 ]; then
-  tmp=$(umask 077 && mktemp -d "$bin_dir/.open-ferry-install.XXXXXXXX")
+  tmp=$(umask 077 && run mktemp -d "$bin_dir/.open-ferry-install.XXXXXXXX")
 else
-  tmp=$(mktemp -d 2>/dev/null || mktemp -d -t open-ferry-install)
+  tmp=$(run mktemp -d 2>/dev/null || run mktemp -d -t open-ferry-install)
 fi
 [ -n "$tmp" ] && [ -d "$tmp" ] || die "couldn't make a temporary directory"
 cleanup() {
-  rm -rf "$tmp"
+  run rm -rf "$tmp"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ "$uid" = 0 ]; then
-  chmod 700 "$tmp" || die "couldn't protect $tmp"
+  run chmod 700 "$tmp" || die "couldn't protect $tmp"
   check_directory "$tmp" || exit 1
 fi
 
@@ -475,7 +513,7 @@ fi
 
 # SHA256SUMS lines are "<hash>  <name>", or "<hash> *<name>" in binary mode.
 sums_hash() {
-  awk -v want="$2" '{ name = $2; sub(/^\*/, "", name); if (name == want) { print tolower($1); exit } }' "$1"
+  run awk -v want="$2" '{ name = $2; sub(/^\*/, "", name); if (name == want) { print tolower($1); exit } }' "$1"
 }
 
 suffix=-$target.tar.gz
@@ -484,7 +522,7 @@ if [ -z "$version" ]; then
   download "$base_url/latest/download/SHA256SUMS" "$tmp/SHA256SUMS" ||
     die "couldn't download the latest release's SHA256SUMS from $base_url"
   # The archive's name carries the version: open-ferry-<version>-<target>.tar.gz.
-  archive=$(awk -v suffix="$suffix" '{
+  archive=$(run awk -v suffix="$suffix" '{
     name = $2; sub(/^\*/, "", name)
     n = length(name) - length(suffix)
     if (index(name, "open-ferry-") == 1 && n > 11 && substr(name, n + 1) == suffix) { print name; exit }
@@ -499,7 +537,7 @@ else
 fi
 archive=open-ferry-$version$suffix
 expected=$(sums_hash "$tmp/SHA256SUMS" "$archive")
-printf '%s\n' "$expected" | grep -Eqx '[0-9a-f]{64}' ||
+printf '%s\n' "$expected" | run grep -Eqx '[0-9a-f]{64}' ||
   die "open-ferry $version's SHA256SUMS lists no archive for $target"
 
 say "Downloading open-ferry $version for $target..."
@@ -520,7 +558,7 @@ if [ "$attestation" = 0 ]; then
   say "Not checking the build provenance attestation (--no-attestation)."
 elif has "$gh"; then
   say "Checking the build provenance attestation with gh..."
-  if ! "$gh" attestation verify "$tmp/$archive" --repo "$REPO"; then
+  if ! run "$gh" attestation verify "$tmp/$archive" --repo "$REPO"; then
     die "gh couldn't verify $archive's attestation: not installing it. If gh isn't signed in, run 'gh auth login' and try again, or pass --no-attestation to rely on the SHA256SUMS check alone."
   fi
 else
@@ -529,19 +567,19 @@ fi
 
 # --- Install -----------------------------------------------------------------
 
-(cd "$tmp" && tar -xzf "$archive") || die "couldn't unpack $archive"
+(cd "$tmp" && run tar -xzf "$archive") || die "couldn't unpack $archive"
 binary=$tmp/open-ferry-$version-$target/open-ferry
 [ -f "$binary" ] || die "$archive holds no open-ferry binary"
 
-mkdir -p "$bin_dir" || die "couldn't make $bin_dir"
+run mkdir -p "$bin_dir" || die "couldn't make $bin_dir"
 # Copied next to the old binary, then the new binary moves itself into place
 # (`install-self`): a running open-ferry keeps its file, and a failed install
 # leaves the old one. The staged file has a name of its own, so two installs
 # never share it.
-staged=$(mktemp "$bin_dir/.open-ferry.$$.XXXXXXXX") || die "couldn't write to $bin_dir"
+staged=$(run mktemp "$bin_dir/.open-ferry.$$.XXXXXXXX") || die "couldn't write to $bin_dir"
 installed=$bin_dir/open-ferry
-if ! cp "$binary" "$staged" || ! chmod 755 "$staged"; then
-  rm -f "$staged"
+if ! run cp "$binary" "$staged" || ! run chmod 755 "$staged"; then
+  run rm -f "$staged"
   die "couldn't write to $bin_dir"
 fi
 status=0
@@ -549,19 +587,19 @@ status=0
 # so a version this script can name has it: no fallback, no probe.
 set -- install-self -from "$staged" -to "$installed" -installer install.sh
 if [ "$system" = 1 ]; then set -- "$@" -system; fi
-(cd / && "$staged" "$@" </dev/null) || status=$?
+(cd / && run "$staged" "$@" </dev/null) || status=$?
 case $status in
   0) ;;
   3)
-    rm -f "$staged"
+    run rm -f "$staged"
     die "open-ferry runs as a background service: install-self said how to stop it, above. Nothing was changed."
     ;;
   4)
-    rm -f "$staged"
+    run rm -f "$staged"
     die "couldn't tell whether open-ferry is running from $installed: see above. Nothing was changed."
     ;;
   5)
-    rm -f "$staged"
+    run rm -f "$staged"
     die "gave up waiting for another open-ferry install or update to finish. Nothing was changed; run the installer again."
     ;;
   6)
@@ -569,7 +607,7 @@ case $status in
     die "the install didn't finish and open-ferry couldn't put things back: see above for the files to restore by hand."
     ;;
   *)
-    rm -f "$staged"
+    run rm -f "$staged"
     die "couldn't install open-ferry in $bin_dir: see above."
     ;;
 esac
@@ -596,8 +634,8 @@ fi
 # so a key can't be found inside a string.
 json_string() {
   printf '%s\n' "$search" |
-    sed -n -E 's/^.*"'"$1"'":"(([^"\\]|\\.)*)".*$/\1/p' |
-    sed -e 's/\\"/"/g' -e 's/\\\\/\\/g'
+    run sed -n -E 's/^.*"'"$1"'":"(([^"\\]|\\.)*)".*$/\1/p' |
+    run sed -e 's/\\"/"/g' -e 's/\\\\/\\/g'
 }
 
 # Whether someone at a terminal can answer: the output is a terminal and
@@ -615,7 +653,7 @@ if [ "$system" = 1 ]; then
   say "Skipping the migrate offer for a machine install. To migrate CLIProxyAPI, run: sudo open-ferry migrate"
 fi
 if [ "$migrate" != no ]; then
-  search=$(cd / && "$installed" migrate -json </dev/null 2>/dev/null || true)
+  search=$(cd / && run "$installed" migrate -json </dev/null 2>/dev/null || true)
   case $search in
     '{"found":true,'*) found_cpa=1 ;;
     '{"found":false}')
@@ -639,7 +677,7 @@ if [ "$found_cpa" = 1 ]; then
     '' | 0.0.0.0 | ::) cpa_host=127.0.0.1 ;;
     *:*) cpa_host="[$cpa_host]" ;;
   esac
-  cpa_port=$(printf '%s\n' "$search" | sed -n -E 's/^.*"port":([0-9]+).*$/\1/p')
+  cpa_port=$(printf '%s\n' "$search" | run sed -n -E 's/^.*"port":([0-9]+).*$/\1/p')
   cpa_scheme=http
   case $search in
     *'"tls":true'*) cpa_scheme=https ;;
@@ -674,7 +712,7 @@ if [ "$found_cpa" = 1 ]; then
   esac
   if [ "$switch_now" = 1 ]; then
     say ""
-    if (cd / && "$installed" migrate -yes </dev/null); then
+    if (cd / && run "$installed" migrate -yes </dev/null); then
       switched=1
     else
       switch_failed="the switch from CLIProxyAPI didn't finish: see what open-ferry migrate said above"
@@ -704,7 +742,7 @@ else
   say ""
   set -- init -config "$config"
   if [ "$system" = 1 ]; then set -- init -system -config "$config"; fi
-  (cd / && "$installed" "$@") || die "open-ferry init couldn't write $config"
+  (cd / && run "$installed" "$@") || die "open-ferry init couldn't write $config"
   say ""
 fi
 
@@ -724,7 +762,7 @@ elif [ "$skipped_init" = 1 ]; then
 fi
 if [ -n "$self_update" ]; then
   if [ -n "$mode_config" ]; then
-    (cd / && "$installed" update -mode "$self_update" -config "$mode_config") ||
+    (cd / && run "$installed" update -mode "$self_update" -config "$mode_config") ||
       die "open-ferry update couldn't set self-update.mode to $self_update in $mode_config"
   else
     say "There's no config yet to set self-update.mode to $self_update in. Once open-ferry runs on one, run: $command update -mode $self_update -config <config>"
