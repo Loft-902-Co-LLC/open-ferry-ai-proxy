@@ -52,8 +52,11 @@
 #   OPEN_FERRY_INSTALL_SELF_UPDATE  off, notify or auto: set self-update.mode
 #                                in the config (-NoAutoUpdate is off)
 #
-# It writes install-receipt.json in %LOCALAPPDATA%\open-ferry, which lets
-# open-ferry update itself; see docs/updates.md for turning that off.
+# The new open-ferry.exe installs itself (`open-ferry install-self`): it waits
+# for any other install or update, refuses to replace a binary a background
+# service runs, replaces the old one with a way back, and writes
+# install-receipt.json in %LOCALAPPDATA%\open-ferry, which lets open-ferry
+# update itself; see docs/updates.md for turning that off.
 #
 # See https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy#install
 
@@ -194,6 +197,14 @@ function Install-OpenFerry {
         }
     }
 
+    # One argument for a Windows command line, quoted so it reads back as it
+    # is: backslashes before a quote are doubled, and so is a trailing run.
+    function ConvertTo-CommandLineArgument([string]$Value) {
+        $escaped = [Text.RegularExpressions.Regex]::Replace($Value, '(\\*)"', '$1$1\"')
+        $escaped = [Text.RegularExpressions.Regex]::Replace($escaped, '(\\+)$', '$1$1')
+        return '"' + $escaped + '"'
+    }
+
     # Runs a native command with its output on the console, and returns its
     # exit code. Its standard error isn't taken for a PowerShell error, as
     # Windows PowerShell may when its own output is redirected.
@@ -281,20 +292,59 @@ function Install-OpenFerry {
 
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         $exe = Join-Path $InstallDir 'open-ferry.exe'
-        $staged = Join-Path $InstallDir '.open-ferry.exe.new'
-        Copy-Item -LiteralPath (Join-Path $source 'open-ferry.exe') -Destination $staged -Force
-        # A running open-ferry.exe can be neither replaced nor deleted, but it
-        # can be renamed: the old one moves aside, and is deleted once it has
-        # stopped, now or at a later install.
-        if (Test-Path -LiteralPath $exe) {
-            $aside = Join-Path $InstallDir ('.open-ferry.exe.' + [Guid]::NewGuid().ToString('N') + '.old')
-            Move-Item -LiteralPath $exe -Destination $aside
+        # Staged under a name of its own, so two installs never share it.
+        $staged = Join-Path $InstallDir ('.open-ferry.' + $PID + '.' + [Guid]::NewGuid().ToString('N') + '.new')
+        # `install-self` is in every release (0.1.0 has it, and no release is
+        # older), so a version this script can name has it: no fallback, no probe.
+        # The staged file is removed whatever happens, unless the exit was 6,
+        # when it may hold the only copy of the new binary.
+        $status = $null
+        $process = $null
+        try {
+            # Copied through streams, so the bytes are flushed to disk before the
+            # staged binary runs: it is a running image from then on, and
+            # nothing can open it for writing to flush it. Both files are closed
+            # before it starts.
+            $reader = $null
+            $writer = $null
+            try {
+                $reader = New-Object System.IO.FileStream -ArgumentList @((Join-Path $source 'open-ferry.exe'), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+                $writer = New-Object System.IO.FileStream -ArgumentList @($staged, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                $reader.CopyTo($writer)
+                $writer.Flush($true)
+            } finally {
+                # The writer's dispose can throw (a failed flush): the reader is
+                # still disposed, or the download's cleanup can't remove it.
+                try {
+                    if ($null -ne $writer) { $writer.Dispose() }
+                } finally {
+                    if ($null -ne $reader) { $reader.Dispose() }
+                }
+            }
+            # The staged binary moves itself into place: a running open-ferry.exe
+            # can be neither replaced nor deleted, but it can be renamed, so it
+            # moves the old one aside and deletes it once it has stopped.
+            # ProcessStartInfo runs the file as it is named, which & does not for
+            # an extension that isn't .exe.
+            $info = New-Object System.Diagnostics.ProcessStartInfo
+            $info.FileName = $staged
+            $info.UseShellExecute = $false
+            $info.Arguments = (@('install-self', '-from', $staged, '-to', $exe, '-installer', 'install.ps1') | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' '
+            $process = [System.Diagnostics.Process]::Start($info)
+            $process.WaitForExit()
+            $status = $process.ExitCode
+        } finally {
+            if ($null -ne $process) { $process.Dispose() }
+            if ($status -ne 6) { Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue }
         }
-        Move-Item -LiteralPath $staged -Destination $exe
-        $stillRunning = $false
-        foreach ($old in Get-ChildItem -LiteralPath $InstallDir -Filter '.open-ferry.exe.*.old' -Force) {
-            Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
-            if (Test-Path -LiteralPath $old.FullName) { $stillRunning = $true }
+        if ($status -ne 0) {
+            switch ($status) {
+                3 { throw 'open-ferry runs as a background service: install-self said how to stop it, above. Nothing was changed.' }
+                4 { throw "Couldn't tell whether open-ferry is running from ${exe}: see above. Nothing was changed." }
+                5 { throw 'Gave up waiting for another open-ferry install or update to finish. Nothing was changed; run the installer again.' }
+                6 { throw "The install didn't finish and open-ferry couldn't put things back: see above for the files to restore by hand." }
+                default { throw "Couldn't install open-ferry in ${InstallDir}: see above." }
+            }
         }
         foreach ($item in Get-ChildItem -LiteralPath $source) {
             if ($item.Name -ne 'open-ferry.exe') {
@@ -302,29 +352,6 @@ function Install-OpenFerry {
             }
         }
         Write-Host "Installed open-ferry $Version as $exe."
-
-        # The install receipt: open-ferry updates itself only when it names
-        # the binary that runs (see docs/updates.md).
-        $receiptOk = $false
-        if ($env:LOCALAPPDATA) {
-            $receipt = Join-Path $env:LOCALAPPDATA 'open-ferry\install-receipt.json'
-            try {
-                New-Item -ItemType Directory -Path (Split-Path $receipt) -Force | Out-Null
-                $json = [ordered]@{ format = 1; installer = 'install.ps1'; version = $Version; binary = $exe; target = $target
-                    installed_at = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) } | ConvertTo-Json -Compress
-                [IO.File]::WriteAllText("$receipt.new", $json + "`n", (New-Object Text.UTF8Encoding $false))
-                Move-Item -LiteralPath "$receipt.new" -Destination $receipt -Force
-                $receiptOk = $true
-            } catch {
-                Remove-Item -LiteralPath "$receipt.new" -Force -ErrorAction SilentlyContinue
-            }
-        }
-        if (-not $receiptOk) {
-            Write-Host "Couldn't write the install receipt in %LOCALAPPDATA%\open-ferry, so open-ferry won't update itself; it will say when a release is out."
-        }
-        if ($stillRunning) {
-            Write-Host 'An older open-ferry.exe is still running: restart it to run this one.'
-        }
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -540,8 +567,6 @@ function Install-OpenFerry {
             Write-Host "The copy of open-ferry in CLIProxyAPI's place says when a release is out, but doesn't install it. To update it, run $command update, then $command migrate -undo, then $command migrate. $off"
         } elseif ($selfUpdate -eq 'notify') {
             Write-Host "open-ferry says when a release is out, but doesn't install it. $off"
-        } elseif (-not $receiptOk) {
-            Write-Host "open-ferry says when a release is out. $off"
         } elseif ($selfUpdate -or $wroteConfig) {
             Write-Host "open-ferry keeps itself up to date. $off"
         } else {

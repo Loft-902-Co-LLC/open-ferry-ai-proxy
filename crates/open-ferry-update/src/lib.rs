@@ -51,6 +51,8 @@ pub use fetch::{Fetch, FetchError, HttpFetch};
 pub use install::{Install, NotSelfUpdating};
 pub use keys::{ReleaseKeys, VerifyError};
 pub use open_ferry_core::config::{SelfUpdate, SelfUpdateMode};
+/// The one directory-fsync rule, shared with `open-ferry install-self`.
+pub use publication::sync_directory;
 pub use settings::{ModeSource, Settings};
 pub use state::State;
 pub use switch::{KeepPolicy, ReplaceOnDisk, Switch, SwitchPlan};
