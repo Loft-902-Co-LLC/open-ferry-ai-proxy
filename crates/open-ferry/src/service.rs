@@ -272,7 +272,7 @@ pub async fn run(
     if options.self_update {
         service.start_update_checks();
     }
-    claude_cli::warn_outdated(&config.claude_cli);
+    claude_cli::warn_outdated_guarded(&config.claude_cli, service.claude_guard.clone());
     // An unsupervised run activates at once and never closes the gate.
     if let Err(error) = service.first_activation(&key) {
         tracing::error!("failed to activate the service: {error}");
@@ -776,6 +776,7 @@ struct ReloadRequest {
 /// state, and what was registered from the config and the auth directory.
 struct Service {
     config: Arc<Config>,
+    claude_guard: Option<claude_cli::SpawnGuard>,
     auth_dir: PathBuf,
     log_level: LogLevel,
     /// The gate the store, the manager, the config writer and the
@@ -895,10 +896,15 @@ impl Service {
         ))
         .with_config_reload(Arc::new(ReloadSender { requests: reloads }))
         .with_config_path(config_path)
+        .with_config_read_check(|path| {
+            crate::scope::authorize_file(&crate::scope::Host, path)
+                .map_err(|error| error.to_string())
+        })
         .with_observability(observability.clone())
         .with_gate(gate.clone());
         Self {
             config,
+            claude_guard: crate::scope::claude_spawn_guard(),
             auth_dir,
             log_level,
             gate,
@@ -1324,7 +1330,9 @@ impl Service {
         ));
         // It sends nothing itself, so takes no proxy.
         self.manager.register_executor(Arc::new(
-            ClaudeCliExecutor::new().with_config(Arc::clone(&self.config)),
+            ClaudeCliExecutor::new()
+                .with_config(Arc::clone(&self.config))
+                .with_spawn_guard(self.claude_guard.clone()),
         ));
         self.manager.register_executor(Arc::new(
             GeminiExecutor::new(proxy_url.clone())
@@ -1916,7 +1924,7 @@ impl Service {
         // Before any credential is registered, so they get its models.
         self.catalogs.update(&config.models);
         if previous.claude_cli != config.claude_cli {
-            claude_cli::warn_outdated(&config.claude_cli);
+            claude_cli::warn_outdated_guarded(&config.claude_cli, self.claude_guard.clone());
         }
         // What the executors do to Codex clients' requests before
         // translating them.
@@ -2077,10 +2085,23 @@ fn authorize_config_auth_dir(
     probe: &dyn crate::scope::Probe,
     config: &Config,
 ) -> Result<(), String> {
-    if let Ok(dir) = config.resolve_auth_dir() {
-        crate::scope::authorize_auth_dir(probe, &dir).map_err(|error| error.to_string())?;
+    authorize_resolved_auth_dir(
+        probe,
+        config.resolve_auth_dir().map_err(|error| error.to_string()),
+    )
+}
+
+fn authorize_resolved_auth_dir(
+    probe: &dyn crate::scope::Probe,
+    dir: Result<PathBuf, String>,
+) -> Result<(), String> {
+    match dir {
+        Ok(dir) => crate::scope::authorize_auth_dir(probe, &dir).map_err(|error| error.to_string()),
+        Err(reason) if probe.privileged()? => Err(format!(
+            "Refusing auth directory: {reason}; set auth-dir to a full path"
+        )),
+        Err(_) => Ok(()),
     }
-    Ok(())
 }
 
 /// The watcher's check before each read of the config file: the trust check
@@ -2152,6 +2173,44 @@ mod config_trust_tests {
     }
 
     #[test]
+    fn unresolved_auth_directories_fail_closed_only_under_privilege() {
+        let mut probe = Fake::new(Platform::Linux, true);
+        let result = authorize_resolved_auth_dir(&probe, Err("HOME is unset".into()));
+        assert!(result.unwrap_err().contains("HOME is unset"));
+        probe.privileged = Ok(false);
+        assert!(authorize_resolved_auth_dir(&probe, Err("HOME is unset".into())).is_ok());
+        probe.privileged = Err("token failed".into());
+        assert!(authorize_resolved_auth_dir(&probe, Err("HOME is unset".into())).is_err());
+    }
+
+    #[test]
+    fn all_three_production_watcher_starts_keep_the_read_guard() {
+        // These are wiring assertions; the core watcher test observes the reader.
+        let service = include_str!("service.rs");
+        let production = service
+            .split("#[cfg(test)]\nmod config_trust_tests")
+            .next()
+            .unwrap();
+        assert_eq!(
+            production.matches("ConfigWatcher::start_guarded(").count(),
+            2
+        );
+        assert!(!production.contains("ConfigWatcher::start("));
+        let worker = include_str!("service/worker.rs");
+        assert_eq!(worker.matches("ConfigWatcher::start_guarded(").count(), 1);
+        assert!(!worker.contains("ConfigWatcher::start("));
+        for source in [production, worker] {
+            for call in source.split("ConfigWatcher::start_guarded(").skip(1) {
+                let call = call.chars().take(300).collect::<String>();
+                assert!(
+                    call.contains("Some(config_read_guard())")
+                        || call.contains("Some(super::config_read_guard())")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_watcher_reads_only_a_config_file_the_trust_check_passes() {
         let mut probe = Fake::new(Platform::Linux, true);
         let path = Path::new("/work/config.yaml");
@@ -2179,7 +2238,7 @@ mod config_trust_tests {
         let path = Path::new("/work/config.yaml");
         let config = Config::parse("auth-dir: /srv/auth\n").unwrap();
         assert!(authorize_reloaded_config(&probe, path, &config).is_err());
-        probe.file("/work/config.yaml");
+        probe.file("/work/config.yaml").dir("/srv/auth");
         assert!(authorize_reloaded_config(&probe, path, &config).is_ok());
         probe.untrust("/work");
         assert!(
@@ -2196,6 +2255,7 @@ mod config_trust_tests {
         let path = dir.path().join("config.yaml");
         let mut probe = Fake::new(Platform::Windows, true);
         let root = "C:/ProgramData/open-ferry";
+        probe.dir(root);
         let old = Config::parse("auth-dir: C:/ProgramData/open-ferry/auth\n").unwrap();
         assert!(authorize_config_auth_dir(&probe, &old).is_ok());
         assert!(load_config_with_probe(&probe, &path).is_err());
@@ -2238,6 +2298,7 @@ mod config_trust_tests {
             let mut probe = Fake::new(platform, true);
             let config = Config::parse(format!("auth-dir: '{root}'\n")).unwrap();
             assert!(authorize_config_auth_dir(&probe, &config).is_err());
+            probe.dir(root);
             let config = Config::parse(format!("auth-dir: '{root}/auth/team'\n")).unwrap();
             assert!(authorize_config_auth_dir(&probe, &config).is_ok());
             probe.privileged = Ok(false);

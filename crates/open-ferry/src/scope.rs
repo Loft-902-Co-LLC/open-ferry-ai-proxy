@@ -696,17 +696,29 @@ pub(crate) fn authorize_auth_dir(probe: &dyn Probe, auth_dir: &Path) -> Result<(
         reason,
         remedy: None,
     })?;
-    let Some(root) = root else {
-        return Ok(());
-    };
     let refuse = |reason| Refusal {
-        reason,
-        remedy: None,
+        reason: format!("Refusing auth directory {}: {reason}", auth_dir.display()),
+        remedy: Some(format!(
+            "Make it and every directory above it root's (administrators or SYSTEM on Windows), not writable by others, with no links{}.",
+            root.as_ref()
+                .map(|root| format!(
+                    ", or set auth-dir to {}",
+                    probe.platform().join(root, AUTH_DIR)
+                ))
+                .unwrap_or_default()
+        )),
     };
     let text = auth_dir
         .to_str()
         .ok_or_else(|| refuse("the auth directory's path isn't valid Unicode".to_owned()))?;
     let platform = probe.platform();
+    if !probe.in_container()
+        && text
+            .split(|c| platform.is_separator(c))
+            .any(|part| part == "." || part == "..")
+    {
+        return Err(refuse("the path contains `.` or `..`".to_owned()));
+    }
     let auth_dir = if platform.is_absolute(text) {
         text.to_owned()
     } else {
@@ -717,7 +729,181 @@ pub(crate) fn authorize_auth_dir(probe: &dyn Probe, auth_dir: &Path) -> Result<(
             .ok_or_else(|| refuse("the working directory's path isn't valid Unicode".to_owned()))?;
         platform.absolute(cwd, text).map_err(refuse)?
     };
-    check_auth_dir_placement(platform, &root, &auth_dir)
+    if let Some(root) = &root {
+        check_auth_dir_placement(platform, root, &auth_dir)?;
+    }
+    if !probe.in_container() {
+        let existing = trusted_existing_dir(probe, &auth_dir).map_err(refuse)?;
+        let canonical = probe
+            .canonical(&existing)
+            .map_err(|error| refuse(format!("can't resolve {existing}: {error}")))?;
+        let resolved = resolved_path(platform, &auth_dir, &existing, &canonical);
+        if let Some(root) = &root {
+            let resolved_root = resolved_machine_root(probe, root).map_err(refuse)?;
+            check_auth_dir_placement(platform, &resolved_root, &resolved)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolves the machine root's existing part for the placement comparison.
+fn resolved_machine_root(probe: &dyn Probe, root: &str) -> Result<String, String> {
+    let platform = probe.platform();
+    let mut existing = platform.clean(root);
+    loop {
+        match probe.state(&existing) {
+            State::Directory => break,
+            State::Missing => match platform.parent(&existing) {
+                Some(parent) => existing = parent,
+                // A missing volume cannot hold machine records yet.
+                None => return Ok(platform.clean(root)),
+            },
+            _ => return Err(format!("{existing} is not an accessible real directory")),
+        }
+    }
+    let canonical = probe
+        .canonical(&existing)
+        .map_err(|error| format!("can't resolve {existing}: {error}"))?;
+    Ok(resolved_path(platform, root, &existing, &canonical))
+}
+
+fn resolved_path(platform: Platform, path: &str, existing: &str, canonical: &str) -> String {
+    let canonical = if platform == Platform::Windows {
+        if let Some(unc) = canonical.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            canonical
+                .strip_prefix(r"\\?\")
+                .unwrap_or(canonical)
+                .to_owned()
+        }
+    } else {
+        canonical.to_owned()
+    };
+    let cleaned = platform.clean(path);
+    let suffix = cleaned.strip_prefix(existing).unwrap_or_default();
+    platform.join(
+        &canonical,
+        suffix.trim_start_matches(|c| platform.is_separator(c)),
+    )
+}
+
+/// Checks a directory or its nearest existing ancestor before creating it.
+fn trusted_existing_dir(probe: &dyn Probe, path: &str) -> Result<String, String> {
+    let mut existing = probe.platform().clean(path);
+    loop {
+        match probe.state(&existing) {
+            State::Directory => break,
+            State::Missing => {
+                existing = probe
+                    .platform()
+                    .parent(&existing)
+                    .ok_or_else(|| format!("nothing of {path} exists"))?
+            }
+            _ => return Err(format!("{existing} is not an accessible real directory")),
+        }
+    }
+    probe.trusted_dir(&existing)?;
+    Ok(existing)
+}
+
+/// The binary's policy for each Claude Code invocation.
+pub(crate) fn claude_spawn_guard() -> Option<open_ferry_providers::claude_cli::SpawnGuard> {
+    if matches!(Host.privileged(), Ok(false))
+        || (Host.privileged() == Ok(true) && Host.in_container())
+    {
+        return None;
+    }
+    Some(open_ferry_providers::claude_cli::SpawnGuard::new(
+        |entry, program, root| {
+            let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
+            let profile = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty());
+            let inherited = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty());
+            authorize_claude_spawn(
+                &Host,
+                entry,
+                program,
+                root,
+                home.as_deref().map(Path::new),
+                inherited.as_deref().map(Path::new),
+                profile.as_deref().map(Path::new),
+            )
+        },
+    ))
+}
+
+fn authorize_claude_spawn(
+    probe: &dyn Probe,
+    entry: &open_ferry_providers::claude_cli::Entry,
+    program: &Path,
+    root: &Path,
+    home: Option<&Path>,
+    inherited_config: Option<&Path>,
+    profile: Option<&Path>,
+) -> Result<(), String> {
+    if !probe.privileged()? || probe.in_container() {
+        return Ok(());
+    }
+    if probe.platform() == Platform::MacOs {
+        return Err(macos_refusal().to_string());
+    }
+    let text = |path: &Path| -> Result<String, String> {
+        let path = path.to_str().ok_or("the path isn't valid Unicode")?;
+        if !probe.platform().is_absolute(path)
+            || path
+                .split(|c| probe.platform().is_separator(c))
+                .any(|part| part == "." || part == "..")
+        {
+            return Err(format!(
+                "{path} isn't a full path without `.` or `..`; set full paths for command and config-dir"
+            ));
+        }
+        Ok(path.to_owned())
+    };
+    let remedy = |reason| {
+        format!(
+            "{reason}; make the program and its directories, config-dir and working directories root's (administrators or SYSTEM on Windows), not writable by others, with no links"
+        )
+    };
+    probe.trusted_file(&text(program)?).map_err(remedy)?;
+    let account = match entry.config_dir_path() {
+        Some(path) => path,
+        None => {
+            let home = home.ok_or(
+                "Claude Code has no home directory; set config-dir to a trusted full path",
+            )?;
+            Path::new(&probe.platform().join(&text(home)?, ".claude")).to_path_buf()
+        }
+    };
+    trusted_existing_dir(probe, &text(&account)?).map_err(remedy)?;
+    // Without an entry override Claude Code also honours this inherited path.
+    if entry.config_dir.is_empty()
+        && let Some(path) = inherited_config
+    {
+        trusted_existing_dir(probe, &text(path)?).map_err(remedy)?;
+    }
+    // Windows also has USERPROFILE; check its default account directory
+    // when the entry and the environment supply no explicit config directory.
+    if probe.platform() == Platform::Windows
+        && entry.config_dir.is_empty()
+        && inherited_config.is_none()
+    {
+        let profile = profile.ok_or(
+            "Claude Code has no Windows profile directory; set config-dir to a trusted full path",
+        )?;
+        let account = probe.platform().join(&text(profile)?, ".claude");
+        trusted_existing_dir(probe, &account).map_err(remedy)?;
+    }
+    if root.starts_with(std::env::temp_dir()) {
+        return Err("Claude Code's working root is in the temporary directory; set a trusted LOCALAPPDATA (Windows) or XDG_RUNTIME_DIR/XDG_CACHE_HOME/HOME (Unix), or use a trusted data directory".to_owned());
+    }
+    let root = text(root)?;
+    let dir = probe.platform().join(&root, &entry.dir_name());
+    let work = probe.platform().join(&dir, "work");
+    for path in [&root, &dir, &work] {
+        trusted_existing_dir(probe, path).map_err(remedy)?;
+    }
+    Ok(())
 }
 
 /// [`authorize`], given whose directory `root` is.
@@ -890,7 +1076,7 @@ fn remedy(platform: Platform, whose: Whose, root: &str) -> String {
 fn file_remedy(platform: Platform) -> String {
     match platform {
         Platform::Windows => "As an administrator, make it and every folder above it writable only by administrators, or run open-ferry in a terminal not opened as administrator.".to_owned(),
-        Platform::Linux | Platform::MacOs => "As root, make it and every directory above it writable only by root, or run open-ferry without sudo.".to_owned(),
+        Platform::Linux | Platform::MacOs => "As root, make the file and every directory above it root's and writable only by root, or run open-ferry as a user other than root. This also applies in a container open-ferry doesn't recognise (LXC, systemd-nspawn, or a Kubernetes pod without a service-account token).".to_owned(),
     }
 }
 

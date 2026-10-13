@@ -35,11 +35,49 @@ pub enum VersionCheck {
 /// Runs the entry's Claude Code with `--version`, in the entry's
 /// environment, and reads the first `x.y.z` it prints.
 pub async fn check_version(entry: &Entry) -> VersionCheck {
+    check_version_guarded(entry, None).await
+}
+
+/// Checks the application policy before the version command runs.
+pub async fn check_version_guarded(
+    entry: &Entry,
+    guard: Option<&super::SpawnGuard>,
+) -> VersionCheck {
+    check_version_in(entry, guard, &super::default_work_root()).await
+}
+
+async fn check_version_in(
+    entry: &Entry,
+    guard: Option<&super::SpawnGuard>,
+    root: &std::path::Path,
+) -> VersionCheck {
     let program = match entry.program() {
         Ok(program) => program,
         Err(error) => return VersionCheck::Failed(error),
     };
+    let work = if let Some(guard) = guard {
+        if let Err(error) = guard.authorize(entry, &program, root) {
+            return VersionCheck::Failed(error);
+        }
+        let (_, work) = match entry.dirs(root) {
+            Ok(dirs) => dirs,
+            Err(error) => {
+                return VersionCheck::Failed(format!(
+                    "couldn't make the entry's directory: {error}"
+                ));
+            }
+        };
+        if let Err(error) = guard.authorize(entry, &program, root) {
+            return VersionCheck::Failed(error);
+        }
+        Some(work)
+    } else {
+        None
+    };
     let mut command = Command::new(&program);
+    if let Some(work) = work {
+        command.current_dir(work);
+    }
     command
         .arg("--version")
         .stdin(Stdio::null())
@@ -88,9 +126,26 @@ pub fn by_command(entries: &[ClaudeCli]) -> Vec<(Entry, Vec<String>)> {
 /// [`check_version`], once for each command (see [`by_command`]), and
 /// returns the names of the entries that run it with what it found.
 pub async fn check_versions(entries: &[ClaudeCli]) -> Vec<(Vec<String>, VersionCheck)> {
+    check_versions_guarded(entries, None).await
+}
+
+/// Checks every enabled entry with the application's spawn policy.
+pub async fn check_versions_guarded(
+    entries: &[ClaudeCli],
+    guard: Option<&super::SpawnGuard>,
+) -> Vec<(Vec<String>, VersionCheck)> {
     let mut out = Vec::new();
-    for (entry, names) in by_command(entries) {
-        let check = check_version(&entry).await;
+    let groups = if guard.is_some() {
+        entries
+            .iter()
+            .filter(|entry| !entry.disabled)
+            .map(|entry| (Entry::from_config(entry), vec![entry.name.clone()]))
+            .collect()
+    } else {
+        by_command(entries)
+    };
+    for (entry, names) in groups {
+        let check = check_version_guarded(&entry, guard).await;
         out.push((names, check));
     }
     out
@@ -101,12 +156,27 @@ pub async fn check_versions(entries: &[ClaudeCli]) -> Vec<(Vec<String>, VersionC
 /// old or unreadable. Entries that run the same command are checked once.
 /// Does nothing outside a Tokio runtime.
 pub fn warn_outdated(entries: &[ClaudeCli]) {
+    warn_outdated_guarded(entries, None);
+}
+
+/// Logs version checks after applying the application's spawn policy.
+pub fn warn_outdated_guarded(entries: &[ClaudeCli], guard: Option<super::SpawnGuard>) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    for (entry, names) in by_command(entries) {
+    let groups = if guard.is_some() {
+        entries
+            .iter()
+            .filter(|entry| !entry.disabled)
+            .map(|entry| (Entry::from_config(entry), vec![entry.name.clone()]))
+            .collect()
+    } else {
+        by_command(entries)
+    };
+    for (entry, names) in groups {
+        let guard = guard.clone();
         handle.spawn(async move {
-            let check = check_version(&entry).await;
+            let check = check_version_guarded(&entry, guard.as_ref()).await;
             log_check(&names.join(", "), &check);
         });
     }
@@ -127,6 +197,7 @@ fn log_check(names: &str, check: &VersionCheck) {
             "claude-cli {names}: Claude Code gave no version (it printed {output:?}); \
              claude-cli needs {min_major}.{min_minor}.{min_patch} or later"
         ),
+        VersionCheck::Failed(error) if error.starts_with("claude-cli execution refused") => {}
         VersionCheck::Failed(error) => {
             tracing::warn!("claude-cli {names}: couldn't check Claude Code's version: {error}")
         }
@@ -152,6 +223,29 @@ fn format_version((major, minor, patch): (u32, u32, u32)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_refused_version_check_never_runs_the_program() {
+        let entry = Entry {
+            command: "./never-run-claude".into(),
+            ..Entry::from_auth(&open_ferry_core::auth::Auth::default())
+        };
+        let guard = super::super::SpawnGuard::new(|_, _, _| Err("private refusal reason".into()));
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let root = dir.path().join("entries");
+        let VersionCheck::Failed(error) = check_version_in(&entry, Some(&guard), &root).await
+        else {
+            panic!("must refuse")
+        };
+        assert!(error.contains("execution refused"));
+        assert!(!error.contains("private refusal reason"));
+        assert!(!root.exists());
+        let VersionCheck::Failed(error) = check_version_guarded(&entry, None).await else {
+            panic!("missing program")
+        };
+        assert!(error.contains("couldn't run"));
+    }
 
     #[test]
     fn reads_the_first_version() {

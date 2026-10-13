@@ -58,6 +58,8 @@ use crate::{json, oauth};
 /// The environment variable that holds a management secret.
 const PASSWORD_VAR: &str = "MANAGEMENT_PASSWORD";
 
+type ConfigReadCheck = dyn Fn(&Path) -> Result<bool, String> + Send + Sync;
+
 /// The management API's state. Cloning it gives another handle to the same
 /// state.
 #[derive(Clone)]
@@ -96,6 +98,7 @@ struct Parts {
     store: Option<Arc<FileStore>>,
     sync: Option<Arc<dyn CredentialSync>>,
     config_path: Option<PathBuf>,
+    config_read_check: Option<Arc<ConfigReadCheck>>,
     config_writer: Option<Arc<dyn ConfigWriter>>,
     config_reload: Option<Arc<dyn ConfigReload>>,
     observability: Observability,
@@ -192,6 +195,41 @@ impl ManagementState {
     pub fn with_config_path(mut self, path: PathBuf) -> Self {
         Arc::make_mut(&mut self.parts).config_path = Some(path);
         self
+    }
+
+    /// Checks the config path before the management handlers read its bytes.
+    #[must_use]
+    pub fn with_config_read_check(
+        mut self,
+        check: impl Fn(&Path) -> Result<bool, String> + Send + Sync + 'static,
+    ) -> Self {
+        Arc::make_mut(&mut self.parts).config_read_check = Some(Arc::new(check));
+        self
+    }
+
+    pub(crate) fn read_config_file(&self) -> std::io::Result<Vec<u8>> {
+        self.read_config_file_with(|path| std::fs::read(path))
+    }
+
+    pub(crate) fn read_config_file_with(
+        &self,
+        reader: impl FnOnce(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> std::io::Result<Vec<u8>> {
+        let path = self.config_path().ok_or(std::io::ErrorKind::NotFound)?;
+        if let Some(check) = &self.parts.config_read_check {
+            match check(path) {
+                Ok(true) => {}
+                Ok(false) => return Err(std::io::ErrorKind::NotFound.into()),
+                Err(reason) => {
+                    tracing::warn!(%reason, "management config file not read");
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "config file authorization refused",
+                    ));
+                }
+            }
+        }
+        reader(path)
     }
 
     /// Saves the config file through `writer` when a route changes the

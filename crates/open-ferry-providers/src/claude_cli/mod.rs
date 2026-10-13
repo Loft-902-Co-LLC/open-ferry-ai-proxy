@@ -48,6 +48,7 @@
 mod aggregate;
 mod events;
 mod executor;
+mod guard;
 mod process;
 mod prompt;
 mod settings;
@@ -55,8 +56,10 @@ mod status;
 mod version;
 
 pub use executor::ClaudeCliExecutor;
+pub use guard::SpawnGuard;
 pub use settings::{Entry, default_work_root};
-pub use status::{AuthStatus, StatusError, auth_status};
+pub use status::{AuthStatus, StatusError, auth_status, auth_status_guarded};
 pub use version::{
-    MIN_VERSION, VersionCheck, by_command, check_version, check_versions, warn_outdated,
+    MIN_VERSION, VersionCheck, by_command, check_version, check_version_guarded, check_versions,
+    check_versions_guarded, warn_outdated, warn_outdated_guarded,
 };
