@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::Entry;
-use super::affinity::{Affinity, Session};
+use super::affinity::{Affinity, Session, should_rebind_on_error};
 use super::classify::{auth_error_text, has_unauthorized_auth_failure};
 use super::credential::{is_zero, priority, websockets_enabled, weight};
 use super::models::{Resolver, openai_compatible_provider_key};
@@ -49,7 +49,7 @@ use super::quota_rank;
 use super::settings::RoutingStrategy;
 use super::summary::extract_upstream_error_summary;
 use super::text::{canonical_model_key, equal_fold, go_lower, parse_suffix};
-use crate::auth::{Auth, ModelState, Status, Timestamp};
+use crate::auth::{Auth, AuthError, ModelState, QuotaState, Status, Timestamp};
 use crate::exec::{ErrorKind, ExecError};
 use crate::executor::ProviderExecutor;
 use crate::registry::ModelRegistry;
@@ -247,6 +247,74 @@ pub(crate) fn is_auth_blocked_for_model(
         auth.quota.next_recover_at,
         now,
     )
+}
+
+/// Upstream's `isAuthBlockedByQuotaOrAuthForModel`: transient blocks keep
+/// the binding, while quota, auth, model and permanent blocks move it.
+fn is_auth_blocked_by_quota_or_auth_for_model(auth: &Auth, model: &str, now: Timestamp) -> bool {
+    if auth.disabled
+        || auth.status == Status::Disabled
+        || has_unauthorized_auth_failure(auth)
+        || auth
+            .access_token_expiration_time()
+            .is_some_and(|exp| !is_zero(Some(exp)) && exp <= now)
+    {
+        return true;
+    }
+    if auth.quota.exceeded
+        && auth.quota.reason == "credential_quota"
+        && (is_zero(auth.quota.next_recover_at) || after(auth.quota.next_recover_at, now))
+    {
+        return true;
+    }
+    if !model.is_empty() && !auth.model_states.is_empty() {
+        let key = canonical_model_key(model);
+        return auth.model_states.iter().any(|(name, state)| {
+            canonical_model_key(name) == key
+                && (state.status == Status::Disabled
+                    || is_state_blocked_by_quota_or_auth(
+                        state.unavailable,
+                        &state.quota,
+                        state.next_retry_after,
+                        state.last_error.as_ref(),
+                        now,
+                    ))
+        });
+    }
+    let mut quota = auth.quota.clone();
+    if !auth.model_states.is_empty() && quota.reason != "credential_quota" && !auth.unavailable {
+        quota.exceeded = false;
+    }
+    is_state_blocked_by_quota_or_auth(
+        auth.unavailable,
+        &quota,
+        auth.next_retry_after,
+        auth.last_error.as_ref(),
+        now,
+    )
+}
+
+fn is_state_blocked_by_quota_or_auth(
+    unavailable: bool,
+    quota: &QuotaState,
+    next_retry_after: Option<Timestamp>,
+    last_error: Option<&AuthError>,
+    now: Timestamp,
+) -> bool {
+    if quota.exceeded && (is_zero(quota.next_recover_at) || after(quota.next_recover_at, now)) {
+        return true;
+    }
+    let (blocked, _, _) = availability_block(
+        unavailable,
+        quota.exceeded,
+        next_retry_after,
+        quota.next_recover_at,
+        now,
+    );
+    if !blocked || last_error.is_some() {
+        return should_rebind_on_error(last_error);
+    }
+    is_zero(next_retry_after) && is_zero(quota.next_recover_at)
 }
 
 /// Upstream's `availabilityBlock`.
@@ -1434,7 +1502,7 @@ impl<'a> Selection<'a> {
         providers: &[String],
         args: &PickArgs<'_>,
     ) -> Result<Picked, ExecError> {
-        let candidates = self.legacy_candidates(providers, args)?;
+        let candidates = self.legacy_candidates(providers, args, false)?;
         let available = self.available_auths_for_route_model(&candidates, "mixed", args.model)?;
         let selected = self.pick_legacy(state, &available, "mixed", args.model, "")?;
         self.picked(selected)
@@ -1452,9 +1520,21 @@ impl<'a> Selection<'a> {
         args: &PickArgs<'_>,
         session: Option<&Session>,
     ) -> Result<Picked, ExecError> {
-        let candidates = self.legacy_candidates(providers, args)?;
-        let selected =
-            self.pick_sticky(state, affinity, &candidates, "mixed", args.model, session)?;
+        // Preserve eligible tried credentials for quota-only affinity, after
+        // checking model support (upstream's affinityCandidates).
+        let candidates =
+            self.legacy_candidates(providers, args, affinity.rebind_on_quota_only())?;
+        if candidates.iter().all(|auth| args.tried.contains(&auth.id)) {
+            return Err(ExecError::auth_not_found());
+        }
+        let selected = self.pick_sticky_filtered(
+            state,
+            affinity,
+            (&candidates, Some(args.tried)),
+            "mixed",
+            args.model,
+            session,
+        )?;
         self.picked(selected)
     }
 
@@ -1465,6 +1545,7 @@ impl<'a> Selection<'a> {
         &self,
         providers: &[String],
         args: &PickArgs<'_>,
+        include_tried: bool,
     ) -> Result<Vec<&'a Arc<Auth>>, ExecError> {
         let provider_set: HashSet<String> = providers
             .iter()
@@ -1498,9 +1579,9 @@ impl<'a> Selection<'a> {
                 let key = executor_key_from_auth(auth);
                 !key.is_empty()
                     && provider_set.contains(&key)
-                    && !args.tried.contains(&auth.id)
                     && lookup_executor(self.executors, &key).is_some()
                     && (model_key.is_empty() || self.auth_supports_route_model(auth, args.model))
+                    && (include_tried || !args.tried.contains(&auth.id))
             })
             .collect();
         if candidates.is_empty() {
@@ -1536,8 +1617,39 @@ impl<'a> Selection<'a> {
         model: &str,
         session: Option<&Session>,
     ) -> Result<&'c Arc<Auth>, ExecError> {
+        self.pick_sticky_filtered(state, affinity, (candidates, None), scope, model, session)
+    }
+
+    fn pick_sticky_filtered<'c>(
+        &self,
+        state: &mut SelectorState,
+        affinity: &mut Affinity,
+        candidates: (&[&'c Arc<Auth>], Option<&HashSet<String>>),
+        scope: &str,
+        model: &str,
+        session: Option<&Session>,
+    ) -> Result<&'c Arc<Auth>, ExecError> {
+        let (candidates, tried) = candidates;
+        let transient_auth_ids = candidates
+            .iter()
+            .filter(|auth| {
+                affinity.rebind_on_quota_only()
+                    && (self.strategy != RoutingStrategy::Weighted || weight(auth) > 0)
+                    && !is_auth_blocked_by_quota_or_auth_for_model(
+                        auth,
+                        &self.resolver.selection_model_for_auth(auth, model),
+                        self.now,
+                    )
+            })
+            .map(|auth| auth.id.clone())
+            .collect();
+        let untried: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|auth| tried.is_none_or(|tried| !tried.contains(&auth.id)))
+            .collect();
         let mut available =
-            self.available_auths_for_route_model_with(candidates, scope, model, true)?;
+            self.available_auths_for_route_model_with(&untried, scope, model, true)?;
         if self.strategy == RoutingStrategy::Weighted {
             available.retain(|auth| weight(auth) > 0);
             if available.is_empty() {
@@ -1547,9 +1659,14 @@ impl<'a> Selection<'a> {
                 ));
             }
         }
-        affinity.pick(scope, model, session, &available, self.now, |tier| {
-            self.pick_legacy(state, tier, scope, model, model)
-        })
+        affinity.pick(
+            scope,
+            model,
+            session,
+            (&available, &transient_auth_ids),
+            self.now,
+            |tier| self.pick_legacy(state, tier, scope, model, model),
+        )
     }
 
     /// The built-in selector's pick among the `available` credentials, with

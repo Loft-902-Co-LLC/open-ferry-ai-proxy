@@ -11,8 +11,10 @@
 //! call picked, for its provider scope and model. Later calls of the session
 //! take that credential while it is ready, whatever its priority; when it
 //! isn't, the routing strategy picks again among the highest priority ready
-//! credentials and the session is bound to the new one. A failure the
-//! credential is to blame for unbinds it; a success keeps the binding alive
+//! credentials and the session is bound to the new one. With
+//! `routing.session-affinity-rebind-on: quota`, transient failures keep the
+//! original binding while this call fails over; quota, auth, model-support
+//! and permanent unavailability move it. A success keeps the binding alive
 //! for another TTL. A call with no session is picked as without affinity.
 //!
 //! A session may fall back to another (its parent, or the conversation of a
@@ -34,15 +36,19 @@
 mod cache;
 mod keys;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::classify::should_skip_credential_cooldown;
+use super::classify::{
+    is_cloudflare_challenge_result_error, is_invalid_grant_result_error,
+    is_model_support_result_error, should_skip_credential_cooldown,
+};
 use super::cooldown::CallResult;
 use super::credential::priority;
 use super::settings::{RoutingState, Settings};
 use super::text::canonical_model_key;
-use crate::auth::{Auth, Timestamp};
+use crate::auth::{Auth, AuthError, Timestamp};
 use crate::exec::ExecError;
 
 use cache::SessionCache;
@@ -59,6 +65,7 @@ mod tests;
 pub(crate) struct Affinity {
     cache: SessionCache,
     subagents: bool,
+    rebind_on_quota_only: bool,
 }
 
 impl Affinity {
@@ -73,15 +80,24 @@ impl Affinity {
         Self {
             cache: SessionCache::new(ttl),
             subagents,
+            rebind_on_quota_only: false,
         }
+    }
+
+    /// Whether transient failovers preserve the binding.
+    pub(super) fn rebind_on_quota_only(&self) -> bool {
+        self.rebind_on_quota_only
     }
 
     /// The affinity `settings` turn on, if they do.
     pub(crate) fn for_settings(settings: &Settings) -> Option<Self> {
         let state = RoutingState::of(settings);
-        state
-            .session_affinity
-            .then(|| Self::new(state.session_affinity_ttl, state.session_affinity_subagents))
+        state.session_affinity.then(|| {
+            let mut affinity =
+                Self::new(state.session_affinity_ttl, state.session_affinity_subagents);
+            affinity.rebind_on_quota_only = state.session_affinity_rebind_on == "quota";
+            affinity
+        })
     }
 
     /// Picks among the `available` credentials (every priority, by ID) for a
@@ -94,13 +110,14 @@ impl Affinity {
         scope: &str,
         model: &str,
         session: Option<&Session>,
-        available: &[&'c Arc<Auth>],
+        candidates: (&[&'c Arc<Auth>], &HashSet<String>),
         now: Timestamp,
         mut fallback: F,
     ) -> Result<&'c Arc<Auth>, ExecError>
     where
         F: FnMut(&[&'c Arc<Auth>]) -> Result<&'c Arc<Auth>, ExecError>,
     {
+        let (available, transient_auth_ids) = candidates;
         let tier = highest_priority_auths(available);
         let Some(session) = session else {
             return fallback(&tier);
@@ -121,16 +138,32 @@ impl Affinity {
                 // even spread.
                 None => fallback(&tier)?,
             };
-            self.bind(&cache_key, alias, &auth.id, now);
+            let bind_id = if self.rebind_on_quota_only && transient_auth_ids.contains(&id) {
+                &id
+            } else {
+                &auth.id
+            };
+            self.bind(&cache_key, alias, bind_id, now);
             return Ok(auth);
         }
         if let Some(fallback_key) = &fallback_key
             && let Some(id) = self.cache.get(fallback_key, now)
-            && let Some(auth) = find(&id)
-            && (!is_subagent || self.subagents)
         {
-            self.bind(&cache_key, alias, &auth.id, now);
-            return Ok(auth);
+            if let Some(auth) = find(&id)
+                && (!is_subagent || self.subagents)
+            {
+                self.bind(&cache_key, alias, &auth.id, now);
+                return Ok(auth);
+            }
+            if !is_subagent
+                && !is_fork
+                && self.rebind_on_quota_only
+                && transient_auth_ids.contains(&id)
+            {
+                let auth = fallback(&tier)?;
+                self.bind(&cache_key, alias, &id, now);
+                return Ok(auth);
+            }
         }
         let auth = fallback(&tier)?;
         self.bind(&cache_key, alias, &auth.id, now);
@@ -162,6 +195,12 @@ impl Affinity {
         if should_skip_credential_cooldown(result.error.as_ref()) {
             // A request-scoped or caller-attributed failure says nothing
             // about the credential, so the bindings stay.
+            return;
+        }
+        if !result.success
+            && self.rebind_on_quota_only
+            && !should_rebind_on_error(result.error.as_ref())
+        {
             return;
         }
         let model = if result.route_model.is_empty() {
@@ -196,6 +235,19 @@ impl Affinity {
     pub(crate) fn bound(&mut self, key: &str, now: Timestamp) -> Option<String> {
         self.cache.get(key, now)
     }
+}
+
+/// Whether an error unbinds a quota-only session (upstream's
+/// `shouldRebindSessionAffinityOnError`).
+pub(super) fn should_rebind_on_error(error: Option<&AuthError>) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    !should_skip_credential_cooldown(Some(error))
+        && (is_model_support_result_error(error)
+            || is_cloudflare_challenge_result_error(error)
+            || is_invalid_grant_result_error(error)
+            || matches!(error.http_status, 401 | 402 | 403 | 404 | 429))
 }
 
 /// `auths` narrowed to their highest priority, in their order (upstream's

@@ -6,6 +6,7 @@
 //! Upstream runs these on its selector and cache objects with the wall
 //! clock; here the time is passed in, from a fixed start.
 
+mod affinity_rebind;
 mod cache;
 mod keys;
 mod results;

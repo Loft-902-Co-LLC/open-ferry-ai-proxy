@@ -10,6 +10,7 @@
 //!   own [`FakeModels`].
 
 mod affinity;
+mod affinity_rebind;
 mod api_key_model_alias;
 mod auto_refresh_issue6199;
 mod auto_refresh_loop;
