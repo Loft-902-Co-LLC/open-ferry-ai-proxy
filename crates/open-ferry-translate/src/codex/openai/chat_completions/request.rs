@@ -24,11 +24,14 @@
 //! - A number too large for `f64`, where upstream copies a value as a number
 //!   (such as `reasoning_effort`), is kept as written. Go can't write it, and
 //!   upstream's output breaks.
+//! - A shortened call ID's prefix ends at a UTF-8 character boundary, where
+//!   upstream's byte slice can split a character.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use super::super::super::unique_names::UniqueNames;
 use crate::apply_patch;
@@ -273,7 +276,7 @@ fn push_tool_calls(
         if !source_call_id.is_empty() && ambiguous.contains(&*source_call_id) {
             continue;
         }
-        let call_id = if source_call_id.is_empty() {
+        let mut call_id = if source_call_id.is_empty() {
             let base = format!("call_missing_{message_index}_{j}");
             let mut call_id = base.clone();
             let mut suffix = 1;
@@ -286,6 +289,16 @@ fn push_tool_calls(
         } else {
             source_call_id.clone().into_owned()
         };
+        let mut short_id = shorten_call_id_if_needed(&call_id);
+        if short_id != call_id {
+            let mut attempt = 1;
+            while used.contains(&short_id) {
+                short_id = shorten_call_id_if_needed(&format!("{call_id}_{attempt}"));
+                attempt += 1;
+            }
+            used.insert(short_id.clone());
+            call_id = short_id;
+        }
         pending.push(PendingCall {
             call_id: call_id.clone(),
             source_call_id: source_call_id.into_owned(),
@@ -590,6 +603,21 @@ fn convert_tool_choice(choice: Option<&Value>, names: &ToolNames) -> Option<Valu
         out.insert("name".into(), names.codex_name(&name).into());
     }
     Some(Value::Object(out))
+}
+
+/// Fits a call ID within Codex's 64-byte limit with a deterministic hash suffix.
+fn shorten_call_id_if_needed(id: &str) -> String {
+    if id.len() <= 64 {
+        return id.to_owned();
+    }
+    let hash = Sha256::digest(id.as_bytes());
+    let suffix: String = hash[..8].iter().map(|byte| format!("{byte:02x}")).collect();
+    // Unlike Go's byte slice, keep a UTF-8 character whole at the boundary.
+    let mut end = 47;
+    while !id.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}_{suffix}", &id[..end])
 }
 
 fn service_tier(tier: Option<&Value>) -> Option<&'static str> {

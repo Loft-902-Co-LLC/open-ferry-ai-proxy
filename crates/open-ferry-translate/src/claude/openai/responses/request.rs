@@ -236,16 +236,17 @@ fn convert(
     (out, drops.err())
 }
 
-/// `defaultClaudeResponsesMaxTokensForModel`: 64000 for Fable models and
-/// 32000 for others, or the model's own limit if that is lower.
+/// `defaultClaudeResponsesMaxTokensForModel`: the registered output limit,
+/// capped at 64000 for Fable, or the historical default without a limit.
 fn default_max_tokens(model_name: &str, models: &ModelCatalog) -> i64 {
-    let default = if go::to_lower(model_name.trim()).contains("fable") {
+    let fable = go::to_lower(model_name.trim()).contains("fable");
+    let default = if fable {
         DEFAULT_FABLE_MAX_TOKENS
     } else {
         DEFAULT_MAX_TOKENS
     };
     match max_completion_tokens(model_name, models) {
-        Some(limit) if limit < default => limit,
+        Some(limit) if !fable || limit < default => limit,
         _ => default,
     }
 }

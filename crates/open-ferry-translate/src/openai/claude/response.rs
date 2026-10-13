@@ -213,8 +213,8 @@ impl OpenAIToClaudeStream {
         if let Some(usage) = usage {
             self.usage = extract_usage(usage);
         }
-        // A chunk with usage and no choice, after anything was sent, ends the
-        // response as a finish reason does.
+        // Wait for trailing usage or [DONE]: a finish chunk's preliminary
+        // usage may omit cached tokens that arrive in the trailing chunk.
         let trailing_usage = usage.is_some()
             && choice.is_none()
             && (!self.finish_reason.is_empty()
@@ -223,10 +223,7 @@ impl OpenAIToClaudeStream {
                 || self.thinking_block.is_some()
                 || self.content_seen
                 || !self.held.is_empty());
-        if !self.message_delta_sent
-            && (!self.finish_reason.is_empty() || trailing_usage)
-            && usage.is_some()
-        {
+        if !self.message_delta_sent && trailing_usage {
             self.finalize(out);
             self.message_delta(out);
             self.message_stop(out);

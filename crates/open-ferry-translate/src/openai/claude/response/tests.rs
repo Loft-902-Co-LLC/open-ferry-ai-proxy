@@ -11,6 +11,59 @@ use serde_json::{Value, json};
 
 use super::*;
 
+#[test]
+fn split_usage_waits_for_trailing_cached_tokens() {
+    for (delta, finish, stop) in [
+        (
+            json!({"role": "assistant", "content": "hello"}),
+            "stop",
+            "end_turn",
+        ),
+        (
+            json!({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]}),
+            "tool_calls",
+            "tool_use",
+        ),
+    ] {
+        for trailing in [true, false] {
+            let mut stream = OpenAIToClaudeStream::new(&json!({"stream": true}));
+            let mut events = Vec::new();
+            let first = json!({"id": "c1", "model": "m", "choices": [{"index": 0, "delta": delta, "finish_reason": null}]});
+            events.extend(stream.translate_line(format!("data: {first}").as_bytes()));
+            let finish = json!({"id": "c1", "model": "m", "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": {"prompt_tokens": 140025, "completion_tokens": 741, "prompt_tokens_details": {}}});
+            let emitted = stream.translate_line(format!("data: {finish}").as_bytes());
+            assert!(
+                emitted
+                    .iter()
+                    .all(|raw| !raw.contains("message_delta") && !raw.contains("message_stop")),
+                "{emitted:?}"
+            );
+            events.extend(emitted);
+            if trailing {
+                let usage = json!({"id": "c1", "model": "m", "choices": [], "usage": {"prompt_tokens": 140025, "completion_tokens": 741, "prompt_tokens_details": {"cached_tokens": 139136}}});
+                let emitted = stream.translate_line(format!("data: {usage}").as_bytes());
+                assert!(emitted.iter().any(|raw| raw.contains("message_delta")));
+                events.extend(emitted);
+            }
+            events.extend(stream.translate_line(b"data: [DONE]"));
+            let events: Vec<_> = events.iter().filter_map(|raw| parse_event(raw)).collect();
+            assert_eq!(count_by_type(&events, "message_delta"), 1);
+            assert_eq!(count_by_type(&events, "message_stop"), 1);
+            assert_eq!(kinds(&events).last(), Some(&"message_stop"));
+            let delta = first_message_delta(&events);
+            assert_eq!(delta["delta"]["stop_reason"], stop);
+            assert_eq!(delta["usage"]["output_tokens"], 741);
+            assert_eq!(
+                delta["usage"]["input_tokens"],
+                if trailing { 889 } else { 140025 }
+            );
+            if trailing {
+                assert_eq!(delta["usage"]["cache_read_input_tokens"], 139136);
+            }
+        }
+    }
+}
+
 /// One Claude SSE event: its name and its data.
 #[derive(Debug)]
 struct Event {
