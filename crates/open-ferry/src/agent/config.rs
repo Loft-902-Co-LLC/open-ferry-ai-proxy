@@ -89,7 +89,49 @@ impl Source {
 
     /// The value's text, as given, as bytes.
     fn bytes(&self, ctx: &Context) -> Result<Vec<u8>, Failure> {
+        authorize_config_source(&crate::scope::Host, self)?;
         self.text(ctx).map(String::into_bytes)
+    }
+}
+
+/// Checks a replacement config's source before reading or resolving its file.
+fn authorize_config_source(
+    probe: &dyn crate::scope::Probe,
+    source: &Source,
+) -> Result<(), Failure> {
+    if let Source::File(path) = source {
+        let exists = crate::scope::authorize_file(probe, path)
+            .map_err(|error| Failure::new("unsafe_file", error.to_string()))?;
+        if !exists {
+            return Err(Failure::new(
+                "not_found",
+                format!("{} doesn't exist", path.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+
+    #[test]
+    fn a_replacement_config_file_is_authorized_before_its_contents_are_read() {
+        let mut probe = Fake::new(Platform::Linux, true);
+        let source = Source::File("/work/replacement.yaml".into());
+        assert!(authorize_config_source(&probe, &source).is_err());
+        probe.file("/work/replacement.yaml");
+        assert!(authorize_config_source(&probe, &source).is_ok());
+        probe.untrust("/work/replacement.yaml");
+        let error = authorize_config_source(&probe, &source).unwrap_err();
+        assert_eq!(error.error, "unsafe_file");
+        assert!(error.message.contains("Refusing to load"));
+        probe.privileged = Ok(false);
+        assert!(authorize_config_source(&probe, &source).is_ok());
+        assert!(authorize_config_source(&probe, &Source::Stdin("port: 0".into())).is_ok());
     }
 }
 
@@ -555,7 +597,7 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     }
     let current = read_config(&ctx.path)?;
     check_expected(ctx, &current)?;
-    let saved = std::fs::read(&backup).map_err(|error| {
+    let saved = crate::settings::read(&crate::scope::Host, &backup).map_err(|error| {
         Failure::new(
             "failed",
             format!("can't read {}: {error}", backup.display()),

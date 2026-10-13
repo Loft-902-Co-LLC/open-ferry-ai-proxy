@@ -365,6 +365,9 @@ fn serve_for_service_manager(
     {
         return refuse_for_service_manager(&log, error.to_string());
     }
+    if let Err(error) = check_config(&crate::scope::Host, &config) {
+        return refuse_for_service_manager(&log, error);
+    }
     if let Ok(mut prepared) = PREPARED.lock() {
         *prepared = Some(Prepared {
             config,
@@ -385,6 +388,15 @@ fn serve_for_service_manager(
         .ok()
         .and_then(|mut exited| exited.take())
         .unwrap_or(ExitCode::FAILURE)
+}
+
+/// Checks the service's settings and resolved auth directory before dispatch.
+fn check_config(probe: &dyn crate::scope::Probe, path: &Path) -> Result<(), String> {
+    let config = crate::settings::load(probe, path)?;
+    let auth_dir = config
+        .resolve_auth_dir()
+        .map_err(|error| format!("failed to resolve auth directory: {error}"))?;
+    crate::scope::authorize_auth_dir(probe, &auth_dir).map_err(|error| error.to_string())
 }
 
 fn service_main(_arguments: Vec<OsString>) {
@@ -686,6 +698,41 @@ fn report(status: ServiceStatusHandle, state: ServiceState, exit_code: ServiceEx
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_settings_are_checked_before_dispatch_and_auth_paths_before_use() {
+        use crate::os_service::Platform;
+        use crate::update::scope_probe::Fake;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut probe = Fake::new(Platform::Windows, true);
+        assert!(
+            check_config(&probe, &path)
+                .unwrap_err()
+                .contains("failed to read")
+        );
+        probe
+            .file(path.to_str().unwrap())
+            .untrust(path.to_str().unwrap());
+        assert!(
+            check_config(&probe, &path)
+                .unwrap_err()
+                .contains("Refusing to load")
+        );
+        probe.untrusted.clear();
+        fs::write(&path, "auth-dir: C:/ProgramData/open-ferry/versions\n").unwrap();
+        assert!(
+            check_config(&probe, &path)
+                .unwrap_err()
+                .contains("machine's records")
+        );
+        fs::write(&path, "auth-dir: C:/ProgramData/open-ferry/auth\n").unwrap();
+        assert!(check_config(&probe, &path).is_ok());
+        probe.privileged = Ok(false);
+        fs::write(&path, "auth-dir: C:/ProgramData/open-ferry\n").unwrap();
+        assert!(check_config(&probe, &path).is_ok());
+    }
 
     #[derive(Default)]
     struct Reporter {

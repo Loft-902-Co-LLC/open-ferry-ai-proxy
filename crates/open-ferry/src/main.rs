@@ -62,6 +62,7 @@ mod scope;
 #[cfg(feature = "blue-green-test")]
 mod seams;
 mod service;
+mod settings;
 mod supervised;
 mod tls;
 mod tui;
@@ -71,8 +72,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
-
-use open_ferry_core::config::Config;
 
 use crate::flags::{FlagError, Flags};
 use crate::login::Login;
@@ -204,12 +203,8 @@ async fn run(
     working_dir: PathBuf,
     stop: impl Future<Output = ()>,
 ) -> ExitCode {
-    let config_path = if flags.config.is_empty() {
-        working_dir.join("config.yaml")
-    } else {
-        PathBuf::from(&flags.config)
-    };
-    let (config, config_sha256) = match Config::load_with_sha256(&config_path) {
+    let config_path = settings::config_path(&working_dir, &flags.config);
+    let (config, config_sha256) = match settings::load_with_sha256(&scope::Host, &config_path) {
         Ok(loaded) => loaded,
         Err(error) => {
             tracing::error!("failed to load config: {error}");
@@ -225,6 +220,10 @@ async fn run(
             return ExitCode::FAILURE;
         }
     };
+    if let Err(error) = scope::authorize_auth_dir(&scope::Host, &auth_dir) {
+        tracing::error!("{error}");
+        return ExitCode::FAILURE;
+    }
 
     let login = if flags.codex_login {
         Some(Login::Codex)

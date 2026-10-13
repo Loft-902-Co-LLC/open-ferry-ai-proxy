@@ -120,8 +120,7 @@ impl Report for Status {
 /// `status`.
 pub(crate) async fn status(ctx: &Context) -> Result<Outcome, Failure> {
     let target = probe(ctx).await?;
-    let data = std::fs::read(&ctx.path).unwrap_or_default();
-    let client_keys = tree_of(&data)
+    let client_keys = tree_of(&target.data)
         .ok()
         .map_or(0, |tree| super::guard::client_keys(&tree).len());
     let mut report = Status {

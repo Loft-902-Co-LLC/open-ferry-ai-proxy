@@ -1663,12 +1663,14 @@ fn prepare(
     standby: bool,
     context: Context,
 ) -> Result<Prepared, String> {
-    let (config, sha256) = Config::load_with_sha256(config_path)
+    let (config, sha256) = crate::settings::load_with_sha256(&crate::scope::Host, config_path)
         .map_err(|error| format!("failed to load config: {error}"))?;
     log_level.set_debug(config.debug);
     let auth_dir = config
         .resolve_auth_dir()
         .map_err(|error| format!("failed to resolve auth directory: {error}"))?;
+    crate::scope::authorize_auth_dir(&crate::scope::Host, &auth_dir)
+        .map_err(|error| error.to_string())?;
     if config.has_example_api_keys() {
         tracing::error!(
             api_keys = %config.example_api_keys().join(","),

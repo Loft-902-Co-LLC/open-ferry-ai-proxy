@@ -137,12 +137,7 @@ pub(crate) fn document_tree(document: &V8Document) -> Result<Value, Failure> {
 
 /// The config file at `path`, in the v8 layout, as JSON.
 pub(crate) fn read_tree(path: &Path) -> Result<Value, Failure> {
-    let data = std::fs::read(path).map_err(|error| {
-        Failure::new(
-            "not_found",
-            format!("can't read {}: {error}", path.display()),
-        )
-    })?;
+    let data = super::change::read_config(path)?;
     tree_of(&data)
 }
 

@@ -99,23 +99,7 @@ impl std::error::Error for Error {
 
 /// Checks a privileged process's file before anything from it is read or set.
 pub(crate) fn authorize(probe: &dyn crate::scope::Probe, path: &Path) -> Result<bool, Error> {
-    let refuse = |reason: String| {
-        Error::Refused(crate::scope::Refusal {
-        reason: format!("Refusing to load {}: {reason}", path.display()),
-        remedy: Some("As root or an administrator, make the file and its directories writable only by root or administrators, remove the file, or run without sudo / in a terminal not opened as administrator.".to_owned()),
-    })
-    };
-    let privileged = probe.privileged().map_err(refuse)?;
-    if !privileged {
-        return Ok(true);
-    }
-    let text = path
-        .to_str()
-        .ok_or_else(|| refuse("the path isn't valid Unicode".to_owned()))?;
-    if probe.state(text) == crate::scope::State::Missing {
-        return Ok(false);
-    }
-    probe.trusted_file(text).map(|()| true).map_err(refuse)
+    crate::scope::authorize_file(probe, path).map_err(Error::Refused)
 }
 
 #[cfg(test)]
@@ -123,6 +107,14 @@ mod trust_tests {
     use super::*;
     use crate::os_service::Platform;
     use crate::update::scope_probe::Fake;
+
+    #[test]
+    fn a_root_container_reads_a_bind_mounted_dotenv_as_it_is() {
+        let mut probe = crate::scope::tests::Fake::new(Platform::Linux, true);
+        probe.container = true;
+        probe.file("/work/.env").untrust("/work/.env");
+        assert!(authorize(&probe, Path::new("/work/.env")).unwrap());
+    }
 
     #[test]
     fn privileged_dotenv_loading_requires_a_trusted_file_and_names_the_remedy() {
@@ -140,10 +132,19 @@ mod trust_tests {
             let error = authorize(&probe, Path::new(path)).unwrap_err();
             assert!(error.is_refused());
             assert!(error.to_string().contains(path));
-            assert!(error.to_string().contains("remove the file"));
+            assert!(error.to_string().contains(if platform == Platform::MacOs {
+                "without sudo"
+            } else {
+                "writable only"
+            }));
             assert!(!error.is_not_found());
             probe.untrusted.clear();
-            assert!(authorize(&probe, Path::new(path)).unwrap());
+            if platform == Platform::MacOs {
+                let error = authorize(&probe, Path::new(path)).unwrap_err();
+                assert!(error.to_string().contains("macOS"));
+            } else {
+                assert!(authorize(&probe, Path::new(path)).unwrap());
+            }
             let parent = platform.parent(path).unwrap();
             probe.untrust(&parent);
             assert!(authorize(&probe, Path::new(path)).unwrap_err().is_refused());

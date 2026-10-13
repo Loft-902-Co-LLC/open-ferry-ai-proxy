@@ -990,7 +990,17 @@ impl Service {
         config_path: &Path,
         events: &mut Option<mpsc::Receiver<WatchEvent>>,
     ) {
-        match load_config(config_path) {
+        self.reload_from_disk_with_probe(config_path, events, &crate::scope::Host)
+            .await;
+    }
+
+    async fn reload_from_disk_with_probe<P: crate::scope::Probe>(
+        &mut self,
+        config_path: &Path,
+        events: &mut Option<mpsc::Receiver<WatchEvent>>,
+        probe: &P,
+    ) {
+        match load_config_with_probe(probe, config_path) {
             Ok(Some((config, sha256, _))) => {
                 let watching = self
                     .apply_config(Arc::new(config), Some(sha256), config_path)
@@ -1837,6 +1847,10 @@ impl Service {
         sha256: Option<String>,
         config_path: &Path,
     ) -> Watching {
+        if let Err(error) = authorize_reloaded_config(&crate::scope::Host, config_path, &config) {
+            tracing::error!("failed to reload config: {error}; keeping the current one");
+            return Watching::Same;
+        }
         let directory_changes = config
             .resolve_auth_dir()
             .map(absolute_dir)
@@ -2025,14 +2039,23 @@ fn ask_reload(watcher: &ConfigWatcher, ticket: u64, force: bool) {
 /// change: with its `auth-dir` resolved, and the SHA-256 of the contents it
 /// loaded from; `None` when the file is empty, which the watcher skips.
 fn load_config(path: &Path) -> Result<Option<(Config, String, Vec<u8>)>, String> {
-    let data =
-        std::fs::read(path).map_err(|error| format!("failed to read config file: {error}"))?;
+    load_config_with_probe(&crate::scope::Host, path)
+}
+
+fn load_config_with_probe(
+    probe: &dyn crate::scope::Probe,
+    path: &Path,
+) -> Result<Option<(Config, String, Vec<u8>)>, String> {
+    let data = crate::settings::read(probe, path)?;
     if data.is_empty() {
         return Ok(None);
     }
     let mut config = Config::load_bytes(&data).map_err(|error| error.to_string())?;
+    authorize_config_auth_dir(probe, &config)?;
     match config.resolve_auth_dir() {
-        Ok(dir) => config.auth_dir = dir.to_string_lossy().into_owned(),
+        Ok(dir) => {
+            config.auth_dir = dir.to_string_lossy().into_owned();
+        }
         Err(error) => tracing::error!("failed to resolve auth directory from config: {error}"),
     }
     Ok(Some((
@@ -2040,6 +2063,143 @@ fn load_config(path: &Path) -> Result<Option<(Config, String, Vec<u8>)>, String>
         open_ferry_core::config::save::sha256_hex(&data),
         data,
     )))
+}
+
+/// Checks the auth placement of every reload, including watcher snapshots.
+fn authorize_config_auth_dir(
+    probe: &dyn crate::scope::Probe,
+    config: &Config,
+) -> Result<(), String> {
+    if let Ok(dir) = config.resolve_auth_dir() {
+        crate::scope::authorize_auth_dir(probe, &dir).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Checks a watcher snapshot again before any of its settings are applied.
+fn authorize_reloaded_config(
+    probe: &dyn crate::scope::Probe,
+    path: &Path,
+    config: &Config,
+) -> Result<(), String> {
+    if !crate::scope::authorize_file(probe, path).map_err(|error| error.to_string())? {
+        return Err(format!("config file {} doesn't exist", path.display()));
+    }
+    authorize_config_auth_dir(probe, config)
+}
+
+#[cfg(test)]
+mod config_trust_tests {
+    use super::*;
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_refused_reload_keeps_the_running_config_and_auth_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let old =
+            Arc::new(Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap());
+        let mut service = Service::new(
+            old.clone(),
+            path.clone(),
+            dir.path().to_owned(),
+            LogLevel::detached(),
+        );
+        let mut probe = Fake::new(Platform::Windows, true);
+        probe
+            .file(path.to_str().unwrap())
+            .untrust(path.to_str().unwrap());
+        std::fs::write(&path, "auth-dir: C:/ProgramData/open-ferry/auth\n").unwrap();
+        service
+            .reload_from_disk_with_probe(&path, &mut None, &probe)
+            .await;
+        assert!(Arc::ptr_eq(&old, &service.config));
+        assert_eq!(service.auth_dir, dir.path());
+        assert_eq!(service.config_applies, 0);
+        probe.untrusted.clear();
+        std::fs::write(&path, "auth-dir: C:/ProgramData/open-ferry/versions\n").unwrap();
+        service
+            .reload_from_disk_with_probe(&path, &mut None, &probe)
+            .await;
+        assert!(Arc::ptr_eq(&old, &service.config));
+        assert_eq!(service.auth_dir, dir.path());
+        assert_eq!(service.config_applies, 0);
+    }
+
+    #[test]
+    fn an_untrusted_watcher_snapshot_is_refused_before_its_settings_are_applied() {
+        let mut probe = Fake::new(Platform::Linux, true);
+        let path = Path::new("/work/config.yaml");
+        let config = Config::parse("auth-dir: /srv/auth\n").unwrap();
+        assert!(authorize_reloaded_config(&probe, path, &config).is_err());
+        probe.file("/work/config.yaml");
+        assert!(authorize_reloaded_config(&probe, path, &config).is_ok());
+        probe.untrust("/work");
+        assert!(
+            authorize_reloaded_config(&probe, path, &config)
+                .unwrap_err()
+                .contains("Refusing to load")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn every_reload_checks_the_config_file_again_and_refuses_machine_record_auth_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut probe = Fake::new(Platform::Windows, true);
+        let root = "C:/ProgramData/open-ferry";
+        let old = Config::parse("auth-dir: C:/ProgramData/open-ferry/auth\n").unwrap();
+        assert!(authorize_config_auth_dir(&probe, &old).is_ok());
+        assert!(load_config_with_probe(&probe, &path).is_err());
+        probe.file(path.to_str().unwrap());
+        std::fs::write(&path, "auth-dir: C:/ProgramData/open-ferry/auth\n").unwrap();
+        let loaded = load_config_with_probe(&probe, &path).unwrap().unwrap();
+        assert_eq!(
+            loaded.1,
+            open_ferry_core::config::save::sha256_hex(&loaded.2)
+        );
+        probe.untrust(path.to_str().unwrap());
+        assert!(
+            load_config_with_probe(&probe, &path)
+                .unwrap_err()
+                .contains("Refusing to load")
+        );
+        probe.untrusted.clear();
+        std::fs::write(&path, format!("auth-dir: {root}\n")).unwrap();
+        let error = load_config_with_probe(&probe, &path).unwrap_err();
+        assert!(error.contains("machine's records"), "{error}");
+        // The watcher snapshot follows the same placement rule.
+        let incoming = Config::parse(format!("auth-dir: {root}\n")).unwrap();
+        assert!(authorize_config_auth_dir(&probe, &incoming).is_err());
+        assert_eq!(old.auth_dir, "C:/ProgramData/open-ferry/auth");
+        probe.privileged = Ok(false);
+        assert!(load_config_with_probe(&probe, &path).is_ok());
+    }
+
+    #[test]
+    fn watcher_snapshots_cannot_move_auth_files_among_machine_records() {
+        for (platform, root) in [
+            (Platform::Linux, "/var/lib/open-ferry"),
+            (Platform::Windows, "C:/ProgramData/open-ferry"),
+        ] {
+            // Config resolves paths for this host; the placement helper's
+            // string-path tests cover both platforms on every host.
+            if Some(platform) != Platform::HOST {
+                continue;
+            }
+            let mut probe = Fake::new(platform, true);
+            let config = Config::parse(format!("auth-dir: '{root}'\n")).unwrap();
+            assert!(authorize_config_auth_dir(&probe, &config).is_err());
+            let config = Config::parse(format!("auth-dir: '{root}/auth/team'\n")).unwrap();
+            assert!(authorize_config_auth_dir(&probe, &config).is_ok());
+            probe.privileged = Ok(false);
+            let config = Config::parse(format!("auth-dir: '{root}/versions'\n")).unwrap();
+            assert!(authorize_config_auth_dir(&probe, &config).is_ok());
+        }
+    }
 }
 
 /// `dir` made absolute against the current directory and cleaned, as the
