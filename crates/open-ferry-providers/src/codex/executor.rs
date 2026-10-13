@@ -125,7 +125,7 @@ pub struct CodexExecutor {
     /// The clock of stream bootstrap buffering's time limit.
     bootstrap_clock: Clock,
     /// The Responses WebSocket sessions.
-    websockets: websocket::Store,
+    websockets: Arc<websocket::Store>,
 }
 
 impl CodexExecutor {
@@ -140,13 +140,24 @@ impl CodexExecutor {
             base_url: DEFAULT_BASE_URL.to_owned(),
             oauth_endpoints: Endpoints::default(),
             bootstrap_clock: Arc::new(Instant::now),
-            websockets: websocket::Store::new(),
+            websockets: Arc::new(websocket::Store::new()),
         }
     }
 
     /// Follows `config` where upstream's executor reads its config.
     pub fn with_config(mut self, config: Arc<Config>) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Keeps the previous Codex executor's WebSocket sessions during reload.
+    pub fn with_execution_sessions_from(mut self, previous: &dyn ProviderExecutor) -> Self {
+        if previous.id() == self.id()
+            && let Some(store) = previous.execution_session_store()
+            && let Ok(store) = store.downcast::<websocket::Store>()
+        {
+            self.websockets = store;
+        }
         self
     }
 
@@ -181,7 +192,7 @@ impl CodexExecutor {
     /// message, instead of five minutes.
     #[cfg(test)]
     pub(crate) fn with_websocket_idle(mut self, idle: Duration) -> Self {
-        self.websockets = websocket::Store::with_idle(idle);
+        self.websockets = Arc::new(websocket::Store::with_idle(idle));
         self
     }
 
@@ -694,6 +705,23 @@ impl ProviderExecutor for CodexExecutor {
 
     fn close_execution_session(&self, session_id: &str) {
         self.websockets.close(session_id);
+    }
+
+    fn execution_session_store(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.websockets.clone())
+    }
+
+    fn close_auth_execution_sessions(&self, auth_id: &str) {
+        self.websockets.close_auth(auth_id);
+    }
+
+    fn interrupt_execution_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        payload: &'a [u8],
+        auth_check: open_ferry_core::exec::AuthCheck,
+    ) -> BoxFuture<'a, Result<bool, ExecError>> {
+        Box::pin(self.websockets.interrupt(session_id, payload, auth_check))
     }
 
     fn http_request(

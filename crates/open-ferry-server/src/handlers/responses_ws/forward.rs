@@ -151,6 +151,15 @@ pub(super) async fn forward<S: Socket>(
 
     loop {
         let next = tokio::select! {
+            payload = conn.local_interrupt() => {
+                let response_id = str_at(&payload, "response_id").trim().to_owned();
+                let output = completed_output_from_payload(b"{\"response\":{\"output\":[]}}", &outputs);
+                let mut event = br#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}"#.to_vec();
+                event = json::set_str(&event, "response.id", &response_id);
+                event = json::set_raw(&event, "response.output", &output);
+                if conn.write(&event).await.is_err() { return Forwarded::Closed; }
+                return Forwarded::Completed { output, response_id, pending_call_ids: pending.into_iter().collect() };
+            }
             () = tick(ticker.as_mut()) => {
                 if conn.ping().await.is_err() {
                     return Forwarded::Closed;
@@ -265,7 +274,10 @@ async fn tick(ticker: Option<&mut Interval>) {
 
 /// Whether `event_type` ends a response (`isResponsesWebsocketCompletionEvent`).
 pub(super) fn is_completion_event(event_type: &str) -> bool {
-    event_type == "response.completed" || event_type == "response.done"
+    matches!(
+        event_type,
+        "response.completed" | "response.done" | "response.incomplete"
+    )
 }
 
 /// An `error` event as a message: its status, or 500, and the event as the

@@ -248,6 +248,7 @@ impl Manager {
         }
         if let Some(replaced) = replaced
             && !Arc::ptr_eq(&replaced, &executor)
+            && !replaced.shares_execution_sessions_with(&*executor)
         {
             Self::close_all_sessions(&*replaced);
         }
@@ -647,7 +648,7 @@ impl Manager {
         if !provider.is_empty()
             && let Some(executor) = self.executor(&provider)
         {
-            Self::close_all_sessions(&*executor);
+            executor.close_auth_execution_sessions(id);
         }
     }
 

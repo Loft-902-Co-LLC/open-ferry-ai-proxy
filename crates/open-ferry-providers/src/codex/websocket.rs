@@ -38,8 +38,9 @@
 //!   considered, where upstream's WebSocket executor hands it to HTTP; the
 //!   outcome is the same.
 //! - The execution lifecycle binding, `RequiredUpstreamWebsocket`,
-//!   `UpstreamDisconnectChan` and `CloseCodexWebsocketSessionsForAuthID`
-//!   aren't ported, as the server uses none of them.
+//!   and `UpstreamDisconnectChan` aren't ported, as the server uses none of
+//!   them. Credential removal closes that credential's sessions through
+//!   `ProviderExecutor::close_auth_execution_sessions`.
 //! - Usage reporting and request logging are left to the call's taps: they
 //!   are told of the `response.create` message before the connection is
 //!   made, with no answer head, then of each message read (see the crate's

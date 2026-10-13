@@ -122,10 +122,12 @@ pub(super) async fn open(
         }
         None => (store.ephemeral(), true, None),
     };
-    let proxy = executor.proxy_for(auth);
+    let proxy = session.effective_proxy(&auth.id, &auth.proxy_url, executor.proxy_for(auth));
     let mut secrets = observe_send::secrets(&prepared.url, &prepared.headers, &proxy, auth);
     let token = crate::codex::request::credentials(auth).0;
-    let target = Target::new(&auth.id, &prepared.url, &proxy, token).with_secrets(&secrets);
+    let target = Target::new(&auth.id, &prepared.url, &proxy, token)
+        .with_secrets(&secrets)
+        .with_config(executor.shared_config());
     // A connection kept for the call was opened with the secrets of an
     // earlier one, which Codex may quote back too.
     if let Some(kept) = session.kept_secrets(&target) {

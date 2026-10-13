@@ -67,6 +67,7 @@ use crate::state::AppState;
 use crate::status::status_text;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome};
 
+mod interrupts;
 mod steering;
 
 /// `raw` as JSON.

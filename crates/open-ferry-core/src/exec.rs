@@ -251,6 +251,15 @@ pub trait Dispatcher: Send + Sync + 'static {
     /// Ends a WebSocket session's executor state, when the socket closes.
     fn close_execution_session(&self, _session_id: &str) {}
 
+    /// Handles a Responses interrupt; `false` permits local HTTP cancellation.
+    fn interrupt_execution_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _payload: &'a [u8],
+    ) -> BoxFuture<'a, Result<bool, ExecError>> {
+        Box::pin(async { Ok(false) })
+    }
+
     /// What the Responses WebSocket may rely on for `model` among
     /// `providers`, and, with `auth_id`, what it needs to know about that
     /// credential (the credential lookups in upstream's

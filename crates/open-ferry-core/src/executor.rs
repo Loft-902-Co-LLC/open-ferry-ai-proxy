@@ -81,6 +81,44 @@ pub trait ProviderExecutor: Send + Sync + 'static {
     /// [`CLOSE_ALL_EXECUTION_SESSIONS`] asks for all of them to end.
     fn close_execution_session(&self, _session_id: &str) {}
 
+    /// The shared session store, when sessions survive executor replacement.
+    fn execution_session_store(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
+    /// Whether replacing this executor with `other` keeps the same sessions.
+    fn shares_execution_sessions_with(&self, other: &dyn ProviderExecutor) -> bool {
+        match (
+            self.execution_session_store(),
+            other.execution_session_store(),
+        ) {
+            (Some(store), Some(next)) => Arc::ptr_eq(&store, &next),
+            _ => false,
+        }
+    }
+
+    /// Closes one credential's sessions; executors without that capability
+    /// retain the upstream fallback of closing all sessions.
+    fn close_auth_execution_sessions(&self, _auth_id: &str) {
+        self.close_execution_session(CLOSE_ALL_EXECUTION_SESSIONS);
+    }
+
+    /// Forwards the original interrupt to the current upstream, without dialing.
+    /// `false` means there is no active upstream WebSocket.
+    fn interrupt_execution_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _payload: &'a [u8],
+        _auth_check: crate::exec::AuthCheck,
+    ) -> BoxFuture<'a, Result<bool, ExecError>> {
+        Box::pin(async {
+            Err(ExecError::upstream(
+                400,
+                "upstream executor does not support response.interrupt",
+            ))
+        })
+    }
+
     /// Sends `call` with the credential's token and custom headers, and
     /// returns the answer whatever its status (upstream's `HttpRequest`). An
     /// error means no answer came. The default sends nothing.

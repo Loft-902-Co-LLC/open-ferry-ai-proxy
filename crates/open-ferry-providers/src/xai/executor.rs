@@ -123,7 +123,7 @@ pub struct XaiExecutor {
     clients: Clients,
     config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
-    pub(super) websockets: websocket::Sessions,
+    pub(super) websockets: Arc<websocket::Sessions>,
 }
 
 impl XaiExecutor {
@@ -135,13 +135,24 @@ impl XaiExecutor {
             clients: Clients::new(global_proxy_url).for_provider(PROVIDER),
             config: None,
             models: None,
-            websockets: websocket::Sessions::new(),
+            websockets: Arc::new(websocket::Sessions::new()),
         }
     }
 
     /// Follows `config` where upstream's executor reads its config.
     pub fn with_config(mut self, config: Arc<Config>) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Keeps the previous xAI executor's connections and transcript state.
+    pub fn with_execution_sessions_from(mut self, previous: &dyn ProviderExecutor) -> Self {
+        if previous.id() == self.id()
+            && let Some(store) = previous.execution_session_store()
+            && let Ok(store) = store.downcast::<websocket::Sessions>()
+        {
+            self.websockets = store;
+        }
         self
     }
 
@@ -163,6 +174,11 @@ impl XaiExecutor {
             config: self.config.as_deref(),
             models: self.models.as_deref(),
         }
+    }
+
+    /// The config retained by a WebSocket connection across reloads.
+    pub(super) fn shared_config(&self) -> Option<Arc<Config>> {
+        self.config.clone()
     }
 
     /// Posts `body` and returns xAI's answer, whatever its status, with the
@@ -622,6 +638,14 @@ impl ProviderExecutor for XaiExecutor {
 
     fn close_execution_session(&self, session_id: &str) {
         self.websockets.close(session_id);
+    }
+
+    fn execution_session_store(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.websockets.clone())
+    }
+
+    fn close_auth_execution_sessions(&self, auth_id: &str) {
+        self.websockets.close_auth(auth_id);
     }
 
     fn http_request(

@@ -165,19 +165,16 @@ struct Session<S> {
 pub(super) async fn run<S: Socket>(state: AppState, client: ClientRequest, socket: S) {
     let dispatcher = state.dispatcher_arc();
     let key = session_key(&client.headers);
-    // With response steering on, the socket is read all the time, so a
-    // Codex call can take the client's messages while its stream runs.
-    let conn = if state.settings().config.codex_response_steering {
-        Conn::split(socket)
-    } else {
-        Conn::new(socket)
-    };
+    // Interrupts are read all the time; with response steering on, a Codex
+    // call also takes the queued create and steer messages while it runs.
+    let id = Uuid::now_v7().to_string();
+    let conn = Conn::split(socket, Arc::clone(&dispatcher), id.clone());
     let mut session = Session {
         state,
         client,
         dispatcher,
         conn,
-        id: Uuid::now_v7().to_string(),
+        id,
         key,
         last_request: Vec::new(),
         last_output: b"[]".to_vec(),
@@ -369,7 +366,14 @@ impl<S: Socket> Session<S> {
             self.pinned.clone()
         };
         let selected: Arc<Mutex<Vec<String>>> = Arc::default();
-        let input = self.conn.input();
+        let _local_turn = self.conn.begin_turn();
+        let input = self
+            .state
+            .settings()
+            .config
+            .codex_response_steering
+            .then(|| self.conn.input())
+            .flatten();
         let started = match Call::new(
             &self.state,
             &self.client,
@@ -405,7 +409,16 @@ impl<S: Socket> Session<S> {
                         .unwrap_or_else(PoisonError::into_inner)
                         .push(auth_id.to_owned());
                 }));
-                call.stream().await
+                tokio::select! {
+                    biased;
+                    // A ready upstream error is observed before cancellation.
+                    started = call.stream() => started,
+                    _ = self.conn.local_interrupt() => Started {
+                        headers: HeaderMap::new(),
+                        items: Box::pin(futures_util::stream::pending()),
+                    },
+                    _ = self.conn.gone() => return ControlFlow::Break(()),
+                }
             }
             Err(error) => Started::failed(error),
         };
