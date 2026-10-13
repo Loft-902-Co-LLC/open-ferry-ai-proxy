@@ -44,7 +44,7 @@ The script:
 - if there's no config where `open-ferry init` writes one by default ([below](#download-a-release)), and it didn't find CLIProxyAPI, runs `open-ferry init`, which prints the new keys once. A config that's already there is kept as it is. When it found CLIProxyAPI, it writes no config, as one would compete with CLIProxyAPI's for its port;
 - prints how to start open-ferry with that config, run it at login with `open-ferry service install`, open the dashboard, and check the setup with `open-ferry check`. After a switch, it prints how to check the setup and open the dashboard on CLIProxyAPI's config, and how to switch back.
 
-It changes no shell profile and no `PATH`. When the install directory isn't on your `PATH`, it says how to add it.
+It changes no shell profile or saved `PATH`. When the install directory isn't on your `PATH`, it says how to add it.
 
 To read the script before you run it, download it, read it, then run the file:
 
@@ -90,9 +90,15 @@ For a machine install, run `sudo sh install.sh --system` on Linux or `.\install.
 
 Account installs run without sudo or elevation. Inside a Linux container, root may install for its own account; the installer prints a note. Machine installs on macOS are not supported yet.
 
+On Windows machines where every terminal is elevated (UAC off, the built-in Administrator, Windows Server), account installs and user services are refused; use `.\install.ps1 -System`.
+
 Under an elevated Windows `-System` run, `OPEN_FERRY_INSTALL_BASE_URL`, `OPEN_FERRY_INSTALL_GH`, `OPEN_FERRY_INSTALL_DIR` and `OPEN_FERRY_INSTALL_CONFIG` are ignored with a notice. Choose paths with `-InstallDir` and `-ConfigPath`; downloads use the official GitHub releases, and download, verification and unpacking take place in a new staging directory inside the install directory, removed on success or failure.
 
-To download from a mirror instead of GitHub, set `OPEN_FERRY_INSTALL_BASE_URL` to its address, in place of `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases`. The mirror needs GitHub's layout: `<base>/download/v<version>/<file>` for each release, and `<base>/latest/download/<file>` for the latest. The top of each script lists the rest of its settings.
+When `install.sh` runs as real root, it ignores `OPEN_FERRY_INSTALL_GH`, `OPEN_FERRY_INSTALL_BASE_URL`, `OPEN_FERRY_INSTALL_TEST_PRIVILEGED` and every `FAKE_*` variable, printing only their names. It uses a fixed system `PATH` for that run and detects containers by their marker files, not environment variables. Both scripts disable their test overrides under real privilege; an elevated Windows run also ignores every `FAKE_*` variable.
+
+Before downloading, a privileged run checks the install directory and every directory above it for trusted ownership, no links and permissions that keep other accounts from changing it. Download and unpacking use a checked private staging directory inside it; Unix creates missing directories with mode 0755 and staging with mode 0700, and Windows uses protected ACLs for Administrators and SYSTEM.
+
+For an unprivileged install, to download from a mirror instead of GitHub, set `OPEN_FERRY_INSTALL_BASE_URL` to its address, in place of `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases`. The mirror needs GitHub's layout: `<base>/download/v<version>/<file>` for each release, and `<base>/latest/download/<file>` for the latest. The top of each script lists the rest of its settings.
 
 ### Run it in a container
 
@@ -127,6 +133,7 @@ docker run -d --name open-ferry --restart unless-stopped -p 127.0.0.1:8317:8317 
 
 What's different in a container:
 
+- **Files it reads as root.** Outside a container, open-ferry run as root, or elevated on Windows, reads `.env` and `config.yaml` only when root or the administrators alone can change them and every directory above them, and on macOS not at all. In a container (Docker, Podman, or a Kubernetes pod with its service account token mounted) it reads them as they are, so a bind-mounted config owned by your user works.
 - **The host.** `-host ""` leaves the config's `server.host` empty, as the template has it, so open-ferry listens on every interface of the container. That's what a container needs: Docker forwards the published port to the container's own address, not to its loopback. The Compose file publishes the port on the host's 127.0.0.1 only; to serve other machines, publish it on another address.
 - **The dashboard.** Requests from the host reach the container through Docker's gateway, not its loopback, so the dashboard and the management API turn them away (403) unless `management.allow-remote` is `true`. Every management request still needs the management key.
 - **A management port of its own.** To keep the management API and the dashboard off the proxy's port, set `separate-address: ":8318"` under `management:` (every interface of the container, as for `server.host`), keep `allow-remote: true`, and publish 8318 on the host's 127.0.0.1 only: `-p 127.0.0.1:8318:8318`, or the commented line in `docker-compose.yml`. The dashboard is then at `http://127.0.0.1:8318/dashboard/`, and only the proxy's port, 8317, need be published on another address.

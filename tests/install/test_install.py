@@ -28,13 +28,12 @@ XDG_CONFIG_HOME, XDG_DATA_HOME, LOCALAPPDATA, APPDATA and the temporary
 directory are redirected to temporary directories too, so the install
 receipt is written in one. System installs use fake privilege through the
 loopback server and recording seam. On Windows, explicit TestBaseUrl,
-TestPrivilege and TestProgramFiles/TestProgramData parameters also let the
-fakes run on already elevated CI runners: inherited environment variables
-cannot turn on that seam in an elevated installer. TestElevated exercises
-that hardened path without elevating. Machine folders are passed as test
-parameters pointing into scratch. The suite refuses root and refuses real
-binary tests when elevated. Under elevation, pipeline tests invoke the
-script block with explicit parameters, since iex cannot pass parameters.
+TestPrivilege and TestProgramFiles/TestProgramData parameters exercise the
+privileged paths only on unelevated runners. TestElevated exercises the
+hardened path without elevating. Machine folders are passed as test
+parameters pointing into scratch. The suite skips root and elevated Windows
+script runs: neither inherited environment nor explicit parameters may
+turn on the seam under real privilege.
 The fakes refuse writes outside FAKE_OPEN_FERRY_SCRATCH, set to each case's
 scratch directory, even if a shell restores HOME after it was unset.
 
@@ -156,6 +155,9 @@ FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
 # first, and, with FAKE_INSTALL_SELF_EXIT set, changes nothing and exits with
 # that code.
 log=$FAKE_OPEN_FERRY_LOG
+if [ -n "${FAKE_CWD_LOG:-}" ]; then
+  printf '%s\t%s\n' "${1:-}" "$(pwd)" >> "$FAKE_CWD_LOG"
+fi
 inside_scratch() {
   case $1 in
     "${FAKE_OPEN_FERRY_SCRATCH:?}"/*)
@@ -443,6 +445,9 @@ public static class FakeOpenFerry
 
     public static int Main(string[] args)
     {
+        string cwdLog = Environment.GetEnvironmentVariable("FAKE_CWD_LOG");
+        if (!String.IsNullOrEmpty(cwdLog))
+            File.AppendAllText(cwdLog, args[0] + "\t" + Environment.CurrentDirectory + "\n");
         string name = "@NAME@";
         bool migrate = args.Length >= 1 && args[0] == "migrate";
         bool installSelf = args.Length >= 1 && args[0] == "install-self";
@@ -1002,9 +1007,9 @@ def setUpModule():
         import ctypes
         ELEVATED = bool(ctypes.windll.shell32.IsUserAnAdmin())
         if ELEVATED and REAL_BINARY:
-            raise RuntimeError("real binary install tests must not run in an elevated terminal")
+            raise unittest.SkipTest("real binary install tests must not run in an elevated terminal")
     elif os.geteuid() == 0:
-        raise RuntimeError("install tests must not run as root")
+        raise unittest.SkipTest("real root ignores the loopback seam; install tests must run as an ordinary user")
     scratch = os.environ.get("OFP_TEST_SCRATCH")
     if not scratch_inside_target(scratch):
         raise RuntimeError("OFP_TEST_SCRATCH must be inside this worktree's target directory")
@@ -1072,6 +1077,87 @@ class Case(unittest.TestCase):
 
 @unittest.skipIf(SH is None, "no sh")
 class InstallShTests(Case):
+    def test_privileged_directory_checks_refuse_before_any_download(self):
+        tools = os.path.join(self.work, "trust-tools")
+        real_ls = sh_path(shutil.which("ls", path=os.pathsep.join(SH_TOOLS + [os.environ.get("PATH", "")])) or "/bin/ls")
+        # Metadata fakes make the Unix ownership/mode verdict testable on
+        # Windows too. Every other directory is read by the real ls.
+        for mode, owner, message in (("drwxrwxr-x", "0", "group and other write"),
+                                     ("drwxr-xrwx", "0", "group and other write"),
+                                     ("drwxr-xr-x", "987654", "owned by root")):
+            with self.subTest(mode=mode, owner=owner):
+                write_file(os.path.join(tools, "ls"), '#!/bin/sh\n'
+                           'if [ "$2" = "$FAKE_UNTRUSTED_DIR" ]; then\n'
+                           f"  printf '%s\\n' '{mode} 1 {owner} 0 0 Jan 1 00:00 directory'\n"
+                           f'else exec "{real_ls}" "$@"; fi\n')
+                requests = list(SERVER.httpd.requests)
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args("--system"), path_first=[tools, FAKE_BIN],
+                    FAKE_UNAME_S="Linux", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+                    FAKE_UNTRUSTED_DIR=sh_path(self.work),
+                )
+                self.assertExit(result, 1)
+                self.assertIn(sh_path(self.work), result.output)
+                self.assertIn(message, result.output)
+                self.assertNothingInstalled()
+                self.assertEqual(SERVER.httpd.requests, requests)
+
+    def test_privileged_install_refuses_files_and_linked_ancestors(self):
+        blocked = os.path.join(self.work, "blocked")
+        write_file(blocked, "not a directory\n", mode=0o644)
+        requests = list(SERVER.httpd.requests)
+        result = self.run_sh(
+            "--target", GNU, "--system", "--bin-dir", sh_path(os.path.join(blocked, "bin")),
+            "--config", sh_path(self.config), path_first=[FAKE_BIN], FAKE_UNAME_S="Linux",
+            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+        )
+        self.assertExit(result, 1)
+        self.assertIn("not a link or file", result.output)
+        self.assertEqual(SERVER.httpd.requests, requests)
+        os.remove(blocked)
+        try:
+            os.symlink(self.home, blocked, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"file refusal passed; cannot create a test symlink: {error}")
+        result = self.run_sh(
+            "--target", GNU, "--system", "--bin-dir", sh_path(os.path.join(blocked, "bin")),
+            "--config", sh_path(self.config), path_first=[FAKE_BIN], FAKE_UNAME_S="Linux",
+            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+        )
+        self.assertExit(result, 1)
+        self.assertIn(sh_path(blocked), result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "bin")))
+        self.assertEqual(SERVER.httpd.requests, requests)
+
+    def test_privileged_staging_is_private_and_stays_inside_the_checked_directory(self):
+        gate = os.path.join(self.work, "release")
+        env = self.env(path_first=[FAKE_BIN], FAKE_UNAME_S="Linux",
+                       OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_INSTALL_SELF_WAIT_FILE=sh_path(gate))
+        process = subprocess.Popen([SH, sh_path(INSTALL_SH), "--target", GNU, *self.install_args("--system")],
+                                   env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(stop, process)
+        self.assertTrue(wait_for(lambda: bool(read_log(self.install_log)), timeout=150), "install did not reach install-self")
+        staging = [name for name in os.listdir(self.bin_dir) if name.startswith(".open-ferry-install.")]
+        self.assertEqual(len(staging), 1)
+        tmp = os.path.join(self.bin_dir, staging[0])
+        self.assertTrue(os.path.isfile(os.path.join(tmp, "SHA256SUMS")))
+        self.assertEqual(os.listdir(self.tmp), [])
+        if not WINDOWS:
+            self.assertEqual(os.stat(tmp).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(self.bin_dir).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(tmp).st_uid, os.geteuid())
+        write_file(gate, "go\n", mode=0o644)
+        output = process.communicate(timeout=180)[0].decode("utf-8", "replace")
+        self.assertEqual(process.returncode, 0, output)
+        self.assertFalse(os.path.exists(tmp))
+
+    def test_new_binary_runs_from_root_with_an_explicit_config(self):
+        cwd_log = os.path.join(self.work, "cwd.log")
+        result = self.run_sh("--target", GNU, *self.install_args("--no-auto-update"), FAKE_CWD_LOG=sh_path(cwd_log))
+        self.assertExit(result, 0)
+        self.assertEqual(read_log(cwd_log), [[command, "/"] for command in ("install-self", "migrate", "init", "update")])
+        self.assertEqual(read_log(self.log)[-1][-2:], ["-config", sh_path(self.config)])
+
     def test_the_fake_refuses_writes_outside_its_scratch_directory(self):
         result = self.run_sh(
             "--target", GNU, *self.install_args(),
@@ -1115,16 +1201,16 @@ class InstallShTests(Case):
         self.assertEqual(read_log(self.log), [])
 
     def test_system_default_paths_are_recorded_without_writing_there(self):
-        # Stop at the first attempted binary-directory creation. The fake
-        # records /usr/local/bin and never passes it to the real mkdir.
+        # Stop at the trust check of the real default. This fake only
+        # records the path and never permits writing a machine directory.
         fake_tools = os.path.join(self.work, "record-tools")
-        write_file(os.path.join(fake_tools, "mkdir"), '#!/bin/sh\nprintf "binary directory: %s\\n" "$*" >&2\nexit 1\n')
+        write_file(os.path.join(fake_tools, "ls"), '#!/bin/sh\nprintf "binary directory: %s\\n" "$*" >&2\nexit 1\n')
         result = self.run_sh(
             "--target", GNU, "--system", path_first=[fake_tools, FAKE_BIN],
             FAKE_UNAME_S="Linux", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", HOME="",
         )
         self.assertExit(result, 1)
-        self.assertIn("binary directory: -p /usr/local/bin", result.output)
+        self.assertIn("binary directory: -ldn /", result.output)
         self.assertEqual(read_log(self.install_log), [])
         # Fail init after it records the default, before any config write.
         result = self.run_sh(
@@ -1138,18 +1224,20 @@ class InstallShTests(Case):
         self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", "/etc/open-ferry/config.yaml"]])
 
     def test_root_can_install_its_own_account_only_inside_a_linux_container(self):
-        for signal in ("none", "dockerenv", "containerenv", "container", "kubernetes"):
+        for signal in ("none", "dockerenv", "containerenv", "container", "kubernetes", "kubernetes-env"):
             with self.subTest(signal=signal):
                 self.reset()
+                shutil.rmtree(os.path.dirname(self.receipt()), ignore_errors=True)
                 result = self.run_sh(
                     "--target", GNU, *self.install_args(), path_first=[FAKE_BIN],
                     FAKE_UNAME_S="Linux", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
                     FAKE_CONTAINER_MARKER=signal,
                     container="test" if signal == "container" else "",
-                    KUBERNETES_SERVICE_HOST="test" if signal == "kubernetes" else "",
+                    KUBERNETES_SERVICE_HOST="test" if signal == "kubernetes-env" else "",
                 )
-                self.assertExit(result, 1 if signal == "none" else 0)
-                if signal == "none":
+                refused = signal in ("none", "container", "kubernetes-env")
+                self.assertExit(result, 1 if refused else 0)
+                if refused:
                     self.assertNothingInstalled()
                 else:
                     name = self.assertInstalled(LATEST, GNU)
@@ -1189,6 +1277,8 @@ class InstallShTests(Case):
         self.assertEqual(SERVER.httpd.requests, requests)
 
     def setUp(self):
+        if WINDOWS and ELEVATED:
+            self.skipTest("installer fakes must run in an unelevated process")
         self.work = self.make_work()
         self.home = os.path.join(self.work, "home")
         self.tmp = os.path.join(self.work, "tmp")
@@ -2003,6 +2093,67 @@ class InstallShTests(Case):
 class InstallPs1Cases:
     """install.ps1's tests, run under each PowerShell (shell)."""
 
+    def test_privileged_directory_checks_refuse_foreign_write_aces_before_download(self):
+        os.makedirs(self.install_dir)
+        for rights in ("WriteData", "AppendData", "Delete", "ChangePermissions", "TakeOwnership"):
+            with self.subTest(rights=rights):
+                command = (
+                    f"$path = {ps_quote(self.install_dir)}; "
+                    "$acl = Get-Acl -LiteralPath $path; "
+                    "$everyone = [Security.Principal.SecurityIdentifier]::new('S-1-1-0'); "
+                    "$acl.PurgeAccessRules($everyone); "
+                    f"$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone, '{rights}', 'Allow')); "
+                    "Set-Acl -LiteralPath $path -AclObject $acl"
+                )
+                self.assertExit(run([*self.shell_args(), "-Command", command], self.env()), 0)
+                requests = list(SERVER.httpd.requests)
+                result = self.run_file(*self.install_args("-System"), OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1")
+                self.assertExit(result, 1)
+                self.assertIn(self.install_dir, result.output)
+                self.assertIn("S-1-1-0 is allowed to write", result.output)
+                self.assertEqual(SERVER.httpd.requests, requests)
+                self.assertEqual(os.listdir(self.install_dir), [])
+                self.assertEqual(read_log(self.install_log), [])
+
+    def test_privileged_install_refuses_a_replaceable_ancestor_before_creating_directories(self):
+        parent = os.path.dirname(self.install_dir)
+        os.makedirs(parent)
+        command = (
+            f"$path = {ps_quote(parent)}; $acl = Get-Acl -LiteralPath $path; "
+            "$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new("
+            "[Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'DeleteSubdirectoriesAndFiles', 'Allow')); "
+            "Set-Acl -LiteralPath $path -AclObject $acl"
+        )
+        self.assertExit(run([*self.shell_args(), "-Command", command], self.env()), 0)
+        requests = list(SERVER.httpd.requests)
+        result = self.run_file(*self.install_args("-System"), OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1")
+        self.assertExit(result, 1)
+        self.assertIn(parent, result.output)
+        self.assertIn("S-1-1-0 is allowed to write", result.output)
+        self.assertNothingInstalled()
+        self.assertEqual(SERVER.httpd.requests, requests)
+
+    def test_privileged_install_refuses_a_linked_ancestor(self):
+        parent = os.path.dirname(self.install_dir)
+        try:
+            os.symlink(self.local, parent, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"cannot create a test symlink: {error}")
+        requests = list(SERVER.httpd.requests)
+        result = self.run_file(*self.install_args("-System"), OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1")
+        self.assertExit(result, 1)
+        self.assertIn(parent, result.output)
+        self.assertIn("link or the wrong file type", result.output)
+        self.assertEqual(SERVER.httpd.requests, requests)
+        self.assertFalse(os.path.exists(os.path.join(self.local, "open-ferry")))
+
+    def test_new_binary_runs_from_install_directory_with_an_explicit_config(self):
+        cwd_log = os.path.join(self.work, "cwd.log")
+        result = self.run_file(*self.install_args("-NoAutoUpdate"), FAKE_CWD_LOG=cwd_log)
+        self.assertExit(result, 0)
+        self.assertEqual(read_log(cwd_log), [[command, self.install_dir] for command in ("install-self", "migrate", "init", "update")])
+        self.assertEqual(read_log(self.log)[-1][-2:], ["-config", self.config])
+
     def test_the_fake_refuses_writes_outside_its_scratch_directory(self):
         result = self.run_file(
             *self.install_args(), FAKE_OPEN_FERRY_SCRATCH=os.path.join(self.work, "narrower"),
@@ -2025,8 +2176,9 @@ class InstallPs1Cases:
         self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", self.config]])
         self.assertEqual(read_log(self.migrate_log), [])
 
-    def test_pipeline_seam_passes_explicit_parameters_on_an_elevated_runner(self):
+    def test_pipeline_seam_can_exercise_the_hardened_path_without_elevation(self):
         from unittest.mock import patch
+        # Select the explicit script-block route without changing the token.
         with patch.dict(globals(), ELEVATED=True):
             result = self.run_command(
                 f"irm {self.script_url()} | iex; Write-Host 'The session goes on.'",
@@ -2110,6 +2262,14 @@ class InstallPs1Cases:
         self.assertTrue(os.path.isfile(os.path.join(staged, "SHA256SUMS")))
         self.assertTrue(os.path.isfile(os.path.join(staged, archive_name(LATEST, WINDOWS_TARGET))))
         self.assertTrue(os.path.isdir(os.path.join(staged, "unpacked", top_dir(LATEST, WINDOWS_TARGET))))
+        check_acl = (
+            f"$acl = Get-Acl -LiteralPath {ps_quote(staged)}; "
+            "if (-not $acl.AreAccessRulesProtected) { throw 'staging inherits permissions' }; "
+            "$allowed = @('S-1-5-18', 'S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value); "
+            "foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { "
+            "if ($rule.IdentityReference.Value -notin $allowed) { throw 'unexpected staging trustee' } }"
+        )
+        self.assertExit(run([*self.shell_args(), "-Command", check_acl], self.env()), 0)
         write_file(gate, "go\n", mode=0o644)
         output = process.communicate(timeout=180)[0].decode("utf-8", "replace")
         self.assertEqual(process.returncode, 0, output)
@@ -2198,6 +2358,8 @@ class InstallPs1Cases:
     def setUp(self):
         if not WINDOWS:
             self.skipTest("install.ps1 runs on Windows")
+        if ELEVATED:
+            self.skipTest("real elevation disables the loopback test seam; run installer cases unelevated")
         if not self.shell:
             self.skipTest("not installed")
         self.work = self.make_work()
@@ -3096,6 +3258,17 @@ class PowerShell7Tests(InstallPs1Cases, Case):
     shell = PWSH
 
 
+@unittest.skipUnless(WINDOWS, "Windows elevation guard")
+class InstallerPrivilegeGuardTests(unittest.TestCase):
+    def test_elevated_runners_skip_every_installer_seam(self):
+        from unittest.mock import patch
+        with patch.dict(globals(), ELEVATED=True):
+            for case in (InstallShTests, WindowsPowerShellTests, PowerShell7Tests):
+                with self.subTest(case=case.__name__):
+                    with self.assertRaisesRegex(unittest.SkipTest, "unelevated"):
+                        case("test_the_fake_refuses_writes_outside_its_scratch_directory").setUp()
+
+
 # --- The real binary ---------------------------------------------------------
 
 
@@ -3110,6 +3283,8 @@ class RealBinaryTests(Case):
     def setUp(self):
         if WINDOWS and not (POWERSHELL or PWSH):
             self.skipTest("no PowerShell")
+        if WINDOWS and ELEVATED:
+            self.skipTest("real binary installer tests must run unelevated")
         if not WINDOWS and not SH:
             self.skipTest("no sh")
         self.work = self.make_work()
