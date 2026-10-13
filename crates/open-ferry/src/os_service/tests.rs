@@ -4956,6 +4956,130 @@ fn an_untrusted_system_config_is_never_read_as_given_or_resolved() {
 }
 
 #[test]
+fn install_auth_placement_resolves_both_the_auth_directory_and_machine_root() {
+    for (platform, root, existing_root, canonical_root, auth, canonical_auth, accepted) in [
+        (
+            Platform::Windows,
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\ProgramData\open-ferry",
+            r"C:\ProgramData\open-ferry\logs",
+            r"C:\ProgramData\open-ferry\logs",
+            false,
+        ),
+        (
+            Platform::Windows,
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"\\?\C:\ProgramData\open-ferry",
+            r"D:\credentials",
+            r"\\?\c:\PROGRAMDATA\OPEN-FERRY\logs",
+            false,
+        ),
+        (
+            Platform::Windows,
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\PROGRA~3",
+            r"\\?\C:\ProgramData",
+            r"D:\credentials",
+            r"C:\ProgramData\OPEN-F~1\logs",
+            false,
+        ),
+        (
+            Platform::Windows,
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"\\?\C:\ProgramData\open-ferry",
+            r"C:\PROGRA~3\OPEN-F~1\auth",
+            r"\\?\c:\PROGRAMDATA\OPEN-FERRY\auth",
+            true,
+        ),
+        (
+            Platform::Windows,
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"\\?\UNC\server\share\open-ferry",
+            r"D:\credentials",
+            r"\\server\share\open-ferry\logs",
+            false,
+        ),
+        (
+            Platform::Windows,
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"\\?\UNC\server\share\open-ferry",
+            r"C:\PROGRA~3\OPEN-F~1\auth",
+            r"\\server\share\OPEN-FERRY\auth",
+            true,
+        ),
+        (
+            Platform::Windows,
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"C:\PROGRA~3\OPEN-F~1",
+            r"\\?\C:\ProgramData\open-ferry",
+            r"D:\credentials",
+            r"\\?\D:\credentials",
+            true,
+        ),
+        (
+            Platform::Linux,
+            "/machine",
+            "/machine",
+            "/var/lib/open-ferry",
+            "/credentials",
+            "/var/lib/open-ferry/logs",
+            false,
+        ),
+        (
+            Platform::Linux,
+            "/machine",
+            "/",
+            "/real",
+            "/credentials",
+            "/real/machine/logs",
+            false,
+        ),
+        (
+            Platform::Linux,
+            "/machine",
+            "/machine",
+            "/var/lib/open-ferry",
+            "/machine/auth",
+            "/var/lib/open-ferry/auth",
+            true,
+        ),
+    ] {
+        let mut fake = Fake::default().dir(existing_root).dir(auth);
+        fake.resolved_paths
+            .insert(existing_root.into(), canonical_root.into());
+        fake.resolved_paths
+            .insert(auth.into(), canonical_auth.into());
+        let result = authorize_auth_dir_with(
+            platform,
+            root,
+            auth,
+            &|path| {
+                if fake.dirs.contains(path) {
+                    scope::State::Directory
+                } else {
+                    scope::State::Missing
+                }
+            },
+            &|path| fake.trusted_dir(path),
+            &|path| fake.real_path(path),
+        );
+        assert_eq!(result.is_ok(), accepted, "{root}, {auth}: {result:?}");
+        if !accepted {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("credential files among the machine's records")
+            );
+        }
+    }
+}
+
+#[test]
 fn auth_directory_trust_and_aliases_are_checked_at_install() {
     for (auth, existing, untrusted, alias, accepted) in [
         (

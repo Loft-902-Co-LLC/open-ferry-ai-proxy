@@ -826,7 +826,26 @@ pub(crate) fn authorize_auth_dir_with(
         ));
     }
     scope::check_auth_dir_placement(platform, root, path).map_err(|why| refuse(why.to_string()))?;
-    let mut existing = path.to_owned();
+    let (existing, missing) = existing_auth_placement_dir(platform, path, state).map_err(refuse)?;
+    trusted(&existing).map_err(refuse)?;
+    let actual =
+        resolve_auth_placement_path(platform, &existing, &missing, canonical).map_err(refuse)?;
+    let (existing_root, missing_root) =
+        existing_auth_placement_dir(platform, root, state).map_err(refuse)?;
+    let actual_root =
+        resolve_auth_placement_path(platform, &existing_root, &missing_root, canonical)
+            .map_err(refuse)?;
+    scope::check_auth_dir_placement(platform, &actual_root, &actual)
+        .map_err(|why| refuse(why.to_string()))
+}
+
+/// Finds the existing part, keeping missing names for the placement check.
+fn existing_auth_placement_dir(
+    platform: Platform,
+    path: &str,
+    state: &dyn Fn(&str) -> scope::State,
+) -> Result<(String, Vec<String>), String> {
+    let mut existing = platform.clean(path);
     let mut missing = Vec::new();
     loop {
         match state(&existing) {
@@ -835,7 +854,7 @@ pub(crate) fn authorize_auth_dir_with(
                 let parent = platform
                     .parent(&existing)
                     .filter(|parent| parent != &existing)
-                    .ok_or_else(|| refuse("no existing ancestor could be found".to_owned()))?;
+                    .ok_or_else(|| "no existing ancestor could be found".to_owned())?;
                 let name = existing
                     .rsplit(|c| platform.is_separator(c))
                     .next()
@@ -844,12 +863,20 @@ pub(crate) fn authorize_auth_dir_with(
                 missing.push(name);
                 existing = parent;
             }
-            _ => return Err(refuse(format!("{existing} isn't a directory"))),
+            _ => return Err(format!("{existing} isn't a directory")),
         }
     }
-    trusted(&existing).map_err(refuse)?;
-    let actual = canonical(&existing)
-        .map_err(|why| refuse(format!("failed to resolve {existing}: {why}")))?;
+    Ok((existing, missing))
+}
+
+fn resolve_auth_placement_path(
+    platform: Platform,
+    existing: &str,
+    missing: &[String],
+    canonical: &dyn Fn(&str) -> io::Result<String>,
+) -> Result<String, String> {
+    let actual =
+        canonical(existing).map_err(|why| format!("failed to resolve {existing}: {why}"))?;
     let mut actual = if platform == Platform::Windows {
         plain_windows_path(actual)
     } else {
@@ -858,7 +885,7 @@ pub(crate) fn authorize_auth_dir_with(
     for part in missing.iter().rev() {
         actual = platform.join(&actual, part);
     }
-    scope::check_auth_dir_placement(platform, root, &actual).map_err(|why| refuse(why.to_string()))
+    Ok(actual)
 }
 
 /// Resolves native helpers without searching PATH or the current directory.
