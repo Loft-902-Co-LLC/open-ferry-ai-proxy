@@ -194,3 +194,37 @@ fn the_client_key_is_hidden_from_debug() {
     assert!(!debug.contains("sk-very-secret-key"), "{debug}");
     assert!(debug.contains("ClientKey(..)"), "{debug}");
 }
+
+// Ported from usage_helpers_test.go's DistinguishesNativeKey and
+// sdk/cliproxy/usage/manager_test.go's context fallback tests (37fe2608).
+#[test]
+fn authentication_metadata_reaches_records_and_observers() {
+    for (provider, explicit, native) in [
+        ("config-inline", None, true),
+        ("CONFIG-API-KEY", None, true),
+        ("  config-inline  ", None, true),
+        ("custom-auth-plugin", None, false),
+        ("realtime-client-secret", None, false),
+        ("config-inline", Some(false), false),
+        ("custom-auth-plugin", Some(true), true),
+        ("", None, false),
+    ] {
+        let harness = Harness::new();
+        let (receiver, _observation) = harness.usage.observe();
+        let call = ClientCall::new("gpt-5.4");
+        call.context.set_access_provider(provider);
+        if let Some(value) = explicit {
+            call.context.set_is_native_key(value);
+        }
+        completed_call(&harness, call, "test-client");
+        let event = one_event(&receiver);
+        assert_eq!(event.access_provider, provider.trim());
+        assert_eq!(event.is_native_key, native);
+        let record = harness.record();
+        assert_eq!(record["is_native_key"], native);
+        assert_eq!(
+            record["access_provider"].as_str().unwrap_or(""),
+            provider.trim()
+        );
+    }
+}

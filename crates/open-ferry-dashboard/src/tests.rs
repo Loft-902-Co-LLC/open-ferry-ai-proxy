@@ -84,6 +84,8 @@ pub(crate) fn event(time: &str, provider: &str, model: &str) -> UsageEvent {
         alias: model.to_owned(),
         credential: None,
         client_key: ClientKey::default(),
+        access_provider: String::new(),
+        is_native_key: false,
         stream: false,
         failed: false,
         status: 200,

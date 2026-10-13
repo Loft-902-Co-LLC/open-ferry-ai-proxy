@@ -60,6 +60,10 @@ pub(crate) struct Record {
     pub(crate) source: String,
     /// The key the client authenticated with.
     pub(crate) api_key: String,
+    /// The client authentication provider, empty when unknown.
+    pub(crate) access_provider: String,
+    /// Whether the client key was authenticated by a built-in provider.
+    pub(crate) is_native_key: bool,
     /// The session header the client sent, or empty.
     pub(crate) session_id: String,
     pub(crate) auth_index: String,
@@ -335,6 +339,8 @@ impl Record {
         object.str("endpoint", self.endpoint.trim());
         object.str("auth_type", auth_type);
         object.str("api_key", self.api_key.trim());
+        object.str_omitempty("access_provider", self.access_provider.trim());
+        object.bool("is_native_key", self.is_native_key);
         object.str("request_id", request_id);
         object.str_omitempty("execution_id", execution_id);
         object.str_omitempty("trace_id", trace_id);

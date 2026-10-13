@@ -99,6 +99,8 @@ pub(crate) async fn require_key(
             Ok(key) => {
                 if let Some(context) = request_context::of(request.extensions()) {
                     context.set_client_key(key);
+                    context.set_access_provider("config-inline");
+                    context.set_is_native_key(true);
                 }
                 state.principal_tags().of(key)
             }
@@ -266,5 +268,69 @@ mod tests {
         strip_credentials(&mut h, &mut p);
         assert_eq!(h.len(), 1);
         assert_eq!(p, [("alt".to_owned(), "sse".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn authentication_records_native_provider_for_every_key_source() {
+        use crate::config::ServerConfig;
+        use crate::testing::{FakeCatalog, FakeDispatcher, state};
+        use axum::{Router, body::Body, middleware, routing::get};
+        use http::Method;
+        use http_body_util::BodyExt;
+        use open_ferry_core::observe::RequestContext;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        for (name, uri) in [
+            (Some("authorization"), "/"),
+            (Some("x-api-key"), "/"),
+            (Some("x-goog-api-key"), "/"),
+            (None, "/?key=test-key"),
+            (None, "/?auth_token=test-key"),
+        ] {
+            for enabled in [true, false] {
+                let dispatcher = FakeDispatcher::new(vec![]);
+                let state = state(
+                    ServerConfig {
+                        api_keys: if enabled {
+                            vec!["test-key".to_owned()]
+                        } else {
+                            vec![]
+                        },
+                        ..ServerConfig::default()
+                    },
+                    FakeCatalog::new(),
+                    &dispatcher,
+                );
+                let app = Router::new()
+                    .route(
+                        "/",
+                        get(|request: Request| async move {
+                            let context = request_context::of(request.extensions()).unwrap();
+                            format!("{}:{}", context.access_provider(), context.is_native_key())
+                        }),
+                    )
+                    .layer(middleware::from_fn_with_state(state, require_key));
+                let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+                if let Some(name) = name {
+                    request
+                        .headers_mut()
+                        .insert(name, HeaderValue::from_static("test-key"));
+                }
+                let context = Arc::new(RequestContext::new(Method::GET, "/".to_owned()));
+                request.extensions_mut().insert(context);
+                let response = app.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), 200);
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(
+                    body.as_ref(),
+                    if enabled {
+                        &b"config-inline:true"[..]
+                    } else {
+                        &b":false"[..]
+                    }
+                );
+            }
+        }
     }
 }

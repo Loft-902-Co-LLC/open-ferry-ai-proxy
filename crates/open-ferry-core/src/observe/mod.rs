@@ -137,6 +137,8 @@ pub struct RequestContext {
     /// The trimmed `User-Agent` (`UserAgent`).
     pub user_agent: String,
     client_key: OnceLock<String>,
+    access_provider: OnceLock<String>,
+    is_native_key: OnceLock<bool>,
     selected: Mutex<Option<SelectedAuth>>,
     request_log: request_log::RequestState,
 }
@@ -158,6 +160,8 @@ impl RequestContext {
             forwarded_for: String::new(),
             user_agent: String::new(),
             client_key: OnceLock::new(),
+            access_provider: OnceLock::new(),
+            is_native_key: OnceLock::new(),
             selected: Mutex::new(None),
             request_log: request_log::RequestState::default(),
         }
@@ -173,6 +177,33 @@ impl RequestContext {
     /// secret: never log it as it is.
     pub fn client_key(&self) -> Option<&str> {
         self.client_key.get().map(String::as_str)
+    }
+
+    /// Records the client authentication provider. The first nonempty one stays.
+    pub fn set_access_provider(&self, provider: &str) {
+        let provider = provider.trim();
+        if !provider.is_empty() {
+            let _ = self.access_provider.set(provider.to_owned());
+        }
+    }
+
+    /// The client authentication provider, empty when authentication was disabled.
+    pub fn access_provider(&self) -> &str {
+        self.access_provider.get().map_or("", String::as_str)
+    }
+
+    /// Records an explicit native-key flag, including false. The first one stays.
+    pub fn set_is_native_key(&self, native: bool) {
+        let _ = self.is_native_key.set(native);
+    }
+
+    /// Whether authentication used a built-in client-key provider, unless explicitly set.
+    pub fn is_native_key(&self) -> bool {
+        self.is_native_key.get().copied().unwrap_or_else(|| {
+            let provider = self.access_provider();
+            provider.eq_ignore_ascii_case("config-inline")
+                || provider.eq_ignore_ascii_case("config-api-key")
+        })
     }
 
     /// The client's key as logs show it (see [`mask::hide_api_key`]).

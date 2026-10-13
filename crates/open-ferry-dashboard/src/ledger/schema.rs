@@ -8,7 +8,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
 /// The schema this binary writes.
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 
 /// How long a connection waits for the other's write before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,6 +73,12 @@ CREATE INDEX requests_provider_ts ON requests (provider, ts);
 CREATE INDEX requests_credential_ts ON requests (credential_id, ts);
 CREATE INDEX requests_client_key_ts ON requests (client_key_id, ts);
 CREATE INDEX requests_request_id ON requests (request_id);
+";
+
+/// Schema version 2 adds metadata without changing how older readers read rows.
+const V2: &str = "
+ALTER TABLE requests ADD COLUMN access_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN is_native_key INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Opens the ledger at `path`, making it and its directory if need be, and
@@ -205,8 +211,16 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrateError> {
     match version.unwrap_or(0) {
         0 => {
             transaction.execute_batch(V1)?;
+            transaction.execute_batch(V2)?;
             transaction.execute(
                 "INSERT INTO schema_version (version) VALUES (?1)",
+                params![SCHEMA_VERSION],
+            )?;
+        }
+        1 => {
+            transaction.execute_batch(V2)?;
+            transaction.execute(
+                "UPDATE schema_version SET version = ?1",
                 params![SCHEMA_VERSION],
             )?;
         }
@@ -219,7 +233,7 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrateError> {
         }
     }
     let defaults = [
-        (MIN_READER_SCHEMA, SCHEMA_VERSION.to_string()),
+        (MIN_READER_SCHEMA, "1".to_owned()),
         (RETENTION_DAYS, DEFAULT_RETENTION_DAYS.to_string()),
         (MAX_ROWS, DEFAULT_MAX_ROWS.to_string()),
         (CURRENCY, DEFAULT_CURRENCY.to_owned()),

@@ -104,10 +104,11 @@ pub(super) fn insert(
                 client_key_id, client_key_masked,
                 stream, failed, status, latency_ms, ttft_ms,
                 input_tokens, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
-                output_tokens, reasoning_tokens, unclassified_tokens, total_tokens
+                output_tokens, reasoning_tokens, unclassified_tokens, total_tokens,
+                access_provider, is_native_key
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
             )",
         )?;
         for event in events {
@@ -148,6 +149,8 @@ pub(super) fn insert(
                 tokens.output.reasoning_tokens,
                 tokens.unclassified_tokens,
                 event.total_tokens,
+                event.access_provider,
+                event.is_native_key,
             ])?;
         }
     }
