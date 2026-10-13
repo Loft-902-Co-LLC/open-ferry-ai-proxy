@@ -60,6 +60,8 @@
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it.
 
+pub mod tool_search;
+
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,6 +76,7 @@ use open_ferry_core::exec::{ExecError, Format, Options, Request, Response, Strea
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_core::observe::AttemptKind;
+use open_ferry_translate::claude::openai::responses;
 use open_ferry_translate::json::exact;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::{Map, Value};
@@ -188,6 +191,15 @@ impl ClaudeExecutor {
         }
     }
 
+    fn response_registry(&self, format: &Format) -> Option<Registry> {
+        if *format != Format::OPENAI_RESPONSE || !self.tool_search_enabled() {
+            return None;
+        }
+        Some(responses::registry_with_tool_search(
+            self.tool_search_enabled(),
+        ))
+    }
+
     /// The Messages body for Claude, from the client's request.
     fn prepare_messages(
         &self,
@@ -228,6 +240,9 @@ impl ClaudeExecutor {
         let extra_betas = extract_and_remove_betas(&mut body);
         // Nor does one that a payload rule writes reach Claude.
         strip_prompt_cache_options(&mut body);
+        if self.tool_search_enabled() {
+            tool_search::drop_deferred_cache_control(&mut body);
+        }
         Ok(Prepared {
             upstream: body,
             translation,
@@ -355,6 +370,9 @@ impl ClaudeExecutor {
         options: &Options,
         summary: bool,
     ) -> Result<Response, ExecError> {
+        let (request, options) = self.tool_search_fallback(auth, request, options);
+        let request = request.as_ref();
+        let options = options.as_ref();
         let base_model = thinking::parse_suffix(&request.model).0;
         let target = self.target(auth);
         let url = format!("{}/v1/messages?beta=true", target.base_url);
@@ -405,7 +423,10 @@ impl ClaudeExecutor {
             original_request: &original,
             request: &prepared.translation,
         };
-        let mut out = Registry::global()
+        let registry = self.response_registry(&format);
+        let mut out = registry
+            .as_ref()
+            .unwrap_or_else(|| Registry::global())
             .translate_non_stream(&Format::CLAUDE, &format, &context, data)
             .filter(|out| !out.is_empty())
             .ok_or_else(apply_patch_error)?;
@@ -431,6 +452,9 @@ impl ClaudeExecutor {
         }
         let request = &request;
         let options = &options;
+        let (request, options) = self.tool_search_fallback(auth, request, options);
+        let request = request.as_ref();
+        let options = options.as_ref();
         let base_model = thinking::parse_suffix(&request.model).0;
         let target = self.target(auth);
         let url = format!("{}/v1/messages?beta=true", target.base_url);
@@ -467,7 +491,10 @@ impl ClaudeExecutor {
                 original_request: &original,
                 request: &prepared.translation,
             };
-            Registry::global().response_stream(&Format::CLAUDE, &format, &context)
+            self.response_registry(&format)
+                .as_ref()
+                .unwrap_or_else(|| Registry::global())
+                .response_stream(&Format::CLAUDE, &format, &context)
         });
         let chunks = stream::forward(
             response,
@@ -493,6 +520,9 @@ impl ClaudeExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         let target = self.target(auth);
+        let (request, options) = self.tool_search_fallback(auth, request, options);
+        let request = request.as_ref();
+        let options = options.as_ref();
         let base_model = thinking::parse_suffix(&request.model).0;
         // A streaming translation keeps tool calls, except from Claude.
         let translate_stream = options.source_format != Format::CLAUDE;
@@ -523,6 +553,9 @@ impl ClaudeExecutor {
             json::delete(&mut body, field);
         }
         self.apply_payload_rules(request, options, base_model, translate_stream, &mut body);
+        if self.tool_search_enabled() {
+            tool_search::drop_deferred_cache_control(&mut body);
+        }
         strip_prompt_cache_options(&mut body);
         let headers = headers::build(&Inputs {
             key: &target.key,
@@ -640,13 +673,25 @@ pub(crate) fn translate_request(
     let from = &options.source_format;
     let mut payload = parse_object(&request.payload);
     compat::before_translation(config, options, &Format::CLAUDE, &mut payload);
-    let mut body = Registry::global().translate_request_checked(
-        from,
-        &Format::CLAUDE,
-        base_model,
-        payload,
-        stream,
-    )?;
+    let mut body = if *from == Format::OPENAI_RESPONSE
+        && config.is_some_and(|config| config.claude.tool_search)
+    {
+        responses::registry_with_tool_search(true).translate_request_checked(
+            from,
+            &Format::CLAUDE,
+            base_model,
+            payload,
+            stream,
+        )?
+    } else {
+        Registry::global().translate_request_checked(
+            from,
+            &Format::CLAUDE,
+            base_model,
+            payload,
+            stream,
+        )?
+    };
     if json::str_at(&body, "model") != base_model {
         json::set(&mut body, "model", Value::String(base_model.to_owned()));
     }

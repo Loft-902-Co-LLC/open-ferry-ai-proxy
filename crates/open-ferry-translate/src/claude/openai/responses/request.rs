@@ -56,6 +56,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
+use super::tool_search;
 use super::tools::{
     Descriptor, RequestTools, allows_external_web_access, is_unsupported_builtin_tool_type,
     qualify, tool_description, tool_name, tool_parameters,
@@ -107,7 +108,7 @@ pub fn convert_openai_responses_request_to_claude(
     stream: bool,
     models: &ModelCatalog,
 ) -> (Value, Option<UnsupportedPartError>) {
-    convert(model_name, request, stream, models, false)
+    convert(model_name, request, stream, models, false, false)
 }
 
 /// [`convert_openai_responses_request_to_claude`] for compatibility
@@ -120,7 +121,20 @@ pub fn convert_openai_responses_request_to_claude_with_compat(
     stream: bool,
     models: &ModelCatalog,
 ) -> (Value, Option<UnsupportedPartError>) {
-    convert(model_name, request, stream, models, true)
+    convert(model_name, request, stream, models, true, false)
+}
+
+/// Translates with the tool-search switch pinned for this request.
+/// `compat` preserves the compatibility endpoint reasoning history.
+pub fn convert_openai_responses_request_to_claude_with_tool_search(
+    model_name: &str,
+    request: &Value,
+    stream: bool,
+    models: &ModelCatalog,
+    compat: bool,
+    tool_search: bool,
+) -> (Value, Option<UnsupportedPartError>) {
+    convert(model_name, request, stream, models, compat, tool_search)
 }
 
 fn convert(
@@ -129,6 +143,7 @@ fn convert(
     stream: bool,
     models: &ModelCatalog,
     compat: bool,
+    tool_search: bool,
 ) -> (Value, Option<UnsupportedPartError>) {
     let request = normalize_codex_agent_messages(request);
     let request = request.as_ref();
@@ -184,9 +199,9 @@ fn convert(
         push_system_text(&mut system, &instruction, None);
     }
 
-    let tools = RequestTools::new(request);
+    let tools = RequestTools::with_tool_search(request, tool_search);
     let mut drops = UserTurnDrops::default();
-    let mut messages = convert_input(input, &tools, &mut drops, compat);
+    let mut messages = convert_input(input, &tools, &mut drops, compat, tool_search);
     let had_messages = !messages.is_empty();
     if !compat {
         strip_trailing_thinking(&mut messages);
@@ -211,9 +226,17 @@ fn convert(
     let mut included = HashSet::new();
     let mut claude_tools = Vec::new();
     for descriptor in tools.winning() {
-        let Some(tool) = convert_tool(descriptor, &tools.claude_name(&descriptor.name)) else {
+        let Some(mut tool) = convert_tool(descriptor, &tools.claude_name(&descriptor.name)) else {
             continue;
         };
+        if tools.client_search_wins()
+            && descriptor.source_priority == tool_search::DISCOVERED_PRIORITY
+        {
+            if let Some(fields) = tool.as_object_mut() {
+                fields.remove("cache_control");
+            }
+            tool["defer_loading"] = true.into();
+        }
         let name = str_of(tool.get("name")).into_owned();
         if !name.is_empty() {
             included.insert(descriptor.name.clone());
@@ -454,6 +477,7 @@ fn convert_input(
     tools: &RequestTools,
     drops: &mut UserTurnDrops,
     compat: bool,
+    tool_search: bool,
 ) -> Vec<Value> {
     let mut turns = Turns::default();
     let items = match input {
@@ -569,6 +593,41 @@ fn convert_input(
                         ("content", tool_result_content(output)),
                     ])],
                 );
+            }
+            "tool_search_call" if tool_search => {
+                let raw_id = str_of(item.get("call_id")).trim().to_owned();
+                if raw_id.is_empty() || str_of(item.get("execution")).trim() != "client" {
+                    continue;
+                }
+                let arguments = item.get("arguments").cloned().unwrap_or(Value::Null);
+                let arguments = if let Some(raw) = arguments.as_str() {
+                    serde_json::from_str(raw).unwrap_or(Value::Null)
+                } else {
+                    arguments
+                };
+                called.insert(raw_id.clone());
+                turns.push_tool_use(json!({"type":"tool_use","id":sanitize_tool_id(&raw_id),
+                    "name":tools.claude_name(tool_search::TYPE),
+                    "input":if arguments.is_object() {arguments} else {json!({})}}));
+            }
+            "tool_search_output" if tool_search => {
+                let raw_id = str_of(item.get("call_id")).trim().to_owned();
+                if !raw_id.is_empty() && !answered.insert(raw_id.clone()) {
+                    continue;
+                }
+                if raw_id.is_empty() || !called.contains(&raw_id) {
+                    turns.push(
+                        "user",
+                        vec![text_block(tool_search::output_text(item, tools))],
+                    );
+                } else {
+                    turns.push(
+                        "user",
+                        vec![json!({"type":"tool_result",
+                        "tool_use_id":sanitize_tool_id(&raw_id),
+                        "content":tool_search::output_content(item, tools)})],
+                    );
+                }
             }
             // `additional_tools` items declare tools; other types have no
             // Claude counterpart yet.
@@ -1114,6 +1173,9 @@ fn convert_tool(descriptor: &Descriptor, claude_name: &str) -> Option<Value> {
         claude_name
     };
     let tool = &descriptor.tool;
+    if descriptor.client_search {
+        return Some(tool_search::declaration(tool, name));
+    }
     match &*descriptor.kind {
         "function" => function_tool(tool, name),
         "custom" => custom_tool(tool, name),

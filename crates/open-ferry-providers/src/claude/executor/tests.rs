@@ -17,6 +17,9 @@ use super::*;
 use crate::claude::client::USER_AGENT;
 use crate::claude::request::OAUTH_BETA;
 
+#[path = "tool_search_tests.rs"]
+mod tool_search_tests;
+
 /// One request the mock received.
 #[derive(Clone, Debug)]
 struct Seen {

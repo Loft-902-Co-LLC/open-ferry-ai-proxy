@@ -145,6 +145,8 @@ pub struct ApiKeyEntry {
     pub request_scoped_errors: Vec<RequestScopedErrorRule>,
     /// Claude only: rebuild system messages found mid-conversation.
     pub rebuild_mid_system_message: bool,
+    /// Claude only: trust a custom upstream for Anthropic native tool search.
+    pub native_tool_search: bool,
     /// Codex, xAI and Meta only: use the Responses WebSocket transport.
     pub websockets: bool,
     /// Codex only: allow alpha search.
@@ -209,6 +211,7 @@ impl From<&GeminiKey> for ApiKeyEntry {
             request_retry: key.request_retry,
             request_scoped_errors: key.request_scoped_errors.clone(),
             rebuild_mid_system_message: false,
+            native_tool_search: false,
             websockets: false,
             alpha_search: false,
         }
@@ -242,6 +245,7 @@ impl From<&ClaudeKey> for ApiKeyEntry {
             request_retry: key.request_retry,
             request_scoped_errors: key.request_scoped_errors.clone(),
             rebuild_mid_system_message: key.rebuild_mid_system_message,
+            native_tool_search: key.native_tool_search,
             websockets: false,
             alpha_search: false,
         }
@@ -275,6 +279,7 @@ impl From<&CodexKey> for ApiKeyEntry {
             request_retry: key.request_retry,
             request_scoped_errors: key.request_scoped_errors.clone(),
             rebuild_mid_system_message: false,
+            native_tool_search: false,
             websockets: key.websockets,
             alpha_search: key.alpha_search,
         }
@@ -398,6 +403,9 @@ pub fn api_key_auth(
     match provider {
         ApiKeyProvider::Gemini | ApiKeyProvider::Interactions => {}
         ApiKeyProvider::Claude => {
+            if entry.native_tool_search {
+                attrs.insert("native_tool_search".to_owned(), "true".to_owned());
+            }
             if entry.rebuild_mid_system_message {
                 attrs.insert("rebuild_mid_system_message".to_owned(), "true".to_owned());
             }
@@ -548,6 +556,24 @@ mod tests {
 
     fn synth(claude: &[ApiKeyEntry], codex: &[ApiKeyEntry]) -> Result<Vec<Auth>, SynthesisError> {
         synthesize_api_key_auths(claude, codex, &ctx(), &mut StableIdGenerator::new())
+    }
+
+    #[test]
+    fn claude_native_tool_search_is_a_per_key_attribute() {
+        for enabled in [false, true] {
+            let typed = ClaudeKey {
+                api_key: "test-key".into(),
+                native_tool_search: enabled,
+                ..ClaudeKey::default()
+            };
+            let entry = ApiKeyEntry::from(&typed);
+            let auths = synth(std::slice::from_ref(&entry), std::slice::from_ref(&entry)).unwrap();
+            assert_eq!(
+                auths[0].attribute("native_tool_search"),
+                enabled.then_some("true")
+            );
+            assert_eq!(auths[1].attribute("native_tool_search"), None);
+        }
     }
 
     #[test]

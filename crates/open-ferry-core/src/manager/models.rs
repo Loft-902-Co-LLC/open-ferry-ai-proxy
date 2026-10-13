@@ -981,10 +981,142 @@ pub(crate) fn resolve_openai_compat_config<'a>(
     })
 }
 
+/// Credential-backed native search lookup. The caller supplies the executor's
+/// optional support method because ProviderExecutor has no optional-interface
+/// downcast in this port. Missing executors and empty serving sets fail closed.
+impl super::Manager {
+    pub fn supports_native_tool_search_for_model(
+        &self,
+        model: &str,
+        supports: &dyn Fn(&Auth, &str) -> bool,
+    ) -> bool {
+        let mut model = model.trim();
+        if model.is_empty() {
+            return false;
+        }
+        let auths = self.list();
+        let serving = |model: &str| -> Vec<_> {
+            auths
+                .iter()
+                .filter(|auth| {
+                    !auth.disabled
+                        && auth.status != crate::auth::Status::Disabled
+                        && self.shared.models.client_supports_model(&auth.id, model)
+                })
+                .collect()
+        };
+        let mut selected = serving(model);
+        if selected.is_empty()
+            && let Some((_, base)) = model.split_once('/')
+        {
+            model = base.trim();
+            selected = serving(model);
+        }
+        !selected.is_empty()
+            && selected.into_iter().all(|auth| {
+                self.executor(&auth.provider).is_some()
+                    && supports(auth, &self.resolve_execution_model(auth, model))
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    struct SearchExecutor;
+
+    impl crate::executor::ProviderExecutor for SearchExecutor {
+        fn id(&self) -> &str {
+            "claude"
+        }
+        fn execute(
+            &self,
+            _: std::sync::Arc<Auth>,
+            _: crate::exec::Request,
+            _: crate::exec::Options,
+        ) -> futures_core::future::BoxFuture<
+            '_,
+            Result<crate::exec::Response, crate::exec::ExecError>,
+        > {
+            Box::pin(async { Err(crate::exec::ExecError::canceled()) })
+        }
+        fn execute_stream(
+            &self,
+            _: std::sync::Arc<Auth>,
+            _: crate::exec::Request,
+            _: crate::exec::Options,
+        ) -> futures_core::future::BoxFuture<
+            '_,
+            Result<crate::exec::StreamResponse, crate::exec::ExecError>,
+        > {
+            Box::pin(async { Err(crate::exec::ExecError::canceled()) })
+        }
+        fn count_tokens(
+            &self,
+            _: std::sync::Arc<Auth>,
+            _: crate::exec::Request,
+            _: crate::exec::Options,
+        ) -> futures_core::future::BoxFuture<
+            '_,
+            Result<crate::exec::Response, crate::exec::ExecError>,
+        > {
+            Box::pin(async { Err(crate::exec::ExecError::canceled()) })
+        }
+        fn refresh(
+            &self,
+            auth: std::sync::Arc<Auth>,
+        ) -> futures_core::future::BoxFuture<'_, Result<Auth, crate::exec::ExecError>> {
+            Box::pin(async move { Ok((*auth).clone()) })
+        }
+    }
+
+    #[test]
+    fn native_tool_search_checks_every_enabled_serving_credential_and_resolves_aliases() {
+        let registry = std::sync::Arc::new(crate::registry::ModelRegistry::new());
+        let mut settings = Settings::default();
+        settings
+            .oauth_model_alias
+            .insert("claude".into(), vec![alias("claude-real", "public", false)]);
+        let manager = super::super::Manager::new(settings, registry.clone(), None);
+        let mut first = oauth_auth("claude");
+        first.id = "a".into();
+        manager.register(first.clone()).unwrap();
+        registry.register_client(
+            "a",
+            "claude",
+            &[crate::models::ModelInfo {
+                id: "public".into(),
+                ..crate::models::ModelInfo::default()
+            }],
+        );
+        let supports = |auth: &Auth, model: &str| {
+            assert_eq!(model, "claude-real");
+            auth.id == "a"
+        };
+        assert!(!manager.supports_native_tool_search_for_model("public", &supports));
+        manager.register_executor(std::sync::Arc::new(SearchExecutor));
+        assert!(manager.supports_native_tool_search_for_model("public", &supports));
+        assert!(manager.supports_native_tool_search_for_model("team/public", &supports));
+        assert!(!manager.supports_native_tool_search_for_model("unknown", &supports));
+        assert!(!manager.supports_native_tool_search_for_model("", &supports));
+        let mut second = first;
+        second.id = "b".into();
+        manager.register(second.clone()).unwrap();
+        registry.register_client(
+            "b",
+            "claude",
+            &[crate::models::ModelInfo {
+                id: "public".into(),
+                ..crate::models::ModelInfo::default()
+            }],
+        );
+        assert!(!manager.supports_native_tool_search_for_model("public", &supports));
+        second.disabled = true;
+        manager.register(second).unwrap();
+        assert!(manager.supports_native_tool_search_for_model("public", &supports));
+    }
 
     fn alias(name: &str, alias: &str, force: bool) -> ModelAlias {
         ModelAlias {

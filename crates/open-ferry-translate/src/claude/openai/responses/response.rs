@@ -63,6 +63,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 
 use super::request::{REDACTED_THINKING_PREFIX, unwrap_custom_tool_input};
+use super::tool_search;
 use super::tools::RequestTools;
 use super::web_search::{
     WEB_SEARCH_TOOL_NAME, build_responses_web_search_call_item, claude_web_search_query,
@@ -227,12 +228,22 @@ impl ClaudeToOpenAIResponsesStream {
     /// `request` the translated one; the first that isn't `Null` supplies the
     /// tool declarations and the fields the final event repeats.
     pub fn new(model: &str, original_request: &Value, request: &Value) -> Self {
+        Self::with_tool_search(model, original_request, request, false)
+    }
+
+    /// Starts a response using the switch pinned by request translation.
+    pub fn with_tool_search(
+        model: &str,
+        original_request: &Value,
+        request: &Value,
+        enabled: bool,
+    ) -> Self {
         let picked = pick_request(original_request, request);
         Self {
             model: request_model_name(original_request, request)
                 .unwrap_or(model)
                 .to_owned(),
-            tools: RequestTools::new(picked.unwrap_or(&Value::Null)),
+            tools: RequestTools::with_tool_search(picked.unwrap_or(&Value::Null), enabled),
             echo: picked.map(|request| echo_fields(request, |_| None)),
             error: None,
             completed: false,
@@ -789,11 +800,12 @@ impl ClaudeToOpenAIResponsesStream {
             } else {
                 call.item_status
             };
-            let mut args = if !call.custom && status == "completed" {
-                "{}"
-            } else {
-                ""
-            };
+            let mut args =
+                if !call.custom && !self.tools.is_search(&call.name) && status == "completed" {
+                    "{}"
+                } else {
+                    ""
+                };
             if !buffer.is_empty() {
                 args = buffer;
             }
@@ -930,7 +942,7 @@ impl ClaudeToOpenAIResponsesStream {
 
     /// `emitPendingFuncArgs`: the arguments that came since the last delta.
     fn emit_pending_func_args(&mut self, call: &mut FuncCall, out: &mut String) {
-        if !call.item_added || self.error.is_some() {
+        if !call.item_added || self.error.is_some() || self.tools.is_search(&call.name) {
             return;
         }
         let Some(args) = &call.args else {
@@ -997,6 +1009,21 @@ impl ClaudeToOpenAIResponsesStream {
         call.item_status = status;
         let output_index = self.call_output_index(call);
         let mut args = call.args.clone().unwrap_or_default();
+        if self.tools.is_search(&call.name) {
+            let status = tool_search::call_status(status, &args);
+            call.item_status = status;
+            let item = tool_search::call_item(&call.call_id, status, &args);
+            let seq = self.next_seq();
+            push_event(
+                out,
+                "response.output_item.done",
+                &json!({
+                "type":"response.output_item.done","sequence_number":seq,
+                "output_index":output_index,"item":item}),
+            );
+            self.in_func_block = false;
+            return;
+        }
         if !call.custom && args.is_empty() && status == "completed" {
             args = "{}".to_owned();
         }
@@ -1280,6 +1307,20 @@ pub(crate) fn convert_claude_response_to_openai_responses_non_stream_checked(
     }
 }
 
+/// Translates a complete reply with the switch pinned by request translation.
+/// Returns `None` when an apply_patch call failed.
+pub fn convert_claude_response_to_openai_responses_non_stream_with_tool_search(
+    original_request: &Value,
+    request: &Value,
+    response: &[u8],
+    enabled: bool,
+) -> Option<Value> {
+    match non_stream_with_tool_search(original_request, request, response, enabled) {
+        (response, None) => Some(response),
+        (_, Some(_)) => None,
+    }
+}
+
 /// One output item of a complete response.
 #[derive(Default)]
 struct OutputItem {
@@ -1302,8 +1343,17 @@ fn non_stream(
     request: &Value,
     response: &[u8],
 ) -> (Value, Option<ToolInputError>) {
+    non_stream_with_tool_search(original_request, request, response, false)
+}
+
+fn non_stream_with_tool_search(
+    original_request: &Value,
+    request: &Value,
+    response: &[u8],
+    enabled: bool,
+) -> (Value, Option<ToolInputError>) {
     let picked = pick_request(original_request, request);
-    let tools = RequestTools::new(picked.unwrap_or(&Value::Null));
+    let tools = RequestTools::with_tool_search(picked.unwrap_or(&Value::Null), enabled);
 
     let mut response_id = String::new();
     let mut created_at = 0;
@@ -1387,7 +1437,9 @@ fn non_stream(
                     "tool_use" => {
                         let name = str_of(block.get("name"));
                         let call_id = str_of(block.get("id"));
-                        let item_type = if tools
+                        let item_type = if tools.is_search(&name) {
+                            "tool_search_call"
+                        } else if tools
                             .winner(tools.identity(&name))
                             .is_some_and(|d| d.kind == "custom")
                         {
@@ -1437,7 +1489,9 @@ fn non_stream(
                         {
                             return fail(&response_id, ToolInputError::Arguments(error.clone()));
                         }
-                        item.id = if item.kind == "custom_tool_call" {
+                        item.id = if item.kind == "tool_search_call" {
+                            format!("tsc_{}", item.call_id)
+                        } else if item.kind == "custom_tool_call" {
                             format!("ctc_{}", item.call_id)
                         } else {
                             format!("fc_{}", item.call_id)
@@ -1509,7 +1563,8 @@ fn non_stream(
                     }
                     (
                         "input_json_delta",
-                        "function_call" | "custom_tool_call" | "web_search_call",
+                        "function_call" | "custom_tool_call" | "tool_search_call"
+                        | "web_search_call",
                     ) => {
                         if let Some(partial) = delta.get("partial_json") {
                             item.args.push_str(&str_of(Some(partial)));
@@ -1623,6 +1678,11 @@ fn non_stream(
                     &item.name,
                 )
             }
+            "tool_search_call" => tool_search::call_item(
+                &item.call_id,
+                tool_search::call_status(status, &item.args),
+                &item.args,
+            ),
             "function_call" => {
                 let args = if item.args.is_empty() && status == "completed" {
                     "{}"
@@ -1884,6 +1944,9 @@ fn call_item(
     call_id: &str,
     claude_name: &str,
 ) -> Value {
+    if tools.is_search(claude_name) {
+        return tool_search::call_item(call_id, status, payload);
+    }
     let (kind, key) = if custom {
         ("custom_tool_call", "input")
     } else {
@@ -1933,3 +1996,23 @@ fn now() -> i64 {
 
 #[cfg(test)]
 mod tests;
+
+impl crate::registry::StreamTranslator for ClaudeToOpenAIResponsesStream {
+    fn translate(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        self.translate_line(chunk)
+            .split_inclusive("\n\n")
+            .map(|frame| frame.as_bytes().to_vec())
+            .collect()
+    }
+
+    fn finish(&mut self) -> Vec<Vec<u8>> {
+        self.finalize_tool_input()
+            .split_inclusive("\n\n")
+            .map(|frame| frame.as_bytes().to_vec())
+            .collect()
+    }
+
+    fn tool_input_error(&self) -> Option<&(dyn Error + 'static)> {
+        self.tool_input_error()
+    }
+}

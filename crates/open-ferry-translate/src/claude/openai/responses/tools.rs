@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::tool_search::{self, DISCOVERED_PRIORITY};
 use crate::common::claude::sanitize_function_name;
 use crate::json::{bool_of, path, str_of};
 
@@ -44,6 +45,8 @@ pub(super) struct Descriptor {
     pub(super) direct: bool,
     /// The order the declaration was found in.
     pub(super) order: usize,
+    /// The client search declaration, only present when the switch is on.
+    pub(super) client_search: bool,
 }
 
 impl Descriptor {
@@ -69,8 +72,13 @@ pub(super) struct RequestTools {
 }
 
 impl RequestTools {
+    #[cfg(test)]
     pub(super) fn new(request: &Value) -> Self {
-        let descriptors = descriptors(request);
+        Self::with_tool_search(request, false)
+    }
+
+    pub(super) fn with_tool_search(request: &Value, enabled: bool) -> Self {
+        let descriptors = descriptors(request, enabled);
         let mut winners = HashMap::<String, usize>::new();
         for (index, descriptor) in descriptors.iter().enumerate() {
             match winners.get(&descriptor.name) {
@@ -163,6 +171,16 @@ impl RequestTools {
                 }
             }
         }
+    }
+
+    pub(super) fn is_search(&self, name: &str) -> bool {
+        self.winner(self.identity(name))
+            .is_some_and(|d| d.client_search)
+    }
+
+    pub(super) fn client_search_wins(&self) -> bool {
+        self.winner(tool_search::TYPE)
+            .is_some_and(|d| d.client_search)
     }
 
     /// The winning declarations, in the order they were found.
@@ -262,8 +280,41 @@ fn is_valid_claude_tool_name(name: &str) -> bool {
 }
 
 /// `responsesToolDescriptors`: every declaration with a name, in order.
-fn descriptors(request: &Value) -> Vec<Descriptor> {
-    let mut descriptors: Vec<Descriptor> = Vec::new();
+fn descriptors(request: &Value, enabled: bool) -> Vec<Descriptor> {
+    let mut result = Vec::new();
+    for (tools, priority) in tool_sources(request, enabled) {
+        append_descriptors(&mut result, tools, priority, enabled);
+    }
+    let winner = result
+        .iter()
+        .filter(|d| d.name == tool_search::TYPE)
+        .reduce(|a, b| if b.precedes(a) { b } else { a });
+    if winner.is_some_and(|d| d.client_search) {
+        result.retain(|d| {
+            d.source_priority == DISCOVERED_PRIORITY
+                || !bool_of(d.tool.get("defer_loading").unwrap_or(&Value::Null))
+        });
+        for (order, d) in result.iter_mut().enumerate() {
+            d.order = order;
+        }
+    }
+    result
+}
+
+pub(super) fn discovered_descriptors(tools: Option<&Value>) -> Vec<Descriptor> {
+    let mut result = Vec::new();
+    if let Some(Value::Array(tools)) = tools {
+        append_descriptors(&mut result, tools, DISCOVERED_PRIORITY, true);
+    }
+    result
+}
+
+fn append_descriptors(
+    descriptors: &mut Vec<Descriptor>,
+    tools: &[Value],
+    priority: u8,
+    enabled: bool,
+) {
     let mut add = |tool: &Value,
                    name: String,
                    child_name: String,
@@ -284,22 +335,56 @@ fn descriptors(request: &Value) -> Vec<Descriptor> {
             source_priority,
             direct,
             order,
+            client_search: kind == tool_search::TYPE
+                && enabled
+                && tool_search::is_client_search(tool),
         });
     };
-    for (tools, priority) in tool_sources(request) {
-        for tool in tools {
-            let kind = str_of(tool.get("type"));
-            let kind = kind.trim();
-            match kind {
-                "" | "function" | "custom" => {
-                    let kind = if kind == "custom" {
-                        "custom"
-                    } else {
-                        "function"
+    for tool in tools {
+        let kind = str_of(tool.get("type"));
+        let kind = kind.trim();
+        match kind {
+            "" | "function" | "custom" => {
+                let kind = if kind == "custom" {
+                    "custom"
+                } else {
+                    "function"
+                };
+                add(
+                    tool,
+                    tool_name(tool),
+                    String::new(),
+                    "",
+                    kind,
+                    priority,
+                    true,
+                );
+            }
+            "namespace" => {
+                let namespace = str_of(tool.get("name"));
+                let namespace = namespace.trim();
+                let Some(Value::Array(children)) = tool.get("tools") else {
+                    continue;
+                };
+                for child in children {
+                    let child_name = tool_name(child);
+                    if child_name.is_empty() {
+                        continue;
+                    }
+                    let name = qualify(namespace, &child_name);
+                    let kind = match str_of(child.get("type")).trim() {
+                        "" | "function" => "function",
+                        "custom" => "custom",
+                        _ => continue,
                     };
+                    add(child, name, child_name, namespace, kind, priority, false);
+                }
+            }
+            "tool_search" if enabled => {
+                if tool_search::is_client_search(tool) {
                     add(
                         tool,
-                        tool_name(tool),
+                        tool_search::TYPE.into(),
                         String::new(),
                         "",
                         kind,
@@ -307,60 +392,39 @@ fn descriptors(request: &Value) -> Vec<Descriptor> {
                         true,
                     );
                 }
-                "namespace" => {
-                    let namespace = str_of(tool.get("name"));
-                    let namespace = namespace.trim();
-                    let Some(Value::Array(children)) = tool.get("tools") else {
-                        continue;
-                    };
-                    for child in children {
-                        let child_name = tool_name(child);
-                        if child_name.is_empty() {
-                            continue;
-                        }
-                        let name = qualify(namespace, &child_name);
-                        let kind = match str_of(child.get("type")).trim() {
-                            "" | "function" => "function",
-                            "custom" => "custom",
-                            _ => continue,
-                        };
-                        add(child, name, child_name, namespace, kind, priority, false);
-                    }
+            }
+            "web_search" => {
+                if !allows_external_web_access(tool) {
+                    continue;
                 }
-                "web_search" => {
-                    if !allows_external_web_access(tool) {
-                        continue;
-                    }
-                    let name = str_of(tool.get("name"));
-                    let name = match name.trim() {
-                        "" => "web_search",
-                        name => name,
-                    };
-                    add(
-                        tool,
-                        name.to_owned(),
-                        String::new(),
-                        "",
-                        kind,
-                        priority,
-                        true,
-                    );
+                let name = str_of(tool.get("name"));
+                let name = match name.trim() {
+                    "" => "web_search",
+                    name => name,
+                };
+                add(
+                    tool,
+                    name.to_owned(),
+                    String::new(),
+                    "",
+                    kind,
+                    priority,
+                    true,
+                );
+            }
+            _ => {
+                if is_unsupported_builtin_tool_type(kind) {
+                    continue;
                 }
-                _ => {
-                    if is_unsupported_builtin_tool_type(kind) {
-                        continue;
-                    }
-                    let name = str_of(tool.get("name")).trim().to_owned();
-                    add(tool, name, String::new(), "", kind, priority, true);
-                }
+                let name = str_of(tool.get("name")).trim().to_owned();
+                add(tool, name, String::new(), "", kind, priority, true);
             }
         }
     }
-    descriptors
 }
 
 /// The arrays tools are declared in, with their priority.
-fn tool_sources(request: &Value) -> Vec<(&Vec<Value>, u8)> {
+fn tool_sources(request: &Value, enabled: bool) -> Vec<(&Vec<Value>, u8)> {
     let mut sources = Vec::new();
     if let Some(Value::Array(tools)) = request.get("tools") {
         sources.push((tools, 0));
@@ -371,6 +435,15 @@ fn tool_sources(request: &Value) -> Vec<(&Vec<Value>, u8)> {
                 && let Some(Value::Array(tools)) = item.get("tools")
             {
                 sources.push((tools, 1));
+            }
+        }
+    }
+    if enabled && let Some(Value::Array(input)) = request.get("input") {
+        for item in input {
+            if str_of(item.get("type")) == "tool_search_output"
+                && let Some(Value::Array(tools)) = item.get("tools")
+            {
+                sources.push((tools, DISCOVERED_PRIORITY));
             }
         }
     }

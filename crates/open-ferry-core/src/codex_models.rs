@@ -69,6 +69,10 @@ pub type ProvidersForModel<'a> = &'a dyn Fn(&str) -> Vec<String>;
 /// `ApplyPatchCapabilityForModelFunc`). False also stands for unknown.
 pub type ApplyPatchCapability<'a> = &'a dyn Fn(&str) -> bool;
 
+/// Whether every serving credential supports Anthropic native tool search.
+/// A missing callback keeps Claude search disabled.
+pub type ToolSearchCapability<'a> = &'a dyn Fn(&str) -> bool;
+
 /// The instructions an entry without a template of its own gets
 /// (`codexClientFallbackInstructions`).
 const FALLBACK_INSTRUCTIONS: &str =
@@ -125,6 +129,28 @@ pub fn build_response(
     optimize_multi_agent_v2: bool,
     client_version: &str,
 ) -> Value {
+    build_response_with_tool_search(
+        catalog,
+        models,
+        providers_for_model,
+        apply_patch,
+        None,
+        optimize_multi_agent_v2,
+        client_version,
+    )
+}
+
+/// Builds the Codex catalog with credential-backed native tool-search evidence.
+/// Existing callers without that evidence retain the pre-feature behavior.
+pub fn build_response_with_tool_search(
+    catalog: &dyn ModelCatalog,
+    models: &[ModelInfo],
+    providers_for_model: Option<ProvidersForModel<'_>>,
+    apply_patch: Option<ApplyPatchCapability<'_>>,
+    tool_search: Option<ToolSearchCapability<'_>>,
+    optimize_multi_agent_v2: bool,
+    client_version: &str,
+) -> Value {
     let builder = Builder {
         catalog,
         statics: StaticCatalog::current(),
@@ -133,8 +159,30 @@ pub fn build_response(
         optimize_multi_agent_v2,
         client_version,
     };
-    let models = CodexClientCatalog::current()
-        .map_or(Value::Null, |templates| builder.build(&templates, models));
+    let models = CodexClientCatalog::current().map_or(Value::Null, |templates| {
+        let mut entries = builder.build(&templates, models);
+        if let Some(entries) = entries.as_array_mut() {
+            for entry in entries {
+                let id = entry["slug"].as_str().unwrap_or("");
+                let template = templates.template(&builder.metadata_model_id(id));
+                let claim = template
+                    .unwrap_or_else(|| templates.default_template())
+                    .get("supports_search_tool")
+                    == Some(&Value::Bool(true));
+                let providers = builder.providers(id);
+                if supports_search_tool(
+                    id,
+                    template.is_some(),
+                    claim,
+                    providers.as_deref(),
+                    tool_search,
+                ) {
+                    entry["supports_search_tool"] = true.into();
+                }
+            }
+        }
+        entries
+    });
     json!({ "models": models })
 }
 
@@ -895,4 +943,161 @@ fn write_string(out: &mut String, text: &str) {
         }
     }
     out.push('"');
+}
+
+/// Whether Codex client tool search applies to a Claude model's serving routes.
+/// `native` must check every enabled serving credential and the request switch;
+/// mixed routes, missing evidence, and unknown routes fail closed.
+pub fn tool_search_applies(
+    model: &str,
+    providers: &[String],
+    native: Option<ToolSearchCapability<'_>>,
+) -> bool {
+    !providers.is_empty()
+        && providers.iter().all(|p| go::equal_fold(p.trim(), "claude"))
+        && native.is_some_and(|supports| supports(model))
+}
+
+/// The complete Codex catalog search decision (`applyCodexClientSearchToolSupport`).
+/// A template must claim search. Template models retain pure Codex support;
+/// Claude routes additionally need every serving credential's native support.
+/// Without route evidence only a model with its own template keeps its claim.
+pub fn supports_search_tool(
+    model: &str,
+    template_model: bool,
+    template_claim: bool,
+    providers: Option<&[String]>,
+    native: Option<ToolSearchCapability<'_>>,
+) -> bool {
+    template_claim
+        && providers.map_or(template_model, |providers| {
+            tool_search_applies(model, providers, native)
+                || (template_model
+                    && !providers.is_empty()
+                    && providers
+                        .iter()
+                        .all(|provider| go::equal_fold(provider.trim(), "codex")))
+        })
+}
+
+#[cfg(test)]
+mod tool_search_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_search_support_keeps_template_claims_and_fails_closed() {
+        let catalog = crate::registry::ModelRegistry::new();
+        let models = [
+            ModelInfo {
+                id: "gpt-5.5".into(),
+                ..ModelInfo::default()
+            },
+            ModelInfo {
+                id: "claude-new".into(),
+                ..ModelInfo::default()
+            },
+        ];
+        let yes = |_: &str| true;
+        let no = |_: &str| false;
+        for (providers, capability, expected_template, expected_synthesized) in [
+            (
+                vec!["claude".into()],
+                Some(&yes as ToolSearchCapability<'_>),
+                true,
+                true,
+            ),
+            (
+                vec!["claude".into()],
+                Some(&no as ToolSearchCapability<'_>),
+                false,
+                false,
+            ),
+            (vec!["claude".into()], None, false, false),
+            (
+                vec!["codex".into()],
+                Some(&yes as ToolSearchCapability<'_>),
+                true,
+                false,
+            ),
+            (
+                vec!["claude".into(), "codex".into()],
+                Some(&yes as ToolSearchCapability<'_>),
+                false,
+                false,
+            ),
+            (vec![], Some(&yes as ToolSearchCapability<'_>), false, false),
+        ] {
+            let routes = |_: &str| providers.clone();
+            let response = build_response_with_tool_search(
+                &catalog,
+                &models,
+                Some(&routes),
+                None,
+                capability,
+                false,
+                "",
+            );
+            for (slug, expected) in [
+                ("gpt-5.5", expected_template),
+                ("claude-new", expected_synthesized),
+            ] {
+                let entry = response["models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["slug"] == slug)
+                    .unwrap();
+                assert_eq!(
+                    entry["supports_search_tool"], expected,
+                    "{slug}/{providers:?}"
+                );
+                if providers == ["claude"] {
+                    assert_eq!(entry["prefer_websockets"], false);
+                    assert_eq!(entry["service_tiers"], json!([]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_search_requires_all_claude_routes_and_native_credentials() {
+        let yes = |_: &str| true;
+        let no = |_: &str| false;
+        assert!(tool_search_applies(
+            "model",
+            &[" Claude ".into()],
+            Some(&yes)
+        ));
+        for providers in [
+            vec![],
+            vec!["claude".into(), "codex".into()],
+            vec!["unknown".into()],
+        ] {
+            assert!(!tool_search_applies("model", &providers, Some(&yes)));
+        }
+        assert!(!tool_search_applies("model", &["claude".into()], Some(&no)));
+        assert!(!tool_search_applies("model", &["claude".into()], None));
+        assert!(supports_search_tool("model", true, true, None, None));
+        assert!(!supports_search_tool(
+            "model",
+            false,
+            true,
+            None,
+            Some(&yes)
+        ));
+        assert!(!supports_search_tool(
+            "model",
+            true,
+            false,
+            Some(&["claude".into()]),
+            Some(&yes)
+        ));
+        assert!(supports_search_tool(
+            "model",
+            true,
+            true,
+            Some(&["codex".into()]),
+            None
+        ));
+    }
 }
