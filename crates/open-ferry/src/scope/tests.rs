@@ -39,6 +39,8 @@ struct Fake {
     /// What creating a directory fails with.
     create: Option<io::ErrorKind>,
     created: Vec<String>,
+    /// Whether it is a container.
+    container: bool,
 }
 
 impl Fake {
@@ -63,6 +65,7 @@ impl Fake {
             reads: RefCell::new(Vec::new()),
             create: None,
             created: Vec::new(),
+            container: false,
         }
     }
 
@@ -220,6 +223,10 @@ impl Probe for Fake {
         self.created.push(path.clone());
         self.dir(&path);
         Ok(())
+    }
+
+    fn in_container(&self) -> bool {
+        self.container
     }
 }
 
@@ -885,4 +892,129 @@ fn the_host_tells_directories_files_and_nothing_apart() {
     assert!(names.iter().any(|name| name == "Cargo.toml"), "{names:?}");
     assert_eq!(Host.entries(dir, 1).unwrap().len(), 1);
     assert_eq!(Some(Host.platform()), Platform::HOST);
+}
+
+#[test]
+fn a_privileged_process_takes_settings_only_from_a_trusted_file() {
+    for (platform, path) in [
+        (Platform::Linux, "/work/config.yaml"),
+        (Platform::Windows, "C:/work/config.yaml"),
+    ] {
+        let mut probe = Fake::new(platform, true);
+        let file = Path::new(path);
+        let dir = platform.parent(&platform.clean(path)).unwrap();
+        // Nothing there: nothing to read, whatever the directory.
+        probe.untrust(&dir);
+        assert_eq!(authorize_file(&probe, file), Ok(false));
+        probe.file(path);
+        let refusal = refused(authorize_file(&probe, file));
+        assert!(refusal.reason.starts_with("Refusing to load"), "{refusal}");
+        assert!(refusal.reason.contains(path), "{refusal}");
+        assert!(refusal.remedy.is_some());
+        probe.untrusted.clear();
+        assert_eq!(authorize_file(&probe, file), Ok(true));
+        probe.untrust(path);
+        refused(authorize_file(&probe, file));
+        probe.untrusted.clear();
+        probe.privileged = Err("no token".to_owned());
+        refused(authorize_file(&probe, file));
+        probe.privileged = Ok(false);
+        probe.untrust(path);
+        assert_eq!(authorize_file(&probe, file), Ok(true));
+    }
+}
+
+#[test]
+fn a_privileged_process_takes_settings_only_from_a_full_plain_path() {
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe.file("/work/config.yaml");
+    for path in [
+        "config.yaml",
+        "/work/./config.yaml",
+        "/work/x/../config.yaml",
+    ] {
+        let refusal = refused(authorize_file(&probe, Path::new(path)));
+        assert!(refusal.reason.contains("full path"), "{refusal}");
+    }
+}
+
+#[test]
+fn a_container_takes_settings_from_any_file() {
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe.file("/work/.env").untrust("/work");
+    probe.container = true;
+    assert_eq!(authorize_file(&probe, Path::new("/work/.env")), Ok(true));
+}
+
+#[test]
+fn macos_refuses_every_settings_file_a_privileged_process_finds() {
+    let mut probe = Fake::new(Platform::MacOs, true);
+    let file = Path::new("/work/.env");
+    assert_eq!(authorize_file(&probe, file), Ok(false));
+    probe.file("/work/.env");
+    let refusal = refused(authorize_file(&probe, file));
+    assert!(refusal.reason.contains("/work/.env"), "{refusal}");
+    assert!(refusal.reason.contains("macOS"), "{refusal}");
+    probe.privileged = Ok(false);
+    assert_eq!(authorize_file(&probe, file), Ok(true));
+}
+
+#[test]
+fn the_auth_directory_stays_out_of_the_machine_records() {
+    let linux = Platform::Linux;
+    for auth in [
+        "/",
+        "/var/lib",
+        MACHINE,
+        "/var/lib/open-ferry/",
+        "/var/lib/open-ferry/versions",
+    ] {
+        let refusal = refused(check_auth_dir_placement(linux, MACHINE, auth));
+        assert!(refusal.reason.contains(MACHINE), "{refusal}");
+        assert!(
+            refusal.remedy.unwrap().contains("/var/lib/open-ferry/auth"),
+            "{auth}"
+        );
+    }
+    for auth in [
+        "/var/lib/open-ferry/auth",
+        "/var/lib/open-ferry/auth/team",
+        "/var/lib/open-ferry-two",
+        "/srv/open-ferry/auth",
+    ] {
+        assert_eq!(
+            check_auth_dir_placement(linux, MACHINE, auth),
+            Ok(()),
+            "{auth}"
+        );
+    }
+    let windows = Platform::Windows;
+    let machine = "C:/ProgramData/open-ferry";
+    for auth in [
+        "C:/ProgramData",
+        "c:/programdata/OPEN-FERRY",
+        "C:/ProgramData/open-ferry/logs",
+    ] {
+        refused(check_auth_dir_placement(windows, machine, auth));
+    }
+    for auth in ["C:/ProgramData/Open-Ferry/AUTH", "D:/open-ferry/auth"] {
+        assert_eq!(
+            check_auth_dir_placement(windows, machine, auth),
+            Ok(()),
+            "{auth}"
+        );
+    }
+}
+
+#[test]
+fn the_host_is_a_container_only_by_its_files() {
+    #[cfg(windows)]
+    assert!(!Host.in_container());
+    #[cfg(unix)]
+    assert_eq!(
+        Host.in_container(),
+        CONTAINER_MARKERS
+            .iter()
+            .any(|path| Path::new(path).symlink_metadata().is_ok())
+    );
 }
