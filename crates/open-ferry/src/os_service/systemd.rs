@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use super::{Cmd, Context, DOCS, Definition, Platform, Step};
 
 /// The unit's name.
-const UNIT: &str = "open-ferry.service";
+pub(super) const UNIT: &str = "open-ferry.service";
 
 /// Where the unit goes.
 pub(super) fn unit_path(context: &Context, system: bool) -> Result<String, String> {

@@ -72,6 +72,10 @@ pub struct Flags {
     pub supervise: bool,
     /// With `-supervise`: the system service's, not the user's (`-system`).
     pub system: bool,
+    /// With `-supervise`: the data directory, an absolute path, that
+    /// `service install` pins so the service and the update CLI agree on it
+    /// (`-data-dir`). Not upstream's.
+    pub data_dir: String,
     /// With `-supervise`, in a `blue-green-test` build only: the supervisor's
     /// data directory (`-test-data-dir`).
     #[cfg(feature = "blue-green-test")]
@@ -150,6 +154,11 @@ const DEFINITIONS: &[Definition<Flags>] = &[
         kind: Kind::String(|flags, value| flags.config = value),
     },
     Definition {
+        name: "data-dir",
+        usage: "",
+        kind: Kind::String(|flags, value| flags.data_dir = value),
+    },
+    Definition {
         name: "local-model",
         usage: "Use embedded model catalogs unless models.catalog or models.codex-catalog names a file (no catalog is downloaded, so this is always so)",
         kind: Kind::Bool(|flags, value| flags.local_model = value),
@@ -226,6 +235,7 @@ const DEFINITIONS: &[Definition<Flags>] = &[
 /// The flags the usage leaves out: the password, as upstream's does, and
 /// those only a supervisor starts or a test uses.
 const HIDDEN: &[&str] = &[
+    "data-dir",
     "password",
     #[cfg(feature = "blue-green-test")]
     "test-data-dir",
@@ -260,6 +270,18 @@ fn check_modes(flags: &Flags) -> Result<(), FlagError> {
     }
     if flags.system && !flags.supervise {
         return invalid("-system needs -supervise");
+    }
+    if !flags.data_dir.is_empty() {
+        if !flags.supervise {
+            return invalid("-data-dir needs -supervise");
+        }
+        if !std::path::Path::new(&flags.data_dir).is_absolute() {
+            return invalid("-data-dir needs an absolute path");
+        }
+    }
+    #[cfg(feature = "blue-green-test")]
+    if !flags.data_dir.is_empty() && !flags.test_data_dir.is_empty() {
+        return invalid("-data-dir and -test-data-dir can't be used together");
     }
     #[cfg(feature = "blue-green-test")]
     if !flags.supervise && (!flags.test_data_dir.is_empty() || !flags.test_endpoint.is_empty()) {
@@ -520,6 +542,24 @@ mod tests {
         assert!(usage.contains("\n  -system\n"));
         assert!(!usage.contains("-worker"));
         assert!(!usage.contains("-test-"));
+        assert!(!usage.contains("-data-dir"));
+    }
+
+    #[test]
+    fn the_data_dir_needs_the_supervisor_and_an_absolute_path() {
+        let dir = if cfg!(windows) { "C:/d" } else { "/d" };
+        let flags = parse_args(&["-supervise", "-data-dir", dir]).unwrap();
+        assert_eq!(flags.data_dir, dir);
+        assert_eq!(
+            parse_args(&["-data-dir", dir]),
+            Err(FlagError::Invalid("-data-dir needs -supervise".into()))
+        );
+        assert_eq!(
+            parse_args(&["-supervise", "-data-dir", "d"]),
+            Err(FlagError::Invalid(
+                "-data-dir needs an absolute path".into()
+            ))
+        );
     }
 
     #[cfg(feature = "blue-green-test")]
@@ -531,6 +571,13 @@ mod tests {
         assert_eq!(flags.test_endpoint, "/e/s");
         assert!(parse_args(&["-test-data-dir", "/d"]).is_err());
         assert!(parse_args(&["-test-endpoint", "/e"]).is_err());
+        let dir = if cfg!(windows) { "C:/d" } else { "/d" };
+        assert_eq!(
+            parse_args(&["-supervise", "-data-dir", dir, "-test-data-dir", dir]),
+            Err(FlagError::Invalid(
+                "-data-dir and -test-data-dir can't be used together".into()
+            ))
+        );
     }
 
     #[cfg(not(feature = "blue-green-test"))]

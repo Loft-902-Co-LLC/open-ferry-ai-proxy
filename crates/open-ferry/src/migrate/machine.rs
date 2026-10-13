@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use open_ferry_supervisor::client::StopOutcome;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::check::{self, Finding};
@@ -273,6 +274,14 @@ impl System for Host {
 
     fn remove(&mut self, path: &str) -> io::Result<()> {
         self.system.remove(path)
+    }
+
+    fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.system.write_atomic(path, data)
+    }
+
+    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
+        self.system.stop_supervisor(data_dir, budget)
     }
 }
 

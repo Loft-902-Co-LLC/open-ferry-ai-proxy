@@ -12,6 +12,8 @@ struct Fake {
     links: BTreeMap<String, String>,
     answers: BTreeMap<String, Output>,
     events: Vec<String>,
+    /// What `stop_supervisor` answers; `NotRunning` when not set.
+    stop: Option<StopOutcome>,
 }
 
 impl Fake {
@@ -139,6 +141,18 @@ impl System for Fake {
             .remove(path)
             .map(drop)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+    }
+
+    fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.events.push(format!("write_atomic {path}"));
+        self.files.insert(path.to_owned(), data.to_vec());
+        Ok(())
+    }
+
+    fn stop_supervisor(&mut self, data_dir: &str, budget: Duration) -> StopOutcome {
+        self.events
+            .push(format!("stop_supervisor {data_dir} {}s", budget.as_secs()));
+        self.stop.clone().unwrap_or(StopOutcome::NotRunning)
     }
 }
 

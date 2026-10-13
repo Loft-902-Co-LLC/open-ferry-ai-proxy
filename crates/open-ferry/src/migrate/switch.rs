@@ -389,7 +389,12 @@ fn summarize(plan: &os_service::Plan) -> String {
     for step in &plan.steps {
         done.push(match step {
             os_service::Step::CreateDir(dir) => format!("create {dir}"),
-            os_service::Step::Write { path, .. } => format!("write {path}"),
+            os_service::Step::Write { path, .. } | os_service::Step::WriteAtomic { path, .. } => {
+                format!("write {path}")
+            }
+            os_service::Step::StopSupervisor { data_dir } => {
+                format!("stop the supervisor of {data_dir}")
+            }
             os_service::Step::Remove(path) => format!("remove {path}"),
             os_service::Step::Run(cmd) | os_service::Step::TryRun(cmd) => format!("run `{cmd}`"),
         });

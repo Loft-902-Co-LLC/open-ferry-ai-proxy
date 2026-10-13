@@ -17,8 +17,9 @@
 //! removes or shows open-ferry as a background service (see
 //! [`os_service`]), `update` checks for, installs or rolls back a release,
 //! or sets whether updates are automatic (see [`update`]), and `migrate`
-//! switches from CLIProxyAPI and back (see [`migrate`]); the arguments
-//! after it are theirs. `status`, `config`, `keys`, `credentials`,
+//! switches from CLIProxyAPI and back (see [`migrate`]), and
+//! `install-self` is what the install scripts run from the binary they
+//! downloaded (see [`install_self`]); the arguments after it are theirs. `status`, `config`, `keys`, `credentials`,
 //! `clients` and `mcp` look at and change a setup, for people and agents
 //! (see [`agent`]). `-version` prints the version.
 //!
@@ -47,6 +48,7 @@ mod dotenv;
 mod file_log;
 mod flags;
 mod init;
+mod install_self;
 mod installed;
 mod keep_alive;
 mod logging;
@@ -87,6 +89,7 @@ fn main() -> ExitCode {
         Some(os_service::NAME) => return os_service::main(&program, args.skip(1)),
         Some(update::NAME) => return update::main(&program, args.skip(1)),
         Some(migrate::NAME) => return migrate::main(&program, args.skip(1)),
+        Some(install_self::NAME) => return install_self::main(&program, args.skip(1)),
         Some(name) if agent::is_command(name) => return agent::main(&program, args),
         _ => {}
     }

@@ -24,6 +24,7 @@ pub mod background;
 pub mod data_dir;
 pub mod fetch;
 pub mod install;
+pub mod install_lock;
 pub mod installed_file;
 pub mod journal;
 pub mod keys;
