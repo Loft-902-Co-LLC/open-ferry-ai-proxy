@@ -12,6 +12,9 @@
 # docs/migrating-from-cliproxyapi.md). When it doesn't, and there is no
 # config at %APPDATA%\open-ferry\config.yaml, it writes one with
 # `open-ferry init`. It changes neither PATH nor any profile.
+# With -System, in an administrator terminal, the binary and config go to
+# C:\Program Files\open-ferry; init -system uses the machine auth directory.
+# It skips migration; account installs use a terminal not opened as administrator.
 #
 # Runs in Windows PowerShell 5.1 and PowerShell 7. To pass options through
 # irm, make the script a script block:
@@ -19,12 +22,15 @@
 #   & ([scriptblock]::Create((irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1))) -Version 0.1.0
 #
 # Options:
+#   -System            install for the whole machine; needs an administrator
 #   -Version VERSION   install this version (such as 0.1.0) rather than the
 #                      latest release
 #   -InstallDir DIR    install in DIR (default:
-#                      %LOCALAPPDATA%\Programs\open-ferry)
+#                      %LOCALAPPDATA%\Programs\open-ferry;
+#                      with -System: C:\Program Files\open-ferry)
 #   -ConfigPath PATH   the config to keep, or to write when there is none
-#                      (default: %APPDATA%\open-ferry\config.yaml)
+#                      (default: %APPDATA%\open-ferry\config.yaml;
+#                      with -System: config.yaml beside the machine binary)
 #   -NoAttestation     don't check the build provenance attestation, even
 #                      when gh is installed; the SHA256SUMS check still runs
 #   -NoAutoUpdate      turn automatic updates off (self-update.mode: off in
@@ -39,6 +45,9 @@
 # end of the input is no answer.
 #
 # Environment:
+#   OPEN_FERRY_INSTALL_SYSTEM    yes: as -System; no: an account install
+#   OPEN_FERRY_INSTALL_TEST_PRIVILEGED  0 or 1: fake privilege only with a
+#                                loopback base URL and FAKE_OPEN_FERRY_INSTALL_LOG
 #   OPEN_FERRY_INSTALL_DIR       the install directory, when -InstallDir
 #                                isn't given
 #   OPEN_FERRY_INSTALL_CONFIG    the config path, when -ConfigPath isn't
@@ -67,7 +76,8 @@ param(
     [switch]$NoAttestation,
     [switch]$NoAutoUpdate,
     [switch]$Migrate,
-    [switch]$NoMigrate
+    [switch]$NoMigrate,
+    [switch]$System
 )
 
 # Everything runs in this function, which ends by returning or throwing,
@@ -81,7 +91,8 @@ function Install-OpenFerry {
         [bool]$NoAttestation,
         [bool]$NoAutoUpdate,
         [bool]$Migrate,
-        [bool]$NoMigrate
+        [bool]$NoMigrate,
+        [bool]$System
     )
 
     $ErrorActionPreference = 'Stop'
@@ -96,6 +107,28 @@ function Install-OpenFerry {
 
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         throw "install.ps1 is for Windows. On Linux and macOS, use install.sh: curl -fsSL https://github.com/$repo/releases/latest/download/install.sh | sh"
+    }
+    # Refuse before downloading or creating any directory.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal $identity
+        $privileged = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or $identity.User.Value -eq 'S-1-5-18'
+    } finally {
+        $identity.Dispose()
+    }
+    # Only the fake-release suite's existing loopback and recording seam
+    # may pretend to be elevated; a normal run uses the actual token.
+    if ($env:OPEN_FERRY_INSTALL_BASE_URL -like 'http://127.0.0.1:*' -and $env:FAKE_OPEN_FERRY_INSTALL_LOG) {
+        switch ($env:OPEN_FERRY_INSTALL_TEST_PRIVILEGED) {
+            '0' { $privileged = $false }
+            '1' { $privileged = $true }
+        }
+    }
+    if ($System -and -not $privileged) {
+        throw 'installing open-ferry for the whole machine needs an administrator. Run it in a terminal opened as administrator.'
+    }
+    if (-not $System -and $privileged) {
+        throw 'an account install must not run as administrator. Run it in a terminal not opened as administrator, or install open-ferry for the whole machine with `install.ps1 -System`.'
     }
     # A 32-bit PowerShell on 64-bit Windows sees x86 here and the machine's
     # architecture in PROCESSOR_ARCHITEW6432.
@@ -117,14 +150,23 @@ function Install-OpenFerry {
     }
     if (-not $InstallDir) { $InstallDir = $env:OPEN_FERRY_INSTALL_DIR }
     if (-not $InstallDir) {
-        if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: pass -InstallDir' }
-        $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\open-ferry'
+        if ($System) {
+            if (-not $env:ProgramFiles) { throw 'ProgramFiles is not set: pass -InstallDir' }
+            $InstallDir = Join-Path $env:ProgramFiles 'open-ferry'
+        } else {
+            if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: pass -InstallDir' }
+            $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\open-ferry'
+        }
     }
     if (-not $ConfigPath) { $ConfigPath = $env:OPEN_FERRY_INSTALL_CONFIG }
     if (-not $ConfigPath) {
         # Where open-ferry init writes by default.
-        if (-not $env:APPDATA) { throw 'APPDATA is not set: pass -ConfigPath' }
-        $ConfigPath = Join-Path $env:APPDATA 'open-ferry\config.yaml'
+        if ($System) {
+            $ConfigPath = Join-Path $InstallDir 'config.yaml'
+        } else {
+            if (-not $env:APPDATA) { throw 'APPDATA is not set: pass -ConfigPath' }
+            $ConfigPath = Join-Path $env:APPDATA 'open-ferry\config.yaml'
+        }
     }
     # Absolute, against PowerShell's current location, as they're printed in
     # commands to run from anywhere.
@@ -150,6 +192,8 @@ function Install-OpenFerry {
             default { throw "OPEN_FERRY_INSTALL_MIGRATE is yes or no, not $env:OPEN_FERRY_INSTALL_MIGRATE" }
         }
     }
+
+    if ($System) { $migrateMode = 'no' }
 
     # MAJOR.MINOR.PATCH with an optional pre-release part, as the release
     # workflow requires; a leading v is allowed.
@@ -329,13 +373,27 @@ function Install-OpenFerry {
             $info = New-Object System.Diagnostics.ProcessStartInfo
             $info.FileName = $staged
             $info.UseShellExecute = $false
-            $info.Arguments = (@('install-self', '-from', $staged, '-to', $exe, '-installer', 'install.ps1') | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' '
+            $installArgs = @('install-self', '-from', $staged, '-to', $exe, '-installer', 'install.ps1')
+            if ($System) { $installArgs += '-system' }
+            $info.Arguments = ($installArgs | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' '
             $process = [System.Diagnostics.Process]::Start($info)
             $process.WaitForExit()
             $status = $process.ExitCode
         } finally {
             if ($null -ne $process) { $process.Dispose() }
-            if ($status -ne 6) { Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue }
+            if ($status -ne 6) {
+                # The exited image may still be held briefly. Remove only
+                # this install's staged file, with a bounded retry.
+                for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                    try {
+                        Remove-Item -LiteralPath $staged -Force -ErrorAction Stop
+                        break
+                    } catch {
+                        if (-not (Test-Path -LiteralPath $staged)) { break }
+                        if ($attempt -lt 19) { Start-Sleep -Milliseconds 100 }
+                    }
+                }
+            }
         }
         if ($status -ne 0) {
             switch ($status) {
@@ -403,6 +461,9 @@ function Install-OpenFerry {
     $cpa = $null
     $switched = $false
     $switchFailed = $null
+    if ($System) {
+        Write-Host 'Skipping the migrate offer for a machine install. To migrate CLIProxyAPI, run open-ferry migrate in a terminal opened as administrator.'
+    }
     if ($migrateMode -ne 'no') {
         $search = Get-NativeOutput $exe @('migrate', '-json')
         $answer = $null
@@ -484,7 +545,9 @@ function Install-OpenFerry {
         $wroteConfig = $true
         Write-Host 'Writing a starting config with open-ferry init...'
         Write-Host ''
-        if ((Invoke-Native { & $exe init -config $ConfigPath }) -ne 0) {
+        $initArgs = @('init', '-config', $ConfigPath)
+        if ($System) { $initArgs = @('init', '-system', '-config', $ConfigPath) }
+        if ((Invoke-Native { & $exe @initArgs }) -ne 0) {
             throw "open-ferry init couldn't write $ConfigPath"
         }
         Write-Host ''
@@ -544,7 +607,11 @@ function Install-OpenFerry {
         }
         if (-not $skippedInit) {
             Write-Host "  Start it:            $command -config $quotedConfig"
-            Write-Host "  Or run it at login:  $command service install -config $quotedConfig"
+            if ($System) {
+                Write-Host "  Run it at boot:      $command service install -system -config $quotedConfig"
+            } else {
+                Write-Host "  Or run it at login:  $command service install -config $quotedConfig"
+            }
             if ($wroteConfig) {
                 Write-Host '  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with the management key above'
             } else {
@@ -577,7 +644,14 @@ function Install-OpenFerry {
 }
 
 try {
-    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent
+    if (-not $PSBoundParameters.ContainsKey('System')) {
+        switch ("$env:OPEN_FERRY_INSTALL_SYSTEM") {
+            { $_ -in '', '0', 'no', 'false' } { $System = $false }
+            { $_ -in '1', 'yes', 'true' } { $System = $true }
+            default { throw "OPEN_FERRY_INSTALL_SYSTEM is yes or no, not $env:OPEN_FERRY_INSTALL_SYSTEM" }
+        }
+    }
+    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent -System $System.IsPresent
 } catch {
     Write-Host "install.ps1: error: $($_.Exception.Message)" -ForegroundColor Red
     # Run as a file, the script exits with 1. Run from irm, it only returns,

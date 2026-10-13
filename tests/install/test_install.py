@@ -26,7 +26,13 @@ checked to refuse to run, when pwsh is installed.
 Every install goes to a temporary directory the test passes, and HOME,
 XDG_CONFIG_HOME, XDG_DATA_HOME, LOCALAPPDATA, APPDATA and the temporary
 directory are redirected to temporary directories too, so the install
-receipt is written in one.
+receipt is written in one. System installs use fake privilege, never real
+elevation, through OPEN_FERRY_INSTALL_TEST_PRIVILEGED (0 or 1), honored only
+with the existing loopback base URL and FAKE_OPEN_FERRY_INSTALL_LOG seam.
+The suite refuses to run as root or elevated. Machine default paths are
+recorded without writing there, or redirected to scratch through ProgramFiles.
+The fakes refuse writes outside FAKE_OPEN_FERRY_SCRATCH, set to each case's
+scratch directory, even if a shell restores HOME after it was unset.
 
 Environment:
   INSTALL_TEST_EXPECT_TARGET  also run install.sh with this system's own
@@ -146,6 +152,14 @@ FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
 # first, and, with FAKE_INSTALL_SELF_EXIT set, changes nothing and exits with
 # that code.
 log=$FAKE_OPEN_FERRY_LOG
+inside_scratch() {
+  case $1 in
+    "${FAKE_OPEN_FERRY_SCRATCH:?}"/*)
+      case /$1/ in */../* | */./*) return 1 ;; esac
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
 case "${1:-}" in
   migrate) log=${FAKE_OPEN_FERRY_MIGRATE_LOG:-/dev/null} ;;
   install-self) log=${FAKE_OPEN_FERRY_INSTALL_LOG:-/dev/null} ;;
@@ -159,8 +173,9 @@ printf '%s\n' "$line" >> "$log"
 if [ "${1:-}" = install-self ]; then
   shift
   from= to= installer=
-  while [ "$#" -ge 2 ]; do
+  while [ "$#" -gt 0 ]; do
     case $1 in
+      -system) shift; continue ;;
       -from) from=$2 ;;
       -to) to=$2 ;;
       -installer) installer=$2 ;;
@@ -195,6 +210,10 @@ if [ "${1:-}" = install-self ]; then
     /*) data=$XDG_DATA_HOME/open-ferry ;;
     *) data=$HOME/.local/share/open-ferry ;;
   esac
+  if ! inside_scratch "$from" || ! inside_scratch "$to" || ! inside_scratch "$data"; then
+    echo "fake open-ferry: refusing a write outside its scratch directory" >&2
+    exit 1
+  fi
   rest='@NAME@'
   rest=${rest#open-ferry-}
   version=${rest%%-*}
@@ -253,11 +272,16 @@ if [ "${1:-}" = migrate ]; then
   exit 2
 fi
 if [ "${1:-}" = init ]; then
+  if [ "${2:-}" = -system ]; then shift; fi
   if [ -n "${FAKE_OPEN_FERRY_FAIL:-}" ]; then
     echo "fake open-ferry: init failed" >&2
     exit 3
   fi
   if [ "${2:-}" = -config ] && [ -n "${3:-}" ]; then
+    if ! inside_scratch "$3"; then
+      echo "fake open-ferry: refusing a write outside its scratch directory" >&2
+      exit 1
+    fi
     mkdir -p "$(dirname "$3")"
     printf 'fake-config: @NAME@\n' > "$3"
     echo "Wrote $3"
@@ -292,6 +316,14 @@ using System.Threading;
 
 public static class FakeOpenFerry
 {
+    static bool InsideScratch(string path)
+    {
+        string scratch = Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_SCRATCH");
+        if (String.IsNullOrEmpty(scratch)) return false;
+        string root = Path.GetFullPath(scratch).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return Path.GetFullPath(path).StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
     static string Json(string text)
     {
         return "\"" + text.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
@@ -299,6 +331,7 @@ public static class FakeOpenFerry
 
     static int InstallSelf(string name, string[] args)
     {
+        args = Array.FindAll(args, arg => arg != "-system");
         string from = null, to = null, installer = null;
         for (int i = 1; i + 1 < args.Length; i += 2)
         {
@@ -334,6 +367,11 @@ public static class FakeOpenFerry
             return Int32.Parse(exit);
         }
         string data = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "open-ferry");
+        if (!InsideScratch(from) || !InsideScratch(to) || !InsideScratch(data))
+        {
+            Console.Error.WriteLine("fake open-ferry: refusing a write outside its scratch directory");
+            return 1;
+        }
         string rest = name.Substring("open-ferry-".Length);
         string version = rest.Substring(0, rest.IndexOf('-'));
         string target = rest.Substring(rest.IndexOf('-') + 1);
@@ -474,6 +512,7 @@ public static class FakeOpenFerry
         }
         if (args.Length >= 1 && args[0] == "init")
         {
+            args = Array.FindAll(args, arg => arg != "-system");
             if (!String.IsNullOrEmpty(Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_FAIL")))
             {
                 Console.Error.WriteLine("fake open-ferry: init failed");
@@ -481,6 +520,11 @@ public static class FakeOpenFerry
             }
             if (args.Length >= 3 && args[1] == "-config")
             {
+                if (!InsideScratch(args[2]))
+                {
+                    Console.Error.WriteLine("fake open-ferry: refusing a write outside its scratch directory");
+                    return 1;
+                }
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(args[2])));
                 File.WriteAllText(args[2], "fake-config: " + name + "\n");
                 Console.WriteLine("Wrote " + args[2]);
@@ -879,6 +923,7 @@ class ReleaseHandler(http.server.SimpleHTTPRequestHandler):
     <base>/latest/download/<file> to the latest release's file."""
 
     def do_GET(self):
+        self.server.requests.append(self.path)
         path = self.path.split("?", 1)[0]
         for base, version in self.server.latest.items():
             prefix = f"/{base}/latest/download/"
@@ -905,6 +950,7 @@ class ReleaseServer:
             ("127.0.0.1", 0), functools.partial(ReleaseHandler, directory=root)
         )
         self.httpd.latest = latest
+        self.httpd.requests = []
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
@@ -927,7 +973,17 @@ FAKE_GH = None  # the fake gh: gh, and gh.cmd for install.ps1
 
 def setUpModule():
     global BASE, BASE_SH, SERVER, FAKE_BIN, FAKE_GH
-    BASE = long_path(tempfile.mkdtemp(prefix="dist-install-"))
+    if WINDOWS:
+        import ctypes
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            raise RuntimeError("install tests must not run in an elevated terminal")
+    elif os.geteuid() == 0:
+        raise RuntimeError("install tests must not run as root")
+    scratch = os.environ.get("OFP_TEST_SCRATCH")
+    if not scratch or os.path.commonpath([os.path.abspath(scratch), os.path.join(ROOT, "target")]) != os.path.join(ROOT, "target"):
+        raise RuntimeError("OFP_TEST_SCRATCH must be inside this worktree's target directory")
+    os.makedirs(scratch, exist_ok=True)
+    BASE = long_path(tempfile.mkdtemp(prefix="dist-install-", dir=scratch))
     try:
         BASE_SH = find_base_sh(BASE)
         fakes = os.path.join(BASE, "fakes")
@@ -990,6 +1046,99 @@ class Case(unittest.TestCase):
 
 @unittest.skipIf(SH is None, "no sh")
 class InstallShTests(Case):
+    def test_the_fake_refuses_writes_outside_its_scratch_directory(self):
+        result = self.run_sh(
+            "--target", GNU, *self.install_args(),
+            FAKE_OPEN_FERRY_SCRATCH=sh_path(os.path.join(self.work, "narrower")),
+        )
+        self.assertExit(result, 1)
+        self.assertIn("fake open-ferry: refusing a write outside its scratch directory", result.output)
+        self.assertFalse(os.path.exists(self.binary()))
+        self.assertFalse(os.path.exists(self.receipt()))
+        self.assertFalse(os.path.exists(self.config))
+
+    def test_system_install_passes_the_scope_and_skips_migration(self):
+        cases = ((["--system"], {}), ([], {"OPEN_FERRY_INSTALL_SYSTEM": "yes"}), (["--system"], {"OPEN_FERRY_INSTALL_SYSTEM": "no"}))
+        for flags, extra in cases:
+            with self.subTest(flags=flags, extra=extra):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(*flags, "--migrate"),
+                    path_first=[FAKE_BIN], FAKE_UNAME_S="Linux", FAKE_UNAME_M="x86_64",
+                    OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(), **extra,
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST, GNU)
+                self.assertEqual(read_log(self.install_log)[0][4:], ["-to", sh_path(self.binary()), "-installer", "install.sh", "-system"])
+                self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", sh_path(self.config)]])
+                self.assertEqual(read_log(self.migrate_log), [])
+                self.assertIn("sudo open-ferry migrate", result.output)
+                self.assertIn(f'service install -system -config "{sh_path(self.config)}"', result.output)
+                self.assertNotIn("Or run it at login", result.output)
+
+    def test_system_install_keeps_an_existing_config(self):
+        write_file(self.config, "oauth:\n  auth-dir: /existing/credentials\n", mode=0o600)
+        result = self.run_sh(
+            "--target", GNU, *self.install_args("--system"),
+            path_first=[FAKE_BIN], FAKE_UNAME_S="Linux", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+        )
+        self.assertExit(result, 0)
+        self.assertEqual(read_text(self.config), "oauth:\n  auth-dir: /existing/credentials\n")
+        self.assertEqual(read_log(self.log), [])
+
+    def test_system_default_paths_are_recorded_without_writing_there(self):
+        # Stop at the first attempted binary-directory creation. The fake
+        # records /usr/local/bin and never passes it to the real mkdir.
+        fake_tools = os.path.join(self.work, "record-tools")
+        write_file(os.path.join(fake_tools, "mkdir"), '#!/bin/sh\nprintf "binary directory: %s\\n" "$*" >&2\nexit 1\n')
+        result = self.run_sh(
+            "--target", GNU, "--system", path_first=[fake_tools, FAKE_BIN],
+            FAKE_UNAME_S="Linux", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", HOME="",
+        )
+        self.assertExit(result, 1)
+        self.assertIn("binary directory: -p /usr/local/bin", result.output)
+        self.assertEqual(read_log(self.install_log), [])
+        # Fail init after it records the default, before any config write.
+        result = self.run_sh(
+            "--target", GNU, "--system", "--bin-dir", sh_path(self.bin_dir),
+            path_first=[FAKE_BIN], FAKE_UNAME_S="Linux", HOME="",
+            XDG_DATA_HOME=sh_path(os.path.join(self.home, ".local", "share")),
+            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_OPEN_FERRY_FAIL="1",
+        )
+        self.assertExit(result, 1)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", "/etc/open-ferry/config.yaml"]])
+
+    def test_privilege_refusals_happen_before_downloads(self):
+        macos = "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root. Run it without sudo; installs for the whole machine come to macOS in a later version."
+        cases = (
+            ("Linux", "0", ["--system"], "installing open-ferry for the whole machine needs root. Run it with sudo."),
+            ("Linux", "1", [], "an account install must not run as root. Run it without sudo, or install open-ferry for the whole machine with `install.sh --system`."),
+            ("Darwin", "0", ["--system"], macos), ("Darwin", "1", ["--system"], macos), ("Darwin", "1", [], macos),
+        )
+        for system, privileged, flags, message in cases:
+            with self.subTest(system=system, privileged=privileged, flags=flags):
+                requests = list(SERVER.httpd.requests)
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(*flags), path_first=[FAKE_BIN],
+                    FAKE_UNAME_S=system, OPEN_FERRY_INSTALL_TEST_PRIVILEGED=privileged,
+                )
+                self.assertExit(result, 1)
+                self.assertIn(f"install.sh: error: {message}", result.output)
+                self.assertNothingInstalled()
+                self.assertEqual(SERVER.httpd.requests, requests)
+
+    def test_fake_privilege_requires_the_existing_recording_seam(self):
+        requests = list(SERVER.httpd.requests)
+        result = self.run_sh(
+            "--target", GNU, *self.install_args("--system"),
+            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_OPEN_FERRY_INSTALL_LOG=None,
+        )
+        self.assertExit(result, 1)
+        self.assertIn("needs root. Run it with sudo.", result.output)
+        self.assertNothingInstalled()
+        self.assertEqual(SERVER.httpd.requests, requests)
+
     def setUp(self):
         self.work = self.make_work()
         self.home = os.path.join(self.work, "home")
@@ -1015,6 +1164,8 @@ class InstallShTests(Case):
             FAKE_OPEN_FERRY_MIGRATE_LOG=sh_path(self.migrate_log),
             FAKE_OPEN_FERRY_INSTALL_LOG=sh_path(self.install_log),
             FAKE_GH_LOG=sh_path(self.gh_log),
+            FAKE_OPEN_FERRY_SCRATCH=sh_path(self.work),
+            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="0",
         )
         for key, value in extra.items():
             if value is None:
@@ -1159,6 +1310,7 @@ class InstallShTests(Case):
         result = self.run_sh("--help")
         self.assertExit(result, 0)
         self.assertIn("Usage: install.sh [options]", result.output)
+        self.assertIn("--system           install for the whole machine on Linux; needs root", result.output)
         for option in ("--no-attestation", "--migrate", "--no-migrate", "OPEN_FERRY_INSTALL_MIGRATE=yes"):
             self.assertIn(option, result.output)
 
@@ -1799,6 +1951,103 @@ class InstallShTests(Case):
 
 
 class InstallPs1Cases:
+    def test_the_fake_refuses_writes_outside_its_scratch_directory(self):
+        result = self.run_file(
+            *self.install_args(), FAKE_OPEN_FERRY_SCRATCH=os.path.join(self.work, "narrower"),
+        )
+        self.assertExit(result, 1)
+        self.assertIn("fake open-ferry: refusing a write outside its scratch directory", result.output)
+        self.assertFalse(os.path.exists(self.exe))
+        self.assertFalse(os.path.exists(self.receipt()))
+        self.assertFalse(os.path.exists(self.config))
+
+    def test_system_install_from_pipeline_uses_the_environment(self):
+        result = self.run_command(
+            f"irm {self.script_url()} | iex",
+            OPEN_FERRY_INSTALL_DIR=self.install_dir, OPEN_FERRY_INSTALL_CONFIG=self.config,
+            OPEN_FERRY_INSTALL_SYSTEM="yes", OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+        )
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST)
+        self.assertEqual(read_log(self.install_log)[0][-1], "-system")
+        self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", self.config]])
+        self.assertEqual(read_log(self.migrate_log), [])
+
+    def test_system_install_passes_the_scope_and_skips_migration(self):
+        cases = ((["-System"], {}), ([], {"OPEN_FERRY_INSTALL_SYSTEM": "yes"}), (["-System"], {"OPEN_FERRY_INSTALL_SYSTEM": "no"}))
+        for flags, extra in cases:
+            with self.subTest(flags=flags, extra=extra):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                shutil.rmtree(os.path.dirname(self.config), ignore_errors=True)
+                self.reset_logs()
+                result = self.run_file(
+                    *self.install_args(*flags, "-Migrate"), OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+                    FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(), **extra,
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST)
+                self.assertEqual(read_log(self.install_log)[0][4:], ["-to", self.exe, "-installer", "install.ps1", "-system"])
+                self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", self.config]])
+                self.assertEqual(read_log(self.migrate_log), [])
+                self.assertIn("run open-ferry migrate in a terminal opened as administrator", result.output)
+                self.assertIn(f"service install -system -config {ps_quote(self.config)}", result.output)
+                self.assertNotIn("Or run it at login", result.output)
+
+    def test_system_default_paths_are_redirected_to_scratch(self):
+        program_files = os.path.join(self.work, "Program Files")
+        install_dir = os.path.join(program_files, "open-ferry")
+        config = os.path.join(install_dir, "config.yaml")
+        # Set this inside PowerShell too, so no inherited casing or shell
+        # startup can substitute the machine's real ProgramFiles directory.
+        result = self.run_command(
+            f"$env:ProgramFiles = {ps_quote(program_files)}; & {ps_quote(INSTALL_PS1)} -System",
+            PROGRAMFILES=program_files, OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1",
+        )
+        self.assertExit(result, 0)
+        name = top_dir(LATEST, WINDOWS_TARGET)
+        with open(os.path.join(install_dir, "open-ferry.exe"), "rb") as f:
+            self.assertEqual(f.read(), EXES[name])
+        self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", config]])
+        self.assertIn(f"service install -system -config {ps_quote(config)}", result.output)
+        self.assertEqual(read_text(config), f"fake-config: {name}\n")
+
+    def test_system_config_defaults_beside_an_explicit_binary_directory(self):
+        config = os.path.join(self.install_dir, "config.yaml")
+        result = self.run_file("-System", "-InstallDir", self.install_dir, OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1")
+        self.assertExit(result, 0)
+        name = top_dir(LATEST, WINDOWS_TARGET)
+        self.assertEqual(read_log(self.log), [[name, "init", "-system", "-config", config]])
+        self.assertEqual(read_text(config), f"fake-config: {name}\n")
+
+    def test_system_install_keeps_an_existing_config(self):
+        write_file(self.config, "oauth:\n  auth-dir: C:/existing/credentials\n", mode=0o600)
+        result = self.run_file(*self.install_args("-System"), OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1")
+        self.assertExit(result, 0)
+        self.assertEqual(read_text(self.config), "oauth:\n  auth-dir: C:/existing/credentials\n")
+        self.assertEqual(read_log(self.log), [])
+
+    def test_privilege_refusals_happen_before_downloads(self):
+        cases = (
+            ("0", ["-System"], "installing open-ferry for the whole machine needs an administrator. Run it in a terminal opened as administrator."),
+            ("1", [], "an account install must not run as administrator. Run it in a terminal not opened as administrator, or install open-ferry for the whole machine with `install.ps1 -System`."),
+        )
+        for privileged, flags, message in cases:
+            with self.subTest(privileged=privileged, flags=flags):
+                requests = list(SERVER.httpd.requests)
+                result = self.run_file(*self.install_args(*flags), OPEN_FERRY_INSTALL_TEST_PRIVILEGED=privileged)
+                self.assertExit(result, 1)
+                self.assertIn(f"install.ps1: error: {message}", result.output)
+                self.assertNothingInstalled()
+                self.assertEqual(SERVER.httpd.requests, requests)
+
+    def test_fake_privilege_requires_the_existing_recording_seam(self):
+        requests = list(SERVER.httpd.requests)
+        result = self.run_file(*self.install_args("-System"), OPEN_FERRY_INSTALL_TEST_PRIVILEGED="1", FAKE_OPEN_FERRY_INSTALL_LOG=None)
+        self.assertExit(result, 1)
+        self.assertIn("needs an administrator. Run it in a terminal opened as administrator.", result.output)
+        self.assertNothingInstalled()
+        self.assertEqual(SERVER.httpd.requests, requests)
+
     """install.ps1's tests, run under each PowerShell (shell)."""
 
     shell = None
@@ -1836,6 +2085,8 @@ class InstallPs1Cases:
             FAKE_OPEN_FERRY_MIGRATE_LOG=self.migrate_log,
             FAKE_OPEN_FERRY_INSTALL_LOG=self.install_log,
             FAKE_GH_LOG=self.gh_log,
+            FAKE_OPEN_FERRY_SCRATCH=self.work,
+            OPEN_FERRY_INSTALL_TEST_PRIVILEGED="0",
         )
         for key, value in extra.items():
             if value is None:

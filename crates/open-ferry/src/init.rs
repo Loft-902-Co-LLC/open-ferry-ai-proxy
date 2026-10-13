@@ -19,6 +19,8 @@
 //! The config goes to `-config`, else to the installed config path (see
 //! [`installed`]), and its directory is made. An existing
 //! file is replaced only with `-force`, and then kept as `<file name>.bak`.
+//! With `-system`, the machine install must already exist and be trusted;
+//! its auth directory replaces the template's, and existing configs stay.
 //! The file is written by the config writer
 //! ([`write_as_is`](open_ferry_core::config::save::write_as_is)): checked
 //! to load, atomically, and readable by its owner only on Unix (0600). On
@@ -45,6 +47,7 @@ use rand::rngs::SysRng;
 
 use crate::flags::{self, Definition, FlagError, Kind};
 use crate::installed;
+use crate::scope;
 
 /// The subcommand's name: the first argument that runs it.
 pub const NAME: &str = "init";
@@ -64,6 +67,7 @@ struct Options {
     host: String,
     port: Option<i64>,
     force: bool,
+    system: bool,
 }
 
 impl Default for Options {
@@ -73,12 +77,13 @@ impl Default for Options {
             host: DEFAULT_HOST.to_owned(),
             port: None,
             force: false,
+            system: false,
         }
     }
 }
 
 /// The flags, sorted by name.
-const DEFINITIONS: [Definition<Options>; 4] = [
+const DEFINITIONS: [Definition<Options>; 5] = [
     Definition {
         name: "config",
         usage: "Write the config to this path (default: the installed config path, shown below)",
@@ -86,7 +91,7 @@ const DEFINITIONS: [Definition<Options>; 4] = [
     },
     Definition {
         name: "force",
-        usage: "Replace an existing config, keeping it as <file name>.bak",
+        usage: "Replace an existing config, keeping it as <file name>.bak (except with -system)",
         kind: Kind::Bool(|options, value| options.force = value),
     },
     Definition {
@@ -98,6 +103,11 @@ const DEFINITIONS: [Definition<Options>; 4] = [
         name: "port",
         usage: "Listen on this port (default 8317, the template's)",
         kind: Kind::Int(|options, value| options.port = Some(value)),
+    },
+    Definition {
+        name: "system",
+        usage: "Use the machine's auth directory; needs a trusted machine install and root or an administrator",
+        kind: Kind::Bool(|options, value| options.system = value),
     },
 ];
 
@@ -152,7 +162,7 @@ where
     } else {
         PathBuf::from(&options.config)
     };
-    match init(&path, &listen, options.force) {
+    match init_scoped(&path, &listen, options.force, options.system, &scope::Host) {
         Ok(written) => {
             print!("{}", report(program, &written));
             ExitCode::SUCCESS
@@ -232,10 +242,58 @@ struct Written {
 
 /// Writes a new config at `path`, replacing a file there only when `force`.
 fn init(path: &Path, listen: &Listen, force: bool) -> Result<Written, String> {
+    init_config(path, listen, force, None)
+}
+
+/// Checks the machine scope before writing; existing machine configs stay
+/// as they are, even with `-force`, so their credentials never move.
+fn init_scoped(
+    path: &Path,
+    listen: &Listen,
+    force: bool,
+    system: bool,
+    probe: &dyn scope::Probe,
+) -> Result<Written, String> {
+    if !system {
+        return init(path, listen, force);
+    }
+    let auth_dir = scope::machine_auth_dir(probe).map_err(|refusal| refusal.to_string())?;
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(format!(
+            "{} already exists; init -system leaves an existing config and its credentials alone",
+            path.display()
+        ));
+    }
+    init_config(path, listen, false, Some(&auth_dir))
+}
+
+/// Writes the template with an optional machine auth directory.
+fn init_config(
+    path: &Path,
+    listen: &Listen,
+    force: bool,
+    auth_dir: Option<&str>,
+) -> Result<Written, String> {
     let client_key = client_key(&random_bytes()?);
     let management_key = management_key(&random_bytes()?);
     let text = render(&client_key, &management_key, listen)?;
+    let text = match auth_dir {
+        Some(auth_dir) => {
+            let old = "  auth-dir: \"~/.cli-proxy-api\"";
+            if text.lines().filter(|line| *line == old).count() != 1 {
+                return Err("the built-in config template doesn't have the auth-dir init sets; this is a bug".into());
+            }
+            // JSON strings are YAML strings too, including escaped Windows
+            // separators, quotes and control characters.
+            let quoted = serde_json::to_string(auth_dir).map_err(|error| error.to_string())?;
+            text.replacen(old, &format!("  auth-dir: {quoted}"), 1)
+        }
+        None => text,
+    };
     let config = verify(&text, &client_key, &management_key, listen)?;
+    if auth_dir.is_some_and(|auth_dir| config.auth_dir != auth_dir) {
+        return Err("the new config doesn't hold the auth-dir init set; this is a bug".into());
+    }
     let backup = write(path, &text, force)?;
     Ok(Written {
         path: path.to_path_buf(),
@@ -502,6 +560,169 @@ fn quote_program(program: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::os_service::Platform;
+    use open_ferry_update::receipt::{Receipt, ReceiptError};
+
+    struct Fake {
+        platform: Platform,
+        privileged: Result<bool, String>,
+        state: scope::State,
+        trust: Result<(), String>,
+        program_data: String,
+    }
+
+    impl Fake {
+        fn new(platform: Platform) -> Self {
+            Self {
+                platform,
+                privileged: Ok(true),
+                state: scope::State::Directory,
+                trust: Ok(()),
+                program_data: r"C:\ProgramData".into(),
+            }
+        }
+    }
+
+    impl scope::Probe for Fake {
+        fn platform(&self) -> Platform {
+            self.platform
+        }
+        fn privileged(&self) -> Result<bool, String> {
+            self.privileged.clone()
+        }
+        fn program_data(&self) -> Result<String, String> {
+            Ok(self.program_data.clone())
+        }
+        fn state(&self, _path: &str) -> scope::State {
+            self.state.clone()
+        }
+        fn entries(&self, _dir: &str, _limit: usize) -> io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn trusted_dir(&self, _path: &str) -> Result<(), String> {
+            self.trust.clone()
+        }
+        fn account_dir(&self) -> Result<String, String> {
+            panic!("init does not look up account records")
+        }
+        fn trusted_file(&self, _path: &str) -> Result<(), String> {
+            panic!("the fake machine directory is empty")
+        }
+        fn receipt(&self, _path: &str) -> Result<Option<Receipt>, ReceiptError> {
+            panic!("init does not read receipts")
+        }
+        fn canonical(&self, _path: &str) -> io::Result<String> {
+            panic!("init does not resolve the installed binary")
+        }
+        fn create_machine_dir(&mut self, _path: &str) -> io::Result<()> {
+            panic!("init must not provision the machine directory")
+        }
+    }
+
+    #[test]
+    fn writes_the_machine_auth_directory_for_linux_and_windows() {
+        for (platform, expected) in [
+            (Platform::Linux, "/var/lib/open-ferry/auth"),
+            (Platform::Windows, r"C:\ProgramData\open-ferry\auth"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            written_or_panic(init_scoped(
+                &path,
+                &listen(DEFAULT_HOST, None),
+                false,
+                true,
+                &Fake::new(platform),
+            ));
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.auth_dir, expected);
+            // Equivalent to os_service::check_auth_dir: a nonempty auth-dir
+            // passes precisely when it does not start with `~`.
+            assert!(!config.auth_dir.is_empty());
+            assert!(!config.auth_dir.starts_with('~'));
+        }
+    }
+
+    #[test]
+    fn quotes_the_windows_machine_auth_directory_as_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut fake = Fake::new(Platform::Windows);
+        fake.program_data = r#"C:\Data with "quotes" and 'apostrophes'"#.into();
+        written_or_panic(init_scoped(
+            &path,
+            &listen(DEFAULT_HOST, None),
+            false,
+            true,
+            &fake,
+        ));
+        assert_eq!(
+            Config::load(&path).unwrap().auth_dir,
+            format!(r"{}\open-ferry\auth", fake.program_data)
+        );
+    }
+
+    #[test]
+    fn refuses_system_init_with_the_scope_refusal_before_writing() {
+        let mut cases = vec![Fake::new(Platform::MacOs)];
+        for platform in [Platform::Linux, Platform::Windows] {
+            let mut unprivileged = Fake::new(platform);
+            unprivileged.privileged = Ok(false);
+            cases.push(unprivileged);
+            let mut unknown = Fake::new(platform);
+            unknown.privileged = Err("no token".into());
+            cases.push(unknown);
+            for state in [
+                scope::State::Missing,
+                scope::State::Other,
+                scope::State::Inaccessible("access denied".into()),
+            ] {
+                let mut fake = Fake::new(platform);
+                fake.state = state;
+                cases.push(fake);
+            }
+            let mut untrusted = Fake::new(platform);
+            untrusted.trust = Err("machine directory is writable by another account".into());
+            cases.push(untrusted);
+        }
+        for fake in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("new").join("config.yaml");
+            let expected = scope::machine_auth_dir(&fake).unwrap_err().to_string();
+            let Err(error) = init_scoped(&path, &listen(DEFAULT_HOST, None), false, true, &fake)
+            else {
+                panic!("wrote a config despite a scope refusal");
+            };
+            assert_eq!(error, expected);
+            assert!(!path.parent().unwrap().exists());
+        }
+    }
+
+    #[test]
+    fn system_init_never_rewrites_an_existing_config_even_with_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, "oauth:\n  auth-dir: /old/credentials\n").unwrap();
+        for force in [false, true] {
+            let Err(error) = init_scoped(
+                &path,
+                &listen(DEFAULT_HOST, None),
+                force,
+                true,
+                &Fake::new(Platform::Linux),
+            ) else {
+                panic!("system init rewrote an existing config");
+            };
+            assert!(
+                error.contains("init -system leaves an existing config and its credentials alone")
+            );
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "oauth:\n  auth-dir: /old/credentials\n"
+            );
+            assert!(!backup_path(&path).exists());
+        }
+    }
 
     fn listen(host: &str, port: Option<u16>) -> Listen {
         Listen {
@@ -750,7 +971,13 @@ mod tests {
     fn lists_its_flags_and_turns_down_bad_usage() {
         let usage = usage("open-ferry");
         assert!(usage.starts_with("Usage: open-ferry init [flags]\n"));
-        for flag in ["-config string", "-force\n", "-host string", "-port int"] {
+        for flag in [
+            "-config string",
+            "-force\n",
+            "-host string",
+            "-port int",
+            "-system\n",
+        ] {
             assert!(usage.contains(&format!("\n  {flag}")), "{flag}");
         }
         let dir = tempfile::tempdir().unwrap();
