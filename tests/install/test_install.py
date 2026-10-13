@@ -87,6 +87,10 @@ TAMPERED = "0.9.0"  # its SHA256SUMS doesn't match its archives
 MISSING = "2.0.0"  # no such release
 NO_GH = "open-ferry-test-no-gh"  # a GitHub CLI that isn't installed
 
+# The path of a real open-ferry build, to run the scripts with in place of the
+# fakes (RealBinaryTests); the tests skip when it is not set.
+REAL_BINARY = os.environ.get("OFP_INSTALL_REAL_BINARY", "")
+
 EXPECT_TARGET = os.environ.get("INSTALL_TEST_EXPECT_TARGET", "")
 DEFAULT_PATHS = os.environ.get("INSTALL_TEST_DEFAULT_PATHS") == "1"
 
@@ -135,17 +139,93 @@ FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
 # with 1 when it's empty, and `migrate -yes` exits with
 # FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0), or, with FAKE_OPEN_FERRY_MIGRATE_FAIL
 # set, prints it to stderr and exits with 1.
+# `install-self -from F -to T -installer I` is recorded in
+# FAKE_OPEN_FERRY_INSTALL_LOG instead, and does what the real one does when it
+# succeeds: F, which must be this file, moves to T, and the install receipt is
+# written to the data directory. It waits FAKE_INSTALL_SELF_SLEEP seconds
+# first, and, with FAKE_INSTALL_SELF_EXIT set, changes nothing and exits with
+# that code.
 log=$FAKE_OPEN_FERRY_LOG
-if [ "${1:-}" = migrate ]; then
-  log=${FAKE_OPEN_FERRY_MIGRATE_LOG:-/dev/null}
-fi
-{
-  printf '%s' '@NAME@'
-  for arg in "$@"; do
-    printf '\t%s' "$arg"
+case "${1:-}" in
+  migrate) log=${FAKE_OPEN_FERRY_MIGRATE_LOG:-/dev/null} ;;
+  install-self) log=${FAKE_OPEN_FERRY_INSTALL_LOG:-/dev/null} ;;
+esac
+# One write, so that two fakes logging at once don't mix their lines.
+line='@NAME@'
+for arg in "$@"; do
+  line=$line$(printf '\t')$arg
+done
+printf '%s\n' "$line" >> "$log"
+if [ "${1:-}" = install-self ]; then
+  shift
+  from= to= installer=
+  while [ "$#" -ge 2 ]; do
+    case $1 in
+      -from) from=$2 ;;
+      -to) to=$2 ;;
+      -installer) installer=$2 ;;
+      *)
+        echo "fake open-ferry: install-self: unexpected argument: $1" >&2
+        exit 2
+        ;;
+    esac
+    shift 2
   done
-  printf '\n'
-} >> "$log"
+  if [ "$from" != "$0" ] || [ -z "$to" ] || [ -z "$installer" ] || [ "$#" -ne 0 ]; then
+    echo "fake open-ferry: install-self: bad arguments" >&2
+    exit 2
+  fi
+  if [ -n "${FAKE_INSTALL_SELF_SLEEP:-}" ]; then
+    sleep "$FAKE_INSTALL_SELF_SLEEP"
+  fi
+  # A barrier: wait for the test to create the file, after it has seen
+  # every install reach this point (its call is logged above).
+  if [ -n "${FAKE_INSTALL_SELF_WAIT_FILE:-}" ]; then
+    n=0
+    while [ ! -e "$FAKE_INSTALL_SELF_WAIT_FILE" ] && [ "$n" -lt 1200 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+  fi
+  if [ "${FAKE_INSTALL_SELF_EXIT:-0}" != 0 ]; then
+    echo "fake open-ferry: install-self failed" >&2
+    exit "$FAKE_INSTALL_SELF_EXIT"
+  fi
+  case ${XDG_DATA_HOME:-} in
+    /*) data=$XDG_DATA_HOME/open-ferry ;;
+    *) data=$HOME/.local/share/open-ferry ;;
+  esac
+  rest='@NAME@'
+  rest=${rest#open-ferry-}
+  version=${rest%%-*}
+  target=${rest#*-}
+  json() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+  # The real order: the rollback material, the placement, the receipt, and
+  # the old binary put back if the receipt can't be written.
+  mkdir -p "$data" || exit 1
+  old=
+  if [ -e "$to" ]; then
+    old=$to.old-$$
+    ln "$to" "$old" 2>/dev/null || cp -p "$to" "$old" || exit 1
+  fi
+  if [ -d "$to" ] || ! mv -f "$from" "$to"; then
+    [ -z "$old" ] || rm -f "$old"
+    exit 1
+  fi
+  receipt=$data/install-receipt.json
+  if [ -d "$receipt" ] \
+    || ! printf '{"format":1,"installer":%s,"version":%s,"binary":%s,"target":%s,"installed_at":"%s"}\n' \
+      "$(json "$installer")" "$(json "$version")" "$(json "$to")" "$(json "$target")" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$receipt.$$" \
+    || ! mv -f "$receipt.$$" "$receipt"; then
+    rm -f "$receipt.$$"
+    if [ -n "$old" ]; then mv -f "$old" "$to"; else mv -f "$to" "$from"; fi
+    echo "fake open-ferry: install-self: can't write the install receipt" >&2
+    exit 1
+  fi
+  [ -z "$old" ] || rm -f "$old"
+  exit 0
+fi
 if [ "${1:-}" = update ] && [ -n "${FAKE_OPEN_FERRY_UPDATE_FAIL:-}" ]; then
   echo "fake open-ferry: update failed" >&2
   exit 4
@@ -196,18 +276,136 @@ FAKE_OPEN_FERRY_CS = r"""
 // with 1 when it's empty, and `migrate -yes` exits with
 // FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0), or, with FAKE_OPEN_FERRY_MIGRATE_FAIL
 // set, prints it to stderr and exits with 1.
+// `install-self -from F -to T -installer I` is recorded in
+// FAKE_OPEN_FERRY_INSTALL_LOG instead, and does what the real one does on
+// Windows when it succeeds: F, which must be this file, is moved to T after T
+// is moved aside, the aside files that can be deleted are, and "An older
+// open-ferry.exe is still running" is said for one that can't; the install
+// receipt is written to %LOCALAPPDATA%\open-ferry. It waits
+// FAKE_INSTALL_SELF_SLEEP seconds first, and, with FAKE_INSTALL_SELF_EXIT set,
+// changes nothing and exits with that code.
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
 
 public static class FakeOpenFerry
 {
+    static string Json(string text)
+    {
+        return "\"" + text.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    }
+
+    static int InstallSelf(string name, string[] args)
+    {
+        string from = null, to = null, installer = null;
+        for (int i = 1; i + 1 < args.Length; i += 2)
+        {
+            if (args[i] == "-from") from = args[i + 1];
+            else if (args[i] == "-to") to = args[i + 1];
+            else if (args[i] == "-installer") installer = args[i + 1];
+            else
+            {
+                Console.Error.WriteLine("fake open-ferry: install-self: unexpected argument: " + args[i]);
+                return 2;
+            }
+        }
+        string self = Process.GetCurrentProcess().MainModule.FileName;
+        if (from == null || to == null || installer == null || args.Length % 2 != 1
+            || !String.Equals(Path.GetFullPath(from), Path.GetFullPath(self), StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("fake open-ferry: install-self: bad arguments");
+            return 2;
+        }
+        string sleep = Environment.GetEnvironmentVariable("FAKE_INSTALL_SELF_SLEEP");
+        if (!String.IsNullOrEmpty(sleep)) Thread.Sleep(Int32.Parse(sleep) * 1000);
+        // A barrier: wait for the test to create the file, after it has seen
+        // every install reach this point (its call is logged already).
+        string gate = Environment.GetEnvironmentVariable("FAKE_INSTALL_SELF_WAIT_FILE");
+        if (!String.IsNullOrEmpty(gate))
+        {
+            for (int n = 0; n < 1200 && !File.Exists(gate); n++) Thread.Sleep(100);
+        }
+        string exit = Environment.GetEnvironmentVariable("FAKE_INSTALL_SELF_EXIT");
+        if (!String.IsNullOrEmpty(exit) && exit != "0")
+        {
+            Console.Error.WriteLine("fake open-ferry: install-self failed");
+            return Int32.Parse(exit);
+        }
+        string data = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "open-ferry");
+        string rest = name.Substring("open-ferry-".Length);
+        string version = rest.Substring(0, rest.IndexOf('-'));
+        string target = rest.Substring(rest.IndexOf('-') + 1);
+        Directory.CreateDirectory(data);
+
+        bool stillRunning = false;
+        // One install at a time, as the real one's locks make it.
+        Mutex mutex = new Mutex(false, "Local\\fake-open-ferry-"
+            + Path.GetFullPath(to).ToLowerInvariant().Replace('\\', '_').Replace(':', '_'));
+        mutex.WaitOne();
+        try
+        {
+        string dir = Path.GetDirectoryName(Path.GetFullPath(to));
+        string file = Path.GetFileName(to);
+        // The real order: the old binary aside, the placement, the receipt,
+        // and everything undone if the receipt can't be written. Earlier
+        // aside files go only once this install is committed.
+        string aside = null;
+        if (File.Exists(to))
+        {
+            aside = to + ".old-" + Guid.NewGuid().ToString("N");
+            File.Move(to, aside);
+        }
+        File.Move(from, to);
+        string receipt = Path.Combine(data, "install-receipt.json");
+        string text = "{\"format\":1,\"installer\":" + Json(installer) + ",\"version\":" + Json(version)
+            + ",\"binary\":" + Json(to) + ",\"target\":" + Json(target) + ",\"installed_at\":\""
+            + DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture)
+            + "\"}\n";
+        try
+        {
+            if (Directory.Exists(receipt)) throw new IOException("the receipt path is a directory");
+            File.WriteAllText(receipt + ".tmp", text, new UTF8Encoding(false));
+            if (File.Exists(receipt)) File.Delete(receipt);
+            File.Move(receipt + ".tmp", receipt);
+        }
+        catch (Exception)
+        {
+            try { File.Delete(receipt + ".tmp"); } catch (Exception) { }
+            File.Move(to, from);
+            if (aside != null) File.Move(aside, to);
+            Console.Error.WriteLine("fake open-ferry: install-self: can't write the install receipt");
+            return 1;
+        }
+        if (aside != null)
+        {
+            try { File.Delete(aside); } catch (Exception) { stillRunning = true; }
+        }
+        foreach (string old in Directory.GetFiles(dir, file + ".old-*"))
+        {
+            if (aside != null && String.Equals(old, aside, StringComparison.OrdinalIgnoreCase)) continue;
+            try { File.Delete(old); } catch (Exception) { stillRunning = true; }
+        }
+        }
+        finally
+        {
+            mutex.ReleaseMutex();
+        }
+        if (stillRunning)
+        {
+            Console.WriteLine("An older open-ferry.exe is still running: restart it to run this one.");
+        }
+        return 0;
+    }
+
     public static int Main(string[] args)
     {
         string name = "@NAME@";
         bool migrate = args.Length >= 1 && args[0] == "migrate";
-        string log = Environment.GetEnvironmentVariable(migrate ? "FAKE_OPEN_FERRY_MIGRATE_LOG" : "FAKE_OPEN_FERRY_LOG");
+        bool installSelf = args.Length >= 1 && args[0] == "install-self";
+        string log = Environment.GetEnvironmentVariable(
+            migrate ? "FAKE_OPEN_FERRY_MIGRATE_LOG" : installSelf ? "FAKE_OPEN_FERRY_INSTALL_LOG" : "FAKE_OPEN_FERRY_LOG");
         if (!String.IsNullOrEmpty(log))
         {
             StringBuilder line = new StringBuilder(name);
@@ -216,7 +414,24 @@ public static class FakeOpenFerry
                 line.Append('\t').Append(arg);
             }
             line.Append('\n');
-            File.AppendAllText(log, line.ToString());
+            // Two fakes may log at once: try again while the other has the file.
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    File.AppendAllText(log, line.ToString());
+                    break;
+                }
+                catch (IOException)
+                {
+                    if (attempt >= 100) throw;
+                    Thread.Sleep(30);
+                }
+            }
+        }
+        if (installSelf)
+        {
+            return InstallSelf(name, args);
         }
         if (migrate)
         {
@@ -588,9 +803,9 @@ EXTRA_FILES = (
 )
 
 
-def write_tar(path, version, target):
+def write_tar(path, version, target, binary=None):
     top = top_dir(version, target)
-    members = [(f"{top}/open-ferry", FAKE_OPEN_FERRY_SH.replace("@NAME@", top).encode(), 0o755)]
+    members = [(f"{top}/open-ferry", binary or FAKE_OPEN_FERRY_SH.replace("@NAME@", top).encode(), 0o755)]
     members += [(f"{top}/{name}", data, 0o644) for name, data in EXTRA_FILES]
     with tarfile.open(path, "w:gz") as tar:
         for directory in (top, f"{top}/licenses"):
@@ -634,13 +849,13 @@ def compile_fake_exe(directory, name):
         return f.read()
 
 
-def build_release(root, version, exe, binary_mode=False, tampered=False):
+def build_release(root, version, exe, binary_mode=False, tampered=False, unix_binary=None):
     directory = os.path.join(root, "download", "v" + version)
     os.makedirs(directory)
     names = []
     for target in UNIX_TARGETS:
         name = archive_name(version, target)
-        write_tar(os.path.join(directory, name), version, target)
+        write_tar(os.path.join(directory, name), version, target, unix_binary)
         names.append(name)
     name = archive_name(version, WINDOWS_TARGET)
     write_zip(os.path.join(directory, name), version, WINDOWS_TARGET, exe)
@@ -740,7 +955,14 @@ def setUpModule():
         build_release(good, OLDER, older_exe, binary_mode=True)
         build_release(good, TAMPERED, latest_exe, tampered=True)
         build_release(os.path.join(releases, "broken"), TAMPERED, latest_exe, tampered=True)
-        SERVER = ReleaseServer(releases, {"good": LATEST, "broken": TAMPERED})
+        latest = {"good": LATEST, "broken": TAMPERED}
+        if REAL_BINARY:
+            # The real binary in the archives, for RealBinaryTests.
+            with open(REAL_BINARY, "rb") as f:
+                real = f.read()
+            build_release(os.path.join(releases, "real"), LATEST, real, unix_binary=real)
+            latest["real"] = LATEST
+        SERVER = ReleaseServer(releases, latest)
     except BaseException:
         shutil.rmtree(BASE, ignore_errors=True)
         raise
@@ -779,6 +1001,7 @@ class InstallShTests(Case):
         self.config = os.path.join(self.work, "config dir", "open-ferry", "config.yaml")
         self.log = os.path.join(self.work, "open-ferry.log")
         self.migrate_log = os.path.join(self.work, "migrate.log")
+        self.install_log = os.path.join(self.work, "install-self.log")
         self.gh_log = os.path.join(self.work, "gh.log")
 
     def env(self, path_first=(), **extra):
@@ -790,6 +1013,7 @@ class InstallShTests(Case):
             OPEN_FERRY_INSTALL_GH=NO_GH,
             FAKE_OPEN_FERRY_LOG=sh_path(self.log),
             FAKE_OPEN_FERRY_MIGRATE_LOG=sh_path(self.migrate_log),
+            FAKE_OPEN_FERRY_INSTALL_LOG=sh_path(self.install_log),
             FAKE_GH_LOG=sh_path(self.gh_log),
         )
         for key, value in extra.items():
@@ -840,7 +1064,7 @@ class InstallShTests(Case):
     def reset(self):
         for path in (self.bin_dir, os.path.dirname(os.path.dirname(self.config))):
             shutil.rmtree(path, ignore_errors=True)
-        for path in (self.log, self.migrate_log, self.gh_log):
+        for path in (self.log, self.migrate_log, self.install_log, self.gh_log):
             if os.path.exists(path):
                 os.remove(path)
 
@@ -1055,22 +1279,131 @@ class InstallShTests(Case):
         self.assertExit(result, 0)
         self.assertReceipt(OLDER, binary)
 
+    def assertInstallSelfCall(self, name):
+        """install-self ran once, on a staged file of its own in the bin
+        directory."""
+        calls = read_log(self.install_log)
+        self.assertEqual(len(calls), 1, calls)
+        call = calls[0]
+        bin_dir = sh_path(self.bin_dir)
+        self.assertEqual(call[:3], [name, "install-self", "-from"], call)
+        self.assertRegex(call[3], "^" + re.escape(bin_dir + "/.open-ferry.") + r"[0-9]+\.[A-Za-z0-9]+$")
+        self.assertEqual(call[4:], ["-to", bin_dir + "/open-ferry", "-installer", "install.sh"])
+
+    def test_the_binary_installs_itself(self):
+        result = self.run_sh("--target", GNU, *self.install_args())
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertInstallSelfCall(name)
+        # install-self does not run with the other calls.
+        self.assertEqual(read_log(self.log), [[name, "init", "-config", sh_path(self.config)]])
+
+    def test_leaves_the_lock_files_alone(self):
+        os.makedirs(self.bin_dir)
+        locks = [".open-ferry.lock", ".open-ferry.install.lock"]
+        for lock in locks:
+            write_file(os.path.join(self.bin_dir, lock), "held by someone else\n", mode=0o600)
+        result = self.run_sh("--target", GNU, *self.install_args())
+        self.assertExit(result, 0)
+        self.assertEqual(sorted(os.listdir(self.bin_dir)), sorted(["open-ferry", *locks]))
+        for lock in locks:
+            self.assertEqual(read_text(os.path.join(self.bin_dir, lock)), "held by someone else\n")
+
+    def test_stops_when_install_self_cannot_install(self):
+        # What it says for each exit code, and that nothing else ran. An
+        # exit of 6 keeps the staged file, which may be all that is left.
+        cases = (
+            (1, "couldn't install open-ferry in " + sh_path(self.bin_dir), False),
+            (3, "open-ferry runs as a background service", False),
+            (4, "couldn't tell whether open-ferry is running from " + sh_path(self.bin_dir) + "/open-ferry", False),
+            (5, "gave up waiting for another open-ferry install or update", False),
+            (6, "couldn't put things back", True),
+            (7, "couldn't install open-ferry in " + sh_path(self.bin_dir), False),
+        )
+        for code, message, keeps in cases:
+            with self.subTest(code=code):
+                self.reset()
+                self.assertExit(self.run_sh("--target", GNU, "--version", OLDER, *self.install_args()), 0)
+                old = read_text(self.binary())
+                self.reset_logs()
+                shutil.rmtree(os.path.dirname(os.path.dirname(self.config)))
+                result = self.run_sh("--target", GNU, *self.install_args(), FAKE_INSTALL_SELF_EXIT=str(code))
+                self.assertExit(result, 1)
+                self.assertIn("install.sh: error: ", result.output)
+                self.assertIn(message, result.output)
+                self.assertIn("fake open-ferry: install-self failed", result.output)
+                self.assertEqual(read_text(self.binary()), old, "the old binary changed")
+                staged = [entry for entry in os.listdir(self.bin_dir) if entry != "open-ferry"]
+                self.assertEqual(len(staged), 1 if keeps else 0, staged)
+                self.assertEqual(read_log(self.log), [], "something ran after install-self failed")
+                self.assertEqual(read_log(self.migrate_log), [])
+                self.assertFalse(os.path.exists(self.config))
+                self.assertEqual(os.listdir(self.tmp), [], "the temporary directory is left behind")
+                self.assertNotIn("Installed open-ferry", result.output)
+
+    def reset_logs(self):
+        for path in (self.log, self.migrate_log, self.install_log, self.gh_log):
+            if os.path.exists(path):
+                os.remove(path)
+
     def test_says_when_it_cannot_write_the_receipt(self):
-        # A file where the data directory goes.
+        # A file where the data directory goes: the install stops, and the
+        # old binary is as it was.
+        self.assertExit(self.run_sh("--target", GNU, "--version", OLDER, *self.install_args()), 0)
+        old = read_text(self.binary())
+        shutil.rmtree(os.path.join(self.home, ".local"))
         blocker = os.path.join(self.home, ".local", "share", "open-ferry")
         write_file(blocker, "not a directory\n", mode=0o644)
         result = self.run_sh("--target", GNU, *self.install_args())
-        self.assertExit(result, 0)
-        self.assertInstalled(LATEST, GNU)
-        receipt = sh_path(self.home) + "/.local/share/open-ferry/install-receipt.json"
-        lines = lines_of(result.output)
-        self.assertIn(
-            f"Couldn't write the install receipt {receipt}, so open-ferry won't update itself;"
-            " it will say when a release is out.",
-            lines,
-        )
-        self.assertTrue(lines[-1].startswith("open-ferry says when a release is out. To turn that off: "), lines[-1])
+        self.assertExit(result, 1)
+        self.assertEqual(read_text(self.binary()), old)
+        self.assertEqual(os.listdir(self.bin_dir), ["open-ferry"])
         self.assertEqual(read_text(blocker), "not a directory\n")
+        self.assertNotIn("Installed open-ferry", result.output)
+
+    def test_puts_the_old_binary_back_when_the_receipt_path_is_a_directory(self):
+        # The data directory is fine; the receipt's own path is a directory,
+        # so the receipt fails after the binary is placed.
+        self.assertExit(self.run_sh("--target", GNU, "--version", OLDER, *self.install_args()), 0)
+        old = read_text(self.binary())
+        receipt = self.receipt()
+        os.remove(receipt)
+        os.makedirs(receipt)
+        result = self.run_sh("--target", GNU, *self.install_args())
+        self.assertExit(result, 1)
+        self.assertEqual(read_text(self.binary()), old)
+        self.assertEqual(os.listdir(self.bin_dir), ["open-ferry"])
+        self.assertTrue(os.path.isdir(receipt))
+        self.assertEqual(os.listdir(receipt), [])
+        self.assertEqual([entry for entry in os.listdir(os.path.dirname(receipt)) if entry != "install-receipt.json"], [])
+        self.assertNotIn("Installed open-ferry", result.output)
+
+    def test_two_installs_at_once_do_not_share_a_staged_file(self):
+        self.bin_dir =os.path.join(self.work, "bin dir")
+        # Neither install-self goes on until the test has seen both.
+        release = os.path.join(self.work, "release")
+        env = self.env(FAKE_INSTALL_SELF_WAIT_FILE=sh_path(release))
+        command = [SH, sh_path(INSTALL_SH), "--target", GNU, *self.install_args()]
+        first = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(stop, first)
+        second = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(stop, second)
+        # Both have staged a file, and are waiting in install-self.
+        self.assertTrue(
+            wait_for(lambda: len(read_log(self.install_log)) == 2),
+            "both installs didn't reach install-self",
+        )
+        staged = sorted(entry for entry in os.listdir(self.bin_dir) if entry.startswith(".open-ferry."))
+        self.assertEqual(len(staged), 2, staged)
+        write_file(release, "go\n", mode=0o644)
+        for process in (first, second):
+            output = process.communicate(timeout=120)[0].decode("utf-8", "replace")
+            self.assertEqual(process.returncode, 0, output)
+        calls = read_log(self.install_log)
+        self.assertEqual(len({call[3] for call in calls}), 2, calls)
+        self.assertEqual(os.listdir(self.bin_dir), ["open-ferry"])
+        self.assertEqual(read_text(self.binary()), FAKE_OPEN_FERRY_SH.replace("@NAME@", top_dir(LATEST, GNU)))
+        read_receipt(self.receipt())
 
     @unittest.skipIf(WINDOWS, "Windows paths can't hold a double quote")
     def test_escapes_the_receipt(self):
@@ -1482,6 +1815,7 @@ class InstallPs1Cases:
         self.exe = os.path.join(self.install_dir, "open-ferry.exe")
         self.log = os.path.join(self.work, "open-ferry.log")
         self.migrate_log = os.path.join(self.work, "migrate.log")
+        self.install_log = os.path.join(self.work, "install-self.log")
         self.gh_log = os.path.join(self.work, "gh.log")
         self.local = os.path.join(self.work, "LocalAppData")
         self.roaming = os.path.join(self.work, "AppData")
@@ -1500,6 +1834,7 @@ class InstallPs1Cases:
             OPEN_FERRY_INSTALL_GH=NO_GH,
             FAKE_OPEN_FERRY_LOG=self.log,
             FAKE_OPEN_FERRY_MIGRATE_LOG=self.migrate_log,
+            FAKE_OPEN_FERRY_INSTALL_LOG=self.install_log,
             FAKE_GH_LOG=self.gh_log,
         )
         for key, value in extra.items():
@@ -1722,21 +2057,131 @@ class InstallPs1Cases:
         self.assertIn("fake open-ferry: update failed", result.output)
         self.assertIn(f"open-ferry update couldn't set self-update.mode to off in {self.config}", result.output)
 
-    def test_says_when_it_cannot_write_the_receipt(self):
-        # A file where the data directory goes.
-        blocker = os.path.join(self.local, "open-ferry")
-        write_file(blocker, "not a directory\n", mode=0o644)
+    def reset_logs(self):
+        for path in (self.log, self.migrate_log, self.install_log, self.gh_log):
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_the_binary_installs_itself(self):
         result = self.run_file(*self.install_args())
         self.assertExit(result, 0)
-        self.assertInstalled(LATEST)
-        lines = lines_of(result.output)
-        self.assertIn(
-            "Couldn't write the install receipt in %LOCALAPPDATA%" + chr(92) + "open-ferry, so open-ferry won't"
-            " update itself; it will say when a release is out.",
-            lines,
+        name = self.assertInstalled(LATEST)
+        calls = read_log(self.install_log)
+        self.assertEqual(len(calls), 1, calls)
+        call = calls[0]
+        self.assertEqual(call[:3], [name, "install-self", "-from"], call)
+        self.assertRegex(
+            call[3], "^" + re.escape(self.install_dir + chr(92) + ".open-ferry.") + r"[0-9]+\.[0-9a-f]{32}\.new$"
         )
-        self.assertTrue(lines[-1].startswith("open-ferry says when a release is out. To turn that off: "), lines[-1])
+        self.assertEqual(call[4:], ["-to", self.exe, "-installer", "install.ps1"])
+        self.assertEqual(read_log(self.log), [[name, "init", "-config", self.config]])
+        self.assertReceipt(LATEST)
+
+    def test_leaves_the_lock_files_alone(self):
+        os.makedirs(self.install_dir)
+        locks = [".open-ferry.lock", ".open-ferry.install.lock"]
+        for lock in locks:
+            write_file(os.path.join(self.install_dir, lock), "held by someone else\n", mode=0o600)
+        self.assertExit(self.run_file(*self.install_args()), 0)
+        for lock in locks:
+            self.assertEqual(read_text(os.path.join(self.install_dir, lock)), "held by someone else\n")
+
+    def test_stops_when_install_self_cannot_install(self):
+        # What it says for each exit code, and that nothing else ran. An
+        # exit of 6 keeps the staged file, which may be all that is left.
+        cases = (
+            (1, "Couldn't install open-ferry in " + self.install_dir, False),
+            (3, "open-ferry runs as a background service", False),
+            (4, "Couldn't tell whether open-ferry is running from " + self.exe, False),
+            (5, "Gave up waiting for another open-ferry install or update", False),
+            (6, "couldn't put things back", True),
+            (7, "Couldn't install open-ferry in " + self.install_dir, False),
+        )
+        self.assertExit(self.run_file("-Version", OLDER, *self.install_args()), 0)
+        with open(self.exe, "rb") as f:
+            old = f.read()
+        for code, message, keeps in cases:
+            with self.subTest(code=code):
+                self.reset_logs()
+                before = set(os.listdir(self.install_dir))
+                result = self.run_file(*self.install_args(), FAKE_INSTALL_SELF_EXIT=str(code))
+                self.assertExit(result, 1)
+                self.assertIn(message, result.output)
+                self.assertIn("fake open-ferry: install-self failed", result.output)
+                with open(self.exe, "rb") as f:
+                    self.assertTrue(f.read() == old, "the old binary changed")
+                left = set(os.listdir(self.install_dir)) - before
+                self.assertEqual(len(left), 1 if keeps else 0, left)
+                if keeps:
+                    os.remove(os.path.join(self.install_dir, left.pop()))
+                self.assertEqual(read_log(self.log), [], "something ran after install-self failed")
+                self.assertEqual(read_log(self.migrate_log), [])
+                self.assertEqual(
+                    [entry for entry in os.listdir(self.tmp) if entry.startswith("open-ferry-install-")],
+                    [],
+                    "the temporary directory is left behind",
+                )
+                self.assertNotIn("Installed open-ferry", result.output)
+
+    def test_says_when_it_cannot_write_the_receipt(self):
+        # A file where the data directory goes: the install stops, and the
+        # old binary is as it was.
+        self.assertExit(self.run_file("-Version", OLDER, *self.install_args()), 0)
+        with open(self.exe, "rb") as f:
+            old = f.read()
+        shutil.rmtree(os.path.join(self.local, "open-ferry"))
+        blocker = os.path.join(self.local, "open-ferry")
+        write_file(blocker, "not a directory\n", mode=0o644)
+        before = set(os.listdir(self.install_dir))
+        result = self.run_file(*self.install_args())
+        self.assertExit(result, 1)
+        with open(self.exe, "rb") as f:
+            self.assertTrue(f.read() == old, "the old binary changed")
+        self.assertEqual(set(os.listdir(self.install_dir)), before)
         self.assertEqual(read_text(blocker), "not a directory\n")
+        self.assertNotIn("Installed open-ferry", result.output)
+
+    def test_puts_the_old_binary_back_when_the_receipt_path_is_a_directory(self):
+        self.assertExit(self.run_file("-Version", OLDER, *self.install_args()), 0)
+        with open(self.exe, "rb") as f:
+            old = f.read()
+        receipt = self.receipt()
+        os.remove(receipt)
+        os.makedirs(receipt)
+        before = set(os.listdir(self.install_dir))
+        result = self.run_file(*self.install_args())
+        self.assertExit(result, 1)
+        with open(self.exe, "rb") as f:
+            self.assertTrue(f.read() == old, "the old binary changed")
+        self.assertEqual(set(os.listdir(self.install_dir)), before)
+        self.assertTrue(os.path.isdir(receipt))
+        self.assertEqual(os.listdir(receipt), [])
+        self.assertEqual([entry for entry in os.listdir(os.path.dirname(receipt)) if entry != "install-receipt.json"], [])
+        self.assertNotIn("Installed open-ferry", result.output)
+
+    def test_two_installs_at_once_do_not_share_a_staged_file(self):
+        # Neither install-self goes on until the test has seen both.
+        release = os.path.join(self.work, "release")
+        env = self.env(FAKE_INSTALL_SELF_WAIT_FILE=release)
+        command = [*self.shell_args(), "-File", INSTALL_PS1, *self.install_args()]
+        first = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(stop, first)
+        second = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(stop, second)
+        self.assertTrue(
+            wait_for(lambda: len(read_log(self.install_log)) == 2, timeout=150),
+            "both installs didn't reach install-self",
+        )
+        calls = read_log(self.install_log)
+        self.assertEqual(len({call[3] for call in calls}), 2, calls)
+        write_file(release, "go\n", mode=0o644)
+        for process in (first, second):
+            output = process.communicate(timeout=180)[0].decode("utf-8", "replace")
+            self.assertEqual(process.returncode, 0, output)
+        with open(self.exe, "rb") as f:
+            self.assertTrue(f.read() == EXES[top_dir(LATEST, WINDOWS_TARGET)])
+        self.assertEqual([entry for entry in os.listdir(self.install_dir) if entry.endswith(".new")], [])
+        read_receipt(self.receipt())
 
     def test_replaces_a_running_open_ferry(self):
         self.assertExit(self.run_file("-Version", OLDER, *self.install_args()), 0)
@@ -1755,7 +2200,7 @@ class InstallPs1Cases:
         )
 
         def aside():
-            return [entry for entry in os.listdir(self.install_dir) if entry.endswith(".old")]
+            return [entry for entry in os.listdir(self.install_dir) if ".old-" in entry]
 
         # Twice while it runs: the first install moves the running binary
         # aside, and the second can't delete it yet but installs anyway.
@@ -2222,6 +2667,148 @@ class WindowsPowerShellTests(InstallPs1Cases, Case):
 
 class PowerShell7Tests(InstallPs1Cases, Case):
     shell = PWSH
+
+
+# --- The real binary ---------------------------------------------------------
+
+
+@unittest.skipUnless(
+    REAL_BINARY and os.path.isfile(REAL_BINARY),
+    "set OFP_INSTALL_REAL_BINARY to the path of an open-ferry build to run the scripts with it",
+)
+class RealBinaryTests(Case):
+    """The scripts with a real open-ferry in the archives, which installs
+    itself: into scratch directories only."""
+
+    def setUp(self):
+        if WINDOWS and not (POWERSHELL or PWSH):
+            self.skipTest("no PowerShell")
+        if not WINDOWS and not SH:
+            self.skipTest("no sh")
+        self.work = self.make_work()
+        self.home = os.path.join(self.work, "home")
+        self.tmp = os.path.join(self.work, "tmp")
+        self.dest_dir = os.path.join(self.work, "bin dir")
+        self.config = os.path.join(self.work, "config dir", "config.yaml")
+        for path in (self.home, self.tmp):
+            os.makedirs(path)
+        self.dest = os.path.join(self.dest_dir, "open-ferry.exe" if WINDOWS else "open-ferry")
+        with open(REAL_BINARY, "rb") as f:
+            self.real = f.read()
+
+    def env(self):
+        env = clean_env()
+        env.update(
+            OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("real"),
+            OPEN_FERRY_INSTALL_GH=NO_GH,
+        )
+        if WINDOWS:
+            local = os.path.join(self.home, "LocalAppData")
+            os.makedirs(local, exist_ok=True)
+            env.update(LOCALAPPDATA=local, APPDATA=os.path.join(self.home, "AppData"), TEMP=self.tmp, TMP=self.tmp)
+            self.data = os.path.join(local, "open-ferry")
+        else:
+            env.update(HOME=sh_path(self.home), TMPDIR=sh_path(self.tmp))
+            env["PATH"] = os.pathsep.join([os.environ.get("PATH", ""), *SH_TOOLS])
+            self.data = os.path.join(self.home, ".local", "share", "open-ferry")
+        return env
+
+    def install(self, *more):
+        if WINDOWS:
+            shell = POWERSHELL or PWSH
+            command = [shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", INSTALL_PS1]
+            args = ["-InstallDir", self.dest_dir, "-ConfigPath", self.config, "-NoMigrate"]
+        else:
+            command = [SH, sh_path(INSTALL_SH)]
+            args = ["--bin-dir", sh_path(self.dest_dir), "--config", sh_path(self.config), "--no-migrate"]
+        return run([*command, *args, *more], self.env())
+
+    def assertReceiptNames(self, dest):
+        # The data directory also holds open-ferry's lock files, so not
+        # read_receipt; but no temporary receipt is left beside it.
+        self.assertEqual([entry for entry in os.listdir(self.data) if "receipt" in entry], ["install-receipt.json"])
+        receipt = json.loads(read_text(os.path.join(self.data, "install-receipt.json")))
+        self.assertEqual(
+            sorted(receipt), ["binary", "format", "installed_at", "installer", "target", "version"], receipt
+        )
+        self.assertTrue(re.fullmatch(RECEIPT_TIME, receipt["installed_at"]), receipt)
+        self.assertEqual(receipt["installer"], "install.ps1" if WINDOWS else "install.sh")
+        self.assertEqual(receipt["format"], 1)
+        self.assertTrue(receipt["version"] and receipt["target"], receipt)
+        self.assertFalse(receipt["binary"].startswith(chr(92) * 2 + "?" + chr(92)), receipt)
+        self.assertTrue(os.path.samefile(receipt["binary"], dest), receipt)
+        self.assertEqual(os.path.basename(receipt["binary"]), os.path.basename(dest))
+
+    def assertWhole(self, expected=None):
+        with open(self.dest, "rb") as f:
+            if expected is None:
+                self.assertTrue(f.read() == self.real, "the installed binary isn't the real one")
+            else:
+                self.assertEqual(f.read(), expected, "the old binary's bytes were not left as they were")
+        # The install lock's file stays, as the lock is the file's, not its existence.
+        leftovers = [
+            entry
+            for entry in os.listdir(self.dest_dir)
+            if (entry.startswith(".open-ferry") and not entry.endswith(".lock")) or ".old-" in entry
+        ]
+        self.assertEqual(leftovers, [])
+
+    def test_installs_and_replaces_itself(self):
+        result = self.install()
+        self.assertExit(result, 0)
+        self.assertWhole()
+        self.assertReceiptNames(self.dest)
+        self.assertTrue(os.path.isfile(self.config), "no config written")
+        first = read_text(os.path.join(self.data, "install-receipt.json"))
+        # Over the binary just installed.
+        result = self.install()
+        self.assertExit(result, 0)
+        self.assertWhole()
+        self.assertReceiptNames(self.dest)
+        second = read_text(os.path.join(self.data, "install-receipt.json"))
+        self.assertEqual(json.loads(first)["binary"], json.loads(second)["binary"])
+
+    def put_old_bytes(self):
+        # Distinguishable from the real binary, so a blocked install that
+        # replaced it and did not restore it would show.
+        old = b"old open-ferry bytes" + chr(10).encode()
+        with open(self.dest, "wb") as f:
+            f.write(old)
+        return old
+
+    def test_leaves_the_old_binary_when_the_receipt_cannot_be_written(self):
+        self.assertExit(self.install(), 0)
+        old = self.put_old_bytes()
+        # A file where the data directory goes.
+        shutil.rmtree(self.data)
+        write_file(self.data, "not a directory\n", mode=0o644)
+        result = self.install()
+        self.assertExit(result, 1)
+        self.assertNotIn("Installed open-ferry", result.output)
+        self.assertWhole(old)
+        self.assertEqual(read_text(self.data), "not a directory\n")
+
+    def test_leaves_the_old_binary_when_the_receipt_path_is_a_directory(self):
+        self.assertExit(self.install(), 0)
+        old = self.put_old_bytes()
+        receipt = os.path.join(self.data, "install-receipt.json")
+        os.remove(receipt)
+        os.makedirs(receipt)
+        result = self.install()
+        self.assertExit(result, 1)
+        self.assertNotIn("Installed open-ferry", result.output)
+        self.assertWhole(old)
+        self.assertTrue(os.path.isdir(receipt))
+        self.assertEqual(os.listdir(receipt), [])
+        self.assertEqual([entry for entry in os.listdir(self.data) if "receipt" in entry], ["install-receipt.json"])
+
+    def test_refuses_bad_arguments(self):
+        self.assertExit(self.install(), 0)
+        result = run([self.dest, "install-self", "-from", self.dest, "-to", self.dest, "-installer", "install.sh"], self.env())
+        self.assertExit(result, 2)
+        result = run([self.dest, "install-self"], self.env())
+        self.assertExit(result, 2)
+        self.assertWhole()
 
 
 @unittest.skipIf(WINDOWS or not PWSH, "for pwsh outside Windows")

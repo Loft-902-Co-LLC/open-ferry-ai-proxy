@@ -512,17 +512,32 @@ pub(crate) fn create_dir_all_durable(path: &Path, root: &Path) -> io::Result<()>
     create_dir_all_durable_with(&RealFs, path, root)
 }
 
-/// Syncs the directory `path` so a rename or link in it survives a crash.
-/// Does nothing on Windows.
+/// The result of an fsync of a directory (never of a file). A filesystem that
+/// can't sync directories answers EINVAL (Rust's `InvalidInput`): there is
+/// nothing more to do for it, as PostgreSQL's `fsync_fname` takes it for
+/// directories, so it is done. Every other error, EACCES and EIO included, is
+/// a failure. This is the one place the rule lives; install-self uses it too.
 #[cfg(unix)]
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
+pub(crate) fn dir_sync_outcome(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        other => other,
+    }
+}
+
+/// Syncs the directory `path` so a rename or link in it survives a crash.
+/// Does nothing on Windows. Failing to open it is an error; an fsync that a
+/// filesystem refuses for directories (EINVAL) is done, and any other fsync
+/// error is a failure.
+#[cfg(unix)]
+pub fn sync_directory(path: &Path) -> io::Result<()> {
+    dir_sync_outcome(std::fs::File::open(path)?.sync_all())
 }
 
 /// Syncs the directory `path` so a rename or link in it survives a crash.
 /// Does nothing on Windows.
 #[cfg(not(unix))]
-pub(crate) fn sync_directory(_path: &Path) -> io::Result<()> {
+pub fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -1386,5 +1401,29 @@ mod tests {
         sync_directory(&path).unwrap();
         sync_parent(&path).unwrap();
         sync_parent(&dir.path().join("bare")).unwrap();
+    }
+
+    // The one directory-sync rule: EINVAL on the fsync is done, everything
+    // else is a failure, and a directory that can't be opened fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cannot_be_synced_is_done_but_other_errors_are_not() {
+        assert!(dir_sync_outcome(Ok(())).is_ok());
+        assert!(dir_sync_outcome(Err(io::Error::from_raw_os_error(libc_einval()))).is_ok());
+        for errno in [13, 5, 28, 9] {
+            let error = dir_sync_outcome(Err(io::Error::from_raw_os_error(errno))).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            sync_directory(&missing).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    fn libc_einval() -> i32 {
+        22
     }
 }

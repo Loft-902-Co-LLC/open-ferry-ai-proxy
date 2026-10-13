@@ -25,9 +25,12 @@
 #                                in the config (--no-auto-update is off)
 #   OPEN_FERRY_INSTALL_MIGRATE   yes: as --migrate; no: as --no-migrate
 #
-# It writes install-receipt.json in open-ferry's data directory
-# ($XDG_DATA_HOME/open-ferry, or ~/.local/share/open-ferry), which lets the
-# binary update itself; see docs/updates.md for turning that off.
+# The new binary installs itself (`open-ferry install-self`): it waits for
+# any other install or update, refuses to replace a binary a background
+# service runs, replaces the old one with a way back, and writes
+# install-receipt.json in open-ferry's data directory ($XDG_DATA_HOME/open-ferry,
+# or ~/.local/share/open-ferry), which lets the binary update itself; see
+# docs/updates.md for turning that off.
 #
 # See https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy#install
 set -eu
@@ -379,38 +382,44 @@ binary=$tmp/open-ferry-$version-$target/open-ferry
 [ -f "$binary" ] || die "$archive holds no open-ferry binary"
 
 mkdir -p "$bin_dir" || die "couldn't make $bin_dir"
-# Copied next to the old binary, then renamed over it in one step, so a
-# running open-ferry keeps its file and a failed copy leaves the old one.
-staged=$bin_dir/.open-ferry.new.$$
-cp "$binary" "$staged" || die "couldn't write to $bin_dir"
-chmod 755 "$staged"
-if ! mv -f "$staged" "$bin_dir/open-ferry"; then
-  rm -f "$staged"
-  die "couldn't install open-ferry in $bin_dir"
-fi
+# Copied next to the old binary, then the new binary moves itself into place
+# (`install-self`): a running open-ferry keeps its file, and a failed install
+# leaves the old one. The staged file has a name of its own, so two installs
+# never share it.
+staged=$(mktemp "$bin_dir/.open-ferry.$$.XXXXXXXX") || die "couldn't write to $bin_dir"
 installed=$bin_dir/open-ferry
-say "Installed open-ferry $version as $installed."
-
-# The install receipt: open-ferry updates itself only when it names the
-# binary that runs (see docs/updates.md).
-json() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
-case ${XDG_DATA_HOME:-} in
-  /*) receipt=$XDG_DATA_HOME/open-ferry/install-receipt.json ;;
-  *) receipt=${HOME:+$HOME/.local/share/open-ferry/install-receipt.json} ;;
-esac
-if [ -n "$receipt" ] && mkdir -p "${receipt%/*}" 2>/dev/null &&
-  printf '{"format":1,"installer":"install.sh","version":%s,"binary":%s,"target":%s,"installed_at":%s}\n' \
-    "$(json "$version")" "$(json "$installed")" "$(json "$target")" \
-    "$(json "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" 2>/dev/null >"$receipt.$$" &&
-  mv -f "$receipt.$$" "$receipt"; then
-  receipt_ok=1
-else
-  receipt_ok=0
-  # rm -f fails where the path can't exist (a file where a directory
-  # should be) with BSD and busybox rm.
-  [ -z "$receipt" ] || rm -f "$receipt.$$" 2>/dev/null || :
-  say "Couldn't write the install receipt ${receipt:-as HOME is unset}, so open-ferry won't update itself; it will say when a release is out."
+if ! cp "$binary" "$staged" || ! chmod 755 "$staged"; then
+  rm -f "$staged"
+  die "couldn't write to $bin_dir"
 fi
+status=0
+# `install-self` is in every release (0.1.0 has it, and no release is older),
+# so a version this script can name has it: no fallback, no probe.
+"$staged" install-self -from "$staged" -to "$installed" -installer install.sh </dev/null || status=$?
+case $status in
+  0) ;;
+  3)
+    rm -f "$staged"
+    die "open-ferry runs as a background service: install-self said how to stop it, above. Nothing was changed."
+    ;;
+  4)
+    rm -f "$staged"
+    die "couldn't tell whether open-ferry is running from $installed: see above. Nothing was changed."
+    ;;
+  5)
+    rm -f "$staged"
+    die "gave up waiting for another open-ferry install or update to finish. Nothing was changed; run the installer again."
+    ;;
+  6)
+    # The new binary and the files it names may be all that is left: keep them.
+    die "the install didn't finish and open-ferry couldn't put things back: see above for the files to restore by hand."
+    ;;
+  *)
+    rm -f "$staged"
+    die "couldn't install open-ferry in $bin_dir: see above."
+    ;;
+esac
+say "Installed open-ferry $version as $installed."
 
 # How to run open-ferry in the commands printed from here on.
 command=open-ferry
@@ -604,10 +613,9 @@ fi
 if [ -n "$mode_config" ]; then
   say ""
   off="To turn that off: $command update -mode off -config \"$mode_config\""
-  case $self_update:$receipt_ok:$wrote_config in
+  case $self_update:$wrote_config in
     off:*) say "Automatic updates are off. To turn them on: $command update -mode auto -config \"$mode_config\"" ;;
     notify:*) say "open-ferry says when a release is out, but doesn't install it. $off" ;;
-    *:0:*) say "open-ferry says when a release is out. $off" ;;
     auto:* | *:1) say "open-ferry keeps itself up to date. $off" ;;
     *) say "open-ferry keeps itself up to date, unless your config says otherwise. $off" ;;
   esac

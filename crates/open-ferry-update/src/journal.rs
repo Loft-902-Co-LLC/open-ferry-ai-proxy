@@ -813,6 +813,9 @@ pub(crate) struct AtomicFailure {
     /// The move into place succeeded; only the directory sync after it
     /// failed. The target holds the new bytes.
     pub(crate) landed: bool,
+    /// The temporary file this write made, and why it could not be removed
+    /// after the write failed: it is still beside the target.
+    pub(crate) left_behind: Option<(PathBuf, io::Error)>,
 }
 
 impl AtomicFailure {
@@ -820,6 +823,7 @@ impl AtomicFailure {
         Self {
             error,
             landed: false,
+            left_behind: None,
         }
     }
 }
@@ -895,17 +899,47 @@ pub(crate) fn atomic_write_landed(
     bytes: &[u8],
     replace: bool,
 ) -> Result<(), AtomicFailure> {
-    atomic_write_with(path, bytes, replace, run_tag(), &mut || {
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    })
+    atomic_write_removing(path, bytes, replace, &mut |temp| fs::remove_file(temp))
 }
 
+/// [`atomic_write_landed`] with the removal of a failed write's temporary
+/// file given, so a test can make it fail.
+pub(crate) fn atomic_write_removing(
+    path: &Path,
+    bytes: &[u8],
+    replace: bool,
+    remove: &mut dyn FnMut(&Path) -> io::Result<()>,
+) -> Result<(), AtomicFailure> {
+    atomic_write_in(
+        path,
+        bytes,
+        replace,
+        run_tag(),
+        &mut || TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
+        remove,
+    )
+}
+
+#[cfg(test)]
 fn atomic_write_with(
     path: &Path,
     bytes: &[u8],
     replace: bool,
     tag: u64,
     next_counter: &mut dyn FnMut() -> u64,
+) -> Result<(), AtomicFailure> {
+    atomic_write_in(path, bytes, replace, tag, next_counter, &mut |temp| {
+        fs::remove_file(temp)
+    })
+}
+
+fn atomic_write_in(
+    path: &Path,
+    bytes: &[u8],
+    replace: bool,
+    tag: u64,
+    next_counter: &mut dyn FnMut() -> u64,
+    remove: &mut dyn FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), AtomicFailure> {
     let dir = path
         .parent()
@@ -950,8 +984,16 @@ fn atomic_write_with(
         }
     });
     if let Err(error) = placed {
-        let _ = fs::remove_file(&temp);
-        return Err(AtomicFailure::not_landed(error));
+        // A temp that is already gone is gone; one that stays is named.
+        let left_behind = match remove(&temp) {
+            Err(removal) if removal.kind() != io::ErrorKind::NotFound => Some((temp, removal)),
+            _ => None,
+        };
+        return Err(AtomicFailure {
+            error,
+            landed: false,
+            left_behind,
+        });
     }
     // The file is in place. A failure from here on is not "not written".
     retry_sync(SYNC_TRIES, SYNC_WAIT, || {
@@ -961,6 +1003,7 @@ fn atomic_write_with(
     .map_err(|error| AtomicFailure {
         error,
         landed: true,
+        left_behind: None,
     })
 }
 
