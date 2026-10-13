@@ -15,6 +15,8 @@ use tokio::task::JoinHandle;
 
 use super::*;
 
+// Paused-clock tests must use private maps: REFRESHES mixes instants from different runtimes.
+
 const DEVICE: &str = "E61BBE28-07EF-466D-8E5D-A344F94AB305";
 const ACCESS: &str = "fake-siwc-access";
 const REFRESH: &str = "fake-siwc-refresh";
@@ -1394,7 +1396,7 @@ async fn an_evicted_success_retires_its_held_waiter_before_successor_rotation() 
 }
 
 #[tokio::test]
-async fn an_expired_success_retires_its_held_waiter() {
+async fn an_expired_success_sets_its_invalidation_flag() {
     let mut map = HashMap::new();
     let mut entry = cache_entry(Some(tokio::time::Instant::now()));
     entry.successor = Some([1; 32]);
@@ -1497,6 +1499,8 @@ async fn a_real_unpolled_task_is_removed_after_runtime_shutdown() {
     assert!(!cache.lock().unwrap()[&key].started.load(Ordering::SeqCst));
     drop(held);
     runtime.shutdown_background();
+    prune_refreshes(&mut cache.lock().unwrap());
+    assert!(!cache.lock().unwrap().contains_key(&key));
     let mut other = previous();
     other.refresh_token = "fake-unrelated".into();
     assert!(
@@ -1649,6 +1653,209 @@ async fn an_unobserved_post_send_panic_is_kept_from_detection_until_expiry() {
             .refresh_tokens_in_cache(&original, 2, cache)
             .await
             .is_ok()
+    );
+    assert!(
+        fake.request()
+            .await
+            .body
+            .contains("refresh_token=fake-siwc-refresh&")
+    );
+    assert!(fake.captured.is_empty());
+    cache.lock().unwrap().clear();
+}
+
+#[tokio::test]
+async fn a_wrapper_observed_post_send_loss_retires_predecessors() {
+    predecessor_task_loss(Some(true)).await;
+}
+
+#[tokio::test]
+async fn a_reap_observed_post_send_loss_retires_predecessors() {
+    predecessor_task_loss(None).await;
+}
+
+#[tokio::test]
+async fn a_pre_send_loss_preserves_predecessors() {
+    predecessor_task_loss(Some(false)).await;
+}
+
+async fn predecessor_task_loss(panic_after_send: Option<bool>) {
+    let cache: &'static Mutex<HashMap<[u8; 32], RefreshEntry>> =
+        Box::leak(Box::new(Mutex::new(HashMap::new())));
+    let release = Arc::new(Semaphore::new(0));
+    let mut response = grant();
+    response["refresh_token"] = json!("fake-T1");
+    let mut fake = Fake::start(
+        vec![(StatusCode::OK, response.to_string()); 2],
+        Some(release.clone()),
+    )
+    .await;
+    let original = previous();
+    let auth = fake.auth.clone();
+    let mut held = Box::pin(auth.refresh_tokens_in_cache(&original, 3, cache));
+    let waker = futures_util::task::noop_waker();
+    assert!(
+        held.as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert!(
+        fake.request()
+            .await
+            .body
+            .contains("refresh_token=fake-siwc-refresh&")
+    );
+    release.add_permits(1);
+    let rotated = fake
+        .auth
+        .refresh_tokens_in_cache(&original, 3, cache)
+        .await
+        .unwrap();
+    let key = refresh_key(&fake.auth.endpoints.token_url, "oaiapp_issued", "fake-T1");
+    let mut successor_auth = fake.auth.clone();
+    successor_auth.panic_after_send = panic_after_send;
+    if panic_after_send == Some(true) {
+        // Join before the response, so this caller observes the wrapper, not the reap.
+        let mut successor = Box::pin(successor_auth.refresh_tokens_in_cache(&rotated, 3, cache));
+        assert!(
+            successor
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert!(fake.request().await.body.contains("refresh_token=fake-T1&"));
+        release.add_permits(1);
+        assert_eq!(successor.await.unwrap_err(), interrupted_refresh());
+    } else {
+        let runtime = if panic_after_send == Some(false) {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        } else {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let mut successor = Box::pin(successor_auth.refresh_tokens_in_cache(&rotated, 3, cache));
+        {
+            let _entered = runtime.enter();
+            assert!(
+                successor
+                    .as_mut()
+                    .poll(&mut std::task::Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        if panic_after_send.is_none() {
+            assert!(fake.request().await.body.contains("refresh_token=fake-T1&"));
+        } else {
+            assert!(!cache.lock().unwrap()[&key].started.load(Ordering::SeqCst));
+        }
+        drop(successor);
+        runtime.shutdown_background();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !cache.lock().unwrap()[&key]
+                .task
+                .as_ref()
+                .unwrap()
+                .is_finished()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if panic_after_send == Some(false) {
+            prune_refreshes(&mut cache.lock().unwrap());
+            assert!(!cache.lock().unwrap().contains_key(&key));
+            assert_eq!(held.await.unwrap().refresh_token, "fake-T1");
+            assert_eq!(
+                fake.auth
+                    .refresh_tokens_in_cache(&original, 3, cache)
+                    .await
+                    .unwrap()
+                    .refresh_token,
+                "fake-T1"
+            );
+            assert!(fake.captured.is_empty());
+            cache.lock().unwrap().clear();
+            return;
+        }
+        // This lookup's prune is the first observer of the loss.
+        assert_eq!(
+            fake.auth
+                .refresh_tokens_in_cache(&rotated, 3, cache)
+                .await
+                .unwrap_err(),
+            interrupted_refresh()
+        );
+    }
+    let detected = cache.lock().unwrap()[&key].completed.unwrap();
+    assert_eq!(held.await.unwrap_err(), superseded_refresh());
+    assert_eq!(
+        fake.auth
+            .refresh_tokens_in_cache(&original, 3, cache)
+            .await
+            .unwrap_err(),
+        superseded_refresh()
+    );
+    assert_eq!(
+        fake.auth
+            .refresh_tokens_in_cache(&rotated, 3, cache)
+            .await
+            .unwrap_err(),
+        interrupted_refresh()
+    );
+    assert_eq!(cache.lock().unwrap()[&key].completed, Some(detected));
+    assert!(fake.captured.is_empty());
+    cache.lock().unwrap().clear();
+}
+
+#[tokio::test]
+async fn an_evicted_tombstone_allows_a_fresh_request() {
+    let cache: &'static Mutex<HashMap<[u8; 32], RefreshEntry>> =
+        Box::leak(Box::new(Mutex::new(HashMap::new())));
+    let mut response = grant();
+    response["refresh_token"] = json!("fake-T1");
+    let mut fake = Fake::start(vec![(StatusCode::OK, response.to_string()); 4], None).await;
+    let original = previous();
+    let rotated = fake
+        .auth
+        .refresh_tokens_in_cache(&original, 2, cache)
+        .await
+        .unwrap();
+    fake.request().await;
+    fake.auth
+        .refresh_tokens_in_cache(&rotated, 2, cache)
+        .await
+        .unwrap();
+    fake.request().await;
+    assert_eq!(
+        fake.auth
+            .refresh_tokens_in_cache(&original, 2, cache)
+            .await
+            .unwrap_err(),
+        superseded_refresh()
+    );
+    let mut other = previous();
+    other.refresh_token = "fake-unrelated".into();
+    fake.auth
+        .refresh_tokens_in_cache(&other, 2, cache)
+        .await
+        .unwrap();
+    fake.request().await;
+    let key = refresh_key(&fake.auth.endpoints.token_url, "oaiapp_issued", REFRESH);
+    assert!(!cache.lock().unwrap().contains_key(&key));
+    assert_eq!(
+        fake.auth
+            .refresh_tokens_in_cache(&original, 2, cache)
+            .await
+            .unwrap()
+            .refresh_token,
+        "fake-T1"
     );
     assert!(
         fake.request()
