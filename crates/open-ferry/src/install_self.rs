@@ -10,6 +10,8 @@
 //! can't be looked at or resolved included); 2 usage (the arguments are wrong);
 //! 3 a supervisor runs; 4 whether one runs can't be told; 5 the wait ran
 //! out; 6 partly changed and the restore failed.
+//! Scope, privilege and destination trust refusals exit 1, before any lock
+//! or replacement. `-system` provisions the machine's update records.
 
 use std::fs;
 use std::io::{self, Write};
@@ -24,6 +26,7 @@ use open_ferry_update::data_dir::DataDir;
 use open_ferry_update::receipt::{Receipt, WriteError};
 
 use crate::os_service::hint;
+use crate::scope;
 
 /// The subcommand's name: the first argument that runs it.
 pub const NAME: &str = "install-self";
@@ -64,26 +67,30 @@ struct Options {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage: {program} {NAME} -from <file> -to <file> -installer install.sh|install.ps1 [-wait <seconds>]\n\
+        "usage: {program} {NAME} -from <file> -to <file> -installer install.sh|install.ps1 [-wait <seconds>] [-system]\n\
          Not for people: the install scripts run it, from the binary they staged.\n"
     )
 }
 
-/// The options in `args`, the arguments after the subcommand's name.
-fn parse<I>(args: I) -> Result<Options, String>
-where
-    I: IntoIterator<Item = String>,
-{
+/// The scope flag is separate from the replacement's file options.
+fn parse_with_scope(args: impl IntoIterator<Item = String>) -> Result<(Options, bool), String> {
     let mut from = None;
     let mut to = None;
     let mut installer = None;
     let mut wait = DEFAULT_WAIT;
+    let mut system = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let name = arg.trim_start_matches('-');
         let dashes = arg.len() - name.len();
-        if !matches!(name, "from" | "to" | "installer" | "wait") || !(1..=2).contains(&dashes) {
+        if !matches!(name, "from" | "to" | "installer" | "wait" | "system")
+            || !(1..=2).contains(&dashes)
+        {
             return Err(format!("unknown argument: {arg}"));
+        }
+        if name == "system" {
+            system = true;
+            continue;
         }
         let Some(value) = args.next().filter(|value| !value.is_empty()) else {
             return Err(format!("{arg} needs a value"));
@@ -113,12 +120,20 @@ where
             }
         }
     }
-    Ok(Options {
-        from: from.ok_or("-from is needed")?,
-        to: to.ok_or("-to is needed")?,
-        installer: installer.ok_or("-installer is needed")?,
-        wait,
-    })
+    Ok((
+        Options {
+            from: from.ok_or("-from is needed")?,
+            to: to.ok_or("-to is needed")?,
+            installer: installer.ok_or("-installer is needed")?,
+            wait,
+        },
+        system,
+    ))
+}
+
+#[cfg(test)]
+fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
+    parse_with_scope(args).map(|(options, _)| options)
 }
 
 /// Runs `install-self` with `args`, the arguments after its name.
@@ -126,7 +141,7 @@ pub fn main<I>(program: &str, args: I) -> ExitCode
 where
     I: IntoIterator<Item = String>,
 {
-    let options = match parse(args) {
+    let (options, system) = match parse_with_scope(args) {
         Ok(options) => options,
         Err(message) => {
             eprintln!("{NAME}: {message}");
@@ -134,12 +149,12 @@ where
             return ExitCode::from(Exit::Usage as u8);
         }
     };
-    ExitCode::from(run_for_real(&options) as u8)
+    ExitCode::from(run_for_real(&options, system) as u8)
 }
 
 /// The run on this machine: the real binary, data directory, clock, files
 /// and detection.
-fn run_for_real(options: &Options) -> Exit {
+fn run_for_real(options: &Options, system: bool) -> Exit {
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
@@ -147,14 +162,24 @@ fn run_for_real(options: &Options) -> Exit {
             return Exit::Failed;
         }
     };
-    let data = match DataDir::for_this_user() {
-        Ok(data) => data,
+    let destination = match options.to.to_str() {
+        Some(destination) => destination,
+        None => {
+            eprintln!("{NAME}: -to isn't valid Unicode text. Nothing was changed.");
+            return Exit::Usage;
+        }
+    };
+    let home = match install_home(&mut scope::Host, destination, system) {
+        Ok(home) => home,
         Err(error) => {
-            eprintln!("{NAME}: can't find open-ferry's data directory: {error}");
+            eprintln!("{NAME}: {error}");
             return Exit::Failed;
         }
     };
-    let identity = match Identity::current(ServiceKind::User) {
+    if let Some(hint) = &home.machine_hint {
+        println!("{hint}");
+    }
+    let identity = match Identity::current(home.kind) {
         Ok(identity) => identity,
         Err(error) => {
             eprintln!("{NAME}: can't tell who is running: {error}");
@@ -179,7 +204,7 @@ fn run_for_real(options: &Options) -> Exit {
     let mut publish = |receipt: &Receipt, path: &Path| receipt.write_atomic(path);
     let mut env = Env {
         current_exe,
-        data,
+        data: home.data,
         windows: cfg!(windows),
         // The same variable `DataDir::for_this_user` reads on Unix.
         home: std::env::var_os("HOME")
@@ -191,11 +216,44 @@ fn run_for_real(options: &Options) -> Exit {
         clock: &mut clock,
         publish: &mut publish,
     };
-    install(
-        options,
-        &mut env,
-        &mut Say::new(&mut io::stdout(), &mut io::stderr()),
-    )
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    let mut say = Say::new(&mut stdout, &mut stderr);
+    say.kind = home.kind;
+    install(options, &mut env, &mut say)
+}
+
+/// Selects the destination's records before a lock, stop or replacement.
+fn install_home(
+    probe: &mut dyn scope::Probe,
+    destination: &str,
+    system: bool,
+) -> Result<scope::Home, scope::Refusal> {
+    if !system {
+        let home = scope::lookup(probe, destination)?;
+        home.require_privilege()?;
+        return Ok(home);
+    }
+    // Check privilege before the destination or provisioning can do anything.
+    if probe.platform() == crate::os_service::Platform::MacOs
+        || !probe.privileged().is_ok_and(|privileged| privileged)
+    {
+        return scope::provision(probe);
+    }
+    let trust = match probe.state(destination) {
+        scope::State::Missing => match probe.platform().parent(destination) {
+            Some(parent) => probe.trusted_dir(&parent),
+            None => Err(format!("{destination} has no destination directory")),
+        },
+        _ => probe.trusted_file(destination),
+    };
+    trust.map_err(|reason| scope::Refusal {
+        reason,
+        remedy: Some("As root or an administrator, fix the destination's ownership and permissions, then run the installer again with -system.".to_owned()),
+    })?;
+    let home = scope::provision(probe)?;
+    home.require_privilege()?;
+    Ok(home)
 }
 
 // --- What the run depends on, so tests can script it -------------------------
@@ -374,11 +432,16 @@ impl Clock for RealClock {
 struct Say<'a> {
     out: &'a mut dyn Write,
     err: &'a mut dyn Write,
+    kind: ServiceKind,
 }
 
 impl<'a> Say<'a> {
     fn new(out: &'a mut dyn Write, err: &'a mut dyn Write) -> Self {
-        Self { out, err }
+        Self {
+            out,
+            err,
+            kind: ServiceKind::User,
+        }
     }
 
     fn say(&mut self, message: &str) {
@@ -507,7 +570,7 @@ fn wait_for_locks(
                 match (env.detect)(env.data.root(), dest, detect_deadline) {
                     Detection::Clear(install_lock) => return Ok((lock, install_lock)),
                     Detection::Supervised(running) => {
-                        say.warn(&supervised_message(&running));
+                        say.warn(&supervised_message(&running, say.kind));
                         return Err(Exit::Supervised);
                     }
                     Detection::Refuse(reason) => {
@@ -560,7 +623,7 @@ fn detect_deadline(now: Instant, wait_deadline: Instant) -> Instant {
     wait_deadline.min(now + DETECT_BUDGET)
 }
 
-fn supervised_message(running: &Running) -> String {
+fn supervised_message(running: &Running, kind: ServiceKind) -> String {
     let mut who = String::from("An open-ferry supervisor is running");
     if let Some(pid) = running.pid {
         who.push_str(&format!(" (process {pid}"));
@@ -571,7 +634,7 @@ fn supervised_message(running: &Running) -> String {
     }
     format!(
         "{who}, so the binary can't be replaced. Nothing was changed.\n{}",
-        hint::stop_and_retry(ServiceKind::User, "run the installer again")
+        hint::stop_and_retry(kind, "run the installer again")
     )
 }
 
@@ -1258,3 +1321,211 @@ fn sweep_old(dest: &Path, own: Option<&Path>, env: &mut Env<'_>) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::os_service::Platform;
+    use crate::scope::{Probe, Scope};
+    use crate::update::scope_probe::{Fake, Node};
+
+    const DEST: &str = "C:/Program Files/open-ferry/open-ferry.exe";
+
+    #[test]
+    fn the_scope_flag_is_optional_and_does_not_consume_a_value() {
+        let args = |extra: &[&str]| {
+            ["-from", "staged", "-to", DEST, "-installer", "install.ps1"]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert!(!parse_with_scope(args(&[])).unwrap().1);
+        for flag in ["-system", "--system"] {
+            let (options, system) = parse_with_scope(args(&[flag, "-wait", "0"])).unwrap();
+            assert!(system);
+            assert_eq!(options.wait, Duration::ZERO);
+            assert_eq!(options.to, Path::new(DEST));
+        }
+        assert!(parse_with_scope(args(&["---system"])).is_err());
+    }
+
+    #[test]
+    fn the_destination_selects_machine_scope_and_replacement_requires_privilege() {
+        let mut probe = Fake::new(Platform::Windows, false);
+        let machine = scope::machine_root(&probe).unwrap().unwrap();
+        probe.file(DEST).with_receipt(&machine, DEST);
+        let refusal = install_home(&mut probe, DEST, false)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("terminal opened as administrator"));
+        probe.privileged = Ok(true);
+        let home = install_home(&mut probe, DEST, false).unwrap();
+        assert_eq!(home.scope, Scope::Machine);
+        assert_eq!(home.kind, ServiceKind::System);
+        assert_eq!(home.data.root(), Path::new(&machine));
+        assert!(probe.created.is_empty());
+    }
+
+    #[test]
+    fn account_installs_keep_unprivileged_behavior_but_privileged_records_need_trust() {
+        for platform in [Platform::Windows, Platform::Linux, Platform::MacOs] {
+            let mut probe = Fake::new(platform, false);
+            let account = probe.account_dir().unwrap();
+            probe.dir(&account).untrust(&account);
+            assert_eq!(
+                install_home(&mut probe, DEST, false).unwrap().scope,
+                Scope::Account
+            );
+            probe.privileged = Ok(true);
+            let refusal = install_home(&mut probe, DEST, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refusal.contains(match platform {
+                    Platform::Windows => "not opened as administrator",
+                    Platform::Linux => "without sudo",
+                    Platform::MacOs => "macOS",
+                }),
+                "{refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_install_needs_privilege_and_macos_refuses_before_provisioning() {
+        for platform in [Platform::Windows, Platform::Linux, Platform::MacOs] {
+            let mut probe = Fake::new(platform, false);
+            assert!(install_home(&mut probe, DEST, true).is_err());
+            assert!(probe.created.is_empty());
+            if platform == Platform::MacOs {
+                probe.privileged = Ok(true);
+                assert!(
+                    install_home(&mut probe, DEST, true)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("macOS")
+                );
+                assert!(probe.created.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn system_install_checks_an_existing_destination_or_the_new_destination_directory() {
+        for exists in [false, true] {
+            let mut probe = Fake::new(Platform::Windows, true);
+            let parent = probe.platform.parent(DEST).unwrap();
+            probe.dir(&parent);
+            if exists {
+                probe.file(DEST).untrust(DEST);
+            } else {
+                probe.untrust(&parent);
+            }
+            let refusal = install_home(&mut probe, DEST, true)
+                .unwrap_err()
+                .to_string();
+            assert!(refusal.contains("untrusted"), "{refusal}");
+            assert!(probe.created.is_empty(), "trust before provisioning");
+        }
+    }
+
+    #[test]
+    fn system_provisioning_refusal_is_passed_through_and_success_uses_machine_receipts() {
+        let mut probe = Fake::new(Platform::Windows, true);
+        probe.file(DEST);
+        probe.create = Some(io::ErrorKind::PermissionDenied);
+        let refusal = install_home(&mut probe, DEST, true).unwrap_err();
+        let expected = scope::provision(&mut probe).unwrap_err();
+        assert_eq!(refusal, expected);
+        probe.create = None;
+        let home = install_home(&mut probe, DEST, true).unwrap();
+        let root = scope::machine_root(&probe).unwrap().unwrap();
+        assert_eq!(home.scope, Scope::Machine);
+        assert_eq!(home.kind, ServiceKind::System);
+        assert_eq!(
+            home.data.receipt_file(),
+            Path::new(&root).join(open_ferry_update::data_dir::RECEIPT_FILE)
+        );
+        assert_eq!(probe.created, [root]);
+        let message = supervised_message(&Running::default(), home.kind);
+        assert!(message.contains("open-ferry -supervise -system"));
+    }
+
+    #[test]
+    fn an_unreadable_machine_sets_the_hint_for_install_self() {
+        let mut probe = Fake::new(Platform::Windows, false);
+        let machine = scope::machine_root(&probe).unwrap().unwrap();
+        probe.node(&machine, Node::Hidden);
+        let home = install_home(&mut probe, DEST, false).unwrap();
+        assert!(home.machine_hint.unwrap().contains("whole machine"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_install_writes_the_receipt_in_the_fake_machine_directory() {
+        let scratch = std::env::var_os("OFP_TEST_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+            });
+        fs::create_dir_all(&scratch).unwrap();
+        let scratch = unverbatim(fs::canonicalize(scratch).unwrap());
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let from = bin.join("staged.exe");
+        let to = bin.join("open-ferry.exe");
+        fs::write(&from, b"new").unwrap();
+        let options = Options {
+            from: from.clone(),
+            to: to.clone(),
+            installer: "install.ps1".to_owned(),
+            wait: Duration::ZERO,
+        };
+        let mut probe = Fake::new(Platform::Windows, true);
+        probe.program_data = Ok(dir.path().join("ProgramData").to_str().unwrap().to_owned());
+        probe.account = Ok(dir.path().join("account").to_str().unwrap().to_owned());
+        probe.dir(bin.to_str().unwrap());
+        let home = install_home(&mut probe, to.to_str().unwrap(), true).unwrap();
+        assert_eq!(home.kind, ServiceKind::System);
+        assert!(home.data.root().starts_with(dir.path()));
+        fs::create_dir_all(home.data.root()).unwrap();
+        let mut detect = |_: &Path, installed: &Path, _: Instant| {
+            Detection::Clear(
+                open_ferry_update::install_lock::InstallLock::try_acquire(installed).unwrap(),
+            )
+        };
+        let mut files = RealFiles;
+        let mut clock = RealClock;
+        let mut publish = |receipt: &Receipt, path: &Path| receipt.write_atomic(path);
+        let mut env = Env {
+            current_exe: from,
+            data: home.data.clone(),
+            windows: true,
+            home: None,
+            unique: unique_suffix(),
+            detect: &mut detect,
+            files: &mut files,
+            clock: &mut clock,
+            publish: &mut publish,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut say = Say::new(&mut out, &mut err);
+        say.kind = home.kind;
+        assert_eq!(
+            install(&options, &mut env, &mut say),
+            Exit::Installed,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        let receipt = Receipt::load(&home.data.receipt_file()).unwrap().unwrap();
+        assert_eq!(Path::new(&receipt.binary), canonical_dest(&to).unwrap());
+        assert_eq!(fs::read(&to).unwrap(), b"new");
+        assert!(
+            !Path::new(&probe.account_dir().unwrap())
+                .join(open_ferry_update::data_dir::RECEIPT_FILE)
+                .exists()
+        );
+    }
+}

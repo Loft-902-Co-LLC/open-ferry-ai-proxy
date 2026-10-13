@@ -405,15 +405,12 @@ async fn in_scope<T>(operation: Option<Operation>, work: impl FnOnce() -> T) -> 
 /// (`welcome.installation.data_dir`); an ordinary run takes the user's from
 /// the environment.
 fn prepare_update_checks(config: &Config, data_dir: Option<&Path>) -> Option<UpdateService> {
-    let data = match data_dir {
-        Some(root) => DataDir::at(root),
-        None => match DataDir::for_this_user() {
-            Ok(data) => data,
-            Err(error) => {
-                tracing::warn!("update checks don't run: {error}");
-                return None;
-            }
-        },
+    let data = match update_check_data(&crate::scope::Host, data_dir) {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::warn!("update checks don't run: {error}");
+            return None;
+        }
     };
     let make_fetch = update_checks::http_fetch();
     // Each check makes its own downloader from the config in force, so a
@@ -435,6 +432,72 @@ fn prepare_update_checks(config: &Config, data_dir: Option<&Path>) -> Option<Upd
             tracing::warn!("update checks don't run: {error}");
             None
         }
+    }
+}
+
+/// Authorizes the worker's records, or the ordinary server's account records.
+fn update_check_data(
+    probe: &dyn crate::scope::Probe,
+    data_dir: Option<&Path>,
+) -> Result<DataDir, String> {
+    let root = match data_dir {
+        Some(root) => root
+            .to_str()
+            .ok_or_else(|| format!("{} isn't valid Unicode", root.display()))?
+            .to_owned(),
+        None => probe.account_dir()?,
+    };
+    crate::scope::authorize(probe, &root).map_err(|error| error.to_string())?;
+    Ok(DataDir::at(root))
+}
+
+#[cfg(test)]
+mod update_check_scope_tests {
+    use super::update_check_data;
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+    use std::path::Path;
+
+    #[test]
+    fn privileged_checks_refuse_untrusted_account_and_worker_records() {
+        let mut probe = Fake::new(Platform::Windows, true);
+        let account = probe.account.clone().unwrap();
+        probe.dir(&account).untrust(&account);
+        for root in [None, Some(Path::new(account.as_str()))] {
+            let refusal = update_check_data(&probe, root).unwrap_err();
+            assert!(refusal.contains("not opened as administrator"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn unprivileged_checks_use_account_and_worker_records() {
+        let mut probe = Fake::new(Platform::Windows, false);
+        let account = probe.account.clone().unwrap();
+        probe.dir(&account).untrust(&account);
+        assert_eq!(
+            update_check_data(&probe, None).unwrap().root(),
+            Path::new(&account)
+        );
+        assert_eq!(
+            update_check_data(&probe, Some(Path::new(&account)))
+                .unwrap()
+                .root(),
+            Path::new(&account)
+        );
+    }
+
+    #[test]
+    fn trusted_privileged_records_run_but_root_on_macos_does_not() {
+        let mut probe = Fake::new(Platform::Linux, true);
+        let account = probe.account.clone().unwrap();
+        probe.dir(&account);
+        assert!(update_check_data(&probe, None).is_ok());
+        probe.platform = Platform::MacOs;
+        assert!(
+            update_check_data(&probe, None)
+                .unwrap_err()
+                .contains("macOS")
+        );
     }
 }
 

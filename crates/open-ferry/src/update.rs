@@ -43,7 +43,6 @@ use open_ferry_supervisor::client::{self, Detection};
 use open_ferry_supervisor::endpoint::{Identity, ServiceKind};
 use open_ferry_supervisor::timings::DETECT_TIMEOUT;
 use open_ferry_update::background::http_fetch;
-use open_ferry_update::data_dir::NoDataDir;
 use open_ferry_update::install_lock::InstallLock;
 use open_ferry_update::state::SwitchRecord;
 use open_ferry_update::updater::Found;
@@ -54,7 +53,10 @@ use serde::Serialize;
 
 use crate::flags::{self, Definition, FlagError, Kind};
 use crate::installed;
+use crate::scope;
 
+#[cfg(test)]
+pub(crate) mod scope_probe;
 #[cfg(test)]
 mod tests;
 
@@ -200,7 +202,40 @@ where
     };
     // Before `.env` is loaded: a `.env` in the working directory must not move
     // the data directory this command's supervisor check looks at.
-    let data = DataDir::for_this_user();
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    let mut console = Console::new(options.json, &mut stdout, &mut stderr);
+    let binary = match std::env::current_exe() {
+        Ok(binary) => binary,
+        Err(error) => {
+            let outcome = Outcome::new(
+                request.action(),
+                &Settings::resolve(&Default::default(), None),
+            )
+            .failed(
+                &mut console,
+                format!("can't find the installed binary: {error}"),
+            );
+            return console.finish(outcome);
+        }
+    };
+    let home = match binary
+        .to_str()
+        .ok_or_else(|| "the installed binary isn't valid Unicode".to_owned())
+        .and_then(|binary| {
+            command_home(&scope::Host, binary, request).map_err(|error| error.to_string())
+        }) {
+        Ok(home) => home,
+        Err(error) => {
+            let outcome = Outcome::new(
+                request.action(),
+                &Settings::resolve(&Default::default(), None),
+            )
+            .failed(&mut console, error);
+            return console.finish(outcome);
+        }
+    };
+    say_machine_hint(&home, &mut console);
     let dotenv = working_dir.join(".env");
     if let Err(error) = crate::load_dotenv(&dotenv)
         && !error.is_not_found()
@@ -210,16 +245,77 @@ where
             dotenv.display()
         );
     }
-    let path = config_path(&options.config, &working_dir, installed::config_path().ok());
+    let path = match command_config(
+        &scope::Host,
+        &home,
+        &binary,
+        request,
+        &options.config,
+        &working_dir,
+        installed::config_path().ok(),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            let outcome = Outcome::new(
+                request.action(),
+                &Settings::resolve(&Default::default(), None),
+            )
+            .failed(&mut console, error);
+            return console.finish(outcome);
+        }
+    };
     let env = std::env::var(open_ferry_update::MODE_ENV).ok();
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-    let mut console = Console::new(options.json, &mut stdout, &mut stderr);
     let outcome = match request {
         Request::Mode(mode) => set_mode(&path, mode, env.as_deref(), &mut console),
-        request => manual(request, &path, &options, data, &mut console),
+        request => manual(request, &path, &options, home, &mut console),
     };
     console.finish(outcome)
+}
+
+/// Finds the records before any config is read, requiring privilege for a change.
+fn command_home(
+    probe: &dyn scope::Probe,
+    binary: &str,
+    request: Request,
+) -> Result<scope::Home, scope::Refusal> {
+    let home = scope::lookup(probe, binary)?;
+    if request != Request::Check {
+        home.require_privilege()?;
+    }
+    Ok(home)
+}
+
+fn say_machine_hint(home: &scope::Home, console: &mut Console<'_>) {
+    if let Some(hint) = &home.machine_hint {
+        console.say(hint);
+    }
+}
+
+/// Machine mode changes use the machine config, never a working directory's.
+fn command_config(
+    probe: &dyn scope::Probe,
+    home: &scope::Home,
+    binary: &Path,
+    request: Request,
+    flag: &str,
+    working_dir: &Path,
+    installed: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if home.scope == scope::Scope::Machine && matches!(request, Request::Mode(_)) && flag.is_empty()
+    {
+        if let Some(path) = binary
+            .to_str()
+            .and_then(|binary| scope::machine_config(probe.platform(), binary))
+            && probe.state(&path) == scope::State::File
+        {
+            return Ok(PathBuf::from(path));
+        }
+        return Err(
+            "the machine config wasn't found: pass -config with the machine's config path"
+                .to_owned(),
+        );
+    }
+    Ok(config_path(flag, working_dir, installed))
 }
 
 /// Shows `message` and the usage, for bad usage.
@@ -248,7 +344,7 @@ fn manual(
     request: Request,
     path: &Path,
     options: &Options,
-    data: Result<DataDir, NoDataDir>,
+    home: scope::Home,
     console: &mut Console,
 ) -> Outcome {
     let config = if path.is_file() {
@@ -271,7 +367,7 @@ fn manual(
     );
     console.mode_line(request, &settings, path, config.is_some());
     let proxy_url = config.map(|config| config.proxy_url).unwrap_or_default();
-    let updater = match real_updater(data, &proxy_url) {
+    let updater = match real_updater(home.data, &proxy_url, request == Request::Check) {
         Ok(updater) => updater,
         Err(error) => {
             return Outcome::new(request.action(), &settings).failed(console, error.to_string());
@@ -289,7 +385,7 @@ fn manual(
             );
         }
     };
-    let updates = Real(updater);
+    let updates = Real(updater, home.kind);
     let mut terminal = Terminal;
     runtime.block_on(run(
         request,
@@ -303,13 +399,16 @@ fn manual(
 
 /// The updater for this binary, with the data directory found before `.env`
 /// was loaded, downloading through `proxy_url`.
-fn real_updater(data: Result<DataDir, NoDataDir>, proxy_url: &str) -> Result<Updater, UpdateError> {
-    let data = data.map_err(UpdateError::NoDataDir)?;
+fn real_updater(data: DataDir, proxy_url: &str, read_only: bool) -> Result<Updater, UpdateError> {
     let fetch = http_fetch()(proxy_url).map_err(|error| UpdateError::Fetch {
         what: "the release list",
         error,
     })?;
-    Updater::for_this_binary(fetch, data)
+    let mut updater = Updater::for_this_binary(fetch, data)?;
+    updater.system = std::sync::Arc::new(open_ferry_update::install::RealSystem {
+        write_probe: !read_only,
+    });
+    Ok(updater)
 }
 
 /// Whether the installed binary `installed` may be replaced by a caller that
@@ -318,10 +417,14 @@ fn real_updater(data: Result<DataDir, NoDataDir>, proxy_url: &str) -> Result<Upd
 /// directory, another install, a supervisor of another data directory, or an
 /// answer that can't be had, change nothing: [`UpdateError::Supervised`]. The
 /// reason, when there is one, comes before the hint on stopping the service.
-async fn clear_to_replace_in(data: &Path, installed: &Path) -> Result<InstallLock, UpdateError> {
+async fn clear_to_replace_in(
+    data: &Path,
+    installed: &Path,
+    kind: ServiceKind,
+) -> Result<InstallLock, UpdateError> {
     let again = "run `open-ferry update` again";
-    let hint = || crate::os_service::hint::stop_and_retry(ServiceKind::User, again);
-    let identity = Identity::current(ServiceKind::User).map_err(|error| {
+    let hint = || crate::os_service::hint::stop_and_retry(kind, again);
+    let identity = Identity::current(kind).map_err(|error| {
         UpdateError::Supervised(format!(
             "could not tell whether an open-ferry supervisor runs: {error}\n{}",
             hint()
@@ -381,7 +484,7 @@ struct RollbackPlan {
 }
 
 /// The updater.
-struct Real(Updater);
+struct Real(Updater, ServiceKind);
 
 impl Real {
     /// Whether the installed binary may be replaced, asked right after the
@@ -394,14 +497,18 @@ impl Real {
     /// supervisor of another data directory, or an answer that can't be had,
     /// change nothing: [`UpdateError::Supervised`].
     async fn clear_to_replace(&self) -> Result<InstallLock, UpdateError> {
-        clear_to_replace_for(self.0.install(), self.0.data.root()).await
+        clear_to_replace_for(self.0.install(), self.0.data.root(), self.1).await
     }
 }
 
 /// [`clear_to_replace_in`] for `install`, which must be self-updating.
-async fn clear_to_replace_for(install: Install, data: &Path) -> Result<InstallLock, UpdateError> {
+async fn clear_to_replace_for(
+    install: Install,
+    data: &Path,
+    kind: ServiceKind,
+) -> Result<InstallLock, UpdateError> {
     match install {
-        Install::SelfUpdating { binary } => clear_to_replace_in(data, &binary).await,
+        Install::SelfUpdating { binary } => clear_to_replace_in(data, &binary, kind).await,
         Install::NotifyOnly(why) => Err(UpdateError::NotSelfUpdating(why)),
     }
 }

@@ -751,8 +751,9 @@ impl Machine for Host {
     }
 
     fn installed_binary(&mut self) -> Option<String> {
-        let data = open_ferry_update::DataDir::for_this_user().ok()?;
-        match open_ferry_update::receipt::Receipt::load(&data.receipt_file()) {
+        let binary = std::env::current_exe().ok()?;
+        let home = crate::scope::lookup(&crate::scope::Host, binary.to_str()?).ok()?;
+        match open_ferry_update::receipt::Receipt::load(&home.data.receipt_file()) {
             Ok(Some(receipt)) => Some(receipt.binary),
             _ => None,
         }

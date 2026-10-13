@@ -6027,6 +6027,63 @@ fn a_supervisor_and_its_workers_in_version_directories_are_runners() {
 }
 
 #[test]
+fn system_supervisors_and_their_workers_are_runners_on_linux_and_windows() {
+    for mut context in [linux(), windows()] {
+        let (binary, config, data, name, prefix) = if context.platform == Platform::Windows {
+            (
+                r"C:\Program Files\open-ferry\open-ferry.exe",
+                r"C:\Program Files\open-ferry\config.yaml",
+                r"C:\ProgramData\open-ferry",
+                "open-ferry.exe",
+                vec!["service", "run"],
+            )
+        } else {
+            (
+                "/usr/local/bin/open-ferry",
+                "/etc/open-ferry/config.yaml",
+                "/var/lib/open-ferry",
+                "open-ferry",
+                vec![],
+            )
+        };
+        context.exe = binary.to_owned();
+        let mut args = prefix;
+        args.extend([
+            "-supervise",
+            "-system",
+            "-config",
+            config,
+            "-data-dir",
+            data,
+        ]);
+        let supervisor = of_process(100, name, binary, &args);
+        let version = context
+            .platform
+            .join(data, &format!("versions/1.0.0/{name}"));
+        let worker = of_process(
+            101,
+            name,
+            &version,
+            &["-worker", "-config", config, "-worker-control", "3"],
+        );
+        let other = of_process(
+            102,
+            name,
+            &version,
+            &["-worker", "-config", "other.yaml", "-worker-control", "3"],
+        );
+        let mut fake = with_processes(&context, vec![supervisor, worker, other]);
+        assert_eq!(runner_pids(&mut fake, &context, binary, config), [100, 101]);
+        fake.procs.remove(&100);
+        assert_eq!(
+            runner_pids(&mut fake, &context, binary, config),
+            [101],
+            "an orphan system worker remains discoverable"
+        );
+    }
+}
+
+#[test]
 fn standby_and_draining_workers_are_runners() {
     let context = linux();
     let mut fake = with_processes(
