@@ -58,6 +58,7 @@ mod conductor_subsecond_cooldown;
 mod conductor_transport_retry;
 mod conductor_unauthorized_refresh;
 mod conductor_update;
+mod conductor_websocket_ready_error;
 mod conductor_weight_validation;
 mod config_apikey;
 mod connection_lifecycle_cooldown;

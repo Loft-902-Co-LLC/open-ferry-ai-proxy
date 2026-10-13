@@ -1453,16 +1453,22 @@ impl Manager {
             }
             loop {
                 let next = tokio::select! {
-                    // A client that left wins over a source that ended at
-                    // the same moment.
+                    // An item the source already has wins over a client that
+                    // left at the same moment: an error is recorded by
+                    // `emit` before it is sent, so the credential's quota
+                    // cooldown isn't lost. `emit` returns false on a closed
+                    // channel, which ends the loop.
                     biased;
-                    () = forwarder.tx.closed() => return,
                     next = rest.next() => next,
+                    () = forwarder.tx.closed() => return,
                 };
                 let Some(chunk) = next else {
                     break;
                 };
-                if !forwarder.emit(chunk).await {
+                // An empty chunk is not sent, so it can't tell the client
+                // is gone: check, or a source that only yields them would
+                // never be left.
+                if !forwarder.emit(chunk).await || forwarder.tx.is_closed() {
                     return;
                 }
             }
