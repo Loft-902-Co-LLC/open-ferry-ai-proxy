@@ -8,8 +8,8 @@
 //! and the nested credential, never in token forms or logs. Endpoints are
 //! injectable, response bodies are bounded, and errors don't quote remote
 //! bodies or credential values. Shared refresh requests survive cancelled
-//! waiters and time out after 30 seconds. Successful rotations remain in a
-//! bounded in-memory cache for ten minutes so a later waiter can persist them.
+//! waiters and time out after 30 seconds. Successful rotations are reused for
+//! up to ten minutes in a bounded cache, until their successor is rotated.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -278,9 +278,11 @@ impl SiwcAuth {
     /// Refreshes the nested credential. Concurrent requests for the same
     /// endpoint, issued client ID and refresh token share a bounded task.
     /// Each waiter keeps its own device UUID and previous ID token.
-    /// Successful rotations remain available for ten minutes (at most 256
-    /// entries). Callers must run refresh-then-persist in a task that a client
-    /// disconnect cannot cancel, so every rotation reaches durable storage.
+    /// Successful rotations are reused for up to ten minutes (at most 256
+    /// entries), until their successor is rotated. Callers must run
+    /// refresh-then-persist in a task that a client disconnect cannot cancel,
+    /// checking the persisted token baseline so an older result cannot replace
+    /// a newer rotation on disk.
     pub async fn refresh_tokens(&self, previous: &SiwcTokenData) -> Result<SiwcTokenData, Error> {
         let token = previous.refresh_token.trim();
         let client_id = previous.client_id.trim();
@@ -293,46 +295,63 @@ impl SiwcAuth {
             ));
         }
         let key = refresh_key(&self.endpoints.token_url, client_id, token);
-        let shared = {
-            let mut refreshes = REFRESHES.lock().unwrap_or_else(PoisonError::into_inner);
-            refreshes.retain(|_, entry| {
-                entry
-                    .completed
-                    .is_none_or(|at| at.elapsed() < REFRESH_GRACE)
-            });
-            match refreshes.get(&key) {
-                Some(entry) => entry.shared.clone(),
-                None => {
-                    let auth = self.clone();
-                    let form = encode_form(&[
-                        ("grant_type", "refresh_token"),
-                        ("client_id", client_id),
-                        ("refresh_token", token),
-                        ("resource", RESOURCE),
-                    ]);
-                    let id = Arc::new(());
-                    let task_id = id.clone();
-                    let task = tokio::spawn(async move {
-                        let result = auth.request_token(form, false).await;
-                        finish_refresh(key, &task_id, result.is_ok());
-                        result
-                    });
-                    let shared = shared_refresh(task, key, id.clone());
-                    insert_refresh(
-                        &mut refreshes,
-                        key,
-                        RefreshEntry {
-                            shared: shared.clone(),
-                            id,
-                            created: tokio::time::Instant::now(),
-                            completed: None,
-                        },
-                    );
-                    shared
+        let mut retry_cancelled = true;
+        let mut data = loop {
+            let shared = {
+                let mut refreshes = REFRESHES.lock().unwrap_or_else(PoisonError::into_inner);
+                refreshes.retain(|_, entry| {
+                    entry
+                        .completed
+                        .is_none_or(|at| at.elapsed() < REFRESH_GRACE)
+                });
+                match refreshes.get(&key) {
+                    Some(entry) => entry.shared.clone(),
+                    None => {
+                        let auth = self.clone();
+                        let form = encode_form(&[
+                            ("grant_type", "refresh_token"),
+                            ("client_id", client_id),
+                            ("refresh_token", token),
+                            ("resource", RESOURCE),
+                        ]);
+                        let id = Arc::new(());
+                        let task_id = id.clone();
+                        let task_client = client_id.to_owned();
+                        let task = tokio::spawn(async move {
+                            let result = auth.request_token(form, false).await;
+                            let successor = result.as_ref().ok().map(|data| {
+                                refresh_key(
+                                    &auth.endpoints.token_url,
+                                    &task_client,
+                                    data.refresh_token.trim(),
+                                )
+                            });
+                            finish_refresh(key, &task_id, successor);
+                            result
+                        });
+                        let shared = shared_refresh(task, key, id.clone());
+                        insert_refresh(
+                            &mut refreshes,
+                            key,
+                            RefreshEntry {
+                                shared: shared.clone(),
+                                id,
+                                created: tokio::time::Instant::now(),
+                                completed: None,
+                                successor: None,
+                            },
+                        );
+                        shared
+                    }
                 }
+            };
+            match shared.await {
+                Ok(data) => break data,
+                Err(RefreshError::Cancelled) if retry_cancelled => retry_cancelled = false,
+                Err(RefreshError::Cancelled) => return Err(invalid_refresh_result()),
+                Err(RefreshError::Request(error)) => return Err(error),
             }
         };
-        let mut data = shared.await?;
         data.client_id = client_id.to_owned();
         data.device_id = previous.device_id.trim().to_owned();
         if data.id_token.trim().is_empty() {
@@ -417,7 +436,13 @@ impl SiwcAuth {
     }
 }
 
-type SharedRefresh = Shared<BoxFuture<'static, Result<SiwcTokenData, Error>>>;
+#[derive(Clone)]
+enum RefreshError {
+    Request(Error),
+    Cancelled,
+}
+
+type SharedRefresh = Shared<BoxFuture<'static, Result<SiwcTokenData, RefreshError>>>;
 static REFRESHES: LazyLock<Mutex<HashMap<[u8; 32], RefreshEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -426,6 +451,7 @@ struct RefreshEntry {
     id: Arc<()>,
     created: tokio::time::Instant,
     completed: Option<tokio::time::Instant>,
+    successor: Option<[u8; 32]>,
 }
 
 fn refresh_key(endpoint: &str, client: &str, token: &str) -> [u8; 32] {
@@ -440,24 +466,45 @@ fn refresh_key(endpoint: &str, client: &str, token: &str) -> [u8; 32] {
 }
 
 fn insert_refresh(map: &mut HashMap<[u8; 32], RefreshEntry>, key: [u8; 32], entry: RefreshEntry) {
-    if map.len() >= MAX_REFRESHES
+    insert_refresh_with_limit(map, key, entry, MAX_REFRESHES);
+}
+
+fn insert_refresh_with_limit(
+    map: &mut HashMap<[u8; 32], RefreshEntry>,
+    key: [u8; 32],
+    entry: RefreshEntry,
+    limit: usize,
+) {
+    map.retain(|_, entry| {
+        entry
+            .completed
+            .is_none_or(|at| at.elapsed() < REFRESH_GRACE)
+    });
+    if map.len() >= limit
         && let Some(oldest) = map
             .iter()
-            .min_by_key(|(_, entry)| entry.created)
+            .min_by_key(|(_, entry)| (entry.completed.is_none(), entry.created))
             .map(|(key, _)| *key)
     {
+        // If every entry is in flight, drop the oldest tracking entry to keep
+        // the bound. Its task still completes, but later callers may duplicate it.
         map.remove(&oldest);
     }
     map.insert(key, entry);
 }
 
-fn finish_refresh(key: [u8; 32], id: &Arc<()>, success: bool) {
+fn finish_refresh(key: [u8; 32], id: &Arc<()>, successor: Option<[u8; 32]>) {
     let mut map = REFRESHES.lock().unwrap_or_else(PoisonError::into_inner);
+    if successor.is_some() {
+        // This token was spent even if its own tracking entry was evicted.
+        map.retain(|_, entry| entry.successor != Some(key));
+    }
     if let Some(entry) = map.get_mut(&key)
         && Arc::ptr_eq(&entry.id, id)
     {
-        if success {
+        if successor.is_some() {
             entry.completed = Some(tokio::time::Instant::now());
+            entry.successor = successor;
         } else {
             map.remove(&key);
         }
@@ -470,17 +517,25 @@ fn shared_refresh(
     id: Arc<()>,
 ) -> SharedRefresh {
     async move {
-        task.await.unwrap_or_else(|_| {
-            // Also covers a task dropped before its first poll. The identity
-            // check avoids removing a replacement after eviction or failure.
-            finish_refresh(key, &id, false);
-            Err(Error::new(
-                "SIWC token refresh failed: invalid single-flight result",
-            ))
-        })
+        task.await
+            .map_err(|error| {
+                // Also covers a task dropped before its first poll. The identity
+                // check avoids removing a replacement after eviction or failure.
+                finish_refresh(key, &id, None);
+                if error.is_cancelled() {
+                    RefreshError::Cancelled
+                } else {
+                    RefreshError::Request(invalid_refresh_result())
+                }
+            })?
+            .map_err(RefreshError::Request)
     }
     .boxed()
     .shared()
+}
+
+fn invalid_refresh_result() -> Error {
+    Error::new("SIWC token refresh failed: invalid single-flight result")
 }
 
 fn send_error(error: reqwest::Error) -> Error {

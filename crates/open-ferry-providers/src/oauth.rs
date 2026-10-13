@@ -189,7 +189,8 @@ pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, Callba
     let query: Vec<_> = url.query_pairs().collect();
     // Deliberate deviation from internal/misc/oauth.go:84-101: decode the
     // fragment once, retaining parseable fields beside malformed pairs.
-    // Upstream decodes twice and drops the entire fragment on a query error.
+    // Upstream decodes twice, rejects invalid fragment escapes at URL parsing,
+    // and drops the entire fragment on a query error (for example, a semicolon).
     let fragment: Vec<_> =
         url::form_urlencoded::parse(url.fragment().unwrap_or("").as_bytes()).collect();
     let field = |name| {
