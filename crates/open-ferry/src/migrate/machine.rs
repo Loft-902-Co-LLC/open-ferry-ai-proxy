@@ -200,6 +200,8 @@ pub(crate) trait Machine: System {
     /// What the trust check asks of this machine before CLIProxyAPI's
     /// config is read ([`crate::scope::authorize_file`]).
     fn trust_probe(&self) -> &dyn crate::scope::Probe;
+    /// Creates the protected machine data directory through the scope probe.
+    fn create_machine_dir(&mut self, path: &str) -> io::Result<()>;
 }
 
 /// How long a stopped process has to exit before it is ended.
@@ -535,7 +537,16 @@ fn stop_process(pid: u32, name: Option<&str>, started: Option<u64>) -> io::Resul
     )
 }
 
+/// Whether migrate must trust only paths protected from other accounts.
+pub(super) fn privileged_run(probe: &dyn crate::scope::Probe) -> bool {
+    !probe.in_container() && !matches!(probe.privileged(), Ok(false))
+}
+
 impl Machine for Host {
+    fn create_machine_dir(&mut self, path: &str) -> io::Result<()> {
+        crate::scope::Probe::create_machine_dir(&mut crate::scope::Host, path)
+    }
+
     fn trust_probe(&self) -> &dyn crate::scope::Probe {
         &crate::scope::Host
     }

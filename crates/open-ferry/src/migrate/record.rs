@@ -1,7 +1,6 @@
 //! The record of a switch, which `open-ferry migrate -undo` reads:
-//! `migration.json` beside the installed config (`~/.config/open-ferry/`
-//! on Linux and macOS, `%APPDATA%\open-ferry\` on Windows; root's when run
-//! with `sudo`), with a copy in the backup.
+//! `migration.json` in the machine data directory under privilege, otherwise
+//! beside the installed config, with a copy in the backup.
 //!
 //! It holds paths, names and states only: no command line, no
 //! environment, no file contents.
@@ -214,8 +213,14 @@ pub(crate) fn target_of(name: &str) -> Option<Target> {
     .find(|target| target_name(*target) == name)
 }
 
-/// Where the record is kept: beside the installed config.
-pub(crate) fn path(context: &Context) -> Result<String, String> {
+/// Where the record is kept: the machine data directory under privilege,
+/// otherwise beside the installed config.
+pub(crate) fn path(machine: &dyn Machine, context: &Context) -> Result<String, String> {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        let dir = crate::scope::machine_root(machine.trust_probe())?
+            .ok_or("there is nowhere to keep the switch's record on this platform")?;
+        return Ok(context.platform.join(&dir, FILE));
+    }
     let config = context
         .installed_config
         .as_ref()
@@ -228,6 +233,7 @@ pub(crate) fn path(context: &Context) -> Result<String, String> {
 
 /// Reads the record at `path`: `Ok(None)` when there is none.
 pub(crate) fn load(machine: &dyn Machine, path: &str) -> Result<Option<Record>, String> {
+    authorize(machine, path)?;
     if !machine.exists(path) {
         return Ok(None);
     }
@@ -253,6 +259,7 @@ pub(crate) fn recover(
     platform: Platform,
     path: &str,
 ) -> Result<Record, String> {
+    authorize(machine, path)?;
     let data = machine.read(path).map_err(|error| {
         format!("{path} can't be read ({error}), so the backup's directory isn't known")
     })?;
@@ -284,14 +291,31 @@ fn temp_name(path: &str) -> String {
     format!("{path}.{}.{nanos:x}.{count}.tmp", std::process::id())
 }
 
+/// Checks the directory and any existing file before it is read or written.
+pub(super) fn authorize(machine: &dyn Machine, path: &str) -> Result<(), String> {
+    let probe = machine.trust_probe();
+    if !super::machine::privileged_run(probe) {
+        return Ok(());
+    }
+    if let Some(dir) = probe.platform().parent(path) {
+        crate::scope::authorize_dir(probe, std::path::Path::new(&dir))
+            .map_err(|error| error.to_string())?;
+    }
+    crate::scope::authorize_file(probe, std::path::Path::new(path))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 /// Writes `text` to `path` through a new temporary file beside it that is
 /// then renamed into place, so that a failure leaves the old file whole. The
 /// temporary file is made with `create_new`, so it never follows a link or
 /// reuses a file, and only its owner can open it on Unix.
 fn replace(machine: &mut dyn Machine, path: &str, text: &str) -> Result<(), String> {
+    authorize(machine, path)?;
     let mut tries = 0;
     let temp = loop {
         let temp = temp_name(path);
+        authorize(machine, &temp)?;
         match machine.write_new(&temp, text.as_bytes()) {
             Ok(()) => break temp,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => {
@@ -307,12 +331,24 @@ fn replace(machine: &mut dyn Machine, path: &str, text: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// Makes the record's directory `dir` if it is missing, readable only by
-/// its owner on Unix. On Windows the directory is under the user's
-/// `%APPDATA%`, which only that user (and administrators) can read, so
-/// nothing more is set.
+/// Makes the record's directory if missing: protected machine storage under
+/// privilege, otherwise private to the user.
 fn make_dir(machine: &mut dyn Machine, platform: Platform, dir: &str) -> Result<(), String> {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
+            .map_err(|error| error.to_string())?;
+    }
     if machine.exists(dir) {
+        return Ok(());
+    }
+    if super::machine::privileged_run(machine.trust_probe()) {
+        match machine.create_machine_dir(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(format!("failed to create {dir}: {error}")),
+        }
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
+            .map_err(|error| error.to_string())?;
         return Ok(());
     }
     let failed = |error: std::io::Error| format!("failed to create {dir}: {error}");
@@ -336,6 +372,8 @@ pub(crate) fn lock(
     path: &str,
 ) -> Result<Held, String> {
     let lock = format!("{path}.lock");
+    authorize(machine, path)?;
+    authorize(machine, &lock)?;
     if let Some(dir) = platform.parent(path) {
         make_dir(machine, platform, &dir)?;
     }
@@ -357,6 +395,10 @@ pub(crate) fn save(
     path: &str,
     record: &Record,
 ) -> Result<(), String> {
+    authorize(machine, path)?;
+    if let Some(backup) = &record.backup {
+        authorize(machine, &platform.join(&backup.dir, FILE))?;
+    }
     let mut text = serde_json::to_string_pretty(record)
         .map_err(|error| format!("failed to write the switch's record: {error}"))?;
     text.push('\n');

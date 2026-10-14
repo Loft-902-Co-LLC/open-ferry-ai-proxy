@@ -442,8 +442,10 @@ pub(crate) fn plan(
     if let Some(config) = given {
         command.push_str(&format!(" -config {}", platform.quote(config)));
     }
-    let record_path = record::path(context);
-    let linked = kind == Kind::DropIn && link_to(machine, context).is_some();
+    let record_path = record::path(machine, context);
+    let privileged_drop_in =
+        kind == Kind::DropIn && super::machine::privileged_run(machine.trust_probe());
+    let linked = kind == Kind::DropIn && !privileged_drop_in && link_to(machine, context).is_some();
     let mut plan = Plan {
         kind,
         steps: Vec::new(),
@@ -451,20 +453,28 @@ pub(crate) fn plan(
         good_to_know: Vec::new(),
         // Placed by where the config and the auth directory really are, so
         // that a link can't put the backup inside the auth directory.
-        backup_dir: assessment.config.as_deref().and_then(|config| {
-            let real = |path: &str| machine.real_path(path).unwrap_or_else(|_| path.to_owned());
-            backup_dir(
-                platform,
-                &real(config),
-                assessment.auth_dir.as_deref().map(real).as_deref(),
-                machine.now(),
-            )
-        }),
+        backup_dir: assessment
+            .config
+            .as_deref()
+            .filter(|_| !privileged_drop_in)
+            .and_then(|config| {
+                let real = |path: &str| machine.real_path(path).unwrap_or_else(|_| path.to_owned());
+                backup_dir(
+                    platform,
+                    &real(config),
+                    assessment.auth_dir.as_deref().map(real).as_deref(),
+                    machine.now(),
+                )
+            }),
         record: record_path.clone(),
         command,
         theirs: theirs_of(&found.starter, found.process.is_some()),
         drop_in: (kind == Kind::DropIn).then_some(if linked { "symlink" } else { "copy" }),
     };
+    if privileged_drop_in {
+        drop_in_plan(machine, context, found, assessment, &mut plan);
+        return plan;
+    }
     match &record_path {
         Ok(path) => match record::load(machine, path) {
             Ok(Some(existing))
@@ -642,6 +652,18 @@ fn drop_in_plan(
     let Starter::Launcher(launcher) = &found.starter else {
         return;
     };
+    if super::machine::privileged_run(machine.trust_probe()) {
+        let who = if platform == Platform::Windows {
+            "As an administrator"
+        } else {
+            "As root"
+        };
+        plan.blockers.push(format!(
+            "CLIProxyAPI is started by {}, which isn't a service open-ferry can switch. {who}, `migrate` doesn't replace a binary that a launcher starts, or start it with that process's environment. Run `open-ferry migrate` as the account that runs CLIProxyAPI, or switch by hand as docs/migrating-from-cliproxyapi.md says.",
+            launcher_name(launcher)
+        ));
+        return;
+    }
     let Some(process) = &found.process else {
         // The search may have said so already, naming the launcher.
         if found.blockers.is_empty() {
@@ -850,6 +872,16 @@ fn copy_tree(
     top: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(from))
+            .map_err(|error| error.to_string())?;
+        if let Some(parent) = platform.parent(to) {
+            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
+                .map_err(|error| error.to_string())?;
+        }
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(to))
+            .map_err(|error| error.to_string())?;
+    }
     if let Some(target) = machine.link_target(to) {
         return Err(format!(
             "{to} is a symbolic link (to {target}), and is not written through: remove it or put a directory there, then try again"
@@ -869,6 +901,22 @@ fn copy_tree(
             continue;
         }
         let target = platform.join(to, &entry.name);
+        if super::machine::privileged_run(machine.trust_probe())
+            && matches!(
+                entry.kind,
+                EntryKind::File | EntryKind::Link | EntryKind::Other
+            )
+        {
+            crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&source))
+                .map_err(|error| error.to_string())?;
+            if entry.name.to_ascii_lowercase().ends_with(".json") {
+                crate::scope::authorize_credential_file(
+                    machine.trust_probe(),
+                    std::path::Path::new(&source),
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
         match entry.kind {
             EntryKind::File => copy_replacing_link(machine, &source, &target, out)?,
             EntryKind::Dir if !(top && entry.name == "logs") => {
@@ -888,6 +936,14 @@ fn copy_replacing_link(
     to: &str,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(from))
+            .map_err(|error| error.to_string())?;
+        if let Some(parent) = machine.trust_probe().platform().parent(to) {
+            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
+                .map_err(|error| error.to_string())?;
+        }
+    }
     if let Some(target) = machine.link_target(to) {
         machine
             .remove(to)
@@ -1116,6 +1172,10 @@ fn restore(
     backup: &Backup,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
+            .map_err(|error| error.to_string())?;
+    }
     let mut failures = Vec::new();
     for copied in &backup.files {
         if let Some(why) = moved_since(machine, platform, copied) {
@@ -1699,6 +1759,9 @@ pub(crate) fn execute(
     yes: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    if plan.kind == Kind::DropIn && super::machine::privileged_run(machine.trust_probe()) {
+        return Err("A privileged `migrate` doesn't replace a binary that a launcher starts. Run `open-ferry migrate` as the account that runs CLIProxyAPI, or switch by hand.".to_owned());
+    }
     let config = assessment
         .config
         .clone()
@@ -2527,6 +2590,9 @@ fn execute_drop_in(
     yes: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        return Err("A privileged `migrate` doesn't replace a binary that a launcher starts. Run `open-ferry migrate` as the account that runs CLIProxyAPI, or switch by hand.".to_owned());
+    }
     let context = base.context;
     let platform = context.platform;
     let found = base.found;
@@ -3286,6 +3352,15 @@ fn theirs_runs(
         .is_some_and(|answer| answer == Answer::CliProxyApi)
 }
 
+fn refuse_privileged_drop_in_undo(machine: &dyn Machine, record: &Record) -> Result<(), String> {
+    if matches!(record.switch, Switch::DropIn { .. })
+        && super::machine::privileged_run(machine.trust_probe())
+    {
+        return Err("A privileged `migrate` doesn't undo a launcher switch. Run `open-ferry migrate -undo` as the account that made the switch.".to_owned());
+    }
+    Ok(())
+}
+
 /// Switches back to CLIProxyAPI as `record` says. The record is marked
 /// undone only when every step worked; else it stays as it was, and `-undo`
 /// can be run again, each step looking at what is there. `yes` is `-yes`.
@@ -3299,15 +3374,30 @@ pub(crate) fn undo(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let platform = context.platform;
+    refuse_privileged_drop_in_undo(machine, record)?;
+    if super::machine::privileged_run(machine.trust_probe())
+        && let Some(backup) = &record.backup
+    {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
+            .map_err(|error| error.to_string())?;
+    }
     // One `migrate` at a time, for the whole undo. The record is read again
     // under the lock: another run may have changed it since it was read.
     let _lock = record::lock(machine, platform, record_path)?;
+    record::authorize(machine, record_path)?;
     if let Ok(Some(fresh)) = record::load(machine, record_path) {
         if matches!(fresh.status, Status::RolledBack | Status::Undone) {
             return Err(format!(
                 "the switch made at {} was undone while this waited (at {}): there is nothing to undo",
                 fresh.created, fresh.updated
             ));
+        }
+        refuse_privileged_drop_in_undo(machine, &fresh)?;
+        if super::machine::privileged_run(machine.trust_probe())
+            && let Some(backup) = &fresh.backup
+        {
+            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
+                .map_err(|error| error.to_string())?;
         }
         *record = fresh;
     }
