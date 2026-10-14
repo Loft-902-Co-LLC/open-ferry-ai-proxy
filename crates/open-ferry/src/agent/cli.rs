@@ -310,8 +310,6 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
         (!from_stdin && std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
             .then(|| Box::new(ask_at_terminal) as super::Ask);
     let ctx = Context {
-        #[cfg(test)]
-        no_request_timeout: false,
         path,
         env,
         key_file,

@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
+# A generous finite management timeout for cross-crate serialization tests.
 test-support = []
 
 [dependencies]

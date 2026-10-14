@@ -40,7 +40,8 @@
 //!   the key goes only to the base URL. Go's client follows up to ten.
 //! - When the HTTP client can't be made (Go's can't fail), every request
 //!   fails, saying why, rather than going out on a client without the
-//!   timeout, the proxy rule and the redirect rule.
+//!   finite timeout, the proxy rule and the redirect rule. Test clients
+//!   allow more time, but still have a finite timeout.
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -103,16 +104,17 @@ impl Client {
     /// added when it has no scheme and trailing slashes taken off; an empty
     /// one is `http://127.0.0.1:8317`.
     pub fn new(base_url: &str, secret: &str) -> Arc<Self> {
-        Self::with_timeout(base_url, secret, Some(TIMEOUT))
+        Self::with_timeout(base_url, secret, TIMEOUT)
     }
 
-    /// A management client without a latency limit, for tests of serialized writes.
+    /// A management client with a generous, finite 120-second timeout, for tests
+    /// of serialized writes rather than request latency.
     #[cfg(feature = "test-support")]
     pub fn new_for_test(base_url: &str, secret: &str) -> Arc<Self> {
-        Self::with_timeout(base_url, secret, None)
+        Self::with_timeout(base_url, secret, Duration::from_secs(120))
     }
 
-    fn with_timeout(base_url: &str, secret: &str, timeout: Option<Duration>) -> Arc<Self> {
+    fn with_timeout(base_url: &str, secret: &str, timeout: Duration) -> Arc<Self> {
         let mut base = base_url.trim().to_owned();
         if base.is_empty() {
             base = "http://127.0.0.1:8317".to_owned();
@@ -123,10 +125,9 @@ impl Client {
             }
             base = base.trim_end_matches('/').to_owned();
         }
-        let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-        if let Some(timeout) = timeout {
-            builder = builder.timeout(timeout);
-        }
+        let mut builder = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none());
         if is_loopback(&base) {
             builder = builder.no_proxy();
         }
