@@ -32,6 +32,19 @@ mod auth_files_recent_requests;
 mod auth_files_relogin_preserve;
 mod blue_green;
 pub(crate) mod capture;
+
+/// Scratch storage for this crate's tests: under `OFP_TEST_SCRATCH` when
+/// set (CI's Windows runner), else under the workspace's `target/ofp-scratch`.
+pub(crate) fn scratch_dir() -> tempfile::TempDir {
+    let root = std::env::var_os("OFP_TEST_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+        });
+    let root = open_ferry_core::auth::path::clean(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
 mod config_file_write;
 mod config_keys;
 mod config_lists;

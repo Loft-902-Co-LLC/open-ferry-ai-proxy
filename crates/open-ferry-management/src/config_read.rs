@@ -714,8 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn both_config_read_handlers_authorize_before_reading() {
-        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
-        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let dir = crate::tests::scratch_dir();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "api-keys: [secret-file-content]\n").unwrap();
         let registry = Arc::new(open_ferry_core::registry::ModelRegistry::new());

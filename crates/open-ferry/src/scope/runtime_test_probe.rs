@@ -81,13 +81,21 @@ impl Probe for RuntimeFake {
     }
 }
 
-/// Scratch storage for tests that exercise runtime filesystem reads.
-pub(crate) fn scratch_dir() -> tempfile::TempDir {
+/// Where tests keep scratch files: `OFP_TEST_SCRATCH` when set, else the
+/// workspace's `target/ofp-scratch`. It is cleaned, since privileged checks
+/// refuse a path with `..` in it, as the fallback would otherwise have.
+pub(crate) fn scratch_root() -> std::path::PathBuf {
     let root = std::env::var_os("OFP_TEST_SCRATCH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
         });
+    open_ferry_core::auth::path::clean(&root)
+}
+
+/// Scratch storage for tests that exercise runtime filesystem reads.
+pub(crate) fn scratch_dir() -> tempfile::TempDir {
+    let root = scratch_root();
     fs::create_dir_all(&root).unwrap();
     tempfile::tempdir_in(root).unwrap()
 }

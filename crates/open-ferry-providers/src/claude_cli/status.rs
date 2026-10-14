@@ -127,8 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_status_check_never_creates_directories_or_spawns() {
-        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
-        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let dir = crate::test_scratch_dir();
         let root = dir.path().join("entries");
         let entry = Entry {
             command: "./never-run-claude".into(),

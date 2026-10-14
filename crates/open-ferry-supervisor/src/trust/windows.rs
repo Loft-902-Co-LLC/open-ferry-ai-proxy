@@ -633,12 +633,29 @@ mod tests {
         judge(&descriptor(sddl), &TrustRules::system(), tier)
     }
 
+    /// Scratch storage: under `OFP_TEST_SCRATCH` when set (CI's Windows
+    /// runner), else under the workspace's `target/ofp-scratch`.
+    fn scratch_dir() -> tempfile::TempDir {
+        let root = std::env::var_os("OFP_TEST_SCRATCH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                package
+                    .ancestors()
+                    .nth(2)
+                    .unwrap()
+                    .join("target")
+                    .join("ofp-scratch")
+            });
+        std::fs::create_dir_all(&root).unwrap();
+        tempfile::tempdir_in(root).expect("scratch dir")
+    }
+
     const CLEAN: &str = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
     #[test]
     fn the_opened_junction_is_refused_before_its_target_descriptor_is_read() {
-        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("OFP_TEST_SCRATCH is set");
-        let root = tempfile::tempdir_in(scratch).expect("scratch dir");
+        let root = scratch_dir();
         let real = root.path().join("real");
         std::fs::create_dir(&real).expect("target");
         let link = root.path().join("link");
@@ -659,8 +676,7 @@ mod tests {
 
     #[test]
     fn an_open_that_cannot_find_the_path_reports_it_cannot_be_examined() {
-        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("OFP_TEST_SCRATCH is set");
-        let root = tempfile::tempdir_in(scratch).expect("scratch dir");
+        let root = scratch_dir();
         let missing = root.path().join("missing");
         let err = check_one(&missing, &TrustRules::system(), Tier::Full).unwrap_err();
         assert_eq!(err.path, missing);
