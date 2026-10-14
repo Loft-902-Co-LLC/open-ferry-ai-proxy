@@ -70,11 +70,12 @@ pub struct Config {
     pub runner: Arc<dyn Runner>,
     /// How long that may take.
     pub detect_timeout: Duration,
-    /// Where the endpoint is bound. `None` resolves it as production does
+    /// Test-only override of where the endpoint is bound. `None` resolves it as production does
     /// ([`Location::resolve`]); on Unix that is the per-user socket, which is the
     /// real supervisor's. A caller that must not touch it (a test, a fixture)
     /// passes its own; the path policy still applies at bind and at connect.
-    pub endpoint_location: Option<Location>,
+    #[cfg(any(test, feature = "blue-green-test"))]
+    pub test_endpoint_location: Option<Location>,
 }
 
 impl Config {
@@ -1639,10 +1640,13 @@ pub async fn start_watching<H: Host, D: Driver>(
     // 4. The endpoint (M9).
     let mut endpoint = None;
     {
-        let resolved = match &cfg.endpoint_location {
+        #[cfg(any(test, feature = "blue-green-test"))]
+        let resolved = match &cfg.test_endpoint_location {
             Some(location) => Ok(location.clone()),
             None => Location::resolve(&identity, cfg.data.root()),
         };
+        #[cfg(not(any(test, feature = "blue-green-test")))]
+        let resolved = Location::resolve(&identity, cfg.data.root());
         match resolved {
             Ok(location) => match Server::bind(&location, &identity, &lock) {
                 Ok(server) => {
@@ -2330,7 +2334,8 @@ mod tests {
             binary_name: "binary".into(),
             runner: Arc::new(FixtureRunner),
             detect_timeout: Duration::from_secs(5),
-            endpoint_location: None,
+            #[cfg(any(test, feature = "blue-green-test"))]
+            test_endpoint_location: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // Nothing is queued when startup begins: the stop comes with the
@@ -2452,7 +2457,8 @@ mod tests {
             binary_name: "binary".into(),
             runner: Arc::new(FixtureRunner),
             detect_timeout: Duration::from_secs(5),
-            endpoint_location: None,
+            #[cfg(any(test, feature = "blue-green-test"))]
+            test_endpoint_location: None,
         };
         let rules = TrustRules::for_identity(&Identity::current(cfg.kind).unwrap());
         let install_refusal = check_file(&cfg.data.binary("2.0.0", "binary"), &rules)
@@ -2678,7 +2684,8 @@ mod tests {
             binary_name: "binary".into(),
             runner: Arc::new(QuietRunner),
             detect_timeout: Duration::from_secs(5),
-            endpoint_location: None,
+            #[cfg(any(test, feature = "blue-green-test"))]
+            test_endpoint_location: None,
         }
     }
 

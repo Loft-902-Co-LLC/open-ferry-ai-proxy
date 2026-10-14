@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use under_test::*;
 
-/// A loopback port that was free a moment ago.
+/// Choose a candidate; launch retries only a logged address-in-use bind failure.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -58,7 +58,11 @@ fn prepare(root: &Path, port: u16) -> PathBuf {
         .version_dir(env!("CARGO_PKG_VERSION"));
     for dir in [bin, kept] {
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("test-marker"), "e2e-marker\n").unwrap();
+        std::fs::write(
+            dir.join("test-marker"),
+            format!("{}\n", fixture_marker(root)),
+        )
+        .unwrap();
     }
     std::fs::write(root.join("config.yaml"), config_text(root, port, "off")).unwrap();
     exe
@@ -66,8 +70,10 @@ fn prepare(root: &Path, port: u16) -> PathBuf {
 
 /// Starts the supervisor in `root` as `how`, with `root` as its working
 /// directory; its output goes to `root/out.log`.
-fn launch(root: &Path, port: u16, how: How) -> Sup {
+fn spawn(root: &Path, port: u16, how: How) -> Sup {
     let exe = prepare(root, port);
+    // The wrapper appends here: keep each attempt's bind evidence separate.
+    std::fs::write(root.join("service.log"), b"").unwrap();
     let log = std::fs::File::create(root.join("out.log")).unwrap();
     let mut command = Command::new(&exe);
     match how {
@@ -111,6 +117,53 @@ fn dump(root: &Path) -> String {
         .join("\n")
 }
 
+/// Reserve-then-drop cannot hand the socket to this CLI. Only retry an exited
+/// child whose own log confirms AddrInUse; every other startup failure fails.
+fn launch(root: &Path, how: How) -> (Sup, u16) {
+    // Retries share the original startup budget; a collision buys no time.
+    let until = Instant::now() + LONG;
+    for attempt in 0..8 {
+        assert!(
+            Instant::now() < until,
+            "no free port within the startup budget"
+        );
+        let port = free_port();
+        let mut sup = spawn(root, port, how);
+        loop {
+            if let Some(status) = sup.try_exit() {
+                let log = dump(root);
+                let conflict = log.lines().any(|line| {
+                    line.contains("failed to bind the main listener")
+                        && ["(os error 98)", "(os error 48)", "(os error 10048)"]
+                            .iter()
+                            .any(|code| line.contains(code))
+                });
+                assert!(conflict && attempt < 7, "startup exited ({status}):\n{log}");
+                break;
+            }
+            // A foreign answer is never accepted. Wait for our child to
+            // confirm a bind failure before deciding whether to retry.
+            if let Some((_, marker)) = http_get(port, "/")
+                && marker.as_deref() == Some(fixture_marker(root).as_str())
+            {
+                return (sup, port);
+            }
+            assert!(
+                Instant::now() < until,
+                "nothing answered GET /\n{}",
+                dump(root)
+            );
+            std::thread::sleep(POLL);
+        }
+        // Sup::drop ends this attempt's own group before another port is tried.
+    }
+    unreachable!("the last bind conflict fails above")
+}
+
+fn fixture_marker(root: &std::path::Path) -> String {
+    format!("fixture-{}", root.file_name().unwrap().to_string_lossy())
+}
+
 /// Waits for the first answer to `GET /` on `port`, panicking with the logs
 /// if the process exits first or nothing answers.
 fn wait_answer(sup: &mut Sup, port: u16, root: &Path) -> u16 {
@@ -119,7 +172,8 @@ fn wait_answer(sup: &mut Sup, port: u16, root: &Path) -> u16 {
         if let Some(status) = sup.try_exit() {
             panic!("it exited early ({status})\n{}", dump(root));
         }
-        if let Some((status, _)) = http_get(port, "/") {
+        if let Some((status, marker)) = http_get(port, "/") {
+            assert_eq!(marker.as_deref(), Some(fixture_marker(root).as_str()));
             return status;
         }
         assert!(
@@ -158,8 +212,7 @@ fn management_status(dotenv: Option<&str>) -> u16 {
     if let Some(text) = dotenv {
         std::fs::write(root.join(".env"), text).unwrap();
     }
-    let port = free_port();
-    let mut sup = launch(root, port, How::Directly);
+    let (mut sup, port) = launch(root, How::Directly);
     wait_answer(&mut sup, port, root);
     let (status, _) = http_get(port, MANAGEMENT)
         .unwrap_or_else(|| panic!("the management path did not answer\n{}", dump(root)));
@@ -248,8 +301,7 @@ mod wrapper {
         let _permit = Permit::take();
         let dir = scratch();
         let root = dir.path();
-        let port = free_port();
-        let mut sup = launch(root, port, How::ThroughTheWrapper);
+        let (mut sup, port) = launch(root, How::ThroughTheWrapper);
         let status = wait_answer(&mut sup, port, root);
         assert!((200..500).contains(&status), "GET / answered {status}");
         // The supervisor, not the plain server, is what runs: its record
@@ -294,8 +346,7 @@ mod wrapper {
         let _permit = Permit::take();
         let dir = scratch();
         let root = dir.path();
-        let port = free_port();
-        let mut sup = launch(root, port, How::ThroughTheWrapper);
+        let (mut sup, port) = launch(root, How::ThroughTheWrapper);
         wait_answer(&mut sup, port, root);
         let supervisor = u32::try_from(supervisor_pid(root)).unwrap();
         assert_ne!(supervisor, sup.pid(), "the wrapper is not the supervisor");
@@ -412,8 +463,7 @@ mod wrapper {
         );
         let dir = scratch();
         let root = dir.path();
-        let port = free_port();
-        let mut sup = launch(root, port, How::ThroughTheWrapper);
+        let (mut sup, port) = launch(root, How::ThroughTheWrapper);
         let status = wait_answer(&mut sup, port, root);
         assert!((200..500).contains(&status), "GET / answered {status}");
         // The wrapper and the supervisor it started are in the outer job

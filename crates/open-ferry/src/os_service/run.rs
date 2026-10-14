@@ -907,6 +907,7 @@ mod tests {
                 kind: ServiceKind::User,
                 data,
                 installed,
+                #[cfg(feature = "blue-green-test")]
                 endpoint: None,
             });
             let driver = ProcessDriver::new(cfg.kind, cfg.timings.exit_poll);

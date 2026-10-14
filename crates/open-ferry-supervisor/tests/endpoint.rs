@@ -42,7 +42,13 @@ mod unix {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::SeqCst)
             );
-            let location = Location::new("/tmp", name).expect("location");
+            let root = fs::canonicalize("/tmp").expect("canonical endpoint root");
+            let location = Location::new(&root, name).expect("location");
+            assert!(
+                location.socket_path().as_os_str().len() <= 103,
+                "SET-UP: canonical socket path exceeds 103 bytes: {}",
+                location.socket_path().display()
+            );
             let data = tempfile::tempdir().expect("data dir");
             let lock = SupervisorLock::try_acquire(data.path()).expect("lock");
             let dir = location.dir();
@@ -422,7 +428,13 @@ mod unix {
         let Ok(name) = std::env::var(HELPER_ENV) else {
             return;
         };
-        let location = Location::new("/tmp", name).expect("location");
+        let root = fs::canonicalize("/tmp").expect("canonical endpoint root");
+        let location = Location::new(&root, name).expect("location");
+        assert!(
+            location.socket_path().as_os_str().len() <= 103,
+            "SET-UP: canonical socket path exceeds 103 bytes: {}",
+            location.socket_path().display()
+        );
         let data = tempfile::tempdir().expect("data dir");
         let lock = SupervisorLock::try_acquire(data.path()).expect("lock");
         let identity = Identity::current(ServiceKind::User).expect("identity");
