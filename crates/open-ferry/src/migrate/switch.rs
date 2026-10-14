@@ -885,7 +885,9 @@ fn copy_tree(
             && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
                 .map_err(|error| error.to_string())?
         {
-            return Err(format!("{parent} doesn't exist, so {to} isn't restored"));
+            return Err(format!(
+                "{parent} doesn't exist, so nothing was copied to {to}"
+            ));
         }
         crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(to))
             .map_err(|error| error.to_string())?;
@@ -970,7 +972,9 @@ fn copy_replacing_link(
             && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
                 .map_err(|error| error.to_string())?
         {
-            return Err(format!("{parent} doesn't exist, so {to} isn't restored"));
+            return Err(format!(
+                "{parent} doesn't exist, so nothing was copied to {to}"
+            ));
         }
         if machine.link_target(to).is_some() {
             return Err(format!(

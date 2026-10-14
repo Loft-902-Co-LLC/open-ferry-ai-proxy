@@ -355,9 +355,7 @@ fn make_dir(machine: &mut dyn Machine, platform: Platform, dir: &str) -> Result<
         if !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
             .map_err(|error| error.to_string())?
         {
-            return Err(format!(
-                "the record's directory, {dir}, doesn't exist: nothing was changed"
-            ));
+            return Err(format!("the record's directory, {dir}, doesn't exist"));
         }
         return Ok(());
     }

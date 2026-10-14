@@ -8122,12 +8122,16 @@ fn r9_restore_refuses_a_tree_entry_missing_at_authorization() {
 
 #[test]
 fn r9_restore_refuses_a_file_destination_parent_missing_at_authorization() {
-    r9_missing_restore("/config/config.yaml", "/etc/cliproxyapi", "isn't restored");
+    r9_missing_restore(
+        "/config/config.yaml",
+        "/etc/cliproxyapi",
+        "nothing was copied to",
+    );
 }
 
 #[test]
 fn r9_restore_refuses_a_tree_destination_parent_missing_at_authorization() {
-    r9_missing_restore("/auth", "/etc/cliproxyapi", "isn't restored");
+    r9_missing_restore("/auth", "/etc/cliproxyapi", "nothing was copied to");
 }
 
 #[test]
