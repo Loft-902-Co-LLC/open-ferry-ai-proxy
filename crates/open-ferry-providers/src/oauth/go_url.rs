@@ -1,5 +1,7 @@
-// Ported from Go's net/url/url.go (go1.26.4, BSD-3-Clause), as CLIProxyAPI
-// internal/misc/oauth.go uses it (v8.0.27, MIT).
+// Ported from Go's net/url/url.go (Parse and its helpers, with
+// stringContainsCTLByte) and the IPv6 and zone checks of net/netip's
+// ParseAddr (go1.26.4, BSD-3-Clause), as CLIProxyAPI internal/misc/oauth.go
+// uses them (v8.0.27, MIT).
 // https://github.com/golang/go
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -118,8 +120,9 @@ fn parse_host(scheme: &str, host: &str) -> Result<(), CallbackParseError> {
             } else {
                 unescape(hostname, Encoding::Host)?
             };
-            // netip.ParseAddr: brackets require IPv6, with an optional nonempty
-            // zone. Zone bytes need not be UTF-8; the address itself is ASCII.
+            // parseHost with netip.ParseAddr: brackets require IPv6, with an
+            // optional nonempty zone. Zone bytes need not be UTF-8; the address
+            // itself is ASCII.
             let address = if let Some(zone) = decoded.iter().position(|byte| *byte == b'%') {
                 if zone + 1 == decoded.len() {
                     return Err(InvalidUrl);
@@ -159,7 +162,8 @@ fn valid_optional_port(port: &str) -> bool {
             .is_some_and(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-// validUserinfo permits ASCII userinfo and '@' (Go's compatibility exception).
+// validUserinfo permits ASCII letters, digits, RFC 3986 unreserved and
+// sub-delims bytes, ':' and '%', plus '@' (Go's compatibility exception).
 fn valid_userinfo(userinfo: &str) -> bool {
     userinfo
         .bytes()

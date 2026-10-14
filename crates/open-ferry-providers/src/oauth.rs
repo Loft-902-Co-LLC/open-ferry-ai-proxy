@@ -3,7 +3,8 @@
 // from internal/misc/oauth.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // Query and URL parsing also ported from Go's net/url/url.go (ParseQuery,
-// parseQuery, QueryUnescape and the Parse helpers in go_url) (go1.26.4,
+// parseQuery, QueryUnescape, stringContainsCTLByte and the Parse helpers in
+// go_url) and the IPv6 and zone checks of net/netip's ParseAddr (go1.26.4,
 // BSD-3-Clause).
 // https://github.com/golang/go
 
@@ -905,6 +906,20 @@ pub(crate) mod tests {
                 format!("#code=c&x={}", "a%26".repeat(10_000)),
                 Ok(("c", "")),
             ),
+            // Strict colons for any case of http and https, truncated escapes,
+            // bracketed hosts and authority forms.
+            ("HTTP://a:b:80/cb?code=c".to_owned(), Err(InvalidUrl)),
+            ("https://a:b:80/cb?code=c".to_owned(), Err(InvalidUrl)),
+            ("http://localhost/cb%?code=c".to_owned(), Err(InvalidUrl)),
+            ("?code=c#%2".to_owned(), Err(InvalidUrl)),
+            ("http://[1.2.3.4]/cb?code=c".to_owned(), Err(InvalidUrl)),
+            (
+                "http://[::ffff:1.2.3.4]/cb?code=c".to_owned(),
+                Ok(("c", "")),
+            ),
+            ("//host/cb?code=c".to_owned(), Ok(("c", ""))),
+            ("://localhost/cb?code=c".to_owned(), Err(InvalidUrl)),
+            ("http://u@v@localhost/cb?code=c".to_owned(), Ok(("c", ""))),
         ];
         for (index, (input, expected)) in cases.into_iter().enumerate() {
             let result = parse_oauth_callback(&input).map(|callback| {
@@ -1031,7 +1046,6 @@ pub(crate) mod tests {
                 let mut response = Vec::new();
                 stream.read_to_end(&mut response).await.unwrap();
                 assert!(response.starts_with(b"HTTP/1.1 302"));
-                stream.shutdown().await.unwrap();
             })
             .await
             .unwrap();
