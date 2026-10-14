@@ -49,6 +49,8 @@
 //! Upstream can't install itself as a service, and has no `service` (see
 //! [`flags`]).
 
+#[cfg(test)]
+mod helper_tests;
 pub(crate) mod hint;
 mod launchd;
 #[cfg(windows)]
@@ -886,25 +888,148 @@ fn resolve_auth_placement_path(
     Ok(actual)
 }
 
-/// Resolves helpers on PATH only when the runtime probe says we aren't privileged.
-fn helper_path(program: &str) -> io::Result<std::path::PathBuf> {
-    helper_path_with(
+/// A helper's checked program and the environment in which it may run.
+#[derive(Debug, PartialEq, Eq)]
+struct HelperPlan {
+    path: std::path::PathBuf,
+    environment: HelperEnvironment,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HelperEnvironment {
+    Inherited,
+    Unix,
+    Windows { system_dir: String, path: String },
+}
+
+impl HelperPlan {
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.path);
+        match &self.environment {
+            HelperEnvironment::Inherited => {}
+            HelperEnvironment::Unix => {
+                command
+                    .env_clear()
+                    .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+                    .env("LC_ALL", "C")
+                    .current_dir("/");
+            }
+            HelperEnvironment::Windows { system_dir, path } => {
+                command.env("PATH", path).current_dir(system_dir);
+            }
+        }
+        command
+    }
+}
+
+type HelperLocation = (std::path::PathBuf, Option<String>);
+
+fn system_helper_location(program: &str) -> io::Result<HelperLocation> {
+    let candidate = system_helper_path(program)?;
+    #[cfg(windows)]
+    let windows_dir = Some(windows_directory(true)?.to_string_lossy().into_owned());
+    #[cfg(not(windows))]
+    let windows_dir = None;
+    Ok((candidate, windows_dir))
+}
+
+fn helper_plan(program: &str) -> io::Result<HelperPlan> {
+    helper_plan_with(
         program,
         scope::runtime_probe().as_ref(),
         std::env::var_os("PATH").as_deref(),
         std::env::var_os("PATHEXT").as_deref(),
+        &system_helper_location,
     )
 }
 
+#[cfg(all(test, windows))]
+fn helper_path(program: &str) -> io::Result<std::path::PathBuf> {
+    Ok(helper_plan(program)?.path)
+}
+
+#[cfg(test)]
 fn helper_path_with(
     program: &str,
     probe: &dyn scope::Probe,
     path: Option<&std::ffi::OsStr>,
+    extensions: Option<&std::ffi::OsStr>,
+) -> io::Result<std::path::PathBuf> {
+    Ok(helper_plan_with(program, probe, path, extensions, &system_helper_location)?.path)
+}
+
+fn helper_plan_with(
+    program: &str,
+    probe: &dyn scope::Probe,
+    path: Option<&std::ffi::OsStr>,
+    extensions: Option<&std::ffi::OsStr>,
+    system: &dyn Fn(&str) -> io::Result<HelperLocation>,
+) -> io::Result<HelperPlan> {
+    if !probe.in_container() && !matches!(probe.privileged(), Ok(false)) {
+        let name =
+            if probe.platform() == Platform::Windows && Path::new(program).extension().is_none() {
+                format!("{program}.exe")
+            } else {
+                program.to_owned()
+            };
+        let (candidate, windows_dir) = system(&name)?;
+        return privileged_helper_plan(probe, candidate, windows_dir.as_deref());
+    }
+    Ok(HelperPlan {
+        path: search_helper_path(program, path, extensions)?,
+        environment: HelperEnvironment::Inherited,
+    })
+}
+
+fn privileged_helper_plan(
+    probe: &dyn scope::Probe,
+    candidate: std::path::PathBuf,
+    windows_dir: Option<&str>,
+) -> io::Result<HelperPlan> {
+    let path = candidate
+        .to_str()
+        .ok_or_else(|| io::Error::other("the helper path isn't valid Unicode"))?;
+    let platform = probe.platform();
+    let parent = platform
+        .parent(path)
+        .ok_or_else(|| io::Error::other(format!("helper {path} has no parent directory")))?;
+    let check = || -> Result<(), String> {
+        if platform == Platform::Windows {
+            probe.trusted_file(path)
+        } else {
+            let actual = probe.canonical(path).map_err(|why| why.to_string())?;
+            probe.trusted_file(&actual)?;
+            let actual_parent = probe.canonical(&parent).map_err(|why| why.to_string())?;
+            probe.trusted_dir(&actual_parent)
+        }
+    };
+    check().map_err(|why| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing helper {path}: {why}"),
+        )
+    })?;
+    let environment = if platform == Platform::Windows {
+        let windows_dir =
+            windows_dir.ok_or_else(|| io::Error::other("can't find the Windows directory"))?;
+        HelperEnvironment::Windows {
+            path: format!("{parent};{windows_dir};{}", platform.join(&parent, "Wbem")),
+            system_dir: parent,
+        }
+    } else {
+        HelperEnvironment::Unix
+    };
+    Ok(HelperPlan {
+        path: candidate,
+        environment,
+    })
+}
+
+fn search_helper_path(
+    program: &str,
+    path: Option<&std::ffi::OsStr>,
     _extensions: Option<&std::ffi::OsStr>,
 ) -> io::Result<std::path::PathBuf> {
-    if !matches!(probe.privileged(), Ok(false)) {
-        return system_helper_path(program);
-    }
     #[cfg(not(windows))]
     let names = [OsString::from(program)];
     #[cfg(windows)]
@@ -965,22 +1090,12 @@ fn helper_is_executable(path: &Path) -> bool {
 fn system_helper_path(program: &str) -> io::Result<std::path::PathBuf> {
     #[cfg(windows)]
     {
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
-        }
-        let mut buffer = vec![0u16; 32768];
-        // SAFETY: the buffer is writable for the full length passed.
-        let length =
-            unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
-        if length == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if length >= buffer.len() {
-            return Err(io::Error::other("the system directory path is too long"));
-        }
-        use std::os::windows::ffi::OsStringExt as _;
-        Ok(std::path::PathBuf::from(OsString::from_wide(&buffer[..length])).join(program))
+        let name = if Path::new(program).extension().is_none() {
+            format!("{program}.exe")
+        } else {
+            program.to_owned()
+        };
+        Ok(windows_directory(false)?.join(name))
     }
     #[cfg(not(windows))]
     {
@@ -995,6 +1110,34 @@ fn system_helper_path(program: &str) -> io::Result<std::path::PathBuf> {
                 )
             })
     }
+}
+
+#[cfg(windows)]
+fn windows_directory(windows: bool) -> io::Result<std::path::PathBuf> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+        fn GetWindowsDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+    let mut buffer = vec![0u16; 32768];
+    // SAFETY: the buffer is writable for the full length passed.
+    let length = unsafe {
+        if windows {
+            GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32)
+        } else {
+            GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32)
+        }
+    } as usize;
+    if length == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length >= buffer.len() {
+        return Err(io::Error::other("the system directory path is too long"));
+    }
+    use std::os::windows::ffi::OsStringExt as _;
+    Ok(std::path::PathBuf::from(OsString::from_wide(
+        &buffer[..length],
+    )))
 }
 
 /// A command's output as text. Windows tools such as `schtasks /xml` may
@@ -1080,7 +1223,8 @@ impl System for Host {
     }
 
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
-        let output = std::process::Command::new(helper_path(cmd.program)?)
+        let output = helper_plan(cmd.program)?
+            .command()
             .args(&cmd.args)
             .stdin(Stdio::null())
             .output()?;
@@ -1092,7 +1236,8 @@ impl System for Host {
     }
 
     fn show(&mut self, cmd: &Cmd) -> io::Result<Option<i32>> {
-        let status = std::process::Command::new(helper_path(cmd.program)?)
+        let status = helper_plan(cmd.program)?
+            .command()
             .args(&cmd.args)
             .stdin(Stdio::null())
             .status()?;

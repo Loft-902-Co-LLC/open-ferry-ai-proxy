@@ -951,6 +951,18 @@ mod tests {
                 assert!(collected.iter().any(|kept| kept == secret), "{secret}");
             }
         }
+        // Refuse only the directory lookup. The fake still trusts the file
+        // and its ancestry, so a per-file guard cannot hide a missing dir guard.
+        let mut probe = fake();
+        probe.node(
+            auth.to_str().unwrap(),
+            crate::update::scope_probe::Node::Hidden,
+        );
+        let collected = known_secrets_with_probe(&ctx, &probe);
+        assert!(!collected.iter().any(|kept| kept == all[2]));
+        probe.privileged = Ok(false);
+        let collected = known_secrets_with_probe(&ctx, &probe);
+        assert!(collected.iter().any(|kept| kept == all[2]));
         for (missing, secret) in [
             (&path, all[0]),
             (&backup, all[1]),
