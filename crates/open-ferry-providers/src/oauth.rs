@@ -52,14 +52,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Query, RawQuery, State};
+use axum::extract::{RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::StatusCode;
 use open_ferry_core::auth::Auth;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -186,13 +185,17 @@ pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, Callba
         return Err(CallbackParseError::InvalidUrl);
     };
     let url = url::Url::parse(&candidate).map_err(|_| CallbackParseError::InvalidUrl)?;
-    let query: Vec<_> = url.query_pairs().collect();
-    // Deliberate deviation from internal/misc/oauth.go:84-101: decode the
-    // fragment once, retaining parseable fields beside malformed pairs.
-    // Upstream decodes twice, rejects invalid fragment escapes at URL parsing,
-    // and drops the entire fragment on a query error (for example, a semicolon).
-    let fragment: Vec<_> =
-        url::form_urlencoded::parse(url.fragment().unwrap_or("").as_bytes()).collect();
+    let query = callback_query_pairs(url.query().unwrap_or(""));
+    // Deliberate deviation from internal/misc/oauth.go:72-101: decode the
+    // fragment once, not twice, discarding it on malformed raw query pairs.
+    // Upstream first unescapes the fragment during URL parsing (invalid escapes
+    // reject the entire URL), then parses it again; encoded delimiters can differ.
+    let raw_fragment = url.fragment().unwrap_or("");
+    let fragment = if raw_fragment.split('&').all(valid_callback_pair) {
+        callback_query_pairs(raw_fragment)
+    } else {
+        Vec::new()
+    };
     let field = |name| {
         let get = |pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)]| {
             pairs
@@ -303,11 +306,36 @@ struct CallbackState {
     page_wait: Duration,
 }
 
-#[derive(Deserialize)]
-struct CallbackQuery {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
+// Go's URL.Query ignores ParseQuery errors, keeping only valid pairs.
+// Decode after validation so encoded semicolons remain valid values.
+fn callback_query_pairs(
+    query: &str,
+) -> Vec<(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)> {
+    // Go 1.26's default ParseQuery limit counts every pair, even invalid ones.
+    if query.bytes().filter(|byte| *byte == b'&').count() >= 10_000 {
+        return Vec::new();
+    }
+    query
+        .split('&')
+        .filter(|pair| valid_callback_pair(pair))
+        .flat_map(|pair| url::form_urlencoded::parse(pair.as_bytes()))
+        .collect()
+}
+
+fn valid_callback_pair(pair: &str) -> bool {
+    if pair.contains(';') {
+        return false;
+    }
+    let mut bytes = pair.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%'
+            && !(bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
+                && bytes.next().is_some_and(|b| b.is_ascii_hexdigit()))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// How long a connection has to send a request, or take a response
@@ -585,12 +613,19 @@ impl AsyncWrite for LimitedConnection {
     }
 }
 
-async fn callback(
-    State(server): State<CallbackState>,
-    Query(query): Query<CallbackQuery>,
-    RawQuery(raw_query): RawQuery,
-) -> Response {
-    let nonempty = |value: Option<String>| value.filter(|value| !value.is_empty());
+async fn callback(State(server): State<CallbackState>, RawQuery(raw_query): RawQuery) -> Response {
+    let query = callback_query_pairs(raw_query.as_deref().unwrap_or(""));
+    // Go's Values.Get takes the first value, even when it is empty.
+    let field = |name: &str| {
+        query
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_ref())
+            .unwrap_or_default()
+    };
+    let state = field("state");
+    let code = field("code");
+    let error = field("error");
     let failed = |failure| {
         page::response(
             &server.provider,
@@ -600,17 +635,17 @@ async fn callback(
     };
     // Nothing without the login's state counts, not even an error report:
     // anyone who can reach the port could otherwise end the login.
-    if query.state.as_deref().filter(|state| !state.is_empty()) != Some(&*server.state) {
+    if state.is_empty() || state != &*server.state {
         return failed(Failure::new(
             "This page isn't from your sign-in",
             "It didn't come from the sign-in the terminal is waiting for, so open-ferry \
              ignored it.",
         ));
     }
-    let (result, response) = if let Some(error) = nonempty(query.error) {
-        let response = failed(Failure::provider_error(&server.provider, &error));
-        (CallbackResult::Error(error), response)
-    } else if let Some(code) = nonempty(query.code) {
+    let (result, response) = if !error.is_empty() {
+        let response = failed(Failure::provider_error(&server.provider, error));
+        (CallbackResult::Error(error.to_owned()), response)
+    } else if !code.is_empty() {
         // Before the code goes, so that the login, once it has it, knows
         // the browser is on its way to the success page.
         server.redirected.store(true, Ordering::SeqCst);
@@ -623,7 +658,7 @@ async fn callback(
             ],
         )
             .into_response();
-        (CallbackResult::Code(code), response)
+        (CallbackResult::Code(code.to_owned()), response)
     } else {
         let response = failed(Failure::new(
             "No sign-in code came back",
@@ -640,24 +675,16 @@ async fn callback(
         .unwrap_or_else(PoisonError::into_inner)
         .take();
     if let Some(sender) = sender {
-        // Keep the original query extractor unchanged: extra parameters,
-        // including repeated client IDs, must not break ordinary callbacks.
-        let extra = |name: &str| {
-            url::form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes())
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.into_owned())
-                .unwrap_or_default()
-        };
         let (code, error) = match result {
             CallbackResult::Code(code) => (code, String::new()),
             CallbackResult::Error(error) => (String::new(), error),
         };
         let _ = sender.send(OAuthCallback {
             code,
-            state: query.state.unwrap_or_default(),
-            client_id: extra("client_id").trim().to_owned(),
+            state: state.to_owned(),
+            client_id: field("client_id").trim().to_owned(),
             error,
-            error_description: extra("error_description").trim().to_owned(),
+            error_description: field("error_description").trim().to_owned(),
         });
     }
     response
@@ -785,17 +812,167 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn pasted_fragments_decode_once_and_keep_good_fields_beside_malformed_pairs() {
+    fn pasted_fragments_decode_once_and_discard_all_fields_on_a_query_error() {
         for (input, code) in [
             ("#code=c%252B&state=s&client_id=issued", "c%2B"),
             ("#code=c%2B&state=s&client_id=issued", "c+"),
-            ("#code=c%2B&bad=%ZZ&state=s&client_id=issued", "c+"),
-            ("#code=c%2B&bad=a;b&state=s&client_id=issued", "c+"),
         ] {
             let callback = parse_oauth_callback(input).unwrap().unwrap();
             assert_eq!(callback.code, code);
             assert_eq!(callback.state, "s");
             assert_eq!(callback.client_id, "issued");
+        }
+        for input in [
+            "#code=c%2B&bad=%ZZ&state=s&client_id=issued",
+            "#code=c%2B&bad=a;b&state=s&client_id=issued",
+        ] {
+            assert_eq!(
+                parse_oauth_callback(input),
+                Err(CallbackParseError::MissingCode)
+            );
+            let callback = parse_oauth_callback(&format!("?code=query{input}"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(callback.code, "query");
+            assert!(callback.state.is_empty() && callback.client_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn pasted_callback_queries_drop_bad_pairs_and_take_the_first_value() {
+        for query in [
+            "code=a%ZZ&state=s",
+            "code=c;x=1&state=s",
+            "co%ZZde=c&state=s",
+        ] {
+            assert_eq!(
+                parse_oauth_callback(&format!("?{query}")),
+                Err(CallbackParseError::MissingCode)
+            );
+        }
+        for (query, code) in [
+            ("code=c&state=s&bad=%ZZ", "c"),
+            ("code=c&state=s&bad=a;b", "c"),
+            ("code=c+one&state=s", "c one"),
+            ("code=c&code=later&state=s&state=later", "c"),
+            ("code=c%3Bx%3D1&state=s", "c;x=1"),
+        ] {
+            let callback = parse_oauth_callback(&format!("?{query}")).unwrap().unwrap();
+            assert_eq!(callback.code, code);
+            assert_eq!(callback.state, "s");
+        }
+        assert_eq!(
+            parse_oauth_callback("?code=&code=later&state=s"),
+            Err(CallbackParseError::MissingCode)
+        );
+        let callback = parse_oauth_callback(
+            "?error=denied&error=later&state=s&client_id=bad%ZZ&client_id=issued+id&error_description=bad;x=1&error_description=no+access",
+        ).unwrap().unwrap();
+        assert_eq!(callback.error, "denied");
+        assert_eq!(callback.client_id, "issued id");
+        assert_eq!(callback.error_description, "no access");
+    }
+
+    #[tokio::test]
+    async fn live_callback_queries_drop_bad_pairs_and_take_the_first_value() {
+        for provider in ["Codex", "Claude"] {
+            for (query, code) in [
+                ("code=a%ZZ&state=s", ""),
+                ("code=c;x=1&state=s", ""),
+                ("co%ZZde=c&state=s", ""),
+                ("code=c&state=s&bad=%ZZ", "c"),
+                ("code=c&state=s&bad=a;b", "c"),
+                ("code=c+one&state=s", "c one"),
+                ("code=c&code=later&state=s&state=later", "c"),
+                ("code=c%3Bx%3D1&state=s", "c;x=1"),
+                ("code=&code=later&state=s", ""),
+            ] {
+                let mut server = CallbackServer::start(0, "/callback", "s", provider)
+                    .await
+                    .unwrap();
+                let answer = fetch(server.port(), &format!("/callback?{query}")).await;
+                assert_eq!(answer.status, if code.is_empty() { 400 } else { 302 });
+                let callback = server
+                    .wait_for_callback(Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                assert_eq!(callback.code, code);
+                assert_eq!(callback.state, "s");
+                assert_eq!(callback.error, if code.is_empty() { "no_code" } else { "" });
+            }
+            let mut server = CallbackServer::start(0, "/callback", "s", provider)
+                .await
+                .unwrap();
+            let answer = fetch(server.port(), "/callback?code=c&state=bad%ZZ&state=s&error=bad%ZZ&error=bad;x=1&client_id=bad%ZZ&client_id=issued+id&client_id=later&error_description=bad;x=1&error_description=no+access&error_description=later").await;
+            assert_eq!(answer.status, 302);
+            let callback = server
+                .wait_for_callback(Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(callback.code, "c");
+            assert_eq!(callback.state, "s");
+            assert!(callback.error.is_empty());
+            assert_eq!(callback.client_id, "issued id");
+            assert_eq!(callback.error_description, "no access");
+            let mut server = CallbackServer::start(0, "/callback", "s", provider)
+                .await
+                .unwrap();
+            assert_eq!(
+                fetch(server.port(), "/callback?error=denied&error=later&state=s")
+                    .await
+                    .status,
+                400
+            );
+            assert_eq!(
+                server
+                    .wait_for_callback(Duration::from_secs(5))
+                    .await
+                    .unwrap()
+                    .error,
+                "denied"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_queries_follow_go_parameter_limit() {
+        let at_limit = format!("{}code=c&state=s", "a&".repeat(9_998));
+        let over_limit = format!("a&{at_limit}");
+        let callback = parse_oauth_callback(&format!("?{at_limit}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback.code, "c");
+        assert_eq!(callback.state, "s");
+        assert_eq!(
+            parse_oauth_callback(&format!("?{over_limit}")),
+            Err(CallbackParseError::MissingCode)
+        );
+        for provider in ["Codex", "Claude"] {
+            let mut server = CallbackServer::start(0, "/callback", "s", provider)
+                .await
+                .unwrap();
+            assert_eq!(
+                fetch(server.port(), &format!("/callback?{over_limit}"))
+                    .await
+                    .status,
+                400
+            );
+            assert!(matches!(
+                server.wait_for_callback(Duration::from_millis(20)).await,
+                Err(CallbackError::Timeout)
+            ));
+            assert_eq!(
+                fetch(server.port(), &format!("/callback?{at_limit}"))
+                    .await
+                    .status,
+                302
+            );
+            let callback = server
+                .wait_for_callback(Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(callback.code, "c");
+            assert_eq!(callback.state, "s");
         }
     }
 
