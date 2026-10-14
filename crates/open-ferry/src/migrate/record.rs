@@ -233,7 +233,9 @@ pub(crate) fn path(machine: &dyn Machine, context: &Context) -> Result<String, S
 
 /// Reads the record at `path`: `Ok(None)` when there is none.
 pub(crate) fn load(machine: &dyn Machine, path: &str) -> Result<Option<Record>, String> {
-    authorize(machine, path)?;
+    if !authorize(machine, path)? {
+        return Ok(None);
+    }
     if !machine.exists(path) {
         return Ok(None);
     }
@@ -259,7 +261,9 @@ pub(crate) fn recover(
     platform: Platform,
     path: &str,
 ) -> Result<Record, String> {
-    authorize(machine, path)?;
+    if !authorize(machine, path)? {
+        return Err(format!("the switch's record, {path}, doesn't exist"));
+    }
     let data = machine.read(path).map_err(|error| {
         format!("{path} can't be read ({error}), so the backup's directory isn't known")
     })?;
@@ -291,19 +295,21 @@ fn temp_name(path: &str) -> String {
     format!("{path}.{}.{nanos:x}.{count}.tmp", std::process::id())
 }
 
-/// Checks the directory and any existing file before it is read or written.
-pub(super) fn authorize(machine: &dyn Machine, path: &str) -> Result<(), String> {
+/// Checks the directory and file before use: false when either is missing.
+/// Unprivileged callers keep their own existence check.
+pub(super) fn authorize(machine: &dyn Machine, path: &str) -> Result<bool, String> {
     let probe = machine.trust_probe();
     if !super::machine::privileged_run(probe) {
-        return Ok(());
+        return Ok(true);
     }
-    if let Some(dir) = probe.platform().parent(path) {
-        crate::scope::authorize_dir(probe, std::path::Path::new(&dir))
-            .map_err(|error| error.to_string())?;
+    if let Some(dir) = probe.platform().parent(path)
+        && !crate::scope::authorize_dir(probe, std::path::Path::new(&dir))
+            .map_err(|error| error.to_string())?
+    {
+        return Ok(false);
     }
     crate::scope::authorize_file(probe, std::path::Path::new(path))
-        .map_err(|error| error.to_string())?;
-    Ok(())
+        .map_err(|error| error.to_string())
 }
 
 /// Writes `text` to `path` through a new temporary file beside it that is

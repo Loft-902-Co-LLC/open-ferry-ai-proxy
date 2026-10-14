@@ -192,6 +192,14 @@ fn line(out: &mut dyn Write, text: &str) {
     say(out, format_args!("{text}"));
 }
 
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// `text` as a sentence: capitalized, but for open-ferry's name, with a
 /// full stop.
 pub(crate) fn sentence(text: &str) -> String {
@@ -616,12 +624,28 @@ fn run_undo(
     let mut record = match record::load(machine, &path) {
         Ok(Some(record)) => record,
         Ok(None) => {
-            let sudo = match platform {
-                Platform::Windows => {
-                    " A switch made without elevation is undone the same way; its record is beside the installed config."
-                }
-                Platform::Linux | Platform::MacOs => {
-                    " A switch made without sudo is undone the same way; its record is beside the installed config."
+            let sudo = if machine::privileged_run(machine.trust_probe()) {
+                let without = if platform == Platform::Windows {
+                    "without elevation"
+                } else {
+                    "without sudo"
+                };
+                format!(
+                    " A switch made {without} keeps its record beside that account's installed config: undo it as that account."
+                )
+            } else {
+                match platform {
+                    Platform::Linux => {
+                        let root = crate::scope::machine_root(machine.trust_probe())
+                            .ok().flatten().unwrap_or_else(|| "/var/lib/open-ferry".to_owned());
+                        format!(" A switch made with sudo keeps its record in {root}: undo it with sudo.")
+                    }
+                    Platform::Windows => {
+                        let location = crate::scope::machine_root(machine.trust_probe())
+                            .ok().flatten().unwrap_or_else(|| "the open-ferry folder under ProgramData".to_owned());
+                        format!(" A switch made as an administrator keeps its record in {location}: undo it from an elevated prompt.")
+                    }
+                    Platform::MacOs => " A switch made without sudo is undone the same way; its record is beside the installed config.".to_owned(),
                 }
             };
             return fail(
@@ -693,6 +717,9 @@ fn run_undo(
             );
         }
         Status::Switching | Status::Switched | Status::UndoneNotStarted => {}
+    }
+    if let Err(error) = switch::refuse_privileged_drop_in_undo(machine, &record) {
+        return fail(request, out, err, &error);
     }
     line(
         out,

@@ -1115,7 +1115,10 @@ fn linux_not_running(
                         let remedy = refusal.remedy.unwrap_or_else(||
                             "make it and the directories above it writable only by root".to_owned()
                         );
-                        format!("the systemd unit {unit}'s file {path} wasn't read: {}. {}. Then run `open-ferry migrate` again", refusal.reason.trim_end_matches('.'), remedy.trim_end_matches('.'))
+                        let prefix = format!("Refusing to load {path}: ");
+                        let reason = refusal.reason.strip_prefix(&prefix).unwrap_or(&refusal.reason);
+                        let reason = reason.strip_prefix(&format!("{path} ")).map_or_else(|| reason.to_owned(), |rest| format!("it {rest}"));
+                        format!("the systemd unit {unit}'s file {path} wasn't read: {}. {}. Then run `open-ferry migrate` again", super::lower_first(reason.trim_end_matches('.')), remedy.trim_end_matches('.'))
                     }
                 });
             }
@@ -1720,7 +1723,9 @@ fn task_runs(
         ) {
             Ok(authorized) => authorized,
             Err(error) => {
-                notes.push(format!("Scheduled task {} runs {path}, which wasn't read: {}. If it starts CLIProxyAPI, run `open-ferry migrate` as that task's account, or switch it by hand.", task.name, error.to_string().trim_end_matches('.')));
+                let prefix = format!("Refusing to load {path}: ");
+                let reason = error.reason.strip_prefix(&prefix).unwrap_or(&error.reason);
+                notes.push(format!("Scheduled task {} runs {path}, which wasn't read: {}. If it starts CLIProxyAPI, run `open-ferry migrate` as that task's account, or switch it by hand.", task.name, super::lower_first(reason.trim_end_matches('.'))));
                 false
             }
         };

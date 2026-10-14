@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::net::IpAddr;
@@ -42,6 +43,9 @@ enum Effect {
     Place(String, Vec<u8>),
     /// This process ends, and no other.
     End(u32),
+    /// A record disappears or becomes untrusted while waiting for the lock.
+    RemoveRecord(String),
+    Untrust(String),
     /// A process starts.
     Spawn(Box<Proc>),
 }
@@ -56,6 +60,9 @@ struct Fake {
     unreadable: BTreeSet<String>,
     /// Reads that must not happen before a trust refusal.
     forbidden_reads: BTreeSet<String>,
+    forbidden_exists: BTreeSet<String>,
+    /// Trust lookups scripted independently of a file planted after a check.
+    states: RefCell<BTreeMap<String, VecDeque<crate::scope::State>>>,
     forbidden_lists: BTreeSet<String>,
     /// The directories made private.
     private: BTreeSet<String>,
@@ -117,6 +124,8 @@ impl Fake {
             dirs: BTreeSet::new(),
             unreadable: BTreeSet::new(),
             forbidden_reads: BTreeSet::new(),
+            forbidden_exists: BTreeSet::new(),
+            states: RefCell::new(BTreeMap::new()),
             forbidden_lists: BTreeSet::new(),
             private: BTreeSet::new(),
             answers: BTreeMap::new(),
@@ -395,6 +404,14 @@ impl Fake {
                     self.files.insert(path, data);
                 }
                 Effect::End(pid) => self.end(pid),
+                Effect::RemoveRecord(path) => {
+                    self.files.remove(&path);
+                    self.trust.nodes.remove(&self.platform.clean(&path));
+                }
+                Effect::Untrust(path) => {
+                    self.trust.untrust(&path);
+                    self.forbidden_reads.insert(path);
+                }
                 Effect::Spawn(process) => {
                     self.procs.insert(process.pid, (*process).clone());
                 }
@@ -565,6 +582,10 @@ impl System for Fake {
     }
 
     fn exists(&self, path: &str) -> bool {
+        assert!(
+            !self.forbidden_exists.contains(path),
+            "checked missing file {path} again"
+        );
         let path = self.resolve(path);
         self.files.contains_key(&path) || self.dirs.contains(&path)
     }
@@ -602,6 +623,7 @@ impl System for Fake {
     fn create_dir_all(&mut self, path: &str) -> io::Result<()> {
         self.events.push(format!("mkdir {path}"));
         self.dir(path);
+        self.fire(&format!("mkdir {path}"));
         Ok(())
     }
 
@@ -683,6 +705,14 @@ impl crate::scope::Probe for Fake {
         self.trust.program_files()
     }
     fn state(&self, path: &str) -> crate::scope::State {
+        if let Some(state) = self
+            .states
+            .borrow_mut()
+            .get_mut(path)
+            .and_then(VecDeque::pop_front)
+        {
+            return state;
+        }
         match self.trust.state(path) {
             crate::scope::State::Missing if self.links.contains_key(path) => {
                 crate::scope::State::Other
@@ -800,6 +830,7 @@ impl Machine for Fake {
             return Ok(None);
         }
         self.events.push(format!("lock {path}"));
+        self.fire(&format!("lock {path}"));
         Ok(Some(Box::new(())))
     }
 
@@ -1895,7 +1926,7 @@ fn undo_needs_the_record() {
     assert_eq!(ran.code, 1);
     has(
         &ran.err,
-        "migrate: there is no switch to undo: /home/me/.config/open-ferry/migration.json doesn't exist. A switch made without sudo is undone the same way; its record is beside the installed config.",
+        "migrate: there is no switch to undo: /home/me/.config/open-ferry/migration.json doesn't exist. A switch made with sudo keeps its record in /var/lib/open-ferry: undo it with sudo.",
     );
 
     let context = windows();
@@ -2743,6 +2774,8 @@ fn an_unrelated_refused_task_script_is_a_note_instead_of_a_discovery_error() {
             has(&ran.all(), "start.ps1");
             has(&ran.all(), "which wasn't read:");
             has(&ran.all(), "as that task's account, or switch it by hand.");
+            lacks(&ran.all(), "Refusing to load");
+            lacks(&ran.all(), "Make the file");
             assert!(!ran.all().contains("Set-Location"));
             if json {
                 let value: Value = serde_json::from_str(ran.out.trim()).unwrap();
@@ -3305,6 +3338,7 @@ fn a_refused_unit_fragment_has_its_own_blocker_and_remedy() {
     let blockers = found.unwrap().blockers.join("\n");
     has(&blockers, path);
     has(&blockers, "untrusted");
+    lacks(&blockers, "Refusing to load");
     has(
         &blockers,
         "make the file and every directory above it root's and writable only by root",
@@ -7665,4 +7699,352 @@ fn ancillary_credential_probe_failure_skips_enumeration() {
         }
         _ => panic!("credential inventory did not refuse the failed probe"),
     }
+}
+
+// Round 8: missing authorization is a verdict, not permission to check again.
+#[test]
+fn privileged_undo_never_reads_a_record_planted_after_a_missing_check() {
+    for missing_dir in [false, true] {
+        let context = windows();
+        let mut fake = Fake::new(&context);
+        protect_migration(&mut fake);
+        let path = record::path(&fake, &context).unwrap();
+        let dir = context.platform.parent(&path).unwrap();
+        fake.file(&path, "planted after the trust check");
+        let missing = if missing_dir { dir } else { path.clone() };
+        fake.states.borrow_mut().insert(
+            missing.clone(),
+            VecDeque::from([crate::scope::State::Missing]),
+        );
+        fake.forbidden_reads.insert(path.clone());
+        fake.forbidden_exists.insert(path.clone());
+        let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+        assert_eq!(ran.code, 1, "{}", ran.all());
+        has(&ran.err, "there is no switch to undo");
+        assert!(fake.events.is_empty());
+        assert!(fake.launches.is_empty());
+        fake.states
+            .borrow_mut()
+            .insert(missing, VecDeque::from([crate::scope::State::Missing]));
+        has(
+            &record::recover(&fake, context.platform, &path).unwrap_err(),
+            "doesn't exist",
+        );
+        fake.files.remove(&path);
+    }
+}
+
+#[test]
+fn privileged_undo_fails_if_the_record_disappears_or_is_refused_under_the_lock() {
+    for disappears in [true, false] {
+        let (mut fake, context) = system_unit(linux_root(), false);
+        protect_migration(&mut fake);
+        assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+        protect_migration(&mut fake);
+        let path = "/var/lib/open-ferry/migration.json";
+        fake.on(
+            &format!("lock {path}.lock"),
+            if disappears {
+                Effect::RemoveRecord(path.to_owned())
+            } else {
+                Effect::Untrust(path.to_owned())
+            },
+        );
+        fake.events.clear();
+        fake.launches.clear();
+        let mut files = fake.files.clone();
+        if disappears {
+            files.remove(path);
+        }
+        let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+        assert_eq!(ran.code, 1, "{}", ran.all());
+        has(
+            &ran.err,
+            if disappears {
+                "went away while this waited: nothing was changed"
+            } else {
+                "Refusing to load /var/lib/open-ferry/migration.json"
+            },
+        );
+        assert_eq!(fake.files, files);
+        assert_eq!(fake.events, [format!("lock {path}.lock")]);
+        assert!(fake.launches.is_empty());
+    }
+}
+
+#[test]
+fn unprivileged_and_container_undo_keep_the_prelock_record_when_it_disappears() {
+    for container in [false, true] {
+        let (mut fake, context) = bare_process();
+        assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+        fake.trust.privileged = Ok(container);
+        fake.container = container;
+        fake.on(
+            &format!("lock {LINUX_RECORD}.lock"),
+            Effect::RemoveRecord(LINUX_RECORD.to_owned()),
+        );
+        let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+        assert_eq!(ran.code, 0, "{}", ran.all());
+        assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
+    }
+}
+
+#[test]
+fn privileged_cli_drop_in_undo_refuses_before_steps_or_questions() {
+    for args in [vec!["-undo", "-dry-run"], vec!["-undo"]] {
+        let (mut fake, context) = bare_process();
+        assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+        let bytes = fake.data(LINUX_RECORD).to_vec();
+        fake.file("/var/lib/open-ferry/migration.json", bytes);
+        protect_migration(&mut fake);
+        fake.terminal = true;
+        fake.events.clear();
+        fake.questions.clear();
+        fake.launches.clear();
+        let files = fake.files.clone();
+        let ran = migrate(&mut fake, &context, &args);
+        assert_eq!(ran.code, 1, "{}", ran.all());
+        has(
+            &ran.err,
+            "A privileged `migrate` doesn't undo a launcher switch.",
+        );
+        lacks(&ran.out, "Switching back");
+        lacks(&ran.out, "Dry run");
+        assert!(fake.questions.is_empty());
+        assert!(fake.events.is_empty());
+        assert!(fake.launches.is_empty());
+        assert_eq!(fake.files, files);
+    }
+}
+
+#[test]
+fn no_record_hints_name_the_other_privilege_and_the_real_machine_location() {
+    for privileged in [false, true] {
+        for context in [linux(), windows()] {
+            let mut fake = Fake::new(&context);
+            fake.trust.privileged = Ok(privileged);
+            fake.trust.program_data = Ok("D:/ProtectedData".to_owned());
+            let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+            assert_eq!(ran.code, 1, "{}", ran.all());
+            if privileged {
+                has(
+                    &ran.err,
+                    if context.platform == Platform::Windows {
+                        "A switch made without elevation keeps its record beside that account's installed config: undo it as that account."
+                    } else {
+                        "A switch made without sudo keeps its record beside that account's installed config: undo it as that account."
+                    },
+                );
+            } else {
+                has(
+                    &ran.err,
+                    if context.platform == Platform::Windows {
+                        r"A switch made as an administrator keeps its record in D:\ProtectedData\open-ferry: undo it from an elevated prompt."
+                    } else {
+                        "A switch made with sudo keeps its record in /var/lib/open-ferry: undo it with sudo."
+                    },
+                );
+            }
+            assert!(fake.events.is_empty());
+        }
+    }
+}
+
+#[test]
+fn privileged_restore_refuses_existing_destination_credentials_and_config_files() {
+    for credential in [true, false] {
+        let (mut fake, context) = system_unit(linux_root(), false);
+        protect_migration(&mut fake);
+        assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+        let path = if credential {
+            "/etc/cliproxyapi/auths/claude.json"
+        } else {
+            "/etc/cliproxyapi/config.yaml"
+        };
+        fake.file(path, "changed destination");
+        protect_migration(&mut fake);
+        fake.trust.untrust(path);
+        fake.forbidden_reads.insert(path.to_owned());
+        fake.events.clear();
+        let ran = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+        assert_eq!(ran.code, 1, "{}", ran.all());
+        has(&ran.all(), path);
+        has(&ran.all(), "Refusing to load");
+        assert_eq!(fake.data(path), b"changed destination");
+        assert!(
+            !fake
+                .events
+                .iter()
+                .any(|event| event.starts_with("copy ") && event.ends_with(path))
+        );
+    }
+}
+
+#[test]
+fn restore_refuses_destination_links_only_under_privilege() {
+    for (privileged, container) in [(true, false), (false, false), (true, true)] {
+        let (mut fake, context) = system_unit(linux_root(), false);
+        fake.answer("id -u", 0, "0\n");
+        fake.trust.privileged = Ok(privileged);
+        fake.container = container;
+        if privileged {
+            protect_migration(&mut fake);
+        }
+        let switched = migrate(&mut fake, &context, &["-yes"]);
+        assert_eq!(switched.code, 0, "{}", switched.all());
+        let path = "/etc/cliproxyapi/auths/claude.json";
+        fake.files.remove(path);
+        fake.file("/outside/secret.json", "outside credential");
+        fake.links
+            .insert(path.to_owned(), "/outside/secret.json".to_owned());
+        if privileged && !container {
+            protect_migration(&mut fake);
+        }
+        fake.events.clear();
+        let ran = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+        assert_eq!(
+            ran.code,
+            u8::from(privileged && !container),
+            "{}",
+            ran.all()
+        );
+        assert_eq!(fake.data("/outside/secret.json"), b"outside credential");
+        if privileged && !container {
+            has(
+                &ran.all(),
+                &format!(
+                    "{path} is a symbolic link: under root or an administrator, `migrate` doesn't replace it. Remove it, then run `open-ferry migrate -undo -restore` again"
+                ),
+            );
+            assert!(fake.links.contains_key(path));
+            assert!(
+                !fake
+                    .events
+                    .iter()
+                    .any(|event| event == &format!("remove {path}")
+                        || event.starts_with("copy ") && event.ends_with(path))
+            );
+        } else {
+            has(&ran.out, &format!("Replaced the symbolic link {path}"));
+            assert!(!fake.links.contains_key(path));
+            assert_ne!(fake.data(path), b"outside credential");
+        }
+    }
+}
+
+#[test]
+fn privileged_backup_checks_new_directories_before_copying_into_them() {
+    for name in ["", "/config", "/env", "/auth"] {
+        let (mut fake, context) = system_unit(linux_root(), false);
+        fake.file("/etc/cliproxyapi/.env", "DEPLOY=local\n");
+        protect_migration(&mut fake);
+        let root = format!("/etc/cliproxyapi/open-ferry-migrate-{STAMP}");
+        let dir = format!("{root}{name}");
+        fake.trust.untrust(&dir);
+        // A second refusal after creation tells the immediate directory
+        // check apart from a later source or destination-parent check.
+        let source = match name {
+            "/config" => Some("/etc/cliproxyapi/config.yaml"),
+            "/env" => Some("/etc/cliproxyapi/.env"),
+            "/auth" => Some("/etc/cliproxyapi/auths/claude.json"),
+            _ => None,
+        };
+        if let Some(source) = source {
+            fake.on(&format!("mkdir {dir}"), Effect::Untrust(source.to_owned()));
+        }
+        let ran = migrate(&mut fake, &context, &["-yes"]);
+        assert_eq!(ran.code, 1, "{}", ran.all());
+        has(&ran.all(), &format!("Refusing to write in {dir}"));
+        assert!(
+            fake.events
+                .iter()
+                .any(|event| event == &format!("mkdir {dir}"))
+        );
+        assert!(
+            !fake
+                .events
+                .iter()
+                .any(|event| event.starts_with("copy ") && event.contains(&dir))
+        );
+        if name.is_empty() {
+            assert!(!fake.events.contains(&format!("mkdir {root}/config")));
+        }
+        assert!(fake.launches.is_empty());
+    }
+}
+
+#[test]
+fn a_refused_stopped_unit_drop_in_is_a_blocker_naming_the_drop_in() {
+    let argv = "/usr/local/bin/cli-proxy-api -config /etc/old.yaml";
+    let (mut fake, context) = stopped_unit(
+        &format!("[Service]\nExecStart={argv}\n"),
+        Some(&format!("[Service]\nExecStart=\nExecStart={argv}\n")),
+        "/usr/local/bin/cli-proxy-api",
+        argv,
+    );
+    let path = "/etc/systemd/system/cliproxyapi.service.d/override.conf";
+    protect_migration(&mut fake);
+    fake.trust.untrust(path);
+    fake.forbidden_reads.insert(path.to_owned());
+    let (found, _) = discover::discover(&mut fake, &context, None).unwrap();
+    let blockers = found.unwrap().blockers.join("\n");
+    has(
+        &blockers,
+        &format!("the systemd unit cliproxyapi.service's file {path} wasn't read:"),
+    );
+    has(&blockers, "untrusted");
+    has(
+        &blockers,
+        "make the file and every directory above it root's and writable only by root",
+    );
+    lacks(&blockers, "Refusing to load");
+    lacks(&blockers, "can't be told reliably");
+    read_only(&fake);
+    assert!(fake.launches.is_empty());
+}
+
+#[test]
+fn privileged_undo_recovers_the_backup_record_again_under_the_lock() {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    protect_migration(&mut fake);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let path = "/var/lib/open-ferry/migration.json";
+    let mut copy = saved(&fake, path);
+    let backup = copy["backup"]["dir"].as_str().unwrap().to_owned();
+    copy["status"] = Value::String("undone".to_owned());
+    fake.file(&format!("{backup}/migration.json"), copy.to_string());
+    let unsupported = serde_json::json!({"backup": {"dir": backup}}).to_string();
+    fake.on(
+        &format!("lock {path}.lock"),
+        Effect::Place(path.to_owned(), unsupported.into_bytes()),
+    );
+    protect_migration(&mut fake);
+    fake.events.clear();
+    fake.launches.clear();
+    let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.err, "was undone while this waited");
+    assert_eq!(fake.events, [format!("lock {path}.lock")]);
+    assert!(fake.launches.is_empty());
+}
+
+#[test]
+fn privileged_recovery_never_reads_a_backup_record_missing_at_the_check() {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    protect_migration(&mut fake);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let path = "/var/lib/open-ferry/migration.json";
+    let main = saved(&fake, path);
+    let copy = format!("{}/migration.json", main["backup"]["dir"].as_str().unwrap());
+    protect_migration(&mut fake);
+    fake.states
+        .borrow_mut()
+        .insert(copy.clone(), VecDeque::from([crate::scope::State::Missing]));
+    fake.forbidden_reads.insert(copy.clone());
+    fake.forbidden_exists.insert(copy.clone());
+    let error = record::recover(&fake, context.platform, path).unwrap_err();
+    has(
+        &error,
+        &format!("the backup holds no copy of the record ({copy})"),
+    );
 }
