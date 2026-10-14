@@ -1960,17 +1960,7 @@ fn execute_service(
             ours_exe: prepared.definition.exe.clone(),
         },
     );
-    record::save(machine, platform, base.record_path, &record)
-        .and_then(|copied| {
-            if copied {
-                Ok(())
-            } else {
-                Err(format!(
-                    "the backup's directory, {}, doesn't exist, so its copy of the record wasn't written",
-                    base.backup_dir
-                ))
-            }
-        })
+    record::save_first(machine, platform, base.record_path, &record)
         .map_err(|error| format!("{error}\nNothing but the backup was made."))?;
     let listen = base.assessment.listen.as_ref();
 
@@ -2717,17 +2707,7 @@ fn execute_drop_in(
         sha256: &sha256,
         link: link.as_deref(),
     };
-    record::save(machine, platform, base.record_path, &record)
-        .and_then(|copied| {
-            if copied {
-                Ok(())
-            } else {
-                Err(format!(
-                    "the backup's directory, {}, doesn't exist, so its copy of the record wasn't written",
-                    base.backup_dir
-                ))
-            }
-        })
+    record::save_first(machine, platform, base.record_path, &record)
         .map_err(|error| format!("{error}\nNothing but the backup was made."))?;
 
     // The binaries swapped. The move never replaces: a run with another

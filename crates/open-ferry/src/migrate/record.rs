@@ -420,13 +420,35 @@ pub(crate) fn lock(
 }
 
 /// Writes `record` to `path`, and to its copy in the backup, each through a
-/// temporary file renamed into place. Returns whether the backup copy was written.
+/// temporary file renamed into place. The copy is skipped when the backup's
+/// directory doesn't exist.
 pub(crate) fn save(
     machine: &mut dyn Machine,
     platform: Platform,
     path: &str,
     record: &Record,
-) -> Result<bool, String> {
+) -> Result<(), String> {
+    write(machine, platform, path, record, false)
+}
+
+/// [`save`] for a switch's first record, straight after the backup: when the
+/// backup's directory doesn't exist, nothing is written.
+pub(crate) fn save_first(
+    machine: &mut dyn Machine,
+    platform: Platform,
+    path: &str,
+    record: &Record,
+) -> Result<(), String> {
+    write(machine, platform, path, record, true)
+}
+
+fn write(
+    machine: &mut dyn Machine,
+    platform: Platform,
+    path: &str,
+    record: &Record,
+    copy_required: bool,
+) -> Result<(), String> {
     authorize(machine, path)?;
     let copy = if let Some(backup) = &record.backup {
         let exists = if super::machine::privileged_run(machine.trust_probe()) {
@@ -439,6 +461,11 @@ pub(crate) fn save(
             let copy = platform.join(&backup.dir, FILE);
             authorize(machine, &copy)?;
             Some(copy)
+        } else if copy_required {
+            return Err(format!(
+                "the backup's directory, {}, doesn't exist, so the switch's record wasn't written",
+                backup.dir
+            ));
         } else {
             None
         }
@@ -453,11 +480,10 @@ pub(crate) fn save(
     }
     replace(machine, path, &text)
         .map_err(|error| format!("failed to write the switch's record: {error}"))?;
-    let copied = copy.is_some();
     if let Some(copy) = copy {
         replace(machine, &copy, &text)?;
     }
-    Ok(copied)
+    Ok(())
 }
 
 #[cfg(test)]
