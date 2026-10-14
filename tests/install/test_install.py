@@ -260,6 +260,7 @@ fi
 if [ "${1:-}" = migrate ]; then
   case "$*" in
     "migrate -json")
+      echo "Containers weren't checked: fake Docker is unavailable." >&2
       if [ -z "${FAKE_OPEN_FERRY_MIGRATE_JSON:-}" ]; then
         echo '{"found":false}'
         exit 1
@@ -486,6 +487,7 @@ public static class FakeOpenFerry
         {
             if (args.Length == 2 && args[1] == "-json")
             {
+                Console.Error.WriteLine("Containers weren't checked: fake Docker is unavailable.");
                 string json = Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_MIGRATE_JSON");
                 if (String.IsNullOrEmpty(json))
                 {

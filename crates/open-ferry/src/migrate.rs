@@ -243,10 +243,12 @@ pub(crate) fn run(
                     line(err, &note);
                 }
             } else {
-                line(
-                    out,
-                    "CLIProxyAPI wasn't found: it isn't running, and no service, scheduled task or container of it is set up. Nothing was changed.",
-                );
+                let message = if notes.is_empty() {
+                    "CLIProxyAPI wasn't found: it isn't running, and no service, scheduled task or container of it is set up. Nothing was changed."
+                } else {
+                    "CLIProxyAPI wasn't found: it isn't running, and no service or scheduled task of it is set up. Nothing was changed."
+                };
+                line(out, message);
                 for note in notes {
                     line(out, &note);
                 }
