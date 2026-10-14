@@ -1,0 +1,70 @@
+name: Set up Rust
+description: >-
+  Installs the toolchain rust-toolchain.toml names, restores the dependency
+  cache, and on Windows makes the scratch and temp directories the trust
+  checks accept. Run it after actions/checkout.
+
+inputs:
+  cache:
+    description: >-
+      The cache's name. Jobs that build the same way share one, so each way is
+      cached once.
+    required: true
+  save:
+    description: Whether this job saves the cache, which happens on main only.
+    default: "true"
+
+outputs:
+  cache-hit:
+    description: Whether the cache held this exact key.
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the toolchain from rust-toolchain.toml
+      shell: bash
+      run: rustup toolchain install --profile minimal
+
+    # Dependencies only: rust-cache drops the workspace's own crates before
+    # saving, and they would rebuild anyway, as the checkout gives every file
+    # a new time. The key changes with Cargo.lock, the toolchain and the
+    # CARGO* and RUST* variables. Only main saves, so PR and merge-queue runs
+    # don't push main's caches out of the repository's space, and they all
+    # start from main's. A push to main only looks its key up: when main has
+    # it, there is nothing to build.
+    - id: cache
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        shared-key: ${{ inputs.cache }}
+        save-if: ${{ github.ref == 'refs/heads/main' && inputs.save == 'true' }}
+        lookup-only: ${{ github.event_name == 'push' }}
+
+    # The supervisor's tests run binaries from scratch directories, which
+    # its trust check must accept. The runner's D: drive, where the
+    # checkout and the target directory are, is owned by NETWORK SERVICE,
+    # which the check refuses. The runner is also elevated, so open-ferry
+    # runs privileged in the tests and refuses config and auth paths that
+    # anyone but administrators and SYSTEM can write, as the runner's
+    # profile and its temp directory are. So the scratch and temp
+    # directories go under a directory on C: that only administrators and
+    # SYSTEM own and can write.
+    - name: Scratch directory for the trust checks
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $root = 'C:\ofp-ci'
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        icacls $root /setowner '*S-1-5-32-544' /q
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /q
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        $scratch = Join-Path $root 'scratch'
+        $temp = Join-Path $root 'temp'
+        New-Item -ItemType Directory -Force -Path $scratch, $temp | Out-Null
+        $probe = New-Item -ItemType File -Force -Path (Join-Path $temp 'owner-probe')
+        "New files here are owned by $((Get-Acl $probe.FullName).Owner)"
+        Remove-Item $probe.FullName
+        "OFP_TEST_SCRATCH=$scratch" >> $env:GITHUB_ENV
+        "TMP=$temp" >> $env:GITHUB_ENV
+        "TEMP=$temp" >> $env:GITHUB_ENV
