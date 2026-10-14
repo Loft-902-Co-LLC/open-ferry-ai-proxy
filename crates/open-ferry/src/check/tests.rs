@@ -738,8 +738,11 @@ fn privileged_check_reads_relative_auth_paths_as_full_paths() {
     let root = open_ferry_core::auth::path::clean(dir.path());
     let path = root.join("trusted.json");
     fs::write(&path, br#"{"type":"codex"}"#).unwrap();
-    // A rooted path without a drive needs the current directory's drive.
+    // A rooted path without a drive needs the current directory's drive. When that isn't the
+    // scratch directory's, the full path names a directory that isn't there.
     let relative = PathBuf::from(&root.to_str().unwrap()[2..]);
+    let here = std::env::current_dir().unwrap();
+    let full = PathBuf::from(&here.to_str().unwrap()[..2]).join(&relative);
     let mut probe = Fake::new(Platform::HOST.unwrap(), true);
     probe.file(path.to_str().unwrap());
     let mut config = Config::default();
@@ -750,8 +753,18 @@ fn privileged_check_reads_relative_auth_paths_as_full_paths() {
         reads.borrow_mut().push(path.to_path_buf());
         read_capped(path)
     });
-    assert_eq!(auths.len(), 1, "{findings:?}");
-    assert_eq!(*reads.borrow(), vec![path]);
+    if crate::scope::runtime_test_probe::on_current_drive(&root) {
+        assert_eq!(auths.len(), 1, "{findings:?}");
+        assert_eq!(*reads.borrow(), vec![path]);
+    } else {
+        assert!(auths.is_empty());
+        assert!(reads.borrow().is_empty());
+        let missing = format!("nothing of {} exists", full.display());
+        assert!(
+            findings.iter().any(|f| f.message.contains(&missing)),
+            "{findings:?}"
+        );
+    }
 }
 
 #[test]
