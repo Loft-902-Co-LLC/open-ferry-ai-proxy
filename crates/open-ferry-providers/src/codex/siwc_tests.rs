@@ -1684,12 +1684,18 @@ async fn a_wrapper_observed_pre_send_loss_preserves_predecessors() {
     predecessor_task_loss(PredecessorLoss::WrapperPreSend).await;
 }
 
+#[tokio::test]
+async fn a_wrapper_observed_pre_send_cancellation_preserves_predecessors() {
+    predecessor_task_loss(PredecessorLoss::WrapperCancelled).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PredecessorLoss {
     ReapPostSend,
     WrapperPostSend,
     BeforeFirstPoll,
     WrapperPreSend,
+    WrapperCancelled,
 }
 
 async fn predecessor_task_loss(mode: PredecessorLoss) {
@@ -1752,7 +1758,10 @@ async fn predecessor_task_loss(mode: PredecessorLoss) {
             assert_eq!(successor.await.unwrap_err(), interrupted_refresh());
         }
     } else {
-        let runtime = if mode == PredecessorLoss::BeforeFirstPoll {
+        let runtime = if matches!(
+            mode,
+            PredecessorLoss::BeforeFirstPoll | PredecessorLoss::WrapperCancelled
+        ) {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1779,6 +1788,9 @@ async fn predecessor_task_loss(mode: PredecessorLoss) {
         } else {
             assert!(!cache.lock().unwrap()[&key].started.load(Ordering::SeqCst));
         }
+        // Keep the wrapper unpolled until shutdown so the reap cannot observe
+        // this cancellation first, and don't let a caller retry T1.
+        let shared = cache.lock().unwrap()[&key].shared.clone();
         drop(successor);
         runtime.shutdown_background();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1793,8 +1805,15 @@ async fn predecessor_task_loss(mode: PredecessorLoss) {
         })
         .await
         .unwrap();
-        if mode == PredecessorLoss::BeforeFirstPoll {
-            prune_refreshes(&mut cache.lock().unwrap());
+        if matches!(
+            mode,
+            PredecessorLoss::BeforeFirstPoll | PredecessorLoss::WrapperCancelled
+        ) {
+            if mode == PredecessorLoss::WrapperCancelled {
+                assert!(matches!(shared.await, Err(RefreshError::Cancelled)));
+            } else {
+                prune_refreshes(&mut cache.lock().unwrap());
+            }
             assert!(!cache.lock().unwrap().contains_key(&key));
         } else {
             // This lookup's prune is the first observer of the loss.
@@ -1809,7 +1828,9 @@ async fn predecessor_task_loss(mode: PredecessorLoss) {
     }
     if matches!(
         mode,
-        PredecessorLoss::BeforeFirstPoll | PredecessorLoss::WrapperPreSend
+        PredecessorLoss::BeforeFirstPoll
+            | PredecessorLoss::WrapperPreSend
+            | PredecessorLoss::WrapperCancelled
     ) {
         assert_eq!(held.await.unwrap().refresh_token, "fake-T1");
         assert_eq!(
