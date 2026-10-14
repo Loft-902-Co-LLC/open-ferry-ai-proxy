@@ -26,6 +26,8 @@ pub(crate) struct Fake {
     pub(crate) account: Result<String, String>,
     pub(crate) program_data: Result<String, String>,
     pub(crate) nodes: BTreeMap<String, Node>,
+    /// The first bytes of programs, or why they cannot be read.
+    pub(crate) heads: BTreeMap<String, Result<Vec<u8>, String>>,
     /// Paths the trust check refuses, with everything below them.
     pub(crate) untrusted: BTreeSet<String>,
     /// The receipts, by their paths: the binary each names.
@@ -55,6 +57,7 @@ impl Fake {
             account: Ok(platform.clean(account)),
             program_data: Ok(platform.clean("C:/ProgramData")),
             nodes: BTreeMap::new(),
+            heads: BTreeMap::new(),
             untrusted: BTreeSet::new(),
             receipts: BTreeMap::new(),
             receipt_errors: BTreeMap::new(),
@@ -139,6 +142,10 @@ impl Probe for Fake {
         self.program_data.clone()
     }
 
+    fn program_files(&self) -> Result<String, String> {
+        Ok(self.platform.clean("C:/Program Files"))
+    }
+
     fn state(&self, path: &str) -> State {
         match self.nodes.get(&self.path(path)) {
             None => State::Missing,
@@ -170,6 +177,13 @@ impl Probe for Fake {
         } else {
             self.trust(path)
         }
+    }
+
+    fn program_head(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.heads
+            .get(&self.path(path))
+            .cloned()
+            .unwrap_or_else(|| Err("can't tell what kind of program this is".to_owned()))
     }
 
     fn readable_file(&self, path: &str) -> io::Result<()> {

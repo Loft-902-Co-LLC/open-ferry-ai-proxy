@@ -137,6 +137,86 @@ fn restricted_environments_keep_only_allowed_names_and_checked_values() {
 }
 
 #[test]
+fn restricted_environments_keep_switches_but_drop_locale_and_timezone_paths() {
+    for name in [
+        "DISABLE_AUTOUPDATER",
+        "DISABLE_TELEMETRY",
+        "DISABLE_ERROR_REPORTING",
+    ] {
+        let input = vec![(name.into(), "1".into())];
+        assert!(
+            entry()
+                .environment(input.clone(), &restricted())
+                .contains(&input[0])
+        );
+    }
+    for (name, value) in [
+        ("LANG", "/srv/locale"),
+        ("LC_ALL", "locale/path"),
+        ("LC_MESSAGES", "locale/path"),
+        ("TZ", "/srv/zone"),
+        ("TZ", ":/srv/zone"),
+        ("TZ", "../zone"),
+        ("TZ", "zone..name"),
+    ] {
+        let input = vec![(name.into(), value.into())];
+        assert!(
+            !entry()
+                .environment(input.clone(), &restricted())
+                .contains(&input[0])
+        );
+        assert!(
+            entry()
+                .environment(input.clone(), &SpawnEnvironment::Inherited)
+                .contains(&input[0])
+        );
+    }
+    for name in ["LANG", "LC_ALL", "LC_MESSAGES", "TZ"] {
+        let input = vec![(name.into(), "C:\\zone".into())];
+        assert!(
+            !entry()
+                .environment(input.clone(), &restricted())
+                .contains(&input[0])
+        );
+    }
+    for (name, value) in [
+        ("LANG", "en_US.UTF-8"),
+        ("LC_ALL", "C"),
+        ("TZ", "America/New_York"),
+        ("TZ", ":Europe/Paris"),
+    ] {
+        let input = vec![(name.into(), value.into())];
+        assert!(
+            entry()
+                .environment(input.clone(), &restricted())
+                .contains(&input[0])
+        );
+    }
+    for name in [
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "CLAUDE_CODE_GIT_BASH_PATH",
+    ] {
+        let input = vec![(name.into(), "unchecked".into())];
+        assert!(
+            !entry()
+                .environment(input.clone(), &restricted())
+                .contains(&input[0])
+        );
+        let mut environment = restricted();
+        let SpawnEnvironment::Restricted { variables, .. } = &mut environment else {
+            panic!("restricted")
+        };
+        variables.push((name.into(), "checked".into()));
+        assert!(
+            entry()
+                .environment(input, &environment)
+                .contains(&(name.into(), "checked".into()))
+        );
+    }
+}
+
+#[test]
 fn restricted_accounts_follow_the_existing_entry_override_rules() {
     let configured = Entry {
         config_dir: "explicit-account".into(),

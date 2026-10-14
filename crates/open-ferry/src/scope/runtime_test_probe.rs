@@ -49,6 +49,9 @@ impl Probe for RuntimeFake {
     fn program_data(&self) -> Result<String, String> {
         self.fake.lock().unwrap().program_data()
     }
+    fn program_files(&self) -> Result<String, String> {
+        self.fake.lock().unwrap().program_files()
+    }
     fn entries(&self, dir: &str, limit: usize) -> io::Result<Vec<String>> {
         self.fake.lock().unwrap().entries(dir, limit)
     }
@@ -57,6 +60,9 @@ impl Probe for RuntimeFake {
     }
     fn trusted_file(&self, path: &str) -> Result<(), String> {
         self.fake.lock().unwrap().trusted_file(path)
+    }
+    fn program_head(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.fake.lock().unwrap().program_head(path)
     }
     fn readable_file(&self, path: &str) -> io::Result<()> {
         self.fake.lock().unwrap().readable_file(path)
