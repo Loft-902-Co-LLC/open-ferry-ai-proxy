@@ -40,7 +40,7 @@ use open_ferry_dashboard::mask_client_key;
 use serde_json::{Map, Value};
 
 use super::Context;
-use super::target::read_key_file;
+use super::target::read_key_file_with_probe;
 use super::values::any_to_json;
 
 /// The parts of a key's name that make its value a secret.
@@ -329,8 +329,8 @@ fn limited_file_secrets(path: &Path, limit: u64, secrets: &mut Secrets) {
 /// from the config's directory. In tests, only those under the temporary
 /// directory, so a test never looks at a real one. An unreadable or refused
 /// config is skipped.
-pub(crate) fn auth_dirs(ctx: &Context) -> Vec<PathBuf> {
-    let Some(config) = auth_config(&crate::scope::Host, &ctx.path) else {
+pub(super) fn auth_dirs_with_probe(ctx: &Context, probe: &dyn crate::scope::Probe) -> Vec<PathBuf> {
+    let Some(config) = auth_config(probe, &ctx.path) else {
         return Vec::new();
     };
     let Ok(dir) = config.resolve_auth_dir() else {
@@ -348,7 +348,19 @@ pub(crate) fn auth_dirs(ctx: &Context) -> Vec<PathBuf> {
         }
     }
     let temp = std::env::temp_dir();
-    dirs.retain(|dir| !cfg!(test) || dir.starts_with(&temp));
+    #[cfg(test)]
+    let scratch = std::env::var_os("OFP_TEST_SCRATCH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+        });
+    dirs.retain(|dir| {
+        #[cfg(test)]
+        if dir.starts_with(&scratch) {
+            return true;
+        }
+        !cfg!(test) || dir.starts_with(&temp)
+    });
     dirs
 }
 
@@ -589,9 +601,12 @@ fn has_pem_block(text: &str) -> bool {
 
 /// Adds the secrets of the credential files in `ctx`'s auth directories,
 /// up to [`CREDENTIAL_FILES`] of them, to `secrets`.
-fn credential_secrets(ctx: &Context, secrets: &mut Secrets) {
+fn credential_secrets(ctx: &Context, probe: &dyn crate::scope::Probe, secrets: &mut Secrets) {
     let mut read = 0;
-    for dir in auth_dirs(ctx) {
+    for dir in auth_dirs_with_probe(ctx, probe) {
+        if !probe.in_container() && crate::scope::authorize_auth_dir(probe, &dir).is_err() {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -604,6 +619,11 @@ fn credential_secrets(ctx: &Context, secrets: &mut Secrets) {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
             if json && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                if super::files::read(probe, &path).is_err()
+                    || crate::scope::authorize_credential_file(probe, &path).is_err()
+                {
+                    continue;
+                }
                 limited_file_secrets(&path, CREDENTIAL_LIMIT, secrets);
                 read += 1;
             }
@@ -615,10 +635,17 @@ fn credential_secrets(ctx: &Context, secrets: &mut Secrets) {
 /// its backup, `MANAGEMENT_PASSWORD`, the key file, and the credential
 /// files in the auth directory.
 pub(crate) fn known_secrets(ctx: &Context) -> Secrets {
+    known_secrets_with_probe(ctx, crate::scope::runtime_probe().as_ref())
+}
+
+fn known_secrets_with_probe(ctx: &Context, probe: &dyn crate::scope::Probe) -> Secrets {
     let mut secrets = Secrets::new();
-    file_secrets(&ctx.path, &mut secrets);
-    file_secrets(&backup_path(&ctx.path), &mut secrets);
-    credential_secrets(ctx, &mut secrets);
+    for path in [&ctx.path, &backup_path(&ctx.path)] {
+        if super::files::read(probe, path).is_ok() {
+            file_secrets(path, &mut secrets);
+        }
+    }
+    credential_secrets(ctx, probe, &mut secrets);
     if let Some(password) = &ctx.env.password {
         secrets.add(password);
     }
@@ -626,7 +653,7 @@ pub(crate) fn known_secrets(ctx: &Context) -> Secrets {
         .into_iter()
         .flatten()
     {
-        if let Ok(key) = read_key_file(file) {
+        if let Ok(key) = read_key_file_with_probe(probe, file) {
             secrets.add(&key);
         }
     }
@@ -827,7 +854,7 @@ mod tests {
         use crate::os_service::Platform;
         use crate::update::scope_probe::Fake;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::scope::runtime_test_probe::scratch_dir();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "auth-dir: auth\n").unwrap();
         let mut probe = Fake::new(Platform::HOST.unwrap(), true);
@@ -842,6 +869,125 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn secret_collection_skips_each_refused_file_and_auth_directory() {
+        use crate::os_service::Platform;
+        use crate::update::scope_probe::Fake;
+
+        let dir = crate::scope::runtime_test_probe::scratch_dir();
+        let platform = if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        };
+        let path = dir.path().join("config.yaml");
+        let backup = backup_path(&path);
+        let auth = dir.path().join("auth");
+        std::fs::create_dir(&auth).unwrap();
+        let credential = auth.join("credential.json");
+        let key = dir.path().join("key.txt");
+        let env_key = dir.path().join("env-key.txt");
+        std::fs::write(
+            &path,
+            format!(
+                "api-keys: [config-secret-value]\nauth-dir: '{}'\n",
+                auth.display().to_string().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        std::fs::write(&backup, "api-keys: [backup-secret-value]\n").unwrap();
+        std::fs::write(&credential, r#"{"access_token":"credential-secret-value"}"#).unwrap();
+        std::fs::write(&key, "key-secret-value\n").unwrap();
+        std::fs::write(&env_key, "env-key-secret-value\n").unwrap();
+        let ctx = Context {
+            path: path.clone(),
+            env: super::super::target::Env {
+                password: Some("password-secret-value".into()),
+                key_file: Some(env_key.clone()),
+            },
+            key_file: Some(key.clone()),
+            yes: true,
+            expect_sha256: None,
+            expect_backup_sha256: None,
+            ask: None,
+            say: None,
+            caller: super::super::Caller::Cli,
+        };
+        let all = [
+            "config-secret-value",
+            "backup-secret-value",
+            "credential-secret-value",
+            "key-secret-value",
+            "env-key-secret-value",
+            "password-secret-value",
+        ];
+        let fake = || {
+            let mut probe = Fake::new(platform, true);
+            for file in [&path, &backup, &credential, &key, &env_key] {
+                probe.file(file.to_str().unwrap());
+            }
+            probe
+        };
+        let collected = known_secrets_with_probe(&ctx, &fake());
+        for secret in all {
+            assert!(collected.iter().any(|kept| kept == secret), "{secret}");
+        }
+        for (refused, secret) in [
+            (&path, all[0]),
+            (&backup, all[1]),
+            (&credential, all[2]),
+            (&key, all[3]),
+            (&env_key, all[4]),
+            (&auth, all[2]),
+        ] {
+            let mut probe = fake();
+            probe.untrust(refused.to_str().unwrap());
+            let collected = known_secrets_with_probe(&ctx, &probe);
+            assert!(
+                !collected.iter().any(|kept| kept == secret),
+                "{}",
+                refused.display()
+            );
+            probe.privileged = Ok(false);
+            let collected = known_secrets_with_probe(&ctx, &probe);
+            for secret in all {
+                assert!(collected.iter().any(|kept| kept == secret), "{secret}");
+            }
+        }
+        for (missing, secret) in [
+            (&path, all[0]),
+            (&backup, all[1]),
+            (&credential, all[2]),
+            (&key, all[3]),
+            (&env_key, all[4]),
+        ] {
+            let mut probe = fake();
+            probe
+                .nodes
+                .remove(&platform.clean(missing.to_str().unwrap()));
+            let collected = known_secrets_with_probe(&ctx, &probe);
+            assert!(
+                !collected.iter().any(|kept| kept == secret),
+                "{}",
+                missing.display()
+            );
+        }
+        let mut probe = fake();
+        probe.privileged = Err("token unavailable".into());
+        let collected = known_secrets_with_probe(&ctx, &probe);
+        assert_eq!(collected.iter().collect::<Vec<_>>(), vec![all[5]]);
+        let mut container = crate::scope::tests::Fake::new(platform, true);
+        container.container = true;
+        for file in [&path, &backup, &credential, &key, &env_key] {
+            container.file(file.to_str().unwrap());
+        }
+        container.untrust(dir.path().to_str().unwrap());
+        let collected = known_secrets_with_probe(&ctx, &container);
+        for secret in all {
+            assert!(collected.iter().any(|kept| kept == secret), "{secret}");
+        }
+    }
 
     // Not upstream's: a value is masked by the key nearest above it, a list
     // by the key that holds it, a header as the request log masks it.

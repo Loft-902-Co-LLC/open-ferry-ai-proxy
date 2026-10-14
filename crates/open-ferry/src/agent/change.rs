@@ -420,20 +420,13 @@ async fn attempt(
         }
         Reach::Refused(failure) | Reach::OtherConfig(failure) => return Err(failure.clone()),
         other => {
-            if let Err(error) = save::write_file_expecting(&ctx.path, &planned, data) {
-                return match error.kind() {
-                    SaveErrorKind::Stale => Ok(Attempt::Changed(read_config(&ctx.path)?)),
-                    SaveErrorKind::Io | SaveErrorKind::Symlink => Err(Failure::new(
-                        "failed",
-                        format!(
-                            "the config file couldn't be written, so nothing was changed: {error}"
-                        ),
-                    )),
-                    _ => Err(Failure::new(
-                        "failed",
-                        "the change can't be written as a config file, so nothing was changed",
-                    )),
-                };
+            if let Some(changed) = write_in_file(
+                crate::scope::runtime_probe().as_ref(),
+                &ctx.path,
+                &planned,
+                data,
+            )? {
+                return Ok(Attempt::Changed(changed));
             }
             ("file", Some(file_note(other)))
         }
@@ -732,5 +725,36 @@ pub(crate) fn edit_failure(error: V8EditError) -> Failure {
             "failed",
             placed("the config writer refused the change", &other.to_string()),
         ),
+    }
+}
+
+/// Writes a local change only after every file the writer uses passes its check.
+pub(super) fn write_in_file(
+    probe: &dyn crate::scope::Probe,
+    path: &Path,
+    planned: &[u8],
+    data: &[u8],
+) -> Result<Option<Vec<u8>>, Failure> {
+    super::files::config_write(probe, path)?;
+    match save::write_file_expecting(path, planned, data) {
+        Ok(()) => Ok(None),
+        Err(error) => match error.kind() {
+            SaveErrorKind::Stale => crate::settings::read(probe, path)
+                .map(Some)
+                .map_err(|error| {
+                    Failure::new(
+                        "not_found",
+                        format!("can't read {}: {error}", path.display()),
+                    )
+                }),
+            SaveErrorKind::Io | SaveErrorKind::Symlink => Err(Failure::new(
+                "failed",
+                format!("the config file couldn't be written, so nothing was changed: {error}"),
+            )),
+            _ => Err(Failure::new(
+                "failed",
+                "the change can't be written as a config file, so nothing was changed",
+            )),
+        },
     }
 }
