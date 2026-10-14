@@ -862,7 +862,8 @@ fn finish(
 /// Copies `from`, a directory, to `to`, with what it holds, but for
 /// symbolic links, `skip`, and at the top a `logs` directory. A symbolic
 /// link where `to` is refuses the copy; one where a file goes is replaced
-/// by the file. Nothing is written through a link.
+/// by the file unless privileged, when it is refused. Nothing is written
+/// through a link.
 fn copy_tree(
     machine: &mut dyn Machine,
     platform: Platform,
@@ -891,6 +892,10 @@ fn copy_tree(
         machine
             .create_dir_all(to)
             .map_err(|error| format!("failed to create {to}: {error}"))?;
+    }
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(to))
+            .map_err(|error| error.to_string())?;
     }
     let entries = machine
         .list_dir(from)
@@ -929,7 +934,7 @@ fn copy_tree(
 }
 
 /// Copies the file `from` to `to`. A symbolic link at `to` is replaced by
-/// the copy, not written through, and that is said.
+/// the copy unless privileged, when it is refused. No copy writes through it.
 fn copy_replacing_link(
     machine: &mut dyn Machine,
     from: &str,
@@ -939,6 +944,23 @@ fn copy_replacing_link(
     if super::machine::privileged_run(machine.trust_probe()) {
         crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(from))
             .map_err(|error| error.to_string())?;
+        if machine.link_target(to).is_some() {
+            return Err(format!(
+                "{to} is a symbolic link: under root or an administrator, `migrate` doesn't replace it. Remove it, then run `open-ferry migrate -undo -restore` again"
+            ));
+        }
+        if machine.exists(to) {
+            if to.to_ascii_lowercase().ends_with(".json") {
+                crate::scope::authorize_credential_file(
+                    machine.trust_probe(),
+                    std::path::Path::new(to),
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(to))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         if let Some(parent) = machine.trust_probe().platform().parent(to) {
             crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
                 .map_err(|error| error.to_string())?;
@@ -1044,6 +1066,10 @@ fn backup_subdir(
             .create_dir_all(&sub)
             .map_err(|error| format!("failed to create {sub}: {error}"))?;
     }
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&sub))
+            .map_err(|error| error.to_string())?;
+    }
     Ok(sub)
 }
 
@@ -1063,6 +1089,10 @@ fn back_up(
     machine
         .create_private_dir(dir)
         .map_err(|error| format!("failed to create the backup, {dir}: {error}"))?;
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
+            .map_err(|error| error.to_string())?;
+    }
     let mut files = Vec::new();
     let config_to = backup_subdir(machine, platform, dir, "config")?;
     let config_copy = copy_file(
@@ -3352,7 +3382,10 @@ fn theirs_runs(
         .is_some_and(|answer| answer == Answer::CliProxyApi)
 }
 
-fn refuse_privileged_drop_in_undo(machine: &dyn Machine, record: &Record) -> Result<(), String> {
+pub(super) fn refuse_privileged_drop_in_undo(
+    machine: &dyn Machine,
+    record: &Record,
+) -> Result<(), String> {
     if matches!(record.switch, Switch::DropIn { .. })
         && super::machine::privileged_run(machine.trust_probe())
     {
@@ -3384,8 +3417,24 @@ pub(crate) fn undo(
     // One `migrate` at a time, for the whole undo. The record is read again
     // under the lock: another run may have changed it since it was read.
     let _lock = record::lock(machine, platform, record_path)?;
-    record::authorize(machine, record_path)?;
-    if let Ok(Some(fresh)) = record::load(machine, record_path) {
+    let fresh = if super::machine::privileged_run(machine.trust_probe()) {
+        match record::load(machine, record_path) {
+            Ok(Some(fresh)) => Some(fresh),
+            Ok(None) => {
+                return Err(format!(
+                    "the switch's record, {record_path}, went away while this waited: nothing was changed"
+                ));
+            }
+            Err(error) => Some(
+                record::recover(machine, platform, record_path).map_err(|why| {
+                    format!("{error}. The backup's copy can't be used either: {why}")
+                })?,
+            ),
+        }
+    } else {
+        record::load(machine, record_path).ok().flatten()
+    };
+    if let Some(fresh) = fresh {
         if matches!(fresh.status, Status::RolledBack | Status::Undone) {
             return Err(format!(
                 "the switch made at {} was undone while this waited (at {}): there is nothing to undo",
