@@ -141,14 +141,24 @@ jobs:
             cargo-blue-green-${{ runner.os }}-
             cargo-${{ runner.os }}-
 
-      # As in check: the trust check refuses the runner's D: drive.
+      # As in check: the trust check refuses the runner's D: drive, and the
+      # elevated runner's profile and temp directory.
       - name: Scratch directory for the trust checks
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $dir = Join-Path $env:USERPROFILE 'ofp-scratch'
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          "OFP_TEST_SCRATCH=$dir" >> $env:GITHUB_ENV
+          $root = 'C:\ofp-ci'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          icacls $root /setowner '*S-1-5-32-544' /q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $scratch = Join-Path $root 'scratch'
+          $temp = Join-Path $root 'temp'
+          New-Item -ItemType Directory -Force -Path $scratch, $temp | Out-Null
+          "OFP_TEST_SCRATCH=$scratch" >> $env:GITHUB_ENV
+          "TMP=$temp" >> $env:GITHUB_ENV
+          "TEMP=$temp" >> $env:GITHUB_ENV
 
       - name: Clippy with the blue-green test seams
         run: cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
