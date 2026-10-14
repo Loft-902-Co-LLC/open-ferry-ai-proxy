@@ -28,6 +28,7 @@ pub(crate) struct Fake {
     privileged: Result<bool, String>,
     account: Result<String, String>,
     program_data: Result<String, String>,
+    program_files: Result<String, String>,
     nodes: BTreeMap<String, Node>,
     /// Paths the trust check refuses, with everything below them.
     untrusted: BTreeSet<String>,
@@ -58,11 +59,12 @@ impl Fake {
             (Platform::Linux, true) => ROOT_ACCOUNT,
             (Platform::Linux, false) => USER_ACCOUNT,
         };
-        Fake {
+        let mut probe = Fake {
             platform,
             privileged: Ok(privileged),
             account: Ok(platform.clean(account)),
             program_data: Ok(platform.clean("C:/ProgramData")),
+            program_files: Ok(platform.clean("C:/Program Files")),
             nodes: BTreeMap::new(),
             untrusted: BTreeSet::new(),
             receipts: BTreeMap::new(),
@@ -75,7 +77,17 @@ impl Fake {
             created: Vec::new(),
             container: false,
             aliases: BTreeMap::new(),
+        };
+        match platform {
+            Platform::Windows => {
+                probe.dir("C:/ProgramData").dir("C:/Program Files");
+            }
+            Platform::Linux => {
+                probe.dir("/etc");
+            }
+            Platform::MacOs => {}
         }
+        probe
     }
 
     fn path(&self, path: &str) -> String {
@@ -175,7 +187,7 @@ impl Probe for Fake {
     }
 
     fn program_files(&self) -> Result<String, String> {
-        Ok(self.platform.clean("C:/Program Files"))
+        self.program_files.clone()
     }
 
     fn state(&self, path: &str) -> State {
@@ -1627,7 +1639,7 @@ mod claude {
             ),
             (
                 Platform::Windows,
-                "C:/trusted;D:/untrusted/claude.cmd",
+                "C:/trusted;D:/untrusted/claude.exe",
                 "C:/account",
                 "C:/entries",
             ),
@@ -1829,6 +1841,131 @@ mod claude {
     }
 
     #[test]
+    fn missing_managed_settings_directories_require_a_trusted_existing_ancestor() {
+        for (platform, parent, directory) in [
+            (Platform::Linux, "/etc", "/etc/claude-code"),
+            (
+                Platform::Windows,
+                "D:/MachineData",
+                "D:/MachineData/ClaudeCode",
+            ),
+        ] {
+            let mut probe = Fake::new(platform, true);
+            probe.dir(parent);
+            if platform == Platform::Windows {
+                probe.program_data = Ok(probe.path(parent));
+            }
+            assert!(claude_managed_settings(&probe).is_ok());
+            assert!(matches!(probe.state(directory), State::Missing));
+            probe.untrust(parent);
+            let error = claude_managed_settings(&probe).unwrap_err();
+            assert!(error.contains(&probe.path(parent)), "{error}");
+            if platform == Platform::Windows {
+                let directory = probe.path(directory);
+                assert!(error.contains(&format!("mkdir \"{directory}\"")), "{error}");
+                assert!(error.contains("/setowner *S-1-5-32-544"), "{error}");
+                assert!(error.contains("/inheritance:r /grant:r"), "{error}");
+                assert!(error.contains("*S-1-5-32-545:(OI)(CI)RX"), "{error}");
+                assert!(!error.contains("C:/ProgramData"), "{error}");
+            } else {
+                assert!(error.contains("not writable by others"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn managed_settings_drop_ins_require_a_trusted_directory_and_regular_files() {
+        for (platform, directory) in [
+            (Platform::Linux, "/etc/claude-code/managed-settings.d"),
+            (
+                Platform::Windows,
+                "C:/ProgramData/ClaudeCode/managed-settings.d",
+            ),
+        ] {
+            let mut probe = Fake::new(platform, true);
+            probe.dir(directory);
+            let path = platform.join(directory, "policy.json");
+            probe.file(&path);
+            assert!(claude_managed_settings(&probe).is_ok());
+            assert!(probe.listed.borrow().contains(&probe.path(directory)));
+            for untrusted in [directory, &path] {
+                probe.untrust(untrusted);
+                assert!(claude_managed_settings(&probe).is_err());
+                probe.untrusted.clear();
+            }
+            for node in [Node::Link, Node::Dir, Node::Hidden] {
+                probe.node(&path, node);
+                assert!(claude_managed_settings(&probe).is_err());
+            }
+            probe.file(&path);
+            for node in [Node::Link, Node::File, Node::Hidden] {
+                probe.node(directory, node);
+                assert!(claude_managed_settings(&probe).is_err());
+            }
+            probe.dir(directory).node(directory, Node::Dir);
+            for index in 0..MAX_ENTRIES {
+                probe.file(&platform.join(directory, &format!("{index}.json")));
+            }
+            assert!(
+                claude_managed_settings(&probe)
+                    .unwrap_err()
+                    .contains("more than 10000 entries")
+            );
+        }
+    }
+
+    #[test]
+    fn privileged_windows_programs_require_an_exe_suffix_before_reading_the_header() {
+        let mut probe = Fake::new(Platform::Windows, true);
+        probe.dir("C:/account").dir("C:/entries").dir("C:/profile");
+        let entry = Entry {
+            config_dir: "C:/account".into(),
+            ..entry()
+        };
+        for name in [
+            "claude",
+            "claude.cmd",
+            "claude.bat",
+            "claude.EXE",
+            "claude.exe",
+        ] {
+            let program = format!("C:/trusted/bin/{name}");
+            probe.file(&program);
+            probe.head_reads.borrow_mut().clear();
+            let run = |probe: &Fake| {
+                authorize_claude_spawn(
+                    probe,
+                    &entry,
+                    Path::new(&program),
+                    Path::new("C:/entries"),
+                    None,
+                    None,
+                    Some(Path::new("C:/profile")),
+                )
+            };
+            if name.to_ascii_lowercase().ends_with(".exe") {
+                assert!(run(&probe).is_ok());
+                assert_eq!(*probe.head_reads.borrow(), vec![probe.path(&program)]);
+            } else {
+                assert_eq!(
+                    run(&probe).unwrap_err(),
+                    format!("{program} is not an .exe path; set command to a native claude.exe")
+                );
+                assert!(probe.head_reads.borrow().is_empty());
+                probe.untrust(&program);
+                assert!(run(&probe).unwrap_err().contains("native claude.exe"));
+                probe.untrusted.clear();
+            }
+            probe.privileged = Ok(false);
+            assert_eq!(run(&probe).unwrap(), SpawnEnvironment::Inherited);
+            probe.privileged = Ok(true);
+            probe.container = true;
+            assert_eq!(run(&probe).unwrap(), SpawnEnvironment::Inherited);
+            probe.container = false;
+        }
+    }
+
+    #[test]
     fn managed_settings_require_trusted_directories_and_present_files() {
         for (platform, directories) in [
             (Platform::Linux, vec!["/etc/claude-code"]),
@@ -1914,6 +2051,7 @@ mod claude {
         ] {
             probe.dir(path);
         }
+        probe.program_files = Ok("D:/Native/Programs".into());
         probe.file("C:/Native/System/cmd.exe");
         let environment = || SpawnEnvironment::Restricted {
             path: "D:/program".into(),
@@ -1944,11 +2082,13 @@ mod claude {
             )
         );
         let program_data = probe.program_data().unwrap();
+        let program_files = probe.program_files().unwrap();
         for (name, value) in [
             ("SystemRoot", "C:/Native/Windows"),
             ("windir", "C:/Native/Windows"),
             ("SystemDrive", "C:"),
             ("ProgramData", program_data.as_str()),
+            ("ProgramFiles", program_files.as_str()),
             ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
             ("APPDATA", "D:/profile/roaming"),
             ("LOCALAPPDATA", "D:/profile/local"),

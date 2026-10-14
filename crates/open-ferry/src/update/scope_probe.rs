@@ -51,7 +51,7 @@ impl Fake {
             (Platform::Linux, true) => "/root/.local/share/open-ferry",
             (Platform::Linux, false) => "/home/me/.local/share/open-ferry",
         };
-        Fake {
+        let mut probe = Fake {
             platform,
             privileged: Ok(privileged),
             account: Ok(platform.clean(account)),
@@ -64,7 +64,17 @@ impl Fake {
             reads: RefCell::new(Vec::new()),
             create: None,
             created: Vec::new(),
+        };
+        match platform {
+            Platform::Windows => {
+                probe.dir("C:/ProgramData").dir("C:/Program Files");
+            }
+            Platform::Linux => {
+                probe.dir("/etc");
+            }
+            Platform::MacOs => {}
         }
+        probe
     }
 
     fn path(&self, path: &str) -> String {
