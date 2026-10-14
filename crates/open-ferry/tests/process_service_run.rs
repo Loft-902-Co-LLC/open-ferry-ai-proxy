@@ -514,20 +514,18 @@ mod wrapper {
 /// Not upstream's: a live degraded supervisor must not strand a port retry.
 #[test]
 fn a_live_bind_conflict_retries_on_a_different_port() {
+    // The non-root Linux job exercises this control.
     if privilege::privileged() {
-        eprintln!("skipped bind-conflict control: requires an unprivileged account");
+        eprintln!(
+            "skipped process_service_run::a_live_bind_conflict_retries_on_a_different_port: requires an unprivileged account"
+        );
         return;
     }
     let _permit = Permit::take();
     let dir = scratch();
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let occupied = held.local_addr().unwrap().port();
-    let (_sup, port) = launch_with_first_port(
-        dir.path(),
-        How::Directly,
-        Some(occupied),
-        Duration::from_secs(15),
-    );
+    let (_sup, port) = launch_with_first_port(dir.path(), How::Directly, Some(occupied), LONG);
     assert_ne!(port, occupied);
     let log = std::fs::read_to_string(dir.path().join("first-bind-conflict.log")).unwrap();
     assert!(log.contains("failed to bind the main listener"), "{log}");

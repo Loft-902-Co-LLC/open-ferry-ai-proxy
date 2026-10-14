@@ -12,6 +12,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/privilege.rs"]
+mod privilege;
+#[path = "../../open-ferry-supervisor/tests/under_test/timeouts.rs"]
+mod timeouts;
+use timeouts::LONG;
+
 const OPEN_FERRY: &str = env!("CARGO_BIN_EXE_open-ferry");
 
 /// Runs `binary` with `args` in `dir`, which has no `.env`.
@@ -158,51 +164,62 @@ impl Drop for Started {
     }
 }
 
-// Not upstream's: open-ferry started as `cliproxyapi`, with CLIProxyAPI's
-// command line, serves as open-ferry, which is what migrate's drop-in
-// relies on.
-#[test]
-fn serves_under_cliproxyapis_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let binary = renamed(dir.path(), "cliproxyapi");
-    let auth = dir.path().join("auths");
+/// Both a fixture key and the rejection of a different key identify our
+/// server: a foreign keyless server accepts either and must not pass.
+fn answers_as_ours(port: u16, key: &str) -> bool {
+    get(port, "/", None).is_some_and(|root| {
+        root.starts_with("HTTP/1.1 200") && root.contains("open-ferry-ai-proxy")
+    }) && get(port, "/v1/models", Some(key))
+        .is_some_and(|models| models.starts_with("HTTP/1.1 200"))
+        && get(port, "/v1/models", Some(&format!("{key}-wrong")))
+            .is_some_and(|denied| denied.starts_with("HTTP/1.1 401"))
+}
+
+/// Starts our renamed server, retrying only its own logged bind failure.
+fn start_renamed(dir: &Path, first_port: Option<u16>, budget: Duration) -> (Started, u16) {
+    let binary = renamed(dir, "cliproxyapi");
+    let auth = dir.join("auths");
     std::fs::create_dir(&auth).unwrap();
-    let key = format!(
-        "renamed-{}",
-        dir.path().file_name().unwrap().to_string_lossy()
-    );
-    let config = dir.path().join("config.yaml");
-    let stderr = dir.path().join("server.stderr");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let key = format!("renamed-{}", dir.file_name().unwrap().to_string_lossy());
+    let config = dir.join("config.yaml");
+    let log_path = dir.join("server.log");
+    let deadline = Instant::now() + budget;
+    let mut next_port = first_port;
+    let mut attempt = 0;
     'attempts: loop {
         assert!(
             Instant::now() < deadline,
             "no free port within the startup budget"
         );
-        let (_socket, port) = closed_port();
-        drop(_socket);
+        let port = next_port.take().unwrap_or_else(|| {
+            let (socket, port) = closed_port();
+            drop(socket);
+            port
+        });
+        attempt += 1;
         std::fs::write(&config, format!(
             "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys:\n  - '{key}'\nself-update:\n  mode: off\n", auth.display()
         )).unwrap();
+        let log = std::fs::File::create(&log_path).unwrap();
         let child = Command::new(&binary)
             .arg("-config")
             .arg(&config)
-            .current_dir(dir.path())
+            .current_dir(dir)
             .env_remove("MANAGEMENT_PASSWORD")
             .env_remove("WRITABLE_PATH")
             .env_remove("writable_path")
-            .env("LOCALAPPDATA", dir.path())
-            .env("XDG_DATA_HOME", dir.path())
-            .env("HOME", dir.path())
+            .env("LOCALAPPDATA", dir)
+            .env("XDG_DATA_HOME", dir)
+            .env("HOME", dir)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&stderr).unwrap())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
             .spawn()
             .unwrap();
         let mut server = Started(child);
         loop {
             let exit = server.0.try_wait().unwrap();
-            let log = std::fs::read_to_string(&stderr).unwrap_or_default();
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             if let Some(status) = exit {
                 let conflict = log.lines().any(|line| {
                     line.contains("failed to start HTTP server")
@@ -214,15 +231,13 @@ fn serves_under_cliproxyapis_name() {
                     conflict,
                     "the server exited ({status}) before it answered:\n{log}"
                 );
+                if attempt == 1 {
+                    std::fs::write(dir.join("first-bind-conflict.log"), &log).unwrap();
+                }
                 continue 'attempts;
             }
-            if let Some(root) = get(port, "/", None)
-                && root.starts_with("HTTP/1.1 200")
-                && root.contains("open-ferry-ai-proxy")
-                && let Some(models) = get(port, "/v1/models", Some(&key))
-                && models.starts_with("HTTP/1.1 200")
-            {
-                break 'attempts;
+            if answers_as_ours(port, &key) {
+                return (server, port);
             }
             assert!(
                 Instant::now() < deadline,
@@ -231,4 +246,59 @@ fn serves_under_cliproxyapis_name() {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+// Not upstream's: open-ferry started as `cliproxyapi`, with CLIProxyAPI's
+// command line, serves as open-ferry, which is what migrate's drop-in relies on.
+#[test]
+fn serves_under_cliproxyapis_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, _port) = start_renamed(dir.path(), None, Duration::from_secs(30));
+}
+
+#[test]
+fn a_bind_conflict_retries_on_a_different_port() {
+    // The non-root Linux job exercises this control.
+    if privilege::privileged() {
+        eprintln!(
+            "skipped migrate::a_bind_conflict_retries_on_a_different_port: requires an unprivileged account"
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // Reserve without listening: the first child must fail its bind, without
+    // a probe waiting for an HTTP reply from this intentionally silent socket.
+    let (held, occupied) = closed_port();
+    let (_server, port) = start_renamed(dir.path(), Some(occupied), LONG);
+    assert_ne!(port, occupied);
+    let log = std::fs::read_to_string(dir.path().join("first-bind-conflict.log")).unwrap();
+    assert!(log.contains("failed to start HTTP server"), "{log}");
+    drop(held);
+}
+
+#[tokio::test]
+async fn a_keyless_foreign_server_is_rejected() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = axum::Router::new()
+        .route("/", axum::routing::get(|| async { "open-ferry-ai-proxy" }))
+        .route("/v1/models", axum::routing::get(|| async { "{}" }));
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    let accepted = tokio::task::spawn_blocking(move || answers_as_ours(port, "ours"))
+        .await
+        .unwrap();
+    stop.send(()).unwrap();
+    server.await.unwrap();
+    assert!(
+        !accepted,
+        "a foreign keyless server passed the fixture identity check"
+    );
 }

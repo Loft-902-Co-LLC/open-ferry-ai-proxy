@@ -19,8 +19,8 @@ fn assert_cancelled(result: &serde_json::Value) {
 fn off_during_loading_cancels_and_a_never_knew() {
     let fx = Fx::new();
     fx.stage(B, "B");
-    // B is spawned but cannot report loaded yet. The per-second mode read
-    // must cancel this loading switch before A is told anything.
+    // B is spawned but cannot report loaded yet. The mode is read while
+    // loading is held; the switch must end cancelled without telling A.
     fx.fault("hold-load", "@B");
     fx.hold("load.before_loaded");
     let _sup = fx.start(&Tm::default());
