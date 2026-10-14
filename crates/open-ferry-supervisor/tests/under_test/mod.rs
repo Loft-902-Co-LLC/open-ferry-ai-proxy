@@ -107,13 +107,17 @@ pub enum Cap {
     SigninsPending,
     /// The fake-only `spawn-grandchild` fault.
     SpawnGrandchild,
+    /// The fake-only `hold-load` fault, before a standby reports loaded.
+    HoldLoad,
     /// `worker_probe`, the stand-in with modes (`Fx::stage_probe`).
     Probe,
 }
 
 pub fn has(cap: Cap) -> bool {
     match cap {
-        Cap::SendFail | Cap::SigninsPending | Cap::SpawnGrandchild => kind() == Kind::Fake,
+        Cap::SendFail | Cap::SigninsPending | Cap::SpawnGrandchild | Cap::HoldLoad => {
+            kind() == Kind::Fake
+        }
         Cap::Probe => WORKER_PROBE.is_some(),
     }
 }

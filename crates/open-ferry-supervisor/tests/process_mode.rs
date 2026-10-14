@@ -17,17 +17,22 @@ fn assert_cancelled(result: &serde_json::Value) {
 
 #[test]
 fn off_during_loading_cancels_and_a_never_knew() {
+    if lacks(Cap::HoldLoad) {
+        return;
+    }
     let fx = Fx::new();
     fx.stage(B, "B");
-    // J1 is down and B is not yet loading: checkpoint 1 follows B's load and
-    // precedes anything A is told.
-    fx.hold("journal.after:J1");
+    // B is spawned but cannot report loaded yet. The per-second mode read
+    // must cancel this loading switch before A is told anything.
+    fx.fault("hold-load", "@B");
+    fx.hold("load.before_loaded");
     let _sup = fx.start(&Tm::default());
     let mut sw = fx.update(B);
     sw.accepted();
-    fx.wait_arrived("journal.after:J1");
+    fx.wait_arrived("load.before_loaded");
     fx.mode(true, 1);
-    fx.release("journal.after:J1");
+    fx.wait_mode_read(true, 1);
+    fx.release("load.before_loaded");
     assert_cancelled(&sw.done().expect("a done result"));
     fx.wait_settled();
     fx.wait_dead(2);
