@@ -8699,19 +8699,18 @@ fn r10b_switch_requires_backup_copy(drop_in: bool) {
     has(
         &ran.all(),
         &format!(
-            "the backup's directory, {dir}, doesn't exist, so its copy of the record wasn't written"
+            "the backup's directory, {dir}, doesn't exist, so the switch's record wasn't written"
         ),
     );
     has(&ran.all(), "Nothing but the backup was made.");
     let copied = fake.events.iter().position(|seen| seen == &event).unwrap();
+    assert!(fake.events[copied + 1..].is_empty(), "{:?}", fake.events);
     assert!(
-        fake.events[copied + 1..]
-            .iter()
-            .all(|seen| seen.starts_with("mkdir ")
-                || seen.starts_with("write ")
-                || seen.starts_with("rename ")),
+        fake.files
+            .keys()
+            .all(|path| !path.contains("migration.json") || path.ends_with(".lock")),
         "{:?}",
-        fake.events
+        fake.files.keys()
     );
     assert!(fake.launches.is_empty());
     assert_eq!(
