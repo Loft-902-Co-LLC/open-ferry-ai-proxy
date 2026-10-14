@@ -898,7 +898,7 @@ struct HelperPlan {
 #[derive(Debug, PartialEq, Eq)]
 enum HelperEnvironment {
     Inherited,
-    Unix,
+    Unix { argv_zero: std::path::PathBuf },
     Windows { system_dir: String, path: String },
 }
 
@@ -907,7 +907,14 @@ impl HelperPlan {
         let mut command = std::process::Command::new(&self.path);
         match &self.environment {
             HelperEnvironment::Inherited => {}
-            HelperEnvironment::Unix => {
+            HelperEnvironment::Unix {
+                argv_zero: _argv_zero,
+            } => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt as _;
+                    command.arg0(_argv_zero);
+                }
                 command
                     .env_clear()
                     .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
@@ -940,6 +947,7 @@ fn helper_plan(program: &str) -> io::Result<HelperPlan> {
         std::env::var_os("PATH").as_deref(),
         std::env::var_os("PATHEXT").as_deref(),
         &system_helper_location,
+        &helper_link_target,
     )
 }
 
@@ -955,7 +963,15 @@ fn helper_path_with(
     path: Option<&std::ffi::OsStr>,
     extensions: Option<&std::ffi::OsStr>,
 ) -> io::Result<std::path::PathBuf> {
-    Ok(helper_plan_with(program, probe, path, extensions, &system_helper_location)?.path)
+    Ok(helper_plan_with(
+        program,
+        probe,
+        path,
+        extensions,
+        &system_helper_location,
+        &helper_link_target,
+    )?
+    .path)
 }
 
 fn helper_plan_with(
@@ -964,6 +980,7 @@ fn helper_plan_with(
     path: Option<&std::ffi::OsStr>,
     extensions: Option<&std::ffi::OsStr>,
     system: &dyn Fn(&str) -> io::Result<HelperLocation>,
+    read_link: &dyn Fn(&str) -> io::Result<Option<String>>,
 ) -> io::Result<HelperPlan> {
     if !probe.in_container() && !matches!(probe.privileged(), Ok(false)) {
         let name =
@@ -973,7 +990,7 @@ fn helper_plan_with(
                 program.to_owned()
             };
         let (candidate, windows_dir) = system(&name)?;
-        return privileged_helper_plan(probe, candidate, windows_dir.as_deref());
+        return privileged_helper_plan(probe, candidate, windows_dir.as_deref(), read_link);
     }
     Ok(HelperPlan {
         path: search_helper_path(program, path, extensions)?,
@@ -985,6 +1002,7 @@ fn privileged_helper_plan(
     probe: &dyn scope::Probe,
     candidate: std::path::PathBuf,
     windows_dir: Option<&str>,
+    read_link: &dyn Fn(&str) -> io::Result<Option<String>>,
 ) -> io::Result<HelperPlan> {
     let path = candidate
         .to_str()
@@ -993,17 +1011,47 @@ fn privileged_helper_plan(
     let parent = platform
         .parent(path)
         .ok_or_else(|| io::Error::other(format!("helper {path} has no parent directory")))?;
-    let check = || -> Result<(), String> {
+    let check = || -> Result<std::path::PathBuf, String> {
         if platform == Platform::Windows {
-            probe.trusted_file(path)
+            probe.trusted_file(path)?;
+            Ok(candidate.clone())
         } else {
-            let actual = probe.canonical(path).map_err(|why| why.to_string())?;
-            probe.trusted_file(&actual)?;
-            let actual_parent = probe.canonical(&parent).map_err(|why| why.to_string())?;
-            probe.trusted_dir(&actual_parent)
+            let mut hop = path.to_owned();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut links = 0;
+            loop {
+                let dir = platform
+                    .parent(&hop)
+                    .ok_or_else(|| format!("helper {hop} has no parent directory"))?;
+                let actual_dir = probe.canonical(&dir).map_err(|why| why.to_string())?;
+                probe.trusted_dir(&actual_dir)?;
+                let name = hop.rsplit('/').next().unwrap_or_default();
+                hop = platform.join(&actual_dir, name);
+                if !seen.insert(hop.clone()) {
+                    return Err(format!("helper link chain loops at {hop}"));
+                }
+                match read_link(&hop).map_err(|why| why.to_string())? {
+                    Some(target) => {
+                        if links == 40 {
+                            return Err("helper link chain exceeds 40 hops".into());
+                        }
+                        links += 1;
+                        hop = if platform.is_absolute(&target) {
+                            target
+                        } else {
+                            platform.join(&actual_dir, &target)
+                        };
+                    }
+                    None => {
+                        let actual = probe.canonical(&hop).map_err(|why| why.to_string())?;
+                        probe.trusted_file(&actual)?;
+                        return Ok(actual.into());
+                    }
+                }
+            }
         }
     };
-    check().map_err(|why| {
+    let actual = check().map_err(|why| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("refusing helper {path}: {why}"),
@@ -1017,12 +1065,25 @@ fn privileged_helper_plan(
             system_dir: parent,
         }
     } else {
-        HelperEnvironment::Unix
+        HelperEnvironment::Unix {
+            argv_zero: candidate,
+        }
     };
     Ok(HelperPlan {
-        path: candidate,
+        path: actual,
         environment,
     })
+}
+
+fn helper_link_target(path: &str) -> io::Result<Option<String>> {
+    if !std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Ok(None);
+    }
+    std::fs::read_link(path)?
+        .into_os_string()
+        .into_string()
+        .map(Some)
+        .map_err(|_| io::Error::other("the helper link target isn't valid Unicode"))
 }
 
 fn search_helper_path(
