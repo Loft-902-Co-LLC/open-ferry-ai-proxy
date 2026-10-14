@@ -1922,10 +1922,12 @@ mod prepared {
             stage.store(4, Ordering::SeqCst);
             assert!(Lease::try_take(&data).unwrap().is_none());
             stage.store(5, Ordering::SeqCst);
+            // The original dropped the gate before the temp dir.
+            drop(gate);
             stage.store(6, Ordering::SeqCst);
             drop(dir);
+            stage.store(7, Ordering::SeqCst);
         });
-        stage.store(7, Ordering::SeqCst);
         stage.store(8, Ordering::SeqCst);
         let shutdown_started = Instant::now();
         rt.shutdown_timeout(SHUTDOWN);
