@@ -51,9 +51,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 The merge queue also runs the two slowest, which a PR's own run leaves out: the blue-green process tests, split between three runners per OS, and the release builds, which must hold none of their test seams:
 
 ```sh
-cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --features blue-green-test --no-fail-fast
+cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test
+cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --doc
 cargo build --release -p open-ferry --bin open-ferry --no-default-features
 ```
+
+CI pins cargo-nextest 0.9.146. Its `ci` profile runs each test in a separate process, with at most two process tests on Unix and four on Windows, no retries, and a ten-minute hung-test limit. Plain `cargo test --features blue-green-test` still works: the in-process gates serialize the Unix process tests to avoid inherited executable-write and lock descriptors (Windows permits four). The supervisor's `startup` and `supervise` targets now require `blue-green-test`; a feature-off run skips them instead of ever using the user's default endpoint. Doc tests stay on `cargo test --doc`.
 
 To run every check on a branch of this repository before it's queued, run the CI workflow on it from the Actions tab. A change only to files under `dashboard/` skips the Rust checks, unless a Rust test reads one of the files.
 

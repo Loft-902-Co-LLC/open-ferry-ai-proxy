@@ -1,0 +1,22 @@
+# Not upstream's: process-per-test isolation for the blue-green supervisor tests.
+# Plain cargo test retains the shared-process descriptor/fork gates.
+[profile.ci]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[test-groups.process-unix]
+max-threads = 2
+
+[test-groups.process-windows]
+max-threads = 4
+
+[[profile.ci.overrides]]
+platform = 'cfg(unix)'
+filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker)'
+test-group = 'process-unix'
+
+[[profile.ci.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker)'
+test-group = 'process-windows'
