@@ -308,8 +308,7 @@ fn main() {
 
 #[tokio::test]
 async fn a_privileged_fake_guard_restricts_requests_versions_and_status_children() {
-    let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
-    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let dir = crate::test_scratch_dir();
     let entry = Entry {
         command: fake_program(dir.path()).to_str().unwrap().into(),
         ..entry()

@@ -43,4 +43,18 @@ mod unsupported_part_tests;
 pub mod xai;
 
 pub use custom_headers::is_identity_header;
+
+/// Scratch storage for this crate's tests: under `OFP_TEST_SCRATCH` when
+/// set (CI's Windows runner), else under the workspace's `target/ofp-scratch`.
+#[cfg(test)]
+pub(crate) fn test_scratch_dir() -> tempfile::TempDir {
+    let root = std::env::var_os("OFP_TEST_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+        });
+    let root = open_ferry_core::auth::path::clean(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
 pub(crate) use open_ferry_core::observe::redact;

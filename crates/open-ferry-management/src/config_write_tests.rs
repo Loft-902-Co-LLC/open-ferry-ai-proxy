@@ -75,6 +75,7 @@ async fn refused_writes_never_call_the_writer_and_log_once_without_content() {
     let (logs, capturing) = crate::tests::capture::Logs::capture();
     refuse_all(writer.as_ref());
     drop(capturing);
+    assert_eq!(logs.levels(), [tracing::Level::WARN; 4]);
     let logs = logs.text();
     assert_eq!(logs.lines().count(), 4, "{logs}");
     for line in logs.lines() {
@@ -141,8 +142,7 @@ fn backup_and_other_sibling_reads_are_authorized_before_the_writer() {
 
 #[test]
 fn allowed_writes_and_missing_files_under_trusted_parents_work_as_before() {
-    let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
-    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let dir = crate::tests::scratch_dir();
     let path = dir.path().join("config.yaml");
     let parent = dir.path().to_owned();
     let calls = Arc::new(AtomicUsize::new(0));

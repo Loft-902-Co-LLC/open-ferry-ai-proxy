@@ -220,8 +220,7 @@ mod tests {
             ..Entry::from_auth(&open_ferry_core::auth::Auth::default())
         };
         let guard = super::super::SpawnGuard::new(|_, _, _| Err("private refusal reason".into()));
-        let scratch = std::env::var_os("OFP_TEST_SCRATCH").expect("scratch directory");
-        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let dir = crate::test_scratch_dir();
         let root = dir.path().join("entries");
         let VersionCheck::Failed(error) = check_version_in(&entry, Some(&guard), &root).await
         else {

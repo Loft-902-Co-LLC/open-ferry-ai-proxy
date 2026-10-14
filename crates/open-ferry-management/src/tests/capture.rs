@@ -9,13 +9,20 @@ use tracing::subscriber::Interest;
 
 thread_local! {
     /// Where this thread's logs go while a test captures them.
-    static CAPTURED: RefCell<Option<Arc<Mutex<String>>>> = const { RefCell::new(None) };
+    static CAPTURED: RefCell<Option<Arc<Mutex<Captured>>>> = const { RefCell::new(None) };
 }
 
 /// What a test logs on its thread, one event a line: the message, then
 /// any other field as ` name=value`.
 #[derive(Clone, Default)]
-pub(crate) struct Logs(Arc<Mutex<String>>);
+pub(crate) struct Logs(Arc<Mutex<Captured>>);
+
+/// The events of a capture: their lines, and their levels in the same order.
+#[derive(Default)]
+struct Captured {
+    text: String,
+    levels: Vec<tracing::Level>,
+}
 
 impl Logs {
     /// Captures what this thread logs until the guard is dropped. A
@@ -35,7 +42,12 @@ impl Logs {
     }
 
     pub(crate) fn text(&self) -> String {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().text.clone()
+    }
+
+    /// The level of each captured event, in the order they were logged.
+    pub(crate) fn levels(&self) -> Vec<tracing::Level> {
+        self.0.lock().unwrap().levels.clone()
     }
 }
 
@@ -69,14 +81,15 @@ impl tracing::Subscriber for Capture {
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        let Some(text) = CAPTURED.with(|captured| captured.borrow().clone()) else {
+        let Some(captured) = CAPTURED.with(|captured| captured.borrow().clone()) else {
             return;
         };
         let mut line = String::new();
         event.record(&mut Fields(&mut line));
-        let mut text = text.lock().unwrap();
-        text.push_str(&line);
-        text.push('\n');
+        let mut captured = captured.lock().unwrap();
+        captured.text.push_str(&line);
+        captured.text.push('\n');
+        captured.levels.push(*event.metadata().level());
     }
 
     fn enter(&self, _: &tracing::span::Id) {}

@@ -349,11 +349,7 @@ pub(super) fn auth_dirs_with_probe(ctx: &Context, probe: &dyn crate::scope::Prob
     }
     let temp = std::env::temp_dir();
     #[cfg(test)]
-    let scratch = std::env::var_os("OFP_TEST_SCRATCH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
-        });
+    let scratch = crate::scope::runtime_test_probe::scratch_root();
     dirs.retain(|dir| {
         #[cfg(test)]
         if dir.starts_with(&scratch) {
