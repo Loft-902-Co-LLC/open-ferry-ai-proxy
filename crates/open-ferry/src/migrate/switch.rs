@@ -3687,6 +3687,8 @@ pub(crate) fn undo(
                         if wait_for_any(machine, listen.as_ref(), LAUNCHER_WAIT)
                             != Some(Answer::CliProxyApi)
                         {
+                            // Unprivileged only: a privileged drop-in undo is
+                            // refused before this, so the `?` can't fire.
                             let log_dir = if let Some(backup) = &record.backup
                                 && backup_exists(machine, &backup.dir)?
                             {

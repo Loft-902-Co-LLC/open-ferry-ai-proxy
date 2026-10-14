@@ -2244,7 +2244,7 @@ mod tests {
             refusal_reason(path, "Permission was denied."),
             "permission was denied"
         );
-        assert_eq!(refusal_reason(path, "1:/something"), "1:/something");
+        assert_eq!(refusal_reason(path, "C:relative"), "c:relative");
     }
 
     fn words(line: &str) -> Vec<String> {

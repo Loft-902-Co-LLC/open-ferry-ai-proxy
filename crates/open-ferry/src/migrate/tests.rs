@@ -45,7 +45,9 @@ enum Effect {
     End(u32),
     /// A record disappears or becomes untrusted while waiting for the lock.
     RemoveRecord(String),
+    /// A directory and everything in it disappear.
     RemoveTree(String),
+    /// A path becomes untrusted, and can't be read.
     Untrust(String),
     /// A process starts.
     Spawn(Box<Proc>),
