@@ -1318,6 +1318,16 @@ where
                 // The supervisor counts a start until `loaded`, in either role. It comes
                 // before the first active or standby status; a loading one may precede it.
                 let ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                if standby
+                    && self.hooks.fault(Fault::HoldLoad).is_some()
+                    && let Err(error) = self.hooks.barrier(Barrier::LoadBeforeLoaded, false).await
+                {
+                    self.failed.store(true, Ordering::SeqCst);
+                    let reason = format!("a test barrier failed: {error}");
+                    tracing::error!("the standby worker failed to load: {reason}");
+                    self.send(&Message::LoadFailed { reason }).await;
+                    return Flow::Exit(ExitCode::FAILURE);
+                }
                 self.send(&Message::Loaded { ms }).await;
                 if standby {
                     self.hooks.event(Seen::Loaded, false);

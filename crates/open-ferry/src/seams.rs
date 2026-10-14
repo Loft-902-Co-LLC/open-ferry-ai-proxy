@@ -183,6 +183,7 @@ pub fn fault_name(fault: Fault) -> &'static str {
         Fault::SlowReady => "slow-ready",
         Fault::IgnoreHandover => "ignore-handover",
         Fault::HoldRefresh => "hold-refresh",
+        Fault::HoldLoad => "hold-load",
         Fault::DropChannel => "drop-channel",
     }
 }
@@ -191,6 +192,7 @@ fn barrier_name(barrier: Barrier) -> &'static str {
     match barrier {
         Barrier::GateClosing => "handover.gate_closing",
         Barrier::RefreshBeforeSave => "refresh.before_save",
+        Barrier::LoadBeforeLoaded => "load.before_loaded",
         Barrier::GateClosed => "handover.gate_closed",
         Barrier::LeaseRelease => "lease.release",
         Barrier::BeforeReload => "take_over.before_reload",

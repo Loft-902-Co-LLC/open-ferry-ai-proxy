@@ -90,7 +90,7 @@ fn installed_barriers_use_update_files_without_blocking_the_runtime() {
 
 use crate::service::worker::hooks::{Barrier, Event, Fault};
 
-use super::{Seams, binary_marker, event_name, fault_name, mark, parse_fault};
+use super::{Seams, barrier_name, binary_marker, event_name, fault_name, mark, parse_fault};
 
 fn events(dir: &std::path::Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(dir.join(".blue-green-test").join("events.log"))
@@ -148,11 +148,16 @@ fn every_fault_barrier_and_event_has_its_name() {
         (Fault::SlowReady, "slow-ready"),
         (Fault::IgnoreHandover, "ignore-handover"),
         (Fault::HoldRefresh, "hold-refresh"),
+        (Fault::HoldLoad, "hold-load"),
         (Fault::DropChannel, "drop-channel"),
     ];
     for (fault, name) in faults {
         assert_eq!(fault_name(fault), name);
     }
+    assert_eq!(
+        barrier_name(Barrier::LoadBeforeLoaded),
+        "load.before_loaded"
+    );
     assert_eq!(event_name(Event::HandoverWritten), "handover.written");
     assert_eq!(event_name(Event::HandoverFailed), "handover_failed");
     assert_eq!(event_name(Event::PeersGone), "peers_gone");
