@@ -633,6 +633,15 @@ fn run_undo(
                 format!(
                     " A switch made {without} keeps its record beside that account's installed config: undo it as that account."
                 )
+            } else if machine.trust_probe().in_container() {
+                let elevated = if platform == Platform::Windows {
+                    "as an administrator"
+                } else {
+                    "with sudo"
+                };
+                format!(
+                    " A switch made {elevated} is undone the same way; its record is beside the installed config."
+                )
             } else {
                 match platform {
                     Platform::Linux => {
