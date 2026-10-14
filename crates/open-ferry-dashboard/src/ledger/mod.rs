@@ -225,15 +225,21 @@ impl Ledger {
     /// Makes the ledger unavailable for `reason`, and ends its observation,
     /// unless it was opened or failed already.
     fn fail(&self, reason: String) {
-        if self.inner.store.set(Err(reason)).is_ok() {
-            drop(
-                self.inner
-                    .observation
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .take(),
-            );
-        }
+        // Publishing under the observation's lock means a caller woken by the
+        // failure finds the observation already taken.
+        let ended = {
+            let mut observation = self
+                .inner
+                .observation
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.inner.store.set(Err(reason)).is_ok() {
+                observation.take()
+            } else {
+                None
+            }
+        };
+        drop(ended);
     }
 
     /// The open ledger, or why it isn't, once [`Ledger::start`]'s thread has
