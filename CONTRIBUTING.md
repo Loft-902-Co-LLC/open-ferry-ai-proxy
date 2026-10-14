@@ -48,6 +48,15 @@ cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 ```
 
+The merge queue also runs the two slowest, which a PR's own run leaves out: the blue-green process tests, split between three runners per OS, and the release builds, which must hold none of their test seams:
+
+```sh
+cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --features blue-green-test --no-fail-fast
+cargo build --release -p open-ferry --bin open-ferry --no-default-features
+```
+
+To run every check on a branch of this repository before it's queued, run the CI workflow on it from the Actions tab. A change only to files under `dashboard/` skips the Rust checks, unless a Rust test reads one of the files.
+
 For a change to the dashboard app, CI also runs these in `dashboard/`, with the Node version in `dashboard/.nvmrc`:
 
 ```sh

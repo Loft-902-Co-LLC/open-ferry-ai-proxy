@@ -6,6 +6,8 @@ on:
   pull_request:
   # The merge queue runs the checks again on each PR as it would land.
   merge_group:
+  # Every check, as the merge queue runs them, on any branch.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,75 +21,137 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
 
+# What runs when:
+# - A PR runs the tests, clippy, the docs, the licenses, the dashboard and the
+#   install scripts. The release builds and the blue-green tests, the slowest,
+#   are left to the merge queue; skipped, they count as passed on the PR.
+# - The merge queue and workflow_dispatch run everything.
+# - A push to main, which is a PR that landed, runs no tests. It builds what
+#   the Rust caches hold when main's caches don't have it yet, and saves them.
+# - When only files under dashboard/ changed, the Rust jobs are skipped.
+# The checks the ruleset requires keep their names. check and blue-green sum
+# up the jobs that do the work, per OS.
+
 jobs:
-  check:
-    name: check (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.diff.outputs.rust }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
 
-      - name: Install the toolchain from rust-toolchain.toml
-        run: rustup toolchain install --profile minimal
+      # A PR's merge commit is compared with its first parent, the base
+      # branch; a merge group with the queue's base; a push with the commit
+      # before it. Anything else, or a comparison that fails, counts as a
+      # Rust change. So does a file outside dashboard/ (docs/agents.md is
+      # built into open-ferry), and a dashboard file a Rust test reads, which
+      # crates/ names.
+      - name: Whether Rust builds or reads anything that changed
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request) base=$(git rev-parse --verify --quiet 'HEAD^1' || true) ;;
+            merge_group) base=$GROUP_BASE ;;
+            push) base=$PUSH_BASE ;;
+            *) base= ;;
+          esac
+          rust=true
+          if [[ -n $base && $base != 0000000000000000000000000000000000000000 ]] &&
+            git fetch --quiet --no-tags --depth=1 origin "$base" &&
+            git diff --name-only --no-renames "$base" HEAD > "$RUNNER_TEMP/changed" &&
+            [[ -s $RUNNER_TEMP/changed ]]; then
+            rust=false
+            while IFS= read -r path; do
+              if [[ $path != dashboard/* ]] || git grep --quiet --fixed-strings -e "$path" -- crates; then
+                echo "Rust change: $path"
+                rust=true
+                break
+              fi
+            done < "$RUNNER_TEMP/changed"
+          fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+  # Format, clippy, the tests and the docs. The Windows job runs the same
+  # steps.
+  tests-ubuntu:
+    name: tests (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps: &tests-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          persist-credentials: false
+
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: tests
 
       - name: Format
+        if: github.event_name != 'push'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # The supervisor's tests run binaries from scratch directories, which
-      # its trust check must accept. The runner's D: drive, where the
-      # checkout and the target directory are, is owned by NETWORK SERVICE,
-      # which the check refuses. The runner is also elevated, so open-ferry
-      # runs privileged in the tests and refuses config and auth paths that
-      # anyone but administrators and SYSTEM can write, as the runner's
-      # profile and its temp directory are. So the scratch and temp
-      # directories go under a directory on C: that only administrators and
-      # SYSTEM own and can write.
-      - name: Scratch directory for the trust checks
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $root = 'C:\ofp-ci'
-          New-Item -ItemType Directory -Force -Path $root | Out-Null
-          icacls $root /setowner '*S-1-5-32-544' /q
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /q
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $scratch = Join-Path $root 'scratch'
-          $temp = Join-Path $root 'temp'
-          New-Item -ItemType Directory -Force -Path $scratch, $temp | Out-Null
-          $probe = New-Item -ItemType File -Force -Path (Join-Path $temp 'owner-probe')
-          "New files here are owned by $((Get-Acl $probe.FullName).Owner)"
-          Remove-Item $probe.FullName
-          "OFP_TEST_SCRATCH=$scratch" >> $env:GITHUB_ENV
-          "TMP=$temp" >> $env:GITHUB_ENV
-          "TEMP=$temp" >> $env:GITHUB_ENV
+      # A push to main fills the cache: it builds what the tests need and
+      # runs none.
+      - name: Build the tests
+        if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
+        run: cargo test --workspace --locked --no-run
 
       - name: Test
+        if: github.event_name != 'push'
         run: cargo test --workspace --locked --no-fail-fast
 
-      # What the release workflow ships carries none of the blue-green test
-      # seams (see the blue-green job): build it as it ships (the feature off)
-      # and scan it for their strings.
+      - name: Docs
+        if: github.event_name != 'push'
+        run: cargo doc --no-deps --workspace --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  tests-windows:
+    name: tests (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps: *tests-steps
+
+  # What the release workflow ships carries none of the blue-green test
+  # seams (see blue-green-tests): build it as it ships (the feature off) and
+  # scan it for their strings.
+  release-seams-ubuntu:
+    name: release-seams (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps: &release-seams-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: release
+
       - name: Release builds hold no test seams
+        if: github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true'
         shell: bash
         env:
           PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
@@ -98,78 +162,159 @@ jobs:
           cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --message-format=json > "$RUNNER_TEMP/open-ferry-build.json"
           "$PYTHON" -I crates/open-ferry/check-release.py "$RUNNER_TEMP/open-ferry-build.json"
 
-      - name: Docs
-        run: cargo doc --no-deps --workspace --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
+  release-seams-windows:
+    name: release-seams (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps: *release-seams-steps
 
   # The blue-green switch's test seams (worker faults, barriers, the
   # supervisor's isolation flags) are compiled only with this feature. The
   # supervisor's process tests run on it: against its fake worker, and
   # open-ferry's against the real one. Each process runs with the environment
   # cleaned, on its own data directory and endpoint, and its update checks go
-  # to a closed loopback port. These take longer than everything in check
-  # together, so they run beside it, not in it.
-  blue-green:
-    name: blue-green (${{ matrix.os }})
-    strategy:
+  # to a closed loopback port. They take longer than everything else, so three
+  # runners per OS share them; blue-green-shard.py picks each one's targets.
+  blue-green-tests-ubuntu:
+    name: blue-green (ubuntu-latest, ${{ matrix.shard }} of 3)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    strategy: &blue-green-shards
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
-    steps:
+        # A push to main only fills the cache, which one runner does.
+        shard: ${{ fromJSON(github.event_name == 'push' && '[1]' || '[1, 2, 3]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps: &blue-green-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install the toolchain from rust-toolchain.toml
-        run: rustup toolchain install --profile minimal
-
-      # Its own cache: the feature changes what these crates build, and the
-      # check job saves under the plain key. It starts from check's if it has
-      # none yet.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Its own cache: the feature changes what these crates build. The
+      # runners build the same, so one saves.
+      - id: rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-blue-green-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: |
-            cargo-blue-green-${{ runner.os }}-
-            cargo-${{ runner.os }}-
-
-      # As in check: the trust check refuses the runner's D: drive, and the
-      # elevated runner's profile and temp directory.
-      - name: Scratch directory for the trust checks
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $root = 'C:\ofp-ci'
-          New-Item -ItemType Directory -Force -Path $root | Out-Null
-          icacls $root /setowner '*S-1-5-32-544' /q
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /q
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $scratch = Join-Path $root 'scratch'
-          $temp = Join-Path $root 'temp'
-          New-Item -ItemType Directory -Force -Path $scratch, $temp | Out-Null
-          "OFP_TEST_SCRATCH=$scratch" >> $env:GITHUB_ENV
-          "TMP=$temp" >> $env:GITHUB_ENV
-          "TEMP=$temp" >> $env:GITHUB_ENV
+          cache: blue-green
+          save: ${{ matrix.shard == 1 }}
 
       - name: Clippy with the blue-green test seams
+        if: matrix.shard == 1 && (github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true')
         run: cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
 
+      - name: Build the tests
+        if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
+        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-run
+
+      - name: This runner's share of the tests
+        id: shard
+        if: github.event_name != 'push'
+        shell: bash
+        env:
+          PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 --locked > "$RUNNER_TEMP/metadata.json"
+          "$PYTHON" -I .github/scripts/blue-green-shard.py "$RUNNER_TEMP/metadata.json" "$RUNNER_OS" "$SHARD" 3 >> "$GITHUB_OUTPUT"
+
+      # The script passes on plain target names only, so its output can go
+      # into the command line.
       - name: Test with the blue-green test seams
-        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-fail-fast
+        if: github.event_name != 'push'
+        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-fail-fast ${{ steps.shard.outputs.args }}
+
+      - name: Doc tests with the blue-green test seams
+        if: github.event_name != 'push' && steps.shard.outputs.doc == 'true'
+        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --doc
+
+  blue-green-tests-windows:
+    name: blue-green (windows-latest, ${{ matrix.shard }} of 3)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    strategy: *blue-green-shards
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps: *blue-green-steps
+
+  # The required checks check and blue-green, one per OS: each passes when that
+  # OS's jobs passed, or were skipped as the run's event allows (see the top).
+  # They run unless the run was cancelled, so that a job that failed, or was
+  # skipped because one it needs failed, fails them instead of their being
+  # skipped, which would count as passed. Their matrix gives them the names the
+  # ruleset requires; a skipped matrix job reports none of them, so a cancelled
+  # run passes nothing.
+  check:
+    name: check (${{ matrix.os }})
+    needs: [changes, tests-ubuntu, tests-windows, release-seams-ubuntu, release-seams-windows]
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            jobs: tests-ubuntu release-seams-ubuntu
+            queue-only: release-seams-ubuntu
+          - os: windows-latest
+            jobs: tests-windows release-seams-windows
+            queue-only: release-seams-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps: &results-steps
+      - name: Results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          JOBS: changes ${{ matrix.jobs }}
+          QUEUE_ONLY: ${{ matrix.queue-only }}
+          RUST: ${{ needs.changes.outputs.rust }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for job in $JOBS; do
+            result=$(jq -r --arg job "$job" '.[$job].result' <<< "$NEEDS")
+            echo "$job: $result"
+            case $result in
+              success) continue ;;
+              # Skipped as planned: nothing Rust changed, or a PR leaves the
+              # job to the merge queue.
+              skipped)
+                if [[ $job != changes && $RUST == false ]]; then continue; fi
+                if [[ $EVENT == pull_request && " $QUEUE_ONLY " == *" $job "* ]]; then continue; fi
+                ;;
+            esac
+            echo "::error::$job: $result"
+            failed=1
+          done
+          exit "$failed"
+
+  blue-green:
+    name: blue-green (${{ matrix.os }})
+    needs: [changes, blue-green-tests-ubuntu, blue-green-tests-windows]
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            jobs: blue-green-tests-ubuntu
+            queue-only: blue-green-tests-ubuntu
+          - os: windows-latest
+            jobs: blue-green-tests-windows
+            queue-only: blue-green-tests-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps: *results-steps
 
   # What the release workflow's rust-licenses job does, so that a new crate
   # under a license about.toml doesn't accept fails here, not at release time.
   rust-licenses:
     name: rust-licenses
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -180,8 +325,14 @@ jobs:
       - name: Install the toolchain from rust-toolchain.toml
         run: rustup toolchain install --profile minimal
 
+      # cargo-about's own release build, checked against the checksum
+      # install-action keeps for it, instead of building it here. No
+      # fallback: it fails rather than build from source.
       - name: Install cargo-about
-        run: cargo install cargo-about --version 0.9.2 --locked --features cli
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-about@0.9.2
+          fallback: none
 
       - name: Fetch the crates
         run: cargo fetch --locked
@@ -201,6 +352,8 @@ jobs:
         with:
           persist-credentials: false
 
+      # A push to main only installs, so that main saves the npm cache the
+      # PRs start from.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: dashboard/.nvmrc
@@ -212,26 +365,32 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Lint
+        if: github.event_name != 'push'
         run: npm run lint
 
       - name: Typecheck
+        if: github.event_name != 'push'
         run: npm run typecheck
 
       - name: Test
+        if: github.event_name != 'push'
         run: npm test
 
       - name: Build
+        if: github.event_name != 'push'
         run: npm run build
 
       # The browser the end-to-end tests drive, at the revision the locked
       # @playwright/test expects. Headless shell only: no headed Chrome.
       - name: Install Chromium for the end-to-end tests
+        if: github.event_name != 'push'
         run: npx playwright install --with-deps --only-shell chromium
 
       # The build above under `vite preview`, with the headers open-ferry
       # sends: every screen must render without a Content-Security-Policy
       # violation. The API is mocked in the page; nothing leaves 127.0.0.1.
       - name: End-to-end
+        if: github.event_name != 'push'
         run: npx playwright test
 
       # A failed test's trace, to replay with `npx playwright show-trace`. The
@@ -253,6 +412,7 @@ jobs:
   # APPDATA the tests redirect to temporary directories.
   install-scripts:
     name: install-scripts (${{ matrix.os }})
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -319,6 +479,7 @@ jobs:
           python3 -I tests/install/test_install.py -v" installer'
 
   install-scripts-root:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

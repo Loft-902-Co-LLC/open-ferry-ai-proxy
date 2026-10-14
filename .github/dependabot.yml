@@ -24,7 +24,8 @@ updates:
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
-    directory: /
+    # The workflows, and the action they share.
+    directories: [/, /.github/actions/setup-rust]
     schedule:
       interval: weekly
     groups:
