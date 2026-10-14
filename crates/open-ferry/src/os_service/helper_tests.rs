@@ -333,3 +333,198 @@ fn privileged_helpers_allow_40_links_but_refuse_more() {
         }
     }
 }
+
+#[test]
+fn system_helper_selection_keeps_looping_and_dangling_first_links() {
+    for looping in [false, true] {
+        let mut probe = linked_probe();
+        probe.fake.dir("/usr/sbin");
+        probe.links.insert(
+            "/usr/sbin/docker".into(),
+            if looping {
+                "/usr/sbin/docker"
+            } else {
+                "/missing/docker"
+            }
+            .into(),
+        );
+        let plan = helper_plan_with(
+            "docker",
+            &probe,
+            None,
+            None,
+            &|name| {
+                select_system_helper(name, &["/usr/sbin", "/usr/bin"], &|path| {
+                    assert_eq!(path, Path::new("/usr/sbin/docker"));
+                    Ok(())
+                })
+                .map(|path| {
+                    (
+                        path.to_string_lossy().replace(char::from(92), "/").into(),
+                        None,
+                    )
+                })
+            },
+            &|path| {
+                if path == "/missing" {
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "missing link target",
+                    ))
+                } else {
+                    probe.read_link(path)
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(plan.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            plan.to_string().contains(if looping {
+                "loops"
+            } else {
+                "missing link target"
+            }),
+            "{plan}"
+        );
+    }
+}
+
+#[test]
+fn system_helper_selection_skips_only_missing_candidates() {
+    let selected = select_system_helper("docker", &["/usr/sbin", "/usr/bin"], &|path| {
+        if path == Path::new("/usr/sbin/docker") {
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap();
+    assert_eq!(selected, Path::new("/usr/bin/docker"));
+    for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+        let error = select_system_helper("docker", &["/usr/sbin", "/usr/bin"], &|path| {
+            assert_eq!(path, Path::new("/usr/sbin/docker"));
+            Err(io::Error::new(kind, "lookup refused"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.to_string(), "lookup refused");
+    }
+}
+
+#[test]
+fn privileged_helpers_refuse_directory_links_with_untrusted_parents() {
+    let mut probe = linked_probe();
+    probe
+        .links
+        .insert("/usr/bin/docker".into(), "/tmp/choice/docker".into());
+    probe
+        .links
+        .insert("/tmp/choice".into(), "/opt/system".into());
+    probe
+        .aliases
+        .insert("/tmp/choice".into(), "/opt/system".into());
+    probe.fake.dir("/tmp");
+    probe.fake.untrust("/tmp");
+    let error = privileged_helper_plan(&probe, "/usr/bin/docker".into(), None, &|path| {
+        probe.read_link(path)
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("/tmp"));
+}
+
+#[test]
+fn privileged_helpers_count_directory_and_file_links_together() {
+    for count in [39, 40] {
+        let mut probe = linked_probe();
+        probe
+            .links
+            .insert("/usr/bin/docker".into(), "/opt/dir-0/docker".into());
+        for index in 0..count {
+            probe.links.insert(
+                format!("/opt/dir-{index}"),
+                if index + 1 == count {
+                    "system".into()
+                } else {
+                    format!("dir-{}", index + 1)
+                },
+            );
+            probe
+                .aliases
+                .insert(format!("/opt/dir-{index}"), "/opt/system".into());
+        }
+        let result = privileged_helper_plan(&probe, "/usr/bin/docker".into(), None, &|path| {
+            probe.read_link(path)
+        });
+        if count == 39 {
+            let plan = result.unwrap();
+            assert_eq!(plan.path, Path::new("/opt/system/docker"));
+            assert_eq!(
+                plan.environment,
+                HelperEnvironment::Unix {
+                    argv_zero: "/usr/bin/docker".into()
+                }
+            );
+        } else {
+            assert!(result.unwrap_err().to_string().contains("exceeds 40 hops"));
+        }
+    }
+}
+
+#[test]
+fn privileged_helpers_refuse_directory_link_loops() {
+    let mut probe = linked_probe();
+    probe
+        .links
+        .insert("/usr/bin/docker".into(), "/opt/choice/docker".into());
+    probe.links.insert("/opt/choice".into(), "choice".into());
+    probe
+        .aliases
+        .insert("/opt/choice".into(), "/opt/system".into());
+    let error = privileged_helper_plan(&probe, "/usr/bin/docker".into(), None, &|path| {
+        probe.read_link(path)
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("loops"));
+}
+
+#[test]
+fn privileged_helpers_resolve_directory_links_before_dot_dot() {
+    let mut probe = linked_probe();
+    probe.links.insert(
+        "/usr/bin/docker".into(),
+        "/opt/choice/../system/docker".into(),
+    );
+    probe
+        .links
+        .insert("/opt/choice".into(), "/tmp/nested".into());
+    probe.fake.dir("/tmp");
+    probe.fake.untrust("/tmp");
+    let error = privileged_helper_plan(&probe, "/usr/bin/docker".into(), None, &|path| {
+        probe.read_link(path)
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("/tmp"));
+}
+
+#[cfg(unix)]
+#[test]
+fn system_helper_selection_does_not_follow_real_final_links() {
+    let scratch = crate::scope::runtime_test_probe::scratch_dir();
+    let first = scratch.path().join("first");
+    let second = scratch.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    std::fs::write(second.join("docker"), "never executed").unwrap();
+    for target in ["docker", "missing"] {
+        std::os::unix::fs::symlink(target, first.join("docker")).unwrap();
+        let selected = select_system_helper(
+            "docker",
+            &[first.to_str().unwrap(), second.to_str().unwrap()],
+            &|path| std::fs::symlink_metadata(path).map(|_| ()),
+        )
+        .unwrap();
+        assert_eq!(selected, first.join("docker"));
+        std::fs::remove_file(first.join("docker")).unwrap();
+    }
+}
