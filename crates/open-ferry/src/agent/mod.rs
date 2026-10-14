@@ -39,6 +39,7 @@ mod cli;
 mod clients;
 mod config;
 mod credentials;
+mod files;
 mod guard;
 mod keys;
 mod mask;

@@ -166,6 +166,15 @@ fn check_key(key: &str) -> Result<(), Failure> {
 /// Writes `key` to the new file `path`, which on Unix only the user can
 /// read.
 fn write_key_file(path: &Path, key: &str) -> Result<(), Failure> {
+    write_key_file_with_probe(crate::scope::runtime_probe().as_ref(), path, key)
+}
+
+pub(super) fn write_key_file_with_probe(
+    probe: &dyn crate::scope::Probe,
+    path: &Path,
+    key: &str,
+) -> Result<(), Failure> {
+    super::files::write(probe, path)?;
     let failed = |error: std::io::Error| {
         Failure::new(
             "failed",
@@ -185,7 +194,9 @@ fn write_key_file(path: &Path, key: &str) -> Result<(), Failure> {
         .and_then(|()| file.sync_all());
     if let Err(error) = written {
         drop(file);
-        let _ = std::fs::remove_file(path);
+        if super::files::read(probe, path).is_ok() {
+            let _ = std::fs::remove_file(path);
+        }
         return Err(failed(error));
     }
     Ok(())
@@ -267,7 +278,9 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
     let mut changed = match result {
         Ok(changed) => changed,
         Err(failure) => {
-            if let Some(file) = &input.to_file {
+            if let Some(file) = &input.to_file
+                && super::files::read(crate::scope::runtime_probe().as_ref(), file).is_ok()
+            {
                 let _ = std::fs::remove_file(file);
             }
             return Err(failure);

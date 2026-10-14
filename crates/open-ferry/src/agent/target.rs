@@ -204,6 +204,14 @@ pub(crate) fn find_key(
 
 /// The first line of the key file at `path`, trimmed.
 pub(crate) fn read_key_file(path: &Path) -> Result<String, Failure> {
+    read_key_file_with_probe(crate::scope::runtime_probe().as_ref(), path)
+}
+
+pub(super) fn read_key_file_with_probe(
+    probe: &dyn crate::scope::Probe,
+    path: &Path,
+) -> Result<String, Failure> {
+    super::files::read(probe, path)?;
     let unreadable = |why: String| {
         Failure::new(
             "failed",

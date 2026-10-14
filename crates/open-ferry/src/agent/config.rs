@@ -33,7 +33,9 @@ use super::change::{
     make, masked, read_config,
 };
 use super::guard::{READS_A_FILE, confirm, go_ahead, sensitive_reasons};
-use super::mask::{auth_dirs, credential_mark, holds_secret, is_secret_name, mask_at, mask_tree};
+use super::mask::{
+    auth_dirs_with_probe, credential_mark, holds_secret, is_secret_name, mask_at, mask_tree,
+};
 use super::target::{Reach, probe};
 use super::values::{
     check_path, diff as diff_trees, dotted, get as get_value, parse_value, read_tree,
@@ -142,6 +144,14 @@ mod trust_tests {
 /// refused (`unsafe_file`): a value is never a copy of a sign-in's tokens
 /// or a key.
 pub(crate) fn read_value_file(ctx: &Context, path: &Path) -> Result<String, Failure> {
+    read_value_file_with_probe(crate::scope::runtime_probe().as_ref(), ctx, path)
+}
+
+pub(super) fn read_value_file_with_probe(
+    probe: &dyn crate::scope::Probe,
+    ctx: &Context,
+    path: &Path,
+) -> Result<String, Failure> {
     let refused = |why: &str| {
         Failure::new(
             "unsafe_file",
@@ -152,13 +162,14 @@ pub(crate) fn read_value_file(ctx: &Context, path: &Path) -> Result<String, Fail
         )
         .hint("put just the value in a file of its own, outside the auth directory")
     };
+    super::files::read(probe, path)?;
     let real = std::fs::canonicalize(path).map_err(|error| {
         Failure::new(
             "not_found",
             format!("can't read {}: {error}", path.display()),
         )
     })?;
-    for dir in auth_dirs(ctx) {
+    for dir in auth_dirs_with_probe(ctx, probe) {
         let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
         if real.starts_with(&dir) {
             return Err(refused(
@@ -620,7 +631,17 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     let changes = diff_trees(&before, &after);
     let config_sha256 = save::sha256_hex(&current);
     let backup_sha256 = save::sha256_hex(&saved);
-    let edited = save::recorded_sha256(&ctx.path).as_deref() != Some(config_sha256.as_str());
+    let recorded = if crate::scope::authorize_file(
+        crate::scope::runtime_probe().as_ref(),
+        &save::record_path(&ctx.path),
+    )
+    .map_err(|error| Failure::new("unsafe_file", error.to_string()))?
+    {
+        save::recorded_sha256(&ctx.path)
+    } else {
+        None
+    };
+    let edited = recorded.as_deref() != Some(config_sha256.as_str());
     let mut reasons = sensitive_reasons(&changes, &before, &after);
     if edited {
         reasons.insert(0, CHANGED_SINCE.to_owned());
@@ -736,6 +757,16 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
 
 /// Undoes the last change in the file, with `check`.
 fn undo_in_file(ctx: &Context, backup: &Path, check: &save::UndoCheck) -> Result<(), Failure> {
+    undo_in_file_with_probe(crate::scope::runtime_probe().as_ref(), ctx, backup, check)
+}
+
+pub(super) fn undo_in_file_with_probe(
+    probe: &dyn crate::scope::Probe,
+    ctx: &Context,
+    backup: &Path,
+    check: &save::UndoCheck,
+) -> Result<(), Failure> {
+    super::files::config_write(probe, &ctx.path)?;
     save::undo(&ctx.path, check)
         .map(|_| ())
         .map_err(|error| match error.kind() {
