@@ -103,6 +103,16 @@ impl Client {
     /// added when it has no scheme and trailing slashes taken off; an empty
     /// one is `http://127.0.0.1:8317`.
     pub fn new(base_url: &str, secret: &str) -> Arc<Self> {
+        Self::with_timeout(base_url, secret, Some(TIMEOUT))
+    }
+
+    /// A management client without a latency limit, for tests of serialized writes.
+    #[cfg(feature = "test-support")]
+    pub fn new_for_test(base_url: &str, secret: &str) -> Arc<Self> {
+        Self::with_timeout(base_url, secret, None)
+    }
+
+    fn with_timeout(base_url: &str, secret: &str, timeout: Option<Duration>) -> Arc<Self> {
         let mut base = base_url.trim().to_owned();
         if base.is_empty() {
             base = "http://127.0.0.1:8317".to_owned();
@@ -113,9 +123,10 @@ impl Client {
             }
             base = base.trim_end_matches('/').to_owned();
         }
-        let mut builder = reqwest::Client::builder()
-            .timeout(TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none());
+        let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
         if is_loopback(&base) {
             builder = builder.no_proxy();
         }

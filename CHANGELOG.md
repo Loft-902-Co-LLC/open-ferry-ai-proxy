@@ -53,6 +53,8 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 
 ### Changed
 
+- **Config saves on Windows** retry briefly when another program holds the config, backup or write record open without allowing replacement. A persistent refusal is still reported, with no temporary file left behind.
+
 - **Ported from CLIProxyAPI v8.0.20**, up from v8.0.15. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8015-to-v8020-left-out). Besides the speech endpoints, it brings:
   - **`server.github-token`** (or `github-token` in the legacy layout), a token for requests to GitHub's API: the management API's latest-version check sends it ahead of `GITHUB_TOKEN`. The management API never shows it.
   - **Compact error bodies**: an upstream error body that is already JSON is compacted to one line, so a stream's `data:` line carries it whole.

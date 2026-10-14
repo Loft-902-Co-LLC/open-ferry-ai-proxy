@@ -50,6 +50,14 @@ impl Remote {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test(url: &str, key: &str) -> Self {
+        Self {
+            client: ManagementClient::new_for_test(url, key),
+            url: url.to_owned(),
+        }
+    }
+
     /// The root URL it calls.
     pub(crate) fn url(&self) -> &str {
         &self.url

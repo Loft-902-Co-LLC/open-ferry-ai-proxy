@@ -81,6 +81,8 @@ mod tests {
 
     fn context(path: &Path) -> Context {
         Context {
+            #[cfg(test)]
+            no_request_timeout: false,
             path: path.into(),
             env: Env {
                 password: None,

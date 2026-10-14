@@ -9,6 +9,7 @@
 //! refused, before anything is read and again before anything is written.
 //! A file that can't be renamed over, such as a file bind-mounted on its
 //! own into a container, is written in place instead, as upstream does.
+//! On Windows, a rename briefly refused by an open handle is retried.
 //! [`commit_expecting`] writes only while the file still holds the bytes
 //! the caller read.
 //!
@@ -399,7 +400,7 @@ fn replace(
     file.write_all(data)
         .and_then(|()| file.as_file().sync_all())
         .map_err(|error| io_error("write", target, error))?;
-    match file.persist(target) {
+    match persist_with_retry(file, target) {
         Ok(_) => {
             sync_dir(dir);
             Ok(())
@@ -407,6 +408,46 @@ fn replace(
         // The temporary file is deleted as the error drops.
         Err(error) if rename_refused(&error.error) => write_in_place(target, data),
         Err(error) => Err(io_error("rename", target, error.error)),
+    }
+}
+
+/// The same bounded waits as the updater's Windows publication retries.
+const RETRY_WAITS_MS: [u64; 5] = [50, 100, 200, 400, 800];
+
+/// Windows access, sharing and lock violations can be brief; Unix EACCES
+/// is a real refusal, not a reason to retry.
+fn platform_transient(error: &io::Error) -> bool {
+    cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// Retries the same already-flushed temporary file, not its contents.
+fn persist_with_retry(
+    mut file: tempfile::NamedTempFile,
+    target: &Path,
+) -> Result<fs::File, tempfile::PersistError> {
+    let mut retries = 0;
+    loop {
+        match file.persist(target) {
+            Ok(file) => return Ok(file),
+            Err(error) => {
+                #[cfg(all(test, windows))]
+                RENAME_FAILED.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().take() {
+                        hook(error.error.raw_os_error().expect("Windows error"));
+                    }
+                });
+                if platform_transient(&error.error)
+                    && let Some(wait) = RETRY_WAITS_MS.get(retries)
+                {
+                    file = error.file;
+                    std::thread::sleep(Duration::from_millis(*wait));
+                    retries += 1;
+                } else {
+                    // PersistError drops and deletes the temporary file.
+                    return Err(error);
+                }
+            }
+        }
     }
 }
 
@@ -461,10 +502,124 @@ fn sync_dir(dir: &Path) {
 #[cfg(not(unix))]
 fn sync_dir(_dir: &Path) {}
 
+// A one-shot, thread-local release after a real failed rename, for Windows tests.
+#[cfg(all(test, windows))]
+type RenameFailed = Box<dyn FnOnce(i32)>;
+
+#[cfg(all(test, windows))]
+std::thread_local! {
+    static RENAME_FAILED: std::cell::RefCell<Option<RenameFailed>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::testing::TempDir;
+
+    #[test]
+    fn transient_rename_errors_are_windows_only() {
+        for code in [5, 32, 33] {
+            assert_eq!(
+                platform_transient(&io::Error::from_raw_os_error(code)),
+                cfg!(windows)
+            );
+        }
+        for code in [2, 3, 19, 87] {
+            assert!(!platform_transient(&io::Error::from_raw_os_error(code)));
+        }
+        assert!(!platform_transient(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[cfg(windows)]
+    fn held_rename(backup: bool, release: bool) {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, b"port: 1\n").expect("seed config");
+        fs::write(backup_path(&path), b"port: 0\n").expect("seed backup");
+        let target = if backup {
+            backup_path(&path)
+        } else {
+            path.clone()
+        };
+        // FILE_SHARE_READ only: neither writes nor deletion are shared.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&target)
+            .expect("hold target without FILE_SHARE_DELETE");
+        let failed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen = failed.clone();
+        let mut held = Some(held);
+        if release {
+            let handle = held.take().expect("held handle");
+            RENAME_FAILED.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |code| {
+                    seen.set(Some(code));
+                    drop(handle);
+                }))
+            });
+        }
+        let started = Instant::now();
+        let result = commit(&path, b"port: 2\n");
+        if release {
+            assert_eq!(
+                failed.get(),
+                Some(5),
+                "first rename reproduces access denied"
+            );
+            result.expect("short_hold_save_succeeds_after_release");
+            assert_eq!(fs::read(&path).expect("config"), b"port: 2\n");
+            assert_eq!(fs::read(backup_path(&path)).expect("backup"), b"port: 1\n");
+        } else {
+            let error = result.expect_err("held beyond the retry budget");
+            assert!(started.elapsed() >= Duration::from_millis(RETRY_WAITS_MS.iter().sum()));
+            assert_eq!(
+                error.source.as_ref().and_then(io::Error::raw_os_error),
+                Some(5),
+                "{error}"
+            );
+            eprintln!("held {}: {error}; os error 5", target.display());
+            assert!(error.to_string().starts_with("rename "), "{error}");
+            assert_eq!(fs::read(&path).expect("unchanged config"), b"port: 1\n");
+        }
+        assert!(
+            fs::read_dir(dir.path()).expect("list").all(|entry| {
+                let name = entry.expect("entry").file_name();
+                let name = name.to_string_lossy();
+                !(name.starts_with('.') && name.ends_with(".tmp"))
+            }),
+            "no temporary file remains"
+        );
+        drop(held);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backup_short_hold() {
+        held_rename(true, true);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_config_short_hold() {
+        held_rename(false, true);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backup_exhausted_hold() {
+        held_rename(true, false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_config_exhausted_hold() {
+        held_rename(false, false);
+    }
 
     // Not upstream's: a write replaces the file and keeps one backup of what
     // it held.
