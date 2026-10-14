@@ -21,6 +21,7 @@ pub(crate) enum Fault {
     SlowReady,
     IgnoreHandover,
     HoldRefresh,
+    HoldLoad,
     #[cfg_attr(
         not(feature = "blue-green-test"),
         allow(dead_code, reason = "only the feature's seams name it")
@@ -33,6 +34,7 @@ pub(crate) enum Fault {
 pub(crate) enum Barrier {
     GateClosing,
     RefreshBeforeSave,
+    LoadBeforeLoaded,
     GateClosed,
     LeaseRelease,
     BeforeReload,

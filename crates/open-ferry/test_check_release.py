@@ -28,7 +28,7 @@ class PositiveControl(unittest.TestCase):
 
     WORKER = (
         b"events.log", b"test-marker", b"x-open-ferry-test-marker",
-        b"handover.written", b"handover_failed",
+        b"handover.written", b"handover_failed", b"hold-load", b"load.before_loaded",
     )
     FLAGS = (b"test-data-dir", b"test-endpoint")
     REQUIRED = (

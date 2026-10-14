@@ -17,9 +17,6 @@ fn assert_cancelled(result: &serde_json::Value) {
 
 #[test]
 fn off_during_loading_cancels_and_a_never_knew() {
-    if lacks(Cap::HoldLoad) {
-        return;
-    }
     let fx = Fx::new();
     fx.stage(B, "B");
     // B is spawned but cannot report loaded yet. The per-second mode read
