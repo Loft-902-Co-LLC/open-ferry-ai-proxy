@@ -323,6 +323,20 @@ async fn check_handshake_survivor(cancel: bool) {
         vec![id],
         "a wait deadline was mistaken for an exit"
     );
+    #[cfg(unix)]
+    let sockets = tempfile::Builder::new()
+        .prefix("o-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    #[cfg(unix)]
+    let endpoint = {
+        let root = std::fs::canonicalize(sockets.path()).unwrap();
+        let location = open_ferry_supervisor::endpoint::Location::new(&root, "e").unwrap();
+        assert!(location.socket_path().as_os_str().len() <= 103);
+        Some(location)
+    };
+    #[cfg(windows)]
+    let endpoint = None; // Windows resolves the pipe from this fixture's data root.
     let cfg = open_ferry_supervisor::startup::Config {
         data: open_ferry_update::data_dir::DataDir::at(rig.dir.path().join("recovery")),
         installed: probe().to_owned(),
@@ -334,7 +348,7 @@ async fn check_handshake_survivor(cancel: bool) {
         runner: Arc::new(NoRecovery),
         detect_timeout: LONG,
         #[cfg(feature = "blue-green-test")]
-        test_endpoint_location: None,
+        test_endpoint_location: endpoint,
     };
     assert!(
         tokio::time::timeout(

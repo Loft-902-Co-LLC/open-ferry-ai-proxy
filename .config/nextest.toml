@@ -1,3 +1,5 @@
+nextest-version = { recommended = "0.9.146" }
+
 # Not upstream's: process-per-test isolation for the blue-green supervisor tests.
 # Plain cargo test retains the shared-process descriptor/fork gates.
 [profile.ci]
@@ -13,10 +15,10 @@ max-threads = 4
 
 [[profile.ci.overrides]]
 platform = 'cfg(unix)'
-filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker)'
+filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker) | binary(=worker_channel) | binary(=unix_process) | binary(=windows_process) | binary(=windows_sockets) | binary(=endpoint) | binary(=migrate) | binary(=subcommands) | binary(/^open[-_]ferry($|[-_]supervisor$|[-_]update$)/)'
 test-group = 'process-unix'
 
 [[profile.ci.overrides]]
 platform = 'cfg(windows)'
-filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker)'
+filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker) | binary(=worker_channel) | binary(=unix_process) | binary(=windows_process) | binary(=windows_sockets) | binary(=endpoint) | binary(=migrate) | binary(=subcommands) | binary(/^open[-_]ferry($|[-_]supervisor$|[-_]update$)/)'
 test-group = 'process-windows'

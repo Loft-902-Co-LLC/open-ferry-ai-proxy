@@ -131,13 +131,18 @@ fn behaves_the_same_under_another_name() {
 }
 
 /// `GET /` on 127.0.0.1:`port`: the response, or nothing yet.
-fn get_root(port: u16) -> Option<String> {
+fn get(port: u16, path: &str, key: Option<&str>) -> Option<String> {
     let mut stream =
         TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(1)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-    stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .ok()?;
+    let auth = key
+        .map(|key| format!("Authorization: Bearer {key}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Connection: close\r\n\r\n"
+    )
+    .ok()?;
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
     Some(response)
@@ -162,50 +167,68 @@ fn serves_under_cliproxyapis_name() {
     let binary = renamed(dir.path(), "cliproxyapi");
     let auth = dir.path().join("auths");
     std::fs::create_dir(&auth).unwrap();
-    let port = {
-        let (_socket, port) = closed_port();
-        port
-    };
+    let key = format!(
+        "renamed-{}",
+        dir.path().file_name().unwrap().to_string_lossy()
+    );
     let config = dir.path().join("config.yaml");
-    std::fs::write(
-        &config,
-        format!(
-            "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys:\n  - 'test-client-key-for-the-renamed-binary'\nself-update:\n  mode: off\n",
-            auth.display()
-        ),
-    )
-    .unwrap();
-    let child = Command::new(&binary)
-        .arg("-config")
-        .arg(&config)
-        .current_dir(dir.path())
-        .env_remove("MANAGEMENT_PASSWORD")
-        .env_remove("WRITABLE_PATH")
-        .env_remove("writable_path")
-        .env("LOCALAPPDATA", dir.path())
-        .env("XDG_DATA_HOME", dir.path())
-        .env("HOME", dir.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut server = Started(child);
+    let stderr = dir.path().join("server.stderr");
     let deadline = Instant::now() + Duration::from_secs(30);
-    let response = loop {
-        if let Some(response) = get_root(port)
-            && !response.is_empty()
-        {
-            break response;
-        }
+    'attempts: loop {
         assert!(
-            server.0.try_wait().unwrap().is_none(),
-            "the server exited before it answered"
+            Instant::now() < deadline,
+            "no free port within the startup budget"
         );
-        assert!(Instant::now() < deadline, "nothing answered on port {port}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert!(response.contains("open-ferry-ai-proxy"), "{response}");
-    drop(server);
+        let (_socket, port) = closed_port();
+        drop(_socket);
+        std::fs::write(&config, format!(
+            "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys:\n  - '{key}'\nself-update:\n  mode: off\n", auth.display()
+        )).unwrap();
+        let child = Command::new(&binary)
+            .arg("-config")
+            .arg(&config)
+            .current_dir(dir.path())
+            .env_remove("MANAGEMENT_PASSWORD")
+            .env_remove("WRITABLE_PATH")
+            .env_remove("writable_path")
+            .env("LOCALAPPDATA", dir.path())
+            .env("XDG_DATA_HOME", dir.path())
+            .env("HOME", dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let mut server = Started(child);
+        loop {
+            let exit = server.0.try_wait().unwrap();
+            let log = std::fs::read_to_string(&stderr).unwrap_or_default();
+            if let Some(status) = exit {
+                let conflict = log.lines().any(|line| {
+                    line.contains("failed to start HTTP server")
+                        && ["(os error 98)", "(os error 48)", "(os error 10048)"]
+                            .iter()
+                            .any(|code| line.contains(code))
+                });
+                assert!(
+                    conflict,
+                    "the server exited ({status}) before it answered:\n{log}"
+                );
+                continue 'attempts;
+            }
+            if let Some(root) = get(port, "/", None)
+                && root.starts_with("HTTP/1.1 200")
+                && root.contains("open-ferry-ai-proxy")
+                && let Some(models) = get(port, "/v1/models", Some(&key))
+                && models.starts_with("HTTP/1.1 200")
+            {
+                break 'attempts;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nothing authenticated on port {port}:\n{log}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
