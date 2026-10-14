@@ -46,7 +46,7 @@ class PositiveControl(unittest.TestCase):
         self.assertIn("positive control rejected:", result.stdout)
 
     def test_each_hook_fails_a_feature_off_artifact(self):
-        for hook in self.REQUIRED:
+        for hook in (*self.REQUIRED, b"hold-load", b"load.before_loaded"):
             with self.subTest(hook=hook):
                 result = self.check_artifact(hook, feature=False)
                 self.assertNotEqual(result.returncode, 0)

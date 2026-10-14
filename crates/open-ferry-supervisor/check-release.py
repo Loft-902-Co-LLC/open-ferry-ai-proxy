@@ -10,7 +10,8 @@ import sys
 
 FORBIDDEN = (
     b"fail-load", b"fail-before-ready", b"exit-after", b"slow-ready",
-    b"ignore-handover", b"hold-refresh", b"drop-channel", b"supervisor-panic",
+    b"ignore-handover", b"hold-refresh", b"hold-load", b"load.before_loaded",
+    b"drop-channel", b"supervisor-panic",
     b"refresh.after_rotate", b"refresh.before_save", b"persist.before",
     b"handover.gate_closing", b"handover.gate_closed", b"lease.release",
     b"take_over.before_reload", b"rename.after_first", b"journal.before:",

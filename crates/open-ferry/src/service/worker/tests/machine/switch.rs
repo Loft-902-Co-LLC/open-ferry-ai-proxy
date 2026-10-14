@@ -1533,6 +1533,34 @@ mod seams {
         assert!(succeeded(stop(&mut rig).await));
     }
 
+    #[tokio::test]
+    async fn hold_load_releases_the_standby_before_loaded() {
+        let mut rig = marked(Setup::new(Role::Standby), "b", &[("hold-load", "on@b")]).start();
+        let mut barriers = Barriers::of(&rig);
+        barriers.hold("load.before_loaded");
+        barriers.arrived("load.before_loaded").await;
+        assert!(!events(&rig).iter().any(|(name, _)| name == "loaded"));
+        barriers.release("load.before_loaded");
+        let next = rig.fake().recv_other().await;
+        assert!(matches!(next, Message::Loaded { .. }), "{next:?}");
+        assert_eq!(rig.fake().recv_status().await.2, "standby");
+        assert!(succeeded(stop(&mut rig).await));
+    }
+
+    #[tokio::test]
+    async fn hold_load_failure_reports_load_failed_and_exits() {
+        let mut rig = marked(Setup::new(Role::Standby), "b", &[("hold-load", "on@b")]).start();
+        let barriers = Barriers::of(&rig);
+        barriers.fail("load.before_loaded");
+        let next = rig.fake().recv_other().await;
+        assert!(
+            matches!(next, Message::LoadFailed { ref reason } if reason.contains("load.before_loaded")),
+            "{next:?}"
+        );
+        assert_eq!(rig.exit().await, ExitCode::FAILURE);
+        assert!(barriers.has("load.before_loaded.failed"));
+    }
+
     // L7: `ignore-handover` drops the message: no 503, no state, no answer.
     #[tokio::test]
     async fn ignore_handover_ignores_the_message() {

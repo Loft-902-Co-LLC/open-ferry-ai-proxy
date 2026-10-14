@@ -1,4 +1,4 @@
-nextest-version = { recommended = "0.9.146" }
+nextest-version = { required = "0.9.146" }
 
 # Not upstream's: process-per-test isolation for the blue-green supervisor tests.
 # Plain cargo test retains the shared-process descriptor/fork gates.

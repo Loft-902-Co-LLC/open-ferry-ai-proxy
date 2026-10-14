@@ -56,9 +56,8 @@ pub const A: &str = "1.0.0";
 pub const B: &str = "2.0.0";
 pub const C: &str = "3.0.0";
 
-/// How long any one wait lasts. A wrong outcome ends far sooner; this is only
-/// the bound that keeps a failure from hanging.
-pub const LONG: Duration = Duration::from_secs(90);
+mod timeouts;
+pub use timeouts::LONG;
 pub const POLL: Duration = Duration::from_millis(20);
 
 /// Writes a worker binary the supervisor can execute: on Unix a file made by
