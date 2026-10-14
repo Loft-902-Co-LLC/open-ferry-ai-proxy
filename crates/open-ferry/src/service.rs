@@ -2623,7 +2623,7 @@ fn absolute_dir(dir: PathBuf) -> PathBuf {
 
 /// Creates the auth directory if needed, readable by its owner only
 /// (upstream's `ensureAuthDir`).
-fn ensure_auth_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn ensure_auth_dir(dir: &Path) -> io::Result<()> {
     if dir.as_os_str().is_empty() {
         return Ok(());
     }

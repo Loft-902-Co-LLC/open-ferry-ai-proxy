@@ -94,6 +94,59 @@ enum Failure {
 
 /// Runs `login` and saves its credential in `auth_dir`.
 pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Options) -> ExitCode {
+    run_with_probe(
+        login,
+        auth_dir,
+        options,
+        crate::scope::runtime_probe(),
+        |store| sign_in(login, config, options, store),
+    )
+    .await
+}
+
+async fn run_with_probe<F, Fut>(
+    login: Login,
+    auth_dir: &Path,
+    options: Options,
+    probe: crate::scope::RuntimeProbe,
+    sign_in: F,
+) -> ExitCode
+where
+    F: FnOnce(FileStore) -> Fut,
+    Fut: std::future::Future<Output = ExitCode>,
+{
+    let privileged = !matches!(probe.privileged(), Ok(false)) && !probe.in_container();
+    if privileged && let Err(error) = crate::scope::authorize_auth_dir(probe.as_ref(), auth_dir) {
+        return report(login, Failure::Other(error.to_string()), options);
+    }
+    let auth_dir = crate::scope::absolute_auth_dir(probe.as_ref(), auth_dir.to_path_buf());
+    if privileged {
+        let prepare = || {
+            if !crate::scope::authorize_dir(probe.as_ref(), &auth_dir)
+                .map_err(|error| error.to_string())?
+            {
+                crate::service::ensure_auth_dir(&auth_dir).map_err(|error| error.to_string())?;
+                if !crate::scope::authorize_dir(probe.as_ref(), &auth_dir)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "Refusing auth directory {}: it changed while being checked. Make it and every directory above it root's (administrators or SYSTEM on Windows), not writable by others, with no links.",
+                        auth_dir.display()
+                    ));
+                }
+            }
+            Ok::<(), String>(())
+        };
+        if let Err(error) = prepare() {
+            return report(login, Failure::Other(error), options);
+        }
+    }
+    let store =
+        FileStore::new(auth_dir).with_file_guard(crate::scope::credential_file_guard(probe));
+    sign_in(store).await
+}
+
+async fn sign_in(login: Login, config: &Config, options: Options, store: FileStore) -> ExitCode {
     let port = match callback_port(options.callback_port, login.default_port()) {
         Some(port) => port,
         // Upstream can't listen on such a port, and takes it as in use.
@@ -163,9 +216,6 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
             "Codex"
         }
     );
-    let store = FileStore::new(auth_dir).with_file_guard(crate::scope::credential_file_guard(
-        crate::scope::runtime_probe(),
-    ));
     let (outcome, code) = match credentials::save(&store, &mut auth) {
         Ok(path) => {
             if !path.is_empty() {
@@ -305,6 +355,229 @@ fn ssh_tunnel_instructions(port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::scope::{Probe, State};
+
+    struct LoginProbe {
+        fake: crate::scope::runtime_test_probe::RuntimeFake,
+        auth_dir: std::path::PathBuf,
+    }
+
+    impl Probe for LoginProbe {
+        fn platform(&self) -> crate::os_service::Platform {
+            self.fake.platform()
+        }
+        fn privileged(&self) -> Result<bool, String> {
+            self.fake.privileged()
+        }
+        fn account_dir(&self) -> Result<String, String> {
+            self.fake.account_dir()
+        }
+        fn program_data(&self) -> Result<String, String> {
+            self.fake.program_data()
+        }
+        fn state(&self, path: &str) -> State {
+            if self.platform().clean(path) == self.platform().clean(self.auth_dir.to_str().unwrap())
+                && self.auth_dir.is_dir()
+            {
+                State::Directory
+            } else {
+                self.fake.state(path)
+            }
+        }
+        fn entries(&self, dir: &str, limit: usize) -> std::io::Result<Vec<String>> {
+            self.fake.entries(dir, limit)
+        }
+        fn trusted_dir(&self, path: &str) -> Result<(), String> {
+            self.fake.trusted_dir(path)
+        }
+        fn trusted_file(&self, path: &str) -> Result<(), String> {
+            self.fake.trusted_file(path)
+        }
+        fn readable_file(&self, path: &str) -> std::io::Result<()> {
+            self.fake.readable_file(path)
+        }
+        fn receipt(
+            &self,
+            path: &str,
+        ) -> Result<
+            Option<open_ferry_update::receipt::Receipt>,
+            open_ferry_update::receipt::ReceiptError,
+        > {
+            self.fake.receipt(path)
+        }
+        fn canonical(&self, path: &str) -> std::io::Result<String> {
+            if self.state(path) == State::Directory {
+                Ok(self.platform().clean(path))
+            } else {
+                self.fake.canonical(path)
+            }
+        }
+        fn create_machine_dir(&mut self, _: &str) -> std::io::Result<()> {
+            panic!("never provision")
+        }
+    }
+
+    #[tokio::test]
+    async fn privileged_login_creates_and_checks_the_directory_before_sign_in_and_save() {
+        let scratch = crate::scope::runtime_test_probe::scratch_dir();
+        let root = open_ferry_core::auth::path::clean(scratch.path());
+        let dir = root.join("auth");
+        let platform = if cfg!(windows) {
+            crate::os_service::Platform::Windows
+        } else {
+            crate::os_service::Platform::Linux
+        };
+        let mut fake = crate::update::scope_probe::Fake::new(platform, true);
+        fake.dir(root.to_str().unwrap());
+        let probe = std::sync::Arc::new(LoginProbe {
+            fake: crate::scope::runtime_test_probe::RuntimeFake::new(fake),
+            auth_dir: dir.clone(),
+        });
+        let code = run_with_probe(Login::Codex, &dir, Options::default(), probe, |store| {
+            std::future::ready({
+                assert!(dir.is_dir());
+                assert_eq!(store.base_dir(), dir);
+                let mut auth = open_ferry_core::auth::Auth {
+                    id: "account.json".into(),
+                    provider: "codex".into(),
+                    ..Default::default()
+                };
+                auth.metadata
+                    .insert("type".into(), serde_json::json!("codex"));
+                assert!(!credentials::save(&store, &mut auth).unwrap().is_empty());
+                ExitCode::SUCCESS
+            })
+        })
+        .await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(dir.join("account.json").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn privileged_login_refuses_untrusted_parents_and_new_directories_before_sign_in() {
+        for refuse_parent in [true, false] {
+            let scratch = crate::scope::runtime_test_probe::scratch_dir();
+            let root = open_ferry_core::auth::path::clean(scratch.path());
+            let dir = root.join("auth");
+            let platform = if cfg!(windows) {
+                crate::os_service::Platform::Windows
+            } else {
+                crate::os_service::Platform::Linux
+            };
+            let mut fake = crate::update::scope_probe::Fake::new(platform, true);
+            fake.dir(root.to_str().unwrap()).untrust(if refuse_parent {
+                root.to_str().unwrap()
+            } else {
+                dir.to_str().unwrap()
+            });
+            let probe = std::sync::Arc::new(LoginProbe {
+                fake: crate::scope::runtime_test_probe::RuntimeFake::new(fake),
+                auth_dir: dir.clone(),
+            });
+            let starts = std::cell::Cell::new(0);
+            let code = run_with_probe(Login::Codex, &dir, Options::default(), probe, |_| {
+                starts.set(starts.get() + 1);
+                async { ExitCode::SUCCESS }
+            })
+            .await;
+            assert_eq!(code, ExitCode::FAILURE);
+            assert_eq!(starts.get(), 0);
+            assert_eq!(dir.exists(), !refuse_parent);
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn privileged_login_builds_a_full_store_path_and_ordinary_login_keeps_relative_paths() {
+        let scratch = crate::scope::runtime_test_probe::scratch_dir();
+        let root = open_ferry_core::auth::path::clean(scratch.path());
+        let dir = root.join("auth");
+        std::fs::create_dir(&dir).unwrap();
+        let relative = std::path::PathBuf::from(&dir.to_str().unwrap()[2..]);
+        let dotted = std::path::PathBuf::from(format!("{}/./", dir.display()));
+        let mut fake =
+            crate::update::scope_probe::Fake::new(crate::os_service::Platform::Windows, true);
+        fake.dir(dir.to_str().unwrap());
+        let probe = std::sync::Arc::new(crate::scope::runtime_test_probe::RuntimeFake::new(fake));
+        let starts = std::cell::Cell::new(0);
+        let code = run_with_probe(Login::Codex, &dotted, Options::default(), probe, |_| {
+            starts.set(starts.get() + 1);
+            async { ExitCode::SUCCESS }
+        })
+        .await;
+        assert_eq!(code, ExitCode::FAILURE);
+        assert_eq!(starts.get(), 0);
+        for privileged in [true, false] {
+            let mut fake = crate::update::scope_probe::Fake::new(
+                crate::os_service::Platform::Windows,
+                privileged,
+            );
+            fake.dir(dir.to_str().unwrap());
+            let probe =
+                std::sync::Arc::new(crate::scope::runtime_test_probe::RuntimeFake::new(fake));
+            let code = run_with_probe(
+                Login::Codex,
+                &relative,
+                Options::default(),
+                probe,
+                |store| {
+                    std::future::ready({
+                        assert_eq!(
+                            store.base_dir(),
+                            if privileged {
+                                dir.clone()
+                            } else {
+                                relative.clone()
+                            }
+                        );
+                        if privileged {
+                            let mut auth = open_ferry_core::auth::Auth {
+                                id: "relative.json".into(),
+                                provider: "codex".into(),
+                                ..Default::default()
+                            };
+                            auth.metadata
+                                .insert("type".into(), serde_json::json!("codex"));
+                            assert_eq!(
+                                credentials::save(&store, &mut auth).unwrap(),
+                                dir.join("relative.json").to_string_lossy()
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    })
+                },
+            )
+            .await;
+            assert_eq!(code, ExitCode::SUCCESS);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_login_does_not_create_a_directory_before_sign_in() {
+        let scratch = crate::scope::runtime_test_probe::scratch_dir();
+        let dir = scratch.path().join("auth");
+        let fake = crate::update::scope_probe::Fake::new(
+            crate::os_service::Platform::HOST.unwrap(),
+            false,
+        );
+        let probe = std::sync::Arc::new(crate::scope::runtime_test_probe::RuntimeFake::new(fake));
+        let code = run_with_probe(Login::Codex, &dir, Options::default(), probe, |_| async {
+            assert!(!dir.exists());
+            ExitCode::SUCCESS
+        })
+        .await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!dir.exists());
+    }
 
     #[test]
     fn callback_port_falls_back_to_the_providers() {
