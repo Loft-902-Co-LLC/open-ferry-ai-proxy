@@ -2197,7 +2197,13 @@ fn refusal_reason(path: &str, reason: &str) -> String {
         .strip_prefix(&format!("{path} "))
         .map_or_else(|| reason.to_owned(), |rest| format!("it {rest}"));
     let reason = reason.trim_end_matches('.');
-    if reason.as_bytes().get(1) == Some(&b':') {
+    if reason
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+        && reason.as_bytes().get(1) == Some(&b':')
+        && matches!(reason.as_bytes().get(2), Some(b'/' | b'\\'))
+    {
         reason.to_owned()
     } else {
         super::lower_first(reason)
@@ -2221,6 +2227,24 @@ mod tests {
             refusal_reason(path, "Permission was denied."),
             "permission was denied"
         );
+    }
+
+    #[test]
+    fn r10b_refusal_reason_preserves_only_drive_paths() {
+        let path = "other";
+        assert_eq!(
+            refusal_reason(
+                path,
+                r"C:\Users\me is not safe to run binaries from: untrusted parent."
+            ),
+            r"C:\Users\me is not safe to run binaries from: untrusted parent"
+        );
+        assert_eq!(refusal_reason(path, "X: something"), "x: something");
+        assert_eq!(
+            refusal_reason(path, "Permission was denied."),
+            "permission was denied"
+        );
+        assert_eq!(refusal_reason(path, "1:/something"), "1:/something");
     }
 
     fn words(line: &str) -> Vec<String> {

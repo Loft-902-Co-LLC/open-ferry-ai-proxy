@@ -45,6 +45,7 @@ enum Effect {
     End(u32),
     /// A record disappears or becomes untrusted while waiting for the lock.
     RemoveRecord(String),
+    RemoveTree(String),
     Untrust(String),
     /// A process starts.
     Spawn(Box<Proc>),
@@ -410,6 +411,7 @@ impl Fake {
                     self.files.remove(&path);
                     self.trust.nodes.remove(&self.platform.clean(&path));
                 }
+                Effect::RemoveTree(path) => r10_delete_backup(self, &path),
                 Effect::Untrust(path) => {
                     self.trust.untrust(&path);
                     self.forbidden_reads.insert(path);
@@ -840,6 +842,7 @@ impl Machine for Fake {
     }
 
     fn spawn(&mut self, launch: &Launch) -> io::Result<u32> {
+        self.need_parent(&launch.log)?;
         self.events.push(format!("spawn {}", launch.exe));
         self.launches.push(launch.clone());
         self.start(
@@ -8185,7 +8188,10 @@ fn r9_missing_backup_directory(name: &str) {
         .insert(dir.clone(), VecDeque::from([crate::scope::State::Missing]));
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 1, "{}", ran.all());
-    has(&ran.all(), &format!("{dir} went away after it was created"));
+    has(
+        &ran.all(),
+        &format!("{dir} isn't there, so nothing was copied into it"),
+    );
     assert!(
         !fake
             .events
@@ -8231,7 +8237,7 @@ fn r9_restore_requires_its_backup_directory_but_plain_undo_does_not() {
             has(
                 &ran.all(),
                 &format!(
-                    "the backup's directory, {root}, doesn't exist, so `-restore` has nothing to copy back"
+                    "the backup's directory, {root}, doesn't exist, so -restore has nothing to copy back"
                 ),
             );
             assert!(!fake.events.iter().any(|event| event.starts_with("copy ")));
@@ -8520,7 +8526,11 @@ fn r10_restore_without_backup(privileged: bool, after_lock: bool) {
     if after_lock {
         fake.states.borrow_mut().insert(
             dir.clone(),
-            VecDeque::from([crate::scope::State::Directory, crate::scope::State::Missing]),
+            VecDeque::from([
+                crate::scope::State::Directory,
+                crate::scope::State::Directory,
+                crate::scope::State::Missing,
+            ]),
         );
     } else {
         r10_delete_backup(&mut fake, &dir);
@@ -8532,7 +8542,7 @@ fn r10_restore_without_backup(privileged: bool, after_lock: bool) {
     has(
         &ran.err,
         &format!(
-            "the backup's directory, {dir}, doesn't exist, so `-restore` has nothing to copy back: run `open-ferry migrate -undo` without `-restore` to switch back and leave the files as they are. Nothing was changed"
+            "the backup's directory, {dir}, doesn't exist, so -restore has nothing to copy back: run `open-ferry migrate -undo` without -restore to switch back and leave the files as they are. Nothing was changed"
         ),
     );
     assert_eq!(fake.files, files);
@@ -8578,7 +8588,7 @@ fn r10_unprivileged_restore_requires_backup_after_locked_reread() {
     has(
         &ran.err,
         &format!(
-            "the backup's directory, {missing}, doesn't exist, so `-restore` has nothing to copy back"
+            "the backup's directory, {missing}, doesn't exist, so -restore has nothing to copy back"
         ),
     );
     has(&ran.err, "Nothing was changed");
@@ -8625,4 +8635,179 @@ fn r10_record_directory_missing_after_creation_takes_no_lock() {
     );
     assert_eq!(fake.events, [format!("machine mkdir {dir}")]);
     assert!(!fake.files.contains_key(&path));
+}
+
+// Round 10b: all preflights use the effective record, and a missing backup
+// cannot make a switch or its undo plan promise a copy that isn't there.
+#[test]
+fn r10b_recovered_restore_checks_backup_when_locked_read_fails() {
+    let (mut fake, context) = r9_switched();
+    fake.trust.privileged = Ok(false);
+    let main = saved(&fake, "/var/lib/open-ferry/migration.json");
+    let dir = main["backup"]["dir"].as_str().unwrap().to_owned();
+    let path = record::path(&fake, &context).unwrap();
+    fake.file(
+        &path,
+        serde_json::json!({"backup": {"dir": dir}}).to_string(),
+    );
+    fake.on(
+        &format!("lock {path}.lock"),
+        Effect::RemoveTree(dir.clone()),
+    );
+    let mut files = fake.files.clone();
+    files.retain(|path, _| path != &dir && !path.starts_with(&format!("{dir}/")));
+    let mut dirs = fake.dirs.clone();
+    dirs.retain(|path| path != &dir && !path.starts_with(&format!("{dir}/")));
+    let ran = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        &format!(
+            "the backup's directory, {dir}, doesn't exist, so -restore has nothing to copy back: run `open-ferry migrate -undo` without -restore to switch back and leave the files as they are. Nothing was changed"
+        ),
+    );
+    assert_eq!(fake.events, [format!("lock {path}.lock")]);
+    assert!(fake.launches.is_empty());
+    assert_eq!(fake.files, files);
+    assert_eq!(fake.dirs, dirs);
+}
+
+fn r10b_switch_requires_backup_copy(drop_in: bool) {
+    let (mut fake, context) = if drop_in {
+        bare_process()
+    } else {
+        system_unit(linux_root(), false)
+    };
+    if !drop_in {
+        protect_migration(&mut fake);
+    }
+    let config_dir = if drop_in {
+        "/opt/cpa"
+    } else {
+        "/etc/cliproxyapi"
+    };
+    let auth = format!("{config_dir}/auths");
+    fake.files
+        .retain(|path, _| !path.starts_with(&format!("{auth}/")) || path.ends_with("/claude.json"));
+    fake.dirs
+        .retain(|path| !path.starts_with(&format!("{auth}/")));
+    let dir = format!("{config_dir}/open-ferry-migrate-{STAMP}");
+    let event = format!("copy {auth}/claude.json -> {dir}/auth/claude.json");
+    fake.on(&event, Effect::RemoveTree(dir.clone()));
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.all(),
+        &format!(
+            "the backup's directory, {dir}, doesn't exist, so its copy of the record wasn't written"
+        ),
+    );
+    has(&ran.all(), "Nothing but the backup was made.");
+    let copied = fake.events.iter().position(|seen| seen == &event).unwrap();
+    assert!(
+        fake.events[copied + 1..]
+            .iter()
+            .all(|seen| seen.starts_with("mkdir ")
+                || seen.starts_with("write ")
+                || seen.starts_with("rename ")),
+        "{:?}",
+        fake.events
+    );
+    assert!(fake.launches.is_empty());
+    assert_eq!(
+        fake.data(if drop_in { OPT_CPA } else { SYSTEM_CPA }),
+        CLIPROXYAPI
+    );
+}
+
+#[test]
+fn r10b_service_switch_requires_backup_copy() {
+    r10b_switch_requires_backup_copy(false);
+}
+
+#[test]
+fn r10b_drop_in_switch_requires_backup_copy() {
+    r10b_switch_requires_backup_copy(true);
+}
+
+fn r10b_restore_preflight(extra: &[&str], terminal: bool) {
+    let (mut fake, context) = r9_switched();
+    let main = saved(&fake, "/var/lib/open-ferry/migration.json");
+    let dir = main["backup"]["dir"].as_str().unwrap();
+    r10_delete_backup(&mut fake, dir);
+    fake.terminal = terminal;
+    fake.replies.push_back(true);
+    let mut args = vec!["-undo", "-restore"];
+    args.extend_from_slice(extra);
+    let ran = migrate(&mut fake, &context, &args);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        &format!(
+            "the backup's directory, {dir}, doesn't exist, so -restore has nothing to copy back"
+        ),
+    );
+    lacks(&ran.all(), "Copy back from");
+    lacks(&ran.all(), "Dry run:");
+    lacks(&ran.all(), "-undo -restore -yes");
+    assert!(fake.questions.is_empty());
+    assert!(fake.events.is_empty());
+}
+
+#[test]
+fn r10b_restore_dry_run_refuses_missing_backup_before_plan() {
+    r10b_restore_preflight(&["-dry-run"], false);
+}
+
+#[test]
+fn r10b_restore_refuses_missing_backup_before_prompt() {
+    r10b_restore_preflight(&[], false);
+    r10b_restore_preflight(&[], true);
+}
+
+#[test]
+fn r10b_plain_drop_in_undo_logs_outside_deleted_backup() {
+    let (mut fake, context) = bare_process();
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    r10_delete_backup(&mut fake, &opt_backup());
+    fake.events.clear();
+    fake.launches.clear();
+    let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(fake.launches.len(), 1);
+    assert_eq!(
+        fake.launches[0].log,
+        context.platform.join(&context.cwd, "cliproxyapi.log")
+    );
+    has(
+        &ran.out,
+        &format!(
+            "the backup's directory, {}, isn't there any more.",
+            opt_backup()
+        ),
+    );
+}
+
+#[test]
+fn r10b_plain_undo_plan_describes_backup_presence() {
+    let (mut fake, context) = r9_switched();
+    let path = "/var/lib/open-ferry/migration.json";
+    let record: record::Record = serde_json::from_slice(fake.data(path)).unwrap();
+    let old = "Leave the config and the auth directory as they are: with -restore, the backed-up ones are copied back.";
+    assert!(
+        switch::undo_steps(&fake, &context, &record, false)
+            .iter()
+            .any(|step| step == old)
+    );
+    let dir = &record.backup.as_ref().unwrap().dir;
+    r10_delete_backup(&mut fake, dir);
+    let expected = format!(
+        "Leave the config and the auth directory as they are. The backup's directory, {dir}, isn't there, so -restore can't copy them back."
+    );
+    assert!(
+        switch::undo_steps(&fake, &context, &record, false)
+            .iter()
+            .any(|step| step == &expected)
+    );
 }

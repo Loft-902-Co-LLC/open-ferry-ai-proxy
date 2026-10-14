@@ -319,9 +319,13 @@ pub(super) fn authorize(machine: &dyn Machine, path: &str) -> Result<bool, Strin
 fn replace(machine: &mut dyn Machine, path: &str, text: &str) -> Result<(), String> {
     let privileged = super::machine::privileged_run(machine.trust_probe());
     if privileged {
-        if let Some(parent) = machine.trust_probe().platform().parent(path)
-            && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
-                .map_err(|error| error.to_string())?
+        let parent = machine
+            .trust_probe()
+            .platform()
+            .parent(path)
+            .ok_or_else(|| format!("{path} has no parent directory, so it wasn't written"))?;
+        if !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
+            .map_err(|error| error.to_string())?
         {
             return Err(format!("{parent} doesn't exist, so {path} wasn't written"));
         }
@@ -416,13 +420,13 @@ pub(crate) fn lock(
 }
 
 /// Writes `record` to `path`, and to its copy in the backup, each through a
-/// temporary file renamed into place.
+/// temporary file renamed into place. Returns whether the backup copy was written.
 pub(crate) fn save(
     machine: &mut dyn Machine,
     platform: Platform,
     path: &str,
     record: &Record,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     authorize(machine, path)?;
     let copy = if let Some(backup) = &record.backup {
         let exists = if super::machine::privileged_run(machine.trust_probe()) {
@@ -449,10 +453,11 @@ pub(crate) fn save(
     }
     replace(machine, path, &text)
         .map_err(|error| format!("failed to write the switch's record: {error}"))?;
+    let copied = copy.is_some();
     if let Some(copy) = copy {
         replace(machine, &copy, &text)?;
     }
-    Ok(())
+    Ok(copied)
 }
 
 #[cfg(test)]
