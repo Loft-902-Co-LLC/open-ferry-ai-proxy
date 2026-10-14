@@ -344,17 +344,24 @@ fn make_dir(machine: &mut dyn Machine, platform: Platform, dir: &str) -> Result<
         crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
             .map_err(|error| error.to_string())?;
     }
-    if machine.exists(dir) {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        if !machine.exists(dir) {
+            match machine.create_machine_dir(dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("failed to create {dir}: {error}")),
+            }
+        }
+        if !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "the record's directory, {dir}, doesn't exist: nothing was changed"
+            ));
+        }
         return Ok(());
     }
-    if super::machine::privileged_run(machine.trust_probe()) {
-        match machine.create_machine_dir(dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("failed to create {dir}: {error}")),
-        }
-        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
-            .map_err(|error| error.to_string())?;
+    if machine.exists(dir) {
         return Ok(());
     }
     let failed = |error: std::io::Error| format!("failed to create {dir}: {error}");
@@ -382,6 +389,10 @@ pub(crate) fn lock(
     authorize(machine, &lock)?;
     if let Some(dir) = platform.parent(path) {
         make_dir(machine, platform, &dir)?;
+    }
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&lock))
+            .map_err(|error| error.to_string())?;
     }
     match machine.lock(&lock) {
         Ok(Some(held)) => Ok(held),

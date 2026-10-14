@@ -64,6 +64,7 @@ struct Fake {
     /// Trust lookups scripted independently of a file planted after a check.
     states: RefCell<BTreeMap<String, VecDeque<crate::scope::State>>>,
     forbidden_lists: BTreeSet<String>,
+    file_refusals: BTreeMap<String, String>,
     /// The directories made private.
     private: BTreeSet<String>,
     /// What commands print, by their command line or its start.
@@ -127,6 +128,7 @@ impl Fake {
             forbidden_exists: BTreeSet::new(),
             states: RefCell::new(BTreeMap::new()),
             forbidden_lists: BTreeSet::new(),
+            file_refusals: BTreeMap::new(),
             private: BTreeSet::new(),
             answers: BTreeMap::new(),
             run_errors: BTreeMap::new(),
@@ -733,6 +735,9 @@ impl crate::scope::Probe for Fake {
         self.trust.trusted_dir(path)
     }
     fn trusted_file(&self, path: &str) -> Result<(), String> {
+        if let Some(reason) = self.file_refusals.get(path) {
+            return Err(reason.clone());
+        }
         self.trust.trusted_file(path)
     }
     fn program_head(&self, path: &str) -> Result<Vec<u8>, String> {
@@ -8047,4 +8052,355 @@ fn privileged_recovery_never_reads_a_backup_record_missing_at_the_check() {
         &error,
         &format!("the backup holds no copy of the record ({copy})"),
     );
+}
+
+// Round 9: a missing path has not passed a trust check.
+fn r9_switched() -> (Fake, Context) {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    protect_migration(&mut fake);
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    protect_migration(&mut fake);
+    fake.events.clear();
+    fake.launches.clear();
+    (fake, context)
+}
+
+fn r9_missing_restore(suffix: &str, missing: &str, expected: &str) {
+    let (mut fake, context) = r9_switched();
+    let record_path = "/var/lib/open-ferry/migration.json";
+    let mut main = saved(&fake, record_path);
+    let root = main["backup"]["dir"].as_str().unwrap().to_owned();
+    let source = format!("{root}{suffix}");
+    // Keep only this restored entry, so another entry cannot consume
+    // the scripted parent verdict before this copy checks it.
+    main["backup"]["files"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| {
+            let to = entry["to"].as_str().unwrap();
+            source == to || source.starts_with(&format!("{to}/"))
+        });
+    fake.file(record_path, main.to_string());
+    let path = if missing == "source" {
+        &source
+    } else {
+        missing
+    };
+    fake.states.borrow_mut().insert(
+        path.to_owned(),
+        VecDeque::from([crate::scope::State::Missing]),
+    );
+    let ran = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.all(), expected);
+    assert!(!fake.events.iter().any(|event| event.starts_with("copy ")));
+}
+
+#[test]
+fn r9_restore_refuses_a_file_source_missing_at_authorization() {
+    r9_missing_restore(
+        "/config/config.yaml",
+        "source",
+        "went away before it was copied",
+    );
+}
+
+#[test]
+fn r9_restore_refuses_a_tree_source_missing_at_authorization() {
+    r9_missing_restore("/auth", "source", "went away before it was copied");
+}
+
+#[test]
+fn r9_restore_refuses_a_tree_entry_missing_at_authorization() {
+    r9_missing_restore(
+        "/auth/claude.json",
+        "source",
+        "went away before it was copied",
+    );
+}
+
+#[test]
+fn r9_restore_refuses_a_file_destination_parent_missing_at_authorization() {
+    r9_missing_restore("/config/config.yaml", "/etc/cliproxyapi", "isn't restored");
+}
+
+#[test]
+fn r9_restore_refuses_a_tree_destination_parent_missing_at_authorization() {
+    r9_missing_restore("/auth", "/etc/cliproxyapi", "isn't restored");
+}
+
+#[test]
+fn r9_copy_tree_requires_its_destination_after_creation() {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    protect_migration(&mut fake);
+    let dir = format!("/etc/cliproxyapi/open-ferry-migrate-{STAMP}/auth");
+    fake.states.borrow_mut().insert(
+        dir.clone(),
+        VecDeque::from([crate::scope::State::Missing, crate::scope::State::Missing]),
+    );
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.all(),
+        &format!("{dir} went away before it was copied into"),
+    );
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.starts_with("copy ") && event.contains(&dir))
+    );
+}
+
+fn r9_missing_backup_directory(name: &str) {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    fake.file("/etc/cliproxyapi/.env", "DEPLOY=local");
+    protect_migration(&mut fake);
+    let dir = format!("/etc/cliproxyapi/open-ferry-migrate-{STAMP}{name}");
+    fake.states
+        .borrow_mut()
+        .insert(dir.clone(), VecDeque::from([crate::scope::State::Missing]));
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.all(), &format!("{dir} went away after it was created"));
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.starts_with("copy ") && event.contains(&dir))
+    );
+    assert!(fake.launches.is_empty());
+}
+
+#[test]
+fn r9_backup_refuses_its_root_missing_after_creation() {
+    r9_missing_backup_directory("");
+}
+
+#[test]
+fn r9_backup_refuses_its_config_subdirectory_missing_after_creation() {
+    r9_missing_backup_directory("/config");
+}
+
+#[test]
+fn r9_backup_refuses_its_env_subdirectory_missing_after_creation() {
+    r9_missing_backup_directory("/env");
+}
+
+#[test]
+fn r9_restore_requires_its_backup_directory_but_plain_undo_does_not() {
+    for restore in [true, false] {
+        let (mut fake, context) = r9_switched();
+        let main = saved(&fake, "/var/lib/open-ferry/migration.json");
+        let root = main["backup"]["dir"].as_str().unwrap().to_owned();
+        fake.states.borrow_mut().insert(
+            root.clone(),
+            VecDeque::from([const { crate::scope::State::Missing }; 3]),
+        );
+        let args = if restore {
+            vec!["-undo", "-restore", "-yes"]
+        } else {
+            vec!["-undo", "-yes"]
+        };
+        let ran = migrate(&mut fake, &context, &args);
+        assert_eq!(ran.code, u8::from(restore), "{}", ran.all());
+        if restore {
+            has(
+                &ran.all(),
+                &format!("the backup's directory, {root}, doesn't exist, so nothing was restored"),
+            );
+            assert!(!fake.events.iter().any(|event| event.starts_with("copy ")));
+        }
+    }
+}
+
+#[test]
+fn r9_unprivileged_restore_copies_without_trust_checks() {
+    let (mut fake, context) = r9_switched();
+    fake.trust.privileged = Ok(false);
+    let record_path = record::path(&fake, &context).unwrap();
+    let bytes = fake.data("/var/lib/open-ferry/migration.json").to_vec();
+    fake.file(&record_path, bytes);
+    let source = format!("/etc/cliproxyapi/open-ferry-migrate-{STAMP}/config/config.yaml");
+    fake.states.borrow_mut().insert(
+        source.clone(),
+        VecDeque::from([crate::scope::State::Missing]),
+    );
+    fake.trust.untrust(&source);
+    let ran = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(
+        fake.events
+            .contains(&format!("copy {source} -> /etc/cliproxyapi/config.yaml"))
+    );
+    assert_eq!(fake.states.borrow()[&source].len(), 1);
+}
+
+fn r9_refused_lock(directory: bool) {
+    let context = windows();
+    let mut fake = Fake::new(&context);
+    protect_migration(&mut fake);
+    let path = record::path(&fake, &context).unwrap();
+    let dir = context.platform.parent(&path).unwrap();
+    let lock = format!("{path}.lock");
+    fake.dir(&dir);
+    fake.file(&lock, "untrusted lock");
+    protect_migration(&mut fake);
+    let refused = if directory { &dir } else { &lock };
+    fake.trust.untrust(refused);
+    // The two early record/lock checks and make_dir's early check
+    // see no directory. The early leaf check sees no lock.
+    fake.states.borrow_mut().insert(
+        refused.clone(),
+        std::iter::repeat_with(|| crate::scope::State::Missing)
+            .take(if directory { 3 } else { 1 })
+            .collect(),
+    );
+    let error = match record::lock(&mut fake, context.platform, &path) {
+        Err(error) => error,
+        Ok(_) => panic!("the untrusted path was accepted and the lock was taken"),
+    };
+    has(&error, "Refusing to");
+    has(&error, refused);
+    assert!(!fake.events.iter().any(|event| event.starts_with("lock ")));
+}
+
+#[test]
+fn r9_lock_rechecks_a_directory_that_appears_after_the_first_check() {
+    r9_refused_lock(true);
+}
+
+#[test]
+fn r9_lock_rechecks_an_untrusted_leaf_before_opening() {
+    r9_refused_lock(false);
+}
+
+#[test]
+fn r9_locked_undo_announces_recovery() {
+    let (mut fake, context) = r9_switched();
+    let path = "/var/lib/open-ferry/migration.json";
+    let copy = saved(&fake, path);
+    let backup = copy["backup"]["dir"].as_str().unwrap();
+    let damaged = serde_json::json!({"backup": {"dir": backup}}).to_string();
+    fake.on(
+        &format!("lock {path}.lock"),
+        Effect::Place(path.to_owned(), damaged.into_bytes()),
+    );
+    let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    has(
+        &ran.out,
+        &format!("The switch's record, {path}, doesn't read:"),
+    );
+    has(
+        &ran.out,
+        &format!("The copy in the backup, {backup}/migration.json, is read instead."),
+    );
+}
+
+#[test]
+fn r9_locked_undo_refuses_a_record_from_another_platform() {
+    let (mut fake, context) = r9_switched();
+    let path = "/var/lib/open-ferry/migration.json";
+    let mut copy = saved(&fake, path);
+    copy["platform"] = Value::String("windows".to_owned());
+    fake.on(
+        &format!("lock {path}.lock"),
+        Effect::Place(path.to_owned(), copy.to_string().into_bytes()),
+    );
+    let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        &format!("the switch's record, {path}, is of a switch on windows"),
+    );
+    assert_eq!(fake.events, [format!("lock {path}.lock")]);
+    assert!(fake.launches.is_empty());
+}
+
+#[test]
+fn r9_refusal_notes_do_not_repeat_or_lowercase_the_path() {
+    let (mut fake, context) = launcher_task();
+    let path = r"C:\Users\me\cpa\start.ps1";
+    protect_migration(&mut fake);
+    fake.file_refusals
+        .insert(path.to_owned(), format!("{path} is not safe."));
+    fake.forbidden_reads.insert(path.to_owned());
+    let (found, mut notes) = discover::discover(&mut fake, &context, None).unwrap();
+    notes.extend(found.unwrap().notes);
+    let notes = notes.join("\n");
+    has(
+        &notes,
+        &format!("runs {path}, which wasn't read: it is not safe."),
+    );
+    lacks(&notes, r"c:\Users");
+    let argv = "/usr/local/bin/cli-proxy-api -config /etc/old.yaml";
+    let (mut fake, context) = stopped_unit(
+        &format!("[Service]\nExecStart={argv}\n"),
+        None,
+        "/usr/local/bin/cli-proxy-api",
+        argv,
+    );
+    // Exercise the same Windows-style refusal through the unit blocker:
+    // discovery uses the Linux context, while the scripted trust probe
+    // checks a Windows path. Neither path is read after the refusal.
+    let path = r"C:\ProgramData\cliproxyapi\cliproxyapi.service";
+    let shown = fake
+        .lookup("systemctl show cliproxyapi.service")
+        .unwrap()
+        .stdout
+        .replace(
+            "FragmentPath=/etc/systemd/system/cliproxyapi.service",
+            &format!("FragmentPath={path}"),
+        );
+    fake.answer("systemctl show cliproxyapi.service", 0, &shown);
+    fake.file(path, format!("[Service]\nExecStart={argv}\n"));
+    fake.platform = Platform::Windows;
+    fake.trust = crate::update::scope_probe::Fake::new(Platform::Windows, true);
+    protect_migration(&mut fake);
+    fake.file_refusals
+        .insert(path.to_owned(), format!("{path} is not safe."));
+    fake.forbidden_reads.insert(path.to_owned());
+    let (found, _) = discover::discover(&mut fake, &context, None).unwrap();
+    has(
+        &found.unwrap().blockers.join("\n"),
+        &format!("file {path} wasn't read: it is not safe."),
+    );
+}
+
+#[test]
+fn r9_no_record_in_a_container_hints_at_the_installed_config() {
+    for context in [linux(), windows()] {
+        let mut fake = Fake::new(&context);
+        fake.container = true;
+        let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+        assert_eq!(ran.code, 1, "{}", ran.all());
+        let elevated = if context.platform == Platform::Windows {
+            "as an administrator"
+        } else {
+            "with sudo"
+        };
+        has(
+            &ran.err,
+            &format!(
+                "A switch made {elevated} is undone the same way; its record is beside the installed config."
+            ),
+        );
+        assert!(fake.events.is_empty());
+    }
+}
+
+#[test]
+fn r9_locked_undo_refusal_says_nothing_was_changed() {
+    let (mut fake, context) = r9_switched();
+    let path = "/var/lib/open-ferry/migration.json";
+    fake.on(
+        &format!("lock {path}.lock"),
+        Effect::Untrust(path.to_owned()),
+    );
+    let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.err, ". Nothing was changed");
+    assert_eq!(fake.events, [format!("lock {path}.lock")]);
 }

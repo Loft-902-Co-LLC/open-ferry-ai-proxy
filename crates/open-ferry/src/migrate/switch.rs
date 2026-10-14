@@ -874,11 +874,18 @@ fn copy_tree(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     if super::machine::privileged_run(machine.trust_probe()) {
-        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(from))
-            .map_err(|error| error.to_string())?;
-        if let Some(parent) = platform.parent(to) {
-            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
-                .map_err(|error| error.to_string())?;
+        if !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(from))
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "{from} went away before it was copied: nothing was copied there"
+            ));
+        }
+        if let Some(parent) = platform.parent(to)
+            && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
+                .map_err(|error| error.to_string())?
+        {
+            return Err(format!("{parent} doesn't exist, so {to} isn't restored"));
         }
         crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(to))
             .map_err(|error| error.to_string())?;
@@ -893,9 +900,13 @@ fn copy_tree(
             .create_dir_all(to)
             .map_err(|error| format!("failed to create {to}: {error}"))?;
     }
-    if super::machine::privileged_run(machine.trust_probe()) {
-        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(to))
-            .map_err(|error| error.to_string())?;
+    if super::machine::privileged_run(machine.trust_probe())
+        && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(to))
+            .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "{to} went away before it was copied into: nothing was copied there"
+        ));
     }
     let entries = machine
         .list_dir(from)
@@ -912,8 +923,14 @@ fn copy_tree(
                 EntryKind::File | EntryKind::Link | EntryKind::Other
             )
         {
-            crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&source))
-                .map_err(|error| error.to_string())?;
+            let authorized =
+                crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&source))
+                    .map_err(|error| error.to_string())?;
+            if matches!(entry.kind, EntryKind::File) && !authorized {
+                return Err(format!(
+                    "{source} went away before it was copied: nothing was copied there"
+                ));
+            }
             if entry.name.to_ascii_lowercase().ends_with(".json") {
                 crate::scope::authorize_credential_file(
                     machine.trust_probe(),
@@ -942,8 +959,19 @@ fn copy_replacing_link(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     if super::machine::privileged_run(machine.trust_probe()) {
-        crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(from))
-            .map_err(|error| error.to_string())?;
+        if !crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(from))
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "{from} went away before it was copied: nothing was copied there"
+            ));
+        }
+        if let Some(parent) = machine.trust_probe().platform().parent(to)
+            && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
+                .map_err(|error| error.to_string())?
+        {
+            return Err(format!("{parent} doesn't exist, so {to} isn't restored"));
+        }
         if machine.link_target(to).is_some() {
             return Err(format!(
                 "{to} is a symbolic link: under root or an administrator, `migrate` doesn't replace it. Remove it, then run `open-ferry migrate -undo -restore` again"
@@ -960,10 +988,6 @@ fn copy_replacing_link(
                 crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(to))
                     .map_err(|error| error.to_string())?;
             }
-        }
-        if let Some(parent) = machine.trust_probe().platform().parent(to) {
-            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
-                .map_err(|error| error.to_string())?;
         }
     }
     if let Some(target) = machine.link_target(to) {
@@ -1066,9 +1090,13 @@ fn backup_subdir(
             .create_dir_all(&sub)
             .map_err(|error| format!("failed to create {sub}: {error}"))?;
     }
-    if super::machine::privileged_run(machine.trust_probe()) {
-        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&sub))
-            .map_err(|error| error.to_string())?;
+    if super::machine::privileged_run(machine.trust_probe())
+        && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&sub))
+            .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "{sub} went away after it was created: nothing was copied there"
+        ));
     }
     Ok(sub)
 }
@@ -1089,9 +1117,13 @@ fn back_up(
     machine
         .create_private_dir(dir)
         .map_err(|error| format!("failed to create the backup, {dir}: {error}"))?;
-    if super::machine::privileged_run(machine.trust_probe()) {
-        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
-            .map_err(|error| error.to_string())?;
+    if super::machine::privileged_run(machine.trust_probe())
+        && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
+            .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "{dir} went away after it was created: nothing was copied there"
+        ));
     }
     let mut files = Vec::new();
     let config_to = backup_subdir(machine, platform, dir, "config")?;
@@ -1202,9 +1234,14 @@ fn restore(
     backup: &Backup,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    if super::machine::privileged_run(machine.trust_probe()) {
-        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
-            .map_err(|error| error.to_string())?;
+    if super::machine::privileged_run(machine.trust_probe())
+        && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
+            .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "the backup's directory, {}, doesn't exist, so nothing was restored",
+            backup.dir
+        ));
     }
     let mut failures = Vec::new();
     for copied in &backup.files {
@@ -3425,16 +3462,36 @@ pub(crate) fn undo(
                     "the switch's record, {record_path}, went away while this waited: nothing was changed"
                 ));
             }
-            Err(error) => Some(
-                record::recover(machine, platform, record_path).map_err(|why| {
-                    format!("{error}. The backup's copy can't be used either: {why}")
-                })?,
-            ),
+            Err(error) => {
+                let copy = record::recover(machine, platform, record_path).map_err(|why| {
+                    format!("{error}. The backup's copy can't be used either: {why}. Nothing was changed")
+                })?;
+                say(
+                    out,
+                    format_args!(
+                        "{} The copy in the backup, {}, is read instead.",
+                        super::sentence(&error),
+                        platform.join(
+                            copy.backup
+                                .as_ref()
+                                .map_or("", |backup| backup.dir.as_str()),
+                            record::FILE
+                        )
+                    ),
+                );
+                Some(copy)
+            }
         }
     } else {
         record::load(machine, record_path).ok().flatten()
     };
     if let Some(fresh) = fresh {
+        if fresh.platform != record::platform_name(platform) {
+            return Err(format!(
+                "the switch's record, {record_path}, is of a switch on {}",
+                fresh.platform
+            ));
+        }
         if matches!(fresh.status, Status::RolledBack | Status::Undone) {
             return Err(format!(
                 "the switch made at {} was undone while this waited (at {}): there is nothing to undo",
