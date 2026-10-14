@@ -621,6 +621,7 @@ fn run_undo(
         Ok(path) => path,
         Err(error) => return fail(request, out, err, &error),
     };
+    let mut recovered = false;
     let mut record = match record::load(machine, &path) {
         Ok(Some(record)) => record,
         Ok(None) => {
@@ -666,6 +667,7 @@ fn run_undo(
         }
         Err(error) => match record::recover(machine, platform, &path) {
             Ok(copy) => {
+                recovered = true;
                 line(
                     out,
                     &format!(
@@ -787,6 +789,7 @@ fn run_undo(
         &mut record,
         request.restore,
         request.yes,
+        recovered,
         out,
     ) {
         Ok(()) => 0,

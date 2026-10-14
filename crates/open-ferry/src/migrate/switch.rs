@@ -877,9 +877,7 @@ fn copy_tree(
         if !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(from))
             .map_err(|error| error.to_string())?
         {
-            return Err(format!(
-                "{from} went away before it was copied: nothing was copied there"
-            ));
+            return Err(format!("{from} isn't there, so nothing was copied to {to}"));
         }
         if let Some(parent) = platform.parent(to)
             && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
@@ -906,9 +904,7 @@ fn copy_tree(
         && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(to))
             .map_err(|error| error.to_string())?
     {
-        return Err(format!(
-            "{to} went away before it was copied into: nothing was copied there"
-        ));
+        return Err(format!("{to} isn't there, so nothing was copied into it"));
     }
     let entries = machine
         .list_dir(from)
@@ -930,7 +926,7 @@ fn copy_tree(
                     .map_err(|error| error.to_string())?;
             if matches!(entry.kind, EntryKind::File) && !authorized {
                 return Err(format!(
-                    "{source} went away before it was copied: nothing was copied there"
+                    "{source} isn't there, so nothing was copied to {target}"
                 ));
             }
             if entry.name.to_ascii_lowercase().ends_with(".json") {
@@ -964,9 +960,7 @@ fn copy_replacing_link(
         if !crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(from))
             .map_err(|error| error.to_string())?
         {
-            return Err(format!(
-                "{from} went away before it was copied: nothing was copied there"
-            ));
+            return Err(format!("{from} isn't there, so nothing was copied to {to}"));
         }
         if let Some(parent) = machine.trust_probe().platform().parent(to)
             && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
@@ -3438,6 +3432,7 @@ pub(super) fn refuse_privileged_drop_in_undo(
 /// Switches back to CLIProxyAPI as `record` says. The record is marked
 /// undone only when every step worked; else it stays as it was, and `-undo`
 /// can be run again, each step looking at what is there. `yes` is `-yes`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn undo(
     machine: &mut dyn Machine,
     context: &Context,
@@ -3445,15 +3440,25 @@ pub(crate) fn undo(
     record: &mut Record,
     restore_files: bool,
     yes: bool,
+    recovered: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let platform = context.platform;
     refuse_privileged_drop_in_undo(machine, record)?;
-    if super::machine::privileged_run(machine.trust_probe())
-        && let Some(backup) = &record.backup
-    {
-        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
-            .map_err(|error| error.to_string())?;
+    if let Some(backup) = &record.backup {
+        let exists = if super::machine::privileged_run(machine.trust_probe()) {
+            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
+                .map_err(|error| error.to_string())?
+        } else {
+            !restore_files || machine.exists(&backup.dir)
+        };
+        if restore_files && !exists {
+            return Err(format!(
+                "the backup's directory, {}, doesn't exist, so `-restore` has nothing to copy back: run `open-ferry {} -undo` without `-restore` to switch back and leave the files as they are. Nothing was changed",
+                backup.dir,
+                super::NAME
+            ));
+        }
     }
     // One `migrate` at a time, for the whole undo. The record is read again
     // under the lock: another run may have changed it since it was read.
@@ -3470,19 +3475,21 @@ pub(crate) fn undo(
                 let copy = record::recover(machine, platform, record_path).map_err(|why| {
                     format!("{error}. The backup's copy can't be used either: {why}. Nothing was changed")
                 })?;
-                say(
-                    out,
-                    format_args!(
-                        "{} The copy in the backup, {}, is read instead.",
-                        super::sentence(&error),
-                        platform.join(
-                            copy.backup
-                                .as_ref()
-                                .map_or("", |backup| backup.dir.as_str()),
-                            record::FILE
-                        )
-                    ),
-                );
+                if !recovered {
+                    say(
+                        out,
+                        format_args!(
+                            "{} The copy in the backup, {}, is read instead.",
+                            super::sentence(&error),
+                            platform.join(
+                                copy.backup
+                                    .as_ref()
+                                    .map_or("", |backup| backup.dir.as_str()),
+                                record::FILE
+                            )
+                        ),
+                    );
+                }
                 Some(copy)
             }
         }
@@ -3503,11 +3510,23 @@ pub(crate) fn undo(
             ));
         }
         refuse_privileged_drop_in_undo(machine, &fresh)?;
-        if super::machine::privileged_run(machine.trust_probe())
-            && let Some(backup) = &fresh.backup
-        {
-            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
-                .map_err(|error| error.to_string())?;
+        if let Some(backup) = &fresh.backup {
+            let exists = if super::machine::privileged_run(machine.trust_probe()) {
+                crate::scope::authorize_dir(
+                    machine.trust_probe(),
+                    std::path::Path::new(&backup.dir),
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                !restore_files || machine.exists(&backup.dir)
+            };
+            if restore_files && !exists {
+                return Err(format!(
+                    "the backup's directory, {}, doesn't exist, so `-restore` has nothing to copy back: run `open-ferry {} -undo` without `-restore` to switch back and leave the files as they are. Nothing was changed",
+                    backup.dir,
+                    super::NAME
+                ));
+            }
         }
         *record = fresh;
     }

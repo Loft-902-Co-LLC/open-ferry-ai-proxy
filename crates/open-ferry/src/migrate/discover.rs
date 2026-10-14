@@ -2196,12 +2196,32 @@ fn refusal_reason(path: &str, reason: &str) -> String {
     let reason = reason
         .strip_prefix(&format!("{path} "))
         .map_or_else(|| reason.to_owned(), |rest| format!("it {rest}"));
-    super::lower_first(reason.trim_end_matches('.'))
+    let reason = reason.trim_end_matches('.');
+    if reason.as_bytes().get(1) == Some(&b':') {
+        reason.to_owned()
+    } else {
+        super::lower_first(reason)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r10_refusal_reason_keeps_parent_drive_letters() {
+        let path = r"C:\Users\me\cpa\start.ps1";
+        let reason = r"C:\Users\me is not safe to run binaries from: untrusted parent.";
+        assert_eq!(refusal_reason(path, reason), reason.trim_end_matches('.'));
+        assert_eq!(
+            refusal_reason(path, &format!("Refusing to load {path}: {reason}")),
+            reason.trim_end_matches('.')
+        );
+        assert_eq!(
+            refusal_reason(path, "Permission was denied."),
+            "permission was denied"
+        );
+    }
 
     fn words(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_owned).collect()
