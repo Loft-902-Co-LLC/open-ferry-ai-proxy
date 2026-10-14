@@ -11,9 +11,11 @@
 //! waiters and time out after 30 seconds. Successful rotations are reused for
 //! up to ten minutes in a bounded cache. Sets known spent by this process become
 //! tombstones, including for outstanding waiters. Removing a successful entry
-//! retires its outstanding waiters too. If even the sole waiter stays unpolled
-//! across ten minutes or 256 newer refreshes, removal can lose its rotation;
-//! the credential then needs a reload or a new sign-in because its old token is spent.
+//! retires its outstanding waiters too. If no waiter has taken the new set before
+//! its entry expires (ten minutes after completion) or is evicted (the 256-entry
+//! cache is full and it is the oldest completed entry, which one new refresh can
+//! cause when the others are in flight), the rotation is lost: the old token is
+//! already spent, so the credential needs a reload or a new sign-in.
 //! Lost tasks are detected on the next refresh call or by a polling waiter.
 //! Runtime shutdown permits one retry only before sending; shutdown or panic
 //! after the conservative send mark (before connecting) retires predecessors and

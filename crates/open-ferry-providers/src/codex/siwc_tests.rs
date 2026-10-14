@@ -1666,30 +1666,44 @@ async fn an_unobserved_post_send_panic_is_kept_from_detection_until_expiry() {
 
 #[tokio::test]
 async fn a_wrapper_observed_post_send_loss_retires_predecessors() {
-    predecessor_task_loss(Some(true)).await;
+    predecessor_task_loss(PredecessorLoss::WrapperPostSend).await;
 }
 
 #[tokio::test]
 async fn a_reap_observed_post_send_loss_retires_predecessors() {
-    predecessor_task_loss(None).await;
+    predecessor_task_loss(PredecessorLoss::ReapPostSend).await;
 }
 
 #[tokio::test]
 async fn a_pre_send_loss_preserves_predecessors() {
-    predecessor_task_loss(Some(false)).await;
+    predecessor_task_loss(PredecessorLoss::BeforeFirstPoll).await;
 }
 
-async fn predecessor_task_loss(panic_after_send: Option<bool>) {
+#[tokio::test]
+async fn a_wrapper_observed_pre_send_loss_preserves_predecessors() {
+    predecessor_task_loss(PredecessorLoss::WrapperPreSend).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PredecessorLoss {
+    ReapPostSend,
+    WrapperPostSend,
+    BeforeFirstPoll,
+    WrapperPreSend,
+}
+
+async fn predecessor_task_loss(mode: PredecessorLoss) {
     let cache: &'static Mutex<HashMap<[u8; 32], RefreshEntry>> =
         Box::leak(Box::new(Mutex::new(HashMap::new())));
     let release = Arc::new(Semaphore::new(0));
-    let mut response = grant();
-    response["refresh_token"] = json!("fake-T1");
-    let mut fake = Fake::start(
-        vec![(StatusCode::OK, response.to_string()); 2],
-        Some(release.clone()),
-    )
-    .await;
+    let replies = ["fake-T1", "fake-T2"]
+        .map(|token| {
+            let mut response = grant();
+            response["refresh_token"] = json!(token);
+            (StatusCode::OK, response.to_string())
+        })
+        .to_vec();
+    let mut fake = Fake::start(replies, Some(release.clone())).await;
     let original = previous();
     let auth = fake.auth.clone();
     let mut held = Box::pin(auth.refresh_tokens_in_cache(&original, 3, cache));
@@ -1713,8 +1727,15 @@ async fn predecessor_task_loss(panic_after_send: Option<bool>) {
         .unwrap();
     let key = refresh_key(&fake.auth.endpoints.token_url, "oaiapp_issued", "fake-T1");
     let mut successor_auth = fake.auth.clone();
-    successor_auth.panic_after_send = panic_after_send;
-    if panic_after_send == Some(true) {
+    successor_auth.panic_after_send = match mode {
+        PredecessorLoss::WrapperPostSend => Some(true),
+        PredecessorLoss::WrapperPreSend => Some(false),
+        _ => None,
+    };
+    if matches!(
+        mode,
+        PredecessorLoss::WrapperPostSend | PredecessorLoss::WrapperPreSend
+    ) {
         // Join before the response, so this caller observes the wrapper, not the reap.
         let mut successor = Box::pin(successor_auth.refresh_tokens_in_cache(&rotated, 3, cache));
         assert!(
@@ -1723,11 +1744,15 @@ async fn predecessor_task_loss(panic_after_send: Option<bool>) {
                 .poll(&mut std::task::Context::from_waker(&waker))
                 .is_pending()
         );
-        assert!(fake.request().await.body.contains("refresh_token=fake-T1&"));
-        release.add_permits(1);
-        assert_eq!(successor.await.unwrap_err(), interrupted_refresh());
+        if mode == PredecessorLoss::WrapperPreSend {
+            assert_eq!(successor.await.unwrap_err(), invalid_refresh_result());
+        } else {
+            assert!(fake.request().await.body.contains("refresh_token=fake-T1&"));
+            release.add_permits(1);
+            assert_eq!(successor.await.unwrap_err(), interrupted_refresh());
+        }
     } else {
-        let runtime = if panic_after_send == Some(false) {
+        let runtime = if mode == PredecessorLoss::BeforeFirstPoll {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1749,7 +1774,7 @@ async fn predecessor_task_loss(panic_after_send: Option<bool>) {
                     .is_pending()
             );
         }
-        if panic_after_send.is_none() {
+        if mode == PredecessorLoss::ReapPostSend {
             assert!(fake.request().await.body.contains("refresh_token=fake-T1&"));
         } else {
             assert!(!cache.lock().unwrap()[&key].started.load(Ordering::SeqCst));
@@ -1768,30 +1793,36 @@ async fn predecessor_task_loss(panic_after_send: Option<bool>) {
         })
         .await
         .unwrap();
-        if panic_after_send == Some(false) {
+        if mode == PredecessorLoss::BeforeFirstPoll {
             prune_refreshes(&mut cache.lock().unwrap());
             assert!(!cache.lock().unwrap().contains_key(&key));
-            assert_eq!(held.await.unwrap().refresh_token, "fake-T1");
+        } else {
+            // This lookup's prune is the first observer of the loss.
             assert_eq!(
                 fake.auth
-                    .refresh_tokens_in_cache(&original, 3, cache)
+                    .refresh_tokens_in_cache(&rotated, 3, cache)
                     .await
-                    .unwrap()
-                    .refresh_token,
-                "fake-T1"
+                    .unwrap_err(),
+                interrupted_refresh()
             );
-            assert!(fake.captured.is_empty());
-            cache.lock().unwrap().clear();
-            return;
         }
-        // This lookup's prune is the first observer of the loss.
+    }
+    if matches!(
+        mode,
+        PredecessorLoss::BeforeFirstPoll | PredecessorLoss::WrapperPreSend
+    ) {
+        assert_eq!(held.await.unwrap().refresh_token, "fake-T1");
         assert_eq!(
             fake.auth
-                .refresh_tokens_in_cache(&rotated, 3, cache)
+                .refresh_tokens_in_cache(&original, 3, cache)
                 .await
-                .unwrap_err(),
-            interrupted_refresh()
+                .unwrap()
+                .refresh_token,
+            "fake-T1"
         );
+        assert!(fake.captured.is_empty());
+        cache.lock().unwrap().clear();
+        return;
     }
     let detected = cache.lock().unwrap()[&key].completed.unwrap();
     assert_eq!(held.await.unwrap_err(), superseded_refresh());
@@ -1818,9 +1849,14 @@ async fn predecessor_task_loss(panic_after_send: Option<bool>) {
 async fn an_evicted_tombstone_allows_a_fresh_request() {
     let cache: &'static Mutex<HashMap<[u8; 32], RefreshEntry>> =
         Box::leak(Box::new(Mutex::new(HashMap::new())));
-    let mut response = grant();
-    response["refresh_token"] = json!("fake-T1");
-    let mut fake = Fake::start(vec![(StatusCode::OK, response.to_string()); 4], None).await;
+    let replies = ["fake-T1", "fake-T2", "fake-U1", "fake-T3"]
+        .map(|token| {
+            let mut response = grant();
+            response["refresh_token"] = json!(token);
+            (StatusCode::OK, response.to_string())
+        })
+        .to_vec();
+    let mut fake = Fake::start(replies, None).await;
     let original = previous();
     let rotated = fake
         .auth
@@ -1855,7 +1891,69 @@ async fn an_evicted_tombstone_allows_a_fresh_request() {
             .await
             .unwrap()
             .refresh_token,
-        "fake-T1"
+        "fake-T3"
+    );
+    assert!(
+        fake.request()
+            .await
+            .body
+            .contains("refresh_token=fake-siwc-refresh&")
+    );
+    assert!(fake.captured.is_empty());
+    cache.lock().unwrap().clear();
+}
+
+#[tokio::test]
+async fn an_evicted_interruption_allows_a_fresh_request() {
+    let cache: &'static Mutex<HashMap<[u8; 32], RefreshEntry>> =
+        Box::leak(Box::new(Mutex::new(HashMap::new())));
+    let replies = ["fake-T1", "fake-U1", "fake-T2"]
+        .map(|token| {
+            let mut response = grant();
+            response["refresh_token"] = json!(token);
+            (StatusCode::OK, response.to_string())
+        })
+        .to_vec();
+    let mut fake = Fake::start(replies, None).await;
+    let mut panicking = fake.auth.clone();
+    panicking.panic_after_send = Some(true);
+    let original = previous();
+    assert_eq!(
+        panicking
+            .refresh_tokens_in_cache(&original, 1, cache)
+            .await
+            .unwrap_err(),
+        interrupted_refresh()
+    );
+    fake.request().await;
+    assert_eq!(
+        fake.auth
+            .refresh_tokens_in_cache(&original, 1, cache)
+            .await
+            .unwrap_err(),
+        interrupted_refresh()
+    );
+    assert!(fake.captured.is_empty());
+    let mut other = previous();
+    other.refresh_token = "fake-unrelated".into();
+    assert_eq!(
+        fake.auth
+            .refresh_tokens_in_cache(&other, 1, cache)
+            .await
+            .unwrap()
+            .refresh_token,
+        "fake-U1"
+    );
+    fake.request().await;
+    let key = refresh_key(&fake.auth.endpoints.token_url, "oaiapp_issued", REFRESH);
+    assert!(!cache.lock().unwrap().contains_key(&key));
+    assert_eq!(
+        fake.auth
+            .refresh_tokens_in_cache(&original, 1, cache)
+            .await
+            .unwrap()
+            .refresh_token,
+        "fake-T2"
     );
     assert!(
         fake.request()
