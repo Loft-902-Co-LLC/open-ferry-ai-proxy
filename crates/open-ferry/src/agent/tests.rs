@@ -120,6 +120,7 @@ fn offline(key: Option<&str>) -> Offline {
 /// environment, no terminal and no confirmation.
 fn context(path: &Path, caller: Caller) -> Context {
     Context {
+        no_request_timeout: false,
         path: path.to_owned(),
         env: Env::default(),
         key_file: None,
@@ -2578,9 +2579,9 @@ async fn live(key: Option<&str>, password: Option<&str>) -> Live {
 }
 
 impl Live {
-    /// The management API, called with `key`.
+    /// The management API, called with `key`, without a test latency limit.
     fn remote(&self, key: &str) -> Remote {
-        Remote::new(&format!("http://127.0.0.1:{}", self.port), key)
+        Remote::new_for_test(&format!("http://127.0.0.1:{}", self.port), key)
     }
 
     /// Writes the credential file `name` with `data` and registers it, as
@@ -3470,6 +3471,7 @@ const RUNS: usize = 5;
 // API's own writes, made at once, each take the server's write lock, so
 // none is lost. One that gives up on a file that kept changing, as it may
 // on a busy machine, is run again, as its hint says to.
+// These clients have no request timeout: this checks lost writes, not latency.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_keep_each_other() {
     let live = Arc::new(live(Some(KEY), None).await);
@@ -3483,7 +3485,10 @@ async fn concurrent_writes_keep_each_other() {
     ] {
         let live = Arc::clone(&live);
         tasks.push(tokio::spawn(async move {
-            let ctx = cli(&live.setup.path);
+            let ctx = Context {
+                no_request_timeout: true,
+                ..cli(&live.setup.path)
+            };
             let mut runs = 0;
             let changed = loop {
                 runs += 1;
@@ -3526,7 +3531,10 @@ async fn concurrent_writes_keep_each_other() {
     for task in tasks {
         task.await.unwrap();
     }
-    let ctx = cli(&live.setup.path);
+    let ctx = Context {
+        no_request_timeout: true,
+        ..cli(&live.setup.path)
+    };
     for (path, value) in [
         ("routing.strategy", json!("fill-first")),
         ("routing.session-affinity", json!(true)),

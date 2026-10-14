@@ -22,10 +22,3 @@ test-group = 'process-unix'
 platform = 'cfg(windows)'
 filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker) | binary(=worker_channel) | binary(=unix_process) | binary(=windows_process) | binary(=windows_sockets) | binary(=endpoint) | binary(=migrate) | binary(=subcommands)'
 test-group = 'process-windows'
-
-# Load-sensitive against the management client's fixed 10 s timeout.
-# The Windows config.yaml.bak rename denial is under separate investigation.
-# A recovered attempt is still reported as FLAKY by nextest.
-[[profile.ci.overrides]]
-filter = 'test(=agent::tests::concurrent_writes_keep_each_other)'
-retries = 2
