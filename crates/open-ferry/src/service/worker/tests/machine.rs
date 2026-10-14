@@ -1845,32 +1845,100 @@ mod prepared {
         assert!(Lease::try_take(&data).unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn a_resume_accept_failure_closes_the_gate_and_retains_the_lease() {
-        use crate::service::worker::{ProcessLease, activate};
-        let (dir, prepared) = prepared(false);
-        let gate = prepared.service.gate.clone();
-        let data = dir.path().join("data");
-        let lease = lease_slot(Some(ProcessLease(Some(
-            Lease::try_take(&data).unwrap().unwrap(),
-        ))));
-        let timing = Timing {
-            fail_resume_accept: true,
-            ..Timing::default()
+    // Diagnostic for a rare Windows hang: report the stuck stage or slow runtime shutdown.
+    // Remove this diagnostic once the cause is fixed.
+    #[test]
+    fn a_resume_accept_failure_closes_the_gate_and_retains_the_lease() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
         };
-        let error = activate(
-            prepared,
-            &dir.path().join("config.yaml"),
-            lease,
-            &timing,
-            Launch::First,
-        )
-        .await
-        .err()
-        .unwrap();
-        assert!(error.contains("failed to resume accepting"), "{error}");
-        assert_eq!(gate.state(), GateState::Closed);
-        assert!(Lease::try_take(&data).unwrap().is_none());
+        use std::time::{Duration, Instant};
+
+        use crate::service::worker::{ProcessLease, activate};
+
+        const WATCHDOG: Duration = Duration::from_secs(120);
+        const SHUTDOWN: Duration = Duration::from_secs(60);
+        const STAGES: [&str; 10] = [
+            "setup",
+            "activate",
+            "activate returned",
+            "error asserted",
+            "gate asserted",
+            "lease asserted",
+            "drop temp dir",
+            "temp dir dropped",
+            "runtime shutdown",
+            "runtime shut down",
+        ];
+        let stage = Arc::new(AtomicUsize::new(0));
+        let watchdog_stage = stage.clone();
+        let (done, receiver) = mpsc::channel::<()>();
+        let watchdog = std::thread::spawn(move || {
+            if matches!(
+                receiver.recv_timeout(WATCHDOG),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                let message = format!(
+                    "resume-accept test hung at stage: {}\n",
+                    STAGES[watchdog_stage.load(Ordering::SeqCst)]
+                );
+                let mut stderr = std::io::stderr();
+                let _ = std::io::Write::write_all(&mut stderr, message.as_bytes());
+                let _ = std::io::Write::flush(&mut stderr);
+                std::process::abort();
+            }
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (dir, prepared) = prepared(false);
+            let gate = prepared.service.gate.clone();
+            let data = dir.path().join("data");
+            let lease = lease_slot(Some(ProcessLease(Some(
+                Lease::try_take(&data).unwrap().unwrap(),
+            ))));
+            let timing = Timing {
+                fail_resume_accept: true,
+                ..Timing::default()
+            };
+            stage.store(1, Ordering::SeqCst);
+            let error = activate(
+                prepared,
+                &dir.path().join("config.yaml"),
+                lease,
+                &timing,
+                Launch::First,
+            )
+            .await;
+            stage.store(2, Ordering::SeqCst);
+            let error = error.err().unwrap();
+            assert!(error.contains("failed to resume accepting"), "{error}");
+            stage.store(3, Ordering::SeqCst);
+            assert_eq!(gate.state(), GateState::Closed);
+            stage.store(4, Ordering::SeqCst);
+            assert!(Lease::try_take(&data).unwrap().is_none());
+            stage.store(5, Ordering::SeqCst);
+            stage.store(6, Ordering::SeqCst);
+            drop(dir);
+        });
+        stage.store(7, Ordering::SeqCst);
+        stage.store(8, Ordering::SeqCst);
+        let shutdown_started = Instant::now();
+        rt.shutdown_timeout(SHUTDOWN);
+        let shutdown_elapsed = shutdown_started.elapsed();
+        stage.store(9, Ordering::SeqCst);
+        drop(done);
+        watchdog.join().unwrap();
+        if shutdown_elapsed >= Duration::from_secs(30) {
+            panic!(
+                "runtime shutdown waited {}s on a blocking task",
+                shutdown_elapsed.as_secs()
+            );
+        }
     }
 
     #[tokio::test]
