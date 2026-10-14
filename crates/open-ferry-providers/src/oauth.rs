@@ -2,6 +2,8 @@
 // which internal/auth/claude repeats (v8.0.20, MIT), and parse_oauth_callback
 // from internal/misc/oauth.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
+// Query parsing also ported from Go's net/url/url.go (ParseQuery, parseQuery,
+// QueryUnescape) (go1.26.4, BSD-3-Clause).
 
 //! What every OAuth login needs: PKCE codes, a `state` value, and a local
 //! server for the provider's redirect.
@@ -52,9 +54,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{RawQuery, State};
+use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::any;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::StatusCode;
@@ -173,6 +175,9 @@ pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, Callba
     if input.is_empty() {
         return Ok(None);
     }
+    if input.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Err(CallbackParseError::InvalidUrl);
+    }
     let candidate = if input.contains("://") {
         input.to_owned()
     } else if input.starts_with(['?', '#']) {
@@ -184,7 +189,38 @@ pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, Callba
     } else {
         return Err(CallbackParseError::InvalidUrl);
     };
-    let url = url::Url::parse(&candidate).map_err(|_| CallbackParseError::InvalidUrl)?;
+    let url = match url::Url::parse(&candidate) {
+        Ok(url) => url,
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            // Go accepts relative references, but not a colon in their first
+            // path segment. A :// in a query must not turn it into a scheme.
+            if candidate
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .contains(':')
+            {
+                return Err(CallbackParseError::InvalidUrl);
+            }
+            url::Url::parse("http://localhost/")
+                .unwrap()
+                .join(&candidate)
+                .map_err(|_| CallbackParseError::InvalidUrl)?
+        }
+        Err(_) => return Err(CallbackParseError::InvalidUrl),
+    };
+    // Go's setPath and setFragment reject bad escapes before parsing fields.
+    // Check the raw path before URL normalization can remove a segment.
+    // Opaque scheme paths don't go through setPath in Go.
+    let raw_path = candidate.split(['?', '#']).next().unwrap_or("");
+    let raw_path = raw_path.split_once("://").map_or(raw_path, |(_, rest)| {
+        rest.split_once('/').map_or("", |(_, path)| path)
+    });
+    if (!url.cannot_be_a_base() && !valid_callback_escapes(raw_path))
+        || !valid_callback_escapes(url.fragment().unwrap_or(""))
+    {
+        return Err(CallbackParseError::InvalidUrl);
+    }
     let query = callback_query_pairs(url.query().unwrap_or(""));
     // Deliberate deviation from internal/misc/oauth.go:72-101: decode the
     // fragment once, not twice, discarding it on malformed raw query pairs.
@@ -326,7 +362,11 @@ fn valid_callback_pair(pair: &str) -> bool {
     if pair.contains(';') {
         return false;
     }
-    let mut bytes = pair.bytes();
+    valid_callback_escapes(pair)
+}
+
+fn valid_callback_escapes(value: &str) -> bool {
+    let mut bytes = value.bytes();
     while let Some(byte) = bytes.next() {
         if byte == b'%'
             && !(bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
@@ -399,8 +439,9 @@ impl CallbackServer {
         let (shown_sender, shown) = watch::channel(false);
         let redirected = Arc::new(AtomicBool::new(false));
         let app = Router::new()
-            .route(path, get(callback))
-            .route("/success", get(success))
+            .route(path, any(callback))
+            // Upstream's success handler has no method restriction.
+            .route("/success", any(success))
             .with_state(CallbackState {
                 state: state.into(),
                 provider: provider.into(),
@@ -613,8 +654,11 @@ impl AsyncWrite for LimitedConnection {
     }
 }
 
-async fn callback(State(server): State<CallbackState>, RawQuery(raw_query): RawQuery) -> Response {
-    let query = callback_query_pairs(raw_query.as_deref().unwrap_or(""));
+async fn callback(State(server): State<CallbackState>, request: Request) -> Response {
+    if request.method() != http::Method::GET {
+        return (StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n").into_response();
+    }
+    let query = callback_query_pairs(request.uri().query().unwrap_or(""));
     // Go's Values.Get takes the first value, even when it is empty.
     let field = |name: &str| {
         query
@@ -782,6 +826,140 @@ pub(crate) mod tests {
         assert!(!format!("{callback:?}").contains("Denied"));
     }
 
+    // Same ordered table as the offline Go 1.26.4 ParseOAuthCallback run.
+    #[test]
+    fn pasted_callback_urls_follow_go_relative_control_and_escape_rules() {
+        use CallbackParseError::{InvalidUrl, MissingCode};
+        let cases = [
+            ("?code=c&state=s&next=http://x".to_owned(), Ok(("c", "s"))),
+            ("code=c&next=http://x".to_owned(), Err(InvalidUrl)),
+            (
+                "path/cb?code=c&state=s&next=http://x".to_owned(),
+                Ok(("c", "s")),
+            ),
+            ("a:b/cb?code=c&next=http://x".to_owned(), Ok(("c", ""))),
+            ("?code=c\n&state=s".to_owned(), Err(InvalidUrl)),
+            ("?code=c\t&state=s".to_owned(), Err(InvalidUrl)),
+            ("?code=c\x7f&state=s".to_owned(), Err(InvalidUrl)),
+            (" \t\n?code=c&state=s\r\n ".to_owned(), Ok(("c", "s"))),
+            (
+                "http://localhost/cb?code=c&state=s#x=%ZZ".to_owned(),
+                Err(InvalidUrl),
+            ),
+            ("http://localhost/cb%ZZ?code=c".to_owned(), Err(InvalidUrl)),
+            ("?state=s#code=c;x=1".to_owned(), Err(MissingCode)),
+            ("?code=c&state=s#code=c;x=1".to_owned(), Ok(("c", "s"))),
+            ("?code&state=s".to_owned(), Err(MissingCode)),
+            ("?&&code=c&&state=s&&".to_owned(), Ok(("c", "s"))),
+            // Intentional differences: fragment decoded once; invalid UTF-8 lossy.
+            ("#code=c%252B&state=s".to_owned(), Ok(("c%2B", "s"))),
+            ("?code=c%FF&state=s".to_owned(), Ok(("c�", "s"))),
+            (
+                format!("?code=c&state=s#{}code=f", "a&".repeat(10_000)),
+                Ok(("c", "s")),
+            ),
+            (
+                "http://localhost/cb%ZZ/../cb?code=c".to_owned(),
+                Err(InvalidUrl),
+            ),
+        ];
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let result = parse_oauth_callback(&input).map(|callback| {
+                let callback = callback.unwrap();
+                (callback.code, callback.state)
+            });
+            assert_eq!(
+                result,
+                expected.map(|(code, state)| (code.to_owned(), state.to_owned())),
+                "Go table case {}",
+                index + 1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_refuses_non_get_without_consuming_the_wait_and_success_accepts_them() {
+        for (provider, path) in [("Codex", "/auth/callback"), ("Claude", "/callback")] {
+            let mut server = CallbackServer::start_with(0, path, "s", provider, SHORT)
+                .await
+                .unwrap();
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            for method in [http::Method::HEAD, http::Method::POST, http::Method::PUT] {
+                let response = client
+                    .request(
+                        method.clone(),
+                        format!("http://127.0.0.1:{}{path}?code=c&state=s", server.port()),
+                    )
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+                let body = response.text().await.unwrap();
+                assert_eq!(
+                    body,
+                    if method == http::Method::HEAD {
+                        ""
+                    } else {
+                        "Method not allowed\n"
+                    }
+                );
+                assert!(matches!(
+                    server.wait_for_callback(Duration::from_millis(20)).await,
+                    Err(CallbackError::Timeout)
+                ));
+                let response = client
+                    .request(
+                        method.clone(),
+                        format!("http://127.0.0.1:{}/success", server.port()),
+                    )
+                    .send()
+                    .await
+                    .unwrap();
+                // Our page has no outcome yet; it isn't a method rejection.
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                if method != http::Method::HEAD {
+                    assert!(
+                        response
+                            .text()
+                            .await
+                            .unwrap()
+                            .contains("No sign-in to report yet")
+                    );
+                }
+            }
+            assert_eq!(
+                fetch(server.port(), &format!("{path}?code=c&state=s"))
+                    .await
+                    .status,
+                302
+            );
+            assert_eq!(
+                server
+                    .wait_for_callback(Duration::from_secs(5))
+                    .await
+                    .unwrap()
+                    .code,
+                "c"
+            );
+            server.outcome.send_replace(Some(Outcome::SignedIn));
+            for method in [http::Method::HEAD, http::Method::POST] {
+                let response = client
+                    .request(
+                        method,
+                        format!("http://127.0.0.1:{}/success", server.port()),
+                    )
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn richer_callback_keeps_the_issued_client_id_and_checks_state() {
         let mut server = CallbackServer::start(0, "/auth/callback", "s1", "ChatGPT")
@@ -823,8 +1001,8 @@ pub(crate) mod tests {
             assert_eq!(callback.client_id, "issued");
         }
         for input in [
-            "#code=c%2B&bad=%ZZ&state=s&client_id=issued",
             "#code=c%2B&bad=a;b&state=s&client_id=issued",
+            "#code=c;x=1&state=s&client_id=issued",
         ] {
             assert_eq!(
                 parse_oauth_callback(input),
@@ -844,6 +1022,7 @@ pub(crate) mod tests {
             "code=a%ZZ&state=s",
             "code=c;x=1&state=s",
             "co%ZZde=c&state=s",
+            "code&state=s",
         ] {
             assert_eq!(
                 parse_oauth_callback(&format!("?{query}")),
@@ -856,6 +1035,7 @@ pub(crate) mod tests {
             ("code=c+one&state=s", "c one"),
             ("code=c&code=later&state=s&state=later", "c"),
             ("code=c%3Bx%3D1&state=s", "c;x=1"),
+            ("&&code=c&&state=s&&", "c"),
         ] {
             let callback = parse_oauth_callback(&format!("?{query}")).unwrap().unwrap();
             assert_eq!(callback.code, code);
@@ -886,6 +1066,8 @@ pub(crate) mod tests {
                 ("code=c&code=later&state=s&state=later", "c"),
                 ("code=c%3Bx%3D1&state=s", "c;x=1"),
                 ("code=&code=later&state=s", ""),
+                ("code&state=s", ""),
+                ("&&code=c&&state=s&&", "c"),
             ] {
                 let mut server = CallbackServer::start(0, "/callback", "s", provider)
                     .await
@@ -947,6 +1129,11 @@ pub(crate) mod tests {
             parse_oauth_callback(&format!("?{over_limit}")),
             Err(CallbackParseError::MissingCode)
         );
+        let callback = parse_oauth_callback(&format!("?code=query&state=s#{over_limit}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(callback.code, "query");
+        assert_eq!(callback.state, "s");
         for provider in ["Codex", "Claude"] {
             let mut server = CallbackServer::start(0, "/callback", "s", provider)
                 .await
@@ -1060,6 +1247,7 @@ pub(crate) mod tests {
     /// redirects.
     pub(crate) async fn fetch(port: u16, path_and_query: &str) -> Answer {
         let response = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap()
