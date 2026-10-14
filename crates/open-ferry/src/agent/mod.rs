@@ -111,9 +111,6 @@ pub(crate) type Say = Box<dyn Fn(&str) + Send + Sync>;
 
 /// What an action runs with.
 pub(crate) struct Context {
-    /// Tests of write serialization don't assert request latency.
-    #[cfg(test)]
-    pub(crate) no_request_timeout: bool,
     /// The config file.
     pub(crate) path: PathBuf,
     /// The environment's management key and key file.

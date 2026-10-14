@@ -44,16 +44,12 @@ pub(crate) enum Body {
 impl Remote {
     /// The server at the root URL `url`, called with `key`.
     pub(crate) fn new(url: &str, key: &str) -> Self {
+        #[cfg(test)]
+        let client = ManagementClient::new_for_test(url, key);
+        #[cfg(not(test))]
+        let client = ManagementClient::new(url, key);
         Self {
-            client: ManagementClient::new(url, key),
-            url: url.to_owned(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_test(url: &str, key: &str) -> Self {
-        Self {
-            client: ManagementClient::new_for_test(url, key),
+            client,
             url: url.to_owned(),
         }
     }

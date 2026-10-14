@@ -897,8 +897,6 @@ mod tests {
         std::fs::write(&key, "key-secret-value\n").unwrap();
         std::fs::write(&env_key, "env-key-secret-value\n").unwrap();
         let ctx = Context {
-            #[cfg(test)]
-            no_request_timeout: false,
             path: path.clone(),
             env: super::super::target::Env {
                 password: Some("password-secret-value".into()),

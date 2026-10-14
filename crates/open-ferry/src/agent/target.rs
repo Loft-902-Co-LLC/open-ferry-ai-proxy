@@ -385,12 +385,6 @@ async fn reach(
     };
     let url = root_url(&address.ip().to_string(), port, tls);
     let remote = Remote::new(&url, &key.secret);
-    #[cfg(test)]
-    let remote = if ctx.no_request_timeout {
-        Remote::new_for_test(&url, &key.secret)
-    } else {
-        remote
-    };
     let reply = match remote.send(Method::GET, PROBE, None).await {
         Ok(reply) => reply,
         Err(failure) => return Ok(Reach::Refused(failure)),

@@ -721,8 +721,6 @@ impl Server {
         expect_backup_sha256: Option<String>,
     ) -> Result<Context, Failure> {
         Ok(Context {
-            #[cfg(test)]
-            no_request_timeout: false,
             path: self.path.clone()?,
             env: self.env.clone(),
             key_file: self.key_file.clone(),
