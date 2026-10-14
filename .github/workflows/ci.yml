@@ -167,6 +167,17 @@ jobs:
           "$PYTHON" -I crates/open-ferry-supervisor/check-release.py "$RUNNER_TEMP/supervisor-build.json"
           cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --message-format=json > "$RUNNER_TEMP/open-ferry-build.json"
           "$PYTHON" -I crates/open-ferry/check-release.py "$RUNNER_TEMP/open-ferry-build.json"
+          # Scan each artifact before the next feature selection overwrites it.
+          cargo build --release --locked -p open-ferry-update --example release-seam-check --no-default-features
+          suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          "$PYTHON" -I crates/open-ferry-update/tests/check_release_seams.py "target/release/examples/release-seam-check$suffix"
+          cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/supervisor-feature-build.json"
+          "$PYTHON" -I crates/open-ferry-supervisor/check-release.py --self-test "$RUNNER_TEMP/supervisor-feature-build.json"
+          cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/open-ferry-feature-build.json"
+          "$PYTHON" -I crates/open-ferry/check-release.py --self-test "$RUNNER_TEMP/open-ferry-feature-build.json"
+          "$PYTHON" -I -m unittest discover -s crates/open-ferry -p test_check_release.py
+          "$PYTHON" -I -m unittest discover -s crates/open-ferry-supervisor -p test_check_release.py
 
       - name: Save the cache
         if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
@@ -211,13 +222,47 @@ jobs:
         with:
           cache: blue-green
 
+      # Pinned release assets, checked before extraction; no install action or
+      # unverified fallback (the repository allows GitHub-owned actions only).
+      - name: Install cargo-nextest
+        shell: bash
+        env:
+          VERSION: 0.9.146
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)
+              target=x86_64-unknown-linux-musl
+              sha256=b64617e8640624e8f9ba99819e37d7971154e97836d7ae4774fed4715501a6aa
+              temp="$RUNNER_TEMP"
+              ;;
+            Windows)
+              target=x86_64-pc-windows-msvc
+              sha256=809b01f2c94d031ab6cf5f4d4a4f477c8f51b69c96ab3cb2fe4db7ecb222d0d3
+              temp=$(cygpath -u "$RUNNER_TEMP")
+              ;;
+            *) echo "unsupported nextest platform: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          name="cargo-nextest-$VERSION-$target.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --output "$temp/$name" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$VERSION/$name"
+          echo "$sha256  $temp/$name" | sha256sum --check --strict
+          mkdir "$temp/nextest-$VERSION"
+          tar -xzf "$temp/$name" -C "$temp/nextest-$VERSION"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cygpath -w "$temp/nextest-$VERSION" >> "$GITHUB_PATH"
+          else
+            echo "$temp/nextest-$VERSION" >> "$GITHUB_PATH"
+          fi
+
       - name: Clippy with the blue-green test seams
         if: matrix.shard == 1 && (github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true')
         run: cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
 
       - name: Build the tests
         if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
-        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-run
+        run: cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-run
 
       - name: This runner's share of the tests
         id: shard
@@ -235,7 +280,7 @@ jobs:
       # into the command line.
       - name: Test with the blue-green test seams
         if: github.event_name != 'push'
-        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-fail-fast ${{ steps.shard.outputs.args }}
+        run: cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test ${{ steps.shard.outputs.args }}
 
       - name: Doc tests with the blue-green test seams
         if: github.event_name != 'push' && steps.shard.outputs.doc == 'true'
