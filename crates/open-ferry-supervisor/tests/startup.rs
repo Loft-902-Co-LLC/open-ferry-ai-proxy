@@ -3082,12 +3082,15 @@ async fn a_symlinked_final_endpoint_is_unsafe_and_never_falls_back() {
     .await
     .unwrap();
     assert!(started.endpoint.is_none());
-    assert!(
-        started
-            .switching_disabled
-            .as_deref()
-            .unwrap()
-            .contains("not safe")
+    assert_eq!(
+        started.switching_disabled.as_deref(),
+        Some(
+            format!(
+                "the endpoint could not be bound: the endpoint path is taken or not safe: {} is a symlink or not a directory",
+                own.dir().display()
+            )
+            .as_str()
+        )
     );
     assert!(!rig.cfg.data.root().join("supervisor.json").exists());
     assert!(!own.socket_path().exists());
@@ -3112,12 +3115,15 @@ async fn an_untrusted_endpoint_root_disables_switching_without_binding_or_fallba
     .unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(started.endpoint.is_none());
-    assert!(
-        started
-            .switching_disabled
-            .as_deref()
-            .unwrap()
-            .contains("switching is disabled")
+    assert_eq!(
+        started.switching_disabled.as_deref(),
+        Some(
+            format!(
+                "the endpoint could not be bound: switching is disabled: {}: anyone can write to it",
+                std::fs::canonicalize(&root).unwrap().display()
+            )
+            .as_str()
+        )
     );
     assert!(!own.socket_path().exists());
     assert!(!rig.cfg.data.root().join("supervisor.json").exists());

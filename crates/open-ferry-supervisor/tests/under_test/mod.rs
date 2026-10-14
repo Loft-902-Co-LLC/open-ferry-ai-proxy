@@ -633,7 +633,11 @@ fn watch_test_parent() {
             if unsafe { libc::getppid() } != parent {
                 // SAFETY: Fx::spawn made us the group leader; this group contains
                 // only our helper and workers, and our live pid reserves its id.
-                unsafe { libc::killpg(libc::getpgrp(), libc::SIGKILL) };
+                unsafe {
+                    if libc::getpgrp() == libc::getpid() {
+                        libc::killpg(libc::getpgrp(), libc::SIGKILL);
+                    }
+                }
                 std::process::abort();
             }
             std::thread::sleep(Duration::from_millis(50));

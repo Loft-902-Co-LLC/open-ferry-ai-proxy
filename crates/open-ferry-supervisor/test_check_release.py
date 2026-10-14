@@ -14,7 +14,7 @@ class PositiveControl(unittest.TestCase):
         b"test_endpoint_location",
     )
 
-    def check_artifact(self, content, feature=True):
+    def check_artifact(self, content, feature=True, *, artifact_feature=None, test=False, opt_level="3", artifacts=True):
         with tempfile.TemporaryDirectory() as root:
             root = pathlib.Path(root)
             artifact = root / "test-artifact.rlib"
@@ -22,8 +22,9 @@ class PositiveControl(unittest.TestCase):
             events = root / "cargo.json"
             events.write_text("\n".join(json.dumps(event) for event in (
                 {"reason": "compiler-artifact", "target": {"name": "open_ferry_supervisor", "kind": ["lib"]},
-                 "profile": {"opt_level": "3", "test": False}, "features": ["blue-green-test"] if feature else [],
-                 "filenames": [str(artifact)]},
+                 "profile": {"opt_level": opt_level, "test": test},
+                 "features": ["blue-green-test"] if (feature if artifact_feature is None else artifact_feature) else [],
+                 "filenames": [str(artifact)] if artifacts else []},
                 {"reason": "build-finished", "success": True},
             )), encoding="utf-8")
             return subprocess.run(
@@ -54,6 +55,28 @@ class PositiveControl(unittest.TestCase):
     def test_a_feature_off_artifact_without_hooks_passes(self):
         result = self.check_artifact(b"nothing here", feature=False)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_feature_state_must_match_the_scan(self):
+        for feature in (False, True):
+            with self.subTest(feature=feature):
+                result = self.check_artifact(b"\n".join(self.REQUIRED), feature=feature, artifact_feature=not feature)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("feature build" if feature else "test hooks enabled", result.stderr)
+
+    def test_a_test_profile_is_rejected(self):
+        result = self.check_artifact(b"\n".join(self.REQUIRED), test=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("test harness", result.stderr)
+
+    def test_an_unoptimized_artifact_is_rejected(self):
+        result = self.check_artifact(b"\n".join(self.REQUIRED), opt_level="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release optimization", result.stderr)
+
+    def test_zero_artifacts_are_rejected(self):
+        result = self.check_artifact(b"\n".join(self.REQUIRED), artifacts=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no release library", result.stderr)
 
 
 if __name__ == "__main__":

@@ -172,6 +172,8 @@ jobs:
           suffix=
           if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
           "$PYTHON" -I crates/open-ferry-update/tests/check_release_seams.py "target/release/examples/release-seam-check$suffix"
+          cargo build --release --locked -p open-ferry-update --example release-seam-check --no-default-features --features blue-green-test
+          "$PYTHON" -I crates/open-ferry-update/tests/check_release_seams.py --self-test "target/release/examples/release-seam-check$suffix"
           cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/supervisor-feature-build.json"
           "$PYTHON" -I crates/open-ferry-supervisor/check-release.py --self-test "$RUNNER_TEMP/supervisor-feature-build.json"
           cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/open-ferry-feature-build.json"

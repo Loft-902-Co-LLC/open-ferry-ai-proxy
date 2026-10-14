@@ -659,7 +659,9 @@ fn run_supervisor(
             .and_then(std::fs::canonicalize)
             .map(plain)
             .map_err(|error| format!("failed to find the open-ferry binary: {error}"))?;
-        let (data, _endpoint) = located;
+        let (data, endpoint) = located;
+        #[cfg(not(feature = "blue-green-test"))]
+        let _ = endpoint;
         let kind = if flags.system {
             ServiceKind::System
         } else {
@@ -674,7 +676,7 @@ fn run_supervisor(
                 data,
                 installed: exe,
                 #[cfg(feature = "blue-green-test")]
-                endpoint: _endpoint,
+                endpoint,
             },
         ))
     };

@@ -9,6 +9,9 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/parent_death.rs"]
+mod parent_death;
+
 use open_ferry_supervisor::client::{self, StopOutcome};
 use open_ferry_supervisor::endpoint::{Identity, ServiceKind};
 use open_ferry_supervisor::timings::STOP_BUDGET;
@@ -72,6 +75,7 @@ fn command(binary: &str, args: &[&str], home: &str) -> Command {
         .stdin(Stdio::null())
         // Each child and its descendants can be killed without touching others.
         .process_group(0);
+    parent_death::on_test_exit(&mut command);
     command
 }
 

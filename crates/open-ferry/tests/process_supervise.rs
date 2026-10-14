@@ -17,11 +17,15 @@ mod privilege;
 mod under_test;
 
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use open_ferry_supervisor::protocol::{EndpointReply, EndpointRequest, VERSION};
 use open_ferry_supervisor::timings::STOP_BUDGET;
 use under_test::*;
+
+#[cfg(target_os = "linux")]
+#[path = "support/parent_death.rs"]
+mod parent_death;
 
 /// Choose a candidate; launch retries only a logged address-in-use bind failure.
 fn free_port() -> u16 {
@@ -80,45 +84,60 @@ fn spawn(root: &std::path::Path, port: u16) -> Sup {
         .stderr(log);
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    #[cfg(target_os = "linux")]
+    parent_death::on_test_exit(&mut command);
     Sup::adopt(command.spawn().expect("start open-ferry -supervise"), root)
 }
 
-/// Reserve-then-drop cannot hand the socket to this CLI. Only retry an exited
-/// child whose own log confirms AddrInUse; every other startup failure fails.
+/// A bind failure leaves the supervisor alive but degraded. Inspect its log
+/// on every poll, and retry only that failure within the one startup budget.
 fn launch(root: &std::path::Path) -> (Sup, u16) {
-    // Retries share the original startup budget; a collision buys no time.
-    let until = Instant::now() + LONG;
+    launch_with_first_port(root, None, LONG)
+}
+
+fn launch_with_first_port(
+    root: &std::path::Path,
+    first_port: Option<u16>,
+    budget: Duration,
+) -> (Sup, u16) {
+    let until = Instant::now() + budget;
     for attempt in 0..8 {
         assert!(
             Instant::now() < until,
             "no free port within the startup budget"
         );
-        let port = free_port();
+        let port = if attempt == 0 {
+            first_port.unwrap_or_else(free_port)
+        } else {
+            free_port()
+        };
         let mut sup = spawn(root, port);
         loop {
-            if let Some(status) = sup.try_exit() {
-                let log = std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default();
-                let conflict = log.lines().any(|line| {
-                    line.contains("failed to bind the main listener")
-                        && ["(os error 98)", "(os error 48)", "(os error 10048)"]
-                            .iter()
-                            .any(|code| line.contains(code))
-                });
-                assert!(conflict && attempt < 7, "startup exited ({status}):\n{log}");
+            let exit = sup.try_exit();
+            let log = std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default();
+            let conflict = log.lines().any(|line| {
+                line.contains("failed to bind the main listener")
+                    && ["(os error 98)", "(os error 48)", "(os error 10048)"]
+                        .iter()
+                        .any(|code| line.contains(code))
+            });
+            if conflict {
+                assert!(attempt < 7, "all bind attempts failed:\n{log}");
+                if attempt == 0 {
+                    std::fs::write(root.join("first-bind-conflict.log"), &log).unwrap();
+                }
                 break;
             }
-            // A foreign answer is never accepted. Wait for our child to
-            // confirm a bind failure before deciding whether to retry.
+            if let Some(status) = exit {
+                panic!("startup exited ({status}):\n{log}");
+            }
+            // A foreign answer is never accepted, even while our child lives.
             if let Some((_, marker)) = http_get(port, "/")
                 && marker.as_deref() == Some(fixture_marker(root).as_str())
             {
                 return (sup, port);
             }
-            assert!(
-                Instant::now() < until,
-                "nothing answered GET /\n{}",
-                std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default()
-            );
+            assert!(Instant::now() < until, "nothing answered GET /\n{log}");
             std::thread::sleep(POLL);
         }
         // Sup::drop ends this attempt's own group before another port is tried.
@@ -304,5 +323,28 @@ fn a_terminate_signal_stops_the_supervisor_and_its_worker() {
     assert!(
         http_get(port, "/").is_none(),
         "something still answers on the port"
+    );
+}
+
+/// Not upstream's: a live degraded supervisor must not strand a port retry.
+#[test]
+fn a_live_bind_conflict_retries_on_a_different_port() {
+    if privilege::privileged() {
+        eprintln!("skipped bind-conflict control: requires an unprivileged account");
+        return;
+    }
+    let _permit = Permit::take();
+    let dir = scratch();
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let occupied = held.local_addr().unwrap().port();
+    let (_sup, port) = launch_with_first_port(dir.path(), Some(occupied), Duration::from_secs(15));
+    assert_ne!(port, occupied);
+    let log = std::fs::read_to_string(dir.path().join("first-bind-conflict.log")).unwrap();
+    assert!(log.contains("failed to bind the main listener"), "{log}");
+    assert!(
+        ["(os error 98)", "(os error 48)", "(os error 10048)"]
+            .iter()
+            .any(|code| log.contains(code)),
+        "{log}"
     );
 }
