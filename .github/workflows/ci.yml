@@ -167,19 +167,10 @@ jobs:
           "$PYTHON" -I crates/open-ferry-supervisor/check-release.py "$RUNNER_TEMP/supervisor-build.json"
           cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --message-format=json > "$RUNNER_TEMP/open-ferry-build.json"
           "$PYTHON" -I crates/open-ferry/check-release.py "$RUNNER_TEMP/open-ferry-build.json"
-          # Scan each artifact before the next feature selection overwrites it.
           cargo build --release --locked -p open-ferry-update --example release-seam-check --no-default-features
           suffix=
           if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
           "$PYTHON" -I crates/open-ferry-update/tests/check_release_seams.py "target/release/examples/release-seam-check$suffix"
-          cargo build --release --locked -p open-ferry-update --example release-seam-check --no-default-features --features blue-green-test
-          "$PYTHON" -I crates/open-ferry-update/tests/check_release_seams.py --self-test "target/release/examples/release-seam-check$suffix"
-          cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/supervisor-feature-build.json"
-          "$PYTHON" -I crates/open-ferry-supervisor/check-release.py --self-test "$RUNNER_TEMP/supervisor-feature-build.json"
-          cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/open-ferry-feature-build.json"
-          "$PYTHON" -I crates/open-ferry/check-release.py --self-test "$RUNNER_TEMP/open-ferry-feature-build.json"
-          "$PYTHON" -I -m unittest discover -s crates/open-ferry -p test_check_release.py
-          "$PYTHON" -I -m unittest discover -s crates/open-ferry-supervisor -p test_check_release.py
 
       - name: Save the cache
         if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
@@ -194,6 +185,55 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps: *release-seams-steps
+
+  # The same builds with the feature on, scanned with each checker's
+  # --self-test: there the scans must find the seams, so a scan can't pass by
+  # finding nothing. A job of its own, so that the two halves build side by
+  # side. The feature changes none of the dependencies, so it shares
+  # release-seams' cache and leaves saving it to that job: a push builds
+  # nothing here.
+  release-seams-feature-ubuntu:
+    name: release-seams-feature (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps: &release-seams-feature-steps
+      - if: github.event_name != 'push'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - if: github.event_name != 'push'
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: release
+
+      - name: Feature builds hold the test seams
+        if: github.event_name != 'push'
+        shell: bash
+        env:
+          PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -I -m unittest discover -s crates/open-ferry -p test_check_release.py
+          "$PYTHON" -I -m unittest discover -s crates/open-ferry-supervisor -p test_check_release.py
+          cargo build --release --locked -p open-ferry-update --example release-seam-check --no-default-features --features blue-green-test
+          suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          "$PYTHON" -I crates/open-ferry-update/tests/check_release_seams.py --self-test "target/release/examples/release-seam-check$suffix"
+          cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/supervisor-feature-build.json"
+          "$PYTHON" -I crates/open-ferry-supervisor/check-release.py --self-test "$RUNNER_TEMP/supervisor-feature-build.json"
+          cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/open-ferry-feature-build.json"
+          "$PYTHON" -I crates/open-ferry/check-release.py --self-test "$RUNNER_TEMP/open-ferry-feature-build.json"
+
+  release-seams-feature-windows:
+    name: release-seams-feature (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps: *release-seams-feature-steps
 
   # The blue-green switch's test seams (worker faults, barriers, the
   # supervisor's isolation flags) are compiled only with this feature. The
@@ -312,18 +352,18 @@ jobs:
   # run passes nothing.
   check:
     name: check (${{ matrix.os }})
-    needs: [changes, tests-ubuntu, tests-windows, release-seams-ubuntu, release-seams-windows]
+    needs: [changes, tests-ubuntu, tests-windows, release-seams-ubuntu, release-seams-windows, release-seams-feature-ubuntu, release-seams-feature-windows]
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            jobs: tests-ubuntu release-seams-ubuntu
-            queue-only: release-seams-ubuntu
+            jobs: tests-ubuntu release-seams-ubuntu release-seams-feature-ubuntu
+            queue-only: release-seams-ubuntu release-seams-feature-ubuntu
           - os: windows-latest
-            jobs: tests-windows release-seams-windows
-            queue-only: release-seams-windows
+            jobs: tests-windows release-seams-windows release-seams-feature-windows
+            queue-only: release-seams-windows release-seams-feature-windows
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps: &results-steps
