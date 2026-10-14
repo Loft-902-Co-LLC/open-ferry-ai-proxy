@@ -439,6 +439,9 @@ async fn run(
         return Err(io::Error::other("fail-load"));
     }
     if attached.welcome.role == Role::Standby {
+        if ctx.fault("hold-load").is_some() {
+            ctx.barrier("load.before_loaded").await?;
+        }
         send!(&Message::Loaded { ms: 0 });
         ctx.event("loaded", false)?;
         ctx.exit_after("loaded");
