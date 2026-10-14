@@ -223,6 +223,14 @@ pub(crate) fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
+    if context.platform == Platform::MacOs && machine::privileged_run(machine.trust_probe()) {
+        return fail(
+            request,
+            out,
+            err,
+            "`open-ferry migrate` doesn't run as root on macOS: run it as the account that runs CLIProxyAPI.",
+        );
+    }
     if request.undo {
         return run_undo(machine, context, request, out, err);
     }
@@ -601,7 +609,7 @@ fn run_undo(
     err: &mut dyn Write,
 ) -> u8 {
     let platform = context.platform;
-    let path = match record::path(context) {
+    let path = match record::path(machine, context) {
         Ok(path) => path,
         Err(error) => return fail(request, out, err, &error),
     };
@@ -609,9 +617,11 @@ fn run_undo(
         Ok(Some(record)) => record,
         Ok(None) => {
             let sudo = match platform {
-                Platform::Windows => "",
+                Platform::Windows => {
+                    " A switch made without elevation is undone the same way; its record is beside the installed config."
+                }
                 Platform::Linux | Platform::MacOs => {
-                    " A switch made with sudo is undone with sudo, as its record is root's."
+                    " A switch made without sudo is undone the same way; its record is beside the installed config."
                 }
             };
             return fail(
