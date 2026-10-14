@@ -2,8 +2,10 @@
 // which internal/auth/claude repeats (v8.0.20, MIT), and parse_oauth_callback
 // from internal/misc/oauth.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
-// Query parsing also ported from Go's net/url/url.go (ParseQuery, parseQuery,
-// QueryUnescape) (go1.26.4, BSD-3-Clause).
+// Query and URL parsing also ported from Go's net/url/url.go (ParseQuery,
+// parseQuery, QueryUnescape and the Parse helpers in go_url) (go1.26.4,
+// BSD-3-Clause).
+// https://github.com/golang/go
 
 //! What every OAuth login needs: PKCE codes, a `state` value, and a local
 //! server for the provider's redirect.
@@ -14,6 +16,14 @@
 //! the save, then [finishes](CallbackServer::finish) it with the outcome.
 //!
 //! Deviations from upstream:
+//! - Pasted fragments decode once, not twice. A fragment Go discards on its
+//!   second decode (such as `#code=c&x=%25ZZ`) can be read here; Go counts
+//!   the parameter limit after its first decode. Invalid decoded UTF-8 is
+//!   replaced lossily, whereas Go retains bytes.
+//! - The live HTTP layer refuses raw non-UTF-8 query bytes, raw `"`, `<`, `>`
+//!   and targets over 65,534 bytes before the handler runs, where Go serves
+//!   them. It also truncates a raw `#` suffix, which Go keeps in RawQuery.
+//!   Browsers never send fragments; this affects hand-made requests only.
 //! - The callback server listens on 127.0.0.1 only; upstream listens on
 //!   every interface.
 //! - The pages are this project's own (see [`page`]) and take nothing from
@@ -42,6 +52,7 @@
 //!   shutdown timeout) to finish and then closes them; upstream's shutdown
 //!   gives up waiting and leaves them to their deadlines.
 
+mod go_url;
 pub mod page;
 
 use std::future::Future;
@@ -175,13 +186,10 @@ pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, Callba
     if input.is_empty() {
         return Ok(None);
     }
-    if input.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-        return Err(CallbackParseError::InvalidUrl);
-    }
     let candidate = if input.contains("://") {
         input.to_owned()
-    } else if input.starts_with(['?', '#']) {
-        format!("http://localhost/{input}")
+    } else if input.starts_with('?') {
+        format!("http://localhost{input}")
     } else if input.contains(['/', '?', '#', ':']) {
         format!("http://{input}")
     } else if input.contains('=') {
@@ -189,44 +197,12 @@ pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, Callba
     } else {
         return Err(CallbackParseError::InvalidUrl);
     };
-    let url = match url::Url::parse(&candidate) {
-        Ok(url) => url,
-        Err(url::ParseError::RelativeUrlWithoutBase) => {
-            // Go accepts relative references, but not a colon in their first
-            // path segment. A :// in a query must not turn it into a scheme.
-            if candidate
-                .split(['/', '?', '#'])
-                .next()
-                .unwrap_or("")
-                .contains(':')
-            {
-                return Err(CallbackParseError::InvalidUrl);
-            }
-            url::Url::parse("http://localhost/")
-                .unwrap()
-                .join(&candidate)
-                .map_err(|_| CallbackParseError::InvalidUrl)?
-        }
-        Err(_) => return Err(CallbackParseError::InvalidUrl),
-    };
-    // Go's setPath and setFragment reject bad escapes before parsing fields.
-    // Check the raw path before URL normalization can remove a segment.
-    // Opaque scheme paths don't go through setPath in Go.
-    let raw_path = candidate.split(['?', '#']).next().unwrap_or("");
-    let raw_path = raw_path.split_once("://").map_or(raw_path, |(_, rest)| {
-        rest.split_once('/').map_or("", |(_, path)| path)
-    });
-    if (!url.cannot_be_a_base() && !valid_callback_escapes(raw_path))
-        || !valid_callback_escapes(url.fragment().unwrap_or(""))
-    {
-        return Err(CallbackParseError::InvalidUrl);
-    }
-    let query = callback_query_pairs(url.query().unwrap_or(""));
+    let (raw_query, raw_fragment) = go_url::parse(&candidate)?;
+    let query = callback_query_pairs(raw_query);
     // Deliberate deviation from internal/misc/oauth.go:72-101: decode the
     // fragment once, not twice, discarding it on malformed raw query pairs.
     // Upstream first unescapes the fragment during URL parsing (invalid escapes
     // reject the entire URL), then parses it again; encoded delimiters can differ.
-    let raw_fragment = url.fragment().unwrap_or("");
     let fragment = if raw_fragment.split('&').all(valid_callback_pair) {
         callback_query_pairs(raw_fragment)
     } else {
@@ -828,7 +804,7 @@ pub(crate) mod tests {
 
     // Same ordered table as the offline Go 1.26.4 ParseOAuthCallback run.
     #[test]
-    fn pasted_callback_urls_follow_go_relative_control_and_escape_rules() {
+    fn pasted_callback_urls_follow_go_except_once_decoded_fragments_and_lossy_utf8() {
         use CallbackParseError::{InvalidUrl, MissingCode};
         let cases = [
             ("?code=c&state=s&next=http://x".to_owned(), Ok(("c", "s"))),
@@ -862,6 +838,73 @@ pub(crate) mod tests {
                 "http://localhost/cb%ZZ/../cb?code=c".to_owned(),
                 Err(InvalidUrl),
             ),
+            ("?code=c&state=s#x\ty".to_owned(), Ok(("c", "s"))),
+            ("?code=c&state=s#x=\x7fz".to_owned(), Ok(("c", "s"))),
+            ("/?code=c&state=s".to_owned(), Ok(("c", "s"))),
+            ("/#code=c&state=s".to_owned(), Ok(("c", "s"))),
+            (
+                ":1455/auth/callback?code=c&state=s".to_owned(),
+                Ok(("c", "s")),
+            ),
+            ("http://localhost:65536/cb?code=c".to_owned(), Ok(("c", ""))),
+            ("http://?code=c".to_owned(), Ok(("c", ""))),
+            ("http://[fe80::1%25en0]/cb?code=c".to_owned(), Ok(("c", ""))),
+            ("http://999.1.1.1/cb?code=c".to_owned(), Ok(("c", ""))),
+            ("http:?code=c&n=http://x".to_owned(), Ok(("c", ""))),
+            ("http://loc%61lhost/cb?code=c".to_owned(), Err(InvalidUrl)),
+            (
+                "http://u%ZZ@localhost/cb?code=c&state=s".to_owned(),
+                Err(InvalidUrl),
+            ),
+            ("http://local\\host/cb?code=c".to_owned(), Err(InvalidUrl)),
+            ("http://local{host/cb?code=c".to_owned(), Err(InvalidUrl)),
+            (
+                "/bad%ZZ/http://x?code=c&state=s".to_owned(),
+                Err(InvalidUrl),
+            ),
+            ("a%ZZ/b://c?code=c".to_owned(), Err(InvalidUrl)),
+            ("a:b%ZZ?code=c&n=http://x".to_owned(), Ok(("c", ""))),
+            // L16: Go discards the whole fragment when its second decode fails.
+            ("#code=c&x=%25ZZ".to_owned(), Ok(("c", ""))),
+            (
+                "http://user:p%3Ass@localhost/cb?code=c".to_owned(),
+                Ok(("c", "")),
+            ),
+            ("http://[::1]:65536/cb?code=c".to_owned(), Ok(("c", ""))),
+            ("http://localhost:/cb?code=c".to_owned(), Ok(("c", ""))),
+            (
+                "http://localhost/a%2Fb/%2e%2e/cb?code=c".to_owned(),
+                Ok(("c", "")),
+            ),
+            (
+                "http://user{bad@localhost/cb?code=c".to_owned(),
+                Err(InvalidUrl),
+            ),
+            ("http://localhost:bad/cb?code=c".to_owned(), Err(InvalidUrl)),
+            ("http://[bad]/cb?code=c".to_owned(), Err(InvalidUrl)),
+            ("http://[fe80::1%25]/cb?code=c".to_owned(), Err(InvalidUrl)),
+            (
+                "http://[fe80::1%25en%20x]/cb?code=c".to_owned(),
+                Ok(("c", "")),
+            ),
+            (
+                "http://[fe80::1%25en%2Fx]/cb?code=c".to_owned(),
+                Err(InvalidUrl),
+            ),
+            ("http://a:b:80/cb?code=c".to_owned(), Err(InvalidUrl)),
+            ("other://a:b:80/cb?code=c".to_owned(), Ok(("c", ""))),
+            ("http://local%FFhost/cb?code=c".to_owned(), Ok(("c", ""))),
+            (
+                "http://u:p%ZZ@localhost/cb?code=c".to_owned(),
+                Err(InvalidUrl),
+            ),
+            ("?state=s#code=x\ty".to_owned(), Ok(("x\ty", "s"))),
+            ("?state=s#code=x\x7fz".to_owned(), Ok(("x\x7fz", "s"))),
+            // L16/L46: Go counts the parameter limit after its first decode.
+            (
+                format!("#code=c&x={}", "a%26".repeat(10_000)),
+                Ok(("c", "")),
+            ),
         ];
         for (index, (input, expected)) in cases.into_iter().enumerate() {
             let result = parse_oauth_callback(&input).map(|callback| {
@@ -883,13 +926,15 @@ pub(crate) mod tests {
             let mut server = CallbackServer::start_with(0, path, "s", provider, SHORT)
                 .await
                 .unwrap();
-            let client = reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap();
+            let client = || {
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .unwrap()
+            };
             for method in [http::Method::HEAD, http::Method::POST, http::Method::PUT] {
-                let response = client
+                let response = client()
                     .request(
                         method.clone(),
                         format!("http://127.0.0.1:{}{path}?code=c&state=s", server.port()),
@@ -911,7 +956,7 @@ pub(crate) mod tests {
                     server.wait_for_callback(Duration::from_millis(20)).await,
                     Err(CallbackError::Timeout)
                 ));
-                let response = client
+                let response = client()
                     .request(
                         method.clone(),
                         format!("http://127.0.0.1:{}/success", server.port()),
@@ -947,7 +992,7 @@ pub(crate) mod tests {
             );
             server.outcome.send_replace(Some(Outcome::SignedIn));
             for method in [http::Method::HEAD, http::Method::POST] {
-                let response = client
+                let response = client()
                     .request(
                         method,
                         format!("http://127.0.0.1:{}/success", server.port()),
@@ -957,6 +1002,48 @@ pub(crate) mod tests {
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::OK);
             }
+        }
+    }
+
+    // L44: http::Uri removes a raw '#' suffix before the handler sees it.
+    // Go keeps '#;x' in RawQuery and drops the code pair for its semicolon.
+    #[tokio::test]
+    async fn live_callback_raw_hash_is_truncated_by_the_http_layer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (provider, path) in [("Codex", "/auth/callback"), ("Claude", "/callback")] {
+            let mut server = CallbackServer::start_with(0, path, "s", provider, SHORT)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port()))
+                    .await
+                    .unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "GET {path}?state=s&code=c#;x HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                            server.port()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                let mut response = Vec::new();
+                stream.read_to_end(&mut response).await.unwrap();
+                assert!(response.starts_with(b"HTTP/1.1 302"));
+                stream.shutdown().await.unwrap();
+            })
+            .await
+            .unwrap();
+            let callback = server
+                .wait_for_callback(Duration::from_secs(2))
+                .await
+                .unwrap();
+            assert_eq!(
+                (callback.code.as_str(), callback.state.as_str()),
+                ("c", "s")
+            );
+            drop(server);
         }
     }
 
