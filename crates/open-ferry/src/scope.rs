@@ -986,6 +986,12 @@ fn authorize_claude_spawn(
     let text = |path: &Path| claude_path(probe, path);
     let remedy = claude_remedy;
     let program_text = text(program)?;
+    if probe.platform() == Platform::Windows && !program_text.to_ascii_lowercase().ends_with(".exe")
+    {
+        return Err(format!(
+            "{program_text} is not an .exe path; set command to a native claude.exe"
+        ));
+    }
     probe.trusted_file(&program_text).map_err(remedy)?;
     let native_remedy = |reason| {
         format!(
@@ -1105,7 +1111,18 @@ fn claude_managed_settings(probe: &dyn Probe) -> Result<(), String> {
     for directory in directories {
         let directory = claude_path(probe, Path::new(&directory))?;
         match probe.state(&directory) {
-            State::Missing => continue,
+            State::Missing => {
+                trusted_existing_dir(probe, &directory).map_err(|reason| {
+                    if probe.platform() == Platform::Windows {
+                        format!(
+                            r#"{reason}; from an elevated prompt, run mkdir "{directory}", then icacls "{directory}" /setowner *S-1-5-32-544 and icacls "{directory}" /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX""#
+                        )
+                    } else {
+                        claude_remedy(reason)
+                    }
+                })?;
+                continue;
+            }
             State::Directory => probe.trusted_dir(&directory).map_err(claude_remedy)?,
             _ => {
                 return Err(claude_remedy(format!(
@@ -1115,6 +1132,33 @@ fn claude_managed_settings(probe: &dyn Probe) -> Result<(), String> {
         }
         for name in ["managed-settings.json", "managed-mcp.json"] {
             claude_optional_file(probe, &probe.platform().join(&directory, name))?;
+        }
+        let drop_ins = probe.platform().join(&directory, "managed-settings.d");
+        match probe.state(&drop_ins) {
+            State::Missing => continue,
+            State::Directory => probe.trusted_dir(&drop_ins).map_err(claude_remedy)?,
+            _ => {
+                return Err(claude_remedy(format!(
+                    "{drop_ins} is not an accessible real directory"
+                )));
+            }
+        }
+        let entries = probe
+            .entries(&drop_ins, MAX_ENTRIES + 1)
+            .map_err(|error| claude_remedy(format!("can't list {drop_ins}: {error}")))?;
+        if entries.len() > MAX_ENTRIES {
+            return Err(claude_remedy(format!(
+                "{drop_ins} holds more than {MAX_ENTRIES} entries"
+            )));
+        }
+        for name in entries {
+            let path = probe.platform().join(&drop_ins, &name);
+            if !matches!(probe.state(&path), State::File) {
+                return Err(claude_remedy(format!(
+                    "{path} is not an accessible real file"
+                )));
+            }
+            probe.trusted_file(&path).map_err(claude_remedy)?;
         }
     }
     Ok(())
@@ -1216,12 +1260,14 @@ fn claude_windows_environment(
         .filter(|drive| drive.ends_with(':'))
         .ok_or("the Windows directory has no system drive")?;
     let program_data = claude_path(probe, Path::new(&probe.program_data()?))?;
+    let program_files = claude_path(probe, Path::new(&probe.program_files()?))?;
     for (name, value) in [
         ("SystemRoot", windows.as_str()),
         ("windir", windows.as_str()),
         ("ComSpec", comspec.as_str()),
         ("SystemDrive", drive),
         ("ProgramData", program_data.as_str()),
+        ("ProgramFiles", program_files.as_str()),
         ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
     ] {
         variables.push((name.into(), value.into()));
