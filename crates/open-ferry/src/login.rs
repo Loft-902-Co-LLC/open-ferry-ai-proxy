@@ -175,10 +175,13 @@ async fn sign_in(login: Login, config: &Config, options: Options, store: FileSto
             let auth = CodexAuth::with_proxy_url(&config.proxy_url);
             codex_oauth::login_with_device_code(&auth, |code| {
                 print!("{}", device_prompt(&code.verification_url, &code.user_code));
-                if !options.no_browser
-                    && let Err(error) = browser::open(&code.verification_url)
-                {
-                    tracing::warn!("Failed to open browser automatically: {error}");
+                if !options.no_browser {
+                    let probe = crate::scope::runtime_probe();
+                    if let Some(reason) = browser::refusal(probe.as_ref()) {
+                        println!("{reason}");
+                    } else if let Err(error) = browser::open(&code.verification_url) {
+                        tracing::warn!("Failed to open browser automatically: {error}");
+                    }
                 }
             })
             .await
