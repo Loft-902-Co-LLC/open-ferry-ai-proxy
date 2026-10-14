@@ -26,16 +26,17 @@ runs:
       shell: bash
       run: rustup toolchain install --profile minimal
 
-    # What the dependencies' builds depend on: the toolchain, the lock file
-    # and the manifests, which pick the features. The workflow's CARGO*
-    # variables count too: bump v1 when they change.
+    # What the dependencies' builds depend on: the compiler, which
+    # rust-toolchain.toml's stable channel doesn't pin, the lock file and the
+    # manifests, which pick the features. The workflow's CARGO* variables
+    # count too: bump v1 when they change.
     - id: key
       shell: bash
       env:
         CACHE: ${{ inputs.cache }}
       run: |
         set -euo pipefail
-        hash=$(git ls-files -z -- rust-toolchain.toml Cargo.lock ':(glob)**/Cargo.toml' | xargs -0 cat | sha256sum | cut -c1-16)
+        hash=$({ rustc -vV; git ls-files -z -- rust-toolchain.toml Cargo.lock ':(glob)**/Cargo.toml' | xargs -0 cat; } | sha256sum | cut -c1-16)
         echo "key=cargo-v1-$CACHE-$RUNNER_OS-$hash" >> "$GITHUB_OUTPUT"
         echo "prefix=cargo-v1-$CACHE-$RUNNER_OS-" >> "$GITHUB_OUTPUT"
 
