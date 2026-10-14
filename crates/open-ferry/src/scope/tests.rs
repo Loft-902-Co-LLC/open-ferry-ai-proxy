@@ -38,6 +38,8 @@ pub(crate) struct Fake {
     /// The receipts read, in order.
     reads: RefCell<Vec<String>>,
     listed: RefCell<Vec<String>>,
+    heads: BTreeMap<String, Result<Vec<u8>, String>>,
+    head_reads: RefCell<Vec<String>>,
     /// What creating a directory fails with.
     create: Option<io::ErrorKind>,
     created: Vec<String>,
@@ -67,6 +69,8 @@ impl Fake {
             receipt_errors: BTreeMap::new(),
             reads: RefCell::new(Vec::new()),
             listed: RefCell::new(Vec::new()),
+            heads: BTreeMap::new(),
+            head_reads: RefCell::new(Vec::new()),
             create: None,
             created: Vec::new(),
             container: false,
@@ -99,6 +103,11 @@ impl Fake {
     }
 
     pub(crate) fn file(&mut self, path: &str) -> &mut Fake {
+        let head = match self.platform {
+            Platform::Windows => b"MZ".to_vec(),
+            _ => vec![0x7f, b'E', b'L', b'F'],
+        };
+        self.heads.insert(self.path(path), Ok(head));
         self.node(path, Node::File)
     }
 
@@ -165,6 +174,10 @@ impl Probe for Fake {
         self.program_data.clone()
     }
 
+    fn program_files(&self) -> Result<String, String> {
+        Ok(self.platform.clean("C:/Program Files"))
+    }
+
     fn state(&self, path: &str) -> State {
         match self.nodes.get(&self.path(path)) {
             None => State::Missing,
@@ -194,6 +207,15 @@ impl Probe for Fake {
 
     fn trusted_file(&self, path: &str) -> Result<(), String> {
         self.trust(path)
+    }
+
+    fn program_head(&self, path: &str) -> Result<Vec<u8>, String> {
+        let path = self.path(path);
+        self.head_reads.borrow_mut().push(path.clone());
+        self.heads
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| Err("can't tell what kind of program this is".to_owned()))
     }
 
     fn readable_file(&self, _path: &str) -> io::Result<()> {
@@ -1402,7 +1424,11 @@ fn windows_default_claude_accounts_accept_a_trusted_profile_without_home() {
     assert!(
         authorize_claude_spawn(&probe, &entry, program, root, None, None, Some(profile)).is_ok()
     );
-    assert!(authorize_claude_spawn(&probe, &entry, program, root, Some(home), None, None).is_ok());
+    assert!(
+        authorize_claude_spawn(&probe, &entry, program, root, Some(home), None, None)
+            .unwrap_err()
+            .contains("set USERPROFILE")
+    );
     probe.untrust("D:/account").dir("C:/trusted/account");
     let explicit = Entry {
         config_dir: "C:/trusted/account".into(),
@@ -1515,7 +1541,79 @@ mod claude {
         };
         assert_eq!(path, "/srv/bin");
         probe.node("/bin", Node::Link);
+        let SpawnEnvironment::Restricted { path, .. } = authorize(&probe, &entry).unwrap() else {
+            panic!("restricted")
+        };
+        assert_eq!(path, "/srv/bin:/usr/sbin:/usr/bin:/sbin");
+        probe.node("/bin", Node::Hidden);
         assert!(authorize(&probe, &entry).is_err());
+    }
+
+    #[test]
+    fn privileged_programs_require_the_platforms_native_header() {
+        for (platform, program, account, root, native, foreign) in [
+            (
+                Platform::Linux,
+                "/srv/bin/claude",
+                "/srv/account",
+                "/srv/entries",
+                vec![0x7f, b'E', b'L', b'F'],
+                b"MZ".to_vec(),
+            ),
+            (
+                Platform::Windows,
+                "C:/trusted/bin/claude.exe",
+                "C:/account",
+                "C:/entries",
+                b"MZ".to_vec(),
+                vec![0x7f, b'E', b'L', b'F'],
+            ),
+        ] {
+            let mut probe = Fake::new(platform, true);
+            probe.file(program).dir(account).dir(root);
+            let entry = Entry {
+                config_dir: account.into(),
+                ..entry()
+            };
+            let run = |probe: &Fake| {
+                authorize_claude_spawn(
+                    probe,
+                    &entry,
+                    Path::new(program),
+                    Path::new(root),
+                    None,
+                    None,
+                    (platform == Platform::Windows).then_some(Path::new("C:/profile")),
+                )
+            };
+            probe.heads.insert(probe.path(program), Ok(native));
+            assert!(run(&probe).is_ok());
+            assert_eq!(*probe.head_reads.borrow(), vec![probe.path(program)]);
+            for head in [
+                Ok(b"#!/bin/sh".to_vec()),
+                Ok(b"@echo off".to_vec()),
+                Ok(b"$basedir =".to_vec()),
+                Ok(Vec::new()),
+                Ok(foreign),
+                Err("can't tell what kind of program this is: access is denied".to_owned()),
+            ] {
+                probe.heads.insert(probe.path(program), head);
+                let error = run(&probe).unwrap_err();
+                assert!(error.contains("native build"), "{error}");
+                assert!(error.contains("real executable"), "{error}");
+                assert!(error.contains("root-owned copy"), "{error}");
+            }
+            probe.heads.remove(&probe.path(program));
+            assert!(
+                run(&probe)
+                    .unwrap_err()
+                    .contains("can't tell what kind of program this is")
+            );
+            probe.head_reads.borrow_mut().clear();
+            probe.untrust(program);
+            assert!(run(&probe).is_err());
+            assert!(probe.head_reads.borrow().is_empty());
+        }
     }
 
     #[test]
@@ -1548,7 +1646,7 @@ mod claude {
                     Path::new(root),
                     None,
                     None,
-                    None
+                    (platform == Platform::Windows).then_some(Path::new("C:/profile"))
                 )
                 .unwrap_err()
                 .contains("PATH separator")
@@ -1558,7 +1656,7 @@ mod claude {
 
     #[test]
     fn account_settings_leaves_are_checked_even_inside_a_trusted_directory() {
-        for name in ["settings.json", "settings.local.json"] {
+        for name in ["settings.json", "settings.local.json", ".claude.json"] {
             let path = format!("/srv/account/{name}");
             let mut probe = linux();
             probe.file(&path);
@@ -1611,6 +1709,11 @@ mod claude {
             .untrust("/srv/account/settings.json");
         assert!(run(&probe, Some(Path::new("/srv/account"))).is_err());
         probe.untrusted.clear();
+        probe
+            .file("/srv/account/.claude.json")
+            .untrust("/srv/account/.claude.json");
+        assert!(run(&probe, Some(Path::new("/srv/account"))).is_err());
+        probe.untrusted.clear();
         let SpawnEnvironment::Restricted { variables, .. } =
             run(&probe, Some(Path::new("/srv/account"))).unwrap()
         else {
@@ -1623,6 +1726,9 @@ mod claude {
     fn unprivileged_and_container_guards_keep_the_inherited_policy() {
         let mut probe = linux();
         probe.untrust("/srv");
+        probe
+            .heads
+            .insert(probe.path("/srv/bin/claude"), Err("unreadable".to_owned()));
         probe.privileged = Ok(false);
         assert_eq!(
             authorize(&probe, &entry()).unwrap(),
@@ -1634,6 +1740,7 @@ mod claude {
             authorize(&probe, &entry()).unwrap(),
             SpawnEnvironment::Inherited
         );
+        assert!(probe.head_reads.borrow().is_empty());
     }
 
     #[test]
@@ -1656,16 +1763,142 @@ mod claude {
             )
         };
         assert!(run(&probe, Some(Path::new("D:/profile"))).is_ok());
-        assert!(run(&probe, None).unwrap_err().contains("set config-dir"));
+        assert!(run(&probe, None).unwrap_err().contains("set USERPROFILE"));
         for path in [
             "D:/profile/.claude/settings.json",
             "D:/profile/.claude/settings.local.json",
+            "D:/profile/.claude/.claude.json",
             "D:/profile/.claude.json",
         ] {
             probe.file(path).untrust(path);
             assert!(run(&probe, Some(Path::new("D:/profile"))).is_err());
             probe.untrusted.clear();
         }
+    }
+
+    #[test]
+    fn inherited_file_paths_are_checked_before_retention() {
+        for platform in [Platform::Linux, Platform::Windows] {
+            let mut probe = Fake::new(platform, true);
+            let path = if platform == Platform::Windows {
+                "C:/trusted/file"
+            } else {
+                "/srv/file"
+            };
+            probe.file(path);
+            for name in [
+                "NODE_EXTRA_CA_CERTS",
+                "SSL_CERT_FILE",
+                "CLAUDE_CODE_GIT_BASH_PATH",
+            ] {
+                let input = |value: &str| vec![(name.into(), value.into())];
+                if platform == Platform::Linux && name == "CLAUDE_CODE_GIT_BASH_PATH" {
+                    assert!(
+                        claude_environment_files(&probe, input("untrusted"))
+                            .unwrap()
+                            .is_empty()
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    claude_environment_files(&probe, input(path)).unwrap(),
+                    input(path)
+                );
+                for value in [
+                    "relative/file",
+                    "",
+                    &format!("{path}/../file"),
+                    &format!("{path}/./file"),
+                ] {
+                    let error = claude_environment_files(&probe, input(value)).unwrap_err();
+                    assert!(error.contains(name), "{error}");
+                    assert!(error.contains("not writable by others"), "{error}");
+                }
+                probe.untrust(path);
+                assert!(
+                    claude_environment_files(&probe, input(path))
+                        .unwrap_err()
+                        .contains(name)
+                );
+                probe.untrusted.clear();
+                probe.node(path, Node::Link);
+                assert!(claude_environment_files(&probe, input(path)).is_err());
+                probe.file(path);
+            }
+        }
+    }
+
+    #[test]
+    fn managed_settings_require_trusted_directories_and_present_files() {
+        for (platform, directories) in [
+            (Platform::Linux, vec!["/etc/claude-code"]),
+            (
+                Platform::Windows,
+                vec!["C:/ProgramData/ClaudeCode", "C:/Program Files/ClaudeCode"],
+            ),
+        ] {
+            let mut probe = Fake::new(platform, true);
+            assert!(claude_managed_settings(&probe).is_ok());
+            for directory in directories {
+                probe.dir(directory);
+                assert!(claude_managed_settings(&probe).is_ok());
+                for parent in [directory, &platform.parent(directory).unwrap()] {
+                    probe.untrust(parent);
+                    assert!(claude_managed_settings(&probe).is_err());
+                    probe.untrusted.clear();
+                }
+                for name in ["managed-settings.json", "managed-mcp.json"] {
+                    let path = platform.join(directory, name);
+                    probe.file(&path);
+                    assert!(claude_managed_settings(&probe).is_ok());
+                    probe.untrust(&path);
+                    assert!(claude_managed_settings(&probe).is_err());
+                    probe.untrusted.clear();
+                    probe.node(&path, Node::Link);
+                    assert!(claude_managed_settings(&probe).is_err());
+                    probe.node(&path, Node::Hidden);
+                    assert!(claude_managed_settings(&probe).is_err());
+                    probe.nodes.remove(&probe.path(&path));
+                }
+                probe.node(directory, Node::Link);
+                assert!(claude_managed_settings(&probe).is_err());
+                probe.node(directory, Node::Hidden);
+                assert!(claude_managed_settings(&probe).is_err());
+                probe.node(directory, Node::File);
+                assert!(claude_managed_settings(&probe).is_err());
+                probe.nodes.remove(&probe.path(directory));
+            }
+        }
+        let mut probe = linux();
+        probe.dir("/etc/claude-code").untrust("/etc/claude-code");
+        assert!(authorize(&probe, &entry()).is_err());
+        probe.privileged = Ok(false);
+        assert_eq!(
+            authorize(&probe, &entry()).unwrap(),
+            SpawnEnvironment::Inherited
+        );
+        probe.privileged = Ok(true);
+        probe.container = true;
+        assert_eq!(
+            authorize(&probe, &entry()).unwrap(),
+            SpawnEnvironment::Inherited
+        );
+    }
+
+    #[test]
+    fn host_program_reads_are_capped_at_four_bytes() {
+        let scratch = runtime_test_probe::scratch_dir();
+        let path = scratch.path().join("program");
+        fs::write(&path, b"MZ0123456789").unwrap();
+        assert_eq!(Host.program_head(path.to_str().unwrap()).unwrap(), b"MZ01");
+        fs::write(&path, b"").unwrap();
+        assert!(
+            Host.program_head(path.to_str().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_file(&path).unwrap();
+        assert!(Host.program_head(path.to_str().unwrap()).is_err());
     }
 
     #[test]

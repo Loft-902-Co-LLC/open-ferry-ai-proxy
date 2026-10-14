@@ -186,6 +186,10 @@ pub(crate) trait Probe {
     fn account_dir(&self) -> Result<String, String>;
     /// The ProgramData known folder (Windows).
     fn program_data(&self) -> Result<String, String>;
+    /// The ProgramFiles known folder (Windows).
+    fn program_files(&self) -> Result<String, String> {
+        Err("can't find the ProgramFiles known folder".to_owned())
+    }
     /// What is at `path`, links not followed.
     fn state(&self, path: &str) -> State;
     /// The names in the directory `dir`: at most `limit` of them.
@@ -196,6 +200,10 @@ pub(crate) trait Probe {
     /// Refuses `path` unless it is a regular file, not a link, that passes
     /// the system service's trust check with every directory above it.
     fn trusted_file(&self, path: &str) -> Result<(), String>;
+    /// Reads at most the first four bytes of a trusted program.
+    fn program_head(&self, _path: &str) -> Result<Vec<u8>, String> {
+        Err("can't tell what kind of program this is".to_owned())
+    }
     /// Opens `path` read-only without following a link or waiting on a special
     /// file. Permission denied distinguishes an unreadable receipt from a
     /// readable one the trust check refuses; success does not imply trust.
@@ -244,6 +252,20 @@ impl Probe for Host {
         program_data()
     }
 
+    fn program_files(&self) -> Result<String, String> {
+        #[cfg(windows)]
+        {
+            known_folder(
+                &windows_sys::Win32::UI::Shell::FOLDERID_ProgramFiles,
+                "ProgramFiles",
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            Err("there is no ProgramFiles folder on this system".to_owned())
+        }
+    }
+
     fn state(&self, path: &str) -> State {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
@@ -285,6 +307,15 @@ impl Probe for Host {
 
     fn trusted_file(&self, path: &str) -> Result<(), String> {
         os_service::Host.trusted_file(path)
+    }
+
+    fn program_head(&self, path: &str) -> Result<Vec<u8>, String> {
+        use std::io::Read as _;
+        let mut head = Vec::new();
+        fs::File::open(path)
+            .and_then(|file| file.take(4).read_to_end(&mut head))
+            .map_err(|error| format!("can't tell what kind of program this is: {error}"))?;
+        Ok(head)
     }
 
     fn readable_file(&self, path: &str) -> io::Result<()> {
@@ -890,7 +921,7 @@ pub(crate) fn claude_spawn_guard(
             let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
             let profile = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty());
             let inherited = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty());
-            let environment = authorize_claude_spawn(
+            let mut environment = authorize_claude_spawn(
                 probe.as_ref(),
                 entry,
                 program,
@@ -899,6 +930,16 @@ pub(crate) fn claude_spawn_guard(
                 inherited.as_deref().map(Path::new),
                 profile.as_deref().map(Path::new),
             )?;
+            if let open_ferry_providers::claude_cli::SpawnEnvironment::Restricted {
+                variables,
+                ..
+            } = &mut environment
+            {
+                variables.extend(claude_environment_files(
+                    probe.as_ref(),
+                    std::env::vars_os(),
+                )?);
+            }
             #[cfg(windows)]
             let environment = if matches!(
                 environment,
@@ -939,9 +980,29 @@ fn authorize_claude_spawn(
     if probe.platform() == Platform::MacOs {
         return Err(macos_refusal().to_string());
     }
+    if probe.platform() == Platform::Windows && profile.is_none() {
+        return Err("set USERPROFILE to a trusted directory".to_owned());
+    }
     let text = |path: &Path| claude_path(probe, path);
     let remedy = claude_remedy;
-    probe.trusted_file(&text(program)?).map_err(remedy)?;
+    let program_text = text(program)?;
+    probe.trusted_file(&program_text).map_err(remedy)?;
+    let native_remedy = |reason| {
+        format!(
+            "{reason}; install Claude Code's native build and set command to the real executable (not the ~/.local/bin/claude link), or to a root-owned copy (administrators' or SYSTEM's on Windows)"
+        )
+    };
+    let head = probe.program_head(&program_text).map_err(native_remedy)?;
+    let native = match probe.platform() {
+        Platform::Windows => head.starts_with(b"MZ"),
+        Platform::Linux => head.starts_with(&[0x7f, b'E', b'L', b'F']),
+        Platform::MacOs => false,
+    };
+    if !native {
+        return Err(native_remedy(format!(
+            "{program_text} is not a native executable"
+        )));
+    }
     let mut variables = Vec::new();
     let windows_profile = (probe.platform() == Platform::Windows)
         .then_some(profile)
@@ -957,7 +1018,7 @@ fn authorize_claude_spawn(
         text(path)?
     } else {
         let home = if probe.platform() == Platform::Windows {
-            profile.or(home)
+            profile
         } else {
             home
         }
@@ -967,9 +1028,10 @@ fn authorize_claude_spawn(
         probe.platform().join(&home, ".claude")
     };
     trusted_existing_dir(probe, &account).map_err(remedy)?;
-    for name in ["settings.json", "settings.local.json"] {
+    for name in ["settings.json", "settings.local.json", ".claude.json"] {
         claude_optional_file(probe, &probe.platform().join(&account, name))?;
     }
+    claude_managed_settings(probe)?;
     if configured.is_none()
         && let Some(path) = inherited_config
     {
@@ -1004,6 +1066,58 @@ fn authorize_claude_spawn(
         temp: temp.into(),
         variables,
     })
+}
+
+fn claude_environment_files(
+    probe: &dyn Probe,
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, String> {
+    let mut variables = Vec::new();
+    for (name, value) in inherited {
+        let key = name.to_string_lossy().to_ascii_uppercase();
+        if matches!(key.as_str(), "NODE_EXTRA_CA_CERTS" | "SSL_CERT_FILE")
+            || (probe.platform() == Platform::Windows && key == "CLAUDE_CODE_GIT_BASH_PATH")
+        {
+            let check = || {
+                let path = claude_path(probe, Path::new(&value))?;
+                probe.trusted_file(&path)
+            };
+            check().map_err(|reason| claude_remedy(format!("{key}: {reason}")))?;
+            variables.push((name, value));
+        }
+    }
+    Ok(variables)
+}
+
+fn claude_managed_settings(probe: &dyn Probe) -> Result<(), String> {
+    let directories = match probe.platform() {
+        Platform::Windows => vec![
+            probe
+                .platform()
+                .join(&probe.program_data().map_err(claude_remedy)?, "ClaudeCode"),
+            probe
+                .platform()
+                .join(&probe.program_files().map_err(claude_remedy)?, "ClaudeCode"),
+        ],
+        Platform::Linux => vec!["/etc/claude-code".to_owned()],
+        Platform::MacOs => return Err(macos_refusal().to_string()),
+    };
+    for directory in directories {
+        let directory = claude_path(probe, Path::new(&directory))?;
+        match probe.state(&directory) {
+            State::Missing => continue,
+            State::Directory => probe.trusted_dir(&directory).map_err(claude_remedy)?,
+            _ => {
+                return Err(claude_remedy(format!(
+                    "{directory} is not an accessible real directory"
+                )));
+            }
+        }
+        for name in ["managed-settings.json", "managed-mcp.json"] {
+            claude_optional_file(probe, &probe.platform().join(&directory, name))?;
+        }
+    }
+    Ok(())
 }
 
 fn claude_path(probe: &dyn Probe, path: &Path) -> Result<String, String> {
@@ -1043,7 +1157,7 @@ fn claude_system_paths(
 ) -> Result<(), String> {
     for path in system {
         match probe.state(path) {
-            State::Missing => continue,
+            State::Missing | State::Other => continue,
             State::Directory => probe.trusted_dir(path).map_err(claude_remedy)?,
             _ => {
                 return Err(claude_remedy(format!(
@@ -1396,17 +1510,23 @@ fn privileged_process() -> Result<bool, String> {
 /// The ProgramData known folder, from the shell, never the environment.
 #[cfg(windows)]
 fn program_data() -> Result<String, String> {
+    known_folder(
+        &windows_sys::Win32::UI::Shell::FOLDERID_ProgramData,
+        "ProgramData",
+    )
+}
+
+#[cfg(windows)]
+fn known_folder(folder: &windows_sys::core::GUID, name: &str) -> Result<String, String> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{
-        FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    };
+    use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
     let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
     // SAFETY: the folder ID is a valid GUID, a null token asks for this user's view, and
     // `path` is a valid out-pointer.
     let result = unsafe {
         SHGetKnownFolderPath(
-            &FOLDERID_ProgramData,
+            folder,
             KF_FLAG_DEFAULT as u32,
             std::ptr::null_mut(),
             &mut path,
@@ -1430,9 +1550,9 @@ fn program_data() -> Result<String, String> {
     unsafe { CoTaskMemFree(path.cast()) };
     match text {
         Some(Ok(text)) => Ok(text),
-        Some(Err(_)) => Err("the ProgramData folder's path isn't valid Unicode".to_owned()),
+        Some(Err(_)) => Err(format!("the {name} folder's path isn't valid Unicode")),
         None => Err(format!(
-            "failed to find the ProgramData folder (HRESULT {result:#010x})"
+            "failed to find the {name} folder (HRESULT {result:#010x})"
         )),
     }
 }

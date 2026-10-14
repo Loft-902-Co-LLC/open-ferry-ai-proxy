@@ -140,9 +140,10 @@ impl Entry {
         let config_dir = self.config_dir_path();
         let mut variables: Vec<_> = inherited
             .into_iter()
-            .filter(|(name, _)| {
+            .filter(|(name, value)| {
                 !scrubbed(name, config_dir.is_none())
-                    && (matches!(environment, super::SpawnEnvironment::Inherited) || allowed(name))
+                    && (matches!(environment, super::SpawnEnvironment::Inherited)
+                        || allowed(name, value))
             })
             .collect();
         if let super::SpawnEnvironment::Restricted {
@@ -218,8 +219,20 @@ impl Entry {
     }
 }
 
-fn allowed(name: &OsStr) -> bool {
+fn allowed(name: &OsStr, value: &OsStr) -> bool {
     let name = name.to_string_lossy().to_ascii_uppercase();
+    let value = value.to_string_lossy();
+    if (name == "LANG" || name.starts_with("LC_")) && value.contains(['/', '\\']) {
+        return false;
+    }
+    if name == "TZ"
+        && (value.starts_with('/')
+            || value.starts_with(":/")
+            || value.contains("..")
+            || value.contains('\\'))
+    {
+        return false;
+    }
     name.starts_with("LC_")
         || matches!(
             name.as_str(),
@@ -230,6 +243,9 @@ fn allowed(name: &OsStr) -> bool {
                 | "NO_PROXY"
                 | "ALL_PROXY"
                 | "CLAUDE_CODE_OAUTH_TOKEN"
+                | "DISABLE_AUTOUPDATER"
+                | "DISABLE_TELEMETRY"
+                | "DISABLE_ERROR_REPORTING"
         )
 }
 
