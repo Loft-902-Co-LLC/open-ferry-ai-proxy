@@ -5475,6 +5475,23 @@ fn restore_skips_a_directory_that_leads_elsewhere_now() {
         saved(&fake, LINUX_RECORD)["backup"]["files"][0]["parent"],
         "/data/cfg"
     );
+    // Keep the backup available after the parent changes, so this tests
+    // the changed restore destination rather than a missing backup.
+    let backup = saved(&fake, LINUX_RECORD)["backup"]["dir"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let moved = backup.replacen("/data/cfg", "/data/other", 1);
+    for dir in fake.dirs.clone() {
+        if let Some(rest) = dir.strip_prefix(&backup) {
+            fake.dir(&format!("{moved}{rest}"));
+        }
+    }
+    for (path, data) in fake.files.clone() {
+        if let Some(rest) = path.strip_prefix(&format!("{backup}/")) {
+            fake.file(&format!("{moved}/{rest}"), data);
+        }
+    }
     fake.links
         .insert("/data/cfg".to_owned(), "/data/other".to_owned());
     fake.dir("/data/other");
@@ -5690,6 +5707,7 @@ fn privileged_drop_in_undo_changes_nothing_and_spawns_nothing() {
         &mut record,
         false,
         true,
+        false,
         &mut Vec::new(),
     )
     .unwrap_err();
@@ -8102,13 +8120,13 @@ fn r9_restore_refuses_a_file_source_missing_at_authorization() {
     r9_missing_restore(
         "/config/config.yaml",
         "source",
-        "went away before it was copied",
+        "isn't there, so nothing was copied to",
     );
 }
 
 #[test]
 fn r9_restore_refuses_a_tree_source_missing_at_authorization() {
-    r9_missing_restore("/auth", "source", "went away before it was copied");
+    r9_missing_restore("/auth", "source", "isn't there, so nothing was copied to");
 }
 
 #[test]
@@ -8116,7 +8134,7 @@ fn r9_restore_refuses_a_tree_entry_missing_at_authorization() {
     r9_missing_restore(
         "/auth/claude.json",
         "source",
-        "went away before it was copied",
+        "isn't there, so nothing was copied to",
     );
 }
 
@@ -8147,7 +8165,7 @@ fn r9_copy_tree_requires_its_destination_after_creation() {
     assert_eq!(ran.code, 1, "{}", ran.all());
     has(
         &ran.all(),
-        &format!("{dir} went away before it was copied into"),
+        &format!("{dir} isn't there, so nothing was copied into it"),
     );
     assert!(
         !fake
@@ -8212,7 +8230,9 @@ fn r9_restore_requires_its_backup_directory_but_plain_undo_does_not() {
         if restore {
             has(
                 &ran.all(),
-                &format!("the backup's directory, {root}, doesn't exist, so nothing was restored"),
+                &format!(
+                    "the backup's directory, {root}, doesn't exist, so `-restore` has nothing to copy back"
+                ),
             );
             assert!(!fake.events.iter().any(|event| event.starts_with("copy ")));
         }
@@ -8407,4 +8427,202 @@ fn r9_locked_undo_refusal_says_nothing_was_changed() {
     assert_eq!(ran.code, 1, "{}", ran.all());
     has(&ran.err, ". Nothing was changed");
     assert_eq!(fake.events, [format!("lock {path}.lock")]);
+}
+
+// Round 10: missing backups never receive record writes or start a restore.
+fn r10_delete_backup(fake: &mut Fake, dir: &str) {
+    let below = |path: &String| path == dir || path.starts_with(&format!("{dir}/"));
+    fake.files.retain(|path, _| !below(path));
+    fake.dirs.retain(|path| !below(path));
+    fake.trust.nodes.retain(|path, _| !below(path));
+}
+
+fn r10_plain_undo_without_backup(privileged: bool) {
+    let (mut fake, context) = r9_switched();
+    let main = saved(&fake, "/var/lib/open-ferry/migration.json");
+    let dir = main["backup"]["dir"].as_str().unwrap().to_owned();
+    fake.trust.privileged = Ok(privileged);
+    let path = record::path(&fake, &context).unwrap();
+    fake.file(&path, main.to_string());
+    r10_delete_backup(&mut fake, &dir);
+    let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(saved(&fake, &path)["status"], "undone");
+    lacks(&ran.all(), "failed to write");
+    lacks(&ran.all(), &format!("{dir} doesn't exist"));
+    assert!(
+        !fake.events.iter().any(|event| {
+            (event.starts_with("write ") || event.starts_with("rename ")) && event.contains(&dir)
+        }),
+        "{:?}",
+        fake.events
+    );
+    assert!(
+        !fake
+            .files
+            .keys()
+            .any(|path| path.starts_with(&format!("{dir}/")))
+    );
+}
+
+#[test]
+fn r10_privileged_plain_undo_skips_a_deleted_backup_record() {
+    r10_plain_undo_without_backup(true);
+}
+
+#[test]
+fn r10_unprivileged_plain_undo_skips_a_deleted_backup_record() {
+    r10_plain_undo_without_backup(false);
+}
+
+#[test]
+fn r10_record_write_requires_its_backup_parent_again() {
+    let (mut fake, context) = r9_switched();
+    let path = "/var/lib/open-ferry/migration.json";
+    let main: record::Record = serde_json::from_slice(fake.data(path)).unwrap();
+    let dir = main.backup.as_ref().unwrap().dir.clone();
+    let copy = context.platform.join(&dir, record::FILE);
+    let bytes = fake.data(&copy).to_vec();
+    // save's directory check and its copy pre-check succeed, then the
+    // directory disappears before replace is allowed to write anything.
+    fake.states.borrow_mut().insert(
+        dir.clone(),
+        VecDeque::from([
+            crate::scope::State::Directory,
+            crate::scope::State::Directory,
+            crate::scope::State::Missing,
+        ]),
+    );
+    let error = record::save(&mut fake, context.platform, path, &main).unwrap_err();
+    assert_eq!(
+        error,
+        format!("{dir} doesn't exist, so {copy} wasn't written")
+    );
+    assert_eq!(fake.data(&copy), bytes);
+    assert!(!fake.events.iter().any(|event| {
+        (event.starts_with("write ") || event.starts_with("rename ")) && event.contains(&dir)
+    }));
+    assert!(
+        !fake
+            .files
+            .keys()
+            .any(|path| path.starts_with(&format!("{copy}.")))
+    );
+}
+
+fn r10_restore_without_backup(privileged: bool, after_lock: bool) {
+    let (mut fake, context) = r9_switched();
+    let main = saved(&fake, "/var/lib/open-ferry/migration.json");
+    let dir = main["backup"]["dir"].as_str().unwrap().to_owned();
+    fake.trust.privileged = Ok(privileged);
+    let path = record::path(&fake, &context).unwrap();
+    fake.file(&path, main.to_string());
+    if after_lock {
+        fake.states.borrow_mut().insert(
+            dir.clone(),
+            VecDeque::from([crate::scope::State::Directory, crate::scope::State::Missing]),
+        );
+    } else {
+        r10_delete_backup(&mut fake, &dir);
+    }
+    let files = fake.files.clone();
+    let dirs = fake.dirs.clone();
+    let ran = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        &format!(
+            "the backup's directory, {dir}, doesn't exist, so `-restore` has nothing to copy back: run `open-ferry migrate -undo` without `-restore` to switch back and leave the files as they are. Nothing was changed"
+        ),
+    );
+    assert_eq!(fake.files, files);
+    assert_eq!(fake.dirs, dirs);
+    assert!(fake.launches.is_empty());
+    if after_lock {
+        assert_eq!(fake.events, [format!("lock {path}.lock")]);
+    } else {
+        assert!(fake.events.is_empty(), "{:?}", fake.events);
+    }
+}
+
+#[test]
+fn r10_privileged_restore_requires_backup_before_lock() {
+    r10_restore_without_backup(true, false);
+}
+
+#[test]
+fn r10_privileged_restore_requires_backup_after_locked_reread() {
+    r10_restore_without_backup(true, true);
+}
+
+#[test]
+fn r10_unprivileged_restore_requires_backup_before_lock() {
+    r10_restore_without_backup(false, false);
+}
+
+#[test]
+fn r10_unprivileged_restore_requires_backup_after_locked_reread() {
+    let (mut fake, context) = r9_switched();
+    fake.trust.privileged = Ok(false);
+    let mut main = saved(&fake, "/var/lib/open-ferry/migration.json");
+    let path = record::path(&fake, &context).unwrap();
+    fake.file(&path, main.to_string());
+    let missing = "/etc/cliproxyapi/deleted-backup";
+    main["backup"]["dir"] = Value::String(missing.to_owned());
+    fake.on(
+        &format!("lock {path}.lock"),
+        Effect::Place(path.clone(), main.to_string().into_bytes()),
+    );
+    let ran = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        &format!(
+            "the backup's directory, {missing}, doesn't exist, so `-restore` has nothing to copy back"
+        ),
+    );
+    has(&ran.err, "Nothing was changed");
+    assert_eq!(fake.events, [format!("lock {path}.lock")]);
+    assert!(fake.launches.is_empty());
+}
+
+#[test]
+fn r10_recovered_undo_announces_the_backup_copy_once() {
+    let (mut fake, context) = r9_switched();
+    let path = "/var/lib/open-ferry/migration.json";
+    let main = saved(&fake, path);
+    let dir = main["backup"]["dir"].as_str().unwrap();
+    fake.file(
+        path,
+        serde_json::json!({"backup": {"dir": dir}}).to_string(),
+    );
+    let ran = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let notice = format!("The copy in the backup, {dir}/migration.json, is read instead.");
+    assert_eq!(ran.out.matches(&notice).count(), 1, "{}", ran.all());
+}
+
+#[test]
+fn r10_record_directory_missing_after_creation_takes_no_lock() {
+    let context = linux_root();
+    let mut fake = Fake::new(&context);
+    protect_migration(&mut fake);
+    let path = record::path(&fake, &context).unwrap();
+    let dir = context.platform.parent(&path).unwrap();
+    fake.states.borrow_mut().insert(
+        dir.clone(),
+        std::iter::repeat_with(|| crate::scope::State::Missing)
+            .take(4)
+            .collect(),
+    );
+    let error = match record::lock(&mut fake, context.platform, &path) {
+        Err(error) => error,
+        Ok(_) => panic!("the missing record directory was accepted"),
+    };
+    assert_eq!(
+        error,
+        format!("the record's directory, {dir}, doesn't exist")
+    );
+    assert_eq!(fake.events, [format!("machine mkdir {dir}")]);
+    assert!(!fake.files.contains_key(&path));
 }

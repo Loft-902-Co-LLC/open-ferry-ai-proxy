@@ -317,11 +317,24 @@ pub(super) fn authorize(machine: &dyn Machine, path: &str) -> Result<bool, Strin
 /// temporary file is made with `create_new`, so it never follows a link or
 /// reuses a file, and only its owner can open it on Unix.
 fn replace(machine: &mut dyn Machine, path: &str, text: &str) -> Result<(), String> {
-    authorize(machine, path)?;
+    let privileged = super::machine::privileged_run(machine.trust_probe());
+    if privileged {
+        if let Some(parent) = machine.trust_probe().platform().parent(path)
+            && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&parent))
+                .map_err(|error| error.to_string())?
+        {
+            return Err(format!("{parent} doesn't exist, so {path} wasn't written"));
+        }
+        crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(path))
+            .map_err(|error| error.to_string())?;
+    }
     let mut tries = 0;
     let temp = loop {
         let temp = temp_name(path);
-        authorize(machine, &temp)?;
+        if privileged {
+            crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&temp))
+                .map_err(|error| error.to_string())?;
+        }
         match machine.write_new(&temp, text.as_bytes()) {
             Ok(()) => break temp,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => {
@@ -411,9 +424,23 @@ pub(crate) fn save(
     record: &Record,
 ) -> Result<(), String> {
     authorize(machine, path)?;
-    if let Some(backup) = &record.backup {
-        authorize(machine, &platform.join(&backup.dir, FILE))?;
-    }
+    let copy = if let Some(backup) = &record.backup {
+        let exists = if super::machine::privileged_run(machine.trust_probe()) {
+            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
+                .map_err(|error| error.to_string())?
+        } else {
+            machine.exists(&backup.dir)
+        };
+        if exists {
+            let copy = platform.join(&backup.dir, FILE);
+            authorize(machine, &copy)?;
+            Some(copy)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut text = serde_json::to_string_pretty(record)
         .map_err(|error| format!("failed to write the switch's record: {error}"))?;
     text.push('\n');
@@ -422,8 +449,7 @@ pub(crate) fn save(
     }
     replace(machine, path, &text)
         .map_err(|error| format!("failed to write the switch's record: {error}"))?;
-    if let Some(backup) = &record.backup {
-        let copy = platform.join(&backup.dir, FILE);
+    if let Some(copy) = copy {
         replace(machine, &copy, &text)?;
     }
     Ok(())
