@@ -123,6 +123,12 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      - name: Save the cache
+        if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.key }}
+
   tests-windows:
     name: tests (windows-latest)
     needs: changes
@@ -162,6 +168,12 @@ jobs:
           cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --message-format=json > "$RUNNER_TEMP/open-ferry-build.json"
           "$PYTHON" -I crates/open-ferry/check-release.py "$RUNNER_TEMP/open-ferry-build.json"
 
+      - name: Save the cache
+        if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.key }}
+
   release-seams-windows:
     name: release-seams (windows-latest)
     needs: changes
@@ -193,13 +205,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # Its own cache: the feature changes what these crates build. The
-      # runners build the same, so one saves.
+      # Its own cache: the feature changes what these crates build.
       - id: rust
         uses: ./.github/actions/setup-rust
         with:
           cache: blue-green
-          save: ${{ matrix.shard == 1 }}
 
       - name: Clippy with the blue-green test seams
         if: matrix.shard == 1 && (github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true')
@@ -230,6 +240,12 @@ jobs:
       - name: Doc tests with the blue-green test seams
         if: github.event_name != 'push' && steps.shard.outputs.doc == 'true'
         run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --doc
+
+      - name: Save the cache
+        if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.key }}
 
   blue-green-tests-windows:
     name: blue-green (windows-latest, ${{ matrix.shard }} of 3)
@@ -325,14 +341,21 @@ jobs:
       - name: Install the toolchain from rust-toolchain.toml
         run: rustup toolchain install --profile minimal
 
-      # cargo-about's own release build, checked against the checksum
-      # install-action keeps for it, instead of building it here. No
-      # fallback: it fails rather than build from source.
+      # cargo-about's own release build, instead of building it here,
+      # checked against the checksum GitHub lists for that release asset.
       - name: Install cargo-about
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
-        with:
-          tool: cargo-about@0.9.2
-          fallback: none
+        env:
+          VERSION: 0.9.2
+          SHA256: 9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af
+        run: |
+          set -euo pipefail
+          name="cargo-about-$VERSION-x86_64-unknown-linux-musl"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/$VERSION/$name.tar.gz"
+          echo "$SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
 
       - name: Fetch the crates
         run: cargo fetch --locked

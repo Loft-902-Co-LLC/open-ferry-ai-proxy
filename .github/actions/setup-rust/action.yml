@@ -10,14 +10,14 @@ inputs:
       The cache's name. Jobs that build the same way share one, so each way is
       cached once.
     required: true
-  save:
-    description: Whether this job saves the cache, which happens on main only.
-    default: "true"
 
 outputs:
   cache-hit:
     description: Whether the cache held this exact key.
-    value: ${{ steps.cache.outputs.cache-hit }}
+    value: ${{ steps.lookup.outputs.cache-hit || steps.cache.outputs.cache-hit }}
+  key:
+    description: The cache's key, for save-rust-cache.
+    value: ${{ steps.key.outputs.key }}
 
 runs:
   using: composite
@@ -26,19 +26,50 @@ runs:
       shell: bash
       run: rustup toolchain install --profile minimal
 
-    # Dependencies only: rust-cache drops the workspace's own crates before
-    # saving, and they would rebuild anyway, as the checkout gives every file
-    # a new time. The key changes with Cargo.lock, the toolchain and the
-    # CARGO* and RUST* variables. Only main saves, so PR and merge-queue runs
-    # don't push main's caches out of the repository's space, and they all
-    # start from main's. A push to main only looks its key up: when main has
-    # it, there is nothing to build.
-    - id: cache
-      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+    # What the dependencies' builds depend on: the toolchain, the lock file
+    # and the manifests, which pick the features. The workflow's CARGO*
+    # variables count too: bump v1 when they change.
+    - id: key
+      shell: bash
+      env:
+        CACHE: ${{ inputs.cache }}
+      run: |
+        set -euo pipefail
+        hash=$(git ls-files -z -- rust-toolchain.toml Cargo.lock ':(glob)**/Cargo.toml' | xargs -0 cat | sha256sum | cut -c1-16)
+        echo "key=cargo-v1-$CACHE-$RUNNER_OS-$hash" >> "$GITHUB_OUTPUT"
+        echo "prefix=cargo-v1-$CACHE-$RUNNER_OS-" >> "$GITHUB_OUTPUT"
+
+    # Only a push to main saves (see save-rust-cache), so the caches are
+    # main's: PR and merge-queue runs don't push them out of the
+    # repository's space. A push only looks its key up. When main has it,
+    # there is nothing to build; when not, it builds from nothing, so that
+    # builds of old dependencies don't pile up in the cache.
+    - id: lookup
+      if: github.event_name == 'push'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        shared-key: ${{ inputs.cache }}
-        save-if: ${{ github.ref == 'refs/heads/main' && inputs.save == 'true' }}
-        lookup-only: ${{ github.event_name == 'push' }}
+        # The same paths as save-rust-cache's.
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ steps.key.outputs.key }}
+        lookup-only: true
+
+    # Everything else starts from main's cache for this key, or the newest
+    # one with the same name.
+    - id: cache
+      if: github.event_name != 'push'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.prefix }}
 
     # The supervisor's tests run binaries from scratch directories, which
     # its trust check must accept. The runner's D: drive, where the

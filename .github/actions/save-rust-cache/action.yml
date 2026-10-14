@@ -1,0 +1,34 @@
+name: Save the Rust cache
+description: >-
+  Drops the workspace's own crates from the target directory and saves the
+  rest, the dependencies, under the key setup-rust gave. Only a push to main
+  runs it, when setup-rust found no cache for the key.
+
+inputs:
+  key:
+    description: setup-rust's key output.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The workspace's crates rebuild in every run anyway, as the checkout
+    # gives every file a new time, so they stay out of the cache.
+    - name: Keep the dependencies only
+      shell: bash
+      env:
+        PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+      run: |
+        set -euo pipefail
+        cargo metadata --no-deps --format-version 1 --locked > "$RUNNER_TEMP/workspace.json"
+        "$PYTHON" -I .github/scripts/clean-target.py "$RUNNER_TEMP/workspace.json"
+
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        # The same paths as setup-rust's.
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ inputs.key }}
