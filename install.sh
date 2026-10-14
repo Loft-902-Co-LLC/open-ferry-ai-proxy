@@ -124,6 +124,7 @@ run() (
     exit $?
   fi
   for proxy in http_proxy https_proxy HTTPS_PROXY no_proxy NO_PROXY all_proxy ALL_PROXY; do
+    present=
     eval "present=\${$proxy+x}"
     if [ "$present" = x ]; then
       eval "value=\${$proxy}"
