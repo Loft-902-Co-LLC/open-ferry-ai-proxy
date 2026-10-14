@@ -461,6 +461,7 @@ fn check_auth_dir_with_reader(
         ));
         return Vec::new();
     }
+    let dir = crate::scope::absolute_auth_dir(probe, dir);
     let shown = dir.display();
     match fs::metadata(&dir) {
         Ok(metadata) if metadata.is_dir() => {}

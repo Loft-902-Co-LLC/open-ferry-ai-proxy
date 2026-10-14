@@ -189,11 +189,25 @@ fn save_unlinked(files: &FileStore, record: &mut Auth) -> io::Result<(String, Op
         return Err(linked(&path));
     }
     let path = credentials::save_merged(files, record)?;
-    let data = match read_unlinked(path.as_ref()) {
+    let data = read_back(files, path.as_ref(), read_unlinked);
+    Ok((path, data))
+}
+
+fn read_back(
+    files: &FileStore,
+    path: &std::path::Path,
+    read: impl FnOnce(&std::path::Path) -> io::Result<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if files
+        .file_guard()
+        .is_some_and(|guard| guard.check_read(path).is_err())
+    {
+        return None;
+    }
+    match read(path) {
         Ok(data) if !data.is_empty() => Some(data),
         _ => None,
-    };
-    Ok((path, data))
+    }
 }
 
 /// The metadata of the credential registered with `record`'s ID, else of
@@ -216,4 +230,62 @@ fn registered_metadata(
         .into_iter()
         .find(|auth| auth.file_name == record.file_name && !auth.metadata.is_empty())
         .map(|auth| auth.metadata.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use open_ferry_core::auth::file_guard::FileGuard;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_refused_readback_uses_the_failed_read_path_without_calling_the_reader() {
+        let root = std::env::var_os("OFP_TEST_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+            });
+        fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::tempdir_in(root).unwrap();
+        let refused = Arc::new(AtomicBool::new(false));
+        let checked = Arc::clone(&refused);
+        let store = FileStore::new(dir.path()).with_file_guard(Some(FileGuard::new(move |_| {
+            if checked.load(Ordering::SeqCst) {
+                Err("untrusted readback".into())
+            } else {
+                Ok(())
+            }
+        })));
+        let mut record = Auth {
+            id: "account.json".into(),
+            provider: "codex".into(),
+            ..Auth::default()
+        };
+        record
+            .metadata
+            .insert("type".into(), serde_json::json!("codex"));
+        let path = credentials::save_merged(&store, &mut record).unwrap();
+        refused.store(true, Ordering::SeqCst);
+        let reads = std::cell::Cell::new(0);
+        assert!(
+            read_back(&store, path.as_ref(), |_| {
+                reads.set(reads.get() + 1);
+                Ok(b"secret".to_vec())
+            })
+            .is_none()
+        );
+        assert_eq!(reads.get(), 0);
+        refused.store(false, Ordering::SeqCst);
+        assert!(
+            read_back(&store, path.as_ref(), |_| Err(
+                io::ErrorKind::PermissionDenied.into()
+            ))
+            .is_none()
+        );
+        assert!(read_back(&store, path.as_ref(), |_| Ok(Vec::new())).is_none());
+        assert_eq!(
+            read_back(&store, path.as_ref(), |_| Ok(b"trusted".to_vec())),
+            Some(b"trusted".to_vec())
+        );
+    }
 }

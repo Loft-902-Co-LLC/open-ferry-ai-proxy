@@ -25,8 +25,23 @@ pub(crate) fn authorize_credential_file(probe: &dyn Probe, path: &Path) -> Resul
             }
             Ok(())
         }
-        State::File => authorize_file(probe, path).map(|_| ()),
+        State::File => match authorize_file(probe, path)? {
+            true => Ok(()),
+            false => Err(refuse("it changed while being checked".to_owned())),
+        },
         _ => Err(refuse("it isn't an accessible real file".to_owned())),
+    }
+}
+
+/// Uses the same full auth-directory path as the service under privilege.
+/// Call after authorizing the original path, so dot components still refuse.
+pub(crate) fn absolute_auth_dir(probe: &dyn Probe, dir: std::path::PathBuf) -> std::path::PathBuf {
+    if matches!(probe.privileged(), Ok(false)) || probe.in_container() {
+        return dir;
+    }
+    match std::path::absolute(&dir) {
+        Ok(absolute) => open_ferry_core::auth::path::clean(&absolute),
+        Err(_) => dir,
     }
 }
 
@@ -46,6 +61,114 @@ pub(crate) fn credential_file_guard(probe: RuntimeProbe) -> Option<FileGuard> {
 mod tests {
     use super::*;
     use crate::update::scope_probe::Fake;
+
+    struct VanishingFile {
+        fake: super::super::runtime_test_probe::RuntimeFake,
+        path: String,
+        lookups: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Probe for VanishingFile {
+        fn platform(&self) -> Platform {
+            self.fake.platform()
+        }
+        fn privileged(&self) -> Result<bool, String> {
+            self.fake.privileged()
+        }
+        fn account_dir(&self) -> Result<String, String> {
+            self.fake.account_dir()
+        }
+        fn program_data(&self) -> Result<String, String> {
+            self.fake.program_data()
+        }
+        fn state(&self, path: &str) -> State {
+            if self.platform().clean(path) == self.path {
+                if self
+                    .lookups
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0
+                {
+                    State::File
+                } else {
+                    State::Missing
+                }
+            } else {
+                self.fake.state(path)
+            }
+        }
+        fn entries(&self, dir: &str, limit: usize) -> io::Result<Vec<String>> {
+            self.fake.entries(dir, limit)
+        }
+        fn trusted_dir(&self, path: &str) -> Result<(), String> {
+            self.fake.trusted_dir(path)
+        }
+        fn trusted_file(&self, path: &str) -> Result<(), String> {
+            self.fake.trusted_file(path)
+        }
+        fn readable_file(&self, path: &str) -> io::Result<()> {
+            self.fake.readable_file(path)
+        }
+        fn receipt(&self, path: &str) -> Result<Option<Receipt>, ReceiptError> {
+            self.fake.receipt(path)
+        }
+        fn canonical(&self, path: &str) -> io::Result<String> {
+            self.fake.canonical(path)
+        }
+        fn create_machine_dir(&mut self, _: &str) -> io::Result<()> {
+            panic!("never provision")
+        }
+    }
+
+    #[test]
+    fn a_credential_that_vanishes_during_authorization_never_reaches_the_reader() {
+        use open_ferry_core::auth::{Auth, AuthStore, FileStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = super::super::runtime_test_probe::scratch_dir();
+        let root = open_ferry_core::auth::path::clean(dir.path());
+        let path = root.join("vanishing.json");
+        fs::write(&path, br#"{"type":"codex"}"#).unwrap();
+        let platform = Platform::HOST.unwrap();
+        let mut fake = Fake::new(platform, true);
+        fake.file(path.to_str().unwrap());
+        let probe = Arc::new(VanishingFile {
+            fake: super::super::runtime_test_probe::RuntimeFake::new(fake),
+            path: platform.clean(path.to_str().unwrap()),
+            lookups: AtomicUsize::new(0),
+        });
+        let refusal = authorize_credential_file(probe.as_ref(), &path).unwrap_err();
+        assert!(refusal.reason.contains("it changed while being checked"));
+        probe.lookups.store(0, Ordering::SeqCst);
+        let runtime: RuntimeProbe = probe.clone();
+        let store = FileStore::new(&root).with_file_guard(credential_file_guard(runtime));
+        let auth = Auth {
+            file_name: "vanishing.json".into(),
+            ..Auth::default()
+        };
+        let reads = std::cell::Cell::new(0);
+        assert!(
+            store
+                .read_existing_metadata(&auth, |_| {
+                    reads.set(reads.get() + 1);
+                    Ok(b"{}".to_vec())
+                })
+                .is_err()
+        );
+        assert_eq!(reads.get(), 0);
+        probe.lookups.store(0, Ordering::SeqCst);
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn auth_directory_paths_are_made_full_only_under_privilege() {
+        let relative = std::path::PathBuf::from("auth");
+        let mut fake = Fake::new(Platform::HOST.unwrap(), true);
+        assert_eq!(
+            absolute_auth_dir(&fake, relative.clone()),
+            open_ferry_core::auth::path::clean(&std::path::absolute(&relative).unwrap())
+        );
+        fake.privileged = Ok(false);
+        assert_eq!(absolute_auth_dir(&fake, relative.clone()), relative);
+    }
 
     #[test]
     fn credential_leaves_and_new_targets_need_their_own_trust() {

@@ -729,6 +729,31 @@ fn a_trusted_config_with_an_untrusted_auth_directory_never_reads_credentials() {
     assert!(finding.fix.contains("not writable by others"));
 }
 
+#[cfg(windows)]
+#[test]
+fn privileged_check_reads_relative_auth_paths_as_full_paths() {
+    use crate::os_service::Platform;
+    use crate::update::scope_probe::Fake;
+    let dir = crate::scope::runtime_test_probe::scratch_dir();
+    let root = open_ferry_core::auth::path::clean(dir.path());
+    let path = root.join("trusted.json");
+    fs::write(&path, br#"{"type":"codex"}"#).unwrap();
+    // A rooted path without a drive needs the current directory's drive.
+    let relative = PathBuf::from(&root.to_str().unwrap()[2..]);
+    let mut probe = Fake::new(Platform::HOST.unwrap(), true);
+    probe.file(path.to_str().unwrap());
+    let mut config = Config::default();
+    config.auth_dir = relative.to_string_lossy().into_owned();
+    let mut findings = Vec::new();
+    let reads = std::cell::RefCell::new(Vec::new());
+    let auths = check_auth_dir_with_reader(&probe, &config, now(), &mut findings, |path| {
+        reads.borrow_mut().push(path.to_path_buf());
+        read_capped(path)
+    });
+    assert_eq!(auths.len(), 1, "{findings:?}");
+    assert_eq!(*reads.borrow(), vec![path]);
+}
+
 #[test]
 fn check_reports_an_untrusted_credential_without_reading_or_parsing_it() {
     use crate::os_service::Platform;
