@@ -2642,6 +2642,88 @@ fn launcher_task() -> (Fake, Context) {
     (fake, context)
 }
 
+#[test]
+fn an_unrelated_refused_task_script_is_a_note_instead_of_a_discovery_error() {
+    for running in [false, true] {
+        for json in [false, true] {
+            let (mut fake, context) = launcher_task();
+            if !running {
+                fake.procs.clear();
+            }
+            let path = r"C:\Users\me\cpa\start.ps1";
+            fake.trust = crate::update::scope_probe::Fake::new(Platform::Windows, true);
+            fake.trust.file(path).untrust(path);
+            fake.forbidden_reads.insert(path.to_owned());
+            fake.answer(
+                "schtasks.exe /query /xml ONE",
+                0,
+                &tasks_xml(
+                    r"\Unrelated",
+                    true,
+                    "powershell.exe",
+                    &format!(r#"-File "{path}""#),
+                    r"C:\Users\me\cpa",
+                ),
+            );
+            let ran = migrate(&mut fake, &context, if json { &["-json"] } else { &[] });
+            assert_eq!(ran.code, u8::from(!running || !json), "{}", ran.all());
+            has(&ran.all(), "Scheduled task");
+            has(&ran.all(), "start.ps1");
+            has(&ran.all(), "which wasn't read:");
+            has(&ran.all(), "as that task's account, or switch it by hand.");
+            assert!(!ran.all().contains("Set-Location"));
+            if json {
+                let value: Value = serde_json::from_str(ran.out.trim()).unwrap();
+                assert_eq!(value["found"], running);
+                if running {
+                    has(&value["warnings"].to_string(), "Scheduled task");
+                } else {
+                    has(&ran.err, "Scheduled task");
+                }
+            }
+            read_only(&fake);
+        }
+    }
+}
+
+#[test]
+fn a_refused_task_script_still_matches_the_binary_named_in_its_arguments() {
+    for path in [
+        r"C:\Users\me\cpa\start.ps1",
+        "start.ps1",
+        r"%UNKNOWN%\start.ps1",
+    ] {
+        for running in [false, true] {
+            let (mut fake, context) = launcher_task();
+            if !running {
+                fake.procs.clear();
+            }
+            fake.answer(
+                "schtasks.exe /query /xml ONE",
+                0,
+                &tasks_xml(
+                    r"\CLIProxyAPI",
+                    true,
+                    "powershell.exe",
+                    &format!(r#"-File "{path}" {TASK_CPA}"#),
+                    "",
+                ),
+            );
+            fake.trust = crate::update::scope_probe::Fake::new(Platform::Windows, true);
+            fake.trust.file(path).untrust(path);
+            fake.forbidden_reads.insert(path.to_owned());
+            let (found, _) = discover::discover(&mut fake, &context, None).unwrap();
+            let found = found.unwrap();
+            assert!(matches!(
+                found.starter,
+                discover::Starter::Launcher(discover::Launcher::Task { .. })
+            ));
+            has(&found.notes.join("\n"), "Scheduled task");
+            read_only(&fake);
+        }
+    }
+}
+
 // Not upstream's: the plan for a task that runs a launcher script, as
 // `open-ferry migrate -dry-run` shows it.
 #[test]
@@ -3132,6 +3214,82 @@ fn blockers_of(fake: &mut Fake, context: &Context) -> (Value, String) {
         .collect();
     let blockers = serde_json::to_string(&blockers).unwrap();
     (json, blockers)
+}
+
+#[test]
+fn a_refused_unit_fragment_has_its_own_blocker_and_remedy() {
+    let argv = "/usr/local/bin/cli-proxy-api -config /etc/old.yaml";
+    let (mut fake, context) = stopped_unit(
+        &format!("[Service]\nExecStart={argv}\n"),
+        None,
+        "/usr/local/bin/cli-proxy-api",
+        argv,
+    );
+    let path = "/etc/systemd/system/cliproxyapi.service";
+    fake.trust = crate::update::scope_probe::Fake::new(Platform::Linux, true);
+    fake.trust.file(path).untrust(path);
+    fake.forbidden_reads.insert(path.to_owned());
+    let (found, _) = discover::discover(&mut fake, &context, None).unwrap();
+    let blockers = found.unwrap().blockers.join("\n");
+    has(&blockers, path);
+    has(&blockers, "untrusted");
+    has(
+        &blockers,
+        "make the file and every directory above it root's and writable only by root",
+    );
+    has(&blockers, "run `open-ferry migrate` again");
+    assert!(!blockers.contains("can't be told reliably"));
+    assert!(!blockers.contains("switch by hand"));
+    fake.trust.privileged = Err("privilege unavailable".to_owned());
+    let (found, _) = discover::discover(&mut fake, &context, None).unwrap();
+    let blockers = found.unwrap().blockers.join("\n");
+    has(&blockers, "privilege unavailable");
+    has(
+        &blockers,
+        "make the file and every directory above it root's and writable only by root",
+    );
+    has(&blockers, "run `open-ferry migrate` again");
+    assert!(!blockers.contains("switch by hand"));
+    read_only(&fake);
+}
+
+#[test]
+fn an_unrelated_wrapper_unit_is_skipped_before_its_files_are_read() {
+    let argv = "/usr/local/bin/cli-proxy-api -config /etc/old.yaml";
+    let (mut fake, context) = stopped_unit(
+        &format!("[Service]\nExecStart={argv}\n"),
+        None,
+        "/usr/local/bin/cli-proxy-api",
+        argv,
+    );
+    let wrapper = shown_unit(0, "/bin/sh", "/", false, "", "").replace(
+        "FragmentPath=/etc/systemd/system/cliproxyapi.service",
+        "FragmentPath=/etc/wrapper.service",
+    );
+    fake.answer(
+        "systemctl --user show cliproxyapi.service",
+        0,
+        &format!("{wrapper}DropInPaths=/etc/wrapper.conf\n"),
+    );
+    fake.trust = crate::update::scope_probe::Fake::new(Platform::Linux, true);
+    fake.trust.file("/etc/systemd/system/cliproxyapi.service");
+    for path in ["/etc/wrapper.service", "/etc/wrapper.conf"] {
+        fake.trust.file(path).untrust(path);
+        fake.forbidden_reads.insert(path.to_owned());
+    }
+    let (found, _) = discover::discover(&mut fake, &context, None).unwrap();
+    let found = found.unwrap();
+    assert_eq!(found.exe.as_deref(), Some("/usr/local/bin/cli-proxy-api"));
+    assert!(found.blockers.is_empty(), "{:?}", found.blockers);
+    // Even a trusted wrapper's files are irrelevant and must not be read.
+    fake.trust.untrusted.clear();
+    assert!(
+        discover::discover(&mut fake, &context, None)
+            .unwrap()
+            .0
+            .is_some()
+    );
+    read_only(&fake);
 }
 
 // Not upstream's: a drop-in that replaces ExecStart is the command, and a
@@ -6953,11 +7111,11 @@ fn ancillary_task_scripts_are_refused_before_reading() {
             }
             fake.forbidden_reads.insert(path.to_owned());
             let ran = migrate(&mut fake, &context, &["-json"]);
-            assert_eq!(ran.code, 1, "{}", ran.all());
-            // JSON escapes Windows separators.
-            has(&ran.out, "start.ps1");
+            assert_eq!(ran.code, u8::from(!running), "{}", ran.all());
+            // Not-found JSON writes discovery notes to stderr.
+            has(&ran.all(), "start.ps1");
             has(
-                &ran.out,
+                &ran.all(),
                 if probe_error {
                     "privilege unavailable"
                 } else {

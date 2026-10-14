@@ -916,7 +916,15 @@ fn systemd_details(context: &Context, shown: &Shown, user: bool, found: &mut Fou
 struct UnitExec {
     exe: String,
     args: Vec<String>,
-    problem: Option<String>,
+    problem: Option<UnitProblem>,
+}
+
+enum UnitProblem {
+    Unreliable(String),
+    Refused {
+        path: String,
+        refusal: crate::scope::Refusal,
+    },
 }
 
 /// The `ExecStart=` commands in effect, as systemd takes them, each with
@@ -925,22 +933,27 @@ struct UnitExec {
 fn effective_exec_starts(
     machine: &mut dyn Machine,
     shown: &Shown,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<(String, String)>, UnitProblem> {
     let fragment = shown.get("FragmentPath");
     if fragment.is_empty() {
-        return Err("it has no unit file".to_owned());
+        return Err(UnitProblem::Unreliable("it has no unit file".to_owned()));
     }
     let mut commands = Vec::new();
     let drop_ins = shown.get("DropInPaths").split_whitespace();
     for path in std::iter::once(fragment).chain(drop_ins) {
         if !crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(path))
-            .map_err(|error| error.to_string())?
+            .map_err(|refusal| UnitProblem::Refused {
+                path: path.to_owned(),
+                refusal,
+            })?
         {
-            return Err(format!("{path} can't be read: it doesn't exist"));
+            return Err(UnitProblem::Unreliable(format!(
+                "{path} can't be read: it doesn't exist"
+            )));
         }
         let data = machine
             .read(path)
-            .map_err(|error| format!("{path} can't be read: {error}"))?;
+            .map_err(|error| UnitProblem::Unreliable(format!("{path} can't be read: {error}")))?;
         add_exec_starts(&String::from_utf8_lossy(&data), path, &mut commands);
     }
     Ok(commands)
@@ -978,7 +991,7 @@ fn unit_exec(machine: &mut dyn Machine, shown: &Shown) -> Option<UnitExec> {
         exe: path.to_owned(),
         // The words can't be told, so none are guessed.
         args: Vec::new(),
-        problem: Some(problem),
+        problem: Some(UnitProblem::Unreliable(problem)),
     };
     if shown.get("NeedDaemonReload") == "yes" {
         return Some(unreliable(
@@ -988,7 +1001,13 @@ fn unit_exec(machine: &mut dyn Machine, shown: &Shown) -> Option<UnitExec> {
     }
     let commands = match effective_exec_starts(machine, shown) {
         Ok(commands) => commands,
-        Err(error) => return Some(unreliable(error)),
+        Err(problem) => {
+            return Some(UnitExec {
+                exe: path.to_owned(),
+                args: Vec::new(),
+                problem: Some(problem),
+            });
+        }
     };
     let Some((first, file)) = commands.first() else {
         return Some(unreliable("no ExecStart= is found in its files".to_owned()));
@@ -1073,12 +1092,12 @@ fn linux_not_running(
             if shown.get("LoadState") != "loaded" {
                 continue;
             }
-            let Some(exec) = unit_exec(machine, &shown) else {
-                continue;
-            };
             if !is_binary_name(&file_name(Platform::Linux, shown.exec_path())) {
                 continue;
             }
+            let Some(exec) = unit_exec(machine, &shown) else {
+                continue;
+            };
             let mut found = Found::new(Starter::Systemd {
                 unit: unit.to_owned(),
                 user,
@@ -1088,9 +1107,17 @@ fn linux_not_running(
             found.exe = Some(exec.exe);
             found.args = exec.args;
             if let Some(problem) = exec.problem {
-                found.blockers.push(format!(
-                    "the command line of the systemd unit {unit} can't be told reliably ({problem}): switch by hand, as docs/migrating-from-cliproxyapi.md says"
-                ));
+                found.blockers.push(match problem {
+                    UnitProblem::Unreliable(problem) => format!(
+                        "the command line of the systemd unit {unit} can't be told reliably ({problem}): switch by hand, as docs/migrating-from-cliproxyapi.md says"
+                    ),
+                    UnitProblem::Refused { path, refusal } => {
+                        let remedy = refusal.remedy.unwrap_or_else(||
+                            "make it and the directories above it writable only by root".to_owned()
+                        );
+                        format!("the systemd unit {unit}'s file {path} wasn't read: {}. {}. Then run `open-ferry migrate` again", refusal.reason.trim_end_matches('.'), remedy.trim_end_matches('.'))
+                    }
+                });
             }
             systemd_details(context, &shown, user, &mut found);
             found.notes.push(format!(
@@ -1661,7 +1688,8 @@ fn task_runs(
     context: &Context,
     task: &Task,
     exe: Option<&str>,
-) -> Result<Option<TaskRuns>, String> {
+    notes: &mut Vec<String>,
+) -> Option<TaskRuns> {
     let platform = Platform::Windows;
     let command = expand(context, &task.command);
     if is_binary_name(&file_name(platform, &command)) {
@@ -1673,7 +1701,7 @@ fn task_runs(
             }
             _ => true,
         };
-        return Ok(matches.then_some(TaskRuns::Binary));
+        return matches.then_some(TaskRuns::Binary);
     }
     let script = task_script(task);
     let mut text = task.arguments.clone();
@@ -1686,9 +1714,16 @@ fn task_runs(
             _ => path,
         };
         // Read for the binary's name only; never shown.
-        let authorized =
-            crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&path))
-                .map_err(|error| error.to_string())?;
+        let authorized = match crate::scope::authorize_file(
+            machine.trust_probe(),
+            std::path::Path::new(&path),
+        ) {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                notes.push(format!("Scheduled task {} runs {path}, which wasn't read: {}. If it starts CLIProxyAPI, run `open-ferry migrate` as that task's account, or switch it by hand.", task.name, error.to_string().trim_end_matches('.')));
+                false
+            }
+        };
         if let Ok(data) = if authorized {
             machine.read(&path)
         } else {
@@ -1701,14 +1736,14 @@ fn task_runs(
         }
     }
     if !mentions(&text) {
-        return Ok(None);
+        return None;
     }
     let names_exe = exe.is_some_and(|exe| {
         text.to_ascii_lowercase()
             .contains(&exe.to_ascii_lowercase())
     });
     let program = file_name(platform, script.as_deref().unwrap_or(&command));
-    Ok(Some(TaskRuns::Launcher { program, names_exe }))
+    Some(TaskRuns::Launcher { program, names_exe })
 }
 
 fn scheduled_tasks(machine: &mut dyn Machine) -> Result<Vec<Task>, String> {
@@ -1926,7 +1961,7 @@ fn windows_process(
     let mut unknown = Vec::new();
     let mut launchers = Vec::new();
     for task in &tasks {
-        match task_runs(machine, context, task, exe.as_deref())? {
+        match task_runs(machine, context, task, exe.as_deref(), &mut notes) {
             Some(TaskRuns::Binary) => match task_started(context, task, &process) {
                 Started::Yes => direct.push(task),
                 Started::No => {}
@@ -2003,6 +2038,7 @@ fn nssm_parameters(
 fn windows_not_running(
     machine: &mut dyn Machine,
     context: &Context,
+    notes: &mut Vec<String>,
 ) -> Result<Option<Found>, String> {
     for name in KNOWN_SERVICES {
         let Some(config) = service_config(machine, name) else {
@@ -2044,7 +2080,7 @@ fn windows_not_running(
     let mut direct: Vec<&Task> = Vec::new();
     let mut launcher = None;
     for task in &tasks {
-        match task_runs(machine, context, task, None)? {
+        match task_runs(machine, context, task, None, notes) {
             Some(TaskRuns::Binary) => direct.push(task),
             Some(TaskRuns::Launcher { program, .. }) => {
                 launcher.get_or_insert((task, program));
@@ -2137,7 +2173,7 @@ fn not_running(
     let found = match context.platform {
         Platform::Linux => linux_not_running(machine, context)?,
         Platform::MacOs => macos_not_running(machine, context)?,
-        Platform::Windows => windows_not_running(machine, context)?,
+        Platform::Windows => windows_not_running(machine, context, notes)?,
     };
     if found.is_some() {
         return Ok(found);
