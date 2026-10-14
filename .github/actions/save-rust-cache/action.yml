@@ -21,7 +21,7 @@ runs:
       run: |
         set -euo pipefail
         cargo metadata --no-deps --format-version 1 --locked > "$RUNNER_TEMP/workspace.json"
-        "$PYTHON" -I .github/scripts/clean-target.py "$RUNNER_TEMP/workspace.json"
+        "$PYTHON" -I .github/scripts/clean-target.py "$RUNNER_TEMP/workspace.json" Cargo.lock
 
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
