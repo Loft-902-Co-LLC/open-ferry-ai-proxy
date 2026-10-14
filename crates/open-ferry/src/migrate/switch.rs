@@ -1092,9 +1092,7 @@ fn backup_subdir(
         && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&sub))
             .map_err(|error| error.to_string())?
     {
-        return Err(format!(
-            "{sub} went away after it was created: nothing was copied there"
-        ));
+        return Err(format!("{sub} isn't there, so nothing was copied into it"));
     }
     Ok(sub)
 }
@@ -1119,9 +1117,7 @@ fn back_up(
         && !crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
             .map_err(|error| error.to_string())?
     {
-        return Err(format!(
-            "{dir} went away after it was created: nothing was copied there"
-        ));
+        return Err(format!("{dir} isn't there, so nothing was copied into it"));
     }
     let mut files = Vec::new();
     let config_to = backup_subdir(machine, platform, dir, "config")?;
@@ -1965,6 +1961,16 @@ fn execute_service(
         },
     );
     record::save(machine, platform, base.record_path, &record)
+        .and_then(|copied| {
+            if copied {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the backup's directory, {}, doesn't exist, so its copy of the record wasn't written",
+                    base.backup_dir
+                ))
+            }
+        })
         .map_err(|error| format!("{error}\nNothing but the backup was made."))?;
     let listen = base.assessment.listen.as_ref();
 
@@ -2712,6 +2718,16 @@ fn execute_drop_in(
         link: link.as_deref(),
     };
     record::save(machine, platform, base.record_path, &record)
+        .and_then(|copied| {
+            if copied {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the backup's directory, {}, doesn't exist, so its copy of the record wasn't written",
+                    base.backup_dir
+                ))
+            }
+        })
         .map_err(|error| format!("{error}\nNothing but the backup was made."))?;
 
     // The binaries swapped. The move never replaces: a run with another
@@ -2925,7 +2941,12 @@ fn execute_drop_in(
 }
 
 /// What `-undo` would do, in words.
-pub(crate) fn undo_steps(context: &Context, record: &Record, restore: bool) -> Vec<String> {
+pub(crate) fn undo_steps(
+    machine: &dyn Machine,
+    context: &Context,
+    record: &Record,
+    restore: bool,
+) -> Vec<String> {
     let mut steps = Vec::new();
     match &record.switch {
         Switch::Service { theirs, ours, .. } => {
@@ -2978,9 +2999,13 @@ pub(crate) fn undo_steps(context: &Context, record: &Record, restore: bool) -> V
         }
     }
     if !restore {
-        steps.push(
-            "Leave the config and the auth directory as they are: with -restore, the backed-up ones are copied back.".to_owned(),
-        );
+        steps.push(if let Some(backup) = &record.backup
+            && backup_exists(machine, &backup.dir) == Ok(false)
+        {
+            format!("Leave the config and the auth directory as they are. The backup's directory, {}, isn't there, so -restore can't copy them back.", backup.dir)
+        } else {
+            "Leave the config and the auth directory as they are: with -restore, the backed-up ones are copied back.".to_owned()
+        });
     }
     steps
 }
@@ -3429,9 +3454,43 @@ pub(super) fn refuse_privileged_drop_in_undo(
     Ok(())
 }
 
+/// Checks the backup before a restore, and refuses untrusted backups even without it.
+pub(crate) fn check_restore_backup(
+    machine: &dyn Machine,
+    record: &Record,
+    restore_files: bool,
+) -> Result<(), String> {
+    if let Some(backup) = &record.backup {
+        let exists = if !restore_files && !super::machine::privileged_run(machine.trust_probe()) {
+            true
+        } else {
+            backup_exists(machine, &backup.dir)?
+        };
+        if restore_files && !exists {
+            return Err(format!(
+                "the backup's directory, {}, doesn't exist, so -restore has nothing to copy back: run `open-ferry {} -undo` without -restore to switch back and leave the files as they are. Nothing was changed",
+                backup.dir,
+                super::NAME
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the backup directory is still there, with its trust checked under privilege.
+fn backup_exists(machine: &dyn Machine, dir: &str) -> Result<bool, String> {
+    if super::machine::privileged_run(machine.trust_probe()) {
+        crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(dir))
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(machine.exists(dir))
+    }
+}
+
 /// Switches back to CLIProxyAPI as `record` says. The record is marked
 /// undone only when every step worked; else it stays as it was, and `-undo`
 /// can be run again, each step looking at what is there. `yes` is `-yes`.
+/// `recovered` says the caller already announced reading the backup copy.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn undo(
     machine: &mut dyn Machine,
@@ -3445,21 +3504,7 @@ pub(crate) fn undo(
 ) -> Result<(), String> {
     let platform = context.platform;
     refuse_privileged_drop_in_undo(machine, record)?;
-    if let Some(backup) = &record.backup {
-        let exists = if super::machine::privileged_run(machine.trust_probe()) {
-            crate::scope::authorize_dir(machine.trust_probe(), std::path::Path::new(&backup.dir))
-                .map_err(|error| error.to_string())?
-        } else {
-            !restore_files || machine.exists(&backup.dir)
-        };
-        if restore_files && !exists {
-            return Err(format!(
-                "the backup's directory, {}, doesn't exist, so `-restore` has nothing to copy back: run `open-ferry {} -undo` without `-restore` to switch back and leave the files as they are. Nothing was changed",
-                backup.dir,
-                super::NAME
-            ));
-        }
-    }
+    check_restore_backup(machine, record, restore_files)?;
     // One `migrate` at a time, for the whole undo. The record is read again
     // under the lock: another run may have changed it since it was read.
     let _lock = record::lock(machine, platform, record_path)?;
@@ -3510,26 +3555,9 @@ pub(crate) fn undo(
             ));
         }
         refuse_privileged_drop_in_undo(machine, &fresh)?;
-        if let Some(backup) = &fresh.backup {
-            let exists = if super::machine::privileged_run(machine.trust_probe()) {
-                crate::scope::authorize_dir(
-                    machine.trust_probe(),
-                    std::path::Path::new(&backup.dir),
-                )
-                .map_err(|error| error.to_string())?
-            } else {
-                !restore_files || machine.exists(&backup.dir)
-            };
-            if restore_files && !exists {
-                return Err(format!(
-                    "the backup's directory, {}, doesn't exist, so `-restore` has nothing to copy back: run `open-ferry {} -undo` without `-restore` to switch back and leave the files as they are. Nothing was changed",
-                    backup.dir,
-                    super::NAME
-                ));
-            }
-        }
         *record = fresh;
     }
+    check_restore_backup(machine, record, restore_files)?;
     let listen = record.cliproxyapi.listen.as_ref().map(|address| {
         let probe = super::assess::probe_address(&address.host);
         Listen {
@@ -3679,10 +3707,14 @@ pub(crate) fn undo(
                         if wait_for_any(machine, listen.as_ref(), LAUNCHER_WAIT)
                             != Some(Answer::CliProxyApi)
                         {
-                            let log = record.backup.as_ref().map_or_else(
-                                || platform.join(&context.cwd, "cliproxyapi.log"),
-                                |backup| platform.join(&backup.dir, "cliproxyapi.log"),
-                            );
+                            let log_dir = if let Some(backup) = &record.backup
+                                && backup_exists(machine, &backup.dir)?
+                            {
+                                &backup.dir
+                            } else {
+                                &context.cwd
+                            };
+                            let log = platform.join(log_dir, "cliproxyapi.log");
                             match start_like(machine, platform, &binary, process, &log) {
                                 Ok(pid) => say(
                                     out,
@@ -3746,7 +3778,7 @@ pub(crate) fn undo(
         say(
             out,
             format_args!(
-                "Switched back to CLIProxyAPI. The config and the credentials are {}; the backup is kept{}.",
+                "Switched back to CLIProxyAPI. The config and the credentials are {}; {}.",
                 if restore_files {
                     "restored from the backup"
                 } else {
@@ -3755,8 +3787,17 @@ pub(crate) fn undo(
                 record
                     .backup
                     .as_ref()
-                    .map(|backup| format!(" in {}", backup.dir))
-                    .unwrap_or_default()
+                    .map(|backup| {
+                        if backup_exists(machine, &backup.dir) == Ok(false) {
+                            format!(
+                                "the backup's directory, {}, isn't there any more",
+                                backup.dir
+                            )
+                        } else {
+                            format!("the backup is kept in {}", backup.dir)
+                        }
+                    })
+                    .unwrap_or_else(|| "the backup is kept".to_owned())
             ),
         );
         Ok(())

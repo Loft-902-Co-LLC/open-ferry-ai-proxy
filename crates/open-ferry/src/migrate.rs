@@ -732,6 +732,9 @@ fn run_undo(
     if let Err(error) = switch::refuse_privileged_drop_in_undo(machine, &record) {
         return fail(request, out, err, &error);
     }
+    if let Err(error) = switch::check_restore_backup(machine, &record, request.restore) {
+        return fail(request, out, err, &error);
+    }
     line(
         out,
         &format!(
@@ -739,7 +742,7 @@ fn run_undo(
             record.created
         ),
     );
-    for (number, step) in switch::undo_steps(context, &record, request.restore)
+    for (number, step) in switch::undo_steps(machine, context, &record, request.restore)
         .iter()
         .enumerate()
     {
