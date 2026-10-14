@@ -157,7 +157,7 @@ const STORE_PREFIXES: [&str; 3] = ["PGSTORE_", "GITSTORE_", "OBJECTSTORE_"];
 /// definition's and the files it names, and `.env` in the working
 /// directory.
 #[derive(Debug, Default)]
-struct Environment {
+pub(super) struct Environment {
     /// Each variable, with where it came from.
     vars: Vec<(String, String, String)>,
     /// Whether the process's own environment, or its definition's, was
@@ -165,6 +165,8 @@ struct Environment {
     known: bool,
     /// Where it couldn't read.
     unreadable: Vec<String>,
+    /// Files refused by the privileged trust check.
+    pub(super) refused: Vec<String>,
 }
 
 impl Environment {
@@ -200,7 +202,7 @@ fn read_env_file(machine: &dyn Machine, path: &str) -> Result<Vec<(String, Strin
         .collect())
 }
 
-fn environment(
+pub(super) fn environment(
     machine: &dyn Machine,
     found: &Found,
     working_dir: Option<&str>,
@@ -228,6 +230,14 @@ fn environment(
         // own variables last. A file that is missing is skipped, as with the
         // `-` prefix.
         for file in found.env_files.iter().rev() {
+            match crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(file)) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    env.refused.push(error.to_string());
+                    continue;
+                }
+            }
             match read_env_file(machine, file) {
                 Ok(vars) => push(&mut env, &vars, file),
                 Err(_) if !machine.exists(file) => {}
@@ -238,7 +248,17 @@ fn environment(
     }
     if let Some(dir) = working_dir {
         let file = platform.join(dir, ".env");
-        if machine.exists(&file) {
+        let authorized = match crate::scope::authorize_file(
+            machine.trust_probe(),
+            std::path::Path::new(&file),
+        ) {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                env.refused.push(error.to_string());
+                false
+            }
+        };
+        if authorized && machine.exists(&file) {
             match read_env_file(machine, &file) {
                 Ok(vars) => push(&mut env, &vars, &file),
                 Err(error) => env.unreadable.push(format!("{file} ({error})")),
@@ -485,21 +505,34 @@ fn credential_type(data: &[u8]) -> Option<String> {
     (!kind.is_empty()).then_some(kind)
 }
 
+/// Whether inventory failed to read files or refused to open them.
+pub(super) enum CountError {
+    Read(String),
+    Refused(String),
+}
+
 /// Counts the credential files in `dir`, as the server finds them: `*.json`
 /// directly in it.
-fn count_credentials(
+pub(super) fn count_credentials(
     machine: &dyn Machine,
     platform: Platform,
     dir: &str,
-) -> Result<(Credentials, usize, usize, usize), String> {
-    let entries = machine.list_dir(dir).map_err(|error| error.to_string())?;
+) -> Result<(Credentials, usize, usize, usize), CountError> {
+    crate::scope::authorize_auth_dir(machine.trust_probe(), std::path::Path::new(dir))
+        .map_err(|error| CountError::Refused(format!("{dir}: {error}")))?;
+    let entries = machine
+        .list_dir(dir)
+        .map_err(|error| CountError::Read(error.to_string()))?;
     let mut credentials = Credentials::default();
     let (mut claude, mut meta, mut xai) = (0, 0, 0);
     for entry in entries {
         if entry.kind == EntryKind::Dir || !entry.name.to_ascii_lowercase().ends_with(".json") {
             continue;
         }
-        let Ok(data) = machine.read(&platform.join(dir, &entry.name)) else {
+        let path = platform.join(dir, &entry.name);
+        crate::scope::authorize_credential_file(machine.trust_probe(), std::path::Path::new(&path))
+            .map_err(|error| CountError::Refused(format!("{path}: {error}")))?;
+        let Ok(data) = machine.read(&path) else {
             credentials.unreadable += 1;
             continue;
         };
@@ -677,6 +710,7 @@ pub(crate) fn assess(
                 .to_owned(),
         );
     }
+    out.blockers.extend(env.refused.iter().cloned());
     for file in &env.unreadable {
         out.warnings.push(format!(
             "Can't read {file}, so the variables it sets can't be told."
@@ -747,12 +781,19 @@ pub(crate) fn assess(
                         ));
                     }
                 }
-                Err(_) if !machine.exists(&dir) => {
+                Err(CountError::Refused(error)) => {
+                    out.warnings
+                        .push(format!("Credentials weren't counted: {error}"));
+                    // An unreadable credential blocks the switch below. A
+                    // refused inventory cannot establish that none are unreadable.
+                    out.blockers.push(error);
+                }
+                Err(CountError::Read(_)) if !machine.exists(&dir) => {
                     out.warnings.push(format!(
                         "Its auth directory, {dir}, doesn't exist, so it has no credential files."
                     ));
                 }
-                Err(error) => out
+                Err(CountError::Read(error)) => out
                     .blockers
                     .push(format!("Its auth directory, {dir}, can't be read: {error}")),
             }
@@ -924,10 +965,18 @@ pub(crate) fn assess(
             env_files.push(file);
         }
     }
-    out.env_files = env_files
-        .into_iter()
-        .filter(|file| machine.exists(file))
-        .collect();
+    for file in env_files {
+        match crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&file)) {
+            Ok(true) if machine.exists(&file) => out.env_files.push(file),
+            Ok(_) => {}
+            Err(error) => {
+                let error = error.to_string();
+                if !out.blockers.contains(&error) {
+                    out.blockers.push(error);
+                }
+            }
+        }
+    }
     out
 }
 

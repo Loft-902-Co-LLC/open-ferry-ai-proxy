@@ -933,6 +933,11 @@ fn effective_exec_starts(
     let mut commands = Vec::new();
     let drop_ins = shown.get("DropInPaths").split_whitespace();
     for path in std::iter::once(fragment).chain(drop_ins) {
+        if !crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(path))
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!("{path} can't be read: it doesn't exist"));
+        }
         let data = machine
             .read(path)
             .map_err(|error| format!("{path} can't be read: {error}"))?;
@@ -1115,13 +1120,20 @@ pub(crate) struct Job {
 
 /// The XML text of the plist at `path`: binary plists are converted with
 /// `plutil`.
-fn plist_text(machine: &mut dyn Machine, path: &str) -> Option<String> {
-    let data = machine.read(path).ok()?;
+fn plist_text(machine: &mut dyn Machine, path: &str) -> Result<Option<String>, String> {
+    if !crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(path))
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(None);
+    }
+    let Ok(data) = machine.read(path) else {
+        return Ok(None);
+    };
     if data.starts_with(b"bplist") {
         let cmd = Cmd::new("plutil", &["-convert", "xml1", "-o", "-"]).arg(path);
-        return run_checked(machine, &cmd).ok().map(|output| output.stdout);
+        return Ok(run_checked(machine, &cmd).ok().map(|output| output.stdout));
     }
-    Some(String::from_utf8_lossy(&data).into_owned())
+    Ok(Some(String::from_utf8_lossy(&data).into_owned()))
 }
 
 /// XML text with its five entities undone.
@@ -1209,7 +1221,11 @@ pub(crate) fn read_plist(xml: &str) -> Job {
 }
 
 /// The launchd jobs that run CLIProxyAPI, or mention it.
-fn launchd_jobs(machine: &mut dyn Machine, context: &Context, uid: u32) -> Vec<Job> {
+fn launchd_jobs(
+    machine: &mut dyn Machine,
+    context: &Context,
+    uid: u32,
+) -> Result<Vec<Job>, String> {
     let gui = format!("gui/{uid}");
     let mut dirs = Vec::new();
     if let Some(home) = context.var("HOME") {
@@ -1230,7 +1246,7 @@ fn launchd_jobs(machine: &mut dyn Machine, context: &Context, uid: u32) -> Vec<J
                 continue;
             }
             let path = Platform::MacOs.join(&dir, &entry.name);
-            let Some(text) = plist_text(machine, &path) else {
+            let Some(text) = plist_text(machine, &path)? else {
                 continue;
             };
             let job = Job {
@@ -1246,7 +1262,7 @@ fn launchd_jobs(machine: &mut dyn Machine, context: &Context, uid: u32) -> Vec<J
             }
         }
     }
-    jobs
+    Ok(jobs)
 }
 
 /// Whether Homebrew installed the binary at `exe`, and its prefix.
@@ -1292,7 +1308,7 @@ fn macos_process(
     process: Proc,
 ) -> Result<Found, String> {
     let uid = uid(machine)?;
-    let jobs = launchd_jobs(machine, context, uid);
+    let jobs = launchd_jobs(machine, context, uid)?;
     for job in &jobs {
         if job_pid(machine, job) != Some(process.pid) {
             continue;
@@ -1346,7 +1362,7 @@ fn macos_not_running(
     context: &Context,
 ) -> Result<Option<Found>, String> {
     let uid = uid(machine)?;
-    let jobs = launchd_jobs(machine, context, uid);
+    let jobs = launchd_jobs(machine, context, uid)?;
     let Some(job) = jobs.iter().find(|job| job_runs_binary(job)) else {
         return Ok(None);
     };
@@ -1645,7 +1661,7 @@ fn task_runs(
     context: &Context,
     task: &Task,
     exe: Option<&str>,
-) -> Option<TaskRuns> {
+) -> Result<Option<TaskRuns>, String> {
     let platform = Platform::Windows;
     let command = expand(context, &task.command);
     if is_binary_name(&file_name(platform, &command)) {
@@ -1657,7 +1673,7 @@ fn task_runs(
             }
             _ => true,
         };
-        return matches.then_some(TaskRuns::Binary);
+        return Ok(matches.then_some(TaskRuns::Binary));
     }
     let script = task_script(task);
     let mut text = task.arguments.clone();
@@ -1670,7 +1686,14 @@ fn task_runs(
             _ => path,
         };
         // Read for the binary's name only; never shown.
-        if let Ok(data) = machine.read(&path) {
+        let authorized =
+            crate::scope::authorize_file(machine.trust_probe(), std::path::Path::new(&path))
+                .map_err(|error| error.to_string())?;
+        if let Ok(data) = if authorized {
+            machine.read(&path)
+        } else {
+            Err(std::io::ErrorKind::NotFound.into())
+        } {
             let data = data.get(..SCRIPT_LIMIT.min(data.len())).unwrap_or_default();
             // A script may be saved as UTF-16.
             text.push('\n');
@@ -1678,14 +1701,14 @@ fn task_runs(
         }
     }
     if !mentions(&text) {
-        return None;
+        return Ok(None);
     }
     let names_exe = exe.is_some_and(|exe| {
         text.to_ascii_lowercase()
             .contains(&exe.to_ascii_lowercase())
     });
     let program = file_name(platform, script.as_deref().unwrap_or(&command));
-    Some(TaskRuns::Launcher { program, names_exe })
+    Ok(Some(TaskRuns::Launcher { program, names_exe }))
 }
 
 fn scheduled_tasks(machine: &mut dyn Machine) -> Result<Vec<Task>, String> {
@@ -1903,7 +1926,7 @@ fn windows_process(
     let mut unknown = Vec::new();
     let mut launchers = Vec::new();
     for task in &tasks {
-        match task_runs(machine, context, task, exe.as_deref()) {
+        match task_runs(machine, context, task, exe.as_deref())? {
             Some(TaskRuns::Binary) => match task_started(context, task, &process) {
                 Started::Yes => direct.push(task),
                 Started::No => {}
@@ -2021,7 +2044,7 @@ fn windows_not_running(
     let mut direct: Vec<&Task> = Vec::new();
     let mut launcher = None;
     for task in &tasks {
-        match task_runs(machine, context, task, None) {
+        match task_runs(machine, context, task, None)? {
             Some(TaskRuns::Binary) => direct.push(task),
             Some(TaskRuns::Launcher { program, .. }) => {
                 launcher.get_or_insert((task, program));

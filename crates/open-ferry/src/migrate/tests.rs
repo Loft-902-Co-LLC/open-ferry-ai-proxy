@@ -54,6 +54,9 @@ struct Fake {
     dirs: BTreeSet<String>,
     /// Paths that can't be read.
     unreadable: BTreeSet<String>,
+    /// Reads that must not happen before a trust refusal.
+    forbidden_reads: BTreeSet<String>,
+    forbidden_lists: BTreeSet<String>,
     /// The directories made private.
     private: BTreeSet<String>,
     /// What commands print, by their command line or its start.
@@ -112,6 +115,8 @@ impl Fake {
             files: BTreeMap::new(),
             dirs: BTreeSet::new(),
             unreadable: BTreeSet::new(),
+            forbidden_reads: BTreeSet::new(),
+            forbidden_lists: BTreeSet::new(),
             private: BTreeSet::new(),
             answers: BTreeMap::new(),
             run_errors: BTreeMap::new(),
@@ -563,6 +568,10 @@ impl System for Fake {
     }
 
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        assert!(
+            !self.forbidden_reads.contains(path),
+            "read refused file {path}"
+        );
         if self.unreadable.contains(path) {
             return Err(denied());
         }
@@ -734,6 +743,10 @@ impl Machine for Fake {
     }
 
     fn list_dir(&self, path: &str) -> io::Result<Vec<Entry>> {
+        assert!(
+            !self.forbidden_lists.contains(path),
+            "listed refused directory {path}"
+        );
         if self.unreadable.contains(path) {
             return Err(denied());
         }
@@ -1882,12 +1895,13 @@ fn does_not_switch_twice() {
 // the trust check passes it.
 #[test]
 fn a_privileged_run_reads_only_a_trusted_config() {
-    const CONFIG: &str = "/etc/cliproxyapi/config.yaml";
     let root = |trusted: bool| {
         let (mut fake, context) = system_unit(linux_root(), false);
         fake.answer("id -u", 0, "0\n");
         fake.trust = crate::update::scope_probe::Fake::new(context.platform, true);
-        fake.trust.file(CONFIG);
+        for path in fake.files.keys() {
+            fake.trust.file(path);
+        }
         if !trusted {
             fake.trust.untrust("/etc/cliproxyapi");
         }
@@ -3524,6 +3538,11 @@ fn nssm_service(context: Context, admin: bool) -> (Fake, Context) {
         config_text(r"C:\Program Files\CLIProxyAPI\auths"),
     );
     credentials(&mut fake, r"C:\Program Files\CLIProxyAPI\auths");
+    if admin {
+        for path in fake.files.keys() {
+            fake.trust.file(path);
+        }
+    }
     fake.process(Proc {
         pid: 7070,
         started: Some(1000),
@@ -3829,6 +3848,7 @@ fn containers_not_checked(ran: &Ran, json: bool, reason: &str) {
         &ran.err
     } else {
         has(&ran.out, "CLIProxyAPI wasn't found:");
+        lacks(&ran.out, "or container of it is set up");
         assert!(ran.err.is_empty(), "{}", ran.all());
         &ran.out
     };
@@ -6773,4 +6793,248 @@ fn a_unc_config_is_compared_as_an_absolute_path() {
     }
     let other = "//srv/other/open-ferry/config.yaml";
     assert!(!argument_only_taken(&context, config, other, None));
+}
+
+// Ancillary trust refusals must happen before the fake's reader is called.
+fn ancillary_assessment(fake: &mut Fake, context: &Context, env_file: Option<&str>) -> Assessment {
+    let mut found = Found {
+        process: None,
+        exe: None,
+        args: Vec::new(),
+        cwd: None,
+        starter: discover::Starter::Launcher(discover::Launcher::Gone),
+        definition_env: None,
+        env_files: Vec::new(),
+        notes: Vec::new(),
+        blockers: Vec::new(),
+    };
+    found.cwd = Some("/etc/cliproxyapi".to_owned());
+    found.definition_env = Some(Vec::new());
+    found.env_files = env_file.into_iter().map(str::to_owned).collect();
+    assess::assess(
+        fake,
+        context,
+        &found,
+        Kind::DropIn,
+        Some("/etc/cliproxyapi/config.yaml"),
+    )
+}
+
+fn ancillary_machine() -> (Fake, Context) {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    fake.trust = crate::update::scope_probe::Fake::new(Platform::Linux, true);
+    for path in fake.files.keys() {
+        fake.trust.file(path);
+    }
+    (fake, context)
+}
+
+#[test]
+fn ancillary_env_files_are_refused_before_reading() {
+    for path in ["/etc/cliproxyapi/.env", "/etc/cliproxyapi/service.env"] {
+        let (mut fake, context) = ancillary_machine();
+        fake.file(path, "DEPLOY=local");
+        fake.trust.file(path).untrust(path);
+        fake.forbidden_reads.insert(path.to_owned());
+        let assessment = ancillary_assessment(&mut fake, &context, Some(path));
+        let blockers = assessment.blockers.join("\n");
+        has(&blockers, path);
+        has(&blockers, "Refusing to load");
+        has(&blockers, "make the file");
+    }
+}
+
+#[test]
+fn ancillary_env_probe_failure_is_a_blocker_without_reading() {
+    let (mut fake, _context) = ancillary_machine();
+    let path = "/etc/cliproxyapi/.env";
+    fake.file(path, "DEPLOY=local");
+    fake.forbidden_reads.insert(path.to_owned());
+    fake.trust.privileged = Err("privilege unavailable".to_owned());
+    let mut found = Found {
+        process: None,
+        exe: None,
+        args: Vec::new(),
+        cwd: None,
+        starter: discover::Starter::Launcher(discover::Launcher::Gone),
+        definition_env: None,
+        env_files: Vec::new(),
+        notes: Vec::new(),
+        blockers: Vec::new(),
+    };
+    found.definition_env = Some(Vec::new());
+    found.env_files.push(path.to_owned());
+    let env = assess::environment(&fake, &found, Some("/etc/cliproxyapi"), Platform::Linux);
+    has(&env.refused.join("\n"), "privilege unavailable");
+    has(&env.refused.join("\n"), path);
+}
+
+#[test]
+fn ancillary_unit_and_drop_in_files_are_refused_before_reading() {
+    for path in [
+        "/etc/systemd/system/cliproxyapi.service",
+        "/etc/systemd/system/cliproxyapi.service.d/override.conf",
+    ] {
+        for probe_error in [false, true] {
+            let argv = "/usr/local/bin/cli-proxy-api -config /etc/old.yaml";
+            let (mut fake, context) = stopped_unit(
+                &format!("[Service]\nExecStart={argv}\n"),
+                Some("[Service]\n"),
+                "/usr/local/bin/cli-proxy-api",
+                argv,
+            );
+            fake.trust = crate::update::scope_probe::Fake::new(Platform::Linux, true);
+            for file in fake.files.keys() {
+                fake.trust.file(file);
+            }
+            if probe_error {
+                fake.trust.privileged = Err("privilege unavailable".to_owned());
+            } else {
+                fake.trust.untrust(path);
+            }
+            fake.forbidden_reads.insert(path.to_owned());
+            let ran = migrate(&mut fake, &context, &["-json"]);
+            let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+            assert_eq!(json["can_switch"], false);
+            has(
+                &ran.out,
+                if probe_error {
+                    "privilege unavailable"
+                } else {
+                    path
+                },
+            );
+            read_only(&fake);
+        }
+    }
+}
+
+#[test]
+fn ancillary_plists_are_refused_before_reading_or_converting() {
+    for probe_error in [false, true] {
+        let (mut fake, context) = brew_services();
+        let path = "/Users/me/Library/LaunchAgents/homebrew.mxcl.cliproxyapi.plist";
+        fake.file(path, "bplist00");
+        fake.trust = crate::update::scope_probe::Fake::new(Platform::MacOs, true);
+        fake.trust.file(path).untrust(path);
+        if probe_error {
+            fake.trust.privileged = Err("privilege unavailable".to_owned());
+        }
+        fake.forbidden_reads.insert(path.to_owned());
+        let ran = migrate(&mut fake, &context, &["-json"]);
+        assert_eq!(ran.code, 1, "{}", ran.all());
+        has(&ran.out, path);
+        has(
+            &ran.out,
+            if probe_error {
+                "privilege unavailable"
+            } else {
+                "root"
+            },
+        );
+        assert!(!fake.events.iter().any(|event| event.contains("plutil")));
+        read_only(&fake);
+    }
+}
+
+#[test]
+fn ancillary_task_scripts_are_refused_before_reading() {
+    for running in [false, true] {
+        for probe_error in [false, true] {
+            let (mut fake, context) = launcher_task();
+            let path = r"C:\Users\me\cpa\start.ps1";
+            if !running {
+                fake.procs.clear();
+            }
+            fake.trust = crate::update::scope_probe::Fake::new(Platform::Windows, true);
+            fake.trust.file(path).untrust(path);
+            if probe_error {
+                fake.trust.privileged = Err("privilege unavailable".to_owned());
+            }
+            fake.forbidden_reads.insert(path.to_owned());
+            let ran = migrate(&mut fake, &context, &["-json"]);
+            assert_eq!(ran.code, 1, "{}", ran.all());
+            // JSON escapes Windows separators.
+            has(&ran.out, "start.ps1");
+            has(
+                &ran.out,
+                if probe_error {
+                    "privilege unavailable"
+                } else {
+                    "untrusted"
+                },
+            );
+            read_only(&fake);
+        }
+    }
+}
+
+#[test]
+fn ancillary_credential_directory_refusal_skips_enumeration() {
+    let (mut fake, context) = ancillary_machine();
+    let dir = "/etc/cliproxyapi/auths";
+    fake.trust.untrust(dir);
+    fake.forbidden_lists.insert(dir.to_owned());
+    let assessment = ancillary_assessment(&mut fake, &context, None);
+    has(
+        &assessment.warnings.join("\n"),
+        "Credentials weren't counted:",
+    );
+    has(&assessment.warnings.join("\n"), dir);
+    assert!(!assessment.blockers.is_empty());
+}
+
+#[test]
+fn ancillary_credential_leaf_refusal_skips_reading() {
+    let (mut fake, context) = ancillary_machine();
+    let path = "/etc/cliproxyapi/auths/untrusted.json";
+    fake.file(path, r#"{"type":"claude"}"#);
+    fake.trust.file(path).untrust(path);
+    fake.forbidden_reads.insert(path.to_owned());
+    let assessment = ancillary_assessment(&mut fake, &context, None);
+    has(
+        &assessment.warnings.join("\n"),
+        "Credentials weren't counted:",
+    );
+    has(&assessment.warnings.join("\n"), path);
+    assert!(!assessment.blockers.is_empty());
+    assert_eq!(assessment.claude_sign_ins, 0);
+}
+
+#[test]
+fn ancillary_unprivileged_files_keep_their_existing_behavior() {
+    let (mut fake, context) = ancillary_machine();
+    fake.trust.untrust("/etc/cliproxyapi/auths");
+    let privileged = ancillary_assessment(&mut fake, &context, None);
+    has(
+        &privileged.warnings.join("\n"),
+        "Credentials weren't counted:",
+    );
+    fake.trust.privileged = Ok(false);
+    fake.trust.untrust("/etc");
+    fake.file("/etc/cliproxyapi/.env", "DEPLOY=cloud");
+    let assessment = ancillary_assessment(&mut fake, &context, None);
+    has(&assessment.blockers.join("\n"), "DEPLOY=cloud");
+    assert!(
+        assessment
+            .warnings
+            .iter()
+            .all(|note| !note.contains("weren't counted"))
+    );
+    assert!(assessment.credentials.served_total() > 0);
+}
+
+#[test]
+fn ancillary_credential_probe_failure_skips_enumeration() {
+    let (mut fake, _) = ancillary_machine();
+    let dir = "/etc/cliproxyapi/auths";
+    fake.trust.privileged = Err("privilege unavailable".to_owned());
+    fake.forbidden_lists.insert(dir.to_owned());
+    match assess::count_credentials(&fake, Platform::Linux, dir) {
+        Err(assess::CountError::Refused(error)) => {
+            has(&error, dir);
+            has(&error, "privilege unavailable");
+        }
+        _ => panic!("credential inventory did not refuse the failed probe"),
+    }
 }
