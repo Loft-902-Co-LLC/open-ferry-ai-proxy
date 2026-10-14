@@ -235,15 +235,21 @@ pub(crate) fn run(
         None => None,
     };
     let found = match discover::discover(machine, context, given.as_deref()) {
-        Ok(Some(found)) => found,
-        Ok(None) => {
+        Ok((Some(found), _)) => found,
+        Ok((None, notes)) => {
             if request.json {
                 line(out, r#"{"found":false}"#);
+                for note in notes {
+                    line(err, &note);
+                }
             } else {
                 line(
                     out,
                     "CLIProxyAPI wasn't found: it isn't running, and no service, scheduled task or container of it is set up. Nothing was changed.",
                 );
+                for note in notes {
+                    line(out, &note);
+                }
             }
             return 1;
         }

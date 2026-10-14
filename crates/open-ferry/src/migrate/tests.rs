@@ -3822,34 +3822,40 @@ fn blocks_switching_a_stopped_launch_daemon() {
 
 const DOCKER_PS: &str = r#"{"Command":"\"./CLIProxyAPI\"","Image":"eceasy/cli-proxy-api:latest","Labels":"com.docker.compose.project=cpa,com.docker.compose.service=cli-proxy-api,com.docker.compose.project.working_dir=/home/me/cpa,com.docker.compose.project.config_files=/home/me/cpa/docker-compose.yml","Names":"cli-proxy-api","Ports":"0.0.0.0:8317->8317/tcp"}"#;
 
+fn containers_not_checked(ran: &Ran, json: bool, reason: &str) {
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    let notes = if json {
+        assert_eq!(ran.out, "{\"found\":false}\n");
+        &ran.err
+    } else {
+        has(&ran.out, "CLIProxyAPI wasn't found:");
+        assert!(ran.err.is_empty(), "{}", ran.all());
+        &ran.out
+    };
+    has(notes, reason);
+    assert_eq!(notes.matches("Containers weren't checked:").count(), 1);
+    if json {
+        assert_eq!(notes.lines().count(), 1);
+    }
+}
+
 #[test]
 fn says_containers_werent_checked_when_docker_cant_start() {
     for context in [linux(), macos(), windows()] {
-        for reason in [
-            "no helper docker on PATH",
-            "no system helper docker in the system directories",
+        for (kind, reason) in [
+            (io::ErrorKind::NotFound, "no helper docker on PATH"),
+            (
+                io::ErrorKind::NotFound,
+                "no system helper docker in the system directories",
+            ),
+            (io::ErrorKind::PermissionDenied, "docker isn't runnable"),
         ] {
             let mut fake = Fake::new(&context);
-            fake.run_errors.insert(
-                "docker".to_owned(),
-                (io::ErrorKind::NotFound, reason.to_owned()),
-            );
+            fake.run_errors
+                .insert("docker".to_owned(), (kind, reason.to_owned()));
             for args in [&[][..], &["-json"][..]] {
                 let ran = migrate(&mut fake, &context, args);
-                assert_eq!(ran.code, 1, "{}", ran.all());
-                has(&ran.all(), "Containers weren't checked:");
-                has(&ran.all(), reason);
-                lacks(
-                    &ran.all(),
-                    "no service, scheduled task or container of it is set up",
-                );
-                if args == ["-json"] {
-                    let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
-                    has(
-                        json["error"].as_str().unwrap(),
-                        "Containers weren't checked:",
-                    );
-                }
+                containers_not_checked(&ran, args == ["-json"], reason);
                 read_only(&fake);
             }
         }
@@ -3858,35 +3864,41 @@ fn says_containers_werent_checked_when_docker_cant_start() {
 
 #[test]
 fn says_containers_werent_checked_when_docker_ps_fails() {
-    let context = macos();
-    let mut fake = Fake::new(&context);
-    fake.fail(
-        "docker ps",
-        1,
-        "Cannot connect to the Docker daemon\nStart Docker first",
-    );
-    let ran = migrate(&mut fake, &context, &[]);
-    assert_eq!(ran.code, 1, "{}", ran.all());
-    has(&ran.all(), "Containers weren't checked:");
-    has(&ran.all(), "Cannot connect to the Docker daemon");
-    assert_eq!(ran.err.lines().count(), 1, "{}", ran.all());
-    has(&ran.err, "Start Docker first");
-    read_only(&fake);
+    for context in [linux(), macos(), windows()] {
+        let mut fake = Fake::new(&context);
+        fake.fail(
+            "docker ps",
+            1,
+            "Cannot connect to the Docker daemon\nStart Docker first",
+        );
+        for args in [&[][..], &["-json"][..]] {
+            let ran = migrate(&mut fake, &context, args);
+            containers_not_checked(
+                &ran,
+                args == ["-json"],
+                "Cannot connect to the Docker daemon",
+            );
+            has(&ran.all(), "Start Docker first");
+            read_only(&fake);
+        }
+    }
 }
 
 #[test]
 fn says_containers_werent_checked_when_docker_prints_invalid_json() {
-    let context = windows();
-    let mut fake = Fake::new(&context);
-    fake.answer("docker ps", 0, "{}\nnot JSON\n");
-    let ran = migrate(&mut fake, &context, &[]);
-    assert_eq!(ran.code, 1, "{}", ran.all());
-    has(
-        &ran.err,
-        "Containers weren't checked: `docker ps` printed an unreadable container record",
-    );
-    assert_eq!(ran.err.lines().count(), 1);
-    read_only(&fake);
+    for context in [linux(), macos(), windows()] {
+        let mut fake = Fake::new(&context);
+        fake.answer("docker ps", 0, "{}\nnot JSON\n");
+        for args in [&[][..], &["-json"][..]] {
+            let ran = migrate(&mut fake, &context, args);
+            containers_not_checked(
+                &ran,
+                args == ["-json"],
+                "Containers weren't checked: `docker ps` printed an unreadable container record",
+            );
+            read_only(&fake);
+        }
+    }
 }
 
 #[test]

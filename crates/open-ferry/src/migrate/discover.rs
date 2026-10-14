@@ -418,14 +418,14 @@ pub(crate) fn config_of(platform: Platform, args: &[String], cwd: Option<&str>) 
 }
 
 /// Finds CLIProxyAPI. With `config`, a running process whose config is
-/// that file is preferred. `Ok(None)` when nothing is found; an error when
-/// the search can't go on, such as with several processes and no way to
-/// choose.
+/// that file is preferred. Returns no match when nothing is found; an error
+/// when the search can't go on, such as with several processes and no way to
+/// choose. Notes accompany the result even when nothing is found.
 pub(crate) fn discover(
     machine: &mut dyn Machine,
     context: &Context,
     config: Option<&str>,
-) -> Result<Option<Found>, String> {
+) -> Result<(Option<Found>, Vec<String>), String> {
     let platform = context.platform;
     let mut notes = Vec::new();
     let processes = match machine.processes(&BINARY_NAMES) {
@@ -438,12 +438,12 @@ pub(crate) fn discover(
     let process = choose(platform, processes, config)?;
     let mut found = match process {
         Some(process) => Some(starter_of(machine, context, process)?),
-        None => not_running(machine, context)?,
+        None => not_running(machine, context, &mut notes)?,
     };
     if let Some(found) = &mut found {
-        found.notes.splice(0..0, notes);
+        found.notes.splice(0..0, notes.drain(..));
     }
-    Ok(found)
+    Ok((found, notes))
 }
 
 /// The process to switch: the only one, or the one whose config is
@@ -2106,7 +2106,11 @@ fn docker_container(machine: &mut dyn Machine) -> Result<Option<Container>, Stri
 }
 
 /// When no process runs: the service definitions, then Docker.
-fn not_running(machine: &mut dyn Machine, context: &Context) -> Result<Option<Found>, String> {
+fn not_running(
+    machine: &mut dyn Machine,
+    context: &Context,
+    notes: &mut Vec<String>,
+) -> Result<Option<Found>, String> {
     let found = match context.platform {
         Platform::Linux => linux_not_running(machine, context)?,
         Platform::MacOs => macos_not_running(machine, context)?,
@@ -2115,7 +2119,13 @@ fn not_running(machine: &mut dyn Machine, context: &Context) -> Result<Option<Fo
     if found.is_some() {
         return Ok(found);
     }
-    Ok(docker_container(machine)?.map(|container| Found::new(Starter::Container(container))))
+    match docker_container(machine) {
+        Ok(container) => Ok(container.map(|container| Found::new(Starter::Container(container)))),
+        Err(note) => {
+            notes.push(note);
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
