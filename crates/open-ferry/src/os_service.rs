@@ -1020,12 +1020,17 @@ fn privileged_helper_plan(
             let mut seen = std::collections::BTreeSet::new();
             let mut links = 0;
             loop {
-                let dir = platform
-                    .parent(&hop)
+                let (dir, name) = hop
+                    .rsplit_once('/')
                     .ok_or_else(|| format!("helper {hop} has no parent directory"))?;
-                let actual_dir = probe.canonical(&dir).map_err(|why| why.to_string())?;
-                probe.trusted_dir(&actual_dir)?;
-                let name = hop.rsplit('/').next().unwrap_or_default();
+                let dir = if dir.is_empty() { "/" } else { dir };
+                let actual_dir = helper_directory(
+                    probe,
+                    dir,
+                    read_link,
+                    &mut links,
+                    &mut std::collections::BTreeSet::new(),
+                )?;
                 hop = platform.join(&actual_dir, name);
                 if !seen.insert(hop.clone()) {
                     return Err(format!("helper link chain loops at {hop}"));
@@ -1073,6 +1078,54 @@ fn privileged_helper_plan(
         path: actual,
         environment,
     })
+}
+
+fn helper_directory(
+    probe: &dyn scope::Probe,
+    dir: &str,
+    read_link: &dyn Fn(&str) -> io::Result<Option<String>>,
+    links: &mut usize,
+    active: &mut std::collections::BTreeSet<String>,
+) -> Result<String, String> {
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() {
+        probe.trusted_dir("/")?;
+        return Ok("/".to_owned());
+    }
+    let platform = probe.platform();
+    let (parent, name) = dir
+        .rsplit_once('/')
+        .ok_or_else(|| format!("helper directory {dir} has no parent directory"))?;
+    let actual_parent = helper_directory(probe, parent, read_link, links, active)?;
+    let hop = match name {
+        "." | "" => actual_parent.clone(),
+        ".." => platform
+            .parent(&actual_parent)
+            .unwrap_or_else(|| "/".into()),
+        _ => platform.join(&actual_parent, name),
+    };
+    let actual = match read_link(&hop).map_err(|why| why.to_string())? {
+        Some(target) => {
+            if !active.insert(hop.clone()) {
+                return Err(format!("helper link chain loops at {hop}"));
+            }
+            if *links == 40 {
+                return Err("helper link chain exceeds 40 hops".into());
+            }
+            *links += 1;
+            let target = if platform.is_absolute(&target) {
+                target
+            } else {
+                platform.join(&actual_parent, &target)
+            };
+            let actual = helper_directory(probe, &target, read_link, links, active)?;
+            active.remove(&hop);
+            actual
+        }
+        None => probe.canonical(&hop).map_err(|why| why.to_string())?,
+    };
+    probe.trusted_dir(&actual)?;
+    Ok(actual)
 }
 
 fn helper_link_target(path: &str) -> io::Result<Option<String>> {
@@ -1160,17 +1213,32 @@ fn system_helper_path(program: &str) -> io::Result<std::path::PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
-            .into_iter()
-            .map(|dir| Path::new(dir).join(program))
-            .find(|path| path.is_file())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no system helper {program} in /usr/sbin, /usr/bin, /sbin or /bin"),
-                )
-            })
+        select_system_helper(
+            program,
+            &["/usr/sbin", "/usr/bin", "/sbin", "/bin"],
+            &|path| std::fs::symlink_metadata(path).map(|_| ()),
+        )
     }
+}
+
+#[cfg(any(not(windows), test))]
+fn select_system_helper(
+    program: &str,
+    directories: &[&str],
+    lookup: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<std::path::PathBuf> {
+    for dir in directories {
+        let candidate = Path::new(dir).join(program);
+        match lookup(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => {}
+            Err(why) => return Err(why),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no system helper {program} in {}", directories.join(", ")),
+    ))
 }
 
 #[cfg(windows)]
