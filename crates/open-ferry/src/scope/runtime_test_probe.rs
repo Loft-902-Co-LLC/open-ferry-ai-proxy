@@ -99,3 +99,21 @@ pub(crate) fn scratch_dir() -> tempfile::TempDir {
     fs::create_dir_all(&root).unwrap();
     tempfile::tempdir_in(root).unwrap()
 }
+
+/// Whether `path` is on the current directory's drive, the one a rooted path without a drive
+/// resolves to. CI keeps the scratch directory on C: and the checkout on D:.
+#[cfg(windows)]
+pub(crate) fn on_current_drive(path: &std::path::Path) -> bool {
+    use std::path::{Component, Prefix};
+    let drive = |path: &std::path::Path| match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                Some(letter.to_ascii_uppercase())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let here = drive(&std::env::current_dir().unwrap());
+    here.is_some() && drive(path) == here
+}

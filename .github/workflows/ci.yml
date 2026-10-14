@@ -55,14 +55,31 @@ jobs:
       # The supervisor's tests run binaries from scratch directories, which
       # its trust check must accept. The runner's D: drive, where the
       # checkout and the target directory are, is owned by NETWORK SERVICE,
-      # which the check refuses, so they go under the runner's profile.
+      # which the check refuses. The runner is also elevated, so open-ferry
+      # runs privileged in the tests and refuses config and auth paths that
+      # anyone but administrators and SYSTEM can write, as the runner's
+      # profile and its temp directory are. So the scratch and temp
+      # directories go under a directory on C: that only administrators and
+      # SYSTEM own and can write.
       - name: Scratch directory for the trust checks
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $dir = Join-Path $env:USERPROFILE 'ofp-scratch'
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          "OFP_TEST_SCRATCH=$dir" >> $env:GITHUB_ENV
+          $root = 'C:\ofp-ci'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          icacls $root /setowner '*S-1-5-32-544' /q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $scratch = Join-Path $root 'scratch'
+          $temp = Join-Path $root 'temp'
+          New-Item -ItemType Directory -Force -Path $scratch, $temp | Out-Null
+          $probe = New-Item -ItemType File -Force -Path (Join-Path $temp 'owner-probe')
+          "New files here are owned by $((Get-Acl $probe.FullName).Owner)"
+          Remove-Item $probe.FullName
+          "OFP_TEST_SCRATCH=$scratch" >> $env:GITHUB_ENV
+          "TMP=$temp" >> $env:GITHUB_ENV
+          "TEMP=$temp" >> $env:GITHUB_ENV
 
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast

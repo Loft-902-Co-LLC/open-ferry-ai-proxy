@@ -524,6 +524,9 @@ mod tests {
         .await;
         assert_eq!(code, ExitCode::FAILURE);
         assert_eq!(starts.get(), 0);
+        // A rooted path without a drive takes the current directory's drive, so when that isn't
+        // the scratch directory's, the privileged full path names nothing and is refused.
+        let same_drive = crate::scope::runtime_test_probe::on_current_drive(&dir);
         for privileged in [true, false] {
             let mut fake = crate::update::scope_probe::Fake::new(
                 crate::os_service::Platform::Windows,
@@ -565,7 +568,15 @@ mod tests {
                 },
             )
             .await;
-            assert_eq!(code, ExitCode::SUCCESS);
+            let refused = privileged && !same_drive;
+            assert_eq!(
+                code,
+                if refused {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            );
         }
     }
 
