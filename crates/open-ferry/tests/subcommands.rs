@@ -123,8 +123,19 @@ fn init_writes_a_config_that_check_passes() {
     assert!(!out.contains(&client_key) && !out.contains(&management_key));
     let report: Value = serde_json::from_str(&out).unwrap();
     let refused = refuses_the_accounts_records(&report);
-    assert_eq!(exit, Some(if refused { 1 } else { 0 }), "{report:#}");
-    assert_eq!(report["errors"], if refused { 1 } else { 0 }, "{report:#}");
+    // A privileged check also refuses the auth directory, which is under the
+    // scratch directory others can write.
+    let privileged = privilege::privileged();
+    let auth = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["check"] == "auth directory")
+        .unwrap();
+    assert_eq!(auth["level"] == "error", privileged, "{report:#}");
+    let errors = usize::from(refused) + usize::from(privileged);
+    assert_eq!(exit, Some(if errors > 0 { 1 } else { 0 }), "{report:#}");
+    assert_eq!(report["errors"], errors, "{report:#}");
     assert_eq!(report["config"], shown.as_str());
     let checks: Vec<&str> = report["findings"]
         .as_array()
@@ -149,15 +160,14 @@ fn init_writes_a_config_that_check_passes() {
     let check = run(dir.path(), &["check", "-config", &shown]);
     let exit = code(&check);
     let out = String::from_utf8(check.stdout).unwrap();
-    assert_eq!(exit, Some(if refused { 1 } else { 0 }), "{out}");
+    assert_eq!(exit, Some(if errors > 0 { 1 } else { 0 }), "{out}");
     assert!(out.starts_with(&format!("ok      config: {shown} loads\n")));
-    assert!(
-        out.lines()
-            .last()
-            .unwrap()
-            .starts_with(if refused { "1 error, " } else { "no errors, " }),
-        "{out}"
-    );
+    let summary = match errors {
+        0 => "no errors, ".to_owned(),
+        1 => "1 error, ".to_owned(),
+        n => format!("{n} errors, "),
+    };
+    assert!(out.lines().last().unwrap().starts_with(&summary), "{out}");
 
     let again = run(dir.path(), &["init", "-config", &shown]);
     assert_eq!(code(&again), Some(1));
