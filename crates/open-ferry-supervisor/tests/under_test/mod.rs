@@ -486,7 +486,8 @@ async fn child_main(fixture: PathBuf) -> String {
         binary_name: NAME.to_owned(),
         runner: Arc::new(MapRunner(versions)),
         detect_timeout: Duration::from_secs(5),
-        endpoint_location: own_endpoint(&fixture),
+        #[cfg(feature = "blue-green-test")]
+        test_endpoint_location: own_endpoint(&fixture),
     };
     #[cfg(windows)]
     let bind = || {
@@ -604,6 +605,8 @@ fn supervisor_child() {
     let Some(fixture) = std::env::var_os("OFP_PT_FIXTURE") else {
         return;
     };
+    #[cfg(unix)]
+    watch_test_parent();
     let _ = tracing::subscriber::set_global_default(WarningsToStderr);
     let fixture = PathBuf::from(fixture);
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -613,6 +616,29 @@ fn supervisor_child() {
         .unwrap();
     let outcome = runtime.block_on(child_main(fixture.clone()));
     std::fs::write(fixture.join("child.exit"), outcome).unwrap();
+}
+
+/// A nextest timeout kills the test without running Sup::drop. This helper
+/// leads its own group, outside nextest's Unix group, so watch the original
+/// parent and end our entire group when reparented. Workers never setsid.
+#[cfg(unix)]
+fn watch_test_parent() {
+    let parent: libc::pid_t = std::env::var("OFP_PT_PARENT")
+        .expect("the spawning test's pid")
+        .parse()
+        .expect("a pid");
+    std::thread::spawn(move || {
+        loop {
+            // SAFETY: getppid only queries this process's parent.
+            if unsafe { libc::getppid() } != parent {
+                // SAFETY: Fx::spawn made us the group leader; this group contains
+                // only our helper and workers, and our live pid reserves its id.
+                unsafe { libc::killpg(libc::getpgrp(), libc::SIGKILL) };
+                std::process::abort();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
 }
 
 /// The name the test harness lists `supervisor_child` under, which the parent
@@ -628,10 +654,10 @@ fn child_test_name() -> String {
 
 // ---- the parent -----------------------------------------------------------
 
-/// Tests that start a supervisor take turns: on Unix the endpoint is one per
-/// user and, as in `tests/supervise.rs`, nothing else may fork while a worker
-/// binary is written (ETXTBSY), so one at a time; on Windows each data
-/// directory has its own pipe and four run together.
+/// Plain cargo test shares descriptors: on Unix an unrelated fork can inherit
+/// an executable write descriptor (ETXTBSY) or keep a lock alive. Serialize
+/// these tests there; Windows permits four. Nextest gives each test its own
+/// process, with concurrency bounded by the configured process test group.
 struct Gate {
     taken: Mutex<usize>,
     free: Condvar,
@@ -762,11 +788,12 @@ pub fn yaml_single_quoted(text: &str) -> String {
 /// nothing needs injecting.
 #[cfg(unix)]
 fn own_endpoint(fixture: &Path) -> Option<Location> {
-    let location = Location::new(fixture, "e").expect("the fixture's endpoint location");
+    let root = std::fs::canonicalize(fixture).expect("canonical fixture root");
+    let location = Location::new(&root, "e").expect("the fixture's endpoint location");
     let socket = location.socket_path();
     assert!(
-        socket.as_os_str().len() <= 100,
-        "SET-UP: the fixture's socket path is {} bytes, over the 100 a Unix socket path can hold: {}",
+        socket.as_os_str().len() <= 103,
+        "SET-UP: the fixture's socket path is {} bytes, over the product limit of 103: {}",
         socket.as_os_str().len(),
         socket.display()
     );
@@ -1393,6 +1420,8 @@ impl Fx {
         // The workers inherit what it has.
         isolate(&mut command);
         command.env("OFP_PT_FIXTURE", self.root());
+        #[cfg(unix)]
+        command.env("OFP_PT_PARENT", std::process::id().to_string());
         // Its own process group, so that `Sup`'s drop can end the workers too.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);

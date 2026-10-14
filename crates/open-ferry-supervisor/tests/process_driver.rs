@@ -333,7 +333,8 @@ async fn check_handshake_survivor(cancel: bool) {
         binary_name: "worker_probe".to_owned(),
         runner: Arc::new(NoRecovery),
         detect_timeout: LONG,
-        endpoint_location: None,
+        #[cfg(feature = "blue-green-test")]
+        test_endpoint_location: None,
     };
     assert!(
         tokio::time::timeout(

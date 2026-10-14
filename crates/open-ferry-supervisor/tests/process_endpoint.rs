@@ -37,7 +37,13 @@ fn the_fixture_binds_and_asks_its_own_endpoint_and_the_record_names_its_child() 
     let default = Location::resolve(&identity, &fx.data());
     #[cfg(unix)]
     {
-        let own = Location::new(fx.root(), "e").expect("location");
+        let root = std::fs::canonicalize(fx.root()).expect("canonical fixture root");
+        let own = Location::new(&root, "e").expect("location");
+        assert!(
+            own.socket_path().as_os_str().len() <= 103,
+            "SET-UP: canonical socket path exceeds 103 bytes: {}",
+            own.socket_path().display()
+        );
         assert_eq!(used, own);
         assert!(
             std::path::Path::new(&own.to_record()).exists(),

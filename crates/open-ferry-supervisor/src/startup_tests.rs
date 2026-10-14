@@ -70,7 +70,14 @@ fn own_endpoint(rig: &mut Rig) -> Option<tempfile::TempDir> {
         .prefix("o-")
         .tempdir_in(home)
         .unwrap();
-    rig.cfg.endpoint_location = Some(crate::endpoint::Location::new(dir.path(), "e").unwrap());
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let location = crate::endpoint::Location::new(&root, "e").unwrap();
+    assert!(
+        location.socket_path().as_os_str().len() <= 103,
+        "SET-UP: canonical socket path exceeds 103 bytes: {}",
+        location.socket_path().display()
+    );
+    rig.cfg.test_endpoint_location = Some(location);
     Some(dir)
 }
 

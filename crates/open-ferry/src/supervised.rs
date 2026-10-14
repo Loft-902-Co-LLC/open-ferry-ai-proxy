@@ -444,6 +444,7 @@ pub(crate) struct Setup {
     pub kind: ServiceKind,
     pub data: DataDir,
     pub installed: PathBuf,
+    #[cfg(feature = "blue-green-test")]
     pub endpoint: Option<Location>,
 }
 
@@ -470,7 +471,8 @@ pub(crate) fn startup_config(setup: Setup) -> startup::Config {
         binary_name: open_ferry_update::release::binary_name(open_ferry_update::TARGET).to_owned(),
         runner: Arc::new(ProcessRunner),
         detect_timeout: DETECT_TIMEOUT,
-        endpoint_location: setup.endpoint,
+        #[cfg(feature = "blue-green-test")]
+        test_endpoint_location: setup.endpoint,
     }
 }
 
@@ -657,7 +659,7 @@ fn run_supervisor(
             .and_then(std::fs::canonicalize)
             .map(plain)
             .map_err(|error| format!("failed to find the open-ferry binary: {error}"))?;
-        let (data, endpoint) = located;
+        let (data, _endpoint) = located;
         let kind = if flags.system {
             ServiceKind::System
         } else {
@@ -671,7 +673,8 @@ fn run_supervisor(
                 kind,
                 data,
                 installed: exe,
-                endpoint,
+                #[cfg(feature = "blue-green-test")]
+                endpoint: _endpoint,
             },
         ))
     };
@@ -1336,6 +1339,7 @@ mod tests {
             kind: ServiceKind::System,
             data: data.clone(),
             installed: dir.path().join("open-ferry"),
+            #[cfg(feature = "blue-green-test")]
             endpoint: None,
         });
         assert_eq!(cfg.data, data);
@@ -1346,7 +1350,8 @@ mod tests {
             cfg.binary_name,
             open_ferry_update::release::binary_name(open_ferry_update::TARGET)
         );
-        assert!(cfg.endpoint_location.is_none());
+        #[cfg(feature = "blue-green-test")]
+        assert!(cfg.test_endpoint_location.is_none());
         assert_eq!(cfg.receipt, serde_json::json!({}));
         std::fs::create_dir_all(data.root()).unwrap();
         std::fs::write(
@@ -1359,6 +1364,7 @@ mod tests {
             kind: ServiceKind::User,
             data,
             installed: dir.path().join("open-ferry"),
+            #[cfg(feature = "blue-green-test")]
             endpoint: None,
         });
         assert_eq!(cfg.receipt["binary"], "/b/open-ferry");

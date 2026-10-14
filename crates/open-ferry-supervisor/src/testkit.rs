@@ -1166,7 +1166,8 @@ impl Rig {
             binary_name: NAME.to_owned(),
             runner: Arc::new(FakeRunner),
             detect_timeout: Duration::from_secs(5),
-            endpoint_location: None,
+            #[cfg(any(test, feature = "blue-green-test"))]
+            test_endpoint_location: None,
         };
         let driver = FakeDriver::default();
         let disk = FakeDisk::default();

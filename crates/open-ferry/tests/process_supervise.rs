@@ -23,9 +23,7 @@ use open_ferry_supervisor::protocol::{EndpointReply, EndpointRequest, VERSION};
 use open_ferry_supervisor::timings::STOP_BUDGET;
 use under_test::*;
 
-/// A loopback port that was free a moment ago. The supervisor's own
-/// listeners are exclusive on Windows and nothing else here binds, so the
-/// window in which another process could take it is a few milliseconds.
+/// Choose a candidate; launch retries only a logged address-in-use bind failure.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -37,8 +35,8 @@ fn free_port() -> u16 {
 /// Starts `open-ferry -supervise` from a copy of the worker binary in `root`
 /// (its `bin/`), with a config on `port` and self-update off, on a data
 /// directory and an endpoint of its own. The worker answers with the marker
-/// `e2e-marker`.
-fn launch(root: &std::path::Path, port: u16) -> Sup {
+/// unique to this fixture.
+fn spawn(root: &std::path::Path, port: u16) -> Sup {
     // The binary runs from the scratch directory, where the data directory's
     // trust check accepts it, not from the target directory.
     let bin = root.join("bin");
@@ -54,7 +52,11 @@ fn launch(root: &std::path::Path, port: u16) -> Sup {
         .version_dir(env!("CARGO_PKG_VERSION"));
     for dir in [bin.clone(), kept] {
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("test-marker"), "e2e-marker\n").unwrap();
+        std::fs::write(
+            dir.join("test-marker"),
+            format!("{}\n", fixture_marker(root)),
+        )
+        .unwrap();
     }
     // Self-update is off: nothing here may switch or update.
     std::fs::write(root.join("config.yaml"), config_text(root, port, "off")).unwrap();
@@ -79,6 +81,53 @@ fn launch(root: &std::path::Path, port: u16) -> Sup {
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     Sup::adopt(command.spawn().expect("start open-ferry -supervise"), root)
+}
+
+/// Reserve-then-drop cannot hand the socket to this CLI. Only retry an exited
+/// child whose own log confirms AddrInUse; every other startup failure fails.
+fn launch(root: &std::path::Path) -> (Sup, u16) {
+    // Retries share the original startup budget; a collision buys no time.
+    let until = Instant::now() + LONG;
+    for attempt in 0..8 {
+        assert!(
+            Instant::now() < until,
+            "no free port within the startup budget"
+        );
+        let port = free_port();
+        let mut sup = spawn(root, port);
+        loop {
+            if let Some(status) = sup.try_exit() {
+                let log = std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default();
+                let conflict = log.lines().any(|line| {
+                    line.contains("failed to bind the main listener")
+                        && ["(os error 98)", "(os error 48)", "(os error 10048)"]
+                            .iter()
+                            .any(|code| line.contains(code))
+                });
+                assert!(conflict && attempt < 7, "startup exited ({status}):\n{log}");
+                break;
+            }
+            // A foreign answer is never accepted. Wait for our child to
+            // confirm a bind failure before deciding whether to retry.
+            if let Some((_, marker)) = http_get(port, "/")
+                && marker.as_deref() == Some(fixture_marker(root).as_str())
+            {
+                return (sup, port);
+            }
+            assert!(
+                Instant::now() < until,
+                "nothing answered GET /\n{}",
+                std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default()
+            );
+            std::thread::sleep(POLL);
+        }
+        // Sup::drop ends this attempt's own group before another port is tried.
+    }
+    unreachable!("the last bind conflict fails above")
+}
+
+fn fixture_marker(root: &std::path::Path) -> String {
+    format!("fixture-{}", root.file_name().unwrap().to_string_lossy())
 }
 
 /// Waits for the first answer to `GET /` on `port`, panicking with the
@@ -120,8 +169,7 @@ fn the_real_supervisor_starts_serves_and_stops_through_its_endpoint() {
     let _permit = Permit::take();
     let dir = scratch();
     let root = dir.path();
-    let port = free_port();
-    let mut sup = launch(root, port);
+    let (mut sup, port) = launch(root);
     let dump = || std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default();
 
     // First start: the worker serves GET / on the supervisor's own listener.
@@ -131,7 +179,7 @@ fn the_real_supervisor_starts_serves_and_stops_through_its_endpoint() {
     assert!((200..500).contains(&status), "GET / answered {status}");
     assert_eq!(
         marker.as_deref(),
-        Some("e2e-marker"),
+        Some(fixture_marker(root).as_str()),
         "the answer did not carry the binary's test marker"
     );
 
@@ -199,8 +247,7 @@ fn a_terminate_signal_stops_the_supervisor_and_its_worker() {
     let _permit = Permit::take();
     let dir = scratch();
     let root = dir.path();
-    let port = free_port();
-    let mut sup = launch(root, port);
+    let (mut sup, port) = launch(root);
     let dump = || std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default();
     let (status, _) = wait_answer(&mut sup, port, &dump);
     assert!((200..500).contains(&status), "GET / answered {status}");

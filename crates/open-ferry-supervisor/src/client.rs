@@ -621,7 +621,13 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::SeqCst)
             );
-            let location = Location::new("/tmp", name).unwrap();
+            let root = std::fs::canonicalize("/tmp").expect("canonical endpoint root");
+            let location = Location::new(&root, name).unwrap();
+            assert!(
+                location.socket_path().as_os_str().len() <= 103,
+                "SET-UP: canonical socket path exceeds 103 bytes: {}",
+                location.socket_path().display()
+            );
             let _ = std::fs::remove_dir_all(location.dir());
             location
         }

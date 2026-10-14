@@ -35,3 +35,11 @@ required-features = ["blue-green-test"]
 socket2 = "0.6.5"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["test-util"] }
+
+[[test]]
+name = "startup"
+required-features = ["blue-green-test"]
+
+[[test]]
+name = "supervise"
+required-features = ["blue-green-test"]

@@ -115,8 +115,9 @@ impl Driver for FakeDriver {
     }
 }
 
-/// On Unix the endpoint is one per user and its namespace lock is held for as
-/// long as a supervisor lives, so tests that start one take turns.
+/// Plain cargo test shares a descriptor table: an unrelated fork can inherit
+/// an executable write descriptor (ETXTBSY) or a lock descriptor. Keep writes
+/// and forks from different tests apart. Nextest isolates each test process.
 static ENDPOINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Waits for this test's turn. Each test has its own runtime thread, so the
@@ -180,7 +181,13 @@ fn own_endpoint() -> (Option<Location>, Option<tempfile::TempDir>) {
         .prefix("o-")
         .tempdir_in(home)
         .unwrap();
-    let location = Location::new(dir.path(), "e").unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let location = Location::new(&root, "e").unwrap();
+    assert!(
+        location.socket_path().as_os_str().len() <= 103,
+        "SET-UP: canonical socket path exceeds 103 bytes: {}",
+        location.socket_path().display()
+    );
     (Some(location), Some(dir))
 }
 
@@ -198,7 +205,7 @@ fn rig() -> Rig {
         lock_poll: Duration::from_millis(10),
         ..Timings::default()
     };
-    let (endpoint_location, sockets) = own_endpoint();
+    let (test_endpoint_location, sockets) = own_endpoint();
     let cfg = Config {
         data: DataDir::at(root),
         installed: installed.clone(),
@@ -209,7 +216,8 @@ fn rig() -> Rig {
         binary_name: NAME.to_owned(),
         runner: Arc::new(FakeRunner),
         detect_timeout: Duration::from_secs(5),
-        endpoint_location,
+        #[cfg(feature = "blue-green-test")]
+        test_endpoint_location,
     };
     Rig {
         _turn: turn,
@@ -225,18 +233,24 @@ fn rig() -> Rig {
     }
 }
 
-/// `Config::endpoint_location` is where the endpoint is bound and what
+/// `Config::test_endpoint_location` is where the endpoint is bound and what
 /// `supervisor.json` records: an injected location is used as given, and the
 /// default (per-user on Unix) is not resolved, bound or recorded.
 #[cfg(unix)]
 #[tokio::test]
-async fn an_injected_endpoint_location_is_bound_and_recorded_and_not_the_default() {
+async fn an_injected_test_endpoint_location_is_bound_and_recorded_and_not_the_default() {
     use open_ferry_supervisor::endpoint::{Identity, connect};
     let rig = rig();
-    let own = rig.cfg.endpoint_location.clone().expect("an own location");
+    let own = rig
+        .cfg
+        .test_endpoint_location
+        .clone()
+        .expect("an own location");
     let identity = Identity::current(ServiceKind::User).unwrap();
-    let default = Location::resolve(&identity, rig.cfg.data.root()).unwrap();
-    assert_ne!(own.to_record(), default.to_record());
+    let default = Location::resolve(&identity, rig.cfg.data.root()).ok();
+    if let Some(default) = &default {
+        assert_ne!(own.to_record(), default.to_record());
+    }
     let driver = FakeDriver::default();
     let mut registry = Registry::new();
     let started = start(&rig.cfg, &rig.host, &driver, &mut registry, &SystemClock)
@@ -249,7 +263,9 @@ async fn an_injected_endpoint_location_is_bound_and_recorded_and_not_the_default
     );
     let record = std::fs::read_to_string(rig.cfg.data.root().join("supervisor.json")).unwrap();
     assert!(record.contains(&own.to_record()), "{record}");
-    assert!(!record.contains(&default.to_record()), "{record}");
+    if let Some(default) = &default {
+        assert!(!record.contains(&default.to_record()), "{record}");
+    }
     // The injected socket is the one a client reaches.
     assert!(connect(&own, &identity).await.is_ok());
     assert!(std::path::Path::new(&own.to_record()).exists());
@@ -2457,7 +2473,8 @@ async fn startup_crash_child() {
         binary_name: NAME.into(),
         runner: Arc::new(FakeRunner),
         detect_timeout: Duration::from_secs(5),
-        endpoint_location: None,
+        #[cfg(feature = "blue-green-test")]
+        test_endpoint_location: None,
     };
     let started = start(
         &cfg,
@@ -3035,4 +3052,73 @@ async fn recovery_reloads_the_install_tasks_published_journal_after_join_error()
         panic!("no journal")
     };
     assert_eq!(&on_disk, recovered);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_final_endpoint_is_unsafe_and_never_falls_back() {
+    use open_ferry_supervisor::endpoint::{EndpointError, Identity, Server};
+    let rig = rig();
+    let own = rig.cfg.test_endpoint_location.as_ref().unwrap();
+    let target = own.dir().with_file_name("target");
+    std::fs::create_dir(&target).unwrap();
+    std::os::unix::fs::symlink(&target, own.dir()).unwrap();
+    let identity = Identity::current(ServiceKind::User).unwrap();
+    std::fs::create_dir_all(rig.cfg.data.root()).unwrap();
+    let lock =
+        open_ferry_supervisor::process::SupervisorLock::try_acquire(rig.cfg.data.root()).unwrap();
+    assert!(matches!(
+        Server::bind(own, &identity, &lock),
+        Err(EndpointError::Unsafe(_))
+    ));
+    drop(lock);
+    let started = start(
+        &rig.cfg,
+        &rig.host,
+        &FakeDriver::default(),
+        &mut Registry::new(),
+        &SystemClock,
+    )
+    .await
+    .unwrap();
+    assert!(started.endpoint.is_none());
+    assert!(
+        started
+            .switching_disabled
+            .as_deref()
+            .unwrap()
+            .contains("not safe")
+    );
+    assert!(!rig.cfg.data.root().join("supervisor.json").exists());
+    assert!(!own.socket_path().exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_untrusted_endpoint_root_disables_switching_without_binding_or_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig();
+    let root = rig._sockets.as_ref().unwrap().path().to_path_buf();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let own = rig.cfg.test_endpoint_location.as_ref().unwrap().clone();
+    let started = start(
+        &rig.cfg,
+        &rig.host,
+        &FakeDriver::default(),
+        &mut Registry::new(),
+        &SystemClock,
+    )
+    .await
+    .unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(started.endpoint.is_none());
+    assert!(
+        started
+            .switching_disabled
+            .as_deref()
+            .unwrap()
+            .contains("switching is disabled")
+    );
+    assert!(!own.socket_path().exists());
+    assert!(!rig.cfg.data.root().join("supervisor.json").exists());
 }

@@ -153,8 +153,9 @@ impl Driver for FakeDriver {
     }
 }
 
-/// On Unix the endpoint is one per user and its namespace lock is held for as
-/// long as a supervisor lives, so tests that start one take turns.
+/// Plain cargo test shares a descriptor table: an unrelated fork can inherit
+/// an executable write descriptor (ETXTBSY) or a lock descriptor. Keep writes
+/// and forks from different tests apart. Nextest isolates each test process.
 static ENDPOINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Waits for this test's turn. Each test has its own runtime thread, so the
@@ -169,7 +170,7 @@ fn take_turn() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 struct Rig {
-    _turn: tokio::sync::MutexGuard<'static, ()>,
+    _turn: Option<tokio::sync::MutexGuard<'static, ()>>,
     _dir: tempfile::TempDir,
     _sockets: Option<tempfile::TempDir>,
     cfg: Config,
@@ -214,12 +215,25 @@ fn own_endpoint() -> (Option<Location>, Option<tempfile::TempDir>) {
         .prefix("o-")
         .tempdir_in(home)
         .unwrap();
-    let location = Location::new(dir.path(), "e").unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let location = Location::new(&root, "e").unwrap();
+    assert!(
+        location.socket_path().as_os_str().len() <= 103,
+        "SET-UP: canonical socket path exceeds 103 bytes: {}",
+        location.socket_path().display()
+    );
     (Some(location), Some(dir))
 }
 
 fn rig() -> Rig {
     let turn = take_turn();
+    let mut rig = rig_under_gate();
+    rig._turn = Some(turn);
+    rig
+}
+
+/// Caller holds the one outer gate when constructing multiple fixtures.
+fn rig_under_gate() -> Rig {
     let dir = scratch();
     let root = dir.path().join("data");
     let bin = dir.path().join("bin");
@@ -231,7 +245,7 @@ fn rig() -> Rig {
         stop: Duration::from_millis(500),
         ..Timings::default()
     };
-    let (endpoint_location, sockets) = own_endpoint();
+    let (test_endpoint_location, sockets) = own_endpoint();
     let cfg = Config {
         data: DataDir::at(root),
         installed,
@@ -242,10 +256,11 @@ fn rig() -> Rig {
         binary_name: NAME.to_owned(),
         runner: Arc::new(FakeRunner),
         detect_timeout: Duration::from_secs(5),
-        endpoint_location,
+        #[cfg(feature = "blue-green-test")]
+        test_endpoint_location,
     };
     Rig {
-        _turn: turn,
+        _turn: None,
         _dir: dir,
         _sockets: sockets,
         cfg,
@@ -300,7 +315,7 @@ async fn status_of_a_start(rig: &Rig) -> serde_json::Value {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let observer = async {
         until("the worker", || driver.spawned.load(Ordering::SeqCst) == 1).await;
-        let shown = status(rig.cfg.endpoint_location.clone(), &root).await;
+        let shown = status(rig.cfg.test_endpoint_location.clone(), &root).await;
         tx.send(Command::Stop).unwrap();
         shown
     };
@@ -586,7 +601,7 @@ mod panics {
                 driver.spawned.load(Ordering::SeqCst) == 2
             })
             .await;
-            let shown = status(rig.cfg.endpoint_location.clone(), &root).await;
+            let shown = status(rig.cfg.test_endpoint_location.clone(), &root).await;
             driver.hold_second.store(false, Ordering::SeqCst);
             tx.send(Command::Stop).unwrap();
             shown
@@ -815,7 +830,7 @@ mod real_survivor {
                 "J1 was cleared while the child lived"
             );
             // The status shows the switch and the child, not as active or standby.
-            let shown = super::status(rig.cfg.endpoint_location.clone(), &data).await;
+            let shown = super::status(rig.cfg.test_endpoint_location.clone(), &data).await;
             assert!(!shown["switch"].is_null(), "{shown}");
             let survivor = shown["workers"]
                 .as_array()
@@ -912,4 +927,58 @@ mod real_survivor {
     async fn a_failed_real_handshake_waits_for_the_childs_exit() {
         Box::pin(run(How2::Incompatible)).await;
     }
+}
+
+/// Not upstream's: separate roots coexist even in the same runtime/process.
+#[tokio::test]
+async fn two_supervisors_bind_independently_and_stopping_one_leaves_the_other_answering() {
+    let _turn = take_turn();
+    let a = rig_under_gate();
+    let b = rig_under_gate();
+    let da = FakeDriver::default();
+    let db = FakeDriver::default();
+    let (ta, ra) = tokio::sync::mpsc::unbounded_channel();
+    let (tb, rb) = tokio::sync::mpsc::unbounded_channel();
+    let observer = async {
+        until("both workers", || {
+            da.spawned.load(Ordering::SeqCst) == 1 && db.spawned.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        let sa = status(a.cfg.test_endpoint_location.clone(), a.cfg.data.root()).await;
+        let sb = status(b.cfg.test_endpoint_location.clone(), b.cfg.data.root()).await;
+        assert_eq!(sa["state"], "idle");
+        assert_eq!(sb["state"], "idle");
+        ta.send(Command::Stop).unwrap();
+    };
+    let first = async {
+        let (exit, ()) = tokio::join!(
+            supervise(
+                &a.cfg,
+                &a.host,
+                &da,
+                &SystemClock,
+                ta.clone(),
+                ra,
+                default_limit()
+            ),
+            observer
+        );
+        assert_eq!(exit.unwrap(), Exit::Stopped);
+        let still = status(b.cfg.test_endpoint_location.clone(), b.cfg.data.root()).await;
+        assert_eq!(still["state"], "idle");
+        tb.send(Command::Stop).unwrap();
+    };
+    let ((), exit) = tokio::join!(
+        first,
+        supervise(
+            &b.cfg,
+            &b.host,
+            &db,
+            &SystemClock,
+            tb.clone(),
+            rb,
+            default_limit()
+        )
+    );
+    assert_eq!(exit.unwrap(), Exit::Stopped);
 }
