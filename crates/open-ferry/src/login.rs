@@ -313,9 +313,14 @@ fn friendly_message(kind: &str, port: Option<u16>) -> String {
 /// Shows a browser login's URL, opening it unless `no_browser`.
 fn present_url(provider: &str, url: &str, port: u16, no_browser: bool) {
     if !no_browser {
-        println!("Opening browser for {provider} authentication");
-        if let Err(error) = browser::open(url) {
-            tracing::warn!("Failed to open browser automatically: {error}");
+        let probe = crate::scope::runtime_probe();
+        if let Some(reason) = browser::refusal(probe.as_ref()) {
+            println!("{reason}");
+        } else {
+            println!("Opening browser for {provider} authentication");
+            if let Err(error) = browser::open(url) {
+                tracing::warn!("Failed to open browser automatically: {error}");
+            }
         }
     }
     print!("{}", ssh_tunnel_instructions(port));
