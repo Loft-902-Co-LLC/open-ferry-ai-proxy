@@ -572,8 +572,8 @@ export async function mockServer(
   const clientKeys = [...CLIENT_KEYS];
   let configYaml = CONFIG_YAML;
   const calls = recentCalls(now);
-  // Whether a pasted address has come back for the bind it started.
-  let bound = false;
+  // How the bind it started stands: it ends only after an accepted callback.
+  let bound: { status: "wait" | "ok" | "error"; error?: string } = { status: "wait" };
   const logs = recentLogs(calls).map((entry) => ({ ...entry, size: logFile(entry).length }));
   const server: MockServer = {
     unhandled: [],
@@ -725,14 +725,41 @@ export async function mockServer(
           return json(route, { error: "invalid SIWC bind target" }, 400);
         }
         server.binds.push(url.search.slice(1));
-        bound = false;
+        bound = { status: "wait" };
         return json(route, BIND);
       }
       case "GET /v8/management/oauth/status":
-        return json(route, { status: bound ? "ok" : "wait" });
-      case "POST /v8/management/oauth/callback":
-        bound = true;
+        return json(route, bound);
+      case "POST /v8/management/oauth/callback": {
+        // As the server reads a pasted redirect: fields trimmed, the query
+        // first and the fragment where its field is missing or empty.
+        const { redirect_url: pasted } = JSON.parse(request.postData() ?? "{}") as {
+          redirect_url?: string;
+        };
+        let address: URL;
+        try {
+          address = new URL((pasted ?? "").trim());
+        } catch {
+          return json(route, { status: "error", error: "invalid redirect URL" }, 400);
+        }
+        const fragment = new URLSearchParams(address.hash.replace(/^#/, ""));
+        const field = (name: string) => {
+          const value = address.searchParams.get(name)?.trim() ?? "";
+          return value === "" ? (fragment.get(name)?.trim() ?? "") : value;
+        };
+        if (field("state") !== BIND_STATE) {
+          return json(route, { status: "error", error: "invalid state" }, 400);
+        }
+        if (field("code") === "" && field("error") === "" && field("error_description") === "") {
+          return json(route, { status: "error", error: "code or error is required" }, 400);
+        }
+        // Accepted means delivered. A bind without the issued client ID fails the session.
+        bound =
+          field("client_id") === ""
+            ? { status: "error", error: "callback did not contain an issued client ID" }
+            : { status: "ok" };
         return json(route, { status: "ok" });
+      }
       case "DELETE /v8/management/oauth/session":
         return json(route, { status: "ok", cancelled: true });
       case "DELETE /v0/management/oauth-session":

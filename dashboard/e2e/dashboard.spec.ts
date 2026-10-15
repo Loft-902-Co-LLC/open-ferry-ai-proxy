@@ -183,9 +183,15 @@ test("renders every screen under the policy", async ({ page }) => {
   expect(watched.server.binds).toEqual([
     "provider=codex&mode=siwc-bind&name=codex-grace%40example.com-pro.json&is_webui=1",
   ]);
+  // The bind ends only once the server accepts a redirect that has the
+  // state, a code and the issued client ID.
+  await expect(bindDialog.getByText("Waiting for you to sign in")).toBeVisible();
+  await expect(bindDialog.getByText("OpenAI API access added")).toBeHidden();
   await bindDialog
     .getByLabel("Address of the page it sent you to")
-    .fill("http://localhost:1455/auth/callback?code=e2e-code&state=e2e-bind-0001");
+    .fill(
+      "http://localhost:1455/auth/callback?code=e2e-code&state=e2e-bind-0001&client_id=e2e-client",
+    );
   await bindDialog.getByRole("button", { name: "Finish signing in" }).click();
   await expect(bindDialog.getByText("OpenAI API access added")).toBeVisible();
   await shot(page, "30-credentials-bind-done");

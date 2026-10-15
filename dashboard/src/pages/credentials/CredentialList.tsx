@@ -8,6 +8,7 @@ import { credentialAnchor } from "./anchors";
 import { CredentialItem, credentialNames } from "./CredentialItem";
 import { credentialHealth, secondsUntilBack } from "./credentialStates";
 import { CheckedAt, PolledState } from "./PolledState";
+import { SignInDialog, type BindTarget } from "./SignInDialog";
 import { TriageList, type TriageEntry } from "./TriageList";
 import { useUpload } from "./upload";
 
@@ -56,6 +57,8 @@ export function CredentialList() {
   const list = useApiQuery<List>(AUTH_FILES, undefined, { refetchInterval: pollWhileRead });
   const upload = useUpload();
   const [notice, setNotice] = useState<ReactNode>(null);
+  // The credential a bind of Sign in with ChatGPT is running for.
+  const [binding, setBinding] = useState<BindTarget | null>(null);
 
   return (
     <Card
@@ -100,12 +103,25 @@ export function CredentialList() {
                   targeted={view.targeted}
                   readAt={readAt(data, list.dataUpdatedAt)}
                   onDone={setNotice}
+                  onBind={() => {
+                    setBinding({ file: entry.credential.name, name: entry.name });
+                  }}
                 />
               )}
             />
           );
         }}
       </PolledState>
+      {/* Here, not in a row: a row moves between groups, or goes, as its health changes. */}
+      {binding !== null && (
+        <SignInDialog
+          provider="codex"
+          bind={binding}
+          onClose={() => {
+            setBinding(null);
+          }}
+        />
+      )}
     </Card>
   );
 }

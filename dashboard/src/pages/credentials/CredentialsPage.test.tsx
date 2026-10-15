@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -35,7 +35,8 @@ import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 import { claudeCliAnchor, credentialAnchor, providerKeyAnchor } from "./anchors";
-import { SIGN_IN_LIMIT_MS } from "./SignInDialog";
+import { CREDENTIALS_REFRESH_MS } from "./CredentialList";
+import { SIGN_IN_GRACE_MS, SIGN_IN_LIMIT_MS, SIGN_IN_POLL_MS } from "./SignInDialog";
 
 const NAME = "claude-ada@example.com.json";
 const STATE = "test-state-0001";
@@ -905,9 +906,15 @@ describe("signing in with Claude or ChatGPT", () => {
       expect(left).toHaveTextContent("Time left: 0:30");
       expect(said()).toBe(once);
 
-      // Time's up: it says so, and starting again is the next step.
+      // Time's up here, but the server still says wait: it is asked, not blamed.
       act(() => {
         vi.advanceTimersByTime(30_000);
+      });
+      expect(within(dialog).getByText("Checking with the server…")).toBeVisible();
+      expect(within(dialog).queryByRole("alert")).toBeNull();
+      // Past the grace with the server still waiting, it has failed.
+      act(() => {
+        vi.advanceTimersByTime(SIGN_IN_GRACE_MS);
       });
       expect(within(dialog).getByRole("alert")).toHaveTextContent("The sign-in waited too long");
       expect(within(dialog).queryByText(/^Time left/)).toBeNull();
@@ -980,7 +987,8 @@ describe("adding OpenAI API access to a Codex credential", () => {
   const FILE = "codex-grace+test@example.com.json";
   const OPEN = /^Add OpenAI API access/;
   const BIND_URL = `https://sign-in.example/oauth/authorize?state=${STATE}`;
-  const BIND_REDIRECT = `http://localhost:1455/auth/callback?code=bind-code&state=${STATE}`;
+  // As ChatGPT sends the browser back: with the client ID the server issued.
+  const BIND_REDIRECT = `http://localhost:1455/auth/callback?code=bind-code&state=${STATE}&client_id=bind-client`;
 
   function codex(overrides: Partial<Credential> = {}): Credential {
     return credential({
@@ -995,21 +1003,76 @@ describe("adding OpenAI API access to a Codex credential", () => {
     });
   }
 
-  /** A bind whose status calls answer from `statuses`, the last one for good. */
-  function bindServer(statuses: SignInStatus[], cancel: unknown = { status: "ok", cancelled: true }) {
+  /** A field of a pasted `redirect`, as the server reads it; null for a bad address. */
+  function fieldOf(redirect: string): ((name: string) => string) | null {
+    let address: URL;
+    try {
+      address = new URL(redirect.trim());
+    } catch {
+      return null;
+    }
+    const fragment = new URLSearchParams(address.hash.replace(/^#/, ""));
+    return (name) => {
+      const value = address.searchParams.get(name)?.trim() ?? "";
+      return value === "" ? (fragment.get(name)?.trim() ?? "") : value;
+    };
+  }
+
+  /**
+   * Why the server would refuse a bind's pasted `redirect`, in its words; else
+   * null. It reads the fields trimmed, the query first and the fragment where
+   * the query's is empty, and wants this bind's state and a code or an error.
+   */
+  function refusal(redirect: string): string | null {
+    const field = fieldOf(redirect);
+    if (field === null) {
+      return "invalid redirect URL";
+    }
+    if (field("state") !== STATE) {
+      return "invalid state";
+    }
+    if (field("code") === "" && field("error") === "" && field("error_description") === "") {
+      return "code or error is required";
+    }
+    return null;
+  }
+
+  /**
+   * A bind that ends only after the server accepts a callback with its state,
+   * a code and the issued client ID (`bind.accepted`), unless `script` gives
+   * the status calls' answers instead, the last one for good. While
+   * `bind.hold` is set, an accepted bind still says "wait".
+   */
+  function bindServer(
+    script: SignInStatus[] | null = null,
+    cancel: unknown = { status: "ok", cancelled: true },
+  ) {
     const state = server([codex()]);
+    const bind = { accepted: false, hold: false };
     let polls = 0;
     state.api.use(
       route("GET", BIND_START, { json: { status: "ok", url: BIND_URL, state: STATE } }),
       route("GET", BIND_STATUS, () => {
-        const status = statuses[Math.min(polls, statuses.length - 1)] ?? { status: "wait" };
+        if (script === null) {
+          return { json: { status: bind.accepted && !bind.hold ? "ok" : "wait" } };
+        }
+        const status = script[Math.min(polls, script.length - 1)] ?? { status: "wait" };
         polls += 1;
         return { json: status };
       }),
-      route("POST", BIND_CALLBACK, { json: { status: "ok" } }),
+      route("POST", BIND_CALLBACK, (request) => {
+        const { redirect_url: redirect } = request.json() as { redirect_url: string };
+        const problem = refusal(redirect);
+        if (problem !== null) {
+          return { status: 400, json: { status: "error", error: problem } };
+        }
+        // Without the issued client ID the server fails the session.
+        bind.accepted = fieldOf(redirect)?.("client_id") !== "";
+        return { json: { status: "ok" } };
+      }),
       route("DELETE", BIND_SESSION, { json: cancel }),
     );
-    return state;
+    return Object.assign(state, { bind });
   }
 
   async function openBind(user: UserEvent, tally = "1 ready"): Promise<HTMLElement> {
@@ -1049,7 +1112,7 @@ describe("adding OpenAI API access to a Codex credential", () => {
   });
 
   it("explains the bind, starts it with the bind query, and finishes with the pasted address", async () => {
-    const state = bindServer([{ status: "wait" }, { status: "wait" }, { status: "ok" }]);
+    const state = bindServer();
     const { user } = renderApp("/credentials");
     const dialog = await openBind(user);
     expect(dialog).toHaveTextContent("keeps its Codex sign-in and gains Sign in with ChatGPT tokens");
@@ -1068,6 +1131,11 @@ describe("adding OpenAI API access to a Codex credential", () => {
     expect(start?.url.search).toContain("name=codex-grace%2Btest%40example.com.json");
     expect(state.api.callsTo("GET", SIGN_IN_START.codex)).toEqual([]);
 
+    // Nothing ends it but an accepted callback.
+    await waitFor(() => {
+      expect(state.api.callsTo("GET", BIND_STATUS).length).toBeGreaterThan(0);
+    });
+    expect(within(dialog).queryByText("OpenAI API access added")).toBeNull();
     const field = within(dialog).getByLabelText("Address of the page it sent you to");
     await user.click(field);
     await user.paste(BIND_REDIRECT);
@@ -1104,7 +1172,9 @@ describe("adding OpenAI API access to a Codex credential", () => {
 
     // The query's state wins over the fragment's: this one isn't this sign-in's.
     await user.click(field);
-    await user.paste(`http://localhost:1455/cb?state=other&code=query-code#state=${STATE}&code=frag-code`);
+    await user.paste(
+      `http://localhost:1455/cb?state=other&code=query-code&client_id=I#state=${STATE}&code=frag-code`,
+    );
     await user.click(send);
     expect(await within(dialog).findByText(/^That address isn't from this sign-in\./)).toBeVisible();
     expect(dialog).not.toHaveTextContent("query-code");
@@ -1112,7 +1182,7 @@ describe("adding OpenAI API access to a Codex credential", () => {
     expect(posted()).toEqual([]);
 
     // Only a fragment.
-    const fragment = `http://localhost:1455/cb#code=frag-code&state=${STATE}`;
+    const fragment = `http://localhost:1455/cb#code=frag-code&state=${STATE}&client_id=I`;
     await user.clear(field);
     await user.click(field);
     await user.paste(fragment);
@@ -1123,7 +1193,7 @@ describe("adding OpenAI API access to a Codex credential", () => {
     expect(dialog).not.toHaveTextContent("frag-code");
 
     // The query's state is this sign-in's, whatever the fragment says.
-    const both = `http://localhost:1455/cb?state=${STATE}&code=query-code#state=other`;
+    const both = `http://localhost:1455/cb?state=${STATE}&code=query-code&client_id=I#state=other`;
     await user.clear(field);
     await user.click(field);
     await user.paste(both);
@@ -1192,6 +1262,200 @@ describe("adding OpenAI API access to a Codex credential", () => {
       await within(dialog).findByText("OpenAI API access added", undefined, { timeout: 4000 }),
     ).toBeVisible();
     expect(state.api.callsTo("DELETE", BIND_SESSION)).toHaveLength(1);
+  });
+
+  it("asks for the client ID in the pasted address before it sends one", async () => {
+    const state = bindServer();
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+    const field = within(dialog).getByLabelText("Address of the page it sent you to");
+    await user.click(field);
+    await user.paste(`http://localhost:1455/auth/callback?code=bind-code&state=${STATE}`);
+    await user.click(within(dialog).getByRole("button", { name: "Finish signing in" }));
+    expect(await within(dialog).findByText(/^That address has no client ID in it\./)).toBeVisible();
+    expect(state.api.callsTo("POST", BIND_CALLBACK)).toEqual([]);
+  });
+
+  it("does not take a failed give-up for a cancel", async () => {
+    const state = bindServer([{ status: "wait" }]);
+    let failing = true;
+    state.api.use(
+      route("DELETE", BIND_SESSION, () =>
+        failing
+          ? { status: 500, json: { error: "session store unavailable" } }
+          : { json: { status: "ok", cancelled: true } },
+      ),
+    );
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+    await user.click(within(dialog).getByRole("button", { name: "Give up" }));
+
+    // It stays on this sign-in, says it may still finish, and goes on polling.
+    expect(await within(dialog).findByText("The server failed (HTTP 500)")).toBeVisible();
+    expect(dialog).toHaveTextContent("this sign-in may still finish");
+    expect(screen.getByRole("dialog", { name: "Add OpenAI API access" })).toBeVisible();
+    expect(within(dialog).getByText("Waiting for you to sign in…")).toBeVisible();
+    expect(state.api.callsTo("GET", BIND_START)).toHaveLength(1);
+    const polled = state.api.callsTo("GET", BIND_STATUS).length;
+    await waitFor(
+      () => {
+        expect(state.api.callsTo("GET", BIND_STATUS).length).toBeGreaterThan(polled);
+      },
+      { timeout: 4000 },
+    );
+
+    // It can be tried again, and a stopped bind closes the dialog.
+    failing = false;
+    await user.click(within(dialog).getByRole("button", { name: "Give up" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(state.api.callsTo("DELETE", BIND_SESSION)).toHaveLength(2);
+    expect(state.api.callsTo("GET", BIND_START)).toHaveLength(1);
+  });
+
+  it("takes Escape as a give-up, and stays open while the server decides", async () => {
+    const state = bindServer([{ status: "wait" }], { status: "ok", cancelled: false });
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+
+    // The browser's Escape is a cancelable event; the dialog keeps it from closing.
+    expect(fireEvent(dialog, new Event("cancel", { cancelable: true }))).toBe(false);
+    expect(await within(dialog).findByText("The server is already saving it")).toBeVisible();
+    expect(dialog).toHaveAttribute("open");
+    expect(state.api.callsTo("DELETE", BIND_SESSION)).toHaveLength(1);
+
+    // Closed from there, the action works again.
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    const card = screen.getByRole("region", { name: CREDENTIALS });
+    await user.click(
+      within(card).getByRole("button", { name: "Add OpenAI API access grace@example.com" }),
+    );
+    expect(screen.getByRole("dialog", { name: "Add OpenAI API access" })).toBeVisible();
+  });
+
+  it("ignores a second Escape while the give-up is on its way", async () => {
+    const state = bindServer([{ status: "wait" }]);
+    let release: () => void = () => undefined;
+    const answer = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.api.use(
+      route("DELETE", BIND_SESSION, async () => {
+        await answer;
+        return { json: { status: "ok", cancelled: true } };
+      }),
+    );
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    await waitFor(() => {
+      expect(state.api.callsTo("DELETE", BIND_SESSION)).toHaveLength(1);
+    });
+    expect(within(dialog).getByRole("button", { name: "Give up" })).toBeDisabled();
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    expect(screen.getByRole("dialog", { name: "Add OpenAI API access" })).toBeVisible();
+    release();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(state.api.callsTo("DELETE", BIND_SESSION)).toHaveLength(1);
+  });
+
+  it("keeps the dialog and its polling when the credential moves in the list", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    try {
+      const state = bindServer();
+      const { user } = renderApp("/credentials");
+      const dialog = await openBind(user);
+      await user.click(within(dialog).getByRole("button", { name: "Start" }));
+      await within(dialog).findByText("Waiting for you to sign in…");
+      const card = screen.getByRole("region", { name: CREDENTIALS });
+      // Ready, so folded away for now.
+      expect(within(card).getByRole("button", { name: "1 ready" })).toBeVisible();
+
+      // It starts to rest; the next read of the list puts it in the other group.
+      const file = state.files[0];
+      if (file === undefined) {
+        throw new Error("no credential");
+      }
+      file.cooldowns = [cooldown("credential_quota", 300)];
+      const polled = state.api.callsTo("GET", BIND_STATUS).length;
+      await act(() => vi.advanceTimersByTimeAsync(CREDENTIALS_REFRESH_MS + 1000));
+      const row = await within(card).findByRole("article", { name: "grace@example.com" });
+      expect(within(row).getByText("Resting")).toBeVisible();
+      expect(within(card).queryByRole("button", { name: /ready$/ })).toBeNull();
+
+      // The same dialog is still there, still following the sign-in.
+      expect(screen.getByRole("dialog", { name: "Add OpenAI API access" })).toBe(dialog);
+      expect(within(dialog).getByText("Waiting for you to sign in…")).toBeVisible();
+      expect(state.api.callsTo("GET", BIND_STATUS).length).toBeGreaterThan(polled);
+
+      // And it finishes, whichever group the credential is in.
+      await user.click(within(dialog).getByLabelText("Address of the page it sent you to"));
+      await user.paste(BIND_REDIRECT);
+      await user.click(within(dialog).getByRole("button", { name: "Finish signing in" }));
+      await act(() => vi.advanceTimersByTimeAsync(SIGN_IN_POLL_MS + 500));
+      expect(await within(dialog).findByText("OpenAI API access added")).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not call a bind failed at five minutes while the server still says wait", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    try {
+      const state = bindServer();
+      const { user } = renderApp("/credentials");
+      const dialog = await openBind(user);
+      await user.click(within(dialog).getByRole("button", { name: "Start" }));
+      await within(dialog).findByText("Waiting for you to sign in…");
+
+      // The callback comes at 4:59; the server is still exchanging it.
+      await act(() => vi.advanceTimersByTimeAsync(SIGN_IN_LIMIT_MS - 1000));
+      state.bind.hold = true;
+      await user.click(within(dialog).getByLabelText("Address of the page it sent you to"));
+      await user.paste(BIND_REDIRECT);
+      await user.click(within(dialog).getByRole("button", { name: "Finish signing in" }));
+      await waitFor(() => {
+        expect(state.api.callsTo("POST", BIND_CALLBACK)).toHaveLength(1);
+      });
+
+      // Past 5:00 it says it is checking, not that it failed.
+      await act(() => vi.advanceTimersByTimeAsync(3000));
+      const checking = await within(dialog).findByText("Checking with the server…");
+      expect(checking).toBeVisible();
+      expect(checking).toHaveAttribute("role", "status");
+      // Nothing in it has a fixed width, so it fits a 390 px screen.
+      expect(checking.className).not.toMatch(/(^|\s)(min-|max-)?w-/);
+      expect(checking.parentElement?.className).not.toMatch(/(^|\s)(min-|max-)?w-/);
+      expect(within(dialog).queryByRole("alert")).toBeNull();
+      expect(within(dialog).queryByText("The sign-in waited too long")).toBeNull();
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(within(dialog).getByText("Checking with the server…")).toBeVisible();
+      expect(within(dialog).queryByRole("alert")).toBeNull();
+
+      // Then the server finishes saving.
+      state.bind.hold = false;
+      await act(() => vi.advanceTimersByTimeAsync(SIGN_IN_POLL_MS + 500));
+      expect(await within(dialog).findByText("OpenAI API access added")).toBeVisible();
+      expect(within(dialog).queryByText("The sign-in waited too long")).toBeNull();
+      expect(state.api.callsTo("DELETE", BIND_SESSION)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

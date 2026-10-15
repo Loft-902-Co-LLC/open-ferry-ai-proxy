@@ -661,8 +661,11 @@ export function explainBindStartError(status: number, error: string | null): Sta
 
 /**
  * Whether `pasted` is the address a sign-in with `state` sent the browser
- * to: why not, or null when it is. With `fragmentToo`, as for a bind, a field
- * missing from the query may be in the fragment.
+ * to: why not, or null when it is. Reads the address as the server does:
+ * every field trimmed, `error_description` standing in for an empty `error`.
+ * With `fragmentToo`, as for a bind, a field missing from the query, or
+ * empty there, is taken from the fragment, and a code needs the client ID the
+ * server issued.
  */
 export function pastedAddressProblem(
   pasted: string,
@@ -675,19 +678,21 @@ export function pastedAddressProblem(
   } catch {
     return "That isn't a web address. Copy the whole address, starting with http.";
   }
-  // A bind also takes the fields in the fragment, a query field winning.
+  // A bind also takes the fields in the fragment, a non-empty query field winning.
   const fragment = fragmentToo ? new URLSearchParams(url.hash.replace(/^#/, "")) : null;
-  const params = {
-    get: (field: string): string | null => {
-      const value = url.searchParams.get(field);
-      return value !== null || fragment === null ? value : fragment.get(field);
-    },
+  const get = (field: string): string => {
+    const value = url.searchParams.get(field)?.trim() ?? "";
+    return value !== "" || fragment === null ? value : (fragment.get(field)?.trim() ?? "");
   };
-  if (params.get("state") !== state) {
+  if (get("state") !== state.trim()) {
     return "That address isn't from this sign-in. Paste the address of the page this sign-in sent you to.";
   }
-  if ((params.get("code") ?? "") === "" && (params.get("error") ?? "") === "") {
+  const code = get("code");
+  if (code === "" && get("error") === "" && get("error_description") === "") {
     return "That address has no sign-in code in it. Copy all of it, including everything after the question mark.";
+  }
+  if (fragmentToo && code !== "" && get("client_id") === "") {
+    return "That address has no client ID in it. Copy all of it, including everything after the question mark.";
   }
   return null;
 }

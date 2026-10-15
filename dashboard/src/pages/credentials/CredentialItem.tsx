@@ -27,7 +27,6 @@ import {
   formatShortDateTime,
 } from "../../lib/format";
 import { QuotaButton } from "./QuotaDialog";
-import { SignInDialog } from "./SignInDialog";
 import { DetailsButton, useOpenWhenTargeted } from "./TriageList";
 import {
   canReset,
@@ -365,6 +364,11 @@ export interface CredentialItemProps {
    * may move in the list when its health changes, or leave it.
    */
   onDone: (notice: ReactNode) => void;
+  /**
+   * Called to add OpenAI API access to it. The list owns the dialog: the
+   * credential may move in the list, or leave it, while the sign-in runs.
+   */
+  onBind: () => void;
 }
 
 /** One credential: its health, why, what to do, and its actions. */
@@ -376,6 +380,7 @@ export function CredentialItem({
   targeted,
   readAt,
   onDone,
+  onBind,
 }: CredentialItemProps) {
   const titleId = useId();
   const detailsId = useId();
@@ -383,7 +388,6 @@ export function CredentialItem({
   const client = useQueryClient();
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [binding, setBinding] = useState(false);
   const [open, setOpen] = useOpenWhenTargeted(targeted);
   const health = credentialHealth(credential);
   const models = modelCooldowns(credential);
@@ -527,7 +531,7 @@ export function CredentialItem({
               disabled={busy}
               onClick={() => {
                 setProblem(null);
-                setBinding(true);
+                onBind();
               }}
             >
               <KeyRound aria-hidden="true" className="size-4" />
@@ -554,16 +558,6 @@ export function CredentialItem({
 
         {problem !== null && <ProblemNotice problem={problem} live />}
       </div>
-
-      {binding && (
-        <SignInDialog
-          provider="codex"
-          bind={{ file: credential.name, name }}
-          onClose={() => {
-            setBinding(false);
-          }}
-        />
-      )}
 
       <ConfirmDialog
         open={confirmDelete}

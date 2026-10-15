@@ -4,7 +4,7 @@ import { ExternalLink, Eye, EyeOff, LogIn, RotateCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
-import { callProblem } from "../../api/access";
+import { callProblem, type CallProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
 import {
   AUTH_FILES,
@@ -61,10 +61,25 @@ interface Session {
 }
 
 /**
- * The whole seconds left of a sign-in asked for at `startedAt`, counted down
- * once a second; null when no sign-in is waiting.
+ * How long past its five minutes the dialog goes on asking the server before
+ * it calls a sign-in failed: a callback that came just before the limit may
+ * still be exchanged (up to a minute) and saved.
  */
-function useSecondsLeft(startedAt: number | null): number | null {
+export const SIGN_IN_GRACE_MS = 90_000;
+
+/** Where a sign-in's clock stands. */
+interface SignInClock {
+  /** The whole seconds left of the five minutes. */
+  left: number;
+  /** The five minutes and the grace after them are both over. */
+  overdue: boolean;
+}
+
+/**
+ * The clock of a sign-in asked for at `startedAt`, ticking once a second;
+ * null when no sign-in is waiting.
+ */
+function useSignInClock(startedAt: number | null): SignInClock | null {
   const [now, setNow] = useState(0);
   useEffect(() => {
     if (startedAt === null) {
@@ -73,7 +88,7 @@ function useSecondsLeft(startedAt: number | null): number | null {
     const timer = setInterval(() => {
       const at = Date.now();
       setNow(at);
-      if (at >= startedAt + SIGN_IN_LIMIT_MS) {
+      if (at >= startedAt + SIGN_IN_LIMIT_MS + SIGN_IN_GRACE_MS) {
         clearInterval(timer);
       }
     }, 1000);
@@ -84,8 +99,11 @@ function useSecondsLeft(startedAt: number | null): number | null {
   if (startedAt === null) {
     return null;
   }
-  const left = startedAt + SIGN_IN_LIMIT_MS - Math.max(now, startedAt);
-  return Math.max(0, Math.ceil(left / 1000));
+  const at = Math.max(now, startedAt);
+  return {
+    left: Math.max(0, Math.ceil((startedAt + SIGN_IN_LIMIT_MS - at) / 1000)),
+    overdue: at >= startedAt + SIGN_IN_LIMIT_MS + SIGN_IN_GRACE_MS,
+  };
 }
 
 /** "4:05" */
@@ -337,6 +355,8 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
   const [finishing, setFinishing] = useState(false);
   // A give-up has been sent and its answer isn't back.
   const [cancelling, setCancelling] = useState(false);
+  // The last give-up failed: the server may still finish the sign-in.
+  const [cancelProblem, setCancelProblem] = useState<CallProblem | null>(null);
   // Set once the dialog closes: a sign-in that starts after that is given up.
   const closed = useRef(false);
   const content = useRef<HTMLDivElement>(null);
@@ -359,16 +379,21 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
     call<unknown>(routes.session, { method: "DELETE", query: { state } }).catch(() => undefined);
   };
 
-  /** Gives `state` up; whether the server stopped it (a bind it is saving isn't stopped). */
-  const cancelBind = async (state: string): Promise<boolean> => {
+  /**
+   * Gives `state` up: "stopped" when the server stopped it, "saving" when it
+   * was already saving the bind (which it can't stop), "failed" when the call
+   * itself failed, so the server may still finish it.
+   */
+  const cancelBind = async (state: string): Promise<"stopped" | "saving" | "failed"> => {
     try {
       const answer = await call<CancelAnswer>(routes.session, {
         method: "DELETE",
         query: { state },
       });
-      return answer.cancelled !== false;
-    } catch {
-      return true;
+      return answer.cancelled === false ? "saving" : "stopped";
+    } catch (error) {
+      setCancelProblem(callProblem(error));
+      return "failed";
     }
   };
 
@@ -393,6 +418,7 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
     onMutate: () => {
       setSession(null);
       setFinishing(false);
+      setCancelProblem(null);
     },
     onSuccess: (started) => {
       if (closed.current) {
@@ -419,10 +445,14 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
   // The server hasn't said how it ended: it may still be waiting.
   const stillWaiting = session !== null && outcome !== "ok" && outcome !== "error";
   // A bind being saved has no time limit left to count.
-  const secondsLeft = useSecondsLeft(stillWaiting && !finishing ? session.startedAt : null);
-  // The five minutes ran out here; the server says so too, a moment later,
-  // with the same words, so nothing is said twice.
-  const timedOut = stillWaiting && !finishing && secondsLeft === 0;
+  const clock = useSignInClock(stillWaiting && !finishing ? session.startedAt : null);
+  const secondsLeft = clock?.left ?? null;
+  // The five minutes ran out here, but the server may still be finishing a
+  // callback that came just before: it is asked until it says how it ended,
+  // or until the grace is over too. It says "timed out" itself, with the
+  // same words, so nothing is said twice.
+  const checking = clock?.left === 0 && !clock.overdue;
+  const timedOut = clock?.overdue === true;
 
   useEffect(() => {
     if (outcome === "ok") {
@@ -443,7 +473,9 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
           ? "error"
           : finishing
             ? "finishing"
-            : "waiting";
+            : checking
+              ? "checking"
+              : "waiting";
   useEffect(() => {
     if (step === "start-failed" || step === "ok" || step === "error" || step === "finishing") {
       content.current
@@ -459,6 +491,9 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
    * up: the dialog follows it to its end instead.
    */
   const giveUpThen = (proceed: () => void) => {
+    if (cancelling) {
+      return;
+    }
     if (session === null || !stillWaiting || finishing) {
       proceed();
       return;
@@ -469,13 +504,15 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
       return;
     }
     setCancelling(true);
-    void cancelBind(session.state).then((cancelled) => {
+    setCancelProblem(null);
+    void cancelBind(session.state).then((result) => {
       setCancelling(false);
-      if (cancelled) {
+      if (result === "stopped") {
         proceed();
-      } else {
+      } else if (result === "saving") {
         setFinishing(true);
       }
+      // "failed": the dialog stays on this sign-in and says so.
     });
   };
 
@@ -621,6 +658,30 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
         Close
       </Button>
     );
+  } else if (step === "checking") {
+    body = (
+      <div className="space-y-3">
+        <p>
+          The five minutes are up here, but the server may still be finishing a sign-in it already
+          has. It says in a moment how it ended.
+        </p>
+        <p role="status" className="flex items-center gap-2 text-muted">
+          <Spinner /> Checking with the server…
+        </p>
+        {status.isError && <ProblemNotice problem={callProblem(status.error)} />}
+      </div>
+    );
+    footer = (
+      <>
+        <Button disabled={cancelling} onClick={close}>
+          Give up
+        </Button>
+        <Button disabled={cancelling} onClick={startAgain}>
+          <RotateCw aria-hidden="true" className="size-4" />
+          Start again
+        </Button>
+      </>
+    );
   } else {
     const left = secondsLeft ?? Math.ceil(SIGN_IN_LIMIT_MS / 1000);
     body = (
@@ -655,9 +716,21 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
       open
       title={bind === undefined ? `Sign in with ${name}` : "Add OpenAI API access"}
       onClose={close}
+      onCancel={close}
       footer={footer}
     >
-      <div ref={content}>{body}</div>
+      <div ref={content} className="space-y-4">
+        {body}
+        {cancelProblem !== null && stillWaiting && (
+          <div className="space-y-2">
+            <ProblemNotice problem={cancelProblem} live />
+            <p>
+              The server didn&apos;t confirm that it stopped, so this sign-in may still finish. It
+              is still being followed here. Try again.
+            </p>
+          </div>
+        )}
+      </div>
     </Dialog>
   );
 }
