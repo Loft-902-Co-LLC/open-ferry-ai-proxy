@@ -9,6 +9,7 @@ use open_ferry_core::config::{AnyValue, PayloadModelRule, PayloadRule};
 use open_ferry_core::exec::{InputFrame, WebsocketInput};
 
 mod live;
+mod live_messages;
 
 const TOKEN: &str = "siwc-websocket-test-token";
 const DEVICE: &str = "siwc-device-never-transmitted-61a0e56d-c76b-469d-88ca-c2e2cdaf5801";

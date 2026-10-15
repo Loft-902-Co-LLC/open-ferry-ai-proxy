@@ -263,9 +263,10 @@ impl Secrets {
     /// `proxy` goes through, and the `Proxy-Authorization` credential made
     /// of it (see [`Self::add_url`]): the configured URL's secrets, plus the
     /// environment's proxies' (`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`,
-    /// in either case). This is deliberately conservative: invalid settings
-    /// and HTTP client build failures can fall back to the environment, even
-    /// after `direct` or `none`. It covers every fallback; over-redaction is harmless.
+    /// in either case), for every setting including `direct` and `none`.
+    /// This is deliberately conservative: invalid settings and HTTP client
+    /// build failures can fall back to the environment; over-redaction is harmless.
+    /// A separate global configured proxy used on fallback isn't collected here.
     pub fn add_proxy(&mut self, proxy: &str) {
         self.add_proxy_with(proxy, |name| std::env::var(name).ok());
     }

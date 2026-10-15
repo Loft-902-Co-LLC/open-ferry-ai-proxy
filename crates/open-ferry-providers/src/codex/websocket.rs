@@ -74,10 +74,15 @@
 //!   too. A missing SIWC access token fails before preparation or connection.
 //!   A mode change reconnects even if both modes have the same token text;
 //!   token rotation reconnects between calls as for ordinary credentials.
-//!   Each later duplex create uses the live credential: a missing SIWC token
-//!   fails closed, and a mode change or SIWC token rotation ends the duplex
-//!   with replay required, without replaying consumed frames. Ordinary outer
-//!   token refresh mid-duplex still keeps its connection, unchanged.
+//!   Every client frame and final pre-send point checks the live credential:
+//!   a missing SIWC token fails closed with the HTTP path's classification,
+//!   and a mode change or SIWC token rotation ends the duplex
+//!   with replay required (client close 1012), without replaying consumed frames.
+//!   Later creates also prepare from live ordinary credentials, so changes such
+//!   as their base URL can require replay; an ordinary outer-token refresh alone
+//!   keeps the connection. Interrupts check only enabledness because they stop
+//!   running work rather than start it. A credential change after the final
+//!   pre-send check is treated like a request already in flight.
 //!   The ID token's signature and nonce aren't verified, and no account matching is done.
 
 pub(crate) mod dial;
