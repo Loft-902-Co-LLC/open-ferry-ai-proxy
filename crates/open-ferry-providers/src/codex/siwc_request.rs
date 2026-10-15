@@ -65,7 +65,14 @@ pub(crate) fn apply_body(body: &mut Value, explicit: bool, compact: bool) {
     }
 }
 
-/// Enforces L1/L4/L5 after all header sources. Caller IDs are independent;
+/// WebSocket Responses omit streaming and background flags, before payload rules.
+pub(crate) fn apply_websocket_body(body: &mut Value, explicit: bool) {
+    apply_body(body, explicit, false);
+    delete(body, "stream");
+    delete(body, "background");
+}
+
+/// Enforces SIWC identity after all header sources. Caller IDs are independent;
 /// custom headers cannot replace either one or the bearer token.
 pub(crate) fn enforce_headers(
     headers: &mut HeaderMap,

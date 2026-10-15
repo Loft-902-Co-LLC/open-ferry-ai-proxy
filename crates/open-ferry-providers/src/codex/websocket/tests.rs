@@ -104,6 +104,7 @@ mod observe;
 mod proxy;
 mod secrets;
 mod sessions;
+mod siwc;
 
 /// How long a test waits for a call.
 const WAIT: Duration = Duration::from_secs(10);

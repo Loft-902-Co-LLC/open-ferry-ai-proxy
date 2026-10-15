@@ -348,6 +348,8 @@ pub(crate) struct Target {
     pub(super) proxy: String,
     /// The token: a new one connects again.
     token: String,
+    /// Credential mode is independent of the token text.
+    siwc: bool,
     /// What the handshake sends, the token among them, redacted from the
     /// connection's failures; not part of what the target is.
     secrets: Secrets,
@@ -361,6 +363,7 @@ impl PartialEq for Target {
             && self.url == other.url
             && self.proxy == other.proxy
             && self.token == other.token
+            && self.siwc == other.siwc
     }
 }
 
@@ -373,9 +376,15 @@ impl Target {
             url: url.trim().to_owned(),
             proxy: proxy.trim().to_owned(),
             token: token.to_owned(),
+            siwc: false,
             secrets: Secrets::from_iter([token]),
             global_proxy: proxy.trim().to_owned(),
         }
+    }
+
+    pub(crate) fn with_siwc(mut self, siwc: bool) -> Self {
+        self.siwc = siwc;
+        self
     }
 
     /// The target, its connection's failures also redacting `secrets`.

@@ -686,8 +686,7 @@ impl ProviderExecutor for CodexExecutor {
         options: Options,
     ) -> BoxFuture<'_, Result<Response, ExecError>> {
         async move {
-            // SIWC stays on HTTP until its WebSocket transport is ported.
-            if !auth.use_siwc() && websocket::routes(&auth, &options) {
+            if websocket::routes(&auth, &options) {
                 return websocket::execute(self, &auth, &request, &options).await;
             }
             self.execute_inner(&auth, &request, &options).await
@@ -702,8 +701,7 @@ impl ProviderExecutor for CodexExecutor {
         options: Options,
     ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
         async move {
-            // SIWC stays on HTTP until its WebSocket transport is ported.
-            if !auth.use_siwc() && websocket::routes(&auth, &options) {
+            if websocket::routes(&auth, &options) {
                 return websocket::execute_stream(self, &auth, request, options).await;
             }
             self.execute_stream_inner(&auth, request, options).await

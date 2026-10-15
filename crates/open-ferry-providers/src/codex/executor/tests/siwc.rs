@@ -197,9 +197,10 @@ async fn siwc_all_http_egress_has_fixed_identity_and_responses_body() {
 }
 
 #[tokio::test]
-async fn siwc_websockets_enabled_uses_only_http_and_missing_token_sends_nothing() {
+async fn siwc_websockets_enabled_routes_to_websocket_and_missing_token_sends_nothing() {
+    use crate::codex::websocket::mock::Server;
     for streaming in [false, true] {
-        let mock = Mock::start(Reply::sse(SSE)).await;
+        let mock = Server::once(&[r#"{"type":"response.completed","response":{"id":"siwc-ws","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}"#]).await;
         let mut auth = siwc_auth(&mock.url);
         auth.attributes.insert("websockets".into(), "true".into());
         let mut opts = attempted_headers(options("openai-response"), true);
@@ -221,14 +222,20 @@ async fn siwc_websockets_enabled_uses_only_http_and_missing_token_sends_nothing(
                 .await
                 .unwrap();
         }
-        assert_eq!(mock.requests().len(), 1);
-        let seen = mock.last();
+        let record = mock.record();
+        assert_eq!(record.handshakes.len(), 1);
+        let seen = &record.handshakes[0];
         assert_eq!(seen.path, "/responses");
-        assert!(seen.header("upgrade").is_none());
-        assert!(seen.header("sec-websocket-key").is_none());
-        assert_identity(&seen, true);
-        assert_eq!(seen.json()["stream"], true);
-        assert_eq!(seen.json()["store"], false);
+        assert_eq!(seen.header("upgrade"), Some("websocket"));
+        assert!(seen.header("sec-websocket-key").is_some());
+        assert_eq!(
+            seen.header("user-agent"),
+            Some(crate::codex::siwc::user_agent().as_str())
+        );
+        let body: Value = serde_json::from_str(&record.messages[0]).unwrap();
+        assert!(!exists(&body, "stream"));
+        assert_eq!(body["store"], false);
+        assert!(record.bodies.is_empty());
 
         auth.metadata["siwc"]["access_token"] = json!("");
         let error = if streaming {
@@ -240,7 +247,8 @@ async fn siwc_websockets_enabled_uses_only_http_and_missing_token_sends_nothing(
             exec.execute(Arc::new(auth), req, opts).await.err().unwrap()
         };
         assert_eq!(error.status, 401);
-        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(mock.record().handshakes.len(), 1);
+        assert!(mock.record().bodies.is_empty());
     }
 }
 
