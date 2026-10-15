@@ -661,16 +661,28 @@ export function explainBindStartError(status: number, error: string | null): Sta
 
 /**
  * Whether `pasted` is the address a sign-in with `state` sent the browser
- * to: why not, or null when it is.
+ * to: why not, or null when it is. With `fragmentToo`, as for a bind, a field
+ * missing from the query may be in the fragment.
  */
-export function pastedAddressProblem(pasted: string, state: string): string | null {
+export function pastedAddressProblem(
+  pasted: string,
+  state: string,
+  fragmentToo = false,
+): string | null {
   let url: URL;
   try {
     url = new URL(pasted.trim());
   } catch {
     return "That isn't a web address. Copy the whole address, starting with http.";
   }
-  const params = url.searchParams;
+  // A bind also takes the fields in the fragment, a query field winning.
+  const fragment = fragmentToo ? new URLSearchParams(url.hash.replace(/^#/, "")) : null;
+  const params = {
+    get: (field: string): string | null => {
+      const value = url.searchParams.get(field);
+      return value !== null || fragment === null ? value : fragment.get(field);
+    },
+  };
   if (params.get("state") !== state) {
     return "That address isn't from this sign-in. Paste the address of the page this sign-in sent you to.";
   }
