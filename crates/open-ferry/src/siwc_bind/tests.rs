@@ -14,6 +14,11 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
+// Not upstream's: an unguarded selection, as an unprivileged bind makes.
+fn resolve(auth_dir: &Path, raw: &str) -> io::Result<Target> {
+    super::resolve(auth_dir, None, raw)
+}
+
 #[test]
 fn resolves_bare_and_absolute_paths_and_rejects_invalid_targets() {
     let (dir, path) = fixture();
@@ -542,4 +547,63 @@ async fn cli_refuses_short_leaf_at_selection_and_save() {
         "credential leaf has an alternate spelling"
     );
     assert!(std::fs::read(long).unwrap() == OUTER.as_bytes());
+}
+
+// Not upstream's: a store whose guard refuses the credential refuses the bind
+// before any sign-in, with a fixed error.
+#[test]
+fn an_untrusted_bind_target_is_refused() {
+    let (dir, path) = fixture();
+    let guard = FileGuard::new(|_| Err("untrusted owner".to_owned()));
+    let Err(error) = super::resolve(dir.path(), Some(guard), "codex.json") else {
+        panic!("an untrusted credential was selected");
+    };
+    assert_eq!(safe_error(&error), "credential access was denied");
+    assert!(std::fs::read(path).unwrap() == OUTER.as_bytes());
+}
+
+// Not upstream's: the bind saves through the guarded store that selected the
+// credential, so one the guard comes to refuse during sign-in is kept.
+#[tokio::test]
+async fn a_target_the_guard_refuses_after_selection_is_not_saved() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (dir, path) = fixture();
+    let trusted = Arc::new(AtomicBool::new(true));
+    let check = Arc::clone(&trusted);
+    let guard = FileGuard::new(move |_| {
+        if check.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err("untrusted owner".to_owned())
+        }
+    });
+    let target = super::resolve(dir.path(), Some(guard), "codex.json").unwrap();
+    trusted.store(false, Ordering::SeqCst);
+    let Err(error) = save(target, Map::new()).await else {
+        panic!("a refused credential was saved");
+    };
+    assert_eq!(safe_error(&error), "credential access was denied");
+    assert!(std::fs::read(path).unwrap() == OUTER.as_bytes());
+}
+
+// Not upstream's test: as upstream, a bind selects in the auth directory as
+// configured, not as the store trims it.
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_binds_in_the_auth_directory_as_configured() {
+    let parent = tempfile::tempdir().unwrap();
+    let spaced = parent.path().join("auth ");
+    let trimmed = parent.path().join("auth");
+    for dir in [&spaced, &trimmed] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::write(dir.join("codex.json"), OUTER).unwrap();
+    }
+    let target = resolve(&spaced, "codex.json").unwrap();
+    assert!(target.path == spaced.join("codex.json"));
+    save(target, Map::new()).await.unwrap();
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(spaced.join("codex.json")).unwrap()).unwrap();
+    assert!(saved["use_siwc"] == true);
+    assert!(std::fs::read(trimmed.join("codex.json")).unwrap() == OUTER.as_bytes());
 }

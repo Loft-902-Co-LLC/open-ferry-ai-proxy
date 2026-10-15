@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use open_ferry_core::auth::codex_refresh::{generate_device_id, validate_device_id};
 use open_ferry_core::auth::credential_lock::acquire_credential_lock;
-use open_ferry_core::auth::file_store::{BindIdentity, read_siwc_bind_target};
+use open_ferry_core::auth::file_guard::FileGuard;
+use open_ferry_core::auth::file_store::BindIdentity;
 use open_ferry_core::auth::{Auth, FileStore};
 use open_ferry_core::config::Config;
 use open_ferry_providers::codex::siwc::{self, SiwcAuth};
@@ -32,12 +33,13 @@ struct Target {
     path: PathBuf,
     directory: PathBuf,
     auth_directory: PathBuf,
+    store: FileStore,
     identity: BindIdentity,
     record: Auth,
     device_id: String,
 }
 
-fn resolve(auth_dir: &Path, raw: &str) -> io::Result<Target> {
+fn resolve(auth_dir: &Path, guard: Option<FileGuard>, raw: &str) -> io::Result<Target> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(io::Error::other(
@@ -70,7 +72,8 @@ fn resolve(auth_dir: &Path, raw: &str) -> io::Result<Target> {
             "siwc-bind: credential file must belong to auth-dir",
         ));
     }
-    let (metadata, file_id) = read_siwc_bind_target(&path)?;
+    let store = FileStore::new(auth_dir).with_file_guard(guard);
+    let (metadata, file_id) = store.read_bind_target(&path)?;
     require_exact_leaf(&path)?;
     let identity = BindIdentity::capture(&metadata, file_id);
     let device_id = metadata
@@ -92,6 +95,7 @@ fn resolve(auth_dir: &Path, raw: &str) -> io::Result<Target> {
         path,
         directory,
         auth_directory: auth_dir.to_owned(),
+        store,
         identity,
         record,
         device_id,
@@ -115,17 +119,14 @@ async fn save(target: Target, tokens: Map<String, Value>) -> io::Result<()> {
             ));
         }
         require_exact_leaf(&target.path)?;
-        FileStore::new(&target.auth_directory).bind_siwc_locked(
-            &target.record,
-            tokens,
-            &guard,
-            &|disk, id| {
+        target
+            .store
+            .bind_siwc_locked(&target.record, tokens, &guard, &|disk, id| {
                 if target.auth_directory.canonicalize()? != target.directory {
                     return Err(io::Error::other("siwc-bind: auth directory changed"));
                 }
                 target.identity.check(disk, id)
-            },
-        )?;
+            })?;
         Ok(())
     };
     #[allow(clippy::disallowed_methods)]
@@ -319,10 +320,26 @@ pub(crate) async fn run(
     name: &str,
     options: Options,
 ) -> ExitCode {
-    let directory = auth_dir.to_owned();
+    // Not upstream's: as for a login, a privileged bind works only in a
+    // trusted auth directory, and its store reads and replaces only trusted
+    // credential files.
+    let probe = crate::scope::runtime_probe();
+    let directory = crate::scope::absolute_auth_dir(probe.as_ref(), auth_dir.to_path_buf());
+    match crate::scope::authorize_dir(probe.as_ref(), &directory) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("siwc-bind: credential or auth directory is missing");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            tracing::error!("{error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let guard = crate::scope::credential_file_guard(probe);
     let name = name.to_owned();
     #[allow(clippy::disallowed_methods)]
-    let selected = tokio::task::spawn_blocking(move || resolve(&directory, &name)).await;
+    let selected = tokio::task::spawn_blocking(move || resolve(&directory, guard, &name)).await;
     let target = match selected {
         Ok(Ok(target)) => target,
         error => {

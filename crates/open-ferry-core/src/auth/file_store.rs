@@ -609,6 +609,12 @@ impl FileStore {
         .await
     }
 
+    /// [`read_siwc_bind_target`] once this store's file guard allows the read.
+    pub fn read_bind_target(&self, path: &Path) -> io::Result<(Map<String, Value>, FileId)> {
+        self.check_read(path)?;
+        read_siwc_bind_target(path)
+    }
+
     /// Binds SIWC while the caller holds this credential's lock. The check
     /// runs under the save mutex on metadata read through a no-follow handle,
     /// which is closed before atomic replacement. The auth directory must be
@@ -657,6 +663,7 @@ impl FileStore {
     ) -> io::Result<CodexPersisted> {
         let path = self.resolve_auth_path(auth)?;
         refuse_lock_name(&path)?;
+        self.check_file(&path)?;
         let _permit = self.permit()?;
         let credential = super::credential_lock::acquire_sync(&path)?;
         self.persist_codex_partition_with_permit(auth, intent, &credential, None)
@@ -707,6 +714,7 @@ impl FileStore {
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.check_file(&path)?;
         if matches!(
             intent,
             super::codex_refresh::CodexPersistIntent::SiwcBind(_)
@@ -821,6 +829,13 @@ impl FileStore {
                 .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
         }
         Ok(())
+    }
+
+    /// Whether removing `path` takes the Codex credential lock. Not
+    /// upstream's: a credential the file guard refuses isn't read to tell,
+    /// so it's removed without the lock, as before SIWC.
+    fn locks_removal(&self, path: &Path) -> bool {
+        self.check_read(path).is_ok() && codex_file_mutation(path, None)
     }
 
     /// Not upstream's: puts the store under `gate`, which every writer of
@@ -1032,7 +1047,7 @@ impl FileStore {
         let path = self.file_path(name)?;
         refuse_lock_name(&path)?;
         let _permit = self.permit()?;
-        let _credential = if codex_file_mutation(&path, None) {
+        let _credential = if self.locks_removal(&path) {
             Some(super::credential_lock::acquire_sync(&path)?)
         } else {
             None
@@ -1338,7 +1353,7 @@ impl FileStore {
         let path = self.resolve_delete_path(id)?;
         refuse_lock_name(&path)?;
         let _permit = self.permit()?;
-        let _credential = if codex_file_mutation(&path, None) {
+        let _credential = if self.locks_removal(&path) {
             Some(super::credential_lock::acquire_sync(&path)?)
         } else {
             None
@@ -1430,6 +1445,7 @@ impl AuthStore for FileStore {
             return Ok(AdoptionRead::Unsupported);
         }
         let path = self.resolve_auth_path(auth)?;
+        self.check_read(&path)?;
         match read_auth_file_for_adoption(&path, &self.base_dir()) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(AdoptionRead::Missing),
             Err(err)
@@ -1926,6 +1942,108 @@ mod tests {
             .write_file("unsafe.json", b"{}")
             .unwrap();
         assert_eq!(fs::read(&unsafe_path).unwrap(), b"{}");
+    }
+
+    // Not upstream's: a guard that refuses a credential also refuses its SIWC
+    // bind read, fresh read, refresh and bind, and no lock file is made for it.
+    #[test]
+    fn a_file_guard_refuses_siwc_reads_binds_and_refreshes() {
+        use super::super::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
+        use super::super::credential_lock::{acquire_sync, credential_lock_path};
+        use super::super::file_guard::FileGuard;
+        let dir = guarded_scratch();
+        let data = br#"{"type":"codex","access_token":"a","refresh_token":"r"}"#;
+        let unsafe_path = dir.path().join("unsafe.json");
+        let trusted_path = dir.path().join("trusted.json");
+        fs::write(&unsafe_path, data).unwrap();
+        fs::write(&trusted_path, data).unwrap();
+        let store = FileStore::new(dir.path()).with_file_guard(Some(FileGuard::new(|path| {
+            if path.file_name().unwrap() == "unsafe.json" {
+                Err("untrusted owner".to_owned())
+            } else {
+                Ok(())
+            }
+        })));
+        let denied = |error: io::Error| {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        };
+        let refresh = || CodexPersistIntent::Refresh(CredentialRefreshPatch::default());
+        let auth = Auth {
+            id: "unsafe.json".into(),
+            file_name: "unsafe.json".into(),
+            provider: "codex".into(),
+            metadata: meta(json!({"type":"codex", "access_token":"a", "refresh_token":"r"})),
+            ..Auth::default()
+        };
+        denied(store.read_bind_target(&unsafe_path).err().unwrap());
+        denied(store.read_for_adoption(&auth).err().unwrap());
+        denied(
+            store
+                .persist_codex_partition(&auth, &refresh())
+                .err()
+                .unwrap(),
+        );
+        assert!(!credential_lock_path(&unsafe_path).unwrap().exists());
+        let guard = acquire_sync(&unsafe_path).unwrap();
+        denied(
+            store
+                .apply_codex_refresh_locked(&auth, &CredentialRefreshPatch::default(), &guard)
+                .err()
+                .unwrap(),
+        );
+        denied(
+            store
+                .bind_siwc_locked(&auth, Map::new(), &guard, &|_, _| Ok(()))
+                .err()
+                .unwrap(),
+        );
+        drop(guard);
+        assert!(fs::read(&unsafe_path).unwrap() == data);
+        let trusted = Auth {
+            id: "trusted.json".into(),
+            file_name: "trusted.json".into(),
+            ..auth
+        };
+        store.read_bind_target(&trusted_path).unwrap();
+        store.read_for_adoption(&trusted).unwrap();
+        store.persist_codex_partition(&trusted, &refresh()).unwrap();
+    }
+
+    // Not upstream's: a removal doesn't read a credential its guard refuses
+    // to tell whether it's Codex's, so it removes it without the lock.
+    #[test]
+    fn a_file_guard_removes_a_refused_credential_without_reading_it() {
+        use super::super::credential_lock::credential_lock_path;
+        use super::super::file_guard::FileGuard;
+        let dir = guarded_scratch();
+        let data = br#"{"type":"codex","access_token":"a","refresh_token":"r"}"#;
+        let store = FileStore::new(dir.path()).with_file_guard(Some(FileGuard::new(|path| {
+            if path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("unsafe")
+            {
+                Err("untrusted owner".to_owned())
+            } else {
+                Ok(())
+            }
+        })));
+        for name in ["unsafe.json", "unsafe-auth.json", "trusted.json"] {
+            let path = dir.path().join(name);
+            fs::write(&path, data).unwrap();
+            if name == "unsafe-auth.json" {
+                store.delete_auth(name).unwrap();
+            } else {
+                store.remove_file(name).unwrap();
+            }
+            assert!(!path.exists());
+            assert_eq!(
+                credential_lock_path(&path).unwrap().exists(),
+                name == "trusted.json",
+                "{name}"
+            );
+        }
     }
 
     #[cfg(unix)]

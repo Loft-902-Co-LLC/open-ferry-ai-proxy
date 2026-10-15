@@ -684,3 +684,52 @@ async fn management_refuses_real_target_with_leaf_alias() {
     assert!(api.sync.calls().is_empty());
     assert!(std::fs::read(&path).unwrap() == OUTER.as_bytes());
 }
+
+// Not upstream's: a store whose guard refuses the credential refuses the bind
+// before a URL is issued, and leaves the file as it was.
+#[tokio::test]
+async fn refuses_a_target_the_file_guard_refuses() {
+    let dir = AuthDir::guarded(Some(open_ferry_core::auth::file_guard::FileGuard::new(
+        |path| {
+            if path
+                .file_name()
+                .is_some_and(|name| name == "codex-bind.json")
+            {
+                Err("untrusted owner".to_owned())
+            } else {
+                Ok(())
+            }
+        },
+    )));
+    let api = Api::over(&dir);
+    let path = dir.write("codex-bind.json", OUTER);
+    assert_eq!(api.get(START).await.status, StatusCode::BAD_REQUEST);
+    assert!(std::fs::read_to_string(path).unwrap() == OUTER);
+    assert_eq!(api.state.oauth_sessions().running(), 0);
+}
+
+// Not upstream's: a credential the guard comes to refuse during sign-in is
+// neither saved nor synchronized.
+#[tokio::test]
+async fn a_target_the_file_guard_refuses_at_save_time_is_not_saved() {
+    let trusted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let check = Arc::clone(&trusted);
+    let dir = AuthDir::guarded(Some(open_ferry_core::auth::file_guard::FileGuard::new(
+        move |_| {
+            if check.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("untrusted owner".to_owned())
+            }
+        },
+    )));
+    let path = dir.write("codex-bind.json", OUTER);
+    let upstream = Upstream::answering(tokens()).await;
+    let api = login_api(&dir, &upstream.url);
+    let state = start_login(&api, START).await;
+    trusted.store(false, Ordering::SeqCst);
+    deliver(&api, &state, "codex", issued());
+    assert!(!failure(&api, &state).await.is_empty());
+    assert!(std::fs::read(&path).unwrap() == OUTER.as_bytes());
+    assert!(api.sync.calls().is_empty());
+}
