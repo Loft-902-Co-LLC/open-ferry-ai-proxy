@@ -20,9 +20,28 @@ use timeouts::LONG;
 
 const OPEN_FERRY: &str = env!("CARGO_BIN_EXE_open-ferry");
 
+/// `start` once a copied binary can run. While another test forks, its
+/// child briefly holds the copy's write handle until it runs its own
+/// program, and Linux refuses to run a file open for writing (ETXTBSY).
+fn when_runnable<T>(mut start: impl FnMut() -> std::io::Result<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match start() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            result => return result.unwrap(),
+        }
+    }
+}
+
 /// Runs `binary` with `args` in `dir`, which has no `.env`.
 fn run_as(binary: &Path, dir: &Path, args: &[&str]) -> Output {
-    Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .current_dir(dir)
         .env_remove("MANAGEMENT_PASSWORD")
@@ -30,9 +49,8 @@ fn run_as(binary: &Path, dir: &Path, args: &[&str]) -> Output {
         .env_remove("writable_path")
         .env("LOCALAPPDATA", dir)
         .env("XDG_DATA_HOME", dir)
-        .env("HOME", dir)
-        .output()
-        .unwrap()
+        .env("HOME", dir);
+    when_runnable(|| command.output())
 }
 
 fn run(dir: &Path, args: &[&str]) -> Output {
@@ -201,7 +219,8 @@ fn start_renamed(dir: &Path, first_port: Option<u16>, budget: Duration) -> (Star
             "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys:\n  - '{key}'\nself-update:\n  mode: off\n", auth.display()
         )).unwrap();
         let log = std::fs::File::create(&log_path).unwrap();
-        let child = Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .arg("-config")
             .arg(&config)
             .current_dir(dir)
@@ -213,10 +232,8 @@ fn start_renamed(dir: &Path, first_port: Option<u16>, budget: Duration) -> (Star
             .env("HOME", dir)
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let mut server = Started(child);
+            .stderr(log);
+        let mut server = Started(when_runnable(|| command.spawn()));
         loop {
             let exit = server.0.try_wait().unwrap();
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
