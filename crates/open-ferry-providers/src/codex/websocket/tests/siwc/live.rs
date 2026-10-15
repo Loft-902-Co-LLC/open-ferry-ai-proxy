@@ -62,6 +62,7 @@ async fn change(initial_siwc: bool, next_siwc: bool, clear: bool) {
         .unwrap_err();
     if clear {
         assert_eq!(error.status, 401);
+        assert!(!error.request_scoped);
         assert!(error.message.contains("siwc access_token is missing"));
     } else {
         assert_eq!(error.message, ExecError::replay_required().message);

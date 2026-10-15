@@ -431,6 +431,20 @@ impl Duplex {
         self.sending = Some(Box::pin(async move { conn.send(message).await }));
     }
 
+    fn live_check(&self) -> Result<Arc<Auth>, ExecError> {
+        let auth = self
+            .input
+            .live_auth(&self.auth)
+            .ok_or_else(|| connection_failure(CREDENTIAL_DISABLED))?;
+        crate::codex::siwc_request::ensure_credentials(&auth)?;
+        if auth.use_siwc() != self.auth.use_siwc()
+            || (auth.use_siwc() && auth.access_token() != self.auth.access_token())
+        {
+            return Err(connection_error(ExecError::replay_required()));
+        }
+        Ok(auth)
+    }
+
     /// One of the client's frames (the writer's loop).
     fn on_input(&mut self, frame: Option<InputFrame>) {
         let payload = match frame {
@@ -445,10 +459,10 @@ impl Duplex {
             }
             Some(InputFrame::Payload(payload)) => payload,
         };
-        if !self.input.auth_enabled(&self.auth.id) {
+        if let Err(error) = self.live_check() {
             // A new socket may pick an enabled credential; this frame is
             // neither sent on this one nor replayed elsewhere.
-            self.fail_connection(connection_failure(CREDENTIAL_DISABLED));
+            self.fail(error);
             return;
         }
         let parsed = std::str::from_utf8(&payload)
@@ -534,8 +548,8 @@ impl Duplex {
         if let Some(settings) = settings {
             self.steering_settings.insert(steer.parent, settings);
         }
-        if !self.input.auth_enabled(&self.auth.id) {
-            self.fail_connection(connection_failure(CREDENTIAL_DISABLED));
+        if let Err(error) = self.live_check() {
+            self.fail(error);
             return;
         }
         self.start_send(steer.message);
@@ -544,20 +558,13 @@ impl Duplex {
     /// An explicit create or append, prepared as the first request was
     /// (`processCreatePayload`).
     fn process_create(&mut self, mut payload: Value) {
-        let Some(auth) = self.input.live_auth(&self.auth) else {
-            self.fail_connection(connection_failure(CREDENTIAL_DISABLED));
-            return;
+        let auth = match self.live_check() {
+            Ok(auth) => auth,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
         };
-        if let Err(error) = crate::codex::siwc_request::ensure_credentials(&auth) {
-            self.fail_connection(error);
-            return;
-        }
-        if auth.use_siwc() != self.auth.use_siwc()
-            || (auth.use_siwc() && auth.access_token() != self.auth.access_token())
-        {
-            self.fail_connection(ExecError::replay_required());
-            return;
-        }
         let is_append = str_at(&payload, "type") == "response.append";
         let mut previous = str_at(&payload, "previous_response_id").trim().to_owned();
         if is_append && previous.is_empty() && !self.response_id.is_empty() {
@@ -643,8 +650,8 @@ impl Duplex {
                 prepared.optimize && !prepared.conflict,
             );
         }
-        if !self.input.auth_enabled(&self.auth.id) {
-            self.fail_connection(connection_failure(CREDENTIAL_DISABLED));
+        if let Err(error) = self.live_check() {
+            self.fail(error);
             return;
         }
         self.start_send(prepared.message);
