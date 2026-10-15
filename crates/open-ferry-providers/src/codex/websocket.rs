@@ -56,6 +56,23 @@
 //!   custom header may have changed since.
 //! - The connection log lines hide every secret its handshake sent, however
 //!   short, from each field; upstream logs them as they are.
+//! - SIWC handshakes always identify as open-ferry with its version, OS and
+//!   architecture, not upstream's configurable agent name. Caller, credential
+//!   and custom headers cannot replace that identity or the SIWC bearer token,
+//!   or restore Codex identity headers (conversation IDs included). Model
+//!   header overrides and Codex header defaults remain unported.
+//! - SIWC session and request IDs come only from the caller, independently;
+//!   upstream copies its session ID into the request ID and can derive both
+//!   from a prompt cache key. No IDs are generated, and the SIWC device ID
+//!   is never sent. Custom headers run before these invariants here, whereas
+//!   upstream applies them after its SIWC defaults.
+//! - SIWC uses the direct OpenAI API base unless the credential configures
+//!   one, omits instruction normalization and image-tool injection, and
+//!   strips unsupported fields before payload rules, for later duplex creates
+//!   too. A missing SIWC access token fails before preparation or connection.
+//!   A mode change reconnects even if both modes have the same token text;
+//!   token rotation reconnects as for ordinary credentials. The ID token's
+//!   signature and nonce aren't verified, and no account matching is done.
 
 pub(crate) mod dial;
 mod duplex;

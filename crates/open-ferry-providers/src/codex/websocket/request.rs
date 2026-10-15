@@ -31,6 +31,12 @@
 //! `Originator` and session ID (as `session_id`), and for a native client
 //! its Responses Lite header.
 //!
+//! SIWC instead selects only its nested access token and the direct OpenAI
+//! API base (unless configured), skips instruction normalization and image-tool
+//! injection, and applies its WebSocket body rules before payload finalization.
+//! Its handshake uses the fixed open-ferry identity and only independent
+//! caller session/request IDs, enforced after all custom headers.
+//!
 //! Deviations from upstream:
 //! - Nothing is made up: no `codex-tui` `User-Agent` or `Originator` (the
 //!   request says `User-Agent: open-ferry/<version>` unless the client sent
@@ -121,6 +127,7 @@ pub(super) fn prepare(
     request: &Request,
     options: &Options,
 ) -> Result<Prepared, ExecError> {
+    crate::codex::siwc_request::ensure_credentials(auth)?;
     let base = base_model(&request.model);
     let payload = parse_object(&request.payload);
     let native = is_native(&payload, options);
@@ -153,8 +160,10 @@ pub(super) fn prepare(
         delete(&mut body, "prompt_cache_retention");
         delete(&mut body, "safety_identifier");
     }
-    normalize_instructions(&mut body, native);
-    ensure_image_generation_tool(&mut body, base, context, &options.headers);
+    if !auth.use_siwc() {
+        normalize_instructions(&mut body, native);
+        ensure_image_generation_tool(&mut body, base, context, &options.headers);
+    }
     sanitize_reasoning(&mut body, compat::is_compat(context, request, options));
     // normalizeCodexWebsocketParallelToolCalls
     if is_responses_lite(&body, &options.headers) {
@@ -172,6 +181,12 @@ pub(super) fn prepare(
         set_string_if_different(&mut body, "prompt_cache_key", &key);
     }
     sanitize_input_item_ids(&mut body);
+    if auth.use_siwc() {
+        crate::codex::siwc_request::apply_websocket_body(
+            &mut body,
+            crate::codex::siwc_request::explicit_instructions(&payload),
+        );
+    }
     // The rules see the body as it is sent.
     let target = payload::Target {
         executor: "codex-websockets",
@@ -289,7 +304,19 @@ pub(super) fn build_headers(
     client: &HeaderMap,
     native: bool,
 ) -> Result<HeaderMap, ExecError> {
+    crate::codex::siwc_request::ensure_credentials(auth)?;
     let mut headers = HeaderMap::new();
+    if auth.use_siwc() {
+        custom_headers::apply(&mut headers, &auth.attributes, client, "codex");
+        let beta = client_value(client, "openai-beta")
+            .filter(|beta| beta.contains("responses_websockets="))
+            .and_then(|beta| HeaderValue::from_str(&beta).ok())
+            .unwrap_or_else(|| HeaderValue::from_static(BETA_HEADER_VALUE));
+        headers.insert(HeaderName::from_static("openai-beta"), beta);
+        headers.remove("x-responsesapi-include-timing-metrics");
+        crate::codex::siwc_request::enforce_headers(&mut headers, auth, client)?;
+        return Ok(headers);
+    }
     let (token, _) = credentials(auth);
     if !token.trim().is_empty() {
         let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
