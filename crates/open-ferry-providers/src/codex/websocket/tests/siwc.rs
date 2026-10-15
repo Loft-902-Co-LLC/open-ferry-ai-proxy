@@ -8,8 +8,11 @@ use crate::secret_echo::Logs;
 use open_ferry_core::config::{AnyValue, PayloadModelRule, PayloadRule};
 use open_ferry_core::exec::{InputFrame, WebsocketInput};
 
+mod live;
+
 const TOKEN: &str = "siwc-websocket-test-token";
-const DEVICE: &str = "61a0e56d-c76b-469d-88ca-c2e2cdaf5801";
+const DEVICE: &str = "siwc-device-never-transmitted-61a0e56d-c76b-469d-88ca-c2e2cdaf5801";
+const API_KEY: &str = "siwc-unused-api-key-never-transmitted";
 const BODY: &str = r#"{"input":"hello","instructions":"  ","stream":true,"background":true,"store":true,"temperature":0.7,"max_output_tokens":1024,"max_completion_tokens":1024,"prompt_cache_retention":"24h","prompt_cache_options":{"ttl":"30m"},"prompt_cache_key":"body-only-cache-key"}"#;
 const FORBIDDEN: &[&str] = &[
     "originator",
@@ -26,11 +29,11 @@ const FORBIDDEN: &[&str] = &[
     "thread_id",
     "x-openai-internal-codex-responses-lite",
     "x-openai-client-request-time",
-    "x-responsesapi-include-timing-metrics",
 ];
 
 fn credential(base: &str) -> Auth {
     let mut auth = auth(base);
+    auth.attributes.insert("api_key".into(), API_KEY.into());
     auth.metadata.insert("use_siwc".into(), json!(true));
     auth.metadata
         .insert("access_token".into(), json!("unused-outer-token"));
@@ -67,6 +70,10 @@ fn attempted_options(session: &str, ids: bool) -> Options {
         "user-agent",
         HeaderValue::from_static("codex_cli_rs/1 (Mac OS)"),
     );
+    opts.headers.insert(
+        "x-responsesapi-include-timing-metrics",
+        HeaderValue::from_static("caller-metrics-attempt"),
+    );
     opts.headers
         .insert("x-tenant", HeaderValue::from_static("team-blue"));
     if ids {
@@ -92,11 +99,6 @@ fn assert_headers(head: &super::super::mock::Handshake, token: &str, ids: bool) 
     );
     assert_eq!(head.header("x-team"), Some("team-blue"));
     for name in FORBIDDEN {
-        // The HTTP route retains this non-identity metrics option; SIWC
-        // WebSockets skip it, as upstream's SIWC handshake does.
-        if head.method == "POST" && *name == "x-responsesapi-include-timing-metrics" {
-            continue;
-        }
         assert!(head.header(name).is_none(), "forbidden SIWC header {name}");
     }
     assert_eq!(head.header("session_id"), ids.then_some("caller-session"));
@@ -104,7 +106,9 @@ fn assert_headers(head: &super::super::mock::Handshake, token: &str, ids: bool) 
         head.header("x-client-request-id"),
         ids.then_some("caller-request")
     );
-    assert!(!format!("{:?}", head.headers).contains(DEVICE));
+    let headers = format!("{:?}", head.headers);
+    assert!(!headers.contains(DEVICE));
+    assert!(!headers.contains(API_KEY));
 }
 
 fn assert_body(text: &str) {
@@ -171,6 +175,11 @@ async fn siwc_execute_and_stream_use_fixed_identity_and_websocket_body() {
             assert!(record.bodies.is_empty(), "no HTTP request");
             let head = &record.handshakes[0];
             assert_headers(head, TOKEN, ids);
+            // Upstream omits caller metrics, but permits credential overrides.
+            assert!(
+                head.header("x-responsesapi-include-timing-metrics")
+                    .is_none()
+            );
             assert_eq!(
                 head.header("openai-beta"),
                 Some(if ids {
@@ -182,6 +191,99 @@ async fn siwc_execute_and_stream_use_fixed_identity_and_websocket_body() {
             assert_eq!(record.messages.len(), 1);
             assert_body(&record.messages[0]);
         }
+    }
+}
+
+#[tokio::test]
+async fn siwc_custom_protocol_headers_and_hyphenated_session_precedence() {
+    for streaming in [false, true] {
+        for both in [false, true] {
+            let server = Server::once(&[COMPLETED]).await;
+            let mut auth = credential(&format!("{}/v1", server.url));
+            auth.attributes
+                .insert("header:OpenAI-Beta".into(), "credential-beta".into());
+            auth.attributes.insert(
+                "header:x-responsesapi-include-timing-metrics".into(),
+                "credential-metrics".into(),
+            );
+            let mut opts = attempted_options("", true);
+            opts.headers
+                .insert("session-id", HeaderValue::from_static("caller-session"));
+            if both {
+                opts.headers
+                    .insert("session_id", HeaderValue::from_static("underscore-loses"));
+            } else {
+                opts.headers.remove("session_id");
+            }
+            let executor = executor();
+            let req = request("gpt-5-codex", BODY);
+            if streaming {
+                assert!(
+                    collect(
+                        executor
+                            .execute_stream(Arc::new(auth), req, opts)
+                            .await
+                            .unwrap()
+                    )
+                    .await
+                    .1
+                    .is_none()
+                );
+            } else {
+                executor.execute(Arc::new(auth), req, opts).await.unwrap();
+            }
+            let record = server.record();
+            let head = &record.handshakes[0];
+            assert_headers(head, TOKEN, true);
+            assert_eq!(head.header("openai-beta"), Some("credential-beta"));
+            assert_eq!(
+                head.header("x-responsesapi-include-timing-metrics"),
+                Some("credential-metrics")
+            );
+            assert!(head.header("session-id").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn siwc_payload_override_lands_last_on_execute_and_stream() {
+    for streaming in [false, true] {
+        let server = Server::once(&[COMPLETED]).await;
+        let auth = credential(&format!("{}/v1", server.url));
+        let mut config = Config::default();
+        config.payload.r#override.push(PayloadRule {
+            models: vec![PayloadModelRule {
+                name: "gpt-5-codex".into(),
+                protocol: "codex".into(),
+                ..Default::default()
+            }],
+            params: vec![("temperature".into(), AnyValue::Float(0.25))],
+        });
+        let executor = executor_with(config);
+        let req = request("gpt-5-codex", BODY);
+        let opts = attempted_options("", false);
+        if streaming {
+            assert!(
+                collect(
+                    executor
+                        .execute_stream(Arc::new(auth), req, opts)
+                        .await
+                        .unwrap()
+                )
+                .await
+                .1
+                .is_none()
+            );
+        } else {
+            executor.execute(Arc::new(auth), req, opts).await.unwrap();
+        }
+        let record = server.record();
+        assert_headers(&record.handshakes[0], TOKEN, false);
+        let body: Value = serde_json::from_str(&record.messages[0]).unwrap();
+        assert_eq!(body["temperature"], 0.25);
+        assert_eq!(body["store"], false);
+        assert!(!exists(&body, "stream"));
+        assert!(!record.messages[0].contains(DEVICE));
     }
 }
 
@@ -360,6 +462,7 @@ async fn siwc_duplex_second_create_applies_body_rules_on_kept_connection() {
     }
     let record = server.record();
     assert_eq!(record.handshakes.len(), 1);
+    assert_headers(&record.handshakes[0], TOKEN, false);
     assert_eq!(record.messages.len(), 2);
     for message in &record.messages {
         assert_body(message);

@@ -261,21 +261,22 @@ impl Secrets {
 
     /// Adds the password of the proxy a request with the proxy setting
     /// `proxy` goes through, and the `Proxy-Authorization` credential made
-    /// of it (see [`Self::add_url`]): a proxy URL's; none for `direct` or
-    /// `none`; and for an empty
-    /// setting, the environment's proxies' (`HTTP_PROXY`, `HTTPS_PROXY` and
-    /// `ALL_PROXY`, in either case).
+    /// of it (see [`Self::add_url`]): the configured URL's secrets, plus the
+    /// environment's proxies' (`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`,
+    /// in either case). This is deliberately conservative: invalid settings
+    /// and HTTP client build failures can fall back to the environment, even
+    /// after `direct` or `none`. It covers every fallback; over-redaction is harmless.
     pub fn add_proxy(&mut self, proxy: &str) {
+        self.add_proxy_with(proxy, |name| std::env::var(name).ok());
+    }
+
+    fn add_proxy_with(&mut self, proxy: &str, env: impl Fn(&str) -> Option<String>) {
         let proxy = proxy.trim();
-        if proxy.eq_ignore_ascii_case("direct") || proxy.eq_ignore_ascii_case("none") {
-            return;
-        }
         if !proxy.is_empty() {
             self.add_url(proxy);
-            return;
         }
         for name in PROXY_VARIABLES {
-            if let Ok(value) = std::env::var(name) {
+            if let Some(value) = env(name) {
                 let value = value.trim();
                 if value.contains("://") {
                     self.add_url(value);
@@ -742,16 +743,49 @@ mod tests {
         );
     }
 
+    // Not upstream's: fallback secrets are gathered without changing the
+    // process environment, for every proxy setting and variable name.
+    #[test]
+    fn gathers_environment_proxy_secrets_when_a_setting_falls_back() {
+        for proxy in [
+            "",
+            "direct",
+            " none ",
+            "not-a-url",
+            "http:///",
+            "ftp://user:configured-secret@127.0.0.1:1",
+            "http://127.0.0.1:1",
+            "https://127.0.0.1:1",
+            "socks5://127.0.0.1:1",
+            "socks5h://127.0.0.1:1",
+        ] {
+            for name in PROXY_VARIABLES {
+                let mut secrets = Secrets::new();
+                secrets.add_proxy_with(proxy, |variable| {
+                    (variable == name).then(|| "env-user:environment-secret@127.0.0.1:3128".into())
+                });
+                let basic = STANDARD.encode("env-user:environment-secret");
+                let failure = format!(
+                    "CONNECT failed: environment-secret; Proxy-Authorization: Basic {basic}"
+                );
+                let redacted = secrets.text(failure, Policy::Client);
+                assert!(!redacted.contains("environment-secret"), "setting {proxy}");
+                assert!(!redacted.contains(&basic), "setting {proxy}");
+                assert!(redacted.contains(REDACTED));
+            }
+        }
+    }
+
     // Not upstream's: a proxy setting gives its URL's password and the
-    // `Proxy-Authorization` credential made of it, and none for `direct`.
+    // `Proxy-Authorization` credential made of it, with an empty environment.
     #[test]
     fn gathers_a_proxys_password() {
         let mut secrets = Secrets::new();
-        secrets.add_proxy("direct");
-        secrets.add_proxy(" none ");
+        secrets.add_proxy_with("direct", |_| None);
+        secrets.add_proxy_with(" none ", |_| None);
         assert!(secrets.is_empty());
-        secrets.add_proxy("http://user:proxy-secret-5678@127.0.0.1:3128");
-        secrets.add_proxy("http://only-a-user-0123@127.0.0.1:3128");
+        secrets.add_proxy_with("http://user:proxy-secret-5678@127.0.0.1:3128", |_| None);
+        secrets.add_proxy_with("http://only-a-user-0123@127.0.0.1:3128", |_| None);
         assert_eq!(
             secrets.iter().collect::<Vec<_>>(),
             [

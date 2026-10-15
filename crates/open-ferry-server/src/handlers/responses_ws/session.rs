@@ -387,12 +387,8 @@ impl<S: Socket> Session<S> {
                     // A credential that is gone or disabled sends no more
                     // of the client's messages on its connection.
                     let dispatcher = Arc::clone(&self.dispatcher);
-                    let check: AuthCheck = Arc::new(move |auth_id: &str| {
-                        dispatcher
-                            .websocket_support(&[], "", Some(auth_id))
-                            .auth
-                            .is_some_and(|auth| !auth.disabled)
-                    });
+                    let check: AuthCheck =
+                        Arc::new(move |auth_id: &str| dispatcher.websocket_auth(auth_id));
                     call.options.websocket_input = Some(input.clone().with_auth_check(check));
                 }
                 let metadata = &mut call.options.metadata;

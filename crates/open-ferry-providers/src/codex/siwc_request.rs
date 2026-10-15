@@ -118,12 +118,12 @@ pub(crate) fn enforce_headers(
         })?;
     token.set_sensitive(true);
     headers.insert(header::AUTHORIZATION, token);
-    if !super::request::ensure_header(headers, caller, "session_id".parse().unwrap())
-        && let Some(session) = caller.get("session-id")
-    {
-        let mut source = HeaderMap::new();
-        source.insert("session_id", session.clone());
-        super::request::ensure_header(headers, &source, "session_id".parse().unwrap());
+    let session_name = "session_id".parse().unwrap();
+    let mut session = HeaderMap::new();
+    if super::request::ensure_header(&mut session, caller, "session-id".parse().unwrap()) {
+        headers.insert(session_name, session.remove("session-id").unwrap());
+    } else {
+        super::request::ensure_header(headers, caller, session_name);
     }
     super::request::ensure_header(headers, caller, "x-client-request-id".parse().unwrap());
     Ok(())

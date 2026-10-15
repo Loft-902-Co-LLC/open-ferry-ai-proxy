@@ -41,7 +41,7 @@ use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::models::ModelInfo;
 use open_ferry_core::registry::ModelRegistry;
 use open_ferry_providers::codex::CodexExecutor;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
@@ -765,6 +765,17 @@ async fn local_validation_recovery() {
 /// Has the dispatcher say every credential is `test-provider`'s without
 /// websockets, `off` disabled, and that it doesn't know `gone`.
 fn known_credentials(dispatcher: &FakeDispatcher) {
+    let mut auths = dispatcher.websocket_auths.lock().unwrap();
+    for id in ["on", "off"] {
+        let mut auth = open_ferry_core::auth::Auth {
+            id: id.into(),
+            ..Default::default()
+        };
+        auth.metadata
+            .insert("access_token".into(), json!("live-test-token"));
+        auths.insert(id.into(), Arc::new(auth));
+    }
+    drop(auths);
     dispatcher.websocket(
         |_: &[String], _: &str, auth_id: Option<&str>| WebsocketSupport {
             auth: auth_id.filter(|&id| id != "gone").map(|id| WebsocketAuth {
@@ -822,6 +833,14 @@ async fn turns_without_a_duplex_stream_end_as_before() {
         assert!(input.auth_enabled("on"));
         assert!(!input.auth_enabled("off"));
         assert!(!input.auth_enabled("gone"));
+        let snapshot = open_ferry_core::auth::Auth {
+            id: "on".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            input.live_auth(&snapshot).unwrap().access_token(),
+            "live-test-token"
+        );
     }
 }
 

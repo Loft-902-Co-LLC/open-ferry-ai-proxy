@@ -43,7 +43,11 @@ async fn interrupt_forwards_the_original_payload_and_late_interrupt_is_handled()
     assert!(response.chunks.next().await.unwrap().is_ok());
     assert!(
         executor
-            .interrupt_execution_session("interrupt", INTERRUPT.as_bytes(), Arc::new(|_| true))
+            .interrupt_execution_session(
+                "interrupt",
+                INTERRUPT.as_bytes(),
+                Arc::new(|_| Some(Arc::new(Auth::default())))
+            )
             .await
             .unwrap()
     );
@@ -56,7 +60,7 @@ async fn interrupt_forwards_the_original_payload_and_late_interrupt_is_handled()
     );
     assert!(
         executor
-            .interrupt_execution_session("interrupt", INTERRUPT.as_bytes(), Arc::new(|_| false))
+            .interrupt_execution_session("interrupt", INTERRUPT.as_bytes(), Arc::new(|_| None))
             .await
             .unwrap()
     );
@@ -65,7 +69,7 @@ async fn interrupt_forwards_the_original_payload_and_late_interrupt_is_handled()
             .interrupt_execution_session(
                 "interrupt",
                 br#"{"type":"response.interrupt","response_id":"other"}"#,
-                Arc::new(|_| true)
+                Arc::new(|_| Some(Arc::new(Auth::default())))
             )
             .await
             .unwrap()
@@ -81,7 +85,11 @@ async fn interrupt_forwards_the_original_payload_and_late_interrupt_is_handled()
     assert!(next.chunks.next().await.unwrap().is_ok());
     assert!(
         executor
-            .interrupt_execution_session("interrupt", INTERRUPT.as_bytes(), Arc::new(|_| true))
+            .interrupt_execution_session(
+                "interrupt",
+                INTERRUPT.as_bytes(),
+                Arc::new(|_| Some(Arc::new(Auth::default())))
+            )
             .await
             .unwrap()
     );
@@ -114,7 +122,7 @@ async fn interrupt_rejects_a_disabled_credential_without_writing() {
         .unwrap();
     response.chunks.next().await.unwrap().unwrap();
     let error = executor
-        .interrupt_execution_session("disabled", INTERRUPT.as_bytes(), Arc::new(|_| false))
+        .interrupt_execution_session("disabled", INTERRUPT.as_bytes(), Arc::new(|_| None))
         .await
         .unwrap_err();
     assert_eq!(error.message, "websocket credential is no longer enabled");
@@ -283,7 +291,11 @@ async fn interrupt_revalidates_a_credential_after_waiting_for_the_send_lock() {
     let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let check: open_ferry_core::exec::AuthCheck = {
         let enabled = enabled.clone();
-        Arc::new(move |_| enabled.load(Ordering::SeqCst))
+        Arc::new(move |_| {
+            enabled
+                .load(Ordering::SeqCst)
+                .then(|| Arc::new(Auth::default()))
+        })
     };
     let interrupt =
         executor.interrupt_execution_session("queued-interrupt", INTERRUPT.as_bytes(), check);
@@ -370,7 +382,7 @@ async fn interrupt_waiting_for_the_send_lock_drops_a_completed_response() {
     let interrupt = executor.interrupt_execution_session(
         "completion-gate",
         INTERRUPT.as_bytes(),
-        Arc::new(|_| true),
+        Arc::new(|_| Some(Arc::new(Auth::default()))),
     );
     tokio::pin!(interrupt);
     assert!(futures_util::poll!(&mut interrupt).is_pending());

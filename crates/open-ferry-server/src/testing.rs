@@ -11,6 +11,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use futures_util::{FutureExt, Stream, StreamExt, stream};
 use http::HeaderMap;
+use open_ferry_core::auth::{Auth, Status};
 use open_ferry_core::exec::{
     Dispatcher, Download, Downloaded, ExecError, Options, ProviderId, Request, Response,
     StreamResponse, WebsocketSupport,
@@ -143,6 +144,7 @@ pub(crate) struct FakeDispatcher {
     outcomes: Mutex<VecDeque<Outcome>>,
     calls: Mutex<Vec<Recorded>>,
     support: Mutex<Option<Arc<SupportFn>>>,
+    pub(crate) websocket_auths: Mutex<HashMap<String, Arc<Auth>>>,
     closed: Mutex<Vec<String>>,
     /// Held by each stream this has given, until it is dropped.
     live: Arc<()>,
@@ -336,6 +338,22 @@ impl Dispatcher for FakeDispatcher {
         support.map_or_else(WebsocketSupport::default, |support| {
             support(providers, model, auth_id)
         })
+    }
+
+    fn websocket_auth(&self, auth_id: &str) -> Option<Arc<Auth>> {
+        if self
+            .websocket_support(&[], "", Some(auth_id))
+            .auth
+            .is_some_and(|auth| auth.disabled)
+        {
+            return None;
+        }
+        self.websocket_auths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(auth_id)
+            .filter(|auth| !auth.disabled && auth.status != Status::Disabled)
+            .cloned()
     }
 
     fn download(&self, download: Download) -> BoxFuture<'_, Result<Downloaded, ExecError>> {

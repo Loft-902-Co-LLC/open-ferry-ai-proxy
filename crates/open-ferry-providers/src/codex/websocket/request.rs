@@ -307,13 +307,13 @@ pub(super) fn build_headers(
     crate::codex::siwc_request::ensure_credentials(auth)?;
     let mut headers = HeaderMap::new();
     if auth.use_siwc() {
-        custom_headers::apply(&mut headers, &auth.attributes, client, "codex");
         let beta = client_value(client, "openai-beta")
             .filter(|beta| beta.contains("responses_websockets="))
             .and_then(|beta| HeaderValue::from_str(&beta).ok())
             .unwrap_or_else(|| HeaderValue::from_static(BETA_HEADER_VALUE));
         headers.insert(HeaderName::from_static("openai-beta"), beta);
         headers.remove("x-responsesapi-include-timing-metrics");
+        custom_headers::apply(&mut headers, &auth.attributes, client, "codex");
         crate::codex::siwc_request::enforce_headers(&mut headers, auth, client)?;
         return Ok(headers);
     }
