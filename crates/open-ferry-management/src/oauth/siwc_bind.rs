@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use open_ferry_core::auth::codex_refresh::{generate_device_id, validate_device_id};
 use open_ferry_core::auth::credential_lock::acquire_credential_lock;
-use open_ferry_core::auth::file_store::{BindIdentity, read_siwc_bind_target};
+use open_ferry_core::auth::file_store::BindIdentity;
 use open_ferry_core::auth::{Auth, CodexCredentialPartition};
 use open_ferry_core::config::AuthFile;
 use open_ferry_providers::codex::siwc::SiwcAuth;
@@ -58,7 +58,7 @@ pub(super) async fn prepare(state: &ManagementState, name: &str) -> io::Result<B
         // canonical paths are only for containment and substitution checks.
         let path = files.file_path(&name)?;
         let real_path = directory.join(&name);
-        let (metadata, file_id) = read_siwc_bind_target(&path)?;
+        let (metadata, file_id) = files.read_bind_target(&path)?;
         let identity = BindIdentity::capture(&metadata, file_id);
         if path.canonicalize()? != real_path {
             return Err(invalid());
