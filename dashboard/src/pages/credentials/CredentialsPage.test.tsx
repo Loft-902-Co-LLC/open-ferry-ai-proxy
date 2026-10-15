@@ -1314,6 +1314,8 @@ describe("adding OpenAI API access to a Codex credential", () => {
     ["a 300 with a JSON body", { status: 300, json: { status: "ok", cancelled: true } }],
     ["a 200 that isn't the cancel answer", { status: 200, json: { status: "error" } }],
     ["a 200 with no JSON", { status: 200, text: "ok" }],
+    ["a cancelled of text", { status: 200, json: { status: "ok", cancelled: "false" } }],
+    ["a cancelled of null", { status: 200, json: { status: "ok", cancelled: null } }],
   ])("does not take %s for a stopped bind", async (_name, reply) => {
     const state = bindServer([{ status: "wait" }]);
     state.api.use(route("DELETE", BIND_SESSION, reply));
