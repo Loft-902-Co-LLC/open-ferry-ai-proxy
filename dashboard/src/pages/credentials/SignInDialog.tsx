@@ -143,13 +143,13 @@ function PasteForm({
           const problem =
             value.trim() === ""
               ? "Paste the address of the page the provider sent you to."
-              : pastedAddressProblem(value, state);
+              : pastedAddressProblem(value, state, callback === BIND_CALLBACK);
           if (problem !== null) {
             context.addIssue({ code: "custom", message: problem });
           }
         }),
       }),
-    [state],
+    [state, callback],
   );
   const form = useForm<{ address: string }>({
     resolver: zodResolver(schema),

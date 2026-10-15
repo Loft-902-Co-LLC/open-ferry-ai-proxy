@@ -1092,6 +1092,48 @@ describe("adding OpenAI API access to a Codex credential", () => {
     expect(state.api.callsTo("DELETE", BIND_SESSION)).toEqual([]);
   });
 
+  it("takes an address with its fields in the fragment, the query winning", async () => {
+    const state = bindServer([{ status: "wait" }]);
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+    const field = within(dialog).getByLabelText("Address of the page it sent you to");
+    const send = within(dialog).getByRole("button", { name: "Finish signing in" });
+    const posted = () => state.api.callsTo("POST", BIND_CALLBACK).map((call) => call.json());
+
+    // The query's state wins over the fragment's: this one isn't this sign-in's.
+    await user.click(field);
+    await user.paste(`http://localhost:1455/cb?state=other&code=query-code#state=${STATE}&code=frag-code`);
+    await user.click(send);
+    expect(await within(dialog).findByText(/^That address isn't from this sign-in\./)).toBeVisible();
+    expect(dialog).not.toHaveTextContent("query-code");
+    expect(dialog).not.toHaveTextContent("frag-code");
+    expect(posted()).toEqual([]);
+
+    // Only a fragment.
+    const fragment = `http://localhost:1455/cb#code=frag-code&state=${STATE}`;
+    await user.clear(field);
+    await user.click(field);
+    await user.paste(fragment);
+    await user.click(send);
+    await waitFor(() => {
+      expect(posted()).toEqual([{ provider: "codex", redirect_url: fragment }]);
+    });
+    expect(dialog).not.toHaveTextContent("frag-code");
+
+    // The query's state is this sign-in's, whatever the fragment says.
+    const both = `http://localhost:1455/cb?state=${STATE}&code=query-code#state=other`;
+    await user.clear(field);
+    await user.click(field);
+    await user.paste(both);
+    await user.click(send);
+    await waitFor(() => {
+      expect(posted()).toHaveLength(2);
+    });
+    expect(posted()[1]).toEqual({ provider: "codex", redirect_url: both });
+  });
+
   it("says what to do when the server refuses to start", async () => {
     const state = server([codex()]);
     state.api.use(
@@ -1169,6 +1211,25 @@ describe("signing in with ChatGPT, not binding", () => {
     expect(params?.has("name")).toBe(false);
     expect(params?.has("provider")).toBe(false);
     expect(state.api.callsTo("GET", BIND_START)).toEqual([]);
+  });
+
+  it("still refuses an address with its fields only in the fragment", async () => {
+    const state = server([]);
+    state.api.use(
+      route("GET", SIGN_IN_START.codex, { json: { status: "ok", url: SIGN_IN_URL, state: STATE } }),
+      route("GET", SIGN_IN_STATUS, { json: { status: "wait" } }),
+      route("POST", SIGN_IN_CALLBACK, { json: { status: "ok" } }),
+    );
+    const { user } = renderApp("/credentials?start=codex");
+    const dialog = await screen.findByRole("dialog", { name: "Sign in with ChatGPT" });
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+    await user.click(within(dialog).getByLabelText("Address of the page it sent you to"));
+    await user.paste(`http://localhost:1455/cb#code=frag-code&state=${STATE}`);
+    await user.click(within(dialog).getByRole("button", { name: "Finish signing in" }));
+    expect(await within(dialog).findByText(/^That address isn't from this sign-in\./)).toBeVisible();
+    expect(dialog).not.toHaveTextContent("frag-code");
+    expect(state.api.callsTo("POST", SIGN_IN_CALLBACK)).toEqual([]);
   });
 });
 
