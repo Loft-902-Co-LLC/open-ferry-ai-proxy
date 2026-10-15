@@ -37,6 +37,15 @@ export function useApiCall() {
   );
 }
 
+/** Like `useApiCall`, but gives the whole answer, its status too. */
+export function useApiResponse() {
+  const key = useManagementKey();
+  return useCallback(
+    async <T>(path: string, request: ApiRequest = {}) => apiRequest<T>(key, path, request),
+    [key],
+  );
+}
+
 /** A downloader with the session's key: see apiDownload. */
 export function useApiDownload() {
   const key = useManagementKey();

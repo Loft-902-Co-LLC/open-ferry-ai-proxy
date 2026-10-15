@@ -684,10 +684,17 @@ export function pastedAddressProblem(
     const value = url.searchParams.get(field)?.trim() ?? "";
     return value !== "" || fragment === null ? value : (fragment.get(field)?.trim() ?? "");
   };
-  if (get("state") !== state.trim()) {
+  let pastedState = get("state");
+  let code = get("code");
+  // As the server does for a bind: with no state, the code may carry it after a "#".
+  const hash = code.indexOf("#");
+  if (fragmentToo && pastedState === "" && hash >= 0) {
+    pastedState = code.slice(hash + 1);
+    code = code.slice(0, hash);
+  }
+  if (pastedState !== state.trim()) {
     return "That address isn't from this sign-in. Paste the address of the page this sign-in sent you to.";
   }
-  const code = get("code");
   if (code === "" && get("error") === "" && get("error_description") === "") {
     return "That address has no sign-in code in it. Copy all of it, including everything after the question mark.";
   }

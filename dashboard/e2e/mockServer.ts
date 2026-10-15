@@ -753,11 +753,15 @@ export async function mockServer(
         if (field("code") === "" && field("error") === "" && field("error_description") === "") {
           return json(route, { status: "error", error: "code or error is required" }, 400);
         }
-        // Accepted means delivered. A bind without the issued client ID fails the session.
+        // Accepted means delivered. A provider error ends the session before any
+        // exchange and wins; a code without the issued client ID fails it too.
+        const providerError = field("error") || field("error_description");
         bound =
-          field("client_id") === ""
-            ? { status: "error", error: "callback did not contain an issued client ID" }
-            : { status: "ok" };
+          providerError !== ""
+            ? { status: "error", error: providerError }
+            : field("client_id") === ""
+              ? { status: "error", error: "callback did not contain an issued client ID" }
+              : { status: "ok" };
         return json(route, { status: "ok" });
       }
       case "DELETE /v8/management/oauth/session":

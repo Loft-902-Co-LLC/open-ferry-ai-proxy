@@ -394,6 +394,31 @@ describe("the sign-in messages", () => {
     );
   });
 
+  it("split a bind's code at the first # when it has no state, as the server does", () => {
+    const state = "S";
+    const bind = (pasted: string) => pastedAddressProblem(pasted, state, true);
+    expect(bind("http://localhost:1455/cb?code=C%23S&client_id=I")).toBeNull();
+    expect(bind("http://localhost:1455/cb?code=C%23S%23more&client_id=I")).toMatch(
+      /^That address isn't from this sign-in/,
+    );
+    expect(bind("http://localhost:1455/cb?code=C%23other&client_id=I")).toMatch(
+      /^That address isn't from this sign-in/,
+    );
+    // An explicit state present: the code is not split.
+    expect(bind("http://localhost:1455/cb?state=S&code=C%23X&client_id=I")).toBeNull();
+    expect(bind("http://localhost:1455/cb?state=other&code=C%23S&client_id=I")).toMatch(
+      /^That address isn't from this sign-in/,
+    );
+    // A code of only "#S" leaves no code.
+    expect(bind("http://localhost:1455/cb?code=%23S&client_id=I")).toMatch(
+      /^That address has no sign-in code/,
+    );
+    // Ordinary mode does not split.
+    expect(pastedAddressProblem("http://localhost:54545/cb?code=C%23S", state)).toMatch(
+      /^That address isn't from this sign-in/,
+    );
+  });
+
   it("keep the ordinary sign-in's pasted address as it was", () => {
     const state = "s-123";
     // No fragment, and no client ID needed.
