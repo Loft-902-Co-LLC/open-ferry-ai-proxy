@@ -155,6 +155,12 @@ pub(crate) async fn save_token_record(
         merge_existing_auth_metadata(&mut record, &existing);
     }
 
+    let command = capture_destination_command(
+        state,
+        &store.files,
+        &record,
+        open_ferry_core::auth::CodexCredentialPartition::Outer,
+    );
     let files = Arc::clone(&store.files);
     let (record, saved) = run_blocking(move || {
         let saved = save_unlinked(&files, &mut record);
@@ -164,12 +170,16 @@ pub(crate) async fn save_token_record(
     let (path, data) = saved.map_err(SaveError::Save)?;
     let sync: &dyn CredentialSync = store.sync.as_ref();
     // Made under the lock, so the change takes its revision there.
-    let synced = match data {
-        Some(data) => sync.file_written(AuthFile {
-            path: PathBuf::from(&path),
-            data: data.into(),
-        }),
-        None => sync.upsert(record),
+    let file = data.map(|data| AuthFile {
+        path: PathBuf::from(&path),
+        data: data.into(),
+    });
+    let synced = match command {
+        Some(command) if !path.is_empty() => sync.completed_token_command(record, file, command),
+        _ => match file {
+            Some(file) => sync.file_written(file),
+            None => sync.upsert(record),
+        },
     };
     drop(guard);
     match synced.await {
@@ -230,6 +240,28 @@ fn registered_metadata(
         .into_iter()
         .find(|auth| auth.file_name == record.file_name && !auth.metadata.is_empty())
         .map(|auth| auth.metadata.clone())
+}
+
+/// The token command for `partition` of the one credential registered for
+/// `record`'s file, captured before the login or bind that writes it.
+/// Login ids may be empty until save_new_auth normalizes them, so the
+/// destination picks the registration, not a transient id. No registration
+/// there, or several, captures none.
+pub(crate) fn capture_destination_command(
+    state: &ManagementState,
+    files: &FileStore,
+    record: &Auth,
+    partition: open_ferry_core::auth::CodexCredentialPartition,
+) -> Option<open_ferry_core::manager::CompletedTokenCommand> {
+    let destination = files.resolve_auth_path(record).ok()?;
+    let registrations = state.manager().list();
+    let mut matching = registrations
+        .into_iter()
+        .filter(|auth| files.resolve_auth_path(auth).ok().as_ref() == Some(&destination));
+    let registered = matching.next().filter(|_| matching.next().is_none())?;
+    state
+        .manager()
+        .capture_token_command(&registered.id, partition)
 }
 
 #[cfg(test)]

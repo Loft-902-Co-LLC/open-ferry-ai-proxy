@@ -88,6 +88,7 @@ const FLOW_FAILED: &str = "oauth flow failed";
 struct CallbackRequest {
     provider: String,
     redirect_url: String,
+    client_id: String,
     code: String,
     state: String,
     error: String,
@@ -106,7 +107,14 @@ impl fmt::Debug for CallbackRequest {
 }
 
 impl GoStruct for CallbackRequest {
-    const FIELDS: &'static [&'static str] = &["provider", "redirect_url", "code", "state", "error"];
+    const FIELDS: &'static [&'static str] = &[
+        "provider",
+        "redirect_url",
+        "code",
+        "state",
+        "error",
+        "client_id",
+    ];
 
     fn set<'de, A: MapAccess<'de>>(&mut self, index: usize, map: &mut A) -> Result<(), A::Error> {
         let field = match index {
@@ -114,7 +122,8 @@ impl GoStruct for CallbackRequest {
             1 => &mut self.redirect_url,
             2 => &mut self.code,
             3 => &mut self.state,
-            _ => &mut self.error,
+            4 => &mut self.error,
+            _ => &mut self.client_id,
         };
         set_string(field, map)
     }
@@ -143,6 +152,7 @@ pub(super) async fn get(
     let request = CallbackRequest {
         provider: text(query.value("provider")),
         code: text(query.value("code")),
+        client_id: text(query.value("client_id")),
         state: text(query.value("state")),
         error: first_non_empty(&[query.value("error"), query.value("error_description")]),
         redirect_url: String::new(),
@@ -155,20 +165,52 @@ fn handle(state: &ManagementState, request: CallbackRequest) -> Response {
     let mut oauth_state = request.state.trim().to_owned();
     let mut code = request.code.trim().to_owned();
     let mut error = request.error.trim().to_owned();
+    let mut client_id = request.client_id.trim().to_owned();
 
     let redirect = request.redirect_url.trim();
     if !redirect.is_empty() {
-        let Some(query) = redirect_query(redirect) else {
-            return failure(StatusCode::BAD_REQUEST, "invalid redirect_url");
+        let parsed = open_ferry_providers::oauth::parse_oauth_callback(redirect)
+            .ok()
+            .flatten();
+        let selected_state = if oauth_state.is_empty() {
+            parsed.as_ref().map_or("", |p| p.state.as_str())
+        } else {
+            &oauth_state
         };
-        if oauth_state.is_empty() {
-            oauth_state = text(query.value("state"));
-        }
-        if code.is_empty() {
-            code = text(query.value("code"));
-        }
-        if error.is_empty() {
-            error = first_non_empty(&[query.value("error"), query.value("error_description")]);
+        if state.oauth_sessions().store().is_bind(selected_state) {
+            match open_ferry_providers::oauth::parse_oauth_callback(redirect) {
+                Ok(Some(parsed)) => {
+                    if oauth_state.is_empty() {
+                        oauth_state = parsed.state;
+                    }
+                    if code.is_empty() {
+                        code = parsed.code;
+                    }
+                    if error.is_empty() {
+                        error = parsed.error;
+                    }
+                    if client_id.is_empty() {
+                        client_id = parsed.client_id;
+                    }
+                }
+                _ => return failure(StatusCode::BAD_REQUEST, "invalid redirect_url"),
+            }
+        } else {
+            let Some(query) = redirect_query(redirect) else {
+                return failure(StatusCode::BAD_REQUEST, "invalid redirect_url");
+            };
+            if oauth_state.is_empty() {
+                oauth_state = text(query.value("state"));
+            }
+            if code.is_empty() {
+                code = text(query.value("code"));
+            }
+            if error.is_empty() {
+                error = first_non_empty(&[query.value("error"), query.value("error_description")]);
+            }
+            if client_id.is_empty() {
+                client_id = text(query.value("client_id"));
+            }
         }
     }
 
@@ -206,7 +248,15 @@ fn handle(state: &ManagementState, request: CallbackRequest) -> Response {
     }
 
     if store
-        .deliver(&oauth_state, &provider, Callback { code, error })
+        .deliver(
+            &oauth_state,
+            &provider,
+            Callback {
+                code,
+                error,
+                client_id,
+            },
+        )
         .is_err()
     {
         return match store.active(&oauth_state) {
@@ -278,6 +328,7 @@ async fn page_outcome(state: &ManagementState, provider: Provider, query: Option
     };
     let callback = Callback {
         code: text(query.value("code")),
+        client_id: text(query.value("client_id")),
         error: text(error),
     };
     let (code, error) = (callback.code.clone(), callback.error.clone());
@@ -418,6 +469,7 @@ mod tests {
             provider: "codex".into(),
             redirect_url: "http://h/cb?code=MARKER-code".into(),
             code: "MARKER-code".into(),
+            client_id: "MARKER-client".into(),
             state: "MARKER-state".into(),
             error: "MARKER-error".into(),
         };

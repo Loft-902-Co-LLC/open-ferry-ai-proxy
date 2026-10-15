@@ -47,10 +47,11 @@
 //!   slow save never holds the credential back from calls.
 //! - There are no per-credential mutation locks: each change is made whole
 //!   under the state lock, and saves of one credential are ordered by
-//!   epoch and generation, a stale one skipped. The reload barrier is an
-//!   `RwLock`, so waiting on it can't be given up as upstream's contexts
-//!   allow, and a refresh's result is committed with no point between
-//!   where it could be dropped (upstream's `context.WithoutCancel`).
+//!   epoch and generation, a stale one skipped. Reload exclusion uses counted,
+//!   owned permits so a detached save keeps it across threads. Waiting on it
+//!   can't be given up as upstream's contexts allow, and a refresh's result is
+//!   committed with no point where it could be dropped (upstream's
+//!   `context.WithoutCancel`).
 //! - `load` doesn't reschedule refreshes, as upstream; start the refresh
 //!   loop after loading. It restarts the rotation, as upstream's scheduler
 //!   rebuild does.
@@ -67,7 +68,7 @@
 //!   plugin virtual credentials, the Meta key mint save inside the lock
 //!   and result policies.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::Shared;
 use super::affinity::Session;
@@ -86,8 +87,8 @@ use super::models::Resolver;
 use super::refresh::clear_unauthorized_model_states;
 use super::select::{executor_key_from_auth, lookup_executor};
 use super::text::{canonical_model_key, equal_fold, go_lower};
-use super::{EditError, Entry, Manager, ManagerError, State, lock};
-use crate::auth::{Auth, Status, Timestamp};
+use super::{EditError, Entry, Manager, ManagerError, ReloadGuard, State, lock};
+use crate::auth::{AdoptionRead, Auth, Status, Timestamp};
 use crate::executor::ProviderExecutor;
 
 /// How many times reconciliation re-reads the registry when its epoch moves
@@ -223,6 +224,62 @@ enum UpdateMode<'a> {
     },
 }
 
+/// Single-use, token-free authority captured before a login or bind writes.
+/// A failed command must drop this value without adopting it.
+#[doc(hidden)]
+pub struct CompletedTokenCommand {
+    id: String,
+    partition: crate::auth::CodexCredentialPartition,
+    registration_epoch: u64,
+    discard_epoch: u64,
+    binding_generation: u64,
+    provider: String,
+}
+
+/// Result of a save-serialized fresh observation.
+#[doc(hidden)]
+pub enum AdoptionResult {
+    Published { auth: Arc<Auth>, revision: u64 },
+    Unchanged,
+    Retry,
+    RegistrationChanged,
+}
+
+struct PublishedUpdate {
+    snapshot: Arc<Auth>,
+    epoch: u64,
+    generation: u64,
+    discard_epoch: u64,
+    pending: Option<PendingSave>,
+    revision: Option<u64>,
+    changed: bool,
+    ineligible: bool,
+    metadata_unchanged: bool,
+}
+
+#[derive(Default)]
+struct PublishContext {
+    origin: Option<(Arc<Auth>, u64)>,
+    same_origin: Option<bool>,
+    revision: Option<u64>,
+    command: Option<CompletedTokenCommand>,
+    policy_only_ineligible: bool,
+    metadata_unchanged: bool,
+}
+
+/// Cannot escape the closure borrowing it, or be retained through persistence.
+pub(crate) struct AdoptionGuard<'a> {
+    _saved: MutexGuard<'a, ()>,
+    _permit: &'a ReloadGuard,
+}
+
+enum ObservedUpdate {
+    Published(PublishedUpdate),
+    Unchanged,
+    Retry,
+    RegistrationChanged,
+}
+
 impl Manager {
     /// Registers `executor` for the provider it names, replacing (and
     /// closing the sessions of) any executor registered for it before
@@ -299,46 +356,58 @@ impl Manager {
         let snapshot = {
             let mut guard = self.lock();
             let state = &mut *guard;
-            let existing = state
-                .auths
-                .get(&auth.id)
-                .map(|entry| (entry.auth.registration_epoch, entry.auth.credential_version));
-            let existing_epoch = existing.map_or(0, |(epoch, _)| epoch);
-            let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
-            *slot = (*slot).max(existing_epoch).saturating_add(1);
-            auth.registration_epoch = *slot;
-            match existing {
-                Some((_, version)) => {
-                    auth.credential_version =
-                        auth.credential_version.max(version).saturating_add(1);
-                }
-                None if auth.credential_version == 0 => auth.credential_version = 1,
-                None => {}
-            }
-            auth.generation = 1;
-            // open-ferry's capped quota rests go with the state replaced.
-            state.quota_checks.forget(&auth.id);
-            let snapshot = Arc::new(auth);
-            state.auths.insert(
-                snapshot.id.clone(),
-                Entry {
-                    auth: snapshot.clone(),
-                    refresh_failures: 0,
-                },
-            );
-            state.sync_scheduler(self.models(), &snapshot.id, now);
-            let pending = self.pending_save(state, &snapshot.id, save);
-            (snapshot, pending)
+            self.register_locked(state, auth, save, now)
         };
         let (snapshot, pending) = snapshot;
         self.queue_refresh_reschedule(&snapshot.id);
         cooldown_store::changed(self);
-        if let Err(err) = self.persist(&snapshot, snapshot.registration_epoch, 1, save) {
+        if let Err(err) = self.persist(&snapshot, snapshot.registration_epoch, 1, 0, save) {
             log_persist_failure(&snapshot, "failed to persist registered auth", &err);
         }
         drop(pending);
         drop(gate);
         Ok(snapshot)
+    }
+
+    fn register_locked(
+        &self,
+        state: &mut State,
+        mut auth: Auth,
+        save: Save,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> (Arc<Auth>, Option<PendingSave>) {
+        let existing = state
+            .auths
+            .get(&auth.id)
+            .map(|entry| (entry.auth.registration_epoch, entry.auth.credential_version));
+        let existing_epoch = existing.map_or(0, |(epoch, _)| epoch);
+        let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
+        *slot = (*slot).max(existing_epoch).saturating_add(1);
+        auth.registration_epoch = *slot;
+        match existing {
+            Some((_, version)) => {
+                auth.credential_version = auth.credential_version.max(version).saturating_add(1);
+            }
+            None if auth.credential_version == 0 => auth.credential_version = 1,
+            None => {}
+        }
+        auth.generation = 1;
+        // open-ferry's capped quota rests go with the state replaced.
+        state.quota_checks.forget(&auth.id);
+        let snapshot = Arc::new(auth);
+        state.auths.insert(
+            snapshot.id.clone(),
+            Entry {
+                auth: snapshot.clone(),
+                refresh_failures: 0,
+                discard_epoch: 0,
+                undurable: Default::default(),
+                undurable_baselines: Default::default(),
+            },
+        );
+        state.sync_scheduler(self.models(), &snapshot.id, now);
+        let pending = self.pending_save(state, &snapshot.id, save);
+        (snapshot, pending)
     }
 
     /// Replaces a registered credential (upstream's `Update`). Returns
@@ -349,6 +418,15 @@ impl Manager {
     /// disabled, the new one keeps the old model states when it has none, an
     /// active credential-wide quota cooldown carries over, and new tokens
     /// clear a recorded 401.
+    ///
+    /// This synchronous API may wait for a save and read the store. Async
+    /// callers must offload it through `run_persistence` or `spawn_blocking`.
+    /// For supported Codex records, an empty-metadata replacement retains the
+    /// whole current metadata record and retained refresh work. An eligible
+    /// publication saves the full record with pending rotations; ineligible
+    /// policies still discard without saving. Unlike upstream, metadata cannot
+    /// be blanked in memory:
+    /// protected live tokens and non-token fields must survive later saves.
     pub fn update(&self, auth: Auth) -> Result<Option<Arc<Auth>>, ManagerError> {
         Ok(self
             .update_internal(UpdateMode::Replace, auth, Save::Yes)?
@@ -455,6 +533,386 @@ impl Manager {
         )
     }
 
+    /// I3: optional command-slot mutex -> refresh mutex -> ReloadGuard ->
+    /// per-id save mutex -> short state/store I/O. The slot is blocking-worker
+    /// only; the registry mutex is a leaf and no synchronous guard crosses await.
+    pub(crate) fn with_adoption<R>(
+        &self,
+        id: &str,
+        permit: &ReloadGuard,
+        work: impl FnOnce(&AdoptionGuard<'_>) -> R,
+    ) -> R {
+        self.with_persist_save_lock(id, |save_lock| {
+            let guard = AdoptionGuard {
+                _saved: lock(save_lock),
+                _permit: permit,
+            };
+            work(&guard)
+        })
+    }
+
+    fn with_persist_save_lock<R>(&self, id: &str, work: impl FnOnce(&Mutex<()>) -> R) -> R {
+        let save_lock = lock(&self.shared.persist_save_locks)
+            .entry(id.to_owned())
+            .or_default()
+            .clone();
+        let result = work(&save_lock);
+        drop(save_lock);
+        if self.get(id).is_none() {
+            self.prune_idle_save_lock(id);
+        }
+        result
+    }
+
+    fn prune_idle_save_lock(&self, id: &str) {
+        let mut locks = lock(&self.shared.persist_save_locks);
+        if locks
+            .get(id)
+            .is_some_and(|slot| Arc::strong_count(slot) == 1)
+        {
+            locks.remove(id);
+        }
+    }
+
+    /// Adopts CURRENT bytes read by `read`, never the hint's captured tokens
+    /// when read-back is supported. Missing/invalid reads leave live work alone.
+    /// Store permits and credential locks must be released before entering.
+    /// This is synchronous store I/O; async callers must offload the whole call.
+    #[doc(hidden)]
+    pub fn adopt_observed(
+        &self,
+        hint: &Auth,
+        command: Option<CompletedTokenCommand>,
+        read: impl FnOnce(&Auth) -> Result<AdoptionRead, ManagerError>,
+    ) -> Result<AdoptionResult, ManagerError> {
+        if hint.id.is_empty() {
+            return Ok(AdoptionResult::Unchanged);
+        }
+        let permit = self.mutation_gate();
+        let observed = self.with_adoption(&hint.id, &permit, |guard| {
+            self.observe_update(
+                guard,
+                hint.clone(),
+                command,
+                Save::No,
+                (false, || true),
+                read,
+            )
+        })?;
+        match observed {
+            ObservedUpdate::Published(published) => {
+                let revision = published.revision.expect("observation revision");
+                let auth = self.finish_update(published, false, Save::No, permit)?;
+                Ok(match auth {
+                    Some((auth, _)) => AdoptionResult::Published { auth, revision },
+                    None => AdoptionResult::Unchanged,
+                })
+            }
+            ObservedUpdate::Unchanged => Ok(AdoptionResult::Unchanged),
+            ObservedUpdate::Retry => Ok(AdoptionResult::Retry),
+            ObservedUpdate::RegistrationChanged => Ok(AdoptionResult::RegistrationChanged),
+        }
+    }
+
+    /// Token-free registration/tombstone context for a queued observation.
+    #[doc(hidden)]
+    pub fn observation_registration(&self, id: &str) -> (Option<u64>, u64) {
+        let state = self.lock();
+        (
+            state.auths.get(id).map(|e| e.auth.registration_epoch),
+            state.epochs.get(id).copied().unwrap_or(0),
+        )
+    }
+
+    /// Service observation with a config-agnostic publication fence. `validate`
+    /// runs under state, must not block or call the manager, and rejects with
+    /// Retry without publishing. Unlike `adopt_observed`, this entry also permits
+    /// initial registration if the same absence/tombstone survives the read.
+    #[doc(hidden)]
+    pub fn adopt_observed_validated(
+        &self,
+        hint: &Auth,
+        registration: (Option<u64>, u64),
+        read: impl FnOnce(&Auth) -> Result<AdoptionRead, ManagerError>,
+        validate: impl FnOnce() -> bool,
+    ) -> Result<AdoptionResult, ManagerError> {
+        self.adopt_service_validated(hint, registration, &mut None, read, validate)
+    }
+
+    /// A completed service command retains its token-free authority when reading
+    /// fails, and transfers it by value only to the publishing transaction.
+    /// Call only after the command wrote successfully and released store locks.
+    #[doc(hidden)]
+    pub fn adopt_completed_token_command_validated(
+        &self,
+        hint: &Auth,
+        registration: (Option<u64>, u64),
+        command: &mut Option<CompletedTokenCommand>,
+        read: impl FnOnce(&Auth) -> Result<AdoptionRead, ManagerError>,
+        validate: impl FnOnce() -> bool,
+    ) -> Result<AdoptionResult, ManagerError> {
+        if command.is_none() {
+            return Ok(AdoptionResult::Unchanged);
+        }
+        self.adopt_service_validated(hint, registration, command, read, validate)
+    }
+
+    fn adopt_service_validated(
+        &self,
+        hint: &Auth,
+        registration: (Option<u64>, u64),
+        command: &mut Option<CompletedTokenCommand>,
+        read: impl FnOnce(&Auth) -> Result<AdoptionRead, ManagerError>,
+        validate: impl FnOnce() -> bool,
+    ) -> Result<AdoptionResult, ManagerError> {
+        if hint.id.is_empty() {
+            return Ok(AdoptionResult::Unchanged);
+        }
+        let permit = self.mutation_gate();
+        let result = self.with_adoption(&hint.id, &permit, |guard| {
+            let absence = {
+                let state = self.lock();
+                if (
+                    state.auths.get(&hint.id).map(|e| e.auth.registration_epoch),
+                    state.epochs.get(&hint.id).copied().unwrap_or(0),
+                ) != registration
+                {
+                    return Ok(ObservedUpdate::RegistrationChanged);
+                }
+                if state.auths.contains_key(&hint.id) {
+                    None
+                } else {
+                    Some(state.epochs.get(&hint.id).copied().unwrap_or(0))
+                }
+            };
+            let Some(epoch) = absence else {
+                return self.observe_update_retaining_command(
+                    guard,
+                    hint.clone(),
+                    command,
+                    Save::No,
+                    (false, validate),
+                    read,
+                );
+            };
+            let binding = self
+                .shared
+                .store
+                .as_ref()
+                .map_or(0, |s| s.binding_generation());
+            let revision = crate::config::next_revision();
+            let mut auth = match read(hint)? {
+                AdoptionRead::Record(auth) => auth,
+                AdoptionRead::Unsupported => hint.clone(),
+                AdoptionRead::Missing | AdoptionRead::Invalid => return Ok(ObservedUpdate::Retry),
+            };
+            if auth.id != hint.id {
+                return Ok(ObservedUpdate::RegistrationChanged);
+            }
+            normalize_credential_metadata(&mut auth.metadata);
+            validate_weight(&auth)
+                .map_err(|e| ManagerError::InvalidWeight(format!("register auth: {e}")))?;
+            let now = self.now();
+            auth.created_at.get_or_insert(now);
+            auth.updated_at = Some(now);
+            normalize_model_states(&mut auth.model_states);
+            auth.ensure_index();
+            let mut state = self.lock();
+            if state.auths.contains_key(&hint.id)
+                || state.epochs.get(&hint.id).copied().unwrap_or(0) != epoch
+                || self
+                    .shared
+                    .store
+                    .as_ref()
+                    .is_some_and(|s| s.binding_generation() != binding)
+            {
+                return Ok(ObservedUpdate::RegistrationChanged);
+            }
+            if !validate() {
+                return Ok(ObservedUpdate::Retry);
+            }
+            if cooldown_disabled_for_auth(&state.settings, &auth) || is_disabled(&auth) {
+                clear_cooldown_state_for_auth(&mut auth, now);
+            }
+            // A captured registration that disappeared cannot authorize this
+            // new registration; successful observation still consumes the slot.
+            drop(command.take());
+            let (snapshot, pending) = self.register_locked(&mut state, auth, Save::No, now);
+            Ok(ObservedUpdate::Published(PublishedUpdate {
+                epoch: snapshot.registration_epoch,
+                generation: snapshot.generation,
+                snapshot,
+                discard_epoch: 0,
+                pending,
+                revision: Some(revision),
+                changed: true,
+                ineligible: false,
+                metadata_unchanged: false,
+            }))
+        })?;
+        match result {
+            ObservedUpdate::Published(published) => {
+                let revision = published.revision.expect("observation revision");
+                self.queue_refresh_reschedule(&hint.id);
+                let auth = self.finish_update(published, false, Save::No, permit)?;
+                Ok(auth.map_or(AdoptionResult::Unchanged, |(auth, _)| {
+                    AdoptionResult::Published { auth, revision }
+                }))
+            }
+            ObservedUpdate::Unchanged => Ok(AdoptionResult::Unchanged),
+            ObservedUpdate::Retry => Ok(AdoptionResult::Retry),
+            ObservedUpdate::RegistrationChanged => Ok(AdoptionResult::RegistrationChanged),
+        }
+    }
+
+    /// Captures token-free authority BEFORE a login or bind writes its record.
+    #[doc(hidden)]
+    pub fn capture_token_command(
+        &self,
+        id: &str,
+        partition: crate::auth::CodexCredentialPartition,
+    ) -> Option<CompletedTokenCommand> {
+        let state = self.lock();
+        let entry = state.auths.get(id)?;
+        Some(CompletedTokenCommand {
+            id: entry.auth.id.clone(),
+            partition,
+            registration_epoch: entry.auth.registration_epoch,
+            discard_epoch: entry.discard_epoch,
+            binding_generation: self
+                .shared
+                .store
+                .as_ref()
+                .map_or(0, |store| store.binding_generation()),
+            provider: entry.auth.provider.clone(),
+        })
+    }
+
+    /// Adopt only after the login or bind successfully writes its record and
+    /// releases its store locks. A failed command drops its authority unused.
+    /// Every outcome consumes the authority, including Retry. Retry fails closed:
+    /// the marker remains until a verified write or a new valid command; callers
+    /// must not expect to retry with the same authority. Returning authority with
+    /// Retry is left to service plumbing, not this signature.
+    #[doc(hidden)]
+    pub fn adopt_completed_token_command(
+        &self,
+        hint: &Auth,
+        command: CompletedTokenCommand,
+    ) -> Result<AdoptionResult, ManagerError> {
+        self.adopt_observed(hint, Some(command), |live| match &self.shared.store {
+            Some(store) => store.read_for_adoption(live).map_err(ManagerError::Store),
+            None => Ok(AdoptionRead::Unsupported),
+        })
+    }
+
+    fn observe_update(
+        &self,
+        _guard: &AdoptionGuard<'_>,
+        incoming: Auth,
+        mut command: Option<CompletedTokenCommand>,
+        save: Save,
+        publication: (bool, impl FnOnce() -> bool),
+        read: impl FnOnce(&Auth) -> Result<AdoptionRead, ManagerError>,
+    ) -> Result<ObservedUpdate, ManagerError> {
+        self.observe_update_retaining_command(
+            _guard,
+            incoming,
+            &mut command,
+            save,
+            publication,
+            read,
+        )
+    }
+
+    fn observe_update_retaining_command(
+        &self,
+        _guard: &AdoptionGuard<'_>,
+        mut incoming: Auth,
+        command: &mut Option<CompletedTokenCommand>,
+        save: Save,
+        publication: (bool, impl FnOnce() -> bool),
+        read: impl FnOnce(&Auth) -> Result<AdoptionRead, ManagerError>,
+    ) -> Result<ObservedUpdate, ManagerError> {
+        let (replace, validate) = publication;
+        let Some(captured) = self.get(&incoming.id) else {
+            return Ok(ObservedUpdate::RegistrationChanged);
+        };
+        let binding = self
+            .shared
+            .store
+            .as_ref()
+            .map_or(0, |store| store.binding_generation());
+        let revision = crate::config::next_revision();
+        let observation = read(&captured)?;
+        if self
+            .shared
+            .store
+            .as_ref()
+            .is_some_and(|store| store.binding_generation() != binding)
+        {
+            return Ok(ObservedUpdate::RegistrationChanged);
+        }
+        let same_origin = match observation {
+            AdoptionRead::Missing | AdoptionRead::Invalid => return Ok(ObservedUpdate::Retry),
+            AdoptionRead::Unsupported => None,
+            AdoptionRead::Record(record) => {
+                let same = match self.shared.store.as_ref() {
+                    Some(store) => match store.same_record(&captured, &record) {
+                        Ok(same) => same,
+                        Err(_) => {
+                            tracing::debug!(auth_id = %captured.id, "adoption origin proof missed");
+                            return Ok(ObservedUpdate::Retry);
+                        }
+                    },
+                    None => true,
+                };
+                if !same
+                    || record.id != captured.id
+                    || !equal_fold(record.provider.trim(), captured.provider.trim())
+                {
+                    tracing::debug!(auth_id = %captured.id, "adoption origin proof missed");
+                    return Ok(ObservedUpdate::Retry);
+                }
+                if replace {
+                    copy_observed_credentials(&mut incoming, &record);
+                } else {
+                    incoming = record;
+                }
+                Some(true)
+            }
+        };
+        normalize_credential_metadata(&mut incoming.metadata);
+        validate_weight(&incoming)
+            .map_err(|err| ManagerError::InvalidWeight(format!("update auth: {err}")))?;
+        let context = PublishContext {
+            origin: Some((captured, binding)),
+            same_origin,
+            revision: Some(revision),
+            command: None,
+            policy_only_ineligible: false,
+            metadata_unchanged: false,
+        };
+        let mut state = self.lock();
+        if !validate() {
+            return Ok(ObservedUpdate::Retry);
+        }
+        let context = PublishContext {
+            command: command.take(),
+            ..context
+        };
+        match self.publish_update_locked(
+            &mut state,
+            UpdateMode::Replace,
+            incoming,
+            context,
+            save,
+        )? {
+            Some(published) => Ok(ObservedUpdate::Published(published)),
+            None => Ok(ObservedUpdate::RegistrationChanged),
+        }
+    }
+
     /// Upstream's `updateInternal`, for the replace and refresh modes.
     fn update_internal(
         &self,
@@ -469,145 +927,685 @@ impl Manager {
         validate_weight(&auth)
             .map_err(|err| ManagerError::InvalidWeight(format!("update auth: {err}")))?;
         let gate = self.mutation_gate();
+        let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
+        let published = if matches!(mode, UpdateMode::Replace) {
+            let id = auth.id.clone();
+            self.with_adoption(&id, &gate, |guard| {
+                if let Some(store) = &self.shared.store
+                    && self.permanently_ineligible(&auth)
+                {
+                    let Some(captured) = self.get(&id) else {
+                        return Ok(ObservedUpdate::RegistrationChanged);
+                    };
+                    let binding = store.binding_generation();
+                    // Policy-only discard must work even when a supported
+                    // record is missing, invalid or unreadable. Never adopt disk
+                    // credentials here; only Unsupported accepts incoming ones.
+                    let supported = !matches!(
+                        store.read_for_adoption(&captured),
+                        Ok(AdoptionRead::Unsupported)
+                    );
+                    // Unlike upstream's blank metadata, an empty supported
+                    // replacement means metadata unchanged. Read the current
+                    // record under state, retaining pending work when eligible;
+                    // runtime-only and other ineligible policies still discard.
+                    let metadata_unchanged = supported && auth.metadata.is_empty();
+                    if supported && !metadata_unchanged {
+                        copy_observed_credentials(&mut auth, &captured);
+                    }
+                    let context = PublishContext {
+                        origin: Some((captured, binding)),
+                        same_origin: Some(true),
+                        policy_only_ineligible: !metadata_unchanged,
+                        metadata_unchanged,
+                        ..PublishContext::default()
+                    };
+                    let mut state = self.lock();
+                    return self
+                        .publish_update_locked(&mut state, UpdateMode::Replace, auth, context, save)
+                        .map(|published| {
+                            published.map_or(
+                                ObservedUpdate::RegistrationChanged,
+                                ObservedUpdate::Published,
+                            )
+                        });
+                }
+                self.observe_update(guard, auth, None, save, (true, || true), |live| match self
+                    .shared
+                    .store
+                    .as_ref()
+                {
+                    Some(store) => store.read_for_adoption(live).map_err(ManagerError::Store),
+                    None => Ok(AdoptionRead::Unsupported),
+                })
+            })?
+        } else {
+            let mut state = self.lock();
+            match self.publish_update_locked(
+                &mut state,
+                mode,
+                auth,
+                PublishContext::default(),
+                save,
+            )? {
+                Some(published) => ObservedUpdate::Published(published),
+                None => ObservedUpdate::Unchanged,
+            }
+        };
+        match published {
+            ObservedUpdate::Published(published) => {
+                self.finish_update(published, is_refresh, save, gate)
+            }
+            ObservedUpdate::Unchanged | ObservedUpdate::RegistrationChanged => Ok(None),
+            ObservedUpdate::Retry => Err(ManagerError::AdoptionRetry),
+        }
+    }
+
+    /// State-only publication: callers already own admission and, for
+    /// observations, the save mutex. Never performs store I/O or takes permits.
+    fn publish_update_locked(
+        &self,
+        state: &mut State,
+        mode: UpdateMode<'_>,
+        mut auth: Auth,
+        context: PublishContext,
+        save: Save,
+    ) -> Result<Option<PublishedUpdate>, ManagerError> {
         let now = self.now();
         let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
-        let (snapshot, epoch, generation, pending) = {
-            let mut guard = self.lock();
-            let state = &mut *guard;
-            let Some(existing) = state.auths.get(&auth.id) else {
-                return Ok(None);
-            };
-            let existing_auth = existing.auth.clone();
-            let existing_epoch = existing_auth.registration_epoch;
-            let existing_generation = existing_auth.generation;
-            let existing_failures = existing.refresh_failures;
-            let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
-            *slot = (*slot).max(existing_epoch);
-            let live_epoch = *slot;
-            let refresh_failures = match mode {
-                UpdateMode::Replace => 0,
-                UpdateMode::Edit(edit) => {
-                    let mut edited = Auth::clone(&existing_auth);
-                    match edit(&mut edited) {
-                        Err(()) => return Err(ManagerError::Other("edit refused".to_owned())),
-                        Ok(false) => return Ok(Some((existing_auth, existing_generation))),
-                        Ok(true) => {}
-                    }
-                    // The ID is the registration's key: an edit that moved
-                    // it would publish this credential under another ID.
-                    if edited.id != existing_auth.id {
-                        return Err(ManagerError::Other(format!(
-                            "edit auth {}: the edit changed the ID to {:?}",
-                            existing_auth.id, edited.id
-                        )));
-                    }
-                    normalize_credential_metadata(&mut edited.metadata);
-                    validate_weight(&edited).map_err(|err| {
-                        ManagerError::InvalidWeight(format!("update auth: {err}"))
-                    })?;
-                    auth = edited;
+        if let Some((captured, binding)) = &context.origin
+            && (state.auths.get(&auth.id).is_none_or(|entry| {
+                !equal_fold(entry.auth.provider.trim(), captured.provider.trim())
+                    || !same_record_identity(captured, &entry.auth)
+            }) || self
+                .shared
+                .store
+                .as_ref()
+                .is_some_and(|store| store.binding_generation() != *binding))
+        {
+            return Ok(None);
+        }
+        let Some(existing) = state.auths.get(&auth.id) else {
+            return Ok(None);
+        };
+        let existing_auth = existing.auth.clone();
+        let existing_epoch = existing_auth.registration_epoch;
+        let existing_generation = existing_auth.generation;
+        let existing_failures = existing.refresh_failures;
+        let existing_discard_epoch = existing.discard_epoch;
+        let mut undurable = existing.undurable;
+        let mut undurable_baselines = existing.undurable_baselines.clone();
+        if let Some(command) = context.command
+            && command.id == existing_auth.id
+            && command.registration_epoch == existing_epoch
+            && command.discard_epoch == existing_discard_epoch
+            && command.binding_generation
+                == self
+                    .shared
+                    .store
+                    .as_ref()
+                    .map_or(0, |store| store.binding_generation())
+            && equal_fold(command.provider.trim(), existing_auth.provider.trim())
+        {
+            match command.partition {
+                crate::auth::CodexCredentialPartition::Outer => {
+                    undurable.outer = false;
+                    undurable_baselines.outer.clear();
+                }
+                crate::auth::CodexCredentialPartition::Siwc => {
+                    undurable.siwc = false;
+                    undurable_baselines.siwc.clear();
+                }
+            }
+        }
+        let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
+        *slot = (*slot).max(existing_epoch);
+        let live_epoch = *slot;
+        let refresh_failures = match mode {
+            UpdateMode::Replace => {
+                if context.metadata_unchanged {
+                    auth.metadata = existing_auth.metadata.clone();
+                }
+                if crate::auth::codex_refresh::is_codex_auth(&existing_auth) {
+                    overlay_undurable(&mut auth, &existing_auth, undurable);
+                }
+                auth.rebase_pending_refreshes_with_origin(
+                    &existing_auth,
+                    context.same_origin.map(crate::auth::ResolvedOriginProof),
+                );
+                auth.codex_pending_refresh = pending_for_edit(
+                    &existing_auth,
+                    &auth.metadata,
+                    self.permanently_ineligible(&auth),
+                );
+                auth.codex_persist_intent = if context.metadata_unchanged {
+                    existing_auth.codex_persist_intent.clone()
+                } else {
+                    Default::default()
+                };
+                if context.metadata_unchanged {
+                    auth.codex_refresh_failure = existing_auth.codex_refresh_failure.clone();
+                    auth.next_refresh_after = existing_auth.next_refresh_after;
+                    existing_failures
+                } else {
+                    auth.codex_refresh_failure = None;
                     0
                 }
-                UpdateMode::Refresh { base, base_epoch } => {
-                    if existing_epoch != base_epoch {
-                        return Err(ManagerError::Other(format!(
-                            "update auth {}: stale registration epoch {base_epoch} != {existing_epoch}",
-                            auth.id
-                        )));
-                    }
-                    // A refresh that started before the tokens or API key
-                    // were replaced mustn't put the old ones back: the
-                    // credential stays as it is.
-                    if existing_auth.credential_version != base.credential_version
-                        || credentials_changed(base, &existing_auth)
-                    {
-                        return Ok(Some((existing_auth, existing_generation)));
-                    }
-                    auth = merge_refreshed_auth(base, &existing_auth, &auth, now);
-                    normalize_credential_metadata(&mut auth.metadata);
-                    // The merge starts from the live credential, so it
-                    // carries the live epoch and failure count.
-                    if existing_epoch < live_epoch {
-                        return Err(ManagerError::Other(format!(
-                            "update auth {}: stale registration epoch {existing_epoch} < {live_epoch}",
-                            auth.id
-                        )));
-                    }
-                    existing_failures
-                }
-            };
-            if auth.index.is_empty() {
-                auth.index = existing_auth.index.clone();
             }
-            auth.success = existing_auth.success;
-            auth.failed = existing_auth.failed;
-            auth.recent_requests = existing_auth.recent_requests.clone();
-            let mut generation = existing_generation.saturating_add(1);
-            let existing_version = existing_auth.credential_version.max(1);
-            let changed = credentials_changed(&existing_auth, &auth);
-            auth.credential_version = if changed {
-                auth.credential_version
-                    .max(existing_version)
-                    .saturating_add(1)
-            } else {
-                existing_version
-            };
-            if !is_disabled(&existing_auth) && !is_disabled(&auth) {
-                if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
-                    auth.model_states = existing_auth.model_states.clone();
-                }
-                if changed || is_refresh {
-                    auth.rejected_access_token.clear();
-                    let new_unauthorized = auth
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|err| is_unauthorized_error(ErrView::Auth(err)));
-                    if has_unauthorized_auth_failure(&existing_auth) || new_unauthorized {
-                        auth.unavailable = false;
-                        auth.last_error = None;
-                        auth.status_message.clear();
-                        auth.status = Status::Active;
+            UpdateMode::Edit(edit) => {
+                let mut edited = Auth::clone(&existing_auth);
+                match edit(&mut edited) {
+                    Err(()) => return Err(ManagerError::Other("edit refused".to_owned())),
+                    Ok(false) => {
+                        return Ok(Some(PublishedUpdate {
+                            snapshot: existing_auth,
+                            epoch: existing_epoch,
+                            generation: existing_generation,
+                            discard_epoch: existing_discard_epoch,
+                            pending: None,
+                            revision: context.revision,
+                            changed: false,
+                            ineligible: false,
+                            metadata_unchanged: false,
+                        }));
                     }
-                    clear_unauthorized_model_states(&mut auth, now);
-                } else {
-                    auth.rejected_access_token
-                        .clone_from(&existing_auth.rejected_access_token);
+                    Ok(true) => {}
                 }
-                if is_credential_quota_active(&existing_auth.quota, now) {
-                    auth.unavailable = existing_auth.unavailable;
-                    auth.next_retry_after = existing_auth.next_retry_after;
-                    auth.quota = existing_auth.quota.clone();
-                    if auth.status == Status::Active {
-                        auth.status = existing_auth.status;
+                // The ID is the registration's key: an edit that moved
+                // it would publish this credential under another ID.
+                if edited.id != existing_auth.id {
+                    return Err(ManagerError::Other(format!(
+                        "edit auth {}: the edit changed the ID to {:?}",
+                        existing_auth.id, edited.id
+                    )));
+                }
+                normalize_credential_metadata(&mut edited.metadata);
+                validate_weight(&edited)
+                    .map_err(|err| ManagerError::InvalidWeight(format!("update auth: {err}")))?;
+                auth = edited;
+                auth.codex_pending_refresh = pending_for_edit(
+                    &existing_auth,
+                    &auth.metadata,
+                    self.permanently_ineligible(&auth),
+                );
+                // Settings edits must not inherit an in-flight rotation's
+                // partition-only persistence intent from the live snapshot.
+                auth.codex_persist_intent = Default::default();
+                auth.codex_refresh_failure = None;
+                0
+            }
+            UpdateMode::Refresh { base, base_epoch } => {
+                if existing_epoch != base_epoch {
+                    return Err(ManagerError::Other(format!(
+                        "update auth {}: stale registration epoch {base_epoch} != {existing_epoch}",
+                        auth.id
+                    )));
+                }
+                if crate::auth::codex_refresh::is_codex_auth(&auth)
+                    && !matches!(
+                        auth.codex_persist_intent,
+                        crate::auth::codex_refresh::CodexPersistIntent::Refresh(_)
+                    )
+                {
+                    auth.codex_persist_intent =
+                        crate::auth::codex_refresh::CodexPersistIntent::Refresh(
+                            crate::auth::codex_refresh::CredentialRefreshPatch::new(
+                                &base.metadata,
+                                &auth.metadata,
+                                crate::auth::codex_refresh::OUTER_KEYS
+                                    .iter()
+                                    .any(|key| base.metadata.get(*key) != auth.metadata.get(*key)),
+                                base.metadata.get("siwc") != auth.metadata.get("siwc")
+                                    && auth.metadata.contains_key("siwc"),
+                            ),
+                        );
+                }
+                if let crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) =
+                    &auth.codex_persist_intent
+                {
+                    auth.codex_persist_intent =
+                        crate::auth::codex_refresh::CodexPersistIntent::Refresh(
+                            patch.with_durable_baselines(
+                                &undurable_baselines.outer,
+                                &undurable_baselines.siwc,
+                            ),
+                        );
+                }
+                // A refresh that started before the tokens or API key
+                // were replaced mustn't put the old ones back: the
+                // credential stays as it is.
+                if (existing_auth.credential_version != base.credential_version
+                    || credentials_changed(base, &existing_auth))
+                    && !matches!(&auth.codex_persist_intent,
+                        crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch)
+                            if patch.can_apply_to(&existing_auth.metadata))
+                {
+                    return Ok(Some(PublishedUpdate {
+                        snapshot: existing_auth,
+                        epoch: existing_epoch,
+                        generation: existing_generation,
+                        discard_epoch: existing_discard_epoch,
+                        pending: None,
+                        revision: context.revision,
+                        changed: false,
+                        ineligible: false,
+                        metadata_unchanged: false,
+                    }));
+                }
+                auth = merge_refreshed_auth(base, &existing_auth, &auth, now);
+                normalize_credential_metadata(&mut auth.metadata);
+                // A marked partition's admitted write can land even when its
+                // read-back fails. Retain its possible results before admission,
+                // rather than waiting for a later discard of an unwritten clone.
+                if let crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) =
+                    &auth.codex_persist_intent
+                {
+                    for (partition, marked, recorded) in [
+                        (
+                            crate::auth::CodexCredentialPartition::Outer,
+                            undurable.outer,
+                            &mut undurable_baselines.outer,
+                        ),
+                        (
+                            crate::auth::CodexCredentialPartition::Siwc,
+                            undurable.siwc,
+                            &mut undurable_baselines.siwc,
+                        ),
+                    ] {
+                        if marked && patch.includes_partition(partition) {
+                            for baseline in patch.durable_baselines(partition) {
+                                crate::auth::codex_refresh::record_durable_baseline(
+                                    recorded, &baseline,
+                                );
+                            }
+                        }
                     }
                 }
+                // The merge starts from the live credential, so it
+                // carries the live epoch and failure count.
+                if existing_epoch < live_epoch {
+                    return Err(ManagerError::Other(format!(
+                        "update auth {}: stale registration epoch {existing_epoch} < {live_epoch}",
+                        auth.id
+                    )));
+                }
+                existing_failures
             }
-            auth.updated_at = Some(now);
-            normalize_model_states(&mut auth.model_states);
-            if (cooldown_disabled_for_auth(&state.settings, &auth) || is_disabled(&auth))
-                && clear_cooldown_state_for_auth(&mut auth, now)
-            {
-                generation = generation.saturating_add(1);
-            }
-            auth.ensure_index();
-            auth.registration_epoch = live_epoch;
-            auth.generation = generation;
-            let snapshot = Arc::new(auth);
-            state.auths.insert(
-                snapshot.id.clone(),
-                Entry {
-                    auth: snapshot.clone(),
-                    refresh_failures,
-                },
-            );
-            state.sync_scheduler(self.models(), &snapshot.id, now);
-            let pending = self.pending_save(state, &snapshot.id, save);
-            (snapshot, live_epoch, generation, pending)
         };
+        let ineligible = context.policy_only_ineligible || self.permanently_ineligible(&auth);
+        let mut discard_epoch = existing_discard_epoch;
+        if ineligible {
+            discard_refresh_work(
+                &mut discard_epoch,
+                &mut undurable,
+                &mut undurable_baselines,
+                self.shared.store.is_some(),
+                &[&existing_auth, &auth],
+            );
+        }
+        if ineligible {
+            auth.codex_pending_refresh.clear();
+            auth.codex_persist_intent = Default::default();
+        }
+        if auth.index.is_empty() {
+            auth.index = existing_auth.index.clone();
+        }
+        auth.success = existing_auth.success;
+        auth.failed = existing_auth.failed;
+        auth.recent_requests = existing_auth.recent_requests.clone();
+        let mut generation = existing_generation.saturating_add(1);
+        let existing_version = existing_auth.credential_version.max(1);
+        let changed = credentials_changed(&existing_auth, &auth);
+        auth.credential_version = if changed {
+            auth.credential_version
+                .max(existing_version)
+                .saturating_add(1)
+        } else {
+            existing_version
+        };
+        if !is_disabled(&existing_auth) && !is_disabled(&auth) {
+            if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
+                auth.model_states = existing_auth.model_states.clone();
+            }
+            if changed || is_refresh {
+                if !auth
+                    .codex_refresh_failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.partition.is_active(&auth))
+                {
+                    auth.rejected_access_token.clear();
+                }
+                let new_unauthorized = auth
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|err| is_unauthorized_error(ErrView::Auth(err)));
+                if has_unauthorized_auth_failure(&existing_auth) || new_unauthorized {
+                    auth.unavailable = false;
+                    auth.last_error = None;
+                    auth.status_message.clear();
+                    auth.status = Status::Active;
+                }
+                clear_unauthorized_model_states(&mut auth, now);
+            } else {
+                auth.rejected_access_token
+                    .clone_from(&existing_auth.rejected_access_token);
+            }
+            if is_credential_quota_active(&existing_auth.quota, now) {
+                auth.unavailable = existing_auth.unavailable;
+                auth.next_retry_after = existing_auth.next_retry_after;
+                auth.quota = existing_auth.quota.clone();
+                if auth.status == Status::Active {
+                    auth.status = existing_auth.status;
+                }
+            }
+        }
+        auth.updated_at = Some(now);
+        normalize_model_states(&mut auth.model_states);
+        if (cooldown_disabled_for_auth(&state.settings, &auth) || is_disabled(&auth))
+            && clear_cooldown_state_for_auth(&mut auth, now)
+        {
+            generation = generation.saturating_add(1);
+        }
+        auth.ensure_index();
+        auth.registration_epoch = live_epoch;
+        auth.generation = generation;
+        let snapshot = Arc::new(auth);
+        state.auths.insert(
+            snapshot.id.clone(),
+            Entry {
+                auth: snapshot.clone(),
+                refresh_failures,
+                discard_epoch,
+                undurable,
+                undurable_baselines,
+            },
+        );
+        state.sync_scheduler(self.models(), &snapshot.id, now);
+        let pending = self.pending_save(state, &snapshot.id, save);
+        Ok(Some(PublishedUpdate {
+            snapshot,
+            epoch: live_epoch,
+            generation,
+            discard_epoch,
+            pending,
+            revision: context.revision,
+            changed: true,
+            ineligible,
+            metadata_unchanged: context.metadata_unchanged,
+        }))
+    }
+
+    fn finish_update(
+        &self,
+        published: PublishedUpdate,
+        is_refresh: bool,
+        save: Save,
+        gate: ReloadGuard,
+    ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
+        let PublishedUpdate {
+            mut snapshot,
+            epoch,
+            mut generation,
+            discard_epoch,
+            pending,
+            changed,
+            ineligible,
+            metadata_unchanged,
+            ..
+        } = published;
+        if !changed {
+            return Ok(Some((snapshot, generation)));
+        }
+        let now = self.now();
         self.queue_refresh_reschedule(&snapshot.id);
         cooldown_store::changed(self);
-        if let Err(err) = self.persist(&snapshot, epoch, generation, save) {
-            log_persist_failure(&snapshot, "failed to persist updated auth", &err);
+        // An unchanged-metadata replacement saves the whole record and folds
+        // retained operations, without changing the live operation's identity.
+        let configuration = metadata_unchanged.then(|| {
+            let mut writing = (*snapshot).clone();
+            writing.codex_persist_intent = Default::default();
+            writing
+        });
+        let persisted = if ineligible {
+            // Keep the pre-admission seam even when publication already fixed
+            // this outcome; it still precedes completion reconciliation.
+            #[cfg(test)]
+            {
+                let hook = lock(&self.shared.persist_hook).clone();
+                if let Some(hook) = hook {
+                    hook(&snapshot);
+                }
+            }
+            Ok(super::Persisted::Ineligible)
+        } else {
+            self.persist(
+                configuration.as_ref().unwrap_or(&snapshot),
+                epoch,
+                generation,
+                discard_epoch,
+                save,
+            )
+        };
+        match persisted {
+            Err(err) => {
+                log_persist_failure(&snapshot, "failed to persist updated auth", &err);
+                if !metadata_unchanged
+                    && let crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) =
+                        &snapshot.codex_persist_intent
+                {
+                    let mut state = self.lock();
+                    if let Some(entry) = state.auths.get_mut(&snapshot.id)
+                        && entry.auth.registration_epoch == epoch
+                        && entry.discard_epoch == discard_epoch
+                        && patch.can_apply_to(&entry.auth.metadata)
+                    {
+                        let live = Arc::make_mut(&mut entry.auth);
+                        if !self.permanently_ineligible(live)
+                            && !patch.is_written()
+                            && !live
+                                .codex_pending_refresh
+                                .iter()
+                                .any(|pending| pending.same_operation(patch))
+                        {
+                            live.codex_pending_refresh.push(patch.clone());
+                        }
+                        if live
+                            .codex_persist_intent
+                            .same_operation(&snapshot.codex_persist_intent)
+                        {
+                            live.codex_persist_intent = Default::default();
+                        }
+                        snapshot = entry.auth.clone();
+                    }
+                }
+            }
+            Ok(super::Persisted::Written { requested })
+                if (is_refresh || !snapshot.codex_pending_refresh.is_empty())
+                    && save == Save::Yes
+                    && crate::auth::codex_refresh::is_codex_auth(&snapshot) =>
+            {
+                // The FileStore baseline check may have kept newer disk tokens
+                // and settings. Publish the record actually persisted, but only
+                // while this registration is still live, preserving concurrent edits.
+                #[cfg(test)]
+                {
+                    let hook = lock(&self.shared.reconcile_hook).clone();
+                    if let Some(hook) = hook {
+                        hook(&snapshot);
+                    }
+                }
+                let save_id = snapshot.id.clone();
+                self.with_persist_save_lock(&save_id, |save_lock| {
+                    // Shared written flags must stay stable from disk read through
+                    // coverage checks and publication, not merely during saves.
+                    let _saved = lock(save_lock);
+                    let binding = self
+                        .shared
+                        .store
+                        .as_ref()
+                        .map_or(0, |store| store.binding_generation());
+                    let disk = self
+                        .shared
+                        .store
+                        .as_ref()
+                        .and_then(|store| store.read_back(&snapshot).ok().flatten());
+                    #[cfg(test)]
+                    {
+                        let hook = lock(&self.shared.read_back_hook).clone();
+                        if let Some(hook) = hook {
+                            hook(&snapshot);
+                        }
+                    }
+                    let compared = self.get(&snapshot.id);
+                    let same_record = compared.as_ref().is_some_and(|live| {
+                        self.shared.store.as_ref().is_some_and(|store| {
+                            store.supports_codex_refresh_patches()
+                                && store.same_record(&snapshot, live).unwrap_or(false)
+                        })
+                    });
+                    let raw_origin = disk.as_ref().is_some_and(|disk| {
+                        disk.id == snapshot.id
+                            && equal_fold(disk.provider.trim(), snapshot.provider.trim())
+                            && self.shared.store.as_ref().is_some_and(|store| {
+                                store.same_record(&snapshot, disk).unwrap_or(false)
+                            })
+                    });
+                    let mut state = self.lock();
+                    if let Some(entry) = state.auths.get_mut(&snapshot.id)
+                        && entry.auth.registration_epoch == epoch
+                        && entry.discard_epoch == discard_epoch
+                    {
+                        if same_record
+                            && raw_origin
+                            && self
+                                .shared
+                                .store
+                                .as_ref()
+                                .is_some_and(|store| store.binding_generation() == binding)
+                            && compared
+                                .as_ref()
+                                .is_some_and(|before| same_record_identity(before, &entry.auth))
+                            && let Some(disk) = &disk
+                        {
+                            clear_verified_partitions(
+                                &mut entry.undurable,
+                                &mut entry.undurable_baselines,
+                                requested,
+                                &entry.auth,
+                                disk,
+                            );
+                        }
+                        let undurable = entry.undurable;
+                        let live = Arc::make_mut(&mut entry.auth);
+                        if let Some(disk) = disk {
+                            let disk = if live.generation == generation {
+                                Some(disk)
+                            } else if same_record
+                                && pending_save_covers_live(&snapshot, live)
+                                && compared
+                                    .as_ref()
+                                    .is_some_and(|compared| same_record_identity(compared, live))
+                            {
+                                Some(super::merge::reconcile_persisted_codex(
+                                    &snapshot, live, &disk,
+                                ))
+                            } else {
+                                None
+                            };
+                            if let Some(mut disk) = disk {
+                                overlay_undurable(&mut disk, live, undurable);
+                                let changed = credentials_changed(live, &disk);
+                                live.metadata = disk.metadata;
+                                live.disabled = disk.disabled;
+                                if live.disabled {
+                                    live.status = Status::Disabled;
+                                } else if live.status == Status::Disabled {
+                                    live.status = Status::Active;
+                                }
+                                live.proxy_url = disk.proxy_url;
+                                live.prefix = disk.prefix;
+                                live.attributes.retain(|key, _| {
+                                    !key.starts_with("header:") || disk.attributes.contains_key(key)
+                                });
+                                live.attributes.extend(disk.attributes);
+                                if changed {
+                                    live.credential_version =
+                                        live.credential_version.saturating_add(1);
+                                }
+                            }
+                        }
+                        live.codex_pending_refresh
+                            .retain(|patch| !patch.is_written());
+                        if live
+                            .codex_persist_intent
+                            .same_operation(&snapshot.codex_persist_intent)
+                        {
+                            live.codex_persist_intent = Default::default();
+                            if is_refresh
+                                && matches!(&snapshot.codex_persist_intent,
+                                crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch)
+                                    if live.codex_refresh_failure.as_ref().is_none_or(|failure|
+                                        patch.includes_partition(failure.partition)))
+                            {
+                                live.codex_refresh_failure = None;
+                            }
+                        }
+                        live.generation = live.generation.saturating_add(1);
+                        generation = live.generation;
+                        snapshot = entry.auth.clone();
+                        state.sync_scheduler(self.models(), &snapshot.id, now);
+                    }
+                });
+            }
+            Ok(super::Persisted::Ineligible) => {
+                let mut state = self.lock();
+                if let Some(entry) = state.auths.get_mut(&snapshot.id)
+                    && entry.auth.registration_epoch == epoch
+                    && self.permanently_ineligible(&entry.auth)
+                    && has_unwritten_refresh_work(&entry.auth)
+                {
+                    discard_refresh_work(
+                        &mut entry.discard_epoch,
+                        &mut entry.undurable,
+                        &mut entry.undurable_baselines,
+                        self.shared.store.is_some(),
+                        &[&entry.auth],
+                    );
+                    let live = Arc::make_mut(&mut entry.auth);
+                    live.codex_pending_refresh.clear();
+                    live.codex_persist_intent = Default::default();
+                    snapshot = entry.auth.clone();
+                }
+            }
+            Ok(super::Persisted::Skipped) => {
+                if !metadata_unchanged
+                    && matches!(
+                        snapshot.codex_persist_intent,
+                        crate::auth::codex_refresh::CodexPersistIntent::Refresh(_)
+                    )
+                {
+                    let mut state = self.lock();
+                    if let Some(entry) = state.auths.get_mut(&snapshot.id)
+                        && entry.auth.registration_epoch == epoch
+                        && entry.discard_epoch == discard_epoch
+                        && entry
+                            .auth
+                            .codex_persist_intent
+                            .same_operation(&snapshot.codex_persist_intent)
+                    {
+                        let live = Arc::make_mut(&mut entry.auth);
+                        // A skipped write is not completion. Keep eligible work
+                        // for a later save; already-written operations are filtered.
+                        live.codex_pending_refresh = pending_for_edit(
+                            live,
+                            &live.metadata,
+                            self.permanently_ineligible(live),
+                        );
+                        live.codex_persist_intent = Default::default();
+                    }
+                }
+            }
+            Ok(super::Persisted::Written { .. }) => {}
         }
         drop(pending);
         drop(gate);
@@ -618,17 +1616,38 @@ impl Manager {
     /// sessions (upstream's `Remove`). The store isn't touched: deleting the
     /// saved credential is the caller's job.
     pub fn remove(&self, id: &str) {
+        self.remove_matching(id, None);
+    }
+
+    /// Removes only the observation's registration and origin. The check and
+    /// removal share the state lock, so a replacement keeps its pending work.
+    #[doc(hidden)]
+    pub fn remove_observed(&self, expected: &Auth) -> bool {
+        self.remove_matching(&expected.id, Some(expected))
+    }
+
+    fn remove_matching(&self, id: &str, expected: Option<&Auth>) -> bool {
         let id = id.trim();
         if id.is_empty() {
-            return;
+            return false;
         }
         let gate = self.mutation_gate();
         let provider = {
             let mut guard = self.lock();
             let state = &mut *guard;
+            if let Some(expected) = expected
+                && !state.auths.get(id).is_some_and(|entry| {
+                    entry.auth.registration_epoch == expected.registration_epoch
+                        && equal_fold(entry.auth.provider.trim(), expected.provider.trim())
+                        && entry.auth.file_name == expected.file_name
+                        && entry.auth.attribute("path") == expected.attribute("path")
+                })
+            {
+                return false;
+            }
             state.save_sequence.remove(id);
             let Some(existing) = state.auths.remove(id) else {
-                return;
+                return false;
             };
             state.pool_offsets.remove(id);
             if let Some(affinity) = state.affinity.as_mut() {
@@ -642,6 +1661,7 @@ impl Manager {
                 .saturating_add(1);
             existing.auth.provider.trim().to_owned()
         };
+        self.prune_idle_save_lock(id);
         drop(gate);
         self.queue_refresh_unschedule(id);
         cooldown_store::changed(self);
@@ -650,14 +1670,21 @@ impl Manager {
         {
             executor.close_auth_execution_sessions(id);
         }
+        true
     }
 
     /// Replaces every credential with the store's (upstream's `Load`).
     /// Credentials without an ID or with an invalid weight are skipped.
     /// Without a store this does nothing.
     ///
+    /// This discards unwritten pending refreshes and refresh intents. Use only
+    /// for initialization or when no refresh work can be pending; waiting for
+    /// saves to finish does not imply that those saves succeeded. Production
+    /// configuration reloads edit existing credentials instead of calling this.
+    ///
     /// It waits for changes being saved to land, and changes made meanwhile
     /// wait for it. The store is listed with the state lock released.
+    /// Initialization/quiescent-only: reload is not an observational adoption API.
     pub fn load(&self) -> Result<(), ManagerError> {
         let Some(store) = &self.shared.store else {
             return Ok(());
@@ -698,6 +1725,9 @@ impl Manager {
                 Entry {
                     auth: Arc::new(auth),
                     refresh_failures: 0,
+                    discard_epoch: 0,
+                    undurable: Default::default(),
+                    undurable_baselines: Default::default(),
                 },
             );
         }
@@ -713,34 +1743,58 @@ impl Manager {
         Ok(())
     }
 
+    // runtime_only permanently discards existing refresh persistence work,
+    // rather than deferring it. Removing the attribute permits future work;
+    // it cannot resurrect discarded rotations or make a Configuration write
+    // replace disk credentials. Fresh observations rebase only retained unwritten
+    // operations; discarded work keeps rotated live partitions protected from
+    // observations. The discarded-chain baseline sets without eviction supplement later
+    // rotations, so a verified partition write repairs durability without
+    // restoring consumed live tokens. A different disk identity is preserved
+    // and leaves its marker/baseline sets intact. A token command can also repair it.
+    // A save admitted before a discard may land, but its old epoch
+    // cannot clear the marker: the next verified write or valid command must.
+    // Opaque stores without read-back and no-store whole-record Replace are
+    // compatibility exceptions that may restore stale tokens after cleanup.
+    pub(crate) fn permanently_ineligible(&self, auth: &Auth) -> bool {
+        self.shared.store.is_none()
+            || (auth_kind(auth) == KIND_API_KEY && auth_source_kind(auth) == SOURCE_CONFIG)
+            || auth
+                .attributes
+                .get("runtime_only")
+                .is_some_and(|value| go_lower(value.trim()) == "true")
+            || auth.metadata.is_empty()
+    }
+
     /// Saves a credential snapshot taken at (`epoch`, `generation`), unless a
     /// newer one was saved already (upstream's `persist`). Credentials from
     /// config API keys, runtime-only ones and ones without metadata aren't
-    /// saved.
+    /// saved. Unsaved publication only advances a short-held watermark here;
+    /// supported Replace has already waited for the save mutex during adoption.
+    /// Async callers must offload Replace/adoption with run_persistence or
+    /// spawn_blocking, including unsaved replacements and queued reload waits.
     pub(crate) fn persist(
         &self,
         auth: &Auth,
         epoch: u64,
         generation: u64,
+        discard_epoch: u64,
         save: Save,
-    ) -> Result<(), ManagerError> {
+    ) -> Result<super::Persisted, ManagerError> {
+        #[cfg(test)]
+        {
+            let hook = lock(&self.shared.persist_hook).clone();
+            if let Some(hook) = hook {
+                hook(auth);
+            }
+        }
         let Some(store) = &self.shared.store else {
-            return Ok(());
+            return Ok(super::Persisted::Ineligible);
         };
         validate_weight(auth)
             .map_err(|err| ManagerError::InvalidWeight(format!("persist auth: {err}")))?;
-        if auth_kind(auth) == KIND_API_KEY && auth_source_kind(auth) == SOURCE_CONFIG {
-            return Ok(());
-        }
-        if auth
-            .attributes
-            .get("runtime_only")
-            .is_some_and(|value| go_lower(value.trim()) == "true")
-        {
-            return Ok(());
-        }
-        if auth.metadata.is_empty() {
-            return Ok(());
+        if self.permanently_ineligible(auth) {
+            return Ok(super::Persisted::Ineligible);
         }
         // Not upstream's: fail like a save, before the per-id persist lock.
         #[cfg(feature = "blue-green-test")]
@@ -758,34 +1812,363 @@ impl Manager {
                 "injected refresh save failure",
             )));
         }
-        #[cfg(test)]
-        {
-            let hook = lock(&self.shared.persist_hook).clone();
-            if let Some(hook) = hook {
-                hook(auth);
-            }
-        }
         let id_lock = lock(&self.shared.persist_locks)
             .entry(auth.id.clone())
             .or_default()
             .clone();
-        let mut last = lock(&id_lock);
-        let (last_epoch, last_generation) = *last;
-        if epoch < last_epoch || (epoch == last_epoch && generation < last_generation) {
-            return Ok(());
-        }
         if save == Save::No {
-            // Disk-originated state: an older save in flight mustn't
-            // overwrite it.
-            *last = (epoch, generation);
-            return Ok(());
+            let mut last = lock(&id_lock);
+            if (epoch, generation) >= *last {
+                *last = (*last).max((epoch, generation));
+            }
+            return Ok(super::Persisted::Skipped);
         }
-        // The mark moves only once the save has succeeded: a save the gate
-        // refused, or one that failed, must not make an older one that could
-        // still be written look stale.
-        store.save(auth).map(drop).map_err(ManagerError::Store)?;
-        *last = (epoch, generation);
-        Ok(())
+        self.with_persist_save_lock(&auth.id, |save_lock| {
+            let _saved = lock(save_lock);
+            if save == Save::Yes {
+                let state = self.lock();
+                let Some(entry) = state.auths.get(&auth.id) else {
+                    return Ok(super::Persisted::Skipped);
+                };
+                if entry.auth.registration_epoch != epoch {
+                    return Ok(super::Persisted::Skipped);
+                }
+                if (entry.discard_epoch != discard_epoch && has_unwritten_refresh_work(auth))
+                    || self.permanently_ineligible(&entry.auth)
+                {
+                    return Ok(super::Persisted::Ineligible);
+                }
+                // Admission is final: a later policy change may discard pending
+                // work, but this save may finish writing tokens live already holds.
+            }
+            #[cfg(test)]
+            if save == Save::Yes {
+                let hook = lock(&self.shared.persist_admitted_hook).clone();
+                if let Some(hook) = hook {
+                    hook(auth);
+                }
+            }
+            let last = lock(&id_lock);
+            let (last_epoch, last_generation) = *last;
+            let mut writing = auth.clone();
+            if matches!(&writing.codex_persist_intent,
+            crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) if patch.is_written())
+            {
+                writing.codex_persist_intent = Default::default();
+            }
+            writing
+                .codex_pending_refresh
+                .retain(|patch| !patch.is_written());
+            // Identity checks and storage below may perform I/O.
+            drop(last);
+            if epoch < last_epoch {
+                return Ok(super::Persisted::Skipped);
+            }
+            if epoch == last_epoch && generation < last_generation {
+                // A newer configuration save preserves disk credentials. It cannot
+                // discard a successful rotation merely because its whole snapshot
+                // is older: only a scoped, baseline-checked patch may pass here.
+                let scoped_refresh = save == Save::Yes
+                    && store.supports_codex_refresh_patches()
+                    && crate::auth::codex_refresh::is_codex_auth(auth)
+                    && matches!(
+                        &writing.codex_persist_intent,
+                        crate::auth::codex_refresh::CodexPersistIntent::Refresh(_)
+                    )
+                    && (|| {
+                        let compared = self.get(&auth.id)?;
+                        let same_record = store.same_record(auth, &compared).unwrap_or(false);
+                        let state = self.lock();
+                        let entry = state.auths.get(&auth.id)?;
+                        // Identity I/O is outside the state lock. Unrelated settings
+                        // and call-count generations do not change the record's path.
+                        Some(
+                            entry.auth.registration_epoch == epoch
+                                && same_record
+                                && same_record_identity(&compared, &entry.auth)
+                                && matches!(&writing.codex_persist_intent,
+                            crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch)
+                                if patch.can_apply_to(&entry.auth.metadata)),
+                        )
+                    })()
+                    .unwrap_or(false);
+                if !scoped_refresh {
+                    return Ok(super::Persisted::Skipped);
+                }
+            }
+            // The mark moves only once the save has succeeded: a save the gate
+            // refused, or one that failed, must not make an older one that could
+            // still be written look stale.
+            let requested = requested_partitions(&writing);
+            let binding = store.binding_generation();
+            let saved = store.save(&writing).map_err(ManagerError::Store)?;
+            if saved.is_empty() {
+                return Ok(super::Persisted::Skipped);
+            }
+            if has_unwritten_refresh_work(&writing)
+                && self
+                    .lock()
+                    .auths
+                    .get(&auth.id)
+                    .is_some_and(|entry| entry.undurable.outer || entry.undurable.siwc)
+            {
+                let compared = self.get(&auth.id);
+                let disk = store.read_back(&writing).ok().flatten();
+                let origin = compared.as_ref().is_some_and(|live| {
+                    store.same_record(&writing, live).unwrap_or(false)
+                        && disk
+                            .as_ref()
+                            .is_some_and(|disk| store.same_record(live, disk).unwrap_or(false))
+                });
+                let mut state = self.lock();
+                if let Some(entry) = state.auths.get_mut(&auth.id)
+                    && entry.auth.registration_epoch == epoch
+                    && entry.discard_epoch == discard_epoch
+                    && store.binding_generation() == binding
+                    && origin
+                    && equal_fold(entry.auth.provider.trim(), writing.provider.trim())
+                    && disk.as_ref().is_some_and(|disk| {
+                        disk.id == writing.id
+                            && equal_fold(disk.provider.trim(), writing.provider.trim())
+                    })
+                    && compared
+                        .as_ref()
+                        .is_some_and(|before| same_record_identity(before, &entry.auth))
+                    && let Some(disk) = disk
+                {
+                    clear_verified_partitions(
+                        &mut entry.undurable,
+                        &mut entry.undurable_baselines,
+                        requested,
+                        &entry.auth,
+                        &disk,
+                    );
+                }
+            }
+            let refresh = match &writing.codex_persist_intent {
+                crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) => Some(patch),
+                _ => None,
+            };
+            for patch in writing.codex_pending_refresh.iter().chain(refresh) {
+                patch.mark_written();
+            }
+            let mut last = lock(&id_lock);
+            *last = (*last).max((epoch, generation));
+            Ok(super::Persisted::Written { requested })
+        })
+    }
+
+    /// Runs a potentially persisting manager operation away from runtime workers.
+    ///
+    /// The entire operation, including credential-lock waits and its pending-save
+    /// lifetime, runs on a blocking thread with the current operation's admission.
+    /// Without a runtime it runs inline. Synchronous persistence APIs may block
+    /// for the credential lock's bounded wait; async callers should use this API
+    /// for saves. Async callers must also offload `update`/`update_unsaved`
+    /// through this method, `Operation::run_blocking` or `spawn_blocking`: Replace
+    /// waits for the adoption save mutex and reads the store. Settings-only
+    /// `edit_unsaved` does not wait for an in-flight save, but may wait for a
+    /// queued reload, which itself waits for in-flight saves.
+    /// An unscoped caller on a draining gate gets `NotActive` before `work` runs;
+    /// callers that must finish credential writes must retain their operation.
+    pub async fn run_persistence<T, F>(&self, work: F) -> Result<T, ManagerError>
+    where
+        F: FnOnce(Self) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Ok(work(self.clone()));
+        }
+        let operation = match crate::gate::Operation::current() {
+            Some(operation) => operation,
+            None => self
+                .gate()
+                .begin_operation()
+                .map_err(ManagerError::NotActive)?,
+        };
+        let manager = self.clone();
+        operation
+            .run_blocking(move || work(manager))
+            .await
+            .map_err(|_| ManagerError::Store(std::io::Error::other("persistence task failed")))
+    }
+
+    // An unscoped execute finishing after drain starts may skip result counters,
+    // cooldown/quota and success/failure state, affinity updates, projections and
+    // their snapshot save. This does not carry a credential rotation or edit;
+    // admitted operations still finish and persist their results during drain.
+    pub(crate) async fn mark_call_result_async(
+        &self,
+        result: &CallResult,
+        session: Option<&Session>,
+    ) {
+        let result = result.clone();
+        let session = session.cloned();
+        if let Err(error) = self
+            .run_persistence(move |manager| manager.mark_call_result(&result, session.as_ref()))
+            .await
+        {
+            tracing::warn!("record call result failed: {error}");
+        }
+    }
+
+    // Like mark_call_result_async, an unscoped draining caller may skip the
+    // result count/generation, error event and snapshot save, never a rotation.
+    pub(crate) async fn record_availability_neutral_result_async(&self, result: &CallResult) {
+        let result = result.clone();
+        if let Err(error) = self
+            .run_persistence(move |manager| manager.record_availability_neutral_result(&result))
+            .await
+        {
+            tracing::warn!("record neutral call result failed: {error}");
+        }
+    }
+
+    fn reconcile_pending_save(
+        &self,
+        snapshot: &Auth,
+        discard_epoch: u64,
+        requested: super::UndurablePartitions,
+    ) {
+        let Some(store) = self.shared.store.as_ref() else {
+            return;
+        };
+        #[cfg(test)]
+        {
+            let hook = lock(&self.shared.reconcile_hook).clone();
+            if let Some(hook) = hook {
+                hook(snapshot);
+            }
+        }
+        self.with_persist_save_lock(&snapshot.id, |save_lock| {
+            // Keep coverage flags stable until the captured disk is reconciled.
+            let _saved = lock(save_lock);
+            let Some(compared) = self.get(&snapshot.id) else {
+                return;
+            };
+            let binding = store.binding_generation();
+            let same_record = store.same_record(snapshot, &compared).unwrap_or(false);
+            let disk = store.read_back(snapshot).ok().flatten();
+            let raw_origin = disk.as_ref().is_some_and(|disk| {
+                disk.id == snapshot.id
+                    && equal_fold(disk.provider.trim(), snapshot.provider.trim())
+                    && store.same_record(snapshot, disk).unwrap_or(false)
+            });
+            #[cfg(test)]
+            {
+                let hook = lock(&self.shared.read_back_hook).clone();
+                if let Some(hook) = hook {
+                    hook(snapshot);
+                }
+            }
+            let mut state = self.lock();
+            let Some(entry) = state.auths.get_mut(&snapshot.id) else {
+                return;
+            };
+            if !same_record
+                || entry.auth.registration_epoch != snapshot.registration_epoch
+                || entry.discard_epoch != discard_epoch
+                || !pending_save_covers_live(snapshot, &entry.auth)
+                || !entry.auth.codex_pending_refresh.iter().any(|live| {
+                    snapshot
+                        .codex_pending_refresh
+                        .iter()
+                        .any(|saved| live.same_operation(saved))
+                })
+                || !same_record_identity(&entry.auth, &compared)
+            {
+                return;
+            }
+            if raw_origin
+                && store.binding_generation() == binding
+                && let Some(disk) = &disk
+            {
+                clear_verified_partitions(
+                    &mut entry.undurable,
+                    &mut entry.undurable_baselines,
+                    requested,
+                    &entry.auth,
+                    disk,
+                );
+            }
+            let undurable = entry.undurable;
+            let live = Arc::make_mut(&mut entry.auth);
+            if same_record && let Some(disk) = disk {
+                let mut persisted = super::merge::reconcile_persisted_codex(snapshot, live, &disk);
+                overlay_undurable(&mut persisted, live, undurable);
+                if credentials_changed(live, &persisted) {
+                    live.credential_version = live.credential_version.saturating_add(1);
+                }
+                live.metadata = persisted.metadata;
+                live.attributes = persisted.attributes;
+                live.disabled = persisted.disabled;
+                if live.disabled {
+                    live.status = Status::Disabled;
+                } else if live.status == Status::Disabled {
+                    live.status = Status::Active;
+                }
+                live.prefix = persisted.prefix;
+                live.proxy_url = persisted.proxy_url;
+                live.generation = live.generation.saturating_add(1);
+            }
+            live.codex_pending_refresh
+                .retain(|patch| !patch.is_written());
+            if live
+                .codex_persist_intent
+                .same_operation(&snapshot.codex_persist_intent)
+            {
+                live.codex_persist_intent = Default::default();
+            }
+            state.sync_scheduler(self.models(), &snapshot.id, self.now());
+        });
+    }
+
+    fn persist_detached(
+        &self,
+        snapshot: Arc<Auth>,
+        discard_epoch: u64,
+        pending: Option<PendingSave>,
+        gate: super::ReloadGuard,
+        operation: Option<crate::gate::Operation>,
+    ) {
+        let detach =
+            self.shared.store.is_some() && crate::auth::codex_refresh::is_codex_auth(&snapshot);
+        let manager = self.clone();
+        let work = move || {
+            match manager.persist(
+                &snapshot,
+                snapshot.registration_epoch,
+                snapshot.generation,
+                discard_epoch,
+                Save::Yes,
+            ) {
+                Err(error) => {
+                    log_persist_failure(&snapshot, "failed to persist credential state", &error)
+                }
+                Ok(super::Persisted::Written { requested })
+                    if !snapshot.codex_pending_refresh.is_empty() =>
+                {
+                    manager.reconcile_pending_save(&snapshot, discard_epoch, requested);
+                }
+                Ok(_) => {}
+            }
+            drop(pending);
+            drop(gate);
+        };
+        if detach
+            && tokio::runtime::Handle::try_current().is_ok()
+            && crate::gate::Operation::current_blocking().is_none()
+        {
+            if let Some(operation) = operation {
+                // The task owns both admission and the reload/pending-save permits.
+                // Dropping its handle does not cancel persistence.
+                drop(operation.run_blocking(work));
+            } else {
+                tracing::warn!("credential state save refused: operation gate is not open");
+            }
+        } else {
+            work();
+        }
     }
 
     /// Records a call's outcome on its credential: counts it, cools the
@@ -822,10 +2205,12 @@ impl Manager {
         if result.auth_id.is_empty() {
             return true;
         }
+        let operation =
+            crate::gate::Operation::current().or_else(|| self.gate().begin_operation().ok());
         let gate = self.mutation_gate();
         let now = self.now();
         let mut model_key = canonical_model_key(&result.model);
-        let (snapshot, epoch, generation, pending) = {
+        let (snapshot, _epoch, generation, discard_epoch, pending) = {
             let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
@@ -859,14 +2244,13 @@ impl Manager {
                 entry.auth.clone(),
                 entry.auth.registration_epoch,
                 entry.auth.generation,
+                entry.discard_epoch,
             );
             state.sync_scheduler(self.models(), &result.auth_id, now);
             let pending = self.pending_save(state, &result.auth_id, Save::Yes);
-            (committed.0, committed.1, committed.2, pending)
+            (committed.0, committed.1, committed.2, committed.3, pending)
         };
-        let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
-        drop(pending);
-        drop(gate);
+        self.persist_detached(snapshot.clone(), discard_epoch, pending, gate, operation);
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
         self.publish_error_event(result, &snapshot);
@@ -881,9 +2265,11 @@ impl Manager {
         if result.auth_id.is_empty() {
             return;
         }
+        let operation =
+            crate::gate::Operation::current().or_else(|| self.gate().begin_operation().ok());
         let gate = self.mutation_gate();
         let now = self.now();
-        let (snapshot, epoch, generation, pending) = {
+        let (snapshot, _epoch, _generation, discard_epoch, pending) = {
             let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
@@ -900,13 +2286,12 @@ impl Manager {
                 entry.auth.clone(),
                 entry.auth.registration_epoch,
                 entry.auth.generation,
+                entry.discard_epoch,
             );
             let pending = self.pending_save(state, &result.auth_id, Save::Yes);
-            (committed.0, committed.1, committed.2, pending)
+            (committed.0, committed.1, committed.2, committed.3, pending)
         };
-        let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
-        drop(pending);
-        drop(gate);
+        self.persist_detached(snapshot.clone(), discard_epoch, pending, gate, operation);
         self.publish_error_event(result, &snapshot);
     }
 
@@ -928,7 +2313,7 @@ impl Manager {
             .map(|model| canonical_model_key(model))
             .collect();
         let gate = self.mutation_gate();
-        let (snapshot, models, epoch, generation, pending) = {
+        let (snapshot, models, epoch, generation, discard_epoch, pending) = {
             let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(id) else {
@@ -944,17 +2329,25 @@ impl Manager {
                 models,
                 entry.auth.registration_epoch,
                 entry.auth.generation,
+                entry.discard_epoch,
             );
             state.sync_scheduler(self.models(), id, now);
             let pending = self.pending_save(state, id, Save::Yes);
-            (committed.0, committed.1, committed.2, committed.3, pending)
+            (
+                committed.0,
+                committed.1,
+                committed.2,
+                committed.3,
+                committed.4,
+                pending,
+            )
         };
-        let persisted = self.persist(&snapshot, epoch, generation, Save::Yes);
+        let persisted = self.persist(&snapshot, epoch, generation, discard_epoch, Save::Yes);
         drop(pending);
         drop(gate);
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, false);
-        persisted.map(|()| {
+        persisted.map(|_| {
             Some(QuotaReset {
                 auth: snapshot,
                 models,
@@ -970,6 +2363,8 @@ impl Manager {
         if id.is_empty() {
             return;
         }
+        let operation =
+            crate::gate::Operation::current().or_else(|| self.gate().begin_operation().ok());
         let gate = self.mutation_gate();
         let now = self.now();
         let models = self.models();
@@ -1008,6 +2403,7 @@ impl Manager {
                     entry.auth.clone(),
                     entry.auth.registration_epoch,
                     entry.auth.generation,
+                    entry.discard_epoch,
                     changed,
                     supported,
                     reg_epoch,
@@ -1021,18 +2417,17 @@ impl Manager {
                 }
             }
         }
-        let Some((snapshot, epoch, generation, changed, supported, reg_epoch)) = committed else {
+        let Some((snapshot, _epoch, generation, discard_epoch, changed, supported, reg_epoch)) =
+            committed
+        else {
             return;
         };
-        if changed && let Err(err) = self.persist(&snapshot, epoch, generation, Save::Yes) {
-            log_persist_failure(
-                &snapshot,
-                "failed to persist auth changes during model state reconciliation",
-                &err,
-            );
+        if changed {
+            self.persist_detached(snapshot.clone(), discard_epoch, pending, gate, operation);
+        } else {
+            drop(pending);
+            drop(gate);
         }
-        drop(pending);
-        drop(gate);
         cooldown_store::changed(self);
         let (settings, oauth) = self.resolver_parts();
         let resolver = Resolver {
@@ -1073,6 +2468,219 @@ impl Manager {
     }
 }
 
+/// Drop bookkeeping only after recording every unwritten operation's partitions.
+/// Both pending and intent are inspected; identity deduplication avoids treating
+/// the same operation as independent work. No-store registrations have no markers.
+fn discard_refresh_work(
+    epoch: &mut u64,
+    undurable: &mut super::UndurablePartitions,
+    baselines: &mut super::UndurableBaselines,
+    has_store: bool,
+    sources: &[&Auth],
+) {
+    use crate::auth::{CodexCredentialPartition, codex_refresh::CodexPersistIntent};
+    let mut operations = Vec::new();
+    for auth in sources {
+        let intent = match &auth.codex_persist_intent {
+            CodexPersistIntent::Refresh(patch) => Some(patch),
+            _ => None,
+        };
+        for patch in auth.codex_pending_refresh.iter().chain(intent) {
+            if !patch.is_written() {
+                if !operations.iter().any(
+                    |older: &&crate::auth::codex_refresh::CredentialRefreshPatch| {
+                        older.same_operation(patch)
+                    },
+                ) {
+                    operations.push(patch);
+                }
+                // Shared operation identity dedupes the epoch bookkeeping, not
+                // richer chain baselines attached to another clone.
+                if has_store {
+                    for (partition, marked, recorded) in [
+                        (
+                            CodexCredentialPartition::Outer,
+                            &mut undurable.outer,
+                            &mut baselines.outer,
+                        ),
+                        (
+                            CodexCredentialPartition::Siwc,
+                            &mut undurable.siwc,
+                            &mut baselines.siwc,
+                        ),
+                    ] {
+                        if patch.includes_partition(partition) {
+                            for baseline in patch.durable_baselines(partition) {
+                                crate::auth::codex_refresh::record_durable_baseline(
+                                    recorded, &baseline,
+                                );
+                            }
+                            *marked = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !operations.is_empty() {
+        *epoch = epoch.saturating_add(1);
+    }
+}
+
+pub(crate) fn overlay_undurable(
+    target: &mut Auth,
+    live: &Auth,
+    marked: super::UndurablePartitions,
+) {
+    if marked.outer {
+        for key in crate::auth::codex_refresh::OUTER_KEYS {
+            match live.metadata.get(*key) {
+                Some(value) => {
+                    target.metadata.insert((*key).to_owned(), value.clone());
+                }
+                None => {
+                    target.metadata.remove(*key);
+                }
+            }
+        }
+    }
+    if marked.siwc {
+        if let Some(source) = live
+            .metadata
+            .get("siwc")
+            .and_then(serde_json::Value::as_object)
+        {
+            let nested = target
+                .metadata
+                .entry("siwc")
+                .or_insert_with(|| serde_json::json!({}));
+            if !nested.is_object() {
+                *nested = serde_json::json!({});
+            }
+            let nested = nested.as_object_mut().expect("SIWC object");
+            for key in crate::auth::codex_refresh::SIWC_KEYS {
+                match source.get(*key) {
+                    Some(value) => {
+                        nested.insert((*key).to_owned(), value.clone());
+                    }
+                    None => {
+                        nested.remove(*key);
+                    }
+                }
+            }
+        } else if let Some(nested) = target
+            .metadata
+            .get_mut("siwc")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in crate::auth::codex_refresh::SIWC_KEYS {
+                nested.remove(*key);
+            }
+        }
+    }
+}
+
+fn requested_partitions(requested: &Auth) -> super::UndurablePartitions {
+    use crate::auth::{CodexCredentialPartition, codex_refresh::CodexPersistIntent};
+    let intent = match &requested.codex_persist_intent {
+        CodexPersistIntent::Refresh(patch) => Some(patch),
+        _ => None,
+    };
+    let includes = |partition| {
+        requested
+            .codex_pending_refresh
+            .iter()
+            .chain(intent)
+            .any(|patch| !patch.is_written() && patch.includes_partition(partition))
+    };
+    super::UndurablePartitions {
+        outer: includes(CodexCredentialPartition::Outer),
+        siwc: includes(CodexCredentialPartition::Siwc),
+    }
+}
+
+fn clear_verified_partitions(
+    marked: &mut super::UndurablePartitions,
+    baselines: &mut super::UndurableBaselines,
+    requested: super::UndurablePartitions,
+    live: &Auth,
+    disk: &Auth,
+) {
+    if requested.outer
+        && crate::auth::codex_refresh::OUTER_KEYS
+            .iter()
+            .all(|key| live.metadata.get(*key) == disk.metadata.get(*key))
+    {
+        marked.outer = false;
+        baselines.outer.clear();
+    }
+    let live_siwc = live
+        .metadata
+        .get("siwc")
+        .and_then(serde_json::Value::as_object);
+    let disk_siwc = disk
+        .metadata
+        .get("siwc")
+        .and_then(serde_json::Value::as_object);
+    if requested.siwc
+        && crate::auth::codex_refresh::SIWC_KEYS
+            .iter()
+            .all(|key| live_siwc.and_then(|m| m.get(*key)) == disk_siwc.and_then(|m| m.get(*key)))
+    {
+        marked.siwc = false;
+        baselines.siwc.clear();
+    }
+}
+
+/// Incoming settings remain last-writer-wins; only the token partitions are read.
+fn copy_observed_credentials(target: &mut Auth, record: &Auth) {
+    for key in crate::auth::codex_refresh::OUTER_KEYS {
+        match record.metadata.get(*key) {
+            Some(value) => {
+                target.metadata.insert((*key).to_owned(), value.clone());
+            }
+            None => {
+                target.metadata.remove(*key);
+            }
+        }
+    }
+    if let Some(fresh) = record
+        .metadata
+        .get("siwc")
+        .and_then(serde_json::Value::as_object)
+    {
+        let nested = target
+            .metadata
+            .entry("siwc")
+            .or_insert_with(|| serde_json::json!({}));
+        if !nested.is_object() {
+            *nested = serde_json::json!({});
+        }
+        let nested = nested.as_object_mut().expect("SIWC object");
+        for key in crate::auth::codex_refresh::SIWC_KEYS {
+            match fresh.get(*key) {
+                Some(value) => {
+                    nested.insert((*key).to_owned(), value.clone());
+                }
+                None => {
+                    nested.remove(*key);
+                }
+            }
+        }
+    } else {
+        target.metadata.remove("siwc");
+    }
+}
+
+/// Compares registration and lexical record identity without filesystem I/O.
+fn same_record_identity(a: &Auth, b: &Auth) -> bool {
+    a.registration_epoch == b.registration_epoch
+        && a.id == b.id
+        && a.file_name.trim() == b.file_name.trim()
+        && a.trimmed_attribute(crate::auth::classification::ATTRIBUTE_PATH)
+            == b.trimmed_attribute(crate::auth::classification::ATTRIBUTE_PATH)
+}
+
 /// Logs a credential save that failed. A save the gate refused is expected
 /// while a switch is under way, and every request's outcome would log one, so
 /// it is logged at debug.
@@ -1083,12 +2691,76 @@ fn log_persist_failure(auth: &Auth, what: &str, err: &ManagerError) {
     if refused {
         tracing::debug!(auth_id = %auth.id, "{what} refused: the gate is not open");
     } else {
+        let mut secrets = crate::observe::redact::Secrets::new();
+        secrets.add_auth(auth);
+        let error = secrets.text(err.to_string(), crate::observe::redact::Policy::Disk);
         tracing::warn!(
             auth_id = %auth.id,
             provider = %auth.provider,
-            "{what}: {err}"
+            "{what}: {error}"
         );
     }
+}
+
+// An older save cannot reconcile over a newer pending result merely because
+// its token identity is unchanged (expiry-only rotations are independent work).
+fn pending_save_covers_live(snapshot: &Auth, live: &Auth) -> bool {
+    let covered = |operation: &crate::auth::codex_refresh::CredentialRefreshPatch| {
+        operation.is_written()
+            || matches!(&snapshot.codex_persist_intent,
+                crate::auth::codex_refresh::CodexPersistIntent::Refresh(saved)
+                    if operation.same_operation(saved))
+            || snapshot
+                .codex_pending_refresh
+                .iter()
+                .any(|saved| operation.same_operation(saved))
+    };
+    live.codex_pending_refresh.iter().all(&covered)
+        && match &live.codex_persist_intent {
+            crate::auth::codex_refresh::CodexPersistIntent::Refresh(operation) => {
+                covered(operation)
+            }
+            _ => true,
+        }
+}
+
+fn has_unwritten_refresh_work(auth: &Auth) -> bool {
+    auth.codex_pending_refresh
+        .iter()
+        .any(|patch| !patch.is_written())
+        || matches!(&auth.codex_persist_intent,
+            crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) if !patch.is_written())
+}
+
+// Pending memory is bounded by refreshes between successful saves. No cap may
+// silently discard an unwritten rotation; written flags are pruned on edits/save.
+pub(crate) fn pending_for_edit(
+    auth: &Auth,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+    ineligible: bool,
+) -> Vec<crate::auth::codex_refresh::CredentialRefreshPatch> {
+    if ineligible {
+        return Vec::new();
+    }
+    let mut pending = auth.codex_pending_refresh.clone();
+    if let crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) =
+        &auth.codex_persist_intent
+        && !patch.is_written()
+        && !pending.iter().any(|older| older.same_operation(patch))
+    {
+        pending.push(patch.clone());
+    }
+    pending
+        .iter()
+        .enumerate()
+        .filter_map(|(index, patch)| {
+            if patch.is_written() {
+                None
+            } else {
+                patch.pruned_after_following(&pending[index + 1..], metadata)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

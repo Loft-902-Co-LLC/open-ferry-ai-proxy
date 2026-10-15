@@ -806,7 +806,9 @@ impl CodexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        if let Some((model, path)) = direct(request, options) {
+        if !auth.use_siwc()
+            && let Some((model, path)) = direct(request, options)
+        {
             let (response, secrets) = self
                 .send_direct(auth, request, options, &model, path, false)
                 .await?;
@@ -879,7 +881,9 @@ impl CodexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<StreamResponse, ExecError> {
-        if let Some((model, path)) = direct(request, options) {
+        if !auth.use_siwc()
+            && let Some((model, path)) = direct(request, options)
+        {
             let (response, secrets) = self
                 .send_direct(auth, request, options, &model, path, true)
                 .await?;
@@ -1012,7 +1016,11 @@ impl CodexExecutor {
         ] {
             delete(&mut body, field);
         }
-        normalize_instructions(&mut body, false);
+        if auth.use_siwc() {
+            crate::codex::siwc_request::apply_body(&mut body, false, false);
+        } else {
+            normalize_instructions(&mut body, false);
+        }
         sanitize_input_item_ids(&mut body);
         // The rules' defaults check the request as the tool call has it.
         let source = Options {

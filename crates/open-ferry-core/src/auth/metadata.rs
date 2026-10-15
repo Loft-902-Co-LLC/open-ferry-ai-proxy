@@ -94,6 +94,14 @@ pub fn merge_existing_auth_metadata(target: &mut Auth, existing: &Map<String, Va
     {
         target.disabled = *disabled;
     }
+    if super::codex_refresh::is_codex_auth(target)
+        && let Some(Value::Object(disk)) = existing.get("siwc")
+        && let Some(Value::Object(incoming)) = target.metadata.get_mut("siwc")
+    {
+        for (key, value) in disk {
+            incoming.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
     let meta = equal_fold(target.provider.trim(), "meta");
     for (key, value) in existing {
         if is_auth_token_payload_key(key) || target.metadata.contains_key(key) {

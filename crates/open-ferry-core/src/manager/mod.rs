@@ -104,7 +104,7 @@ pub use cooldown::CallResult;
 pub use cooldown_view::{CooldownView, cooldown_snapshot_for_auth};
 pub use credential::last_refresh_timestamp;
 pub use error_events::ErrorEvents;
-pub use lifecycle::QuotaReset;
+pub use lifecycle::{AdoptionResult, CompletedTokenCommand, QuotaReset};
 pub use quota_check::QuotaCheck;
 pub use quota_rank::{QuotaPreference, QuotaPrefs};
 pub use quota_signals::provider_supports_quota_observation;
@@ -117,9 +117,7 @@ pub use settings::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::sync::{
-    Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
-};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak};
 
 use chrono::Utc;
 use futures_core::future::BoxFuture;
@@ -140,6 +138,13 @@ use settings::RoutingState;
 /// The last (epoch, generation) saved for one credential.
 type PersistLock = Arc<Mutex<(u64, u64)>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Persisted {
+    Written { requested: UndurablePartitions },
+    Skipped,
+    Ineligible,
+}
+
 /// What the manager reads the time from.
 pub(crate) type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
@@ -151,6 +156,35 @@ pub(crate) struct Entry {
     /// Refreshes failed in a row with `invalid_grant` (upstream's
     /// `RefreshFailures`).
     pub(crate) refresh_failures: u32,
+    /// Revokes snapshots of refresh work discarded by ineligibility.
+    pub(crate) discard_epoch: u64,
+    /// Partitions whose rotated live credentials have lost persistence work.
+    pub(crate) undurable: UndurablePartitions,
+    /// Baseline sets without eviction, with one agreement entry per identity in
+    /// each set. Clearing a marker empties its set. Patch snapshot copies can
+    /// still use quadratic aggregate history storage across failed saves.
+    pub(crate) undurable_baselines: UndurableBaselines,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct UndurableBaselines {
+    pub(crate) outer: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub(crate) siwc: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct UndurablePartitions {
+    pub(crate) outer: bool,
+    pub(crate) siwc: bool,
+}
+
+impl UndurablePartitions {
+    pub(crate) fn contains(self, partition: crate::auth::CodexCredentialPartition) -> bool {
+        match partition {
+            crate::auth::CodexCredentialPartition::Outer => self.outer,
+            crate::auth::CodexCredentialPartition::Siwc => self.siwc,
+        }
+    }
 }
 
 /// The manager's state, behind one lock (upstream's `Manager` fields under
@@ -192,9 +226,11 @@ pub(crate) struct Shared {
     store: Option<Arc<dyn AuthStore>>,
     models: Arc<dyn ClientModels>,
     clock: Clock,
-    /// The last (epoch, generation) saved per credential; the save happens
-    /// under the credential's lock (upstream's `persistLocks`).
+    /// The saved or adopted (epoch, generation) watermark per credential.
+    /// Its locks are short-held and never held across I/O.
     persist_locks: Mutex<HashMap<String, PersistLock>>,
+    /// Serializes saves and read-back through live reconciliation, including their I/O (upstream's `persistLocks`).
+    persist_save_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Serializes refreshes per credential (upstream's `refreshLocks`).
     refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The reload barrier (upstream's `authLoadGate`): held shared by a
@@ -202,7 +238,7 @@ pub(crate) struct Shared {
     /// exclusively by [`Manager::load`] from listing the store until every
     /// credential is replaced. Taken before the state lock, never twice by
     /// one thread.
-    load_gate: RwLock<()>,
+    load_gate: Arc<ReloadBarrier>,
     refresh_loop: Mutex<Option<RefreshLoopHandle>>,
     /// What failed calls are told to, once set.
     error_events: OnceLock<Arc<dyn ErrorEvents>>,
@@ -211,10 +247,19 @@ pub(crate) struct Shared {
     /// Not upstream's: whether this process may write; always open until a
     /// switch sets one.
     gate: RwLock<ActiveGate>,
-    /// Test seam: called with a credential's snapshot before its save takes
-    /// the persist lock.
+    /// Test seam: called before eligibility checks and the save mutex,
+    /// including for no-store and unsaved updates.
     #[cfg(test)]
     persist_hook: Mutex<Option<PersistHook>>,
+    /// Test seam: after final write admission, with save mutex held and no state lock.
+    #[cfg(test)]
+    persist_admitted_hook: Mutex<Option<PersistHook>>,
+    /// Test seam: called before Written reconciliation takes the save mutex.
+    #[cfg(test)]
+    reconcile_hook: Mutex<Option<PersistHook>>,
+    /// Test seam: called after read-back while the save mutex is held.
+    #[cfg(test)]
+    read_back_hook: Mutex<Option<PersistHook>>,
     /// Test seam: called after adopting from the store has read the record
     /// and before it takes the state lock to apply it.
     #[cfg(test)]
@@ -274,6 +319,9 @@ pub enum ManagerError {
     /// Not upstream's: this process isn't the active version, so it didn't
     /// refresh or write.
     NotActive(NotActive),
+    /// Replace could not obtain a valid current record; nothing was published.
+    /// The caller must retry the observation, including its settings.
+    AdoptionRetry,
     /// Anything else, in upstream's words.
     Other(String),
 }
@@ -285,6 +333,7 @@ impl fmt::Display for ManagerError {
             Self::Store(err) => err.fmt(f),
             Self::Refresh(err) => err.fmt(f),
             Self::NotActive(err) => err.fmt(f),
+            Self::AdoptionRetry => f.write_str("credential observation must be retried"),
         }
     }
 }
@@ -295,7 +344,7 @@ impl std::error::Error for ManagerError {
             Self::Store(err) => Some(err),
             Self::Refresh(err) => Some(err),
             Self::NotActive(err) => Some(err),
-            Self::InvalidWeight(_) | Self::Other(_) => None,
+            Self::InvalidWeight(_) | Self::Other(_) | Self::AdoptionRetry => None,
         }
     }
 }
@@ -352,14 +401,21 @@ impl Manager {
             models,
             clock,
             persist_locks: Mutex::new(HashMap::new()),
+            persist_save_locks: Mutex::new(HashMap::new()),
             refresh_locks: Mutex::new(HashMap::new()),
-            load_gate: RwLock::new(()),
+            load_gate: Arc::new(ReloadBarrier::default()),
             refresh_loop: Mutex::new(None),
             error_events: OnceLock::new(),
             cooldown_store: cooldown_store::CooldownStore::default(),
             gate: RwLock::new(ActiveGate::open()),
             #[cfg(test)]
             persist_hook: Mutex::new(None),
+            #[cfg(test)]
+            persist_admitted_hook: Mutex::new(None),
+            #[cfg(test)]
+            reconcile_hook: Mutex::new(None),
+            #[cfg(test)]
+            read_back_hook: Mutex::new(None),
             #[cfg(test)]
             adopt_hook: Mutex::new(None),
         });
@@ -396,20 +452,14 @@ impl Manager {
     /// Takes the reload barrier for one change, to hold from before the
     /// state lock until the change is saved (upstream's `lockAuthMutation`,
     /// less its per-credential lock). Waits while a reload runs.
-    pub(crate) fn mutation_gate(&self) -> RwLockReadGuard<'_, ()> {
-        self.shared
-            .load_gate
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+    pub(crate) fn mutation_gate(&self) -> ReloadGuard {
+        self.shared.load_gate.acquire(false)
     }
 
     /// Takes the reload barrier for a reload: waits for every change being
     /// published or saved, and holds new ones off.
-    pub(crate) fn reload_gate(&self) -> RwLockWriteGuard<'_, ()> {
-        self.shared
-            .load_gate
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
+    pub(crate) fn reload_gate(&self) -> ReloadGuard {
+        self.shared.load_gate.acquire(true)
     }
 
     pub(crate) fn now(&self) -> Timestamp {
@@ -487,6 +537,61 @@ impl Manager {
 
     fn close_all_sessions(executor: &dyn ProviderExecutor) {
         executor.close_execution_session(CLOSE_ALL_EXECUTION_SESSIONS);
+    }
+}
+
+// An owned reload permit can follow a detached save onto a blocking thread;
+// std's borrowed RwLock guard cannot be transferred between threads.
+#[derive(Default)]
+struct ReloadBarrier {
+    state: Mutex<(usize, bool, usize)>,
+    changed: Condvar,
+}
+
+#[must_use]
+pub(crate) struct ReloadGuard {
+    barrier: Arc<ReloadBarrier>,
+    reload: bool,
+}
+
+impl ReloadBarrier {
+    fn acquire(self: &Arc<Self>, reload: bool) -> ReloadGuard {
+        let mut state = lock(&self.state);
+        if reload {
+            state.2 += 1;
+            while state.0 != 0 || state.1 {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            state.2 -= 1;
+            state.1 = true;
+        } else {
+            while state.1 || state.2 != 0 {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            state.0 += 1;
+        }
+        ReloadGuard {
+            barrier: self.clone(),
+            reload,
+        }
+    }
+}
+
+impl Drop for ReloadGuard {
+    fn drop(&mut self) {
+        let mut state = lock(&self.barrier.state);
+        if self.reload {
+            state.1 = false;
+        } else {
+            state.0 -= 1;
+        }
+        self.barrier.changed.notify_all();
     }
 }
 

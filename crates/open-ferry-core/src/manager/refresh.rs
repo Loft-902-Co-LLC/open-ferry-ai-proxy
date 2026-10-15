@@ -51,7 +51,7 @@ use super::classify::{
 use super::cooldown::{add, reset_model_state, update_aggregated_availability};
 use super::credential::{
     KIND_API_KEY, access_token, auth_kind, has_refresh_credential, is_zero, last_refresh_timestamp,
-    preferred_interval,
+    preferred_interval, refresh_token,
 };
 use super::merge::normalize_credential_metadata;
 use super::text::{equal_fold, go_lower};
@@ -267,6 +267,15 @@ pub(crate) fn should_refresh(auth: &Auth, lead: Option<Duration>, now: Timestamp
     if refresh_held(auth, now) {
         return false;
     }
+    if auth.siwc_refresh_due_at(now).is_some() {
+        return [
+            auth.outer_refresh_due_at(now, lead),
+            auth.siwc_refresh_due_at(now),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|due| due <= now);
+    }
     let last = last_refresh(auth);
     let expiry = non_zero(auth.expiration_time());
     if let Some(interval) = preferred_interval(auth).filter(|d| !d.is_zero()) {
@@ -305,13 +314,22 @@ pub(crate) fn next_refresh_check_at(
     if has_unauthorized_auth_failure(auth) || has_disabled_invalid_grant_failure(auth) {
         return None;
     }
-    if auth_kind(auth) == KIND_API_KEY {
-        return None;
-    }
     if let Some(held) = auth.next_refresh_after
         && now < held
     {
         return Some(held);
+    }
+    if auth.siwc_refresh_due_at(now).is_some() {
+        return [
+            auth.outer_refresh_due_at(now, lead),
+            auth.siwc_refresh_due_at(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+    }
+    if auth_kind(auth) == KIND_API_KEY {
+        return None;
     }
     let last = last_refresh(auth);
     let expiry = non_zero(auth.expiration_time());
@@ -338,6 +356,47 @@ pub(crate) fn next_refresh_check_at(
         return Some(add(last, lead).max(now));
     }
     Some(now)
+}
+
+impl Auth {
+    /// Due time for the refreshable outer Codex partition. The outer metadata
+    /// refresh timestamp wins over runtime time so SIWC rotations cannot
+    /// postpone the outer interval. `None` lead uses Codex's 24-hour default.
+    pub fn outer_refresh_due_at(
+        &self,
+        now: Timestamp,
+        lead: Option<Duration>,
+    ) -> Option<Timestamp> {
+        if !crate::auth::codex_refresh::is_codex_auth(self) || refresh_token(self).is_empty() {
+            return None;
+        }
+        if self.codex_refresh_failure.as_ref().is_some_and(|failure| {
+            failure.partition == crate::auth::CodexCredentialPartition::Outer
+        }) {
+            return Some(now);
+        }
+        let last = last_refresh_timestamp(self).or(self.last_refreshed_at);
+        let expiry = non_zero(self.outer_expiration_time());
+        let due = if let Some(interval) = preferred_interval(self).filter(|d| !d.is_zero()) {
+            let Some(last) = last else {
+                return Some(now);
+            };
+            let interval_due = add(last, interval);
+            expiry.map_or(interval_due, |expiry| {
+                sub(expiry, interval).min(interval_due)
+            })
+        } else {
+            let lead = lead.unwrap_or(Duration::from_secs(24 * 3600));
+            if lead.is_zero() && expiry.is_none() {
+                return None;
+            }
+            expiry
+                .map(|expiry| sub(expiry, lead))
+                .or_else(|| last.map(|last| add(last, lead)))
+                .unwrap_or(now)
+        };
+        Some(due.max(now))
+    }
 }
 
 /// The wait after `failures` refreshes in a row failed with `invalid_grant`
@@ -403,6 +462,20 @@ struct FailedRefresh<'a> {
     failed_token: &'a str,
     /// Whether it was a forced refresh.
     force: bool,
+    /// The Codex partition that failed while the other one rotated, which
+    /// the record keeps so the next check retries it. `None` when the whole
+    /// refresh failed.
+    partition: Option<crate::auth::CodexCredentialPartition>,
+}
+
+/// A failed partition of a Codex refresh whose other partition rotated, held
+/// until it can be recorded against the live credential.
+struct PartialFailure {
+    failure: crate::auth::CodexRefreshFailure,
+    /// The failed partition's tokens as the refresh left them: the failure
+    /// only counts while the live credential still holds those.
+    baseline: Option<crate::auth::codex_refresh::CredentialRefreshPatch>,
+    secrets: crate::observe::redact::Secrets,
 }
 
 /// The status message of a credential whose tokens were both rejected.
@@ -871,7 +944,25 @@ impl Manager {
             .await
         {
             Ok(refreshed) => Some(refreshed),
-            Err(ManagerError::NotActive(_)) => self.adopt_from_store(auth),
+            Err(ManagerError::NotActive(_)) => {
+                let manager = self.clone();
+                let failed = auth.clone();
+                // Adoption is read-only and must not require an Open write gate.
+                if let Some(operation) = crate::gate::Operation::current() {
+                    operation
+                        .run_blocking(move || manager.adopt_from_store(&failed))
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    // No operation exists to carry, and reads must work with a closed gate.
+                    #[allow(clippy::disallowed_methods)]
+                    tokio::task::spawn_blocking(move || manager.adopt_from_store(&failed))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+            }
             Err(_) => {
                 tracing::debug!(auth_id = %auth.id, "credential refresh before fallback failed");
                 None
@@ -917,113 +1008,174 @@ impl Manager {
             // adopting now would drop it.
             return None;
         };
-        // Before it reads: nothing of the credential may be in flight, and
-        // what a save of it could have changed is noted, to be seen again at
-        // the swap.
-        let (live, epoch, sequence) = {
-            let guard = self.lock();
-            if guard
-                .refresh_jobs
-                .get(&failed.id)
-                .is_some_and(|job| job.running)
-                || guard.pending_saves.contains_key(&failed.id)
-            {
-                return None;
-            }
-            let entry = guard.auths.get(&failed.id)?;
-            if access_token(&entry.auth) != failed_token {
-                return Some(entry.auth.clone());
-            }
-            if entry.auth.registration_epoch != failed.registration_epoch {
-                // Removed and registered again since the request's snapshot.
-                return None;
-            }
-            (
-                entry.auth.clone(),
-                entry.auth.registration_epoch,
-                guard.save_sequence.get(&failed.id).copied(),
-            )
-        };
-        // Read the file of the registration just checked, not the failed
-        // snapshot's: the path comes from the `Auth` it is given.
-        // Sampled before the read: the path it resolves uses the directory
-        // bound then, and a rebind since changes where `live` points with no
-        // change to the credential. Compared at the swap.
-        let binding = store.binding_generation();
-        let read = store.read_back(&live);
-        #[cfg(test)]
+        let permit = self.mutation_gate();
+        // Refuse known in-flight work before waiting for its save mutex.
+        // The same checks run again inside the transaction after any wait.
         {
-            let hook = lock(&self.shared.adopt_hook).clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-        let disk = match read {
-            Ok(Some(disk)) => disk,
-            Ok(None) => return None,
-            Err(err) => {
-                tracing::debug!(auth_id = %failed.id, "reading the credential again failed: {err}");
-                return None;
-            }
-        };
-        let fresh = access_token(&disk);
-        if fresh.is_empty() || fresh == failed_token {
-            return None;
-        }
-        let mut metadata = disk.metadata;
-        normalize_credential_metadata(&mut metadata);
-        let now = self.now();
-        let adopted = {
-            let mut guard = self.lock();
-            let state = &mut *guard;
+            let state = self.lock();
             if state
                 .refresh_jobs
                 .get(&failed.id)
                 .is_some_and(|job| job.running)
                 || state.pending_saves.contains_key(&failed.id)
-                || state.save_sequence.get(&failed.id).copied() != sequence
-            {
-                // A save of the credential began, and may have finished,
-                // since the record was read: the record may be older than
-                // what it saved.
-                return None;
-            }
-            let entry = state.auths.get_mut(&failed.id)?;
-            if entry.auth.registration_epoch != epoch {
-                return None;
-            }
-            // The store was rebound since the read: the directory a relative
-            // `file_name` resolves against may have changed.
-            if store.binding_generation() != binding {
-                return None;
-            }
-            // The record was read from where `live` pointed. An edit or
-            // update may have moved the registration to another file since,
-            // with no save, so the epoch and the save sequence are unmoved.
-            // Compared are the inputs of `resolve_auth_path` (the `path`
-            // attribute and `file_name`), not the whole generation: request
-            // outcomes publish new snapshots all the time.
-            if entry.auth.trimmed_attribute(ATTRIBUTE_PATH)
-                != live.trimmed_attribute(ATTRIBUTE_PATH)
-                || entry.auth.file_name.trim() != live.file_name.trim()
             {
                 return None;
             }
-            if access_token(&entry.auth) != failed_token {
-                return Some(entry.auth.clone());
+        }
+        self.with_adoption(&failed.id, &permit, |_guard| {
+            // Before it reads: nothing of the credential may be in flight, and
+            // what a save of it could have changed is noted, to be seen again at
+            // the swap.
+            let (live, epoch, sequence) = {
+                let guard = self.lock();
+                if guard
+                    .refresh_jobs
+                    .get(&failed.id)
+                    .is_some_and(|job| job.running)
+                    || guard.pending_saves.contains_key(&failed.id)
+                {
+                    return None;
+                }
+                let entry = guard.auths.get(&failed.id)?;
+                if access_token(&entry.auth) != failed_token {
+                    return Some(entry.auth.clone());
+                }
+                if entry.auth.registration_epoch != failed.registration_epoch {
+                    // Removed and registered again since the request's snapshot.
+                    return None;
+                }
+                (
+                    entry.auth.clone(),
+                    entry.auth.registration_epoch,
+                    guard.save_sequence.get(&failed.id).copied(),
+                )
+            };
+            // Read the file of the registration just checked, not the failed
+            // snapshot's: the path comes from the `Auth` it is given.
+            // Sampled before the read: the path it resolves uses the directory
+            // bound then, and a rebind since changes where `live` points with no
+            // change to the credential. Compared at the swap.
+            let binding = store.binding_generation();
+            let read = store.read_for_adoption(&live);
+            #[cfg(test)]
+            {
+                let hook = lock(&self.shared.adopt_hook).clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
             }
-            let auth = Arc::make_mut(&mut entry.auth);
-            auth.metadata = metadata;
-            auth.rejected_access_token.clear();
-            auth.credential_version = auth.credential_version.saturating_add(1);
-            auth.generation = auth.generation.saturating_add(1);
-            auth.updated_at = Some(now);
-            let snapshot = entry.auth.clone();
-            state.sync_scheduler(self.models(), &failed.id, now);
-            snapshot
-        };
-        self.queue_refresh_reschedule(&failed.id);
-        Some(adopted)
+            let disk = match read {
+                Ok(crate::auth::AdoptionRead::Record(disk)) => disk,
+                Ok(crate::auth::AdoptionRead::Unsupported) => match store.read_back(&live) {
+                    Ok(Some(disk)) => disk,
+                    _ => return None,
+                },
+                Ok(crate::auth::AdoptionRead::Missing | crate::auth::AdoptionRead::Invalid) => {
+                    return None;
+                }
+                Err(err) => {
+                    let _ = err;
+                    tracing::debug!(auth_id = %failed.id, "reading the credential again failed");
+                    return None;
+                }
+            };
+            let same_origin = match store.same_record(&live, &disk) {
+                Ok(same) => same,
+                Err(_) => {
+                    tracing::debug!(auth_id = %failed.id, "adoption origin proof missed");
+                    return None;
+                }
+            };
+            if !same_origin
+                || disk.id != live.id
+                || !equal_fold(disk.provider.trim(), live.provider.trim())
+            {
+                tracing::debug!(auth_id = %failed.id, "adoption origin proof missed");
+                return None;
+            }
+            let mut disk = disk;
+            normalize_credential_metadata(&mut disk.metadata);
+            let now = self.now();
+            let adopted = {
+                let mut guard = self.lock();
+                let state = &mut *guard;
+                if state
+                    .refresh_jobs
+                    .get(&failed.id)
+                    .is_some_and(|job| job.running)
+                    || state.pending_saves.contains_key(&failed.id)
+                    || state.save_sequence.get(&failed.id).copied() != sequence
+                {
+                    // A save of the credential began, and may have finished,
+                    // since the record was read: the record may be older than
+                    // what it saved.
+                    return None;
+                }
+                let entry = state.auths.get_mut(&failed.id)?;
+                if entry.auth.registration_epoch != epoch
+                    || !equal_fold(entry.auth.provider.trim(), live.provider.trim())
+                {
+                    return None;
+                }
+                // The store was rebound since the read: the directory a relative
+                // `file_name` resolves against may have changed.
+                if store.binding_generation() != binding {
+                    return None;
+                }
+                // The record was read from where `live` pointed. An edit or
+                // update may have moved the registration to another file since,
+                // with no save, so the epoch and the save sequence are unmoved.
+                // Compared are the inputs of `resolve_auth_path` (the `path`
+                // attribute and `file_name`), not the whole generation: request
+                // outcomes publish new snapshots all the time.
+                if entry.auth.trimmed_attribute(ATTRIBUTE_PATH)
+                    != live.trimmed_attribute(ATTRIBUTE_PATH)
+                    || entry.auth.file_name.trim() != live.file_name.trim()
+                {
+                    return None;
+                }
+                if access_token(&entry.auth) != failed_token {
+                    return Some(entry.auth.clone());
+                }
+                let failed_partition = if failed.use_siwc() {
+                    crate::auth::CodexCredentialPartition::Siwc
+                } else {
+                    crate::auth::CodexCredentialPartition::Outer
+                };
+                if entry.undurable.contains(failed_partition) {
+                    return None;
+                }
+                super::lifecycle::overlay_undurable(&mut disk, &entry.auth, entry.undurable);
+                disk.rebase_pending_refreshes_with_origin(
+                    &entry.auth,
+                    Some(crate::auth::ResolvedOriginProof(same_origin)),
+                );
+                // Rebase can retain the failed rotated token even when raw disk
+                // contains a different, consumed token. That is NOT an adoption.
+                let effective = access_token(&disk);
+                if effective.is_empty() || effective == failed_token {
+                    return None;
+                }
+                let pending = super::lifecycle::pending_for_edit(
+                    &entry.auth,
+                    &disk.metadata,
+                    self.permanently_ineligible(&entry.auth),
+                );
+                let auth = Arc::make_mut(&mut entry.auth);
+                auth.metadata = disk.metadata;
+                auth.codex_pending_refresh = pending;
+                auth.codex_persist_intent = Default::default();
+                auth.rejected_access_token.clear();
+                auth.credential_version = auth.credential_version.saturating_add(1);
+                auth.generation = auth.generation.saturating_add(1);
+                auth.updated_at = Some(now);
+                let snapshot = entry.auth.clone();
+                state.sync_scheduler(self.models(), &failed.id, now);
+                snapshot
+            };
+            self.queue_refresh_reschedule(&failed.id);
+            Some(adopted)
+        })
     }
 
     /// Refreshes a credential now, whether or not it is due (upstream's
@@ -1179,7 +1331,18 @@ impl Manager {
         if state != GateState::Open {
             return Err(ManagerError::NotActive(NotActive { state }));
         }
-        let outcome = executor.refresh(auth.clone()).await;
+        let outcome = executor
+            .refresh_with_options(auth.clone(), crate::executor::RefreshOptions { force })
+            .await
+            .map_err(|mut error| {
+                let mut secrets = crate::observe::redact::Secrets::new();
+                secrets.add_auth(&auth);
+                error.message = secrets.text(error.message, crate::observe::redact::Policy::Disk);
+                if let Some(cause) = error.cause.take() {
+                    error.cause = Some(secrets.text(cause, crate::observe::redact::Policy::Disk));
+                }
+                error
+            });
         let now = self.now();
         let mut updated = match outcome {
             Ok(updated) => updated,
@@ -1206,6 +1369,7 @@ impl Manager {
                     base_epoch,
                     failed_token,
                     force,
+                    partition: None,
                 };
                 self.record_refresh_failure(id, &attempt, &err, now);
                 return Err(ManagerError::Refresh(err));
@@ -1216,9 +1380,50 @@ impl Manager {
         let mut save_failure = crate::test_hooks::barrier("refresh.after_rotate")
             .await
             .err();
+        let partial_failure = updated.codex_refresh_failure.clone();
+        let partial_baseline = partial_failure.as_ref().map(|failure| {
+            crate::auth::codex_refresh::CredentialRefreshPatch::new(
+                &updated.metadata,
+                &updated.metadata,
+                failure.partition == crate::auth::CodexCredentialPartition::Outer,
+                failure.partition == crate::auth::CodexCredentialPartition::Siwc,
+            )
+        });
+        let mut partial_secrets = crate::observe::redact::Secrets::new();
+        if partial_failure.is_some() {
+            partial_secrets.add_auth(&auth);
+            partial_secrets.add_auth(&updated);
+        }
+        if crate::auth::codex_refresh::is_codex_auth(&updated)
+            && !matches!(
+                updated.codex_persist_intent,
+                crate::auth::codex_refresh::CodexPersistIntent::Refresh(_)
+            )
+        {
+            updated.codex_persist_intent = crate::auth::codex_refresh::CodexPersistIntent::Refresh(
+                crate::auth::codex_refresh::CredentialRefreshPatch::new(
+                    &auth.metadata,
+                    &updated.metadata,
+                    crate::auth::codex_refresh::OUTER_KEYS
+                        .iter()
+                        .any(|key| auth.metadata.get(*key) != updated.metadata.get(*key)),
+                    auth.metadata.get("siwc") != updated.metadata.get("siwc")
+                        && updated.metadata.contains_key("siwc"),
+                ),
+            );
+        }
         updated.last_refreshed_at = Some(now);
         updated.next_refresh_after = None;
-        updated.rejected_access_token.clear();
+        if partial_failure
+            .as_ref()
+            .is_some_and(|failure| failure.partition.is_active(&auth))
+        {
+            updated
+                .rejected_access_token
+                .clone_from(&auth.rejected_access_token);
+        } else {
+            updated.rejected_access_token.clear();
+        }
         updated.last_error = None;
         updated.status_message.clear();
         updated.unavailable = false;
@@ -1230,9 +1435,6 @@ impl Manager {
         if should_refresh(&updated, executor.refresh_lead(), now) {
             updated.next_refresh_after = Some(add(now, REFRESH_INEFFECTIVE_BACKOFF));
         }
-        // Not upstream's: only an installed test hook offloads this save.
-        // run_blocking owns the admitted guard and restores it in its thread
-        // slot, so a dropped await cannot end admission before the write.
         #[cfg(feature = "blue-green-test")]
         let save_result = {
             if save_failure.is_none() {
@@ -1244,28 +1446,12 @@ impl Manager {
                 // The common update path logs one generic injected save
                 // failure; the barrier-specific cause is not carried into it.
                 self.update_refreshed_after_save_failure(&auth, base_epoch, updated)
-            } else if crate::test_hooks::is_installed()
-                && tokio::runtime::Handle::try_current().is_ok()
-            {
-                let operation = crate::gate::Operation::current().ok_or_else(|| {
-                    ManagerError::Store(std::io::Error::other("refresh save has no operation"))
-                })?;
-                let manager = self.clone();
-                let base = auth.clone();
-                operation
-                    .run_blocking(move || manager.update_refreshed(&base, base_epoch, updated))
-                    .await
-                    .map_err(|error| {
-                        ManagerError::Store(std::io::Error::other(format!(
-                            "refresh save task failed: {error}"
-                        )))
-                    })?
             } else {
-                self.update_refreshed(&auth, base_epoch, updated)
+                self.save_refreshed(&auth, base_epoch, updated).await
             }
         };
         #[cfg(not(feature = "blue-green-test"))]
-        let save_result = self.update_refreshed(&auth, base_epoch, updated);
+        let save_result = self.save_refreshed(&auth, base_epoch, updated).await;
         let (saved, generation) = match save_result {
             Ok(Some(saved)) => saved,
             Ok(None) => return Err(ManagerError::Other(format!("auth {id} not found"))),
@@ -1282,7 +1468,130 @@ impl Manager {
         // can leave the saved credential without these projections. The owned
         // refresh task keeps running when its external caller is cancelled.
         self.publish_projections(&saved, generation, now, true);
+        if let Some(failure) = partial_failure {
+            let mut secrets = partial_secrets;
+            secrets.add_auth(&saved);
+            let partial = PartialFailure {
+                failure,
+                baseline: partial_baseline,
+                secrets,
+            };
+            #[cfg(test)]
+            partial_failure_seam::fire(&self.shared).await;
+            let attempt = FailedRefresh {
+                base_epoch,
+                failed_token,
+                force,
+                partition: Some(partial.failure.partition),
+            };
+            return self.record_partial_failure(id, partial, &attempt, now);
+        }
         Ok(saved)
+    }
+
+    /// Persists a refreshed credential and folds it in, off the runtime
+    /// worker when the save can wait for a credential lock (Codex, or any
+    /// save while the test barriers are installed). An operation retains its
+    /// admission in run_blocking; without one, spawn_blocking owns the save.
+    /// Without a runtime it runs inline.
+    async fn save_refreshed(
+        &self,
+        base: &Arc<Auth>,
+        base_epoch: u64,
+        updated: Auth,
+    ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
+        let blocking =
+            self.shared.store.is_some() && crate::auth::codex_refresh::is_codex_auth(&updated);
+        #[cfg(feature = "blue-green-test")]
+        let blocking = blocking || crate::test_hooks::is_installed();
+        if !blocking || tokio::runtime::Handle::try_current().is_err() {
+            return self.update_refreshed(base, base_epoch, updated);
+        }
+        let manager = self.clone();
+        let base = base.clone();
+        let saved = if let Some(operation) = crate::gate::Operation::current() {
+            // run_blocking owns admission even if the caller drops its await.
+            operation
+                .run_blocking(move || manager.update_refreshed(&base, base_epoch, updated))
+                .await
+        } else {
+            // No operation is in scope; the owned closure retains manager save admission.
+            #[allow(clippy::disallowed_methods)]
+            tokio::task::spawn_blocking(move || {
+                manager.update_refreshed(&base, base_epoch, updated)
+            })
+            .await
+        };
+        saved.map_err(|error| {
+            ManagerError::Store(std::io::Error::other(format!(
+                "refresh save task failed: {error}"
+            )))
+        })?
+    }
+
+    /// Records the failed partition of a Codex refresh whose other partition
+    /// rotated and was saved (L7, L33). The check against the live
+    /// credential and the recording happen under one state lock: a failure
+    /// the live credential has superseded (re-registered, or the failed
+    /// partition's tokens replaced) is discarded and the current credential
+    /// returned. A failure of the partition the live switch selects is
+    /// recorded like a failed full refresh and returned as an error; the
+    /// other partition's gets a bounded retry and leaves the status alone.
+    fn record_partial_failure(
+        &self,
+        id: &str,
+        partial: PartialFailure,
+        attempt: &FailedRefresh<'_>,
+        now: Timestamp,
+    ) -> Result<Arc<Auth>, ManagerError> {
+        let PartialFailure {
+            failure,
+            baseline,
+            secrets,
+        } = partial;
+        let mut error = failure.error;
+        error.message = secrets.text(error.message, crate::observe::redact::Policy::Disk);
+        if let Some(cause) = error.cause.take() {
+            error.cause = Some(secrets.text(cause, crate::observe::redact::Policy::Disk));
+        }
+        let mut state = self.lock();
+        let Some(entry) = state.auths.get(id) else {
+            return Err(ManagerError::Other("auth removed after refresh".into()));
+        };
+        if entry.auth.registration_epoch != attempt.base_epoch
+            || baseline
+                .as_ref()
+                .is_some_and(|patch| !patch.can_apply_to(&entry.auth.metadata))
+        {
+            // A re-registration, bind or login replaced the failed tokens
+            // since the refresh began: that failure is obsolete and the
+            // current credential's tokens aren't marked.
+            return Ok(entry.auth.clone());
+        }
+        if failure.partition.is_active(&entry.auth) {
+            let after = self.record_refresh_failure_locked(&mut state, id, attempt, &error, now);
+            drop(state);
+            self.apply_after_failure(id, after);
+            return Err(ManagerError::Refresh(error));
+        }
+        // The partition the switch doesn't use: retry it after a backoff
+        // without touching the credential's status.
+        let Some(entry) = state.auths.get_mut(id) else {
+            return Err(ManagerError::Other("auth removed after refresh".into()));
+        };
+        let live = Arc::make_mut(&mut entry.auth);
+        live.next_refresh_after = Some(add(now, REFRESH_FAILURE_BACKOFF));
+        live.last_error = Some(refresh_error_from_error(ErrView::Exec(&error)));
+        live.codex_refresh_failure = Some(crate::auth::CodexRefreshFailure {
+            error,
+            partition: failure.partition,
+        });
+        live.generation = live.generation.saturating_add(1);
+        let snapshot = entry.auth.clone();
+        state.sync_scheduler(self.models(), id, now);
+        drop(state);
+        self.queue_refresh_reschedule(id);
+        Ok(snapshot)
     }
 
     /// Marks `failed_token` as refused by the provider while it is still the
@@ -1325,122 +1634,186 @@ impl Manager {
         err: &ExecError,
         now: Timestamp,
     ) {
-        let unauthorized = is_unauthorized_error(ErrView::Exec(err));
-        let invalid_grant = is_invalid_grant_error(ErrView::Exec(err));
         let after = {
             let mut state = self.lock();
-            let Some(entry) = state.auths.get_mut(id) else {
-                return;
-            };
-            if entry.auth.registration_epoch != attempt.base_epoch {
-                return;
-            }
-            let was_terminal_unauthorized = has_unauthorized_auth_failure(&entry.auth);
-            if was_terminal_unauthorized && !attempt.force {
-                return;
-            }
-            let mut failures = entry.refresh_failures;
-            let auth = Arc::make_mut(&mut entry.auth);
-            auth.generation = auth.generation.saturating_add(1);
-            auth.updated_at = Some(now);
-            if was_terminal_unauthorized {
-                auth.unavailable = true;
-                auth.status = Status::Error;
-                auth.next_refresh_after = None;
-                auth.next_retry_after = None;
-                if unauthorized || invalid_grant {
-                    auth.last_error = Some(terminal_unauthorized_error(err));
-                    auth.status_message = TERMINAL_UNAUTHORIZED_MESSAGE.into();
-                }
-                state.sync_scheduler(self.models(), id, now);
-                drop(state);
-                self.queue_refresh_unschedule(id);
-                return;
-            }
-            auth.last_error = Some(refresh_error_from_error(ErrView::Exec(err)));
-            let disabled = is_disabled(auth);
-            // The provider rejected this very access token, so its expiry no
-            // longer says it works.
-            let access_token_rejected =
-                !attempt.failed_token.is_empty() && access_token(auth) == attempt.failed_token;
-            let after = if disabled && invalid_grant {
-                auth.unavailable = true;
-                auth.status = Status::Disabled;
-                auth.next_refresh_after = None;
-                failures = 0;
-                auth.status_message = "disabled (invalid grant)".into();
-                AfterFailure::Unschedule
-            } else if disabled {
-                auth.unavailable = true;
-                auth.status = Status::Disabled;
-                auth.next_refresh_after = Some(add(now, REFRESH_FAILURE_BACKOFF));
-                if auth.status_message.is_empty() {
-                    auth.status_message = "disabled".into();
-                }
-                AfterFailure::Reschedule
-            } else if access_token_rejected && invalid_grant {
-                auth.unavailable = true;
-                auth.status = Status::Error;
-                auth.next_refresh_after = None;
-                auth.next_retry_after = None;
-                failures = 0;
+            self.record_refresh_failure_locked(&mut state, id, attempt, err, now)
+        };
+        self.apply_after_failure(id, after);
+    }
+
+    fn apply_after_failure(&self, id: &str, after: Option<AfterFailure>) {
+        match after {
+            Some(AfterFailure::Reschedule) => self.queue_refresh_reschedule(id),
+            Some(AfterFailure::Unschedule) => self.queue_refresh_unschedule(id),
+            Some(AfterFailure::Nothing) | None => {}
+        }
+    }
+
+    /// [`record_refresh_failure`](Self::record_refresh_failure) on the state
+    /// the caller already holds, so a caller can check the live credential
+    /// and record in one step. `None` when nothing was recorded; otherwise
+    /// what to do with the loop's queue once the lock is released.
+    fn record_refresh_failure_locked(
+        &self,
+        state: &mut State,
+        id: &str,
+        attempt: &FailedRefresh<'_>,
+        err: &ExecError,
+        now: Timestamp,
+    ) -> Option<AfterFailure> {
+        let unauthorized = is_unauthorized_error(ErrView::Exec(err));
+        let invalid_grant = is_invalid_grant_error(ErrView::Exec(err));
+        let entry = state.auths.get_mut(id)?;
+        if entry.auth.registration_epoch != attempt.base_epoch {
+            return None;
+        }
+        let was_terminal_unauthorized = has_unauthorized_auth_failure(&entry.auth);
+        if was_terminal_unauthorized && !attempt.force {
+            return None;
+        }
+        let mut failures = entry.refresh_failures;
+        let auth = Arc::make_mut(&mut entry.auth);
+        auth.generation = auth.generation.saturating_add(1);
+        auth.updated_at = Some(now);
+        if let Some(partition) = attempt.partition {
+            auth.codex_refresh_failure = Some(crate::auth::CodexRefreshFailure {
+                error: err.clone(),
+                partition,
+            });
+        }
+        if was_terminal_unauthorized {
+            auth.unavailable = true;
+            auth.status = Status::Error;
+            auth.next_refresh_after = None;
+            auth.next_retry_after = None;
+            if unauthorized || invalid_grant {
                 auth.last_error = Some(terminal_unauthorized_error(err));
                 auth.status_message = TERMINAL_UNAUTHORIZED_MESSAGE.into();
-                AfterFailure::Unschedule
-            } else if !auth.has_valid_access_token(now) || access_token_rejected {
-                auth.unavailable = true;
-                auth.status = Status::Error;
-                if unauthorized {
-                    auth.next_refresh_after = None;
-                    auth.next_retry_after = None;
-                    failures = 0;
-                    auth.status_message = "unauthorized".into();
-                    AfterFailure::Nothing
-                } else if invalid_grant {
-                    failures = failures.saturating_add(1);
-                    auth.next_refresh_after = Some(add(now, invalid_grant_backoff(failures)));
-                    auth.status_message = "invalid grant (retrying)".into();
-                    AfterFailure::Reschedule
-                } else {
-                    failures = 0;
-                    auth.next_refresh_after = Some(add(now, REFRESH_FAILURE_BACKOFF));
-                    auth.status_message = "token expired".into();
-                    AfterFailure::Reschedule
-                }
-            } else {
-                // The access token still works: keep the credential's
-                // status, and only set when to try again.
-                let mut next_retry = add(now, REFRESH_FAILURE_BACKOFF);
-                if invalid_grant {
-                    failures = failures.saturating_add(1);
-                    next_retry = add(now, invalid_grant_backoff(failures));
-                } else {
-                    failures = 0;
-                }
-                if let Some(expiry) = non_zero(auth.access_token_expiration_time())
-                    && next_retry > expiry
-                {
-                    next_retry = expiry;
-                }
-                auth.next_refresh_after = Some(next_retry);
-                if !auth.unavailable {
-                    tracing::warn!(
-                        auth_id = %id,
-                        provider = %auth.provider,
-                        status = err.status,
-                        "credential refresh failed; keeping the credential as its access token is unexpired"
-                    );
-                }
-                AfterFailure::Reschedule
-            };
-            entry.refresh_failures = failures;
+            }
             state.sync_scheduler(self.models(), id, now);
-            after
+            return Some(AfterFailure::Unschedule);
+        }
+        auth.last_error = Some(refresh_error_from_error(ErrView::Exec(err)));
+        let disabled = is_disabled(auth);
+        // The provider rejected this very access token, so its expiry no
+        // longer says it works.
+        let access_token_rejected =
+            !attempt.failed_token.is_empty() && access_token(auth) == attempt.failed_token;
+        let after = if disabled && invalid_grant {
+            auth.unavailable = true;
+            auth.status = Status::Disabled;
+            auth.next_refresh_after = None;
+            failures = 0;
+            auth.status_message = "disabled (invalid grant)".into();
+            AfterFailure::Unschedule
+        } else if disabled {
+            auth.unavailable = true;
+            auth.status = Status::Disabled;
+            auth.next_refresh_after = Some(add(now, REFRESH_FAILURE_BACKOFF));
+            if auth.status_message.is_empty() {
+                auth.status_message = "disabled".into();
+            }
+            AfterFailure::Reschedule
+        } else if access_token_rejected && invalid_grant {
+            auth.unavailable = true;
+            auth.status = Status::Error;
+            auth.next_refresh_after = None;
+            auth.next_retry_after = None;
+            failures = 0;
+            auth.last_error = Some(terminal_unauthorized_error(err));
+            auth.status_message = TERMINAL_UNAUTHORIZED_MESSAGE.into();
+            AfterFailure::Unschedule
+        } else if !auth.has_valid_access_token(now) || access_token_rejected {
+            auth.unavailable = true;
+            auth.status = Status::Error;
+            if unauthorized {
+                auth.next_refresh_after = None;
+                auth.next_retry_after = None;
+                failures = 0;
+                auth.status_message = "unauthorized".into();
+                AfterFailure::Nothing
+            } else if invalid_grant {
+                failures = failures.saturating_add(1);
+                auth.next_refresh_after = Some(add(now, invalid_grant_backoff(failures)));
+                auth.status_message = "invalid grant (retrying)".into();
+                AfterFailure::Reschedule
+            } else {
+                failures = 0;
+                auth.next_refresh_after = Some(add(now, REFRESH_FAILURE_BACKOFF));
+                auth.status_message = "token expired".into();
+                AfterFailure::Reschedule
+            }
+        } else {
+            // The access token still works: keep the credential's
+            // status, and only set when to try again.
+            let mut next_retry = add(now, REFRESH_FAILURE_BACKOFF);
+            if invalid_grant {
+                failures = failures.saturating_add(1);
+                next_retry = add(now, invalid_grant_backoff(failures));
+            } else {
+                failures = 0;
+            }
+            if let Some(expiry) = non_zero(auth.access_token_expiration_time())
+                && next_retry > expiry
+            {
+                next_retry = expiry;
+            }
+            auth.next_refresh_after = Some(next_retry);
+            if !auth.unavailable {
+                tracing::warn!(
+                    auth_id = %id,
+                    provider = %auth.provider,
+                    status = err.status,
+                    "credential refresh failed; keeping the credential as its access token is unexpired"
+                );
+            }
+            AfterFailure::Reschedule
         };
-        match after {
-            AfterFailure::Reschedule => self.queue_refresh_reschedule(id),
-            AfterFailure::Unschedule => self.queue_refresh_unschedule(id),
-            AfterFailure::Nothing => {}
+        entry.refresh_failures = failures;
+        state.sync_scheduler(self.models(), id, now);
+        Some(after)
+    }
+}
+
+/// Test seam: awaited after a Codex refresh was saved and published, before
+/// its partial failure is checked against the live credential. Keyed by the
+/// manager's shared state, so parallel tests don't see each other's hooks.
+#[cfg(test)]
+pub(super) mod partial_failure_seam {
+    use super::Shared;
+    use futures_core::future::BoxFuture;
+    use std::sync::{Arc, Mutex};
+
+    pub(crate) type Hook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
+    static HOOKS: Mutex<Vec<(usize, Hook)>> = Mutex::new(Vec::new());
+
+    fn key(shared: &Arc<Shared>) -> usize {
+        Arc::as_ptr(shared) as usize
+    }
+
+    /// Installs `hook` until the returned guard is dropped.
+    pub(crate) fn install(shared: &Arc<Shared>, hook: Hook) -> Guard {
+        let key = key(shared);
+        super::lock(&HOOKS).push((key, hook));
+        Guard(key)
+    }
+
+    pub(crate) struct Guard(usize);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            super::lock(&HOOKS).retain(|(key, _)| *key != self.0);
+        }
+    }
+
+    pub(super) async fn fire(shared: &Arc<Shared>) {
+        let key = key(shared);
+        let hook = super::lock(&HOOKS)
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, hook)| hook.clone());
+        if let Some(hook) = hook {
+            hook().await;
         }
     }
 }

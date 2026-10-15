@@ -44,6 +44,8 @@ pub struct Flags {
     pub codex_device_login: bool,
     /// Log in to Claude in a browser (`-claude-login`).
     pub claude_login: bool,
+    /// Bind Sign in with ChatGPT to an existing Codex file (`-siwc-bind`).
+    pub siwc_bind: String,
     /// Show the login URL rather than open a browser (`-no-browser`).
     pub no_browser: bool,
     /// The port for the login's callback server, or 0 for the provider's
@@ -184,6 +186,11 @@ const DEFINITIONS: &[Definition<Flags>] = &[
         kind: Kind::String(|flags, value| flags.password.0 = value),
     },
     Definition {
+        name: "siwc-bind",
+        usage: "Bind Sign in with ChatGPT to an existing Codex credential file",
+        kind: Kind::String(|flags, value| flags.siwc_bind = value),
+    },
+    Definition {
         name: "standalone",
         usage: "In TUI mode, start an embedded local server",
         kind: Kind::Bool(|flags, value| flags.standalone = value),
@@ -306,6 +313,7 @@ fn check_modes(flags: &Flags) -> Result<(), FlagError> {
             || flags.codex_login
             || flags.codex_device_login
             || flags.claude_login
+            || !flags.siwc_bind.is_empty()
             || flags.standalone)
     {
         return invalid("-worker and -supervise can't be used with a login or the TUI");
@@ -362,7 +370,15 @@ where
                 };
                 set(&mut flags, value);
             }
-            Kind::String(set) => set(&mut flags, value_of(name, value, &mut args)?),
+            Kind::String(set) => {
+                let value = value_of(name, value, &mut args)?;
+                if name == "siwc-bind" && value.trim().is_empty() {
+                    return Err(FlagError::Invalid(
+                        "-siwc-bind needs a credential filename".to_owned(),
+                    ));
+                }
+                set(&mut flags, value);
+            }
             Kind::Int(set) => {
                 let value = value_of(name, value, &mut args)?;
                 let value = value.parse().map_err(|_| {
@@ -432,6 +448,27 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Result<Flags, FlagError> {
         parse(args.iter().map(|arg| (*arg).to_owned()))
+    }
+
+    #[test]
+    fn siwc_bind_is_a_separate_string_flag_and_refuses_supervised_modes() {
+        let flags = parse_args(&[
+            "-siwc-bind",
+            "codex.json",
+            "-no-browser",
+            "-oauth-callback-port",
+            "1456",
+        ])
+        .unwrap();
+        assert_eq!(flags.siwc_bind, "codex.json");
+        assert!(!flags.codex_login && !flags.codex_device_login && !flags.claude_login);
+        assert!(flags.no_browser);
+        assert_eq!(flags.oauth_callback_port, 1456);
+        assert!(parse_args(&["-siwc-bind"]).is_err());
+        assert!(parse_args(&["-siwc-bind", ""]).is_err());
+        assert!(parse_args(&["-siwc-bind= "]).is_err());
+        assert!(parse_args(&["-supervise", "-siwc-bind", "codex.json"]).is_err());
+        assert!(parse_args(&["-worker", "-siwc-bind", "codex.json"]).is_err());
     }
 
     #[test]

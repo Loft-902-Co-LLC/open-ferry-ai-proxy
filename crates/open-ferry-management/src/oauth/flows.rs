@@ -136,9 +136,29 @@ pub(super) async fn auth_url(
 ) -> Response {
     let query = Query::parse(query.as_deref());
     let provider = to_lower(&lossy(trim_space(query.value("provider"))));
+    let mode = query.value("mode");
+    if !mode.is_empty() && mode != b"siwc-bind" {
+        return json::error(StatusCode::BAD_REQUEST, "unsupported oauth mode");
+    }
+    if mode == b"siwc-bind" && provider != "codex" {
+        return json::error(StatusCode::BAD_REQUEST, "SIWC bind requires codex");
+    }
     match provider.as_str() {
         "" => json::error(StatusCode::BAD_REQUEST, "provider is required"),
         "claude" => start(&state, Provider::Claude, &query).await,
+        "codex" if query.value("mode") == b"siwc-bind" => {
+            if state.credential_store().is_err() {
+                return json::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "credential store unavailable",
+                );
+            }
+            let name = lossy(query.value("name"));
+            match super::siwc_bind::prepare(&state, &name).await {
+                Ok(bind) => start_with_bind(&state, Provider::Codex, &query, Some(bind)).await,
+                Err(_) => json::error(StatusCode::BAD_REQUEST, "invalid SIWC bind target"),
+            }
+        }
         "codex" => start(&state, Provider::Codex, &query).await,
         _ => json::error(StatusCode::NOT_FOUND, "provider_not_found"),
     }
@@ -147,21 +167,57 @@ pub(super) async fn auth_url(
 /// Starts a `provider` login, and answers with its authorization URL and
 /// state.
 async fn start(state: &ManagementState, provider: Provider, query: &Query) -> Response {
+    start_with_bind(state, provider, query, None).await
+}
+
+async fn start_with_bind(
+    state: &ManagementState,
+    provider: Provider,
+    query: &Query,
+    bind: Option<super::siwc_bind::Bind>,
+) -> Response {
     let sessions = state.oauth_sessions();
     let config = state.config();
     let pkce = Pkce::generate();
     let oauth_state = generate_state();
-    let client = Client::new(state, provider, &config);
-    let url = client.auth_url(&oauth_state, &pkce);
+    let client = match bind {
+        Some(bind) => Client::Siwc(Box::new(bind)),
+        None => Client::new(state, provider, &config),
+    };
+    let redirect = match provider {
+        Provider::Codex => {
+            open_ferry_providers::codex::siwc::redirect_uri(sessions.callback_port(provider))
+        }
+        Provider::Claude => String::new(),
+    };
+    let url = match &client {
+        Client::Siwc(bind) => match bind.auth_url(&oauth_state, &redirect, &pkce) {
+            Ok(url) => url,
+            Err(_) => {
+                return json::error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to generate authorization URL",
+                );
+            }
+        },
+        _ => match client.auth_url(&oauth_state, &pkce) {
+            Ok(url) => url,
+            Err(reason) => return json::error(StatusCode::INTERNAL_SERVER_ERROR, reason),
+        },
+    };
 
     let Some(registration) = sessions.store().register(&oauth_state, provider.name()) else {
         return json::error(StatusCode::TOO_MANY_REQUESTS, "too many oauth sessions");
     };
+    if matches!(client, Client::Siwc(_)) {
+        sessions.store().mark_bind(&oauth_state);
+    }
     // From here, a login that doesn't start drops its session.
     let login = Login {
         client,
         state: oauth_state.clone(),
         pkce,
+        redirect,
         _lease: Lease {
             management: state.clone(),
             state: oauth_state.clone(),
@@ -228,6 +284,7 @@ struct Login {
     /// The session's state.
     state: String,
     pkce: Pkce,
+    redirect: String,
     _lease: Lease,
 }
 
@@ -254,6 +311,12 @@ impl Drop for Lease {
 enum Client {
     Claude(ClaudeAuth),
     Codex(CodexAuth),
+    Siwc(Box<super::siwc_bind::Bind>),
+}
+
+enum Credential {
+    Login(Box<Auth>),
+    Bind(Box<open_ferry_providers::codex::token::SiwcTokenData>),
 }
 
 impl Client {
@@ -276,21 +339,29 @@ impl Client {
     fn provider(&self) -> Provider {
         match self {
             Self::Claude(_) => Provider::Claude,
-            Self::Codex(_) => Provider::Codex,
+            Self::Codex(_) | Self::Siwc(_) => Provider::Codex,
         }
     }
 
     /// The URL that starts the login in the browser.
-    fn auth_url(&self, state: &str, pkce: &Pkce) -> String {
+    fn auth_url(&self, state: &str, pkce: &Pkce) -> Result<String, &'static str> {
         match self {
-            Self::Claude(auth) => auth.generate_auth_url(state, pkce),
-            Self::Codex(auth) => auth.generate_auth_url(state, pkce),
+            Self::Claude(auth) => Ok(auth.generate_auth_url(state, pkce)),
+            Self::Codex(auth) => Ok(auth.generate_auth_url(state, pkce)),
+            Self::Siwc(_) => Err("bind URL requires a redirect URI"),
         }
     }
 
     /// The credential `code` gives, or the session's status saying why
     /// there is none, which may quote the token endpoint's answer.
-    async fn credential(&self, code: &str, state: &str, pkce: &Pkce) -> Result<Auth, String> {
+    async fn credential(
+        &self,
+        callback: &Callback,
+        state: &str,
+        redirect: &str,
+        pkce: &Pkce,
+    ) -> Result<Credential, String> {
+        let code = callback.code.as_str();
         let provider = self.provider();
         match self {
             Self::Claude(auth) => {
@@ -304,6 +375,7 @@ impl Client {
                         EXCHANGE_FAILED.to_owned()
                     })?;
                 claude::build_auth_record(&bundle)
+                    .map(|record| Credential::Login(Box::new(record)))
                     .map_err(|error| error_with_cause(SAVE_FAILED, error.message()))
             }
             Self::Codex(auth) => {
@@ -315,7 +387,27 @@ impl Client {
                         error_with_cause(EXCHANGE_FAILED, error.message())
                     })?;
                 codex::build_auth_record(&bundle)
+                    .map(|record| Credential::Login(Box::new(record)))
                     .map_err(|error| error_with_cause(SAVE_FAILED, error.message()))
+            }
+            Self::Siwc(bind) => {
+                if callback.client_id.trim().is_empty() {
+                    return Err("callback did not contain an issued client ID".into());
+                }
+                bind.client
+                    .exchange_code_for_tokens(
+                        code,
+                        &callback.client_id,
+                        redirect,
+                        &bind.target.device_id,
+                        pkce,
+                    )
+                    .await
+                    .map(|tokens| Credential::Bind(Box::new(tokens)))
+                    .map_err(|error| {
+                        log_exchange_failure(provider, error.status());
+                        EXCHANGE_FAILED.to_owned()
+                    })
             }
         }
     }
@@ -402,7 +494,7 @@ async fn complete(
         sessions.exchange_timeout(),
         login
             .client
-            .credential(&callback.code, &login.state, &login.pkce),
+            .credential(&callback, &login.state, &login.redirect, &login.pkce),
     );
     let record = tokio::select! {
         // The lifeline first: a login whose session ended since its callback
@@ -431,12 +523,41 @@ async fn complete(
     if !store.is_pending(&login.state, provider.name()) {
         return;
     }
-    match save_token_record(&state, record).await {
+    let is_bind = matches!(login.client, Client::Siwc(_));
+    let saved = match (record, login.client) {
+        (Credential::Login(record), Client::Claude(_) | Client::Codex(_)) => {
+            save_token_record(&state, *record)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        (Credential::Bind(tokens), Client::Siwc(bind)) => super::siwc_bind::save(
+            &state,
+            bind.target,
+            *tokens,
+            login.state.clone(),
+            login._lease.id,
+        )
+        .await
+        .map(|()| String::new())
+        .map_err(|error| {
+            format!(
+                "SIWC binding failed ({:?}, OS {:?})",
+                error.kind(),
+                error.raw_os_error()
+            )
+        }),
+        _ => Err("OAuth credential kind mismatch".to_owned()),
+    };
+    match saved {
         Ok(path) => {
-            tracing::info!(
-                "{provider} authentication successful; credential saved as {}",
-                saved_name(&path)
-            );
+            if is_bind {
+                tracing::info!("SIWC credential bound and synchronized");
+            } else {
+                tracing::info!(
+                    "{provider} authentication successful; credential saved as {}",
+                    saved_name(&path)
+                );
+            }
             store.complete(&login.state);
         }
         Err(error) => {

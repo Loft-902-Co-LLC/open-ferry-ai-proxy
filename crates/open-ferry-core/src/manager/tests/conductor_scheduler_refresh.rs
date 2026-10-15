@@ -771,7 +771,7 @@ async fn manager_persist_skip_persist_advances_watermark_and_blocks_older_genera
 
     // The older generation-1 snapshot saves afterwards.
     h.manager
-        .persist(&gen1, epoch, 1, Save::Yes)
+        .persist(&gen1, epoch, 1, 0, Save::Yes)
         .expect("persist");
 
     assert_eq!(h.store.save_count(), saves, "the stale snapshot was saved");

@@ -183,12 +183,12 @@ async fn held_refresh(root: PathBuf, name: &'static str) {
             .manager
             .register_unsaved(auth_with_metadata(
                 "other.json",
-                "codex",
-                json!({"type": "codex", "access_token": "other"}),
+                "gemini",
+                json!({"type": "gemini", "access_token": "other"}),
             ))
             .unwrap();
-        // No admission: ordinary request accounting and another saved mutation
-        // complete on this current-thread runtime while refresh owns the hold.
+        // Non-Codex accounting keeps its synchronous save semantics: it and
+        // another saved mutation complete while the Codex refresh owns the hold.
         h.manager.mark_result(&crate::manager::CallResult {
             auth_id: other.id.clone(),
             success: true,
@@ -318,12 +318,12 @@ fn held_persist_hook_runs_on_a_blocking_thread() {
 // Not upstream's: a service-style unsaved upsert can reconcile into a save
 // inside task-local admission without blocking the current-thread runtime.
 #[test]
-fn task_local_upsert_reconcile_skips_held_persist() {
+fn task_local_upsert_reconcile_detaches_admitted_persist() {
     isolated(
-        "task_local_upsert_reconcile_skips_held_persist",
+        "task_local_upsert_reconcile_detaches_admitted_persist",
         |root| async move {
             let dir = install(&root);
-            let _release = Release::hold(&dir, "persist.before");
+            let release = Release::hold(&dir, "persist.before");
             let (h, auth, _) = harness();
             let operation = h.manager.gate().begin_operation().unwrap();
             let manager = h.manager.clone();
@@ -342,8 +342,15 @@ fn task_local_upsert_reconcile_skips_held_persist() {
             assert_eq!(tokio::time::timeout(WAIT, tick).await.unwrap().unwrap(), 7);
             tokio::time::timeout(WAIT, upsert).await.unwrap().unwrap();
             assert!(h.manager.get(ID).unwrap().model_states.is_empty());
+            arrived(&dir.join("persist.before.arrived")).await;
+            assert_eq!(h.store.save_count(), 0, "save remains behind the barrier");
+            release.release();
+            let gate = h.manager.gate();
+            tokio::time::timeout(WAIT, gate.close(gate.epoch()))
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(h.store.save_count(), 1, "reconcile must actually save");
-            assert!(!dir.join("persist.before.arrived").exists());
         },
     );
 }
@@ -430,7 +437,13 @@ fn persist_failure_is_an_io_error() {
         let operation = h.manager.gate().begin_operation().unwrap();
         let manager = h.manager.clone();
         let saved = operation.run_blocking(move || {
-            manager.persist(&auth, auth.registration_epoch, auth.generation, Save::Yes)
+            manager.persist(
+                &auth,
+                auth.registration_epoch,
+                auth.generation,
+                0,
+                Save::Yes,
+            )
         });
         drop(operation);
         assert!(matches!(saved.await.unwrap(), Err(ManagerError::Store(_))));
@@ -449,7 +462,13 @@ fn persist_stops_before_the_write() {
         let operation = h.manager.gate().begin_operation().unwrap();
         let manager = h.manager.clone();
         let saved = operation.run_blocking(move || {
-            manager.persist(&auth, auth.registration_epoch, auth.generation, Save::Yes)
+            manager.persist(
+                &auth,
+                auth.registration_epoch,
+                auth.generation,
+                0,
+                Save::Yes,
+            )
         });
         drop(operation);
         arrived(&dir.join("persist.before.arrived")).await;

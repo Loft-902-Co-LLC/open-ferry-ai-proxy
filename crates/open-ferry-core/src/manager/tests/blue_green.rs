@@ -796,7 +796,7 @@ impl AuthStore for HoldingStore {
 // save. The gate quiesces, and a late 401 on a request that used the older
 // token reaches the D3 path. Memory has moved past the token that failed, so
 // nothing is adopted from the file: the refresh's token is still in memory
-// when it saves, and the file ends with it.
+// until it saves. L27 then reconciles memory with the newer tokens on disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_401_after_a_refresh_published_does_not_replace_its_unsaved_token() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -857,12 +857,14 @@ async fn a_401_after_a_refresh_published_does_not_replace_its_unsaved_token() {
     assert_eq!(access_token(&manager.get(ID).unwrap()), "access-1");
 
     release_tx.send(()).unwrap();
-    refresh.await.unwrap().expect("the refresh finishes");
+    let refreshed = refresh.await.unwrap().expect("the refresh finishes");
     closing.await.unwrap().expect("closes");
-    assert_eq!(access_token(&manager.get(ID).unwrap()), "access-1");
+    // L27: the Codex disk baseline keeps newer tokens and reconciles memory.
+    assert_eq!(access_token(&refreshed), "access-9");
+    assert_eq!(access_token(&manager.get(ID).unwrap()), "access-9");
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["access_token"], "access-1");
-    assert_eq!(saved["refresh_token"], "refresh-1");
+    assert_eq!(saved["access_token"], "access-9");
+    assert_eq!(saved["refresh_token"], "refresh-9");
     assert_eq!(provider.reused(), 0);
 }
 
@@ -900,19 +902,24 @@ async fn adopting_from_the_file_leaves_the_persist_watermark_alone() {
     let (epoch, generation) = env.versions();
     let mut next = env.manager.get(ID).unwrap().as_ref().clone();
     next.metadata
-        .insert("access_token".into(), json!("access-10"));
+        .insert("note".into(), json!("newer generation"));
     held.clone()
         .scope(async {
             env.manager.persist(
                 &next,
                 epoch,
                 generation + 1,
+                0,
                 crate::manager::lifecycle::Save::Yes,
             )
         })
         .await
         .expect("saved");
-    assert_eq!(env.on_disk()["access_token"], "access-10");
+    // L27: an admitted configuration save lands non-token fields, keeping disk tokens.
+    assert_eq!(env.on_disk()["note"], "newer generation");
+    assert_eq!(env.on_disk()["access_token"], "access-9");
+    assert_eq!(env.on_disk()["refresh_token"], "refresh-9");
+    assert_eq!(watermark(), (epoch, generation + 1));
     drop(held);
     closing.await.expect("task").expect("closes");
 }
@@ -1035,7 +1042,7 @@ fn hold_save(manager: &Manager, when: impl Fn(&Auth) -> bool + Send + Sync + 'st
 // job. It is held after the provider rotated the token and before it
 // publishes. The gate quiesces and a 401 on a request that used the old token
 // reaches D3: the refresh holds the credential's refresh lock, so nothing is
-// adopted, and the refresh's token is the one memory and the file end with.
+// adopted. L27 keeps the newer disk tokens and reconciles memory after saving.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_401_adopts_nothing_while_a_refresh_without_a_job_is_in_flight() {
     for request_path in [false, true] {
@@ -1065,11 +1072,13 @@ async fn a_401_adopts_nothing_while_a_refresh_without_a_job_is_in_flight() {
         assert_eq!(env.token(), "access-0", "request path {request_path}");
 
         env.provider.release();
-        refresh.await.expect("task").expect("the refresh finishes");
+        let refreshed = refresh.await.expect("task").expect("the refresh finishes");
         closing.await.expect("task").expect("closes");
-        assert_eq!(env.token(), "access-1", "request path {request_path}");
-        assert_eq!(env.on_disk()["refresh_token"], "refresh-1");
-        assert_eq!(env.on_disk()["access_token"], "access-1");
+        // L27: the Codex disk baseline keeps newer tokens and reconciles memory.
+        assert_eq!(access_token(&refreshed), "access-9");
+        assert_eq!(env.token(), "access-9", "request path {request_path}");
+        assert_eq!(env.on_disk()["refresh_token"], "refresh-9");
+        assert_eq!(env.on_disk()["access_token"], "access-9");
         assert_eq!(env.provider.reused(), 0);
     }
 }
@@ -1125,6 +1134,7 @@ async fn a_failed_save_does_not_make_an_older_one_stale() {
         &with_note("newer"),
         epoch,
         generation + 5,
+        0,
         crate::manager::lifecycle::Save::Yes,
     );
     assert!(refused.is_err());
@@ -1136,6 +1146,7 @@ async fn a_failed_save_does_not_make_an_older_one_stale() {
                 &with_note("older"),
                 epoch,
                 generation + 2,
+                0,
                 crate::manager::lifecycle::Save::Yes,
             )
         })
@@ -1206,6 +1217,7 @@ async fn a_save_that_fails_with_a_store_error_does_not_make_an_older_one_stale()
             &with_note(note),
             epoch,
             generation,
+            0,
             crate::manager::lifecycle::Save::Yes,
         )
     };
@@ -1225,8 +1237,8 @@ async fn a_save_that_fails_with_a_store_error_does_not_make_an_older_one_stale()
 // Not upstream's: C2-R1. An admitted update published its snapshot, holding
 // the old token, and is held before its save. The gate quiesces and D3 would
 // adopt the token another process left in the file: it is refused while the
-// save is pending, so the save cannot write the old token over the adopted
-// one. Memory and the file agree when it is done.
+// save is pending. L27 keeps the disk tokens during the save; a later D3 401
+// adopts them once the save is done.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_401_adopts_nothing_while_an_admitted_save_is_pending() {
     let env = Env::new();
@@ -1256,8 +1268,83 @@ async fn a_401_adopts_nothing_while_an_admitted_save_is_pending() {
     drop(operation);
     closing.await.expect("task").expect("closes");
     assert_eq!(env.on_disk()["note"], "kept");
-    assert_eq!(env.on_disk()["access_token"], env.token());
+    // L27: an admitted Codex configuration save keeps the newer disk tokens.
+    assert_eq!(env.on_disk()["access_token"], "access-9");
+    assert_eq!(env.on_disk()["refresh_token"], "refresh-9");
+    assert_eq!(env.token(), "access-0");
     assert!(lock(&env.manager.shared.state).pending_saves.is_empty());
+    assert_next_401_adopts_disk_tokens(&env).await;
+}
+
+/// Once an admitted save is done, D3 can adopt the tokens it kept on disk.
+async fn assert_next_401_adopts_disk_tokens(env: &Env) {
+    let before = std::fs::read(env.dir.path().join(ID)).expect("file");
+    let failed = env.manager.get(ID).expect("credential");
+    let adopted = env
+        .manager
+        .try_refresh_after_unauthorized(&failed, &ExecError::upstream(401, "401"), false)
+        .await
+        .expect("the next 401 adopts the disk tokens");
+    assert_eq!(access_token(&adopted), "access-9");
+    assert_eq!(refresh_token(&adopted), "refresh-9");
+    assert_eq!(env.token(), "access-9");
+    assert_eq!(adopted.metadata["note"], "kept");
+    assert_eq!(env.provider.calls(), 0, "never refreshes");
+    assert_eq!(
+        std::fs::read(env.dir.path().join(ID)).expect("file"),
+        before,
+        "never writes"
+    );
+}
+
+// L27 is Codex-only: an admitted non-Codex save still replaces disk tokens.
+#[tokio::test(start_paused = true)]
+async fn an_admitted_non_codex_save_overwrites_the_tokens_on_disk() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let files = Arc::new(FileStore::new(dir.path()));
+    let gate = ActiveGate::open();
+    files.set_gate(gate.clone());
+    let manager = Manager::with_clock(
+        Settings::default(),
+        Arc::new(FakeModels::default()),
+        Some(files as Arc<dyn AuthStore>),
+        TestClock::new().clock(),
+    );
+    manager.set_gate(gate.clone());
+    let mut auth = credential();
+    auth.id = "gemini-a.json".into();
+    auth.file_name = auth.id.clone();
+    auth.provider = "gemini".into();
+    auth.metadata.insert("type".into(), json!("gemini"));
+    let registered = manager.register(auth).expect("register");
+    let path = dir.path().join(&registered.file_name);
+    let mut file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("json");
+    file["access_token"] = json!("access-9");
+    file["refresh_token"] = json!("refresh-9");
+    std::fs::write(&path, serde_json::to_vec(&file).expect("json")).expect("write");
+
+    let operation = gate.begin_operation().expect("operation");
+    gate.quiesce(gate.epoch()).expect("quiesces");
+    let mut next = registered.as_ref().clone();
+    next.metadata.insert("note".into(), json!("kept"));
+    operation
+        .clone()
+        .scope(async { manager.update(next) })
+        .await
+        .expect("the admitted update saves")
+        .expect("credential");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("json");
+    assert_eq!(saved["access_token"], "access-0");
+    assert_eq!(saved["refresh_token"], "refresh-0");
+    assert_eq!(saved["note"], "kept");
+    assert_eq!(
+        access_token(&manager.get(&registered.id).unwrap()),
+        "access-0"
+    );
+    drop(operation);
+    gate.settle(gate.epoch()).await.expect("closes");
 }
 
 // Not upstream's: an edit is made on the credential as it is, so a refresh
@@ -1478,11 +1565,12 @@ async fn a_401_does_not_read_the_store_while_a_save_is_pending() {
 }
 
 // Not upstream's: C3-1 (b). D3 passes its first look and reads the record,
-// which holds a newer token. An admitted update then publishes the old token
-// and finishes saving it before D3 takes the state lock. D3 must see that a
-// save went by and adopt nothing: memory and the file agree.
+// which holds a newer token. A live settings edit then publishes a save.
+// Adoption excludes the write until its read is judged, and sees the pending
+// publication and adopts nothing. L27 keeps disk tokens; the next D3 401
+// adopts them after the save.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_401_adopts_nothing_when_a_save_finished_after_its_read() {
+async fn a_401_adopts_nothing_when_a_save_is_published_after_its_read() {
     let env = Env::new();
     let hold = hold_adoption(&env.manager);
     let operation = env.gate.begin_operation().expect("operation");
@@ -1500,22 +1588,36 @@ async fn a_401_adopts_nothing_when_a_save_finished_after_its_read() {
     };
     hold.wait_entered().await;
 
-    let mut next = env.manager.get(ID).expect("credential").as_ref().clone();
-    next.metadata.insert("note".into(), json!("kept"));
+    let save_hold = hold_save(&env.manager, |auth| auth.metadata.contains_key("note"));
     let manager = env.manager.clone();
-    operation
-        .scope(async move { manager.update(next) })
-        .await
-        .expect("the update saves");
-    assert_eq!(env.on_disk()["note"], "kept");
-    assert!(lock(&env.manager.shared.state).pending_saves.is_empty());
-
+    let updating = operation.clone();
+    let update = tokio::spawn(updating.scope(async move {
+        manager
+            .run_persistence(|manager| {
+                manager.edit(ID, |auth| {
+                    auth.metadata.insert("note".into(), json!("kept"));
+                    Ok::<_, String>(true)
+                })
+            })
+            .await
+            .expect("blocking edit")
+            .expect("the update saves")
+    }));
+    save_hold.wait_entered().await;
+    assert!(!lock(&env.manager.shared.state).pending_saves.is_empty());
+    save_hold.release();
     hold.release();
     assert!(d3.await.expect("task").is_none(), "nothing is adopted");
+    update.await.expect("update task");
+    drop(operation);
+    assert!(lock(&env.manager.shared.state).pending_saves.is_empty());
     assert_eq!(env.token(), "access-0");
-    assert_eq!(env.on_disk()["access_token"], env.token());
+    // L27: an admitted Codex configuration save keeps the newer disk tokens.
+    assert_eq!(env.on_disk()["access_token"], "access-9");
+    assert_eq!(env.on_disk()["refresh_token"], "refresh-9");
     assert_eq!(env.on_disk()["note"], "kept");
     closing.await.expect("task").expect("closes");
+    assert_next_401_adopts_disk_tokens(&env).await;
 }
 
 // Not upstream's: C4-1. A request holds a snapshot of the credential. The

@@ -487,7 +487,7 @@ impl AuthStore for CallbackStore {
             let _ = manager.list();
             self.reads.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(String::new())
+        Ok(auth.id.clone())
     }
 
     fn delete(&self, _id: &str) -> io::Result<()> {

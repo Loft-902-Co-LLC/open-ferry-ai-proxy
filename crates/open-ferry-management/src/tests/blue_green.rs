@@ -108,6 +108,8 @@ fn names(dir: &AuthDir) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        // Codex credentials keep a permanent lock file, as upstream does.
+        .filter(|name| !name.to_ascii_lowercase().ends_with(".json.lock"))
         .collect();
     names.sort();
     names
@@ -1151,6 +1153,8 @@ async fn a_status_or_fields_change_keeps_tokens_saved_after_its_lookup() {
         let mut t1 = Auth::clone(&api.manager.get("a.json").unwrap());
         t1.metadata.insert("access_token".into(), json!("t1"));
         t1.metadata.insert("refresh_token".into(), json!("r1"));
+        // A real refresh persists the rotation before it is adopted.
+        dir.write("a.json", &serde_json::to_string(&t1.metadata).unwrap());
         api.manager.update(t1).unwrap();
         release.send(()).unwrap();
         let answer = request.await.unwrap();

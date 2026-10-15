@@ -64,6 +64,7 @@ pub(crate) const MAX_SESSIONS: usize = 1024;
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Callback {
     pub(crate) code: String,
+    pub(crate) client_id: String,
     pub(crate) error: String,
 }
 
@@ -167,6 +168,8 @@ struct Inner {
 
 struct Entry {
     session: Session,
+    bind: bool,
+    committing: bool,
     /// Where the session's callback goes, until one has gone or the session
     /// stops being pending. Dropping it wakes the waiting login.
     callback: Option<oneshot::Sender<Callback>>,
@@ -253,6 +256,8 @@ impl Store {
         inner.sessions.insert(
             state.to_owned(),
             Entry {
+                bind: false,
+                committing: false,
                 session,
                 callback: Some(sender),
                 changes,
@@ -291,6 +296,7 @@ impl Store {
         message.clone_into(&mut entry.session.status);
         entry.session.expires_at = later(now, ttl);
         entry.callback = None;
+        entry.committing = false;
         entry.changes.send_replace(());
     }
 
@@ -315,6 +321,7 @@ impl Store {
         entry.session.completed = true;
         entry.session.expires_at = later(now, completed_ttl);
         entry.callback = None;
+        entry.committing = false;
         entry.changes.send_replace(());
     }
 
@@ -330,6 +337,37 @@ impl Store {
     /// The session for `state` unless it completed (`GetOAuthSession`).
     pub(crate) fn active(&self, state: &str) -> Option<Session> {
         self.get(state).filter(|session| !session.completed)
+    }
+
+    pub(super) fn mark_bind(&self, state: &str) {
+        if let Some(entry) = self.lock().sessions.get_mut(state) {
+            entry.bind = true;
+        }
+    }
+
+    pub(super) fn is_bind(&self, state: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(state)
+            .is_some_and(|entry| entry.bind)
+    }
+
+    /// Checks the selected registration immediately before a bind commits.
+    pub(super) fn admit_bind(&self, state: &str, id: u64) -> bool {
+        let mut inner = self.lock();
+        inner.purge(Instant::now());
+        let Some(entry) = inner.sessions.get_mut(state) else {
+            return false;
+        };
+        if entry.id != id
+            || !entry.bind
+            || entry.committing
+            || !pending_for(&entry.session, "codex")
+        {
+            return false;
+        }
+        entry.committing = true;
+        true
     }
 
     /// Whether the session for `state` is pending, for `provider` unless it
@@ -358,7 +396,7 @@ impl Store {
         let pending = inner
             .sessions
             .get(state)
-            .is_some_and(|entry| entry.session.is_pending());
+            .is_some_and(|entry| entry.session.is_pending() && !entry.committing);
         if pending {
             inner.sessions.remove(state);
         }
@@ -457,7 +495,7 @@ impl Inner {
     /// Drops the sessions that have expired (`purgeExpiredLocked`).
     fn purge(&mut self, now: Instant) {
         self.sessions
-            .retain(|_, entry| now <= entry.session.expires_at);
+            .retain(|_, entry| entry.committing || now <= entry.session.expires_at);
     }
 }
 
@@ -529,4 +567,43 @@ pub(crate) fn normalize_callback_provider(provider: &str) -> Option<String> {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     plugin.then_some(provider)
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    #[test]
+    fn admitted_sessions_expire_after_completion_or_failure() {
+        for failed in [false, true] {
+            let store = Store::new(Duration::from_nanos(1));
+            // Give admission a real window, then make its pending expiry past.
+            store.lock().ttl = Duration::from_secs(60);
+            let registration = store.register("bind-expiry-test", "codex").unwrap();
+            store.mark_bind("bind-expiry-test");
+            assert!(store.admit_bind("bind-expiry-test", registration.id));
+            assert!(!store.cancel("bind-expiry-test"));
+            store
+                .lock()
+                .sessions
+                .get_mut("bind-expiry-test")
+                .unwrap()
+                .session
+                .expires_at = Instant::now() - Duration::from_secs(1);
+            assert_eq!(store.count(), 1);
+            if failed {
+                store.set_error("bind-expiry-test", "test failure");
+            } else {
+                store.complete("bind-expiry-test");
+            }
+            store
+                .lock()
+                .sessions
+                .get_mut("bind-expiry-test")
+                .unwrap()
+                .session
+                .expires_at = Instant::now() - Duration::from_secs(1);
+            assert_eq!(store.count(), 0);
+        }
+    }
 }

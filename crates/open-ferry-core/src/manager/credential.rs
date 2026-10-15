@@ -213,11 +213,7 @@ pub(crate) fn disable_cooling_override(auth: &Auth) -> Option<bool> {
 
 /// The access token, or empty (upstream's `authAccessToken`).
 pub(crate) fn access_token(auth: &Auth) -> String {
-    let token = metadata_string(auth, "access_token");
-    if !token.is_empty() {
-        return token;
-    }
-    metadata_string(auth, "accessToken")
+    auth.access_token().to_owned()
 }
 
 /// The refresh token, or empty (upstream's `authRefreshToken`).
@@ -249,6 +245,9 @@ fn api_key(auth: &Auth) -> String {
 /// Whether the credential can refresh (upstream's
 /// `authHasRefreshCredential`): a refresh token, or Meta's device token.
 pub(crate) fn has_refresh_credential(auth: &Auth) -> bool {
+    if auth.siwc_refresh_due_at(chrono::Utc::now()).is_some() {
+        return true;
+    }
     if !metadata_string(auth, "refresh_token").is_empty()
         || !metadata_string(auth, "refreshToken").is_empty()
     {
@@ -262,6 +261,16 @@ pub(crate) fn has_refresh_credential(auth: &Auth) -> bool {
 /// Whether the tokens or API key differ (upstream's `CredentialsChanged`).
 pub(crate) fn credentials_changed(existing: &Auth, incoming: &Auth) -> bool {
     access_token(existing) != access_token(incoming)
+        || (crate::auth::codex_refresh::is_codex_auth(existing)
+            && (existing.metadata.get("account_id") != incoming.metadata.get("account_id")
+                || existing.outer_access_token() != incoming.outer_access_token()
+                || ["access_token", "refresh_token", "id_token", "client_id"]
+                    .iter()
+                    .any(|key| existing.siwc_token_field(key) != incoming.siwc_token_field(key))
+                || crate::auth::codex_refresh::parse_use_siwc(existing.metadata.get("use_siwc"))
+                    != crate::auth::codex_refresh::parse_use_siwc(
+                        incoming.metadata.get("use_siwc"),
+                    )))
         || refresh_token(existing) != refresh_token(incoming)
         || id_token(existing) != id_token(incoming)
         || api_key(existing) != api_key(incoming)

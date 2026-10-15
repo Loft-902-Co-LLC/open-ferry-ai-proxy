@@ -34,6 +34,13 @@ use crate::exec::{
     StreamResponse,
 };
 
+/// Options for refreshing independent credential partitions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RefreshOptions {
+    /// Refresh every refreshable partition even if it is not due.
+    pub force: bool,
+}
+
 /// Calls one provider with a credential (upstream's `ProviderExecutor`).
 pub trait ProviderExecutor: Send + Sync + 'static {
     /// The provider served, such as `codex`; [`Auth::provider`] of the
@@ -69,6 +76,19 @@ pub trait ProviderExecutor: Send + Sync + 'static {
     /// ones in its metadata. A credential with nothing to refresh, such as an
     /// API key, comes back unchanged.
     fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>>;
+
+    /// Refreshes with the manager's force flag. Existing executors retain
+    /// their `refresh` implementation. Codex executors attach successful
+    /// partition patches and any partial failure to the returned record.
+    /// They clear `Auth::codex_refresh_failure` on complete success. The due
+    /// helpers mark a failed partition due again after the manager's backoff.
+    fn refresh_with_options(
+        &self,
+        auth: Arc<Auth>,
+        _options: RefreshOptions,
+    ) -> BoxFuture<'_, Result<Auth, ExecError>> {
+        self.refresh(auth)
+    }
 
     /// How long before its tokens expire to refresh a credential, or `None`
     /// to not refresh ahead (upstream's `RefreshLead`).

@@ -34,11 +34,9 @@
 //!   provider's `oauth-excluded-models` from it again, and every
 //!   credential's models are registered again, as aliases and exclusions
 //!   may have changed.
-//! - An auth file that is added or changes is registered from the contents
-//!   the watcher read; one that is removed is unregistered. An event for a
-//!   file that is gone by the time it is applied unregisters its
-//!   credential, so a credential the management API deleted isn't brought
-//!   back by an event from before.
+//! - Auth events queue a fresh, save-serialized read. Supported credentials
+//!   never adopt captured watcher tokens. Failed reads keep live work and retry
+//!   with a capped-rate dirty tail; only an accepted removal unregisters them.
 //!
 //! The model catalogs are read from the files the config's `models`
 //! section names before the credentials are registered, and followed while
@@ -61,16 +59,15 @@
 //! the file itself. Once the loop has stopped, a save still goes to the
 //! file, and is loaded at the next start.
 //!
-//! Changes are ordered as upstream's service orders them. Each one carries
-//! a revision from one counter: the watcher takes its event's before it
-//! reads the file, and the API's change takes one once it is saved. A
-//! change at or below the last revision applied to its credential is
-//! skipped, so the watcher's report of a file read before the API saved it
-//! doesn't undo the API's change. A credential the API changed carries its
-//! generation (see [`Auth::generation`]), and is refused once the manager
-//! has changed the credential since, as by a token refresh, keeping the
-//! newer one. The API is told a skipped or refused change was applied, as
-//! upstream tells it.
+//! Changes carry revisions from one counter: the watcher takes its event's
+//! before reading, and the API's change takes one after saving. Same-key
+//! observations and removals wait behind an in-flight read. Its successful
+//! fresh revision, assigned under save serialization just before reading,
+//! is accounted before that parked work drains. Changes at or below this
+//! watermark are skipped; failures claim no revision. Registration and
+//! origin checks fence replacement credentials, while a config-generation
+//! fence immediately retries synthesis held across a config change. The API
+//! is told a skipped or refused change was applied, as upstream tells it.
 //!
 //! Credentials read from files or the config aren't saved back; the manager
 //! saves those it changes itself, as after a refresh.
@@ -141,12 +138,13 @@
 //!   the server when [`Options::self_update`] is set, and follow the
 //!   config's `self-update` on a reload; upstream has none.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -157,12 +155,12 @@ use open_ferry_core::auth::synthesizer::file::{
 use open_ferry_core::auth::synthesizer::{
     StableIdGenerator, SynthesisContext, synthesize_config_auths,
 };
-use open_ferry_core::auth::{Auth, FileStore, Status};
+use open_ferry_core::auth::{AdoptionRead, Auth, AuthStore, FileStore, Status};
 use open_ferry_core::config::{
     AuthFile, Config, ConfigWatcher, ReadGuard, WatchEvent, next_revision,
 };
 use open_ferry_core::gate::{ActivationKey, ActiveGate, Operation};
-use open_ferry_core::manager::{Manager, Settings};
+use open_ferry_core::manager::{AdoptionResult, Manager, ManagerError, Settings};
 use open_ferry_core::models::{ModelCatalog, ModelInfo};
 use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::{CatalogRuntime, ModelRegistry, RegistrationRules};
@@ -674,6 +672,7 @@ struct SyncRequest {
 }
 
 /// A credential change from the management API.
+#[derive(Clone)]
 enum SyncChange {
     /// A credential to register or update.
     Upsert(Box<Auth>),
@@ -681,6 +680,84 @@ enum SyncChange {
     FileWritten(AuthFile),
     /// An auth file removed.
     FileRemoved(PathBuf),
+    /// Successful write authority is separate from its compatibility payload.
+    Completed {
+        payload: Box<SyncChange>,
+        command: CommandSlot,
+    },
+}
+
+// Shared only to let an already-delivered completion be a no-op. The context
+// itself is neither Clone nor Copy and is transferred by value at publication.
+#[derive(Clone)]
+struct CommandSlot {
+    arrival: u64,
+    consumed: Arc<std::sync::atomic::AtomicBool>,
+    authority: Arc<std::sync::Mutex<Option<open_ferry_core::manager::CompletedTokenCommand>>>,
+}
+
+impl CommandSlot {
+    fn new(command: open_ferry_core::manager::CompletedTokenCommand) -> Self {
+        Self {
+            arrival: 0,
+            consumed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            authority: Arc::new(std::sync::Mutex::new(Some(command))),
+        }
+    }
+
+    fn is_live(command: &Option<Self>) -> bool {
+        command
+            .as_ref()
+            .is_some_and(|slot| !slot.consumed.load(Ordering::Acquire))
+    }
+
+    fn provenance_only(self) -> Self {
+        // A stale identity removes authority, never provenance.
+        if self.consumed.load(Ordering::Acquire) {
+            self
+        } else {
+            Self {
+                arrival: self.arrival,
+                consumed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                authority: Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
+    }
+
+    fn newest(current: Option<Self>, incoming: Option<Self>) -> Option<Self> {
+        // Consumption removes authority, never the fresh-only provenance.
+        match (Self::is_live(&current), Self::is_live(&incoming)) {
+            (true, false) => return current,
+            (false, true) => return incoming,
+            _ => {}
+        }
+        match (current, incoming) {
+            (Some(current), Some(incoming)) if current.arrival > incoming.arrival => Some(current),
+            (current, incoming) => incoming.or(current),
+        }
+    }
+}
+
+impl SyncChange {
+    fn payload(&self) -> &Self {
+        match self {
+            Self::Completed { payload, .. } => payload,
+            other => other,
+        }
+    }
+
+    fn take_command(&mut self) -> Option<CommandSlot> {
+        if !matches!(self, Self::Completed { .. }) {
+            return None;
+        }
+        let Self::Completed { payload, command } =
+            std::mem::replace(self, Self::FileRemoved(PathBuf::new()))
+        else {
+            unreachable!("completed payload checked above");
+        };
+        *self = *payload;
+        Some(command)
+    }
 }
 
 /// The service's [`CredentialSync`], which the management API holds: each
@@ -722,6 +799,26 @@ impl CredentialSync for SyncSender {
     fn file_written(&self, file: AuthFile) -> SyncFuture<'_> {
         let revision = next_revision();
         Box::pin(self.send(SyncChange::FileWritten(file), revision))
+    }
+
+    fn completed_token_command(
+        &self,
+        auth: Auth,
+        file: Option<AuthFile>,
+        command: open_ferry_core::manager::CompletedTokenCommand,
+    ) -> SyncFuture<'_> {
+        let revision = next_revision();
+        let payload = file.map_or_else(
+            || SyncChange::Upsert(Box::new(auth)),
+            SyncChange::FileWritten,
+        );
+        Box::pin(self.send(
+            SyncChange::Completed {
+                payload: Box::new(payload),
+                command: CommandSlot::new(command),
+            },
+            revision,
+        ))
     }
 
     fn file_removed(&self, path: PathBuf) -> SyncFuture<'_> {
@@ -781,6 +878,134 @@ struct ReloadRequest {
     operation: Option<Operation>,
 }
 
+// No credentials or event bytes survive in retry state.
+#[derive(Clone)]
+struct ReadIdentity {
+    id: Option<String>,
+    provider: String,
+    path: Option<PathBuf>,
+    file_name: String,
+    registration: Option<u64>,
+    tombstone: u64,
+    binding: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum ReadKey {
+    Id(String),
+    Path(PathBuf),
+}
+
+struct AuthChange {
+    change: SyncChange,
+    revision: u64,
+    applied: Option<oneshot::Sender<()>>,
+    operation: Option<Operation>,
+}
+
+#[derive(Clone)]
+struct RecoveryFloor {
+    origin: Option<PathBuf>,
+    revision: u64,
+}
+
+struct ReadJob {
+    // Only the active job retains the compatibility payload for Retry-now.
+    source: Option<SyncChange>,
+    trigger_revision: u64,
+    recovery_floor: Option<RecoveryFloor>,
+    identity: ReadIdentity,
+    parked: VecDeque<AuthChange>,
+    covered: Vec<AuthChange>,
+    applied: Option<oneshot::Sender<()>>,
+    operation: Option<Operation>,
+    attempt: usize,
+    command: Option<CommandSlot>,
+    pending_command: Option<CommandSlot>,
+}
+
+struct DirtyRead {
+    identity: ReadIdentity,
+    recovery_floor: Option<RecoveryFloor>,
+    deadline: tokio::time::Instant,
+    attempt: usize,
+    command: Option<CommandSlot>,
+}
+
+fn observation_path(auth_dir: &Path, path: &Path) -> PathBuf {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        auth_dir.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(part.as_os_str()),
+        }
+    }
+    normalized
+}
+
+struct ReadCompletion {
+    key: ReadKey,
+    identity: ReadIdentity,
+    config_generation: u64,
+    result: Result<AdoptionResult, ManagerError>,
+    unsupported_empty: bool,
+    unsupported_sourceless: bool,
+    command_consumed: bool,
+}
+
+fn identity_hint(identity: &ReadIdentity, ctx: &SynthesisContext) -> Auth {
+    let provider = if identity.provider.is_empty() {
+        "codex"
+    } else {
+        &identity.provider
+    };
+    let mut auth = identity
+        .path
+        .as_ref()
+        .and_then(|path| {
+            let data = serde_json::to_vec(&serde_json::json!({ "type": provider })).ok()?;
+            synthesize_auth_file(ctx, path, &data).ok().flatten()
+        })
+        .unwrap_or_default();
+    if let Some(id) = &identity.id {
+        auth.id = id.clone();
+    }
+    auth.provider = provider.to_owned();
+    auth.registration_epoch = identity.registration.unwrap_or(0);
+    if !identity.file_name.is_empty() {
+        auth.file_name = identity.file_name.clone();
+    }
+    auth
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        0 => Duration::from_millis(50),
+        1 => Duration::from_millis(200),
+        2 => Duration::from_secs(1),
+        3 => Duration::from_secs(5),
+        _ => Duration::from_secs(30),
+    }
+}
+
+async fn read_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+type ObservationHook = Arc<dyn Fn(&ReadIdentity) + Send + Sync>;
+
 /// The credential manager, the model registry, the server and management
 /// state, and what was registered from the config and the auth directory.
 struct Service {
@@ -817,6 +1042,20 @@ struct Service {
     /// once it is unregistered so an older change can't bring it back
     /// (upstream's `authRevisions`).
     revisions: HashMap<String, u64>,
+    config_generation: Arc<AtomicU64>,
+    reads: HashMap<ReadKey, ReadJob>,
+    dirty_reads: HashMap<ReadKey, DirtyRead>,
+    read_sender: mpsc::UnboundedSender<ReadCompletion>,
+    read_completions: mpsc::UnboundedReceiver<ReadCompletion>,
+    #[cfg(test)]
+    read_hook: Option<ObservationHook>,
+    #[cfg(test)]
+    command_arrival_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    completion_hook: Option<ObservationHook>,
+    #[cfg(test)]
+    removal_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+
     /// The provider keys OpenAI-compatible executors are registered for.
     compat_executors: BTreeSet<String>,
     /// The management API's credential changes, waiting for the loop.
@@ -846,6 +1085,8 @@ struct Service {
     /// replacement.
     #[cfg(test)]
     upsert_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    file_config_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(test)]
     directory_apply_hook: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     #[cfg(test)]
@@ -966,6 +1207,7 @@ impl Service {
         let (catalog_sender, catalog_changes) = mpsc::unbounded_channel();
         let config_writer = Arc::new(FileConfigWriter::new(config_path).with_gate(gate.clone()));
         let checked_config_path = config_writer.path().to_path_buf();
+        let (read_sender, read_completions) = mpsc::unbounded_channel();
         let management = ManagementState::new(
             Arc::clone(&config),
             manager.clone(),
@@ -1007,6 +1249,19 @@ impl Service {
             config_auths: BTreeSet::new(),
             file_auths: HashMap::new(),
             revisions: HashMap::new(),
+            config_generation: Arc::new(AtomicU64::new(0)),
+            reads: HashMap::new(),
+            dirty_reads: HashMap::new(),
+            read_sender,
+            read_completions,
+            #[cfg(test)]
+            read_hook: None,
+            #[cfg(test)]
+            command_arrival_hook: None,
+            #[cfg(test)]
+            completion_hook: None,
+            #[cfg(test)]
+            removal_hook: None,
             compat_executors: BTreeSet::new(),
             sync_requests,
             reload_requests,
@@ -1021,6 +1276,8 @@ impl Service {
             catalog_changes,
             #[cfg(test)]
             upsert_hook: None,
+            #[cfg(test)]
+            file_config_hook: None,
             #[cfg(test)]
             directory_apply_hook: None,
             #[cfg(test)]
@@ -1184,9 +1441,8 @@ impl Service {
             .filter(|(path, _)| matches!(path.try_exists(), Ok(false)))
             .map(|(path, id)| (path.clone(), id.clone()))
             .collect();
-        for (path, id) in gone {
-            self.file_auths.remove(&path);
-            self.remove(&id);
+        for (path, _) in gone {
+            self.remove_auth_file(&path, next_revision());
         }
     }
 
@@ -1222,7 +1478,10 @@ impl Service {
     /// a catalog change or a config reload, whichever comes first.
     async fn work(&mut self, config_path: &Path, events: &mut Option<mpsc::Receiver<WatchEvent>>) {
         let gate = self.gate.clone();
+        let deadline = self.dirty_reads.values().map(|d| d.deadline).min();
         tokio::select! {
+            Some(completion) = self.read_completions.recv() => self.complete_read(completion),
+            _ = read_deadline(deadline) => self.retry_dirty_reads(),
             event = next_event(events) => match event {
                 Some(event) => {
                     // A ticket's snapshot belongs to the work admitted when
@@ -1256,10 +1515,7 @@ impl Service {
                 }
                 self.follow(watching, events);
             }
-            Some(mut request) = self.sync_requests.recv() => {
-                let operation = request.operation.take();
-                in_scope(operation, || self.apply_sync(request)).await;
-            }
+            Some(request) = self.sync_requests.recv() => self.apply_sync(request),
             Some(changed) = self.catalog_changes.recv() => self.refresh_catalog_models(&changed),
             Some(request) = self.reload_requests.recv() => {
                 let operation = request.operation.clone();
@@ -1587,7 +1843,19 @@ impl Service {
         for auth in auths {
             let path = PathBuf::from(auth.attribute("path").unwrap_or_default());
             let id = auth.id.clone();
-            if self.upsert(auth, &rules) && !path.as_os_str().is_empty() {
+            if self.manager.get(&id).is_some()
+                || self
+                    .reads
+                    .values()
+                    .any(|job| job.identity.id.as_ref() == Some(&id))
+            {
+                self.queue_auth_change(AuthChange {
+                    change: SyncChange::Upsert(Box::new(auth)),
+                    revision: next_revision(),
+                    applied: None,
+                    operation: Operation::current(),
+                });
+            } else if self.upsert(auth, &rules) && !path.as_os_str().is_empty() {
                 self.file_auths.insert(path, id);
             }
         }
@@ -1647,6 +1915,7 @@ impl Service {
                     return Ok(false);
                 }
                 let mut auth = incoming;
+                auth.rebase_pending_refreshes_from(live);
                 auth.created_at = live.created_at;
                 if !is_disabled(live) && !is_disabled(&auth) {
                     auth.last_refreshed_at = live.last_refreshed_at;
@@ -1867,93 +2136,995 @@ impl Service {
     /// Applies a credential change from the management API, then says so,
     /// even when it was skipped as stale.
     fn apply_sync(&mut self, request: SyncRequest) {
-        let revision = request.revision;
-        match request.change {
-            SyncChange::Upsert(auth) => {
-                let path = PathBuf::from(auth.attribute("path").unwrap_or_default());
-                let id = auth.id.clone();
-                let rules = self.rules();
-                if self.claim_revision(&id, revision)
-                    && self.upsert(*auth, &rules)
-                    && !path.as_os_str().is_empty()
-                    && let Some(previous) = self.file_auths.insert(path, id.clone())
-                    && previous != id
-                {
-                    self.remove(&previous);
-                }
-            }
-            SyncChange::FileWritten(file) => self.load_auth_file(&file, revision),
-            SyncChange::FileRemoved(path) => self.remove_auth_file(&path, revision),
-        }
-        // The change stands even if its handler has gone.
-        let _ = request.applied.send(());
+        self.queue_auth_change(AuthChange {
+            change: request.change,
+            revision: request.revision,
+            applied: Some(request.applied),
+            operation: request.operation,
+        });
     }
 
-    /// Takes no more credential changes from the management API, and
-    /// applies those already waiting.
+    /// Refuse queued changes and cancel observation acknowledgements at shutdown.
+    /// Running workers keep their operation until they finish; no reads are started.
     fn close_sync(&mut self) {
         self.sync_requests.close();
-        while let Ok(request) = self.sync_requests.try_recv() {
-            self.apply_sync(request);
+        self.config_generation.fetch_add(1, Ordering::SeqCst);
+        self.dirty_reads.clear();
+        self.reads.clear();
+        while self.sync_requests.try_recv().is_ok() {}
+    }
+
+    fn observation_path(&self, path: &Path) -> PathBuf {
+        observation_path(&self.auth_dir, path)
+    }
+
+    fn change_identity(&self, change: &SyncChange) -> (ReadKey, ReadIdentity) {
+        let (id, path) = match change.payload() {
+            SyncChange::Upsert(auth) => (
+                Some(auth.id.clone()),
+                auth.attribute("path").map(PathBuf::from).or_else(|| {
+                    (!auth.file_name.is_empty()).then(|| PathBuf::from(&auth.file_name))
+                }),
+            ),
+            SyncChange::FileWritten(file) => (None, Some(file.path.clone())),
+            SyncChange::FileRemoved(path) => (None, Some(path.clone())),
+            SyncChange::Completed { .. } => unreachable!("payload is unwrapped"),
+        };
+        let path = path.map(|p| self.observation_path(&p));
+        let path_id = path.as_ref().map(|path| {
+            open_ferry_core::auth::file_store::id_for(path, &path.to_string_lossy(), &self.auth_dir)
+        });
+        // Resolve known id/path aliases before looking for in-flight work. A
+        // path-only job remains the same key even when its read registers it.
+        for (key, identity) in self
+            .reads
+            .iter()
+            .map(|(k, j)| (k, &j.identity))
+            .chain(self.dirty_reads.iter().map(|(k, d)| (k, &d.identity)))
+        {
+            if id
+                .as_ref()
+                .is_some_and(|id| identity.id.as_ref() == Some(id))
+                || path_id
+                    .as_ref()
+                    .is_some_and(|id| identity.id.as_ref() == Some(id))
+                || path
+                    .as_ref()
+                    .is_some_and(|path| identity.path.as_ref() == Some(path))
+            {
+                return (key.clone(), identity.clone());
+            }
+        }
+        let live = id.as_ref().and_then(|id| self.manager.get(id)).or_else(|| {
+            path.as_ref().and_then(|path| {
+                self.file_auths
+                    .iter()
+                    .find_map(|(known, id)| {
+                        (self.observation_path(known) == *path)
+                            .then(|| self.manager.get(id))
+                            .flatten()
+                    })
+                    .or_else(|| {
+                        self.manager.list().into_iter().find(|auth| {
+                            auth.attribute("path")
+                                .map(|p| self.observation_path(Path::new(p)) == *path)
+                                .unwrap_or_else(|| {
+                                    !auth.file_name.is_empty()
+                                        && self.observation_path(Path::new(&auth.file_name))
+                                            == *path
+                                })
+                        })
+                    })
+            })
+        });
+        let requested_id = id
+            .clone()
+            .or_else(|| live.as_ref().map(|a| a.id.clone()))
+            .or_else(|| {
+                path.as_ref().map(|p| {
+                    open_ferry_core::auth::file_store::id_for(
+                        p,
+                        &p.to_string_lossy(),
+                        &self.auth_dir,
+                    )
+                })
+            });
+        let registration = requested_id
+            .as_ref()
+            .map(|id| self.manager.observation_registration(id))
+            .unwrap_or((None, 0));
+        let path = path.or_else(|| {
+            live.as_ref()
+                .and_then(|auth| {
+                    auth.attribute("path").map(PathBuf::from).or_else(|| {
+                        (!auth.file_name.is_empty()).then(|| PathBuf::from(&auth.file_name))
+                    })
+                })
+                .map(|path| self.observation_path(&path))
+        });
+        let identity = ReadIdentity {
+            id: id
+                .or_else(|| live.as_ref().map(|a| a.id.clone()))
+                .or_else(|| {
+                    path.as_ref().map(|p| {
+                        open_ferry_core::auth::file_store::id_for(
+                            p,
+                            &p.to_string_lossy(),
+                            &self.auth_dir,
+                        )
+                    })
+                }),
+            provider: live
+                .as_ref()
+                .map_or_else(String::new, |a| a.provider.clone()),
+            path,
+            file_name: live
+                .as_ref()
+                .map_or_else(String::new, |a| a.file_name.clone()),
+            registration: registration.0,
+            tombstone: registration.1,
+            binding: self.store.binding_generation(),
+        };
+        let key = identity
+            .id
+            .as_ref()
+            .filter(|_| live.is_some() || identity.path.is_none())
+            .map_or_else(
+                || ReadKey::Path(identity.path.clone().expect("file observation path")),
+                |id| ReadKey::Id(id.clone()),
+            );
+        (key, identity)
+    }
+
+    // True only when this call applies a removal, not when it parks or rejects work.
+    fn queue_auth_change(&mut self, mut change: AuthChange) -> bool {
+        if let SyncChange::Completed { command, .. } = &mut change.change {
+            // Release/Acquire publishes consumption without waiting on store I/O.
+            if command.consumed.load(Ordering::Acquire) {
+                Self::acknowledge_change(change);
+                return false;
+            }
+            // Arrival order, not the potentially stale trigger revision, chooses
+            // the newest authority when aliases and parked work coalesce.
+            command.arrival = next_revision();
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.command_arrival_hook.take() {
+            hook();
+        }
+        // An event after a registration/origin change starts a new observation,
+        // rather than inheriting the canceled dirty observation's context.
+        let stale: Vec<_> = self
+            .dirty_reads
+            .iter()
+            .filter(|(_, dirty)| !self.identity_is_current(&dirty.identity))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.dirty_reads.remove(&key);
+        }
+        let (key, identity) = self.change_identity(&change.change);
+        let origin = self.change_origin(&change.change);
+        let recovery_floor = self
+            .reads
+            .get(&key)
+            .filter(|job| self.identity_is_current(&job.identity))
+            .and_then(|job| job.recovery_floor.as_ref())
+            .or_else(|| self.dirty_reads.get(&key)?.recovery_floor.as_ref());
+        if change.revision != 0
+            && recovery_floor
+                .is_some_and(|floor| floor.origin == origin && change.revision <= floor.revision)
+        {
+            // Reject the covered payload, never its command; neither the floor
+            // nor the deadline is changed by attaching token-free authority.
+            if let Some(command) = change.change.take_command() {
+                if let Some(job) = self.reads.get_mut(&key) {
+                    job.pending_command =
+                        CommandSlot::newest(job.pending_command.take(), Some(command));
+                } else if let Some(dirty) = self.dirty_reads.get_mut(&key) {
+                    dirty.command = CommandSlot::newest(dirty.command.take(), Some(command));
+                }
+            }
+            Self::acknowledge_change(change);
+            return false;
+        }
+        if let Some(job) = self.reads.get_mut(&key) {
+            job.parked.push_back(change);
+            return false;
+        }
+        let watermark_key = identity.id.clone().unwrap_or_else(|| {
+            identity
+                .path
+                .as_ref()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let watermark = self
+            .revisions
+            .get(&watermark_key)
+            .copied()
+            .unwrap_or(0)
+            .max(
+                identity
+                    .path
+                    .as_ref()
+                    .and_then(|p| self.revisions.get(p.to_string_lossy().as_ref()))
+                    .copied()
+                    .unwrap_or(0),
+            );
+        if change.revision != 0 && change.revision <= watermark {
+            if let Some(command) = change.change.take_command() {
+                // Like a consumed arrival (E2), a consumed stale command is
+                // a no-op: it attaches neither new work nor provenance.
+                if command.consumed.load(Ordering::Acquire) {
+                    Self::acknowledge_change(change);
+                    return false;
+                }
+                // Stale payloads supply no hint; retain the current recovery.
+                let dirty = self.dirty_reads.remove(&key);
+                let floor = dirty
+                    .as_ref()
+                    .and_then(|dirty| dirty.recovery_floor.clone());
+                let command =
+                    CommandSlot::newest(dirty.and_then(|dirty| dirty.command), Some(command));
+                self.start_read_with_command(
+                    key.clone(),
+                    identity,
+                    None,
+                    0,
+                    change.operation,
+                    command,
+                );
+                let job = self.reads.get_mut(&key).unwrap();
+                job.recovery_floor = floor;
+                job.applied = change.applied;
+            } else {
+                Self::acknowledge_change(change);
+            }
+            return false;
+        }
+        if let SyncChange::FileRemoved(path) = &change.change {
+            let live = identity.id.as_ref().and_then(|id| self.manager.get(id));
+            let live_origin = live.as_ref().and_then(|auth| {
+                auth.attribute("path")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        (!auth.file_name.is_empty()).then(|| PathBuf::from(&auth.file_name))
+                    })
+                    .map(|path| self.observation_path(&path))
+            });
+            if live_origin.is_some_and(|origin| origin != self.observation_path(path)) {
+                let path = self.observation_path(path);
+                if self.file_auths.get(&path) == identity.id.as_ref() {
+                    self.file_auths.remove(&path);
+                }
+                Self::acknowledge_change(change);
+                return false;
+            }
+            self.dirty_reads.remove(&key);
+            let claimed = self.claim_revision(&watermark_key, change.revision);
+            debug_assert!(claimed, "removal revision passed the watermark check");
+            if let Some(path) = &identity.path {
+                self.claim_revision(&path.to_string_lossy(), change.revision);
+            }
+            let applied = identity.id.as_ref().is_none_or(|id| {
+                let removed = live
+                    .as_ref()
+                    .is_none_or(|auth| self.manager.remove_observed(auth));
+                if removed {
+                    self.file_auths.retain(|_, known| known != id);
+                    self.registry.unregister_client(id);
+                }
+                removed
+            });
+            if let Some(applied) = change.applied {
+                let _ = applied.send(());
+            }
+            return applied;
+        }
+        let command = self
+            .dirty_reads
+            .remove(&key)
+            .and_then(|dirty| dirty.command);
+        // A new event resets backoff, but only a newer command replaces authority.
+        self.start_read_with_command(key, identity, Some(change), 0, None, command);
+        false
+    }
+
+    #[cfg(test)]
+    fn start_read(
+        &mut self,
+        key: ReadKey,
+        identity: ReadIdentity,
+        change: Option<AuthChange>,
+        attempt: usize,
+        operation: Option<Operation>,
+    ) {
+        self.start_read_with_command(key, identity, change, attempt, operation, None);
+    }
+
+    fn start_read_with_command(
+        &mut self,
+        key: ReadKey,
+        identity: ReadIdentity,
+        mut change: Option<AuthChange>,
+        attempt: usize,
+        operation: Option<Operation>,
+        command: Option<CommandSlot>,
+    ) {
+        debug_assert!(
+            !self.dirty_reads.contains_key(&key),
+            "active read has no dirty timer"
+        );
+        let command = CommandSlot::newest(
+            command,
+            change
+                .as_mut()
+                .and_then(|change| change.change.take_command()),
+        );
+        debug_assert!(
+            !self.reads.contains_key(&key),
+            "observation job must not be replaced"
+        );
+        let manager = self.manager.clone();
+        let store = self.store.clone();
+        let ctx = self.synthesis_context();
+        let auth_dir = self.auth_dir.clone();
+        let generation = self.config_generation.load(Ordering::SeqCst);
+        let config_generation = self.config_generation.clone();
+        let sender = self.read_sender.clone();
+        let trigger_revision = change.as_ref().map_or(0, |change| change.revision);
+        let (source, applied, operation) = match change {
+            Some(change) => (Some(change.change), change.applied, change.operation),
+            None => (None, None, operation.or_else(Operation::current)),
+        };
+        self.reads.insert(
+            key.clone(),
+            ReadJob {
+                source: source.clone(),
+                trigger_revision,
+                recovery_floor: None,
+                identity: identity.clone(),
+                parked: VecDeque::new(),
+                covered: Vec::new(),
+                applied,
+                operation: operation.clone(),
+                attempt,
+                command: command.clone(),
+                pending_command: None,
+            },
+        );
+        #[cfg(test)]
+        let hook = self.read_hook.clone();
+        #[cfg(test)]
+        let completion_hook = self.completion_hook.clone();
+        tokio::spawn(async move {
+            let failed_key = key.clone();
+            let failed_identity = identity.clone();
+            let work = move || {
+                let mut identity = identity;
+                let mut payload_empty = false;
+                let mut unsupported_empty = false;
+                let mut unsupported_sourceless = false;
+                let has_source = source.is_some();
+                let tagged = command.is_some();
+                let mut hint = match source {
+                    Some(SyncChange::Upsert(auth)) => *auth,
+                    Some(SyncChange::FileWritten(file)) => {
+                        // Payloads identify the requested record only. Supported
+                        // records obtain their credentials inside the transaction.
+                        synthesize_auth_file(&ctx, &file.path, &file.data)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| {
+                                payload_empty = true;
+                                identity_hint(&identity, &ctx)
+                            })
+                    }
+                    _ => identity_hint(&identity, &ctx),
+                };
+                hint.registration_epoch = identity.registration.unwrap_or(0);
+                if !identity.provider.is_empty() {
+                    hint.provider.clone_from(&identity.provider);
+                }
+                identity.id = Some(hint.id.clone());
+                if identity.provider.is_empty() {
+                    identity.provider = hint.provider.clone();
+                }
+                if identity.file_name.is_empty() {
+                    identity.file_name = hint.file_name.clone();
+                }
+                let read = |live: &Auth| {
+                    if live.registration_epoch != identity.registration.unwrap_or(0)
+                        || store.binding_generation() != identity.binding
+                        || (identity.registration.is_some()
+                            && (!go::equal_fold(live.provider.trim(), identity.provider.trim())
+                                || live.file_name != identity.file_name
+                                || (identity.path.is_none() && live.attribute("path").is_some())
+                                || identity.path.as_ref().is_some_and(|path| {
+                                    observation_path(
+                                        &auth_dir,
+                                        Path::new(
+                                            live.attribute("path").unwrap_or(&live.file_name),
+                                        ),
+                                    ) != *path
+                                })))
+                    {
+                        return Ok(AdoptionRead::Invalid);
+                    }
+                    let status = store.read_for_adoption(live).map_err(ManagerError::Store)?;
+                    // Tagged writes never publish a compatibility payload, even
+                    // for providers outside the partitioned Codex contract.
+                    let status = if tagged && matches!(status, AdoptionRead::Unsupported) {
+                        store
+                            .read_back(live)
+                            .map_err(ManagerError::Store)?
+                            .map_or(AdoptionRead::Missing, AdoptionRead::Record)
+                    } else {
+                        status
+                    };
+                    let status = match status {
+                        AdoptionRead::Record(record) => {
+                            let path = identity
+                                .path
+                                .as_deref()
+                                .or_else(|| record.attribute("path").map(Path::new))
+                                .ok_or_else(|| {
+                                    ManagerError::Other("missing observation origin".into())
+                                })?;
+                            let bytes = serde_json::to_vec(&record.metadata).map_err(|_| {
+                                ManagerError::Other("invalid observation record".into())
+                            })?;
+                            match synthesize_auth_file(&ctx, path, &bytes).ok().flatten() {
+                                Some(mut auth) => {
+                                    auth.id = live.id.clone();
+                                    AdoptionRead::Record(auth)
+                                }
+                                None => AdoptionRead::Invalid,
+                            }
+                        }
+                        AdoptionRead::Unsupported if payload_empty => {
+                            unsupported_empty = true;
+                            AdoptionRead::Invalid
+                        }
+                        AdoptionRead::Unsupported if !has_source => {
+                            // Unchanged-generation Unsupported failures are payload errors; sourceless retries cannot repair them.
+                            unsupported_sourceless = true;
+                            AdoptionRead::Invalid
+                        }
+                        other => other,
+                    };
+                    #[cfg(test)]
+                    if let Some(hook) = &hook {
+                        hook(&identity);
+                    }
+                    Ok(status)
+                };
+                let validate = || config_generation.load(Ordering::SeqCst) == generation;
+                let mut command_consumed = false;
+                let result = if let Some(slot) = command {
+                    // I3: command slot -> refresh mutex (when used) -> ReloadGuard
+                    // -> per-id save mutex -> short state/store I/O. Blocking only;
+                    // the loop never takes this mutex and no guard crosses await.
+                    let mut command = slot
+                        .authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let had_command = command.is_some();
+                    let result = if had_command {
+                        manager.adopt_completed_token_command_validated(
+                            &hint,
+                            (identity.registration, identity.tombstone),
+                            &mut command,
+                            read,
+                            validate,
+                        )
+                    } else {
+                        manager.adopt_observed_validated(
+                            &hint,
+                            (identity.registration, identity.tombstone),
+                            read,
+                            validate,
+                        )
+                    };
+                    command_consumed = had_command && command.is_none();
+                    if command.is_none() {
+                        // Publish while the authority mutex still excludes siblings.
+                        slot.consumed.store(true, Ordering::Release);
+                    }
+                    result
+                } else {
+                    manager.adopt_observed_validated(
+                        &hint,
+                        (identity.registration, identity.tombstone),
+                        read,
+                        validate,
+                    )
+                };
+                #[cfg(test)]
+                if let Some(hook) = &completion_hook {
+                    hook(&identity);
+                }
+                ReadCompletion {
+                    key,
+                    identity,
+                    config_generation: generation,
+                    result,
+                    unsupported_empty,
+                    unsupported_sourceless,
+                    command_consumed,
+                }
+            };
+            let completion = match operation {
+                Some(operation) => operation.run_blocking(work).await,
+                None => tokio::task::spawn_blocking(work).await,
+            };
+            let completion = completion.unwrap_or_else(|_| ReadCompletion {
+                key: failed_key,
+                identity: failed_identity,
+                config_generation: generation,
+                result: Err(ManagerError::Other("observation worker stopped".into())),
+                unsupported_empty: false,
+                unsupported_sourceless: false,
+                command_consumed: false,
+            });
+            let _ = sender.send(completion);
+        });
+    }
+
+    fn identity_is_current(&self, identity: &ReadIdentity) -> bool {
+        if self.store.binding_generation() != identity.binding {
+            return false;
+        }
+        if identity.id.as_ref().is_some_and(|id| {
+            self.manager.observation_registration(id) != (identity.registration, identity.tombstone)
+        }) {
+            return false;
+        }
+        let live = identity.id.as_ref().and_then(|id| self.manager.get(id));
+        match (identity.registration, live) {
+            (None, None) => true,
+            (Some(epoch), Some(auth)) => {
+                auth.registration_epoch == epoch
+                    && go::equal_fold(auth.provider.trim(), identity.provider.trim())
+                    && auth.file_name == identity.file_name
+                    && identity.path.as_ref().map_or_else(
+                        || auth.attribute("path").is_none(),
+                        |path| {
+                            auth.attribute("path")
+                                .map(|p| self.observation_path(Path::new(p)))
+                                .unwrap_or_else(|| {
+                                    self.observation_path(Path::new(&auth.file_name))
+                                })
+                                == *path
+                        },
+                    )
+            }
+            _ => false,
         }
     }
 
-    /// Unregisters the credential registered for the auth file at `path`,
-    /// unless a change after `revision` was applied to it.
+    fn complete_read(&mut self, completion: ReadCompletion) {
+        let Some(mut job) = self.reads.remove(&completion.key) else {
+            return;
+        };
+        let taken = if completion.command_consumed {
+            job.command.take()
+        } else {
+            None
+        };
+        job.command = CommandSlot::newest(job.command, job.pending_command.take());
+        if !self.identity_is_current(&completion.identity) {
+            job.command = job.command.map(CommandSlot::provenance_only);
+        }
+        let mut retry_now = false;
+        if completion.result.is_err() {
+            tracing::debug!(
+                id = completion.identity.id.as_deref().unwrap_or_default(),
+                "credential observation read failed"
+            );
+        }
+        if completion.unsupported_empty && self.identity_is_current(&completion.identity) {
+            if let Some(SyncChange::FileWritten(file)) = &job.source {
+                self.queue_auth_change(AuthChange {
+                    change: SyncChange::FileRemoved(file.path.clone()),
+                    revision: job.trigger_revision,
+                    applied: None,
+                    operation: job.operation.clone(),
+                });
+            }
+        } else {
+            match completion.result {
+                Ok(AdoptionResult::Published { auth, revision }) => {
+                    if let Some(current) = self.manager.get(&auth.id)
+                        && current.registration_epoch == auth.registration_epoch
+                        && go::equal_fold(current.provider.trim(), auth.provider.trim())
+                        && current.file_name == auth.file_name
+                        && current.attribute("path") == auth.attribute("path")
+                        && self.store.binding_generation() == completion.identity.binding
+                        && (job.trigger_revision == 0 || revision > job.trigger_revision)
+                        && self.claim_revision(&auth.id, revision)
+                    {
+                        self.ensure_executor(&current);
+                        if let Some(path) = completion.identity.path.clone().or_else(|| {
+                            current
+                                .attribute("path")
+                                .map(|path| self.observation_path(Path::new(path)))
+                        }) {
+                            self.claim_revision(&path.to_string_lossy(), revision);
+                            if let Some(previous) =
+                                self.file_auths.insert(path.clone(), auth.id.clone())
+                                && previous != auth.id
+                            {
+                                self.remove(&previous);
+                            }
+                        }
+                        self.registry.register_auth_with(
+                            &current,
+                            &self.rules(),
+                            &self.catalogs.general(),
+                        );
+                        self.manager.reconcile_registry_model_states(&auth.id);
+                    } else if let Some(current) = self.manager.get(&auth.id)
+                        && current.registration_epoch == auth.registration_epoch
+                    {
+                        if self.store.binding_generation() != completion.identity.binding {
+                            #[cfg(test)]
+                            if let Some(hook) = &self.removal_hook {
+                                hook();
+                            }
+                            if self.manager.remove_observed(&auth) {
+                                self.file_auths.retain(|_, id| id != &auth.id);
+                                self.registry.unregister_client(&auth.id);
+                            }
+                        } else {
+                            retry_now = true;
+                            self.file_auths.retain(|_, id| id != &auth.id);
+                            job.parked.push_front(AuthChange {
+                                change: SyncChange::Upsert(Box::new((*current).clone())),
+                                revision: 0,
+                                applied: None,
+                                operation: job.operation.clone(),
+                            });
+                        }
+                    }
+                }
+                Ok(AdoptionResult::Retry) | Err(_) => {
+                    if !completion.unsupported_sourceless
+                        && self.identity_is_current(&completion.identity)
+                    {
+                        retry_now = completion.config_generation
+                            != self.config_generation.load(Ordering::SeqCst);
+                        if !retry_now {
+                            self.dirty_reads.insert(
+                                completion.key.clone(),
+                                DirtyRead {
+                                    identity: completion.identity.clone(),
+                                    recovery_floor: job.recovery_floor.clone().or_else(|| {
+                                        (job.trigger_revision != 0).then(|| RecoveryFloor {
+                                            origin: job
+                                                .source
+                                                .as_ref()
+                                                .map(|source| self.change_origin(source))
+                                                .unwrap_or_else(|| {
+                                                    completion.identity.path.clone()
+                                                }),
+                                            revision: job.trigger_revision,
+                                        })
+                                    }),
+                                    deadline: tokio::time::Instant::now()
+                                        + retry_delay(job.attempt),
+                                    attempt: job.attempt.saturating_add(1),
+                                    command: job.command.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+                Ok(AdoptionResult::Unchanged | AdoptionResult::RegistrationChanged) => {}
+            }
+        }
+        // Revision zero is an unversioned recovery, not a superseding event.
+        // A positive same-origin removal can cancel it; another origin cannot.
+        let origin = job
+            .source
+            .as_ref()
+            .map(|s| self.change_origin(s))
+            .unwrap_or_else(|| completion.identity.path.clone());
+        let mut floors = BTreeMap::new();
+        floors.insert(origin.clone(), job.trigger_revision);
+        let mut removals = BTreeMap::new();
+        for change in &job.parked {
+            let origin = self.change_origin(&change.change);
+            let revisions = if matches!(change.change, SyncChange::FileRemoved(_)) {
+                &mut removals
+            } else {
+                &mut floors
+            };
+            let floor = revisions.entry(origin).or_insert(0);
+            *floor = (*floor).max(change.revision);
+        }
+        let mut pending: Vec<AuthChange> = Vec::new();
+        let mut removed = Vec::new();
+        for mut change in std::mem::take(&mut job.parked) {
+            let change_origin = self.change_origin(&change.change);
+            let (_, identity) = self.change_identity(&change.change);
+            let watermark = identity
+                .id
+                .as_ref()
+                .and_then(|id| self.revisions.get(id))
+                .copied()
+                .unwrap_or(0)
+                .max(
+                    identity
+                        .path
+                        .as_ref()
+                        .and_then(|p| self.revisions.get(p.to_string_lossy().as_ref()))
+                        .copied()
+                        .unwrap_or(0),
+                );
+            if change.revision != 0 && change.revision <= watermark {
+                if let Some(command) = change.change.take_command() {
+                    job.command = CommandSlot::newest(job.command.take(), Some(command));
+                }
+                Self::acknowledge_change(change);
+            } else if matches!(change.change, SyncChange::FileRemoved(_)) {
+                let floor = watermark
+                    .max(floors.get(&change_origin).copied().unwrap_or(0))
+                    .max(if origin.is_none() {
+                        job.trigger_revision
+                    } else {
+                        0
+                    });
+                if (change.revision > floor || (change.revision == 0 && floor == 0))
+                    && removals.get(&change_origin) == Some(&change.revision)
+                    && !removed.contains(&change_origin)
+                {
+                    if !self.queue_auth_change(change) {
+                        continue;
+                    }
+                    removed.push(change_origin.clone());
+                    let mut keep = Vec::new();
+                    for earlier in pending.drain(..) {
+                        if self.change_origin(&earlier.change) == change_origin {
+                            Self::acknowledge_change(earlier);
+                        } else {
+                            keep.push(earlier);
+                        }
+                    }
+                    pending = keep;
+                } else {
+                    Self::acknowledge_change(change);
+                }
+            } else if self.dirty_reads.get(&completion.key).is_some_and(|dirty| {
+                dirty.recovery_floor.as_ref().is_some_and(|floor| {
+                    change_origin == floor.origin
+                        && change.revision != 0
+                        && change.revision <= floor.revision
+                })
+            }) {
+                // The failed trigger already covers this payload, not its authority.
+                if let Some(command) = change.change.take_command() {
+                    job.command = CommandSlot::newest(job.command.take(), Some(command));
+                }
+                job.covered.push(change);
+            } else if removed.contains(&change_origin) {
+                Self::acknowledge_change(change);
+            } else {
+                pending.push(change);
+            }
+        }
+        let reset_backoff = !pending.is_empty();
+        // An id-only job has no distinct competing origin yet. Its aliased
+        // path removal retires that job, including a config-rejected attempt.
+        let origin_removed = removed.contains(&origin) || (origin.is_none() && !removed.is_empty());
+        if origin_removed {
+            job.command = None;
+        }
+        if let Some(dirty) = self.dirty_reads.get_mut(&completion.key) {
+            dirty.command = job.command.clone();
+        }
+        if retry_now && !origin_removed {
+            if let Some(source) = job.source.take() {
+                // This source retains provenance, not the authority its read consumed.
+                job.command = CommandSlot::newest(job.command.take(), taken);
+                pending.insert(
+                    0,
+                    AuthChange {
+                        change: source,
+                        revision: job.trigger_revision,
+                        applied: job.applied.take(),
+                        operation: job.operation.clone(),
+                    },
+                );
+            }
+            pending.splice(0..0, std::mem::take(&mut job.covered));
+        } else {
+            if let Some(applied) = job.applied.take() {
+                let _ = applied.send(());
+            }
+            for change in std::mem::take(&mut job.covered) {
+                Self::acknowledge_change(change);
+            }
+        }
+        if !pending.is_empty() {
+            // Preserve the first origin, notably an explicit current-origin
+            // recovery. Only that origin's highest revision can cover its peers.
+            let next_origin = self.change_origin(&pending[0].change);
+            // Only the selected origin covers these contexts. Different-origin
+            // commands stay parked until their own fresh transaction.
+            for change in &mut pending {
+                if self.change_origin(&change.change) == next_origin
+                    && let Some(command) = change.change.take_command()
+                {
+                    job.command = CommandSlot::newest(job.command.take(), Some(command));
+                }
+            }
+            // Same-origin replacements are newer: covered arrivals never park.
+            if completion.unsupported_sourceless
+                && !origin_removed
+                && self.identity_is_current(&completion.identity)
+                && let Some(floor) = &job.recovery_floor
+                && next_origin != floor.origin
+            {
+                self.claim_recovery_floor(&completion.identity, floor);
+            }
+            let selected = pending
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| self.change_origin(&c.change) == next_origin)
+                .max_by_key(|(_, c)| c.revision)
+                .map(|(i, _)| i)
+                .unwrap();
+            let change = pending.remove(selected);
+            let (key, identity) = self.change_identity(&change.change);
+            if let Some(active) = self.reads.get_mut(&key) {
+                active.pending_command =
+                    CommandSlot::newest(active.pending_command.take(), job.command);
+                active.parked.push_back(change);
+                active.parked.extend(pending);
+                return;
+            }
+            let (covered, parked): (Vec<_>, Vec<_>) = pending
+                .into_iter()
+                .partition(|c| self.change_origin(&c.change) == next_origin);
+            self.dirty_reads.remove(&key);
+            self.start_read_with_command(
+                key.clone(),
+                identity,
+                Some(change),
+                if retry_now && !reset_backoff {
+                    job.attempt
+                } else {
+                    0
+                },
+                job.operation,
+                job.command,
+            );
+            let next = self.reads.get_mut(&key).unwrap();
+            next.covered = covered;
+            next.parked = parked.into();
+        } else if (retry_now
+            || (CommandSlot::is_live(&job.command)
+                && !self.dirty_reads.contains_key(&completion.key)))
+            && !origin_removed
+            && !self.reads.contains_key(&completion.key)
+        {
+            self.start_read_with_command(
+                completion.key.clone(),
+                completion.identity,
+                None,
+                job.attempt,
+                job.operation,
+                job.command,
+            );
+            let next = self.reads.get_mut(&completion.key).unwrap();
+            next.applied = job.applied;
+            next.recovery_floor = job.recovery_floor;
+        } else if completion.unsupported_sourceless
+            && !origin_removed
+            && self.identity_is_current(&completion.identity)
+            && let Some(floor) = job.recovery_floor
+        {
+            debug_assert!(!self.reads.contains_key(&completion.key));
+            self.claim_recovery_floor(&completion.identity, &floor);
+        }
+    }
+
+    fn claim_recovery_floor(&mut self, identity: &ReadIdentity, floor: &RecoveryFloor) {
+        // Settle ordering without publishing the sourceless identity hint.
+        if let Some(id) = &identity.id {
+            self.claim_revision(id, floor.revision);
+        }
+        if let Some(path) = &identity.path {
+            self.claim_revision(&path.to_string_lossy(), floor.revision);
+        }
+    }
+
+    fn change_origin(&self, change: &SyncChange) -> Option<PathBuf> {
+        match change.payload() {
+            SyncChange::FileWritten(file) => Some(self.observation_path(&file.path)),
+            SyncChange::FileRemoved(path) => Some(self.observation_path(path)),
+            SyncChange::Upsert(auth) => auth
+                .attribute("path")
+                .map(PathBuf::from)
+                .or_else(|| (!auth.file_name.is_empty()).then(|| PathBuf::from(&auth.file_name)))
+                .map(|path| self.observation_path(&path)),
+            SyncChange::Completed { .. } => unreachable!("payload is unwrapped"),
+        }
+    }
+
+    fn acknowledge_change(change: AuthChange) {
+        if let Some(applied) = change.applied {
+            let _ = applied.send(());
+        }
+    }
+
+    fn retry_dirty_reads(&mut self) {
+        let now = tokio::time::Instant::now();
+        let due: Vec<_> = self
+            .dirty_reads
+            .iter()
+            .filter(|(_, d)| d.deadline <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in due {
+            let dirty = self.dirty_reads.remove(&key).unwrap();
+            if self.identity_is_current(&dirty.identity) {
+                if let Some(job) = self.reads.get_mut(&key) {
+                    debug_assert!(false, "dirty retry found an active read");
+                    job.pending_command =
+                        CommandSlot::newest(job.pending_command.take(), dirty.command);
+                    if job.recovery_floor.is_none() {
+                        job.recovery_floor = dirty.recovery_floor;
+                    }
+                    continue;
+                }
+                self.start_read_with_command(
+                    key.clone(),
+                    dirty.identity,
+                    None,
+                    dirty.attempt,
+                    None,
+                    dirty.command,
+                );
+                self.reads.get_mut(&key).unwrap().recovery_floor = dirty.recovery_floor;
+            }
+        }
+    }
+
     fn remove_auth_file(&mut self, path: &Path, revision: u64) {
-        let Some(id) = self.file_auths.get(path).cloned() else {
-            return;
-        };
-        if self.claim_revision(&id, revision) {
-            self.file_auths.remove(path);
-            self.remove(&id);
-        }
+        self.queue_auth_change(AuthChange {
+            change: SyncChange::FileRemoved(path.to_owned()),
+            revision,
+            applied: None,
+            operation: Operation::current(),
+        });
     }
 
-    /// Registers the credential in an auth file, from the contents the
-    /// watcher read, unless a change after `revision` was applied to it. A
-    /// file that is gone unregisters its credential instead: the event is
-    /// older than the removal.
     fn load_auth_file(&mut self, file: &AuthFile, revision: u64) {
-        let path = file.path.as_path();
-        if matches!(path.try_exists(), Ok(false)) {
-            self.remove_auth_file(path, revision);
-            return;
-        }
-        let auth = match synthesize_auth_file(&self.synthesis_context(), path, &file.data) {
-            Ok(auth) => auth,
-            Err(error) => {
-                tracing::warn!("skipping auth file {}: {error}", path.display());
-                None
-            }
-        };
-        // The credential in the file, else the one it unregisters.
-        let id = match &auth {
-            Some(auth) => Some(auth.id.clone()),
-            None => self.file_auths.get(path).cloned(),
-        };
-        if let Some(id) = id
-            && !self.claim_revision(&id, revision)
-        {
-            return;
-        }
-        let previous = self.file_auths.remove(path);
-        let Some(auth) = auth else {
-            if let Some(id) = previous {
-                self.remove(&id);
-            }
-            return;
-        };
-        if let Some(previous) = previous
-            && previous != auth.id
-        {
-            self.remove(&previous);
-        }
-        let id = auth.id.clone();
-        let rules = self.rules();
-        if self.upsert(auth, &rules) {
-            self.file_auths.insert(path.to_owned(), id);
-        }
+        self.queue_auth_change(AuthChange {
+            change: SyncChange::FileWritten(file.clone()),
+            revision,
+            applied: None,
+            operation: Operation::current(),
+        });
+    }
+
+    /// Includes worker publications whose completions the loop has not consumed.
+    fn file_auth_ids(&self) -> BTreeSet<String> {
+        self.file_auths
+            .values()
+            .cloned()
+            .chain(
+                self.manager
+                    .list()
+                    .into_iter()
+                    .filter(|auth| auth.attribute("path").is_some())
+                    .map(|auth| auth.id.clone()),
+            )
+            .collect()
     }
 
     /// Sets the attributes each file credential takes from the config
@@ -1963,14 +3134,16 @@ impl Service {
     /// `oauth-excluded-models` changed).
     fn apply_config_to_file_auths(&self) {
         let ctx = self.synthesis_context();
-        let ids: BTreeSet<&String> = self.file_auths.values().collect();
+        let ids = self.file_auth_ids();
         for id in ids {
-            let Some(current) = self.manager.get(id) else {
-                continue;
-            };
-            let mut auth = Auth::clone(&current);
-            if apply_config_attributes(&ctx, &mut auth)
-                && let Err(error) = self.manager.update_unsaved(auth)
+            #[cfg(test)]
+            if let Some(hook) = &self.file_config_hook {
+                hook();
+            }
+            if let Err(open_ferry_core::manager::EditError::Manager(error)) =
+                self.manager.edit_unsaved(&id, |auth| {
+                    Ok::<_, std::convert::Infallible>(apply_config_attributes(&ctx, auth))
+                })
             {
                 tracing::error!("failed to update auth {id}: {error}");
             }
@@ -2014,7 +3187,9 @@ impl Service {
         #[cfg(test)]
         if directory_changes && let Some((arrived, release)) = &self.directory_apply_hook {
             arrived.notify_one();
-            release.notified().await;
+            tokio::time::timeout(Duration::from_secs(60), release.notified())
+                .await
+                .expect("directory apply hook released within 60s");
         }
         in_scope(operation, || {
             self.apply_config_authorized(config, sha256, config_path)
@@ -2032,6 +3207,7 @@ impl Service {
         {
             self.config_applies += 1;
         }
+        self.config_generation.fetch_add(1, Ordering::SeqCst);
         self.deferred_config = None;
         let applied_hash = sha256.clone();
         let previous = std::mem::replace(&mut self.config, config);
@@ -2100,8 +3276,10 @@ impl Service {
                     // the watcher stay where they were.
                     tracing::warn!(%error, "auth directory not changed");
                 } else {
+                    let ids = self.file_auth_ids();
                     self.auth_dir = auth_dir;
-                    for (_, id) in std::mem::take(&mut self.file_auths) {
+                    self.file_auths.clear();
+                    for id in ids {
                         self.remove(&id);
                     }
                     // The new watcher reports every file in the new directory.
@@ -2842,6 +4020,4078 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn stale_command_absorbs_floorless_dirty_recovery() {
+        stale_command_absorbs_dirty(false).await;
+    }
+
+    #[tokio::test]
+    async fn stale_command_absorbs_floored_dirty_recovery() {
+        stale_command_absorbs_dirty(true).await;
+    }
+
+    async fn stale_command_absorbs_dirty(floored: bool) {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        let first = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        write_command_login(&service, &id, false).await;
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"null").unwrap();
+        let revision = next_revision();
+        if !floored {
+            service.revisions.insert(id.clone(), next_revision());
+        }
+        deliver_command(&mut service, tagged_change(&path, first), revision).await;
+        let key = ReadKey::Id(id.clone());
+        assert_eq!(service.dirty_reads[&key].recovery_floor.is_some(), floored);
+        let floor = service.dirty_reads[&key].recovery_floor.clone();
+        let stale_revision = next_revision();
+        service.revisions.insert(id.clone(), next_revision());
+        service.dirty_reads.get_mut(&key).unwrap().deadline = tokio::time::Instant::now();
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        std::fs::write(&path, &saved).unwrap();
+        let mut held = hold_read(&mut service);
+        let (applied, done) = oneshot::channel();
+        service.queue_auth_change(AuthChange {
+            change: tagged_change(&path, command),
+            revision: stale_revision,
+            applied: Some(applied),
+            operation: None,
+        });
+        assert_eq!(
+            service.reads.len() + service.dirty_reads.len(),
+            1,
+            "stale command has exactly one runnable job"
+        );
+        assert_eq!(
+            service.reads[&key].attempt, 0,
+            "stale command resets recovery backoff"
+        );
+        assert_eq!(
+            service.reads[&key]
+                .recovery_floor
+                .as_ref()
+                .map(|f| f.revision),
+            floor.as_ref().map(|f| f.revision),
+            "stale command preserves dirty floor"
+        );
+        held.entered().await;
+        service.retry_dirty_reads();
+        assert_eq!(
+            held.calls.load(Ordering::SeqCst),
+            1,
+            "old deadline starts no second job"
+        );
+        if let Some(floor) = floor {
+            let covered = service
+                .manager
+                .capture_token_command(&id, command_partition(false))
+                .unwrap();
+            let (applied, covered_done) = oneshot::channel();
+            service.queue_auth_change(AuthChange {
+                change: tagged_change(&path, covered),
+                revision: floor.revision,
+                applied: Some(applied),
+                operation: None,
+            });
+            tokio::time::timeout(Duration::from_secs(5), covered_done)
+                .await
+                .expect("folded floor acknowledges covered command within 5s")
+                .unwrap();
+            assert!(
+                service.reads[&key].pending_command.is_some()
+                    && service.reads[&key].parked.is_empty(),
+                "folded floor covers arrival without another read"
+            );
+        }
+        std::fs::write(&path, saved).unwrap();
+        held.release();
+        drain_reads(&mut service).await;
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("folded dirty command acknowledges within 5s")
+            .unwrap();
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "L",
+            "folded dirty command adopts once"
+        );
+        assert!(service.dirty_reads.is_empty() && service.reads.is_empty());
+    }
+
+    #[test]
+    fn consumed_slot_never_replaces_retained_authority() {
+        let (_dir, _path, service, id) = command_fixture();
+        let mut retained = CommandSlot::new(
+            service
+                .manager
+                .capture_token_command(&id, command_partition(false))
+                .unwrap(),
+        );
+        retained.arrival = 1;
+        let mut consumed = CommandSlot::new(
+            service
+                .manager
+                .capture_token_command(&id, command_partition(false))
+                .unwrap(),
+        );
+        consumed.arrival = 2;
+        drop(consumed.authority.lock().unwrap().take());
+        consumed.consumed.store(true, Ordering::Release);
+        for (current, incoming) in [
+            (retained.clone(), consumed.clone()),
+            (consumed.clone(), retained.clone()),
+        ] {
+            let selected = CommandSlot::newest(Some(current), Some(incoming)).unwrap();
+            assert!(
+                Arc::ptr_eq(&selected.authority, &retained.authority),
+                "consumed newest slot preserves retained authority"
+            );
+        }
+        let mut older = consumed.clone();
+        older.arrival = 0;
+        for (current, incoming) in [(older.clone(), consumed.clone()), (consumed.clone(), older)] {
+            let selected = CommandSlot::newest(Some(current), Some(incoming)).unwrap();
+            assert_eq!(
+                selected.arrival, 2,
+                "two consumed slots retain newer provenance"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn consumed_redelivery_preserves_dirty_command() {
+        consumed_redelivery(false).await;
+    }
+
+    #[tokio::test]
+    async fn concurrently_consumed_covered_arrival_preserves_dirty_command() {
+        consumed_redelivery(true).await;
+    }
+
+    async fn consumed_redelivery(concurrent: bool) {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        let first = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        write_command_login(&service, &id, false).await;
+        let change = tagged_change(&path, first);
+        deliver_command(&mut service, change.clone(), next_revision()).await;
+        mark_command_partition(&service, &id, false, "C").await;
+        let second = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        write_command_login(&service, &id, false).await;
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"null").unwrap();
+        let covered_revision = next_revision();
+        deliver_command(&mut service, tagged_change(&path, second), next_revision()).await;
+        let key = ReadKey::Id(id.clone());
+        let dirty = &service.dirty_reads[&key];
+        let retained = dirty.command.as_ref().unwrap().clone();
+        let before = (
+            dirty.attempt,
+            dirty.deadline,
+            dirty.recovery_floor.as_ref().unwrap().revision,
+        );
+        if concurrent {
+            let SyncChange::Completed { command, .. } = &change else {
+                unreachable!()
+            };
+            // Model consumption between taking authority and publishing its bit.
+            command.consumed.store(false, Ordering::Release);
+            let consumed = command.consumed.clone();
+            service.command_arrival_hook =
+                Some(Arc::new(move || consumed.store(true, Ordering::Release)));
+        }
+        let (applied, done) = oneshot::channel();
+        service.queue_auth_change(AuthChange {
+            change,
+            revision: if concurrent {
+                covered_revision
+            } else {
+                next_revision()
+            },
+            applied: Some(applied),
+            operation: None,
+        });
+        assert!(
+            service.dirty_reads.contains_key(&key),
+            "consumed redelivery leaves dirty recovery parked"
+        );
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("consumed redelivery acknowledges within 5s")
+            .unwrap();
+        let dirty = &service.dirty_reads[&key];
+        assert!(
+            Arc::ptr_eq(
+                &dirty.command.as_ref().unwrap().authority,
+                &retained.authority
+            ),
+            "consumed covered arrival preserves dirty authority"
+        );
+        assert_eq!(
+            (
+                dirty.attempt,
+                dirty.deadline,
+                dirty.recovery_floor.as_ref().unwrap().revision
+            ),
+            before,
+            "consumed arrival changes no recovery state"
+        );
+        std::fs::write(&path, saved).unwrap();
+        fire_dirty_deadline(&mut service).await;
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "L",
+            "retained command clears marker after consumed redelivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumed_clone_falls_back_to_fresh_observation() {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        write_command_login(&service, &id, false).await;
+        let change = tagged_change(&path, command);
+        deliver_command(&mut service, change.clone(), next_revision()).await;
+        mark_command_partition(&service, &id, false, "C").await;
+        let SyncChange::Completed { command, .. } = change else {
+            unreachable!()
+        };
+        // A sibling has taken authority but has not yet published the bit.
+        command.consumed.store(false, Ordering::Release);
+        let mut disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        disk["prefix"] = serde_json::json!("consumed-fresh-prefix");
+        std::fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+        let (key, identity) = service.change_identity(&SyncChange::FileWritten(auth_file(&path)));
+        service.start_read_with_command(key, identity, None, 0, None, Some(command));
+        drain_reads(&mut service).await;
+        assert_eq!(
+            service.manager.get(&id).unwrap().prefix,
+            "consumed-fresh-prefix",
+            "consumed clone performs fresh observed adoption"
+        );
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "C",
+            "consumed clone observation clears no marker"
+        );
+    }
+
+    fn consumed_unsupported_fixture() -> (tempfile::TempDir, PathBuf, Service, Auth, CommandSlot) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("consumed.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.provider = "claude".into();
+        let mut auth = (*service.manager.register_unsaved(auth).unwrap()).clone();
+        let command = CommandSlot::new(
+            service
+                .manager
+                .capture_token_command(&auth.id, command_partition(false))
+                .unwrap(),
+        );
+        std::fs::write(&path, br#"{"type":"claude","access_token":"fresh-disk"}"#).unwrap();
+        auth.metadata
+            .insert("access_token".into(), serde_json::json!("stale-payload"));
+        (dir, path, service, auth, command)
+    }
+
+    fn consume_slot(command: &CommandSlot) {
+        drop(command.authority.lock().unwrap().take());
+        command.consumed.store(true, Ordering::Release);
+    }
+
+    #[tokio::test]
+    async fn consumed_dirty_unsupported_retry_keeps_provenance() {
+        let (_dir, path, mut service, auth, command) = consumed_unsupported_fixture();
+        let (key, identity) = service.change_identity(&SyncChange::Upsert(Box::new(auth.clone())));
+        let floor = next_revision();
+        consume_slot(&command);
+        service.dirty_reads.insert(
+            key.clone(),
+            DirtyRead {
+                identity,
+                recovery_floor: Some(RecoveryFloor {
+                    origin: Some(path),
+                    revision: floor,
+                }),
+                deadline: tokio::time::Instant::now(),
+                attempt: 1,
+                command: Some(command),
+            },
+        );
+        service.retry_dirty_reads();
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("consumed dirty retry completes within 5s")
+                .unwrap();
+        assert!(
+            !completion.unsupported_sourceless,
+            "consumed dirty retry uses read_back, never terminal Unsupported"
+        );
+        service.complete_read(completion);
+        assert_eq!(
+            service.manager.get(&auth.id).unwrap().metadata["access_token"],
+            "fresh-disk",
+            "consumed dirty retry adopts fresh read_back record"
+        );
+        assert_ne!(
+            service.revisions.get(&auth.id),
+            Some(&floor),
+            "consumed dirty retry never claims recovery floor"
+        );
+        assert!(
+            service.reads.is_empty() && service.dirty_reads.is_empty(),
+            "consumed dirty retry leaves no command-only work"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumed_arrival_never_publishes_compatibility_payload() {
+        let (_dir, _path, mut service, auth, command) = consumed_unsupported_fixture();
+        let consumed = command.clone();
+        service.command_arrival_hook = Some(Arc::new(move || consume_slot(&consumed)));
+        let id = auth.id.clone();
+        deliver_command(
+            &mut service,
+            SyncChange::Completed {
+                payload: Box::new(SyncChange::Upsert(Box::new(auth))),
+                command,
+            },
+            next_revision(),
+        )
+        .await;
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "fresh-disk",
+            "consumed arrival never publishes compatibility payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumed_dirty_missing_retry_retains_provenance() {
+        let (_dir, path, mut service, auth, command) = consumed_unsupported_fixture();
+        let (key, identity) = service.change_identity(&SyncChange::Upsert(Box::new(auth.clone())));
+        let floor = next_revision();
+        consume_slot(&command);
+        std::fs::remove_file(&path).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        service.read_hook = Some(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        service.dirty_reads.insert(
+            key.clone(),
+            DirtyRead {
+                identity,
+                recovery_floor: Some(RecoveryFloor {
+                    origin: Some(path.clone()),
+                    revision: floor,
+                }),
+                deadline: tokio::time::Instant::now(),
+                attempt: 1,
+                command: Some(command.clone()),
+            },
+        );
+        service.retry_dirty_reads();
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("consumed Missing read completes within 5s")
+                .unwrap();
+        assert!(
+            matches!(completion.result, Ok(AdoptionResult::Retry))
+                && !completion.unsupported_sourceless,
+            "consumed Missing read retries through read_back"
+        );
+        service.complete_read(completion);
+        assert!(
+            service.dirty_reads[&key]
+                .command
+                .as_ref()
+                .is_some_and(|retained| Arc::ptr_eq(&retained.authority, &command.authority)),
+            "consumed Missing retry retains provenance in dirty entry"
+        );
+        assert!(
+            service.reads.is_empty(),
+            "Missing failure waits for its timer"
+        );
+        std::fs::write(
+            &path,
+            br#"{"type":"claude","access_token":"repaired-disk"}"#,
+        )
+        .unwrap();
+        service.dirty_reads.get_mut(&key).unwrap().deadline = tokio::time::Instant::now();
+        service.retry_dirty_reads();
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("consumed repaired read completes within 5s")
+                .unwrap();
+        assert!(
+            !completion.unsupported_sourceless,
+            "consumed repaired retry uses read_back, never terminal Unsupported"
+        );
+        service.complete_read(completion);
+        assert_eq!(
+            service.manager.get(&auth.id).unwrap().metadata["access_token"],
+            "repaired-disk",
+            "consumed Missing retry adopts repaired disk record"
+        );
+        assert_ne!(
+            service.revisions.get(&auth.id),
+            Some(&floor),
+            "consumed Missing retry never claims recovery floor"
+        );
+        assert!(
+            service.reads.is_empty() && service.dirty_reads.is_empty(),
+            "consumed Missing retry leaves no command-only work"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "consumed Missing failure starts only its required retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumed_arrival_config_retry_retains_provenance() {
+        let (_dir, _path, mut service, auth, command) = consumed_unsupported_fixture();
+        let retained = command.clone();
+        let consumed = command.clone();
+        service.command_arrival_hook = Some(Arc::new(move || consume_slot(&consumed)));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let generation = service.config_generation.clone();
+        service.read_hook = Some(Arc::new(move |_| {
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                generation.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let id = auth.id.clone();
+        let (applied, done) = oneshot::channel();
+        service.queue_auth_change(AuthChange {
+            change: SyncChange::Completed {
+                payload: Box::new(SyncChange::Upsert(Box::new(auth))),
+                command,
+            },
+            revision: next_revision(),
+            applied: Some(applied),
+            operation: None,
+        });
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("consumed config-fenced read completes within 5s")
+                .unwrap();
+        assert!(
+            matches!(completion.result, Ok(AdoptionResult::Retry)),
+            "consumed arrival first read fails config fence"
+        );
+        assert!(
+            !completion.command_consumed,
+            "config-fenced consumed arrival does not consume the already-empty slot"
+        );
+        service.complete_read(completion);
+        assert!(
+            service
+                .reads
+                .values()
+                .next()
+                .unwrap()
+                .command
+                .as_ref()
+                .is_some_and(|command| Arc::ptr_eq(&command.authority, &retained.authority)),
+            "config-fenced consumed arrival retains provenance on requeued job"
+        );
+        consume_read(&mut service).await;
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("consumed config retry acknowledges within 5s")
+            .unwrap();
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "fresh-disk",
+            "consumed config retry never publishes compatibility payload"
+        );
+        assert!(
+            service.reads.is_empty() && service.dirty_reads.is_empty(),
+            "consumed config retry leaves no command-only work"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "consumed config failure starts only its required retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn self_consumed_publish_retry_keeps_provenance() {
+        let (_dir, path, mut service, auth, command) = consumed_unsupported_fixture();
+        let retained = command.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        service.read_hook = Some(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let id = auth.id.clone();
+        let (applied, done) = oneshot::channel();
+        service.queue_auth_change(AuthChange {
+            change: SyncChange::Completed {
+                payload: Box::new(SyncChange::Upsert(Box::new(auth))),
+                command,
+            },
+            revision: next_revision(),
+            applied: Some(applied),
+            operation: None,
+        });
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("self-consumed first read completes within 5s")
+                .unwrap();
+        let revision = match &completion.result {
+            Ok(AdoptionResult::Published { revision, .. }) => *revision,
+            _ => panic!("self-consumed first read publishes"),
+        };
+        assert!(completion.command_consumed, "first read takes its own slot");
+        assert!(!CommandSlot::is_live(&Some(retained.clone())));
+        std::fs::write(&path, br#"{"type":"claude","access_token":"rotated-disk"}"#).unwrap();
+        service.revisions.insert(id.clone(), revision);
+        service.complete_read(completion);
+        let retains_provenance = service
+            .reads
+            .values()
+            .next()
+            .unwrap()
+            .command
+            .as_ref()
+            .is_some_and(|command| Arc::ptr_eq(&command.authority, &retained.authority));
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("self-consumed publish retry completes within 5s")
+                .unwrap();
+        assert!(
+            !completion.unsupported_sourceless,
+            "self-consumed publish retry uses read_back"
+        );
+        service.complete_read(completion);
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "rotated-disk",
+            "self-consumed publish retry never publishes stale-payload"
+        );
+        assert!(
+            retains_provenance,
+            "self-consumed publish retry retains its consumed slot on requeued job"
+        );
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("self-consumed publish retry acknowledges within 5s")
+            .unwrap();
+        assert!(
+            service.reads.is_empty() && service.dirty_reads.is_empty(),
+            "self-consumed publish retry leaves no command-only work"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "self-consumed publication starts only its required retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn self_consumed_registration_retry_keeps_provenance() {
+        let (_dir, path, mut service, auth, command) = consumed_unsupported_fixture();
+        let retained = command.clone();
+        let id = auth.id.clone();
+        service.manager.remove(&id);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        service.read_hook = Some(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let (applied, done) = oneshot::channel();
+        service.queue_auth_change(AuthChange {
+            change: SyncChange::Completed {
+                payload: Box::new(SyncChange::Upsert(Box::new(auth))),
+                command,
+            },
+            revision: next_revision(),
+            applied: Some(applied),
+            operation: None,
+        });
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("registration first read completes within 5s")
+                .unwrap();
+        let revision = match &completion.result {
+            Ok(AdoptionResult::Published { revision, .. }) => *revision,
+            _ => panic!("registration first read publishes"),
+        };
+        assert!(
+            completion.command_consumed,
+            "registration read takes its slot"
+        );
+        assert_eq!(completion.identity.registration, None);
+        assert!(!service.identity_is_current(&completion.identity));
+        std::fs::write(
+            &path,
+            br#"{"type":"claude","access_token":"registration-disk"}"#,
+        )
+        .unwrap();
+        service.revisions.insert(id.clone(), revision);
+        service.complete_read(completion);
+        assert!(
+            service
+                .reads
+                .values()
+                .next()
+                .unwrap()
+                .command
+                .as_ref()
+                .is_some_and(|slot| slot.consumed.load(Ordering::Acquire)
+                    && Arc::ptr_eq(&slot.authority, &retained.authority)),
+            "stale registration retry retains taken provenance"
+        );
+        consume_read(&mut service).await;
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "registration-disk",
+            "stale registration retry never publishes stale-payload"
+        );
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("registration retry acknowledges within 5s")
+            .unwrap();
+        assert!(service.reads.is_empty() && service.dirty_reads.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn stale_consumed_publish_retry_keeps_provenance() {
+        let (_dir, path, mut service, auth, command) = consumed_unsupported_fixture();
+        let retained = command.clone();
+        let id = auth.id.clone();
+        assert_eq!(auth.attribute("path"), Some(path.to_str().unwrap()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        service.read_hook = Some(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let (applied, done) = oneshot::channel();
+        service.queue_auth_change(AuthChange {
+            change: SyncChange::Completed {
+                payload: Box::new(SyncChange::Upsert(Box::new(auth))),
+                command,
+            },
+            revision: next_revision(),
+            applied: Some(applied),
+            operation: None,
+        });
+        let first = tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+            .await
+            .expect("two-race first read completes within 5s")
+            .unwrap();
+        let revision = match &first.result {
+            Ok(AdoptionResult::Published { revision, .. }) => *revision,
+            _ => panic!("two-race first read publishes"),
+        };
+        assert!(first.command_consumed);
+        service.revisions.insert(id.clone(), revision);
+        service.complete_read(first);
+        assert!(
+            service
+                .reads
+                .values()
+                .next()
+                .unwrap()
+                .command
+                .as_ref()
+                .is_some_and(|slot| Arc::ptr_eq(&slot.authority, &retained.authority))
+        );
+        let second = tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+            .await
+            .expect("two-race second read completes within 5s")
+            .unwrap();
+        assert!(matches!(
+            second.result,
+            Ok(AdoptionResult::Published { .. })
+        ));
+        assert!(!second.command_consumed, "second read has provenance only");
+        std::fs::write(
+            &path,
+            br#"{"type":"claude","access_token":"two-race-disk"}"#,
+        )
+        .unwrap();
+        let before = service.manager.get(&id).unwrap();
+        service
+            .manager
+            .edit_unsaved(&id, |live| {
+                live.file_name = "renamed-consumed.json".into();
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        let edited = service.manager.get(&id).unwrap();
+        assert_eq!(edited.registration_epoch, before.registration_epoch);
+        assert_eq!(edited.attribute("path"), before.attribute("path"));
+        assert_eq!(service.store.binding_generation(), second.identity.binding);
+        assert!(!service.identity_is_current(&second.identity));
+        service.complete_read(second);
+        // Leave the file-name edit in place: R3 captured it synchronously.
+        consume_read(&mut service).await;
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "two-race-disk",
+            "two-race stale retry never publishes stale-payload"
+        );
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("two-race retry acknowledges within 5s")
+            .unwrap();
+        assert!(service.reads.is_empty() && service.dirty_reads.is_empty());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "two-race chain starts exactly three reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_pending_command_keeps_provenance_without_authority() {
+        let (_dir, _path, mut service, auth, command) = consumed_unsupported_fixture();
+        let retained = command.clone();
+        let id = auth.id.clone();
+        let (key, identity) = service.change_identity(&SyncChange::Upsert(Box::new(auth.clone())));
+        service.start_read(key.clone(), identity, None, 0, None);
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("forward destination read completes within 5s")
+                .unwrap();
+        assert!(completion.unsupported_sourceless);
+        let (applied, done) = oneshot::channel();
+        // The defensive forward parks an unwrapped payload and its separate slot.
+        let active = service.reads.get_mut(&key).unwrap();
+        active.pending_command = Some(command);
+        active.parked.push_back(AuthChange {
+            change: SyncChange::Upsert(Box::new(auth)),
+            revision: next_revision(),
+            applied: Some(applied),
+            operation: None,
+        });
+        service
+            .manager
+            .edit_unsaved(&id, |live| {
+                live.file_name = "renamed-forward.json".into();
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        assert!(!service.identity_is_current(&completion.identity));
+        service.complete_read(completion);
+        assert!(
+            !retained.consumed.load(Ordering::Acquire),
+            "stale forward leaves original consumed flag false"
+        );
+        consume_read(&mut service).await;
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "fresh-disk",
+            "stale forward never publishes stale-payload"
+        );
+        assert!(
+            retained.authority.lock().unwrap().is_some(),
+            "stale forward never uses original authority"
+        );
+        assert!(!retained.consumed.load(Ordering::Acquire));
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("stale forward acknowledges within 5s")
+            .unwrap();
+        assert!(service.reads.is_empty() && service.dirty_reads.is_empty());
+    }
+
+    #[test]
+    fn command_slot_demotion_preserves_only_provenance() {
+        let (_dir, _path, _service, _auth, mut command) = consumed_unsupported_fixture();
+        command.arrival = 17;
+        let demoted = command.clone().provenance_only();
+        assert_eq!(demoted.arrival, command.arrival);
+        assert!(demoted.consumed.load(Ordering::Acquire));
+        assert!(demoted.authority.lock().unwrap().is_none());
+        assert!(!Arc::ptr_eq(&demoted.consumed, &command.consumed));
+        assert!(!Arc::ptr_eq(&demoted.authority, &command.authority));
+        assert!(!command.consumed.load(Ordering::Acquire));
+        assert!(command.authority.lock().unwrap().is_some());
+        consume_slot(&command);
+        let consumed = command.clone().provenance_only();
+        assert_eq!(consumed.arrival, command.arrival);
+        assert!(Arc::ptr_eq(&consumed.consumed, &command.consumed));
+        assert!(Arc::ptr_eq(&consumed.authority, &command.authority));
+    }
+
+    #[tokio::test]
+    async fn consumed_only_job_starts_no_followup_or_timer() {
+        let (_dir, _path, mut service, auth, command) = consumed_unsupported_fixture();
+        consume_slot(&command);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        service.read_hook = Some(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let (key, identity) = service.change_identity(&SyncChange::Upsert(Box::new(auth)));
+        service.start_read_with_command(
+            key.clone(),
+            identity,
+            None,
+            0,
+            None,
+            Some(command.clone()),
+        );
+        // A sibling's consumed pending clone must not schedule another read.
+        service.reads.get_mut(&key).unwrap().pending_command = Some(command);
+        consume_read(&mut service).await;
+        assert!(
+            service.reads.is_empty(),
+            "consumed-only completion starts no follow-up read"
+        );
+        assert!(
+            service.dirty_reads.is_empty(),
+            "consumed-only completion creates no dirty timer"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "consumed-only job starts exactly one read"
+        );
+    }
+
+    #[tokio::test]
+    async fn folded_provider_service_read_keeps_accounting() {
+        let (_dir, path, mut service, id) = command_fixture();
+        let mut disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        disk["prefix"] = serde_json::json!("folded-service");
+        std::fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+        let (key, mut identity) =
+            service.change_identity(&SyncChange::FileWritten(auth_file(&path)));
+        identity.provider = " CoDeX ".into();
+        assert!(
+            service.identity_is_current(&identity),
+            "folded provider service identity remains current"
+        );
+        let manager = service.manager.clone();
+        service.completion_hook = Some(Arc::new(move |_| {
+            manager
+                .edit_unsaved(&id, |auth| {
+                    auth.provider = " CODEX ".into();
+                    Ok::<_, ()>(true)
+                })
+                .unwrap();
+        }));
+        service.start_read(key, identity, None, 0, None);
+        drain_reads(&mut service).await;
+        assert_eq!(
+            service.manager.list()[0].prefix,
+            "folded-service",
+            "folded provider service read publishes fresh disk"
+        );
+        assert_eq!(
+            service.file_auths.get(&path),
+            Some(&service.manager.list()[0].id),
+            "folded provider publication keeps file accounting"
+        );
+    }
+
+    fn command_partition(siwc: bool) -> open_ferry_core::auth::CodexCredentialPartition {
+        if siwc {
+            open_ferry_core::auth::CodexCredentialPartition::Siwc
+        } else {
+            open_ferry_core::auth::CodexCredentialPartition::Outer
+        }
+    }
+
+    async fn mark_command_partition(service: &Service, id: &str, siwc: bool, token: &'static str) {
+        service
+            .manager
+            .register_executor(Arc::new(CommandRefresher { siwc, token }));
+        tokio::time::timeout(Duration::from_secs(5), service.manager.force_refresh(id))
+            .await
+            .expect("command fixture rotation finishes within 5s")
+            .unwrap();
+        assert!(
+            !service
+                .manager
+                .get(id)
+                .unwrap()
+                .codex_pending_refresh
+                .is_empty()
+        );
+        for runtime_only in [true, false] {
+            service
+                .manager
+                .edit_unsaved(id, |auth| {
+                    auth.attributes
+                        .insert("runtime_only".into(), runtime_only.to_string());
+                    Ok::<_, ()>(true)
+                })
+                .unwrap();
+        }
+    }
+
+    fn command_fixture() -> (tempfile::TempDir, PathBuf, Service, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(
+            dir.path(),
+            "command.json",
+            r#", "refresh_token":"A-refresh", "siwc":{"access_token":"S","refresh_token":"S-refresh"}"#,
+        );
+        let mut service = service(dir.path(), "");
+        service.manager = Manager::new(
+            Settings::from(&*service.config),
+            service.registry.clone(),
+            Some(Arc::new(ServiceRefreshStore {
+                files: service.store.clone(),
+                fail: std::sync::atomic::AtomicBool::new(true),
+            })),
+        );
+
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        (dir, path, service, id)
+    }
+
+    fn live_command_token(service: &Service, id: &str, siwc: bool) -> serde_json::Value {
+        let auth = service.manager.get(id).unwrap();
+        if siwc {
+            auth.metadata["siwc"]["access_token"].clone()
+        } else {
+            auth.metadata["access_token"].clone()
+        }
+    }
+
+    async fn write_command_login(service: &Service, id: &str, siwc: bool) {
+        let mut auth = (*service.manager.get(id).unwrap()).clone();
+        if siwc {
+            let mut tokens = auth.metadata["siwc"].as_object().unwrap().clone();
+            tokens.insert("access_token".into(), serde_json::json!("L"));
+            tokens.insert("refresh_token".into(), serde_json::json!("L-refresh"));
+            // The bind's own write, under its credential lock, as the CLI and
+            // management binds make it.
+            let path = service.store.resolve_auth_path(&auth).unwrap();
+            let guard = tokio::time::timeout(
+                Duration::from_secs(5),
+                open_ferry_core::auth::credential_lock::acquire_credential_lock(&path),
+            )
+            .await
+            .expect("direct bind locks within 5s")
+            .unwrap();
+            service
+                .store
+                .bind_siwc_locked(&auth, tokens, &guard, &|_, _| Ok(()))
+                .unwrap();
+        } else {
+            auth.metadata["access_token"] = serde_json::json!("L");
+            auth.metadata["refresh_token"] = serde_json::json!("L-refresh");
+            // This is the explicit login write, not a manager observation/save.
+            service
+                .store
+                .write_file(
+                    &auth.file_name,
+                    &serde_json::to_vec(&auth.metadata).unwrap(),
+                )
+                .unwrap();
+        }
+    }
+
+    fn tagged_change(
+        path: &Path,
+        command: open_ferry_core::manager::CompletedTokenCommand,
+    ) -> SyncChange {
+        SyncChange::Completed {
+            payload: Box::new(SyncChange::FileWritten(AuthFile {
+                path: path.to_owned(),
+                data: br#"{"type":"codex","access_token":"stale-payload","refresh_token":"stale-payload-refresh"}"#.to_vec().into(),
+            })),
+            command: CommandSlot::new(command),
+        }
+    }
+
+    async fn deliver_command(service: &mut Service, change: SyncChange, revision: u64) {
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change,
+            revision,
+            applied,
+            operation: None,
+        });
+        drain_reads(service).await;
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("tagged completion acknowledges within 5s")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tagged_unsupported_command_reads_disk_without_retry_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tagged-gemini.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.provider = "claude".into();
+        let mut auth = (*service.manager.register_unsaved(auth).unwrap()).clone();
+        let command = service
+            .manager
+            .capture_token_command(&auth.id, command_partition(false))
+            .unwrap();
+        std::fs::write(&path, br#"{"type":"claude","access_token":"fresh-disk"}"#).unwrap();
+        auth.metadata
+            .insert("access_token".into(), serde_json::json!("stale-payload"));
+        let id = auth.id.clone();
+        deliver_command(
+            &mut service,
+            SyncChange::Completed {
+                payload: Box::new(SyncChange::Upsert(Box::new(auth))),
+                command: CommandSlot::new(command),
+            },
+            next_revision(),
+        )
+        .await;
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "fresh-disk",
+            "tagged Unsupported uses fresh disk instead of compatibility payload"
+        );
+        assert!(
+            service.dirty_reads.is_empty() && service.reads.is_empty(),
+            "tagged Unsupported settles without a command retry loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn newest_covered_command_beats_older_parked_command() {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        mark_command_partition(&service, &id, true, "S-new").await;
+        let outer = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        let siwc = service
+            .manager
+            .capture_token_command(&id, command_partition(true))
+            .unwrap();
+        write_command_login(&service, &id, false).await;
+        write_command_login(&service, &id, true).await;
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"null").unwrap();
+        let covered_revision = next_revision();
+        service.load_auth_file(&auth_file(&path), next_revision());
+        drain_reads(&mut service).await;
+        let mut held = hold_read(&mut service);
+        service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+        service.retry_dirty_reads();
+        held.entered().await;
+        service.queue_auth_change(AuthChange {
+            change: tagged_change(&path, outer),
+            revision: next_revision(),
+            applied: None,
+            operation: None,
+        });
+        service.queue_auth_change(AuthChange {
+            change: tagged_change(&path, siwc),
+            revision: covered_revision,
+            applied: None,
+            operation: None,
+        });
+        std::fs::write(&path, saved).unwrap();
+        held.release();
+        drain_reads(&mut service).await;
+        assert_eq!(
+            live_command_token(&service, &id, true),
+            "L",
+            "newest covered authority wins over older parked command"
+        );
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "B",
+            "older parked command cannot replace newer authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_login_command_adopts_fresh_disk_after_watcher() {
+        stale_command_after_watcher(false).await;
+    }
+
+    #[tokio::test]
+    async fn stale_bind_command_adopts_fresh_disk_after_watcher() {
+        stale_command_after_watcher(true).await;
+    }
+
+    async fn stale_command_after_watcher(siwc: bool) {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, siwc, "B").await;
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(siwc))
+            .unwrap();
+        let revision = next_revision();
+        write_command_login(&service, &id, siwc).await;
+        service.load_auth_file(&auth_file(&path), next_revision());
+        drain_reads(&mut service).await;
+        assert_eq!(
+            live_command_token(&service, &id, siwc),
+            "B",
+            "watcher cannot clear command marker"
+        );
+        deliver_command(&mut service, tagged_change(&path, command), revision).await;
+        assert_eq!(
+            live_command_token(&service, &id, siwc),
+            "L",
+            "stale command clears marker through fresh read"
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_login_command_keeps_newer_discard_marker() {
+        let (_dir, path, mut service, id) = command_fixture();
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        let revision = next_revision();
+        write_command_login(&service, &id, false).await;
+        mark_command_partition(&service, &id, false, "B").await;
+        deliver_command(&mut service, tagged_change(&path, command), revision).await;
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "B",
+            "delayed service command keeps newer marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumed_service_command_cannot_clear_another_marker() {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        write_command_login(&service, &id, false).await;
+        let change = tagged_change(&path, command);
+        deliver_command(&mut service, change.clone(), next_revision()).await;
+        assert_eq!(live_command_token(&service, &id, false), "L");
+        mark_command_partition(&service, &id, false, "C").await;
+        deliver_command(&mut service, change, next_revision()).await;
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "C",
+            "consumed service command clears nothing new"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_command_survives_to_thirty_second_tail() {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        write_command_login(&service, &id, false).await;
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"null").unwrap();
+        deliver_command(&mut service, tagged_change(&path, command), next_revision()).await;
+        for _ in 0..4 {
+            fire_dirty_deadline(&mut service).await;
+        }
+        assert!(service.dirty_reads.values().next().unwrap().attempt >= 5);
+        std::fs::write(&path, saved).unwrap();
+        fire_dirty_deadline(&mut service).await;
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "L",
+            "dirty command tail clears marker without event"
+        );
+        assert!(service.dirty_reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepted_removal_drops_dirty_command() {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        std::fs::write(&path, b"null").unwrap();
+        deliver_command(&mut service, tagged_change(&path, command), next_revision()).await;
+        service.remove_auth_file(&path, next_revision());
+        assert!(
+            service.dirty_reads.is_empty(),
+            "accepted removal drops dirty command context"
+        );
+        assert!(service.manager.get(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn covered_login_during_backoff_keeps_command() {
+        covered_command(false).await;
+    }
+
+    #[tokio::test]
+    async fn covered_login_during_sourceless_retry_keeps_command() {
+        covered_command(true).await;
+    }
+
+    async fn covered_command(in_flight: bool) {
+        let (_dir, path, mut service, id) = command_fixture();
+        mark_command_partition(&service, &id, false, "B").await;
+        let command = service
+            .manager
+            .capture_token_command(&id, command_partition(false))
+            .unwrap();
+        let tagged_revision = next_revision();
+        write_command_login(&service, &id, false).await;
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"null").unwrap();
+        service.load_auth_file(&auth_file(&path), next_revision());
+        drain_reads(&mut service).await;
+        let mut held = hold_read(&mut service);
+        if in_flight {
+            service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+            service.retry_dirty_reads();
+            held.entered().await;
+        }
+        let (applied, mut done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: tagged_change(&path, command),
+            revision: tagged_revision,
+            applied,
+            operation: None,
+        });
+        assert_eq!(
+            done.try_recv(),
+            Ok(()),
+            "covered command acknowledged exactly once at arrival"
+        );
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "B",
+            "covered payload is never published"
+        );
+        if in_flight {
+            held.release();
+            drain_reads(&mut service).await;
+        } else {
+            held.release();
+        }
+        std::fs::write(&path, saved).unwrap();
+        fire_dirty_deadline(&mut service).await;
+        assert_eq!(
+            live_command_token(&service, &id, false),
+            "L",
+            "covered command retry clears marker"
+        );
+        assert!(service.dirty_reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn different_origin_claim_rejects_noncurrent_identity() {
+        different_origin_claim_guard(false).await;
+    }
+
+    #[tokio::test]
+    async fn different_origin_claim_rejects_removed_origin() {
+        different_origin_claim_guard(true).await;
+    }
+
+    async fn different_origin_claim_guard(origin_removed: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claim-a.json");
+        let other = dir.path().join("claim-b.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.provider = "claude".into();
+        let auth = service.manager.register_unsaved(auth).unwrap();
+        let source = SyncChange::Upsert(Box::new((*auth).clone()));
+        let (key, mut identity) = service.change_identity(&source);
+        if origin_removed {
+            // An absent registration lets a revision-zero removal settle the
+            // origin without changing the identity/tombstone or claiming a rev.
+            service.manager.remove(&auth.id);
+            let registration = service.manager.observation_registration(&auth.id);
+            identity.registration = registration.0;
+            identity.tombstone = registration.1;
+        }
+        service.read_hook = Some(Arc::new(|_| panic!("guard fixture failed read")));
+        service.start_read(
+            key,
+            identity,
+            Some(AuthChange {
+                change: source,
+                revision: next_revision(),
+                applied: None,
+                operation: None,
+            }),
+            0,
+            None,
+        );
+        drain_reads(&mut service).await;
+        let mut held = hold_read(&mut service);
+        service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+        service.retry_dirty_reads();
+        held.entered().await;
+        if origin_removed {
+            service.remove_auth_file(&path, 0);
+        } else {
+            service.manager.register_unsaved((*auth).clone()).unwrap();
+        }
+        let mut replacement = (*auth).clone();
+        replacement
+            .attributes
+            .insert("path".into(), other.to_string_lossy().into_owned());
+        service.queue_auth_change(AuthChange {
+            change: SyncChange::Upsert(Box::new(replacement)),
+            revision: next_revision(),
+            applied: None,
+            operation: None,
+        });
+        held.release();
+        consume_read(&mut service).await;
+        assert!(
+            !service
+                .revisions
+                .contains_key(path.to_string_lossy().as_ref()),
+            "different-origin guard prevents recovery floor claim"
+        );
+        drain_reads(&mut service).await;
+    }
+
+    struct ReadHold {
+        entered: Arc<tokio::sync::Notify>,
+        release: Option<std::sync::mpsc::Sender<()>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ReadHold {
+        async fn entered(&self) {
+            tokio::time::timeout(Duration::from_secs(5), self.entered.notified())
+                .await
+                .expect("read enters within 5s");
+        }
+        fn release(&mut self) {
+            self.release.take().unwrap().send(()).unwrap();
+        }
+    }
+
+    impl Drop for ReadHold {
+        fn drop(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    fn hold_read(service: &mut Service) -> ReadHold {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, released) = std::sync::mpsc::channel();
+        let released = std::sync::Mutex::new(released);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let arrived = entered.clone();
+        let count = calls.clone();
+        service.read_hook = Some(Arc::new(move |_| {
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                arrived.notify_one();
+                released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("held read released within 60s");
+            }
+        }));
+        ReadHold {
+            entered,
+            release: Some(release),
+            calls,
+        }
+    }
+
+    async fn consume_read(service: &mut Service) {
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("read completes within 5s")
+                .unwrap();
+        service.complete_read(completion);
+    }
+
+    // A deterministic deadline hook, exercised through the production select
+    // branch rather than a sleep or a watcher event.
+    async fn fire_dirty_deadline(service: &mut Service) {
+        assert_eq!(
+            service.dirty_reads.len(),
+            1,
+            "dirty entry survives every retry including the 30s tail"
+        );
+        service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+        service.work(Path::new(""), &mut None).await;
+        drain_reads(service).await;
+    }
+
+    struct ServiceRefreshStore {
+        files: Arc<FileStore>,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl AuthStore for ServiceRefreshStore {
+        fn list(&self) -> io::Result<Vec<Auth>> {
+            self.files.list()
+        }
+        fn save(&self, auth: &Auth) -> io::Result<String> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(io::Error::other("injected rotation failure"));
+            }
+            self.files.save(auth)
+        }
+        fn delete(&self, id: &str) -> io::Result<()> {
+            self.files.delete(id)
+        }
+        fn read_back(&self, auth: &Auth) -> io::Result<Option<Auth>> {
+            self.files.read_back(auth)
+        }
+        fn read_for_adoption(&self, auth: &Auth) -> io::Result<AdoptionRead> {
+            self.files.read_for_adoption(auth)
+        }
+        fn same_record(&self, a: &Auth, b: &Auth) -> io::Result<bool> {
+            self.files.same_record(a, b)
+        }
+        fn binding_generation(&self) -> u64 {
+            self.files.binding_generation()
+        }
+        fn supports_codex_refresh_patches(&self) -> bool {
+            true
+        }
+    }
+
+    struct NamedRefresher(&'static str);
+    impl ProviderExecutor for NamedRefresher {
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn execute(
+            &self,
+            auth: Arc<Auth>,
+            req: Request,
+            opts: Options,
+        ) -> BoxFuture<'_, Result<Response, ExecError>> {
+            Refresher.execute(auth, req, opts)
+        }
+        fn execute_stream(
+            &self,
+            auth: Arc<Auth>,
+            req: Request,
+            opts: Options,
+        ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
+            Refresher.execute_stream(auth, req, opts)
+        }
+        fn count_tokens(
+            &self,
+            auth: Arc<Auth>,
+            req: Request,
+            opts: Options,
+        ) -> BoxFuture<'_, Result<Response, ExecError>> {
+            Refresher.count_tokens(auth, req, opts)
+        }
+        fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
+            Box::pin(async move {
+                let mut auth = (*auth).clone();
+                auth.metadata
+                    .insert("access_token".into(), serde_json::json!(self.0));
+                auth.metadata.insert(
+                    "refresh_token".into(),
+                    serde_json::json!(format!("{}-refresh", self.0)),
+                );
+                Ok(auth)
+            })
+        }
+    }
+
+    struct CommandRefresher {
+        siwc: bool,
+        token: &'static str,
+    }
+    impl ProviderExecutor for CommandRefresher {
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn execute(
+            &self,
+            auth: Arc<Auth>,
+            req: Request,
+            opts: Options,
+        ) -> BoxFuture<'_, Result<Response, ExecError>> {
+            Refresher.execute(auth, req, opts)
+        }
+        fn execute_stream(
+            &self,
+            auth: Arc<Auth>,
+            req: Request,
+            opts: Options,
+        ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
+            Refresher.execute_stream(auth, req, opts)
+        }
+        fn count_tokens(
+            &self,
+            auth: Arc<Auth>,
+            req: Request,
+            opts: Options,
+        ) -> BoxFuture<'_, Result<Response, ExecError>> {
+            Refresher.count_tokens(auth, req, opts)
+        }
+        fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
+            Box::pin(async move {
+                let mut auth = (*auth).clone();
+                let metadata = if self.siwc {
+                    auth.metadata
+                        .get_mut("siwc")
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                } else {
+                    &mut auth.metadata
+                };
+                metadata.insert("access_token".into(), serde_json::json!(self.token));
+                metadata.insert(
+                    "refresh_token".into(),
+                    serde_json::json!(format!("{}-refresh", self.token)),
+                );
+                Ok(auth)
+            })
+        }
+    }
+
+    fn hold_completion(service: &mut Service) -> ReadHold {
+        let hold = hold_read(service);
+        service.completion_hook = service.read_hook.take();
+        hold
+    }
+
+    #[tokio::test]
+    async fn older_unsupported_write_during_backoff_preserves_recovery() {
+        unsupported_write_during_recovery(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn older_unsupported_write_during_retry_preserves_recovery() {
+        unsupported_write_during_recovery(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn newer_unsupported_write_during_backoff_replaces_recovery() {
+        unsupported_write_during_recovery(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn newer_unsupported_write_during_retry_replaces_recovery() {
+        unsupported_write_during_recovery(true, true).await;
+    }
+
+    async fn unsupported_write_during_recovery(in_flight: bool, newer: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("late-write.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.provider = "claude".into();
+        let auth = service.manager.register_unsaved(auth).unwrap();
+        let payload = |value| AuthFile {
+            path: path.clone(),
+            data: serde_json::to_vec(&serde_json::json!({"type":"claude", "access_token":value}))
+                .unwrap()
+                .into(),
+        };
+        let older = next_revision();
+        let trigger = next_revision();
+        let late = if newer { next_revision() } else { older };
+        service.read_hook = Some(Arc::new(|_| panic!("fixture failed trigger")));
+        service.load_auth_file(&payload("trigger"), trigger);
+        drain_reads(&mut service).await;
+        let dirty = service.dirty_reads.values().next().unwrap();
+        let deadline = dirty.deadline;
+        let attempt = dirty.attempt;
+        assert_eq!(attempt, 1);
+        let mut held = hold_read(&mut service);
+        if in_flight {
+            service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                service.work(Path::new(""), &mut None),
+            )
+            .await
+            .expect("dirty deadline is serviced within 5s");
+            held.entered().await;
+        }
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileWritten(payload(if newer { "newer" } else { "older" })),
+            revision: late,
+            applied,
+            operation: None,
+        });
+        // In the backoff control a bad older event starts a read too. Release
+        // that worker and consume it before checking the publication assertion.
+        if !in_flight && !service.reads.is_empty() {
+            held.entered().await;
+        }
+        held.release();
+        drain_reads(&mut service).await;
+        if newer {
+            assert_eq!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "newer",
+                "newer late payload replaces recovery in either window"
+            );
+            assert!(service.dirty_reads.is_empty());
+        } else {
+            assert_ne!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "older",
+                "older late payload is never published during recovery"
+            );
+            if in_flight {
+                assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+                // The terminal Unsupported retry settles ordering without publication.
+                assert!(service.dirty_reads.is_empty());
+                assert_eq!(service.revisions.get(&auth.id), Some(&trigger));
+                assert_eq!(
+                    service.revisions.get(path.to_string_lossy().as_ref()),
+                    Some(&trigger)
+                );
+            } else {
+                let dirty = service
+                    .dirty_reads
+                    .values()
+                    .next()
+                    .expect("older arrival keeps dirty retry");
+                assert_eq!(
+                    dirty.deadline, deadline,
+                    "covered arrival preserves deadline"
+                );
+                assert_eq!(dirty.attempt, attempt, "covered arrival preserves backoff");
+                assert_eq!(held.calls.load(Ordering::SeqCst), 0);
+                tokio::time::timeout(Duration::from_secs(5), fire_dirty_deadline(&mut service))
+                    .await
+                    .expect("covered recovery finishes within 5s");
+                assert!(service.dirty_reads.is_empty());
+            }
+            assert_eq!(
+                service.manager.get(&auth.id).unwrap().metadata,
+                auth.metadata
+            );
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("late payload acknowledges within 5s"),
+            Ok(())
+        );
+        assert!(service.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn different_origin_terminal_replacement_refuses_older_late_write() {
+        different_origin_terminal_replacement(false).await;
+    }
+
+    #[tokio::test]
+    async fn different_origin_terminal_replacement_accepts_newer_late_write() {
+        different_origin_terminal_replacement(true).await;
+    }
+
+    async fn different_origin_terminal_replacement(newer: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminal-origin-a.json");
+        let other = dir.path().join("terminal-origin-b.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.provider = "claude".into();
+        let auth = service.manager.register_unsaved(auth).unwrap();
+        let payload = |value| AuthFile {
+            path: path.clone(),
+            data: serde_json::to_vec(&serde_json::json!({"type":"claude", "access_token":value}))
+                .unwrap()
+                .into(),
+        };
+        let older = next_revision();
+        let trigger = next_revision();
+        service.read_hook = Some(Arc::new(|_| panic!("fixture failed trigger")));
+        service.load_auth_file(&payload("trigger"), trigger);
+        drain_reads(&mut service).await;
+        let mut held = hold_read(&mut service);
+        service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            service.work(Path::new(""), &mut None),
+        )
+        .await
+        .expect("different-origin terminal retry starts within 5s");
+        held.entered().await;
+        // A real Upsert with the same id aliases the active key, but names B.
+        let mut replacement = (*auth).clone();
+        replacement
+            .attributes
+            .insert("path".into(), other.to_string_lossy().into_owned());
+        let (applied, replaced) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(replacement)),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        held.release();
+        consume_read(&mut service).await;
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("different-origin replacement completes within 5s")
+                .unwrap();
+        assert_eq!(completion.identity.path.as_ref(), Some(&other));
+        assert!(
+            matches!(completion.result, Ok(AdoptionResult::Retry)),
+            "different-origin Upsert is refused by the origin check"
+        );
+        service.complete_read(completion);
+        assert!(
+            service.dirty_reads.is_empty(),
+            "refused different-origin read creates no dirty retry"
+        );
+        assert!(service.reads.is_empty());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), replaced)
+                .await
+                .expect("different-origin replacement acknowledges within 5s"),
+            Ok(())
+        );
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileWritten(payload(if newer { "newer" } else { "older" })),
+            revision: if newer { next_revision() } else { older },
+            applied,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        if newer {
+            assert_eq!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "newer",
+                "newer origin-A payload publishes after different-origin replacement"
+            );
+        } else {
+            assert_ne!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "older",
+                "older origin-A payload is never published after different-origin replacement"
+            );
+            assert_eq!(service.revisions.get(&auth.id), Some(&trigger));
+            assert_eq!(
+                service.revisions.get(path.to_string_lossy().as_ref()),
+                Some(&trigger)
+            );
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("origin-A late write acknowledges within 5s"),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_unsupported_recovery_refuses_older_late_write() {
+        terminal_unsupported_late_write(false).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_unsupported_recovery_accepts_newer_late_write() {
+        terminal_unsupported_late_write(true).await;
+    }
+
+    async fn terminal_unsupported_late_write(newer: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminal.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.provider = "claude".into();
+        let auth = service.manager.register_unsaved(auth).unwrap();
+        let payload = |value| AuthFile {
+            path: path.clone(),
+            data: serde_json::to_vec(&serde_json::json!({"type":"claude", "access_token":value}))
+                .unwrap()
+                .into(),
+        };
+        let older = next_revision();
+        let trigger = next_revision();
+        service.read_hook = Some(Arc::new(|_| panic!("fixture failed trigger")));
+        service.load_auth_file(&payload("trigger"), trigger);
+        drain_reads(&mut service).await;
+        service.read_hook = None;
+        tokio::time::timeout(Duration::from_secs(5), fire_dirty_deadline(&mut service))
+            .await
+            .expect("terminal Unsupported retry completes within 5s");
+        assert!(service.dirty_reads.is_empty());
+        assert!(service.reads.is_empty());
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileWritten(payload(if newer { "newer" } else { "older" })),
+            revision: if newer { next_revision() } else { older },
+            applied,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        if newer {
+            assert_eq!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "newer",
+                "newer payload publishes after terminal recovery"
+            );
+        } else {
+            assert_ne!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "older",
+                "older late payload is never published after terminal recovery"
+            );
+            assert_eq!(service.revisions.get(&auth.id), Some(&trigger));
+            assert_eq!(
+                service.revisions.get(path.to_string_lossy().as_ref()),
+                Some(&trigger)
+            );
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("post-terminal write acknowledges within 5s"),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn noncurrent_terminal_unsupported_recovery_claims_nothing() {
+        terminal_unsupported_canceled(false).await;
+    }
+
+    #[tokio::test]
+    async fn replaced_terminal_unsupported_recovery_claims_nothing() {
+        terminal_unsupported_canceled(true).await;
+    }
+
+    async fn terminal_unsupported_canceled(replaced: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("canceled-terminal.json");
+        let mut service = service(dir.path(), "");
+        let auth = registered_gemini(&mut service, &path);
+        let trigger = next_revision();
+        service.read_hook = Some(Arc::new(|_| panic!("fixture failed trigger")));
+        service.queue_auth_change(AuthChange {
+            change: SyncChange::Upsert(Box::new(auth.clone())),
+            revision: trigger,
+            applied: None,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        let before = service.revisions.clone();
+        let mut held = hold_read(&mut service);
+        service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            service.work(Path::new(""), &mut None),
+        )
+        .await
+        .expect("canceled terminal retry starts within 5s");
+        held.entered().await;
+        if replaced {
+            service.queue_auth_change(AuthChange {
+                change: SyncChange::Upsert(Box::new(auth.clone())),
+                revision: next_revision(),
+                applied: None,
+                operation: None,
+            });
+        } else {
+            service.manager.register_unsaved(auth.clone()).unwrap();
+        }
+        held.release();
+        consume_read(&mut service).await;
+        assert_eq!(
+            service.revisions, before,
+            "noncurrent or replaced terminal recovery claims no watermark"
+        );
+        if replaced {
+            assert_eq!(
+                service.reads.len(),
+                1,
+                "replacement observation remains pending"
+            );
+        }
+        drain_reads(&mut service).await;
+    }
+
+    #[tokio::test]
+    async fn older_removal_during_backoff_keeps_recovery() {
+        removal_during_recovery(false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn older_removal_during_retry_keeps_recovery() {
+        removal_during_recovery(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn newer_removal_during_backoff_cancels_recovery() {
+        removal_during_recovery(false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn newer_removal_during_retry_cancels_recovery() {
+        removal_during_recovery(true, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn zero_removal_during_backoff_keeps_existing_rule() {
+        removal_during_recovery(false, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn zero_removal_during_retry_keeps_existing_rule() {
+        removal_during_recovery(true, true, true).await;
+    }
+
+    async fn removal_during_recovery(in_flight: bool, newer: bool, unversioned: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "pending-removal.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let payload = auth_file(&path);
+        let older = next_revision();
+        let trigger = next_revision();
+        std::fs::write(&path, "null").unwrap();
+        service.load_auth_file(&payload, trigger);
+        drain_reads(&mut service).await;
+        let dirty = service.dirty_reads.values().next().unwrap();
+        let deadline = dirty.deadline;
+        let attempt = dirty.attempt;
+        let mut held = hold_read(&mut service);
+        if in_flight {
+            service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                service.work(Path::new(""), &mut None),
+            )
+            .await
+            .expect("pending-removal retry starts within 5s");
+            held.entered().await;
+        }
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileRemoved(path.clone()),
+            revision: if unversioned {
+                0
+            } else if newer {
+                next_revision()
+            } else {
+                older
+            },
+            applied,
+            operation: None,
+        });
+        held.release();
+        drain_reads(&mut service).await;
+        if newer {
+            assert!(
+                service.manager.get(&id).is_none(),
+                "newer removal unregisters in either recovery window"
+            );
+            assert!(service.dirty_reads.is_empty());
+        } else {
+            assert!(
+                service.manager.get(&id).is_some(),
+                "older removal leaves credential still registered in either recovery window"
+            );
+            let dirty = service
+                .dirty_reads
+                .values()
+                .next()
+                .expect("older removal keeps dirty retry");
+            assert_eq!(dirty.recovery_floor.as_ref().unwrap().revision, trigger);
+            assert_eq!(
+                dirty.attempt,
+                attempt + usize::from(in_flight),
+                "older removal preserves retry backoff"
+            );
+            if !in_flight {
+                assert_eq!(
+                    dirty.deadline, deadline,
+                    "older removal preserves dirty deadline"
+                );
+            }
+            assert_eq!(service.file_auths.get(&path), Some(&id));
+            std::fs::write(&path, &payload.data).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), fire_dirty_deadline(&mut service))
+                .await
+                .expect("preserved retry observes repaired disk within 5s");
+            assert!(service.manager.get(&id).is_some());
+            assert!(service.dirty_reads.is_empty());
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("recovery removal acknowledges within 5s"),
+            Ok(())
+        );
+        assert!(service.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_sourceless_retry_claims_only_its_fresh_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "recovery-watermark.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let payload = auth_file(&path);
+        std::fs::write(&path, "null").unwrap();
+        let trigger = next_revision();
+        service.load_auth_file(&payload, trigger);
+        drain_reads(&mut service).await;
+        assert_eq!(
+            service
+                .dirty_reads
+                .values()
+                .next()
+                .unwrap()
+                .recovery_floor
+                .as_ref()
+                .unwrap()
+                .revision,
+            trigger
+        );
+        std::fs::write(&path, &payload.data).unwrap();
+        service.dirty_reads.values_mut().next().unwrap().deadline = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            service.work(Path::new(""), &mut None),
+        )
+        .await
+        .expect("dirty deadline is serviced within 5s");
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("successful retry completes within 5s")
+                .unwrap();
+        let fresh = match &completion.result {
+            Ok(AdoptionResult::Published { revision, .. }) => *revision,
+            _ => panic!("repaired retry publishes a fresh observation"),
+        };
+        assert!(
+            fresh > trigger,
+            "successful retry allocates a revision above its trigger"
+        );
+        service.complete_read(completion);
+        assert_eq!(
+            service.revisions.get(&id),
+            Some(&fresh),
+            "retry claims only its fresh revision"
+        );
+        assert_eq!(
+            service.revisions.get(path.to_string_lossy().as_ref()),
+            Some(&fresh)
+        );
+        assert!(
+            service.dirty_reads.is_empty(),
+            "success ends recovery floor"
+        );
+        assert!(service.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn noncurrent_read_coalesces_three_parked_changes_without_dirty_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = codex_file(dir.path(), "coalesce-old.json", "");
+        let new = codex_file(dir.path(), "coalesce-new.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let id = service.file_auths[&old].clone();
+        let before = service.revisions.clone();
+        let payload = auth_file(&old);
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = completed.clone();
+        service.completion_hook = Some(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let mut held = hold_read(&mut service);
+        service.load_auth_file(&payload, next_revision());
+        held.entered().await;
+        let mut done = Vec::new();
+        for _ in 0..3 {
+            let (applied, ack) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::FileWritten(payload.clone()),
+                revision: next_revision(),
+                applied,
+                operation: None,
+            });
+            done.push(ack);
+        }
+        service
+            .manager
+            .edit_unsaved(&id, |auth| {
+                auth.attributes
+                    .insert("path".into(), new.to_string_lossy().into_owned());
+                auth.file_name = "coalesce-new.json".into();
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        held.release();
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .expect("noncurrent observation completes within 5s")
+                .unwrap();
+        assert!(matches!(
+            completion.result,
+            Ok(AdoptionResult::RegistrationChanged)
+        ));
+        service.complete_read(completion);
+        assert!(
+            service.dirty_reads.is_empty(),
+            "noncurrent completion has no dirty floor"
+        );
+        assert_eq!(
+            service.revisions, before,
+            "noncurrent completion advances no watermark"
+        );
+        for ack in &mut done {
+            assert_eq!(ack.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+        }
+        drain_reads(&mut service).await;
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            2,
+            "noncurrent parked changes cause exactly one further read"
+        );
+        for ack in done {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), ack)
+                    .await
+                    .expect("coalesced noncurrent work acknowledges within 5s"),
+                Ok(())
+            );
+        }
+        assert!(service.dirty_reads.is_empty());
+        assert_eq!(service.revisions, before);
+    }
+
+    #[tokio::test]
+    async fn older_parked_unsupported_write_preserves_failed_trigger_recovery() {
+        parked_unsupported_write_after_failed_trigger(false).await;
+    }
+
+    #[tokio::test]
+    async fn newer_parked_unsupported_write_replaces_failed_trigger() {
+        parked_unsupported_write_after_failed_trigger(true).await;
+    }
+
+    async fn parked_unsupported_write_after_failed_trigger(newer: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed-trigger.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.provider = "claude".into();
+        let auth = service.manager.register_unsaved(auth).unwrap();
+        let payload = |value| AuthFile {
+            path: path.clone(),
+            data: serde_json::to_vec(&serde_json::json!({"type":"claude", "access_token":value}))
+                .unwrap()
+                .into(),
+        };
+        let mut held = hold_read(&mut service);
+        let hook = service.read_hook.take().unwrap();
+        let first = std::sync::atomic::AtomicBool::new(true);
+        service.read_hook = Some(Arc::new(move |identity| {
+            let fail = first.swap(false, Ordering::SeqCst);
+            hook(identity);
+            if fail {
+                panic!("fixture failed trigger");
+            }
+        }));
+        let older = next_revision();
+        let trigger = next_revision();
+        let parked = if newer { next_revision() } else { older };
+        let (applied, mut trigger_done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileWritten(payload("trigger")),
+            revision: trigger,
+            applied,
+            operation: None,
+        });
+        held.entered().await;
+        let (applied, mut parked_done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileWritten(payload(if newer { "newer" } else { "older" })),
+            revision: parked,
+            applied,
+            operation: None,
+        });
+        assert_eq!(
+            trigger_done.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        assert_eq!(
+            parked_done.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        held.release();
+        consume_read(&mut service).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), trigger_done)
+                .await
+                .expect("failed trigger acknowledges within 5s"),
+            Ok(())
+        );
+        if newer {
+            assert_eq!(
+                parked_done.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty),
+                "newer payload waits for covering read"
+            );
+            drain_reads(&mut service).await;
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), parked_done)
+                    .await
+                    .expect("parked payload acknowledges within 5s"),
+                Ok(())
+            );
+            assert_eq!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "newer",
+                "newer parked payload supersedes failed trigger"
+            );
+            assert!(service.dirty_reads.is_empty());
+        } else {
+            // Drain an incorrectly selected older read too, so the control proves publication, not merely selection.
+            drain_reads(&mut service).await;
+            assert_ne!(
+                service.manager.get(&auth.id).unwrap().metadata["access_token"],
+                "older",
+                "older parked payload is never published after failed trigger"
+            );
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), parked_done)
+                    .await
+                    .expect("parked payload acknowledges within 5s"),
+                Ok(())
+            );
+            assert_eq!(
+                service.dirty_reads.len(),
+                1,
+                "failed trigger retains dirty recovery"
+            );
+            assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+            fire_dirty_deadline(&mut service).await;
+            assert_eq!(
+                service.manager.get(&auth.id).unwrap().metadata,
+                auth.metadata
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_removal_keeps_uncovered_id_only_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = codex_file(dir.path(), "rejected-id-only.json", "");
+        let new = codex_file(dir.path(), "current-origin.json", r#", "prefix":"current""#);
+        let mut service = service(dir.path(), "");
+        let mut held = hold_completion(&mut service);
+        let (applied, mut done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(Auth {
+                id: "rejected-id-only.json".into(),
+                provider: "codex".into(),
+                ..Auth::default()
+            })),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        held.entered().await;
+        let id = service.manager.list()[0].id.clone();
+        service
+            .manager
+            .edit_unsaved(&id, |auth| {
+                auth.attributes
+                    .insert("path".into(), new.to_string_lossy().into_owned());
+                auth.file_name = "current-origin.json".into();
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        let (applied, removed) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileRemoved(old),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        service.apply_config_authorized(service.config.clone(), None, Path::new(""));
+        held.release();
+        consume_read(&mut service).await;
+        assert_eq!(
+            done.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty),
+            "rejected removal cannot acknowledge uncovered id-only work"
+        );
+        assert!(
+            !service.reads.is_empty(),
+            "rejected removal keeps id-only retry"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), removed)
+                .await
+                .expect("rejected removal acknowledges within 5s"),
+            Ok(())
+        );
+        drain_reads(&mut service).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("reobserved id-only work acknowledges within 5s"),
+            Ok(())
+        );
+        assert_eq!(service.manager.get(&id).unwrap().prefix, "current");
+        assert_eq!(service.file_auths.get(&new), Some(&id));
+    }
+
+    #[tokio::test]
+    async fn rejected_old_origin_removal_retires_only_stale_mapping() {
+        for relative in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let old = dir.path().join("old-origin.json");
+            let new = dir.path().join("current-origin.json");
+            let mut service = service(dir.path(), "");
+            let auth = registered_gemini(&mut service, &old);
+            service
+                .manager
+                .edit_unsaved(&auth.id, |live| {
+                    live.attributes
+                        .insert("path".into(), new.to_string_lossy().into_owned());
+                    live.file_name = "current-origin.json".into();
+                    Ok::<_, ()>(true)
+                })
+                .unwrap();
+            service.file_auths.insert(new.clone(), auth.id.clone());
+            service.remove_auth_file(
+                if relative {
+                    Path::new("old-origin.json")
+                } else {
+                    &old
+                },
+                next_revision(),
+            );
+            assert!(
+                !service.file_auths.contains_key(&old),
+                "rejected removal retires stale old-origin mapping"
+            );
+            assert_eq!(service.file_auths.get(&new), Some(&auth.id));
+            assert_eq!(
+                service.manager.get(&auth.id).unwrap().registration_epoch,
+                auth.registration_epoch
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_acknowledges_only_after_held_observation_settles() {
+        acknowledgement_after_held_observation(false).await;
+    }
+
+    #[tokio::test]
+    async fn relist_acknowledges_only_after_held_observation_settles() {
+        acknowledgement_after_held_observation(true).await;
+    }
+
+    async fn acknowledgement_after_held_observation(relist: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        codex_file(dir.path(), "positive-settlement.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let mut held = hold_read(&mut service);
+        let (stop, mut settled, task) = worker::settlement_test_loop(service, relist);
+        held.entered().await;
+        let early = tokio::time::timeout(Duration::from_millis(50), &mut settled).await;
+        assert!(
+            early.is_err(),
+            "command acknowledgement waits for held observation"
+        );
+        held.release();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), settled)
+                .await
+                .expect("settlement acknowledges within 5s"),
+            Ok(Ok(()))
+        );
+        stop.send(tokio::time::Instant::now()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn binding_cleanup_keeps_replacement_registration_and_accounting() {
+        for replace in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "cleanup.json", "");
+            let mut service = service(dir.path(), "");
+            let mut held = hold_completion(&mut service);
+            service.load_auth_file(&auth_file(&path), next_revision());
+            held.entered().await;
+            let published = service.manager.list()[0].clone();
+            let id = published.id.clone();
+            service.file_auths.insert(path.clone(), id.clone());
+            service.store.set_base_dir(other.path());
+            let manager = service.manager.clone();
+            let id_for_hook = id.clone();
+            service.removal_hook = Some(Arc::new(move || {
+                if replace {
+                    let mut replacement = (*manager.get(&id_for_hook).unwrap()).clone();
+                    replacement.prefix = "replacement".into();
+                    manager.register_unsaved(replacement).unwrap();
+                } else {
+                    manager
+                        .edit_unsaved(&id_for_hook, |auth| {
+                            auth.file_name = "changed-origin.json".into();
+                            auth.attributes.remove("path");
+                            Ok::<_, ()>(true)
+                        })
+                        .unwrap();
+                }
+            }));
+            held.release();
+            drain_reads(&mut service).await;
+            assert!(
+                service.manager.get(&id).is_some(),
+                "binding cleanup keeps newer registration or origin"
+            );
+            assert_eq!(
+                service.file_auths.get(&path),
+                Some(&id),
+                "conditional cleanup keeps newer accounting"
+            );
+            let live = service.manager.get(&id).unwrap();
+            if replace {
+                assert!(live.registration_epoch > published.registration_epoch);
+            } else {
+                assert_eq!(live.file_name, "changed-origin.json");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn parked_revisions_keep_newer_write_and_accept_newest_removal() {
+        for newest_removal in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "ordered.json", "");
+            let mut service = service(dir.path(), "");
+            service.load_file_auths();
+            let id = service.manager.list()[0].id.clone();
+            let payload = auth_file(&path);
+            std::fs::write(&path, "null").unwrap();
+            let mut held = hold_read(&mut service);
+            service.load_auth_file(&payload, next_revision());
+            held.entered().await;
+            let older_removal = next_revision();
+            let write_revision = next_revision();
+            let removal_revision = if newest_removal {
+                next_revision()
+            } else {
+                older_removal
+            };
+            let (applied, mut written) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::FileWritten(payload),
+                revision: write_revision,
+                applied,
+                operation: None,
+            });
+            let (applied, removed) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::FileRemoved(path),
+                revision: removal_revision,
+                applied,
+                operation: None,
+            });
+            held.release();
+            consume_read(&mut service).await;
+            if newest_removal {
+                assert!(
+                    service.manager.get(&id).is_none(),
+                    "newest parked removal wins"
+                );
+                assert_eq!(written.try_recv(), Ok(()));
+                assert!(service.reads.is_empty());
+            } else {
+                assert!(
+                    service.manager.get(&id).is_some(),
+                    "older parked removal cannot discard newer write"
+                );
+                assert_eq!(
+                    written.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty),
+                    "newer write waits for covering read"
+                );
+                drain_reads(&mut service).await;
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), written)
+                        .await
+                        .expect("written acknowledgement arrives within 5s"),
+                    Ok(())
+                );
+            }
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), removed)
+                    .await
+                    .expect("removed acknowledgement arrives within 5s"),
+                Ok(())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn revision_zero_recovery_yields_to_removal_in_either_arrival_order() {
+        for removal_first in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "zero.json", "");
+            let mut service = service(dir.path(), "");
+            service.load_file_auths();
+            let current = service.manager.list()[0].clone();
+            let payload = auth_file(&path);
+            std::fs::write(&path, "null").unwrap();
+            let mut held = hold_read(&mut service);
+            service.load_auth_file(&payload, next_revision());
+            held.entered().await;
+            let mut changes = vec![
+                SyncChange::Upsert(Box::new((*current).clone())),
+                SyncChange::FileRemoved(path),
+            ];
+            if removal_first {
+                changes.reverse();
+            }
+            let mut acknowledgements = Vec::new();
+            for change in changes {
+                let revision = if matches!(change, SyncChange::FileRemoved(_)) {
+                    next_revision()
+                } else {
+                    0
+                };
+                let (applied, done) = oneshot::channel();
+                service.apply_sync(SyncRequest {
+                    change,
+                    revision,
+                    applied,
+                    operation: None,
+                });
+                acknowledgements.push(done);
+            }
+            service.apply_config_authorized(service.config.clone(), None, Path::new(""));
+            held.release();
+            drain_reads(&mut service).await;
+            assert!(
+                service.manager.get(&current.id).is_none(),
+                "positive removal cancels revision-zero recovery in either order"
+            );
+            for done in acknowledgements {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), done)
+                        .await
+                        .expect("done acknowledgement arrives within 5s"),
+                    Ok(())
+                );
+            }
+            assert!(
+                service.dirty_reads.is_empty(),
+                "positive removal cancels revision-zero recovery in either order"
+            );
+            assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    fn registered_gemini(service: &mut Service, path: &Path) -> Auth {
+        let auth = Auth {
+            id: path.file_name().unwrap().to_string_lossy().into_owned(),
+            provider: "gemini".into(),
+            file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            attributes: [
+                ("path".into(), path.to_string_lossy().into_owned()),
+                ("fixture".into(), "keep".into()),
+            ]
+            .into(),
+            metadata: [("access_token".into(), serde_json::json!("keep-token"))]
+                .into_iter()
+                .collect(),
+            ..Auth::default()
+        };
+        let registered = service.manager.register_unsaved(auth).unwrap();
+        service
+            .file_auths
+            .insert(path.to_owned(), registered.id.clone());
+        (*registered).clone()
+    }
+
+    #[tokio::test]
+    async fn unsupported_coalescing_selects_highest_revision_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.json");
+        let mut service = service(dir.path(), "");
+        let auth = registered_gemini(&mut service, &path);
+        let mut held = hold_read(&mut service);
+        let (applied, initial) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(auth.clone())),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        held.entered().await;
+        let low = next_revision();
+        let high = next_revision();
+        let mut acknowledgements = Vec::new();
+        for (revision, value) in [(high, "newer"), (low, "older")] {
+            let mut payload = auth.clone();
+            payload
+                .metadata
+                .insert("access_token".into(), serde_json::json!(value));
+            let (applied, done) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::Upsert(Box::new(payload)),
+                revision,
+                applied,
+                operation: None,
+            });
+            acknowledgements.push(done);
+        }
+        service.apply_config_authorized(service.config.clone(), None, Path::new(""));
+        held.release();
+        drain_reads(&mut service).await;
+        tokio::time::timeout(Duration::from_secs(5), initial)
+            .await
+            .expect("initial acknowledgement arrives within 5s")
+            .unwrap();
+        for done in acknowledgements {
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("done acknowledgement arrives within 5s")
+                .unwrap();
+        }
+        assert_eq!(
+            service.manager.get(&auth.id).unwrap().metadata["access_token"],
+            "newer",
+            "highest revision Unsupported payload wins"
+        );
+        assert_eq!(held.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn pathless_dirty_empty_unsupported_uses_event_removal_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pathless-empty.json");
+        let mut service = service(dir.path(), "");
+        let mut auth = registered_gemini(&mut service, &path);
+        auth.file_name.clear();
+        auth.attributes.remove("path");
+        service.manager.register_unsaved(auth.clone()).unwrap();
+        service.read_hook = Some(Arc::new(|_| panic!("fixture first read error")));
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(auth.clone())),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("done acknowledgement arrives within 5s")
+            .unwrap();
+        assert!(
+            service
+                .dirty_reads
+                .values()
+                .next()
+                .unwrap()
+                .identity
+                .path
+                .is_none()
+        );
+        service.read_hook = None;
+        service.load_auth_file(
+            &AuthFile {
+                path,
+                data: b"null".to_vec().into(),
+            },
+            next_revision(),
+        );
+        let finished = std::panic::AssertUnwindSafe(drain_reads(&mut service));
+        // Catch a completion panic as a named regression failure, not a hung task.
+        use futures_util::FutureExt;
+        assert!(
+            finished.catch_unwind().await.is_ok(),
+            "empty Unsupported completion never panics on pathless origin"
+        );
+        assert!(
+            service.manager.get(&auth.id).is_none(),
+            "pathless Unsupported empty event unregisters"
+        );
+    }
+
+    #[tokio::test]
+    async fn sourceless_unsupported_retry_never_publishes_identity_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sourceless.json");
+        let mut service = service(dir.path(), "");
+        let auth = registered_gemini(&mut service, &path);
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        service.read_hook = Some(Arc::new(move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("fixture first read error");
+            }
+        }));
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(auth.clone())),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("done acknowledgement arrives within 5s")
+            .unwrap();
+        fire_dirty_deadline(&mut service).await;
+        let live = service.manager.get(&auth.id).unwrap();
+        assert_eq!(
+            live.metadata, auth.metadata,
+            "sourceless Unsupported retry keeps metadata"
+        );
+        assert_eq!(
+            live.attributes, auth.attributes,
+            "sourceless Unsupported retry keeps attributes"
+        );
+        assert!(
+            service.dirty_reads.is_empty(),
+            "Unsupported sourceless observation has no dirty loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_while_resume_observation_is_held() {
+        stop_while_observation_is_held(false).await;
+    }
+
+    #[tokio::test]
+    async fn stop_while_relist_observation_is_held() {
+        stop_while_observation_is_held(true).await;
+    }
+
+    async fn stop_while_observation_is_held(relist: bool) {
+        use open_ferry_management::{CredentialSync, SyncError};
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "settlement.json", "");
+            let mut service = service(dir.path(), "");
+            service.load_file_auths();
+            let sync = sync_sender(&mut service);
+            let mut held = hold_read(&mut service);
+            let (stop, mut settled, task) = worker::settlement_test_loop(service, relist);
+            held.entered().await;
+            assert_eq!(
+                settled.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty),
+                "resume waits for its observations"
+            );
+            let payload = auth_file(&path);
+            let request = tokio::spawn(async move { sync.file_written(payload).await });
+            stop.send(tokio::time::Instant::now()).unwrap();
+            let stopped = tokio::time::timeout(Duration::from_secs(5), task).await;
+            assert!(
+                stopped.is_ok(),
+                "stop-aware settlement closes service within 5s"
+            );
+            stopped.unwrap().unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), request)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Err(SyncError::Stopped)
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), settled)
+                    .await
+                    .expect("settlement receiver closes within 5s")
+                    .is_err(),
+                "stopped resume is not acknowledged as settled"
+            );
+            held.release();
+        }
+    }
+
+    #[tokio::test]
+    async fn coalesced_rekey_parks_without_replacing_active_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = codex_file(dir.path(), "first-job.json", "");
+        let second = codex_file(dir.path(), "second-job.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        std::fs::write(&first, "null").unwrap();
+        let mut held = hold_read(&mut service);
+        service.load_auth_file(&auth_file(&first), next_revision());
+        held.entered().await;
+        let first_key = service
+            .change_identity(&SyncChange::FileWritten(auth_file(&first)))
+            .0;
+        let (applied, second_done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileWritten(auth_file(&second)),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        let second_key = service
+            .change_identity(&SyncChange::FileWritten(auth_file(&second)))
+            .0;
+        let (applied, redirected_done) = oneshot::channel();
+        // Exercise the defensive rekey boundary directly: normal queueing would
+        // already park this request on the second job.
+        service
+            .reads
+            .get_mut(&first_key)
+            .unwrap()
+            .parked
+            .push_back(AuthChange {
+                change: SyncChange::FileWritten(auth_file(&second)),
+                revision: next_revision(),
+                applied: Some(applied),
+                operation: None,
+            });
+        let original_revision = service.reads[&second_key].trigger_revision;
+        held.release();
+        let mut deferred = None;
+        loop {
+            let completion =
+                tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            if completion.key == first_key {
+                service.complete_read(completion);
+                break;
+            }
+            // Keep the second completion unconsumed until rekeying has run.
+            deferred = Some(completion);
+        }
+        if let Some(completion) = deferred {
+            service
+                .read_sender
+                .send(completion)
+                .unwrap_or_else(|_| panic!("completion receiver stays open"));
+        }
+        assert_eq!(
+            service.reads[&second_key].trigger_revision, original_revision,
+            "coalesced rekey preserves active job"
+        );
+        drain_reads(&mut service).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), second_done)
+                .await
+                .expect("second_done acknowledgement arrives within 5s"),
+            Ok(())
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), redirected_done)
+                .await
+                .expect("redirected_done acknowledgement arrives within 5s"),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_and_relist_keep_discarded_live_partition() {
+        for resume in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(
+                dir.path(),
+                "resume.json",
+                r#", "refresh_token":"A-refresh""#,
+            );
+            let mut service = service(dir.path(), "");
+            let store = Arc::new(ServiceRefreshStore {
+                files: service.store.clone(),
+                fail: std::sync::atomic::AtomicBool::new(true),
+            });
+            service.manager = Manager::new(
+                Settings::from(&*service.config),
+                service.registry.clone(),
+                Some(store),
+            );
+            service.load_file_auths();
+            let id = service.manager.list()[0].id.clone();
+            service
+                .manager
+                .register_executor(Arc::new(NamedRefresher("B")));
+            service.manager.force_refresh(&id).await.unwrap();
+            let mut replacement = (*service.manager.get(&id).unwrap()).clone();
+            assert!(!replacement.codex_pending_refresh.is_empty());
+            replacement.metadata.clear();
+            replacement
+                .attributes
+                .insert("runtime_only".into(), "true".into());
+            service
+                .manager
+                .run_persistence(move |manager| manager.update(replacement))
+                .await
+                .unwrap()
+                .unwrap();
+            service
+                .manager
+                .edit_unsaved(&id, |auth| {
+                    auth.attributes.remove("runtime_only");
+                    Ok::<_, ()>(true)
+                })
+                .unwrap();
+            assert!(
+                service
+                    .manager
+                    .get(&id)
+                    .unwrap()
+                    .codex_pending_refresh
+                    .is_empty()
+            );
+            let disk = std::fs::read(&path).unwrap();
+            if resume {
+                let config_path = dir.path().join("resume-config.yaml");
+                std::fs::write(
+                    &config_path,
+                    format!(
+                        "auth-dir: {}\n",
+                        dir.path().to_string_lossy().replace('\\', "/")
+                    ),
+                )
+                .unwrap();
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    service.reload_from_disk(&config_path, &mut None),
+                )
+                .await
+                .unwrap();
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    service.apply_deferred(Path::new(""), &mut None),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            }
+            drain_reads(&mut service).await;
+            assert_eq!(
+                service.manager.get(&id).unwrap().metadata["access_token"],
+                "B",
+                "reload keeps discarded live B"
+            );
+            service.load_auth_file(&auth_file(&path), next_revision());
+            drain_reads(&mut service).await;
+            assert_eq!(
+                service.manager.get(&id).unwrap().metadata["access_token"],
+                "B",
+                "reload retains marker for later adoption"
+            );
+            assert_eq!(std::fs::read(path).unwrap(), disk);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initial_id_only_read_orders_newer_and_stale_path_removals() {
+        for (newer, mismatch) in [(true, false), (false, false), (true, true), (false, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "id-only.json", "");
+            let mut service = service(dir.path(), "");
+            let stale = next_revision();
+            let mut held = hold_read(&mut service);
+            let hint = Auth {
+                id: "id-only.json".into(),
+                provider: "codex".into(),
+                ..Auth::default()
+            };
+            let (applied, done) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::Upsert(Box::new(hint)),
+                revision: next_revision(),
+                applied,
+                operation: None,
+            });
+            held.entered().await;
+            let (applied, removed) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::FileRemoved(path.clone()),
+                revision: if newer { next_revision() } else { stale },
+                applied,
+                operation: None,
+            });
+            assert_eq!(
+                service.reads.values().next().unwrap().parked.len(),
+                1,
+                "path removal shares initial id-only key"
+            );
+            if mismatch {
+                service.apply_config_authorized(service.config.clone(), None, Path::new(""));
+            }
+            held.release();
+            drain_reads(&mut service).await;
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), done)
+                    .await
+                    .expect("done acknowledgement arrives within 5s"),
+                Ok(())
+            );
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), removed)
+                    .await
+                    .expect("removed acknowledgement arrives within 5s"),
+                Ok(())
+            );
+            assert_eq!(
+                service.manager.get("id-only.json").is_none(),
+                newer,
+                "newer path removal wins; stale removal cancels nothing"
+            );
+            assert!(service.dirty_reads.is_empty());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "id-only.json", "");
+        let mut service = service(dir.path(), "");
+        std::fs::write(&path, "null").unwrap();
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(Auth {
+                id: "id-only.json".into(),
+                provider: "codex".into(),
+                ..Auth::default()
+            })),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("done acknowledgement arrives within 5s")
+            .unwrap();
+        assert_eq!(service.dirty_reads.len(), 1);
+        service.remove_auth_file(&path, next_revision());
+        assert!(
+            service.dirty_reads.is_empty(),
+            "path removal cancels id-only dirty timer"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_updates_published_unconsumed_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "published.json", "");
+        let mut service = service(dir.path(), "oauth-excluded-models:\n  codex: [old-model]\n");
+        let mut held = hold_completion(&mut service);
+        service.load_auth_file(&auth_file(&path), next_revision());
+        held.entered().await;
+        assert!(service.file_auths.is_empty());
+        let mut config = (*service.config).clone();
+        config
+            .oauth_excluded_models
+            .insert("codex".into(), vec!["new-model".into()]);
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        held.release();
+        drain_reads(&mut service).await;
+        let live = service.manager.list()[0].clone();
+        let mut expected = (*live).clone();
+        assert!(
+            !apply_config_attributes(&service.synthesis_context(), &mut expected),
+            "unconsumed publication receives C1 attributes"
+        );
+        assert_eq!(service.file_auths.get(&path), Some(&live.id));
+    }
+
+    #[tokio::test]
+    async fn directory_change_removes_published_unconsumed_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let next = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "old-directory.json", "");
+        let mut service = service(dir.path(), "");
+        let mut held = hold_completion(&mut service);
+        service.load_auth_file(&auth_file(&path), next_revision());
+        held.entered().await;
+        assert!(service.file_auths.is_empty());
+        assert_eq!(service.manager.list().len(), 1);
+        let mut config = (*service.config).clone();
+        config.auth_dir = next.path().to_string_lossy().into_owned();
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        assert!(
+            service.manager.list().is_empty(),
+            "directory switch removes unconsumed publication"
+        );
+        held.release();
+        drain_reads(&mut service).await;
+        assert!(service.manager.list().is_empty());
+        assert!(service.file_auths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn changed_published_origin_is_reobserved_before_accounting() {
+        for remove_old in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let old = codex_file(dir.path(), "published-old.json", "");
+            let new = codex_file(
+                dir.path(),
+                "published-new.json",
+                r#", "prefix":"new-origin""#,
+            );
+            let mut service = service(dir.path(), "");
+            let mut held = hold_completion(&mut service);
+            let origins = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = origins.clone();
+            service.read_hook = Some(Arc::new(move |identity| {
+                observed.lock().unwrap().push(identity.path.clone());
+            }));
+            service.load_auth_file(&auth_file(&old), next_revision());
+            held.entered().await;
+            let published = service.manager.list()[0].clone();
+            let id = published.id.clone();
+            service
+                .manager
+                .edit_unsaved(&id, |auth| {
+                    auth.attributes
+                        .insert("path".into(), new.to_string_lossy().into_owned());
+                    auth.file_name = "published-new.json".into();
+                    Ok::<_, ()>(true)
+                })
+                .unwrap();
+            if remove_old {
+                service.remove_auth_file(&old, next_revision());
+            } else {
+                service.load_auth_file(&auth_file(&old), next_revision());
+            }
+            held.release();
+            drain_reads(&mut service).await;
+            assert_eq!(
+                service.file_auths.get(&new),
+                Some(&id),
+                "changed publication is reobserved and accounted"
+            );
+            assert_eq!(service.manager.get(&id).unwrap().prefix, "new-origin");
+            assert!(
+                origins.lock().unwrap().contains(&Some(new.clone())),
+                "current-origin recovery runs its own observation"
+            );
+            assert!(!service.file_auths.contains_key(&old));
+            assert_eq!(
+                service.manager.get(&id).unwrap().registration_epoch,
+                published.registration_epoch,
+                "old-origin removal cannot unregister current-origin recovery"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parked_removal_cancels_first_config_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "churn.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let mut held = hold_read(&mut service);
+        service.load_auth_file(&auth_file(&path), next_revision());
+        held.entered().await;
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileRemoved(path),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        for n in 0..3 {
+            let mut config = (*service.config).clone();
+            config
+                .oauth_excluded_models
+                .insert("codex".into(), vec![format!("model-{n}")]);
+            service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        }
+        held.release();
+        consume_read(&mut service).await;
+        assert!(
+            service.manager.get(&id).is_none(),
+            "parked removal lands at first config rejection"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .unwrap(),
+            Ok(())
+        );
+        assert!(service.reads.is_empty(), "parked removal cancels Retry-now");
+        assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+        assert!(service.dirty_reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_read_coalesces_three_parked_changes_and_acknowledgements() {
+        for mismatch in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "coalesce.json", "");
+            let mut service = service(dir.path(), "");
+            service.load_file_auths();
+            let payload = auth_file(&path);
+            std::fs::write(&path, "null").unwrap();
+            if mismatch {
+                service.load_auth_file(&payload, next_revision());
+                drain_reads(&mut service).await;
+                fire_dirty_deadline(&mut service).await;
+                fire_dirty_deadline(&mut service).await;
+                assert_eq!(service.dirty_reads.values().next().unwrap().attempt, 3);
+            }
+            let mut held = hold_read(&mut service);
+            if mismatch {
+                service.dirty_reads.values_mut().next().unwrap().deadline =
+                    tokio::time::Instant::now();
+                service.work(Path::new(""), &mut None).await;
+            } else {
+                service.load_auth_file(&payload, next_revision());
+            }
+            held.entered().await;
+            let mut done = Vec::new();
+            for _ in 0..3 {
+                let (applied, ack) = oneshot::channel();
+                service.apply_sync(SyncRequest {
+                    change: SyncChange::FileWritten(payload.clone()),
+                    revision: next_revision(),
+                    applied,
+                    operation: None,
+                });
+                done.push(ack);
+            }
+            if mismatch {
+                let mut config = (*service.config).clone();
+                config
+                    .oauth_excluded_models
+                    .insert("codex".into(), vec!["reset-model".into()]);
+                service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+            }
+            held.release();
+            consume_read(&mut service).await;
+            assert_eq!(
+                service.reads.values().next().unwrap().attempt,
+                0,
+                "coalesced new event resets config retry backoff"
+            );
+            for ack in &mut done {
+                assert_eq!(
+                    ack.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty),
+                    "coalesced acknowledgements await covering read"
+                );
+            }
+            drain_reads(&mut service).await;
+            assert_eq!(
+                held.calls.load(Ordering::SeqCst),
+                2,
+                "three parked changes cause exactly one further read"
+            );
+            for ack in done {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), ack)
+                        .await
+                        .expect("ack acknowledgement arrives within 5s"),
+                    Ok(())
+                );
+            }
+            assert_eq!(service.dirty_reads.len(), 1);
+            assert_eq!(service.dirty_reads.values().next().unwrap().attempt, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_empty_payload_unregisters_without_blank_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gemini.json");
+        std::fs::write(
+            &path,
+            r#"{"type":"gemini","access_token":"gemini-fixture"}"#,
+        )
+        .unwrap();
+        let mut service = service(dir.path(), "");
+        // Legacy Gemini files are not synthesized at startup, but an explicit
+        // management Upsert can register this Unsupported requested record.
+        let mut auth = Auth {
+            id: "gemini.json".into(),
+            provider: "gemini".into(),
+            file_name: "gemini.json".into(),
+            ..Auth::default()
+        };
+        auth.attributes
+            .insert("path".into(), path.to_string_lossy().into_owned());
+        auth.metadata
+            .insert("access_token".into(), serde_json::json!("gemini-fixture"));
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(auth)),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("done acknowledgement arrives within 5s")
+            .unwrap();
+        let id = service.manager.list()[0].id.clone();
+        let file = AuthFile {
+            path: path.clone(),
+            data: b"null".to_vec().into(),
+        };
+        service.load_auth_file(&file, next_revision());
+        drain_reads(&mut service).await;
+        assert!(
+            service.manager.get(&id).is_none(),
+            "unsupported empty payload unregisters instead of publishing a blank hint"
+        );
+        assert!(service.file_auths.is_empty());
+        assert!(service.dirty_reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_refuses_queued_parked_and_inflight_callers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "shutdown.json", "");
+        let mut service = service(dir.path(), "");
+        let sync = sync_sender(&mut service);
+        let mut held = hold_read(&mut service);
+        let file = auth_file(&path);
+        let first_sync = sync.clone();
+        let first_file = file.clone();
+        let first = tokio::spawn(async move { first_sync.file_written(first_file).await });
+        let request = tokio::time::timeout(Duration::from_secs(5), service.sync_requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        service.apply_sync(request);
+        held.entered().await;
+        let parked_sync = sync.clone();
+        let parked_file = file.clone();
+        let parked = tokio::spawn(async move { parked_sync.file_written(parked_file).await });
+        let request = tokio::time::timeout(Duration::from_secs(5), service.sync_requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        service.apply_sync(request);
+        let queued_sync = sync.clone();
+        let queued = tokio::spawn(async move { queued_sync.file_written(file).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while sync.requests.capacity() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        service.close_sync();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), parked)
+                .await
+                .expect("shutdown refuses parked caller within 5s")
+                .unwrap(),
+            Err(SyncError::Stopped)
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), queued)
+                .await
+                .expect("shutdown refuses queued caller within 5s")
+                .unwrap(),
+            Err(SyncError::Stopped)
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), first)
+                .await
+                .expect("shutdown refuses in-flight caller within 5s")
+                .unwrap(),
+            Err(SyncError::Stopped)
+        );
+        held.release();
+        assert!(service.dirty_reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fresh_service_read_keeps_failed_successor_and_repairs_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "fresh.json", r#","refresh_token":"A-refresh""#);
+        let payload = auth_file(&path); // Hold watcher A before P and Q.
+        let mut service = service(dir.path(), "");
+        let store = Arc::new(ServiceRefreshStore {
+            files: service.store.clone(),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        });
+        service.manager = Manager::new(
+            Settings::from(&*service.config),
+            service.registry.clone(),
+            Some(store.clone()),
+        );
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        service
+            .manager
+            .register_executor(Arc::new(NamedRefresher("B")));
+        service.manager.force_refresh(&id).await.unwrap();
+        store.fail.store(true, Ordering::SeqCst);
+        service
+            .manager
+            .register_executor(Arc::new(NamedRefresher("C")));
+        service.manager.force_refresh(&id).await.unwrap();
+        let q = service.manager.get(&id).unwrap().codex_pending_refresh[0].clone();
+        service
+            .handle_and_drain(changed(payload), Path::new(""))
+            .await;
+        let live = service.manager.get(&id).unwrap();
+        assert_eq!(
+            live.metadata["access_token"], "C",
+            "fresh service read retains C"
+        );
+        assert!(
+            live.codex_pending_refresh.iter().any(|p| p == &q),
+            "Q stays pending"
+        );
+        let disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(disk["access_token"], "B", "disk stays B before retry");
+        store.fail.store(false, Ordering::SeqCst);
+        service
+            .manager
+            .run_persistence(move |m| {
+                m.edit(&id, |a| {
+                    a.metadata.insert("note".into(), serde_json::json!("retry"));
+                    Ok::<_, ()>(true)
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(disk["access_token"], "C", "next save repairs disk C");
+    }
+
+    #[tokio::test]
+    async fn fresh_service_revision_precedes_parked_management_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "revision.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let stale = (*service.manager.get(&id).unwrap()).clone();
+        let r1 = next_revision();
+        let r2 = next_revision();
+        codex_file(
+            dir.path(),
+            "revision.json",
+            r#","access_token":"C","prefix":"fresh""#,
+        );
+        let mut held = hold_read(&mut service);
+        service.load_auth_file(&auth_file(&path), r1);
+        held.entered().await;
+        let (applied, mut done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(stale)),
+            revision: r2,
+            applied,
+            operation: None,
+        });
+        assert!(
+            done.try_recv().is_err(),
+            "same-key acknowledgement is parked"
+        );
+        held.release();
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        let r3 = match &completion.result {
+            Ok(AdoptionResult::Published { revision, .. }) => *revision,
+            _ => panic!("fresh read publishes"),
+        };
+        service.complete_read(completion);
+        assert_eq!(
+            service.revisions[&id], r3,
+            "watermark is fresh read revision, not trigger"
+        );
+        assert!(r3 > r2);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("done acknowledgement arrives within 5s"),
+            Ok(())
+        );
+        assert_eq!(service.manager.get(&id).unwrap().prefix, "fresh");
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "C"
+        );
+        assert!(
+            service.reads.is_empty(),
+            "stale management result starts no new read"
+        );
+        // A management hint may identify its record by id only. Existing
+        // registrations supply their origin; an initial read supplies its own.
+        for registered in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "pathless.json", r#","prefix":"fresh-origin""#);
+            let mut service = self::service(dir.path(), "");
+            if registered {
+                service.load_file_auths();
+            }
+            let mut hint = Auth {
+                id: "pathless.json".into(),
+                provider: "codex".into(),
+                prefix: "captured".into(),
+                ..Auth::default()
+            };
+            hint.metadata
+                .insert("type".into(), serde_json::json!("codex"));
+            let (applied, done) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::Upsert(Box::new(hint)),
+                revision: next_revision(),
+                applied,
+                operation: None,
+            });
+            drain_reads(&mut service).await;
+            let current = service
+                .manager
+                .get("pathless.json")
+                .expect("pathless service observation synthesizes resolved fresh origin");
+            assert_eq!(
+                current.prefix, "fresh-origin",
+                "pathless service observation uses fresh config synthesis"
+            );
+            assert_eq!(
+                service.file_auths.get(&path),
+                Some(&current.id),
+                "pathless service observation maps resolved origin"
+            );
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), done)
+                    .await
+                    .expect("done acknowledgement arrives within 5s"),
+                Ok(())
+            );
+            assert!(service.dirty_reads.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn service_parks_removal_aliases_until_fresh_completion() {
+        for registered in [false, true] {
+            for management in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = codex_file(dir.path(), "removal.json", "");
+                let mut service = service(dir.path(), "");
+                if registered {
+                    service.load_file_auths();
+                }
+                let r1 = next_revision();
+                let r2 = next_revision();
+                let mut held = hold_read(&mut service);
+                service.load_auth_file(&auth_file(&path), r1);
+                held.entered().await;
+                let (applied, done) = oneshot::channel();
+                let alias = PathBuf::from("./removal.json");
+                if management {
+                    service.apply_sync(SyncRequest {
+                        change: SyncChange::FileRemoved(alias),
+                        revision: r2,
+                        applied,
+                        operation: None,
+                    });
+                } else {
+                    service
+                        .handle(WatchEvent::AuthRemoved(alias, r2), Path::new(""))
+                        .await;
+                    drop(applied);
+                }
+                assert_eq!(
+                    service.reads.len(),
+                    1,
+                    "removal waits behind one logical-key job"
+                );
+                // Another key can finish while this read is held.
+                let other = codex_file(dir.path(), "other.json", "");
+                service.load_auth_file(&auth_file(&other), next_revision());
+                consume_read(&mut service).await;
+                assert!(
+                    service.file_auths.contains_key(&other),
+                    "other keys continue draining"
+                );
+                held.release();
+                drain_reads(&mut service).await;
+                let id = service
+                    .file_auths
+                    .get(&path)
+                    .expect("fresh registration survives parked stale removal");
+                assert!(
+                    service.manager.get(id).is_some(),
+                    "registration survives completion-first removal accounting"
+                );
+                assert!(service.revisions[id] > r2);
+                if management {
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(5), done)
+                            .await
+                            .expect("done acknowledgement arrives within 5s"),
+                        Ok(())
+                    );
+                }
+                assert!(service.dirty_reads.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn service_dirty_failures_preserve_live_pending_and_file_mapping() {
+        for failure in [
+            "missing",
+            "empty",
+            "null",
+            "invalid",
+            "wrong-provider",
+            "read-error",
+        ] {
+            for registered in [true, false] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = codex_file(dir.path(), "dirty.json", r#","refresh_token":"A-refresh""#);
+                let payload = auth_file(&path);
+                let mut service = service(dir.path(), "");
+                if registered {
+                    let store = Arc::new(ServiceRefreshStore {
+                        files: service.store.clone(),
+                        fail: std::sync::atomic::AtomicBool::new(true),
+                    });
+                    service.manager = Manager::new(
+                        Settings::from(&*service.config),
+                        service.registry.clone(),
+                        Some(store),
+                    );
+                    service.load_file_auths();
+                    let id = service.manager.list()[0].id.clone();
+                    service
+                        .manager
+                        .register_executor(Arc::new(NamedRefresher("pending")));
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        service.manager.force_refresh(&id),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(
+                        service
+                            .manager
+                            .get(&id)
+                            .unwrap()
+                            .codex_pending_refresh
+                            .len(),
+                        1,
+                        "failed-read fixture has unwritten pending work"
+                    );
+                }
+                let before = service.manager.list().first().cloned();
+                let mapping = service.file_auths.clone();
+                match failure {
+                    "missing" => std::fs::remove_file(&path).unwrap(),
+                    "empty" => std::fs::write(&path, "").unwrap(),
+                    "null" => std::fs::write(&path, "null").unwrap(),
+                    "invalid" => std::fs::write(&path, "{broken").unwrap(),
+                    "wrong-provider" => std::fs::write(&path, r#"{"type":"gemini"}"#).unwrap(),
+                    _ => std::fs::write(
+                        &path,
+                        vec![
+                            b' ';
+                            open_ferry_core::auth::file_store::MAX_AUTH_FILE_SIZE as usize + 1
+                        ],
+                    )
+                    .unwrap(),
+                }
+                service.load_auth_file(&payload, next_revision());
+                drain_reads(&mut service).await;
+                assert_eq!(
+                    service.dirty_reads.len(),
+                    1,
+                    "every supported failed read is dirty"
+                );
+                assert_eq!(
+                    service.file_auths, mapping,
+                    "failed read leaves file mapping untouched"
+                );
+                if let Some(before) = before {
+                    assert!(
+                        Arc::ptr_eq(&before, &service.manager.get(&before.id).unwrap()),
+                        "failed read publishes nothing and preserves pending"
+                    );
+                } else {
+                    assert!(
+                        service.manager.list().is_empty(),
+                        "never-registered failed read adopts no payload"
+                    );
+                }
+                assert!(
+                    service.revisions.is_empty(),
+                    "failed reads claim no revision"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn service_dirty_tail_adopts_hash_suppressed_repair_without_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "tail.json", r#","prefix":"hashed-A""#);
+        let hashed = auth_file(&path);
+        let mut service = service(dir.path(), "");
+        std::fs::write(&path, "null").unwrap();
+        service.load_auth_file(&hashed, next_revision());
+        drain_reads(&mut service).await;
+        for attempt in 1..=6 {
+            assert_eq!(
+                service.dirty_reads.len(),
+                1,
+                "dirty entry survives every retry including the 30s tail"
+            );
+            let dirty = service.dirty_reads.values().next().unwrap();
+            assert_eq!(dirty.attempt, attempt);
+            assert_eq!(
+                retry_delay(attempt - 1),
+                [50, 200, 1000, 5000, 30000, 30000].map(Duration::from_millis)[attempt - 1]
+            );
+            fire_dirty_deadline(&mut service).await;
+        }
+        std::fs::write(&path, &hashed.data).unwrap(); // Watcher already hashed A.
+        fire_dirty_deadline(&mut service).await;
+        assert_eq!(
+            service.manager.list()[0].prefix,
+            "hashed-A",
+            "30s tail adopts repaired hashed bytes without event"
+        );
+        assert!(
+            service.dirty_reads.is_empty(),
+            "success leaves no retry timer"
+        );
+        assert!(service.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_dirty_dedup_reset_and_removal_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "reset.json", "");
+        let payload = auth_file(&path);
+        let mut service = service(dir.path(), "");
+        service.handle_and_drain(added(&path), Path::new("")).await;
+        let id = service.manager.list()[0].id.clone();
+        let stale = service.revisions[&id];
+        std::fs::write(&path, "null").unwrap();
+        service.load_auth_file(&payload, next_revision());
+        drain_reads(&mut service).await;
+        fire_dirty_deadline(&mut service).await;
+        assert_eq!(service.dirty_reads.values().next().unwrap().attempt, 2);
+        service.remove_auth_file(&path, stale);
+        assert_eq!(
+            service.dirty_reads.len(),
+            1,
+            "stale removal cancels nothing"
+        );
+        let mut held = hold_read(&mut service);
+        service.load_auth_file(&payload, next_revision());
+        assert_eq!(
+            service.reads.values().next().unwrap().attempt,
+            0,
+            "new event resets backoff"
+        );
+        held.entered().await;
+        service.remove_auth_file(&path, stale);
+        for _ in 0..4 {
+            service.load_auth_file(&payload, next_revision());
+        }
+        assert_eq!(
+            service.reads.len(),
+            1,
+            "duplicate events have one outstanding read"
+        );
+        assert!(
+            service.dirty_reads.is_empty(),
+            "no timer while read is outstanding"
+        );
+        held.release();
+        drain_reads(&mut service).await;
+        assert_eq!(
+            held.calls.load(Ordering::SeqCst),
+            2,
+            "parked duplicates coalesce to one further read"
+        );
+        assert_eq!(
+            service.dirty_reads.len(),
+            1,
+            "duplicate events retain only one dirty timer"
+        );
+        assert_eq!(
+            service.dirty_reads.values().next().unwrap().attempt,
+            1,
+            "new event resets backoff"
+        );
+        service.remove_auth_file(&path, next_revision());
+        assert!(
+            service.dirty_reads.is_empty(),
+            "accepted removal cancels retry"
+        );
+        assert!(service.manager.get(&id).is_none());
+        service.retry_dirty_reads();
+        assert!(service.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_dirty_context_changes_and_shutdown_cancel_retries() {
+        for change in [
+            "registration",
+            "origin",
+            "shutdown",
+            "new-registration-event",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = codex_file(dir.path(), "context.json", "");
+            let payload = auth_file(&path);
+            let mut service = service(dir.path(), "");
+            service.load_file_auths();
+            let id = service.manager.list()[0].id.clone();
+            std::fs::write(&path, "null").unwrap();
+            service.load_auth_file(&payload, next_revision());
+            drain_reads(&mut service).await;
+            match change {
+                "registration" | "new-registration-event" => {
+                    let auth = (*service.manager.get(&id).unwrap()).clone();
+                    service.manager.remove(&id);
+                    service.manager.register_unsaved(auth).unwrap();
+                }
+                "origin" => {
+                    service
+                        .manager
+                        .edit_unsaved(&id, |auth| {
+                            auth.attributes
+                                .insert("path".into(), "changed-origin.json".into());
+                            Ok::<_, ()>(true)
+                        })
+                        .unwrap();
+                }
+                _ => service.close_sync(),
+            }
+            if change == "new-registration-event" {
+                std::fs::write(&path, &payload.data).unwrap();
+                let before = service.manager.get(&id).unwrap();
+                service.load_auth_file(&payload, next_revision());
+                drain_reads(&mut service).await;
+                assert!(
+                    !Arc::ptr_eq(&before, &service.manager.get(&id).unwrap()),
+                    "new event uses replacement registration instead of stale dirty context"
+                );
+            } else if !service.dirty_reads.is_empty() {
+                service.dirty_reads.values_mut().next().unwrap().deadline =
+                    tokio::time::Instant::now();
+                service.work(Path::new(""), &mut None).await;
+                assert!(
+                    service.reads.is_empty(),
+                    "context change starts no retry read"
+                );
+            }
+            assert!(
+                service.dirty_reads.is_empty(),
+                "context change cancels dirty state"
+            );
+            assert!(
+                service.reads.is_empty(),
+                "context change starts no retry read"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn service_config_generation_reruns_held_synthesis_with_current_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "config-generation.json", "");
+        let mut service = service(dir.path(), "oauth-excluded-models:\n  codex: [old-model]\n");
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let mut held = hold_read(&mut service);
+        service.load_auth_file(&auth_file(&path), next_revision());
+        held.entered().await;
+        let mut config = (*service.config).clone();
+        config
+            .oauth_excluded_models
+            .insert("codex".into(), vec!["new-model".into()]);
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        held.release();
+        drain_reads(&mut service).await;
+        let live = service.manager.get(&id).unwrap();
+        let mut expected = (*live).clone();
+        assert!(
+            !apply_config_attributes(&service.synthesis_context(), &mut expected),
+            "held synthesis publishes C1 attributes, never C0"
+        );
+        assert_eq!(
+            held.calls.load(Ordering::SeqCst),
+            2,
+            "config mismatch reruns synthesis exactly once"
+        );
+        assert!(
+            service.dirty_reads.is_empty(),
+            "config Retry-now pays no dirty penalty"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_observation_rejects_changed_registration_and_origin() {
+        for initially_registered in [false, true] {
+            for before_read in [false, true] {
+                for change_origin in ["registration", "path", "provider", "file-name"] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = codex_file(dir.path(), "validation.json", "");
+                    let mut service = service(dir.path(), "");
+                    if initially_registered {
+                        service.load_file_auths();
+                    }
+                    let mut held = (!before_read).then(|| hold_read(&mut service));
+                    service.load_auth_file(&auth_file(&path), next_revision());
+                    if let Some(held) = &mut held {
+                        held.entered().await;
+                    }
+                    let id = open_ferry_core::auth::file_store::id_for(
+                        &path,
+                        &path.to_string_lossy(),
+                        dir.path(),
+                    );
+                    let mut replacement = identity_hint(
+                        &ReadIdentity {
+                            id: Some(id.clone()),
+                            provider: "codex".into(),
+                            path: Some(path.clone()),
+                            file_name: "validation.json".into(),
+                            registration: None,
+                            tombstone: 0,
+                            binding: service.store.binding_generation(),
+                        },
+                        &service.synthesis_context(),
+                    );
+                    replacement
+                        .metadata
+                        .insert("access_token".into(), serde_json::json!("replacement"));
+                    replacement.prefix = "replacement".into();
+                    if initially_registered && change_origin != "registration" {
+                        service
+                            .manager
+                            .edit_unsaved(&id, |auth| {
+                                *auth = replacement;
+                                match change_origin {
+                                    "path" => {
+                                        auth.attributes
+                                            .insert("path".into(), "changed-origin.json".into());
+                                    }
+                                    "provider" => auth.provider = "gemini".into(),
+                                    "file-name" => auth.file_name = "different.json".into(),
+                                    _ => unreachable!(),
+                                }
+                                Ok::<_, ()>(true)
+                            })
+                            .unwrap();
+                    } else {
+                        service.manager.register_unsaved(replacement).unwrap();
+                    }
+                    let before = service.manager.get(&id).unwrap();
+                    if let Some(held) = &mut held {
+                        held.release();
+                    }
+                    drain_reads(&mut service).await;
+                    assert!(
+                        Arc::ptr_eq(&before, &service.manager.get(&id).unwrap()),
+                        "publication rejects replacement registration and origin changes"
+                    );
+                    assert!(service.file_auths.is_empty() || initially_registered);
+                    assert!(
+                        service.revisions.is_empty(),
+                        "rejected publication claims no revision"
+                    );
+                    assert!(
+                        service.dirty_reads.is_empty(),
+                        "changed registration never retries old context"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn drain_reads(service: &mut Service) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !service.reads.is_empty() {
+                let completion = service
+                    .read_completions
+                    .recv()
+                    .await
+                    .expect("read completion");
+                service.complete_read(completion);
+            }
+        })
+        .await
+        .expect("service reads complete within 5s");
+    }
+
+    impl Service {
+        async fn handle_and_drain(&mut self, event: WatchEvent, config_path: &Path) -> Watching {
+            let result = self.handle(event, config_path).await;
+            drain_reads(self).await;
+            result
+        }
+    }
+
     /// A service over `dir` with `extra` config, its executors registered.
     fn service(dir: &Path, extra: &str) -> Service {
         let config = Config::parse(format!("auth-dir: '{}'\n{extra}", dir.display())).unwrap();
@@ -3094,11 +8344,11 @@ self-update:
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
         // The watcher reports the same file again, then a change to it.
-        service.handle(added(&path), Path::new("")).await;
+        service.handle_and_drain(added(&path), Path::new("")).await;
         codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
         let rewritten = std::fs::read(&path).unwrap();
         service
-            .handle(changed(auth_file(&path)), Path::new(""))
+            .handle_and_drain(changed(auth_file(&path)), Path::new(""))
             .await;
         assert_eq!(service.manager.list().len(), 1);
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
@@ -3109,7 +8359,9 @@ self-update:
             "the file was rewritten"
         );
 
-        service.handle(removed(&path), Path::new("")).await;
+        service
+            .handle_and_drain(removed(&path), Path::new(""))
+            .await;
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
@@ -3147,25 +8399,36 @@ self-update:
     }
 
     #[tokio::test]
-    async fn an_auth_file_that_stops_parsing_is_unregistered() {
+    async fn an_auth_file_that_stops_parsing_stays_live_and_dirty() {
         let dir = tempfile::tempdir().unwrap();
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
-        service.handle(added(&path), Path::new("")).await;
+        service.handle_and_drain(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
 
         let broken = AuthFile {
             path: path.clone(),
             data: Arc::from(&b"{not json"[..]),
         };
-        service.handle(changed(broken), Path::new("")).await;
-        assert!(service.manager.get(&id).is_none());
-        assert!(service.registry.models_for_client(&id).is_empty());
-        assert!(service.file_auths.is_empty());
+        std::fs::write(&path, "{not json").unwrap();
+        service
+            .handle_and_drain(changed(broken), Path::new(""))
+            .await;
+        assert!(
+            service.manager.get(&id).is_some(),
+            "invalid read keeps live registration"
+        );
+        assert!(!service.registry.models_for_client(&id).is_empty());
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+        assert_eq!(
+            service.dirty_reads.len(),
+            1,
+            "invalid read retains dirty timer"
+        );
     }
 
     #[tokio::test]
-    async fn auth_events_load_the_contents_the_watcher_read() {
+    async fn auth_events_read_current_contents_and_retry_invalid_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
         let checked = auth_file(&path);
@@ -3173,25 +8436,31 @@ self-update:
         std::fs::write(&path, "{not json").unwrap();
         let mut service = service(dir.path(), "");
         service
-            .handle(
+            .handle_and_drain(
                 WatchEvent::AuthAdded(checked, next_revision()),
                 Path::new(""),
             )
             .await;
-        let auths = service.manager.list();
-        assert_eq!(auths.len(), 1);
-        assert_eq!(auths[0].prefix, "team");
-        assert_eq!(service.file_auths.get(&path), Some(&auths[0].id));
+        assert!(
+            service.manager.list().is_empty(),
+            "captured payload is never adopted after invalid fresh read"
+        );
+        assert!(service.file_auths.is_empty());
+        assert_eq!(
+            service.dirty_reads.len(),
+            1,
+            "never-registered path stays dirty"
+        );
     }
 
     #[tokio::test]
-    async fn an_event_for_a_file_that_is_gone_unregisters_it() {
+    async fn a_missing_fresh_read_stays_live_until_explicit_removal() {
         let dir = tempfile::tempdir().unwrap();
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
         let stale = auth_file(&path);
         service
-            .handle(
+            .handle_and_drain(
                 WatchEvent::AuthAdded(stale.clone(), next_revision()),
                 Path::new(""),
             )
@@ -3201,14 +8470,28 @@ self-update:
         // The file is deleted before the watcher's report of a change to it
         // is applied.
         std::fs::remove_file(&path).unwrap();
-        service.handle(changed(stale.clone()), Path::new("")).await;
-        assert!(service.manager.get(&id).is_none());
-        assert!(service.registry.models_for_client(&id).is_empty());
-        assert!(service.file_auths.is_empty());
         service
-            .handle(WatchEvent::AuthAdded(stale, next_revision()), Path::new(""))
+            .handle_and_drain(changed(stale.clone()), Path::new(""))
+            .await;
+        assert!(
+            service.manager.get(&id).is_some(),
+            "missing read is not a removal"
+        );
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+        assert_eq!(
+            service.dirty_reads.len(),
+            1,
+            "missing read retains dirty timer"
+        );
+        service
+            .handle_and_drain(WatchEvent::AuthAdded(stale, next_revision()), Path::new(""))
+            .await;
+        assert!(service.manager.get(&id).is_some());
+        service
+            .handle_and_drain(removed(&path), Path::new(""))
             .await;
         assert!(service.manager.list().is_empty());
+        assert!(service.dirty_reads.is_empty());
     }
 
     /// The service's sync over a queue of one, which `service` now takes
@@ -3231,9 +8514,16 @@ self-update:
         Fut: Future<Output = Result<(), SyncError>> + Send + 'static,
     {
         let sent = tokio::spawn(send(Arc::clone(sync)));
-        let request = service.sync_requests.recv().await.unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(5), service.sync_requests.recv())
+            .await
+            .expect("request arrival 3080 within 5s")
+            .unwrap();
         service.apply_sync(request);
-        sent.await.unwrap()
+        drain_reads(service).await;
+        tokio::time::timeout(Duration::from_secs(5), sent)
+            .await
+            .expect("sync task acknowledges within 5s (case 1)")
+            .unwrap()
     }
 
     #[tokio::test]
@@ -3261,6 +8551,7 @@ self-update:
         let mut renamed = Auth::clone(&service.manager.get(&id).unwrap());
         renamed.id = "codex-renamed".into();
         renamed.prefix = "other".into();
+        codex_file(dir.path(), "codex-a.json", r#","prefix":"other""#);
         let sent = apply_next(&mut service, &sync, |sync| async move {
             sync.upsert(renamed).await
         });
@@ -3298,8 +8589,19 @@ self-update:
             let sync = Arc::clone(&sync);
             async move { sync.file_removed(PathBuf::from("gone.json")).await }
         });
-        drop(service.sync_requests.recv().await.unwrap());
-        assert_eq!(sent.await.unwrap(), Err(SyncError::Stopped));
+        drop(
+            tokio::time::timeout(Duration::from_secs(5), service.sync_requests.recv())
+                .await
+                .expect("request arrival 3152 within 5s")
+                .unwrap(),
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), sent)
+                .await
+                .expect("sync task acknowledges within 5s (case 2)")
+                .unwrap(),
+            Err(SyncError::Stopped)
+        );
 
         // A change still waiting when the loop stops is applied; later ones
         // fail.
@@ -3315,12 +8617,18 @@ self-update:
             })
             .unwrap_or_else(|_| panic!("the queue is full"));
         service.close_sync();
-        assert_eq!(done.await, Ok(()));
-        assert_eq!(service.manager.list().len(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("management_changes_fail_once_the_loop_stops done acknowledges within 5s")
+                .is_err(),
+            "shutdown cancels queued observations"
+        );
+        assert!(service.manager.list().is_empty());
         let error = sync.file_removed(path).await.unwrap_err();
         assert_eq!(error, SyncError::Stopped);
         assert_eq!(error.status().as_u16(), 503);
-        assert_eq!(service.manager.list().len(), 1);
+        assert!(service.manager.list().is_empty());
     }
 
     #[tokio::test]
@@ -3342,19 +8650,28 @@ self-update:
                 .await;
             service
         });
-        arrived.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+            .await
+            .expect("request arrival 3208 within 5s");
         let closing_gate = gate.clone();
         let closing = tokio::spawn(async move { closing_gate.close(closing_gate.epoch()).await });
         while gate.state() == open_ferry_core::gate::GateState::Open {
             tokio::task::yield_now().await;
         }
         release.notify_one();
-        let service = changing.await.unwrap();
+        let service = tokio::time::timeout(Duration::from_secs(5), changing)
+            .await
+            .expect("directory apply task completes within 5s")
+            .unwrap();
         assert_eq!(service.config.resolve_auth_dir().unwrap(), new_auth);
         assert_eq!(service.auth_dir, new_auth);
         assert_eq!(service.store.base_dir(), new_auth);
         assert_eq!(service.watcher.as_ref().unwrap().auth_dir(), new_auth);
-        closing.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("gate close task completes within 5s (case 1)")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3430,8 +8747,15 @@ self-update:
         assert_eq!(service.store.base_dir(), new_auth);
         assert!(service.deferred_config.is_none());
         service.reloaded(2);
-        done.await.unwrap();
-        closing.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("pending ticket acknowledges within 5s")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("gate close task completes within 5s (case 2)")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3467,13 +8791,15 @@ self-update:
         config.auth_dir = dir.path().join("new-auth").to_string_lossy().into_owned();
         // An answer that arrived outside the owned work scope was deferred.
         service
-            .handle(
+            .handle_and_drain(
                 WatchEvent::ConfigChanged(Arc::new(config), "new".into()),
                 &path,
             )
             .await;
         assert!(service.deferred_config.is_some());
-        service.handle(WatchEvent::Reloaded(2), &path).await;
+        service
+            .handle_and_drain(WatchEvent::Reloaded(2), &path)
+            .await;
         tokio::time::timeout(Duration::from_secs(1), closing)
             .await
             .expect("answered reload tickets kept the gate live")
@@ -3524,7 +8850,10 @@ self-update:
         assert_eq!(service.pending_reloads.len(), 1);
         sender.send(WatchEvent::Reloaded(1)).await.unwrap();
         service.work(&path, &mut events).await;
-        done.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("directory retry acknowledges within 5s")
+            .unwrap();
         assert!(service.pending_reloads.is_empty());
     }
 
@@ -3737,13 +9066,16 @@ port: 3
             let event = next_watched(&mut events).await;
             applies += usize::from(matches!(event, WatchEvent::ConfigChanged(..)));
             let finished = event == WatchEvent::Reloaded(1);
-            let watching = service.handle(event, &path).await;
+            let watching = service.handle_and_drain(event, &path).await;
             service.follow(watching, &mut events);
             if finished {
                 break;
             }
         }
-        done.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("an_owned_open_reload_uses_the_watcher_once done acknowledges within 5s")
+            .unwrap();
         service.watcher.as_ref().unwrap().reload_config(2);
         loop {
             let event = next_watched(&mut events).await;
@@ -3751,7 +9083,7 @@ port: 3
             if event == WatchEvent::Reloaded(2) {
                 break;
             }
-            let watching = service.handle(event, &path).await;
+            let watching = service.handle_and_drain(event, &path).await;
             service.follow(watching, &mut events);
         }
         assert_eq!(applies, 1);
@@ -3797,10 +9129,13 @@ port: 3
             })
             .await;
         service.follow(watching, &mut events);
-        done.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("direct reload acknowledges within 5s")
+            .unwrap();
         assert_eq!(service.config.port, 2);
         let applied_config = Arc::clone(&service.config);
-        service.handle(stale, &path).await;
+        service.handle_and_drain(stale, &path).await;
         assert!(
             Arc::ptr_eq(&applied_config, &service.config),
             "a stale snapshot reverted the direct apply"
@@ -3809,7 +9144,7 @@ port: 3
         loop {
             let event = next_watched(&mut events).await;
             let finished = event == WatchEvent::Reloaded(2);
-            let watching = service.handle(event, &path).await;
+            let watching = service.handle_and_drain(event, &path).await;
             service.follow(watching, &mut events);
             assert!(
                 Arc::ptr_eq(&applied_config, &service.config),
@@ -3820,7 +9155,11 @@ port: 3
             }
         }
         drop(operation);
-        closing.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("gate close task completes within 5s (case 3)")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3864,7 +9203,10 @@ port: {port}
             ))
             .await;
         service.follow(watching, &mut events);
-        done.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("a_direct_reload_fence_applies_a_later_valid_file done acknowledges within 5s")
+            .unwrap();
         assert_eq!(service.config.port, 2);
         let later = text(3);
         std::fs::write(&path, &later).unwrap();
@@ -3881,7 +9223,11 @@ port: {port}
             Some(open_ferry_core::config::save::sha256_hex(later.as_bytes()))
         );
         drop(operation);
-        closing.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("gate close task completes within 5s (case 4)")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3923,7 +9269,13 @@ port: {port}
         assert_eq!(service.auth_dir, new_auth);
         assert_eq!(service.store.base_dir(), new_auth);
         assert!(new_auth.is_dir());
-        assert_eq!(closing.await.unwrap(), Ok(()));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), closing)
+                .await
+                .expect("gate close task completes within 5s (case 5)")
+                .unwrap(),
+            Ok(())
+        );
     }
 
     #[tokio::test]
@@ -3956,7 +9308,7 @@ port: {port}
             service.gate.state(),
             open_ferry_core::gate::GateState::Quiescing
         );
-        service.handle(snapshot, &path).await;
+        service.handle_and_drain(snapshot, &path).await;
         assert!(
             Arc::ptr_eq(&original, &service.config),
             "refused config was published"
@@ -3964,9 +9316,13 @@ port: {port}
         assert!(!new_auth.exists());
         let answer = next_watched(&mut events).await;
         assert_eq!(answer, WatchEvent::Reloaded(1));
-        service.handle(answer, &path).await;
+        service.handle_and_drain(answer, &path).await;
         drop(operation);
-        closing.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("gate close task completes within 5s (case 6)")
+            .unwrap()
+            .unwrap();
         service.gate.reopen();
         // No further filesystem event or reload ticket is needed.
         tokio::time::timeout(Duration::from_secs(1), service.work(&path, &mut events))
@@ -3997,7 +9353,9 @@ port: {port}
             Duration::from_millis(50),
         );
         let probe = async {
-            arrived.notified().await;
+            tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+                .await
+                .expect("request arrival 3909 within 5s");
         };
         tokio::join!(shutdown, probe);
         assert!(
@@ -4061,7 +9419,10 @@ port: {port}
             let reload = Arc::clone(&reload);
             async move { reload.reload().await }
         });
-        let request = service.reload_requests.recv().await.unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(5), service.reload_requests.recv())
+            .await
+            .expect("request arrival 3973 within 5s")
+            .unwrap();
         assert!(!request.force);
         let watching = service.request_reload(request, &config_path).await;
         service.follow(watching, &mut events);
@@ -4070,13 +9431,13 @@ port: {port}
             matches!(changed, WatchEvent::ConfigChanged(..)),
             "{changed:?}"
         );
-        let watching = service.handle(changed, &config_path).await;
+        let watching = service.handle_and_drain(changed, &config_path).await;
         service.follow(watching, &mut events);
         assert_eq!(service.config.port, 2);
         assert!(!reloaded.is_finished());
         let answer = next_watched(&mut events).await;
         assert_eq!(answer, WatchEvent::Reloaded(1));
-        service.handle(answer, &config_path).await;
+        service.handle_and_drain(answer, &config_path).await;
         tokio::time::timeout(Duration::from_secs(10), reloaded)
             .await
             .unwrap()
@@ -4093,7 +9454,12 @@ port: {port}
         service.follow(watching, &mut events);
         service.follow(Watching::Stopped, &mut events);
         assert!(service.watcher.is_none() && events.is_none());
-        assert_eq!(done.await, Ok(()));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("management_reloads_are_answered_once_applied done acknowledges within 5s"),
+            Ok(())
+        );
 
         // Without a watcher the file is loaded here. Not upstream's: an
         // empty file is skipped, as the watcher skips it, forced or not, and
@@ -4107,7 +9473,12 @@ port: {port}
         };
         let watching = service.request_reload(request, &config_path).await;
         service.follow(watching, &mut events);
-        assert_eq!(done.await, Ok(()));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("management_reloads_are_answered_once_applied done acknowledges within 5s"),
+            Ok(())
+        );
         assert_eq!(service.config.port, 3);
         let sha256 = service.management.config_sha256();
         std::fs::write(&config_path, "").unwrap();
@@ -4124,7 +9495,14 @@ port: {port}
                 )
                 .await;
             service.follow(watching, &mut events);
-            assert_eq!(done.await, Ok(()));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), done)
+                    .await
+                    .expect(
+                        "management_reloads_are_answered_once_applied done acknowledges within 5s"
+                    ),
+                Ok(())
+            );
             assert_eq!(service.config.port, 3);
             assert_eq!(service.management.config().port, 3);
             assert_eq!(service.management.config_sha256(), sha256);
@@ -4140,7 +9518,12 @@ port: {port}
         };
         reload.requests.try_send(request).unwrap();
         service.close_reloads();
-        assert_eq!(done.await, Ok(()));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("management_reloads_are_answered_once_applied done acknowledges within 5s"),
+            Ok(())
+        );
         tokio::time::timeout(Duration::from_secs(10), reload.reload())
             .await
             .unwrap();
@@ -4179,7 +9562,7 @@ port: {port}
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
         let sync = sync_sender(&mut service);
-        service.handle(added(&path), Path::new("")).await;
+        service.handle_and_drain(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
         assert!(!model_ids(&service, &id).is_empty());
 
@@ -4191,7 +9574,13 @@ port: {port}
         let mut auth = Auth::clone(&service.manager.get(&id).unwrap());
         auth.disabled = true;
         auth.status = Status::Disabled;
-        let disabled = service.manager.update(auth).unwrap().unwrap();
+        let disabled = service
+            .manager
+            .run_persistence(move |manager| manager.update(auth))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["disabled"], true);
@@ -4201,16 +9590,20 @@ port: {port}
         sent.await.unwrap();
         assert!(model_ids(&service, &id).is_empty());
 
-        service.handle(queued, Path::new("")).await;
+        service.handle_and_drain(queued, Path::new("")).await;
         assert!(service.manager.get(&id).unwrap().disabled);
         assert!(model_ids(&service, &id).is_empty());
 
         // A report read after the save is applied.
         service
-            .handle(changed(auth_file(&path)), Path::new(""))
+            .handle_and_drain(changed(auth_file(&path)), Path::new(""))
             .await;
         assert!(service.manager.get(&id).unwrap().disabled);
-        assert_eq!(service.revisions.len(), 1);
+        assert_eq!(
+            service.revisions[&id],
+            service.revisions[&path.to_string_lossy().into_owned()],
+            "id/path aliases share the watermark"
+        );
     }
 
     /// Not upstream's test, for its revisions: a removal the watcher saw
@@ -4223,7 +9616,7 @@ port: {port}
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
         let sync = sync_sender(&mut service);
-        service.handle(added(&path), Path::new("")).await;
+        service.handle_and_drain(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
 
         let queued = removed(&path);
@@ -4233,7 +9626,7 @@ port: {port}
             sync.file_written(file).await
         });
         sent.await.unwrap();
-        service.handle(queued, Path::new("")).await;
+        service.handle_and_drain(queued, Path::new("")).await;
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
@@ -4249,10 +9642,18 @@ port: {port}
             operation: None,
         };
         service
-            .handle(changed(auth_file(&path)), Path::new(""))
+            .handle_and_drain(changed(auth_file(&path)), Path::new(""))
             .await;
         service.apply_sync(request);
-        assert_eq!(done.await, Ok(()));
+        drain_reads(&mut service).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect(
+                    "stale_removals_and_management_changes_are_skipped done acknowledges within 5s"
+                ),
+            Ok(())
+        );
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
     }
 
@@ -4304,6 +9705,190 @@ port: {port}
         }
     }
 
+    #[tokio::test]
+    async fn watcher_upsert_rebases_unwritten_rotation_from_old_disk() {
+        use open_ferry_core::auth::AuthStore;
+        struct FailingRefreshStore(Arc<open_ferry_core::auth::FileStore>);
+        impl AuthStore for FailingRefreshStore {
+            fn list(&self) -> std::io::Result<Vec<Auth>> {
+                self.0.list()
+            }
+            fn save(&self, auth: &Auth) -> std::io::Result<String> {
+                if matches!(
+                    auth.codex_persist_intent,
+                    open_ferry_core::auth::codex_refresh::CodexPersistIntent::Refresh(_)
+                ) {
+                    return Err(std::io::Error::other("synthetic refresh save failure"));
+                }
+                self.0.save(auth)
+            }
+            fn delete(&self, id: &str) -> std::io::Result<()> {
+                self.0.delete(id)
+            }
+            fn read_back(&self, auth: &Auth) -> std::io::Result<Option<Auth>> {
+                self.0.read_back(auth)
+            }
+            fn read_for_adoption(&self, auth: &Auth) -> std::io::Result<AdoptionRead> {
+                self.0.read_for_adoption(auth)
+            }
+            fn binding_generation(&self) -> u64 {
+                self.0.binding_generation()
+            }
+
+            fn supports_codex_refresh_patches(&self) -> bool {
+                true
+            }
+            fn same_record(&self, a: &Auth, b: &Auth) -> std::io::Result<bool> {
+                self.0.same_record(a, b)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(
+            dir.path(),
+            "watcher-race.json",
+            r#","refresh_token":"fixture-refresh""#,
+        );
+        let mut service = service(dir.path(), "");
+        service.handle_and_drain(added(&path), Path::new("")).await;
+        let old = service.manager.list()[0].as_ref().clone();
+        let id = old.id.clone();
+        let files = Arc::new(open_ferry_core::auth::FileStore::new(dir.path()));
+        service.manager = Manager::new(
+            Settings::from(&*service.config),
+            service.registry.clone(),
+            Some(Arc::new(FailingRefreshStore(files))),
+        );
+        service.manager.register_unsaved(old.clone()).unwrap();
+        service.manager.register_executor(Arc::new(Refresher));
+        service.manager.force_refresh(&id).await.unwrap();
+        assert_eq!(
+            service
+                .manager
+                .get(&id)
+                .unwrap()
+                .codex_pending_refresh
+                .len(),
+            1
+        );
+        // This file-synthesized, generation-zero event carries the old disk
+        // tokens with a settings-only change. It must not act like a login.
+        codex_file(
+            dir.path(),
+            "watcher-race.json",
+            r#","refresh_token":"fixture-refresh","prefix":"team""#,
+        );
+        service
+            .handle_and_drain(changed(auth_file(&path)), Path::new(""))
+            .await;
+        let live = service.manager.get(&id).unwrap();
+        assert_eq!(live.metadata["access_token"], "refreshed");
+        assert_eq!(live.prefix, "team");
+        assert_eq!(live.codex_pending_refresh.len(), 1);
+        let saving_id = id.clone();
+        service
+            .manager
+            .run_persistence(move |manager| {
+                manager.edit(&saving_id, |auth| {
+                    auth.metadata
+                        .insert("note".into(), serde_json::json!("retry"));
+                    Ok::<_, ()>(true)
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["access_token"], "refreshed");
+        assert_eq!(saved["prefix"], "team");
+        let mut new_login = service.manager.get(&id).unwrap().as_ref().clone();
+        new_login.generation = 0;
+        new_login.registration_epoch = 0;
+        new_login
+            .metadata
+            .insert("access_token".into(), serde_json::json!("explicit-login"));
+        new_login.metadata.insert(
+            "refresh_token".into(),
+            serde_json::json!("explicit-login-refresh"),
+        );
+        assert!(service.upsert(new_login, &service.rules()));
+        assert_eq!(
+            service.manager.get(&id).unwrap().metadata["access_token"],
+            "explicit-login"
+        );
+        assert!(
+            service
+                .manager
+                .get(&id)
+                .unwrap()
+                .codex_pending_refresh
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn config_apply_keeps_refresh_published_after_its_previous_clone_point() {
+        // Fixed code runs the hook before its locked edit; the old get/clone
+        // negative control moves it after cloning and demonstrates the race.
+        struct FailingStore;
+        impl open_ferry_core::auth::AuthStore for FailingStore {
+            fn list(&self) -> std::io::Result<Vec<Auth>> {
+                Ok(Vec::new())
+            }
+            fn save(&self, _: &Auth) -> std::io::Result<String> {
+                Err(std::io::Error::other("injected save failure"))
+            }
+            fn delete(&self, _: &str) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(
+            dir.path(),
+            "oauth-excluded-models:\n  codex: [excluded-model]\n",
+        );
+        service.manager = Manager::new(
+            Settings::from(&*service.config),
+            service.registry.clone(),
+            Some(Arc::new(FailingStore)),
+        );
+        service.manager.register_executor(Arc::new(Refresher));
+        let auth = Auth {
+            id: "config-race.json".into(), provider: "codex".into(),
+            metadata: serde_json::json!({"type":"codex", "access_token":"before-config", "refresh_token":"fixture-refresh"}).as_object().unwrap().clone(),
+            ..Auth::default()
+        };
+        service.manager.register_unsaved(auth).unwrap();
+        service.file_auths.insert(
+            dir.path().join("config-race.json"),
+            "config-race.json".into(),
+        );
+        let manager = service.manager.clone();
+        service.file_config_hook = Some(Arc::new(move || {
+            let manager = manager.clone();
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(manager.force_refresh("config-race.json"))
+                    .unwrap();
+            })
+            .join()
+            .unwrap();
+        }));
+        service.apply_config_to_file_auths();
+        let live = service.manager.get("config-race.json").unwrap();
+        assert_eq!(live.metadata["access_token"], "refreshed");
+        assert_eq!(live.codex_pending_refresh.len(), 1);
+        let mut expected = (*live).clone();
+        assert!(
+            !apply_config_attributes(&service.synthesis_context(), &mut expected),
+            "config attributes were applied to the refreshed live entry"
+        );
+        assert!(live.attributes.contains_key("excluded_models"));
+    }
+
     /// Not upstream's test, for its generations (sdk/cliproxy/service_auth.go,
     /// prepareCoreAuthForModelRegistration and isStaleCoreAuth): a
     /// management field change whose sync waits while the credential's
@@ -4316,25 +9901,41 @@ port: {port}
         let mut service = service(dir.path(), "");
         service.manager.register_executor(Arc::new(Refresher));
         let sync = sync_sender(&mut service);
-        service.handle(added(&path), Path::new("")).await;
+        service.handle_and_drain(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
 
         // The API changes a field, saving the file; its sync waits.
         let mut auth = Auth::clone(&service.manager.get(&id).unwrap());
         auth.metadata.insert("note".into(), "changed".into());
-        let changed = service.manager.update(auth).unwrap().unwrap();
+        let changed = service
+            .manager
+            .run_persistence(move |manager| manager.update(auth))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let held = tokio::spawn({
             let sync = Arc::clone(&sync);
             async move { sync.upsert(Auth::clone(&changed)).await }
         });
-        let request = service.sync_requests.recv().await.unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(5), service.sync_requests.recv())
+            .await
+            .expect("request arrival 4469 within 5s")
+            .unwrap();
 
         let refreshed = service.manager.force_refresh(&id).await.unwrap();
         assert_eq!(access_token(&service, &id), "refreshed");
         assert!(refreshed.generation > request_generation(&request));
 
         service.apply_sync(request);
-        assert_eq!(held.await.unwrap(), Ok(()));
+        drain_reads(&mut service).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), held)
+                .await
+                .expect("held management sync acknowledges within 5s")
+                .unwrap(),
+            Ok(())
+        );
         let auth = service.manager.get(&id).unwrap();
         assert_eq!(access_token(&service, &id), "refreshed");
         assert_eq!(
@@ -4452,13 +10053,13 @@ port: {port}
         };
         let path = file.path.clone();
         service
-            .handle(WatchEvent::AuthAdded(file, revision), &config_path)
+            .handle_and_drain(WatchEvent::AuthAdded(file, revision), &config_path)
             .await;
         assert_eq!(service.manager.list().len(), 1);
         assert!(service.manager.get(&id).is_some());
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
-        service.handle(removed(&path), &config_path).await;
+        service.handle_and_drain(removed(&path), &config_path).await;
         assert!(service.manager.list().is_empty());
         assert!(service.file_auths.is_empty());
 
@@ -4466,7 +10067,9 @@ port: {port}
         let same = Arc::new(Config::parse(std::fs::read_to_string(&config_path).unwrap()).unwrap());
         service.watcher = Some(watcher);
         assert!(matches!(
-            service.handle(config_changed(same), &config_path).await,
+            service
+                .handle_and_drain(config_changed(same), &config_path)
+                .await,
             Watching::Same
         ));
     }
@@ -4488,7 +10091,7 @@ port: {port}
         let same = Config::parse(format!("auth-dir: '{}'\n{keys}", dir.path().display())).unwrap();
         assert!(matches!(
             service
-                .handle(config_changed(Arc::new(same)), Path::new(""))
+                .handle_and_drain(config_changed(Arc::new(same)), Path::new(""))
                 .await,
             Watching::Same
         ));
@@ -4497,7 +10100,7 @@ port: {port}
         // A reload without the key removes it.
         let none = Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
         service
-            .handle(config_changed(Arc::new(none)), Path::new(""))
+            .handle_and_drain(config_changed(Arc::new(none)), Path::new(""))
             .await;
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
@@ -4631,7 +10234,7 @@ port: {port}
     async fn reload(service: &mut Service, dir: &Path, extra: &str) -> Watching {
         let config = Config::parse(format!("auth-dir: '{}'\n{extra}", dir.display())).unwrap();
         service
-            .handle(config_changed(Arc::new(config)), Path::new(""))
+            .handle_and_drain(config_changed(Arc::new(config)), Path::new(""))
             .await
     }
 
@@ -4668,14 +10271,19 @@ port: {port}
         assert_eq!(auth.attribute("excluded_models"), Some(both.as_str()));
         assert!(model_ids(&service, &id).is_empty());
 
-        // Runtime state the file doesn't hold.
-        let mut auth = Auth::clone(&auth);
-        auth.metadata
-            .insert("access_token".into(), "runtime".into());
-        auth.status_message = "cooling".into();
+        // Runtime state the file doesn't hold. Replace observes disk tokens;
+        // install this live-only fixture through a live-locked edit instead.
         let retry = Utc::now() + chrono::Duration::hours(1);
-        auth.next_retry_after = Some(retry);
-        service.manager.update_unsaved(auth).unwrap();
+        service
+            .manager
+            .edit_unsaved(&id, |auth| {
+                auth.metadata
+                    .insert("access_token".into(), "runtime".into());
+                auth.status_message = "cooling".into();
+                auth.next_retry_after = Some(retry);
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
 
         reload(&mut service, dir.path(), "").await;
         let auth = service.manager.get(&id).unwrap();
@@ -4772,7 +10380,7 @@ port: {port}
         // A reload without them removes both.
         let none = Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
         service
-            .handle(config_changed(Arc::new(none)), Path::new(""))
+            .handle_and_drain(config_changed(Arc::new(none)), Path::new(""))
             .await;
         for auth in &auths {
             assert!(service.manager.get(&auth.id).is_none());
@@ -4928,14 +10536,19 @@ port: {port}
                 }
                 let manager = manager.clone();
                 let finished = Arc::clone(&done);
-                let mut refreshed = Auth::clone(&live);
-                refreshed
-                    .metadata
-                    .insert("access_token".into(), serde_json::json!("t1"));
+                let id = live.id.clone();
                 let (started_tx, started_rx) = std::sync::mpsc::channel();
                 *thread.lock().unwrap() = Some(std::thread::spawn(move || {
                     started_tx.send(()).unwrap();
-                    manager.update_unsaved(refreshed).unwrap();
+                    // Simulate live refresh publication, not Replace, which now
+                    // observes disk credentials rather than captured tokens.
+                    manager
+                        .edit_unsaved(&id, |auth| {
+                            auth.metadata
+                                .insert("access_token".into(), serde_json::json!("t1"));
+                            Ok::<_, ()>(true)
+                        })
+                        .unwrap();
                     finished.store(true, std::sync::atomic::Ordering::SeqCst);
                 }));
                 // The thread is certain to start, so wait for it without a
@@ -5074,7 +10687,7 @@ port: {port}
         let mut invalid = Config::parse(text).unwrap();
         invalid.openai_compatibility[1].api_key_entries[0].weight = Some(MAX_WEIGHT + 1);
         service
-            .handle(config_changed(Arc::new(invalid)), Path::new(""))
+            .handle_and_drain(config_changed(Arc::new(invalid)), Path::new(""))
             .await;
         assert_eq!(service.manager.list().len(), 1);
         assert!(service.manager.get(&beta_auth.id).is_some());
@@ -5197,7 +10810,7 @@ port: {port}
             );
             let reloaded = Arc::new(Config::parse(text).unwrap());
             service
-                .handle(
+                .handle_and_drain(
                     WatchEvent::ConfigChanged(reloaded, String::new()),
                     Path::new(""),
                 )
@@ -5917,7 +11530,7 @@ port: {port}
 
             // A trusted proxy speaks for its client, which isn't local.
             service
-                .handle(
+                .handle_and_drain(
                     config(dir.path(), &format!("{KEYED}{trusted}")),
                     Path::new(""),
                 )
@@ -5930,7 +11543,7 @@ port: {port}
 
             let remote = format!("{KEYED}  allow-remote: true\n{trusted}");
             service
-                .handle(config(dir.path(), &remote), Path::new(""))
+                .handle_and_drain(config(dir.path(), &remote), Path::new(""))
                 .await;
             let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
             assert_eq!(answer.status, 200, "{}", answer.body);
@@ -5938,12 +11551,14 @@ port: {port}
             // The trusted proxies are read once, at start, as upstream
             // reads them.
             service
-                .handle(config(dir.path(), KEYED), Path::new(""))
+                .handle_and_drain(config(dir.path(), KEYED), Path::new(""))
                 .await;
             let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
             assert_eq!(answer.status, 403, "{}", answer.body);
 
-            service.handle(config(dir.path(), ""), Path::new("")).await;
+            service
+                .handle_and_drain(config(dir.path(), ""), Path::new(""))
+                .await;
             let answer = fetch(addr, "GET", LIST, &[key]).await;
             assert_eq!((answer.status, answer.body.as_str()), (404, ""));
         }
@@ -5989,7 +11604,7 @@ port: {port}
             loop {
                 let event = next_watched(events).await;
                 let answered = event == WatchEvent::Reloaded(ticket);
-                let watching = service.handle(event, path).await;
+                let watching = service.handle_and_drain(event, path).await;
                 service.follow(watching, events);
                 if answered {
                     return;
@@ -6254,7 +11869,12 @@ port: {port}
                 operation: None,
             };
             apply_reload(&mut service, &mut events, &path, request).await;
-            assert_eq!(done.await, Ok(()));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), done)
+                    .await
+                    .expect("openai_compat_providers_follow_reloads done acknowledges within 5s"),
+                Ok(())
+            );
             assert_eq!(service.management.config_sha256(), x_sha256);
 
             // The API saves Y, and the file holds X again before the service
@@ -6271,7 +11891,10 @@ port: {port}
                 assert!(!request.force);
                 open_ferry_core::config::save::write_file(&path, x.as_bytes()).unwrap();
                 apply_reload(&mut service, &mut events, &path, request).await;
-                let answer = saving.await.unwrap();
+                let answer = tokio::time::timeout(Duration::from_secs(5), saving)
+                    .await
+                    .expect("management save task answers within 5s (case 1)")
+                    .unwrap();
                 assert_eq!(
                     (answer.status, answer.body.as_str()),
                     (200, r#"{"status":"ok"}"#)
@@ -6291,7 +11914,10 @@ port: {port}
             let request = next_reload(&mut service).await;
             assert!(request.force);
             apply_reload(&mut service, &mut events, &path, request).await;
-            let answer = saving.await.unwrap();
+            let answer = tokio::time::timeout(Duration::from_secs(5), saving)
+                .await
+                .expect("management save task answers within 5s (case 2)")
+                .unwrap();
             assert_eq!((answer.status, answer.body.as_str()), (409, CHANGED));
             assert_eq!(service.config.api_keys, ["x-key"]);
             assert_eq!(service.management.config_sha256(), x_sha256);
@@ -6307,7 +11933,10 @@ port: {port}
             let request = next_reload(&mut service).await;
             assert!(!request.force);
             apply_reload(&mut service, &mut events, &path, request).await;
-            let answer = saving.await.unwrap();
+            let answer = tokio::time::timeout(Duration::from_secs(5), saving)
+                .await
+                .expect("management save task answers within 5s (case 3)")
+                .unwrap();
             assert_eq!(
                 (answer.status, answer.body.as_str()),
                 (200, r#"{"status":"ok"}"#)
@@ -6337,7 +11966,7 @@ port: {port}
 
             let real = format!("api-keys: ['real-key']\n{KEYED}");
             service
-                .handle(config(dir.path(), &real), Path::new(""))
+                .handle_and_drain(config(dir.path(), &real), Path::new(""))
                 .await;
             let client = ("Authorization", "Bearer real-key");
             let answer = fetch(addr, "GET", "/v1/models", &[client]).await;
@@ -6449,7 +12078,13 @@ port: {port}
             assert_eq!(answer.status, 200, "{}", answer.body);
             assert!(answer.body.contains("codex.json"), "{}", answer.body);
             let _ = stop.send(());
-            assert_eq!(served.await.unwrap(), ExitCode::SUCCESS);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), served)
+                    .await
+                    .expect("service task exits within 5s")
+                    .unwrap(),
+                ExitCode::SUCCESS
+            );
         }
     }
 }

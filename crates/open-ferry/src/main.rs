@@ -63,6 +63,7 @@ mod scope;
 mod seams;
 mod service;
 mod settings;
+mod siwc_bind;
 mod supervised;
 mod tls;
 mod tui;
@@ -225,6 +226,18 @@ async fn run(
         return ExitCode::FAILURE;
     }
 
+    if !flags.siwc_bind.is_empty() {
+        return siwc_bind::run(
+            &config,
+            &auth_dir,
+            &flags.siwc_bind,
+            login::Options {
+                no_browser: flags.no_browser,
+                callback_port: flags.oauth_callback_port,
+            },
+        )
+        .await;
+    }
     let login = if flags.codex_login {
         Some(Login::Codex)
     } else if flags.codex_device_login {

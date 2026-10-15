@@ -130,6 +130,9 @@ impl Auth {
     /// else an API key if it has one, else OAuth if its metadata holds
     /// token fields.
     pub fn auth_kind(&self) -> Option<AuthKind> {
+        if self.use_siwc() {
+            return Some(AuthKind::OAuth);
+        }
         if let Some(kind) = AuthKind::parse(self.trimmed_attribute(ATTRIBUTE_AUTH_KIND)) {
             return Some(kind);
         }
@@ -210,6 +213,12 @@ impl Auth {
         .into_iter()
         .any(|key| !self.trimmed_metadata_str(key).is_empty());
         token_field
+            || (super::codex_refresh::is_codex_auth(self)
+                && self
+                    .metadata
+                    .get("siwc")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|m| !m.is_empty()))
             || self
                 .metadata
                 .get("token")

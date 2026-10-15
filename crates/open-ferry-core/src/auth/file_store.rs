@@ -4,6 +4,10 @@
 
 //! [`FileStore`]: credentials kept as JSON files in an auth directory.
 //!
+//! Synchronous mutation APIs may block for the bounded, 30-second credential
+//! lock wait. Async callers must offload the entire operation, not only lock
+//! acquisition. The async partition APIs do that, or run inline without a runtime.
+//!
 //! Each `*.json` file under the directory, at any depth, is one credential.
 //! Its ID is its path relative to the directory (lowercased on Windows,
 //! whose paths ignore case), and its contents become [`Auth::metadata`] as
@@ -89,6 +93,485 @@ use super::{Auth, AuthStore, Status};
 /// The largest credential file read.
 pub const MAX_AUTH_FILE_SIZE: u64 = 8 << 20;
 
+/// Identity of an open file, without retaining a handle or exposing its values.
+#[derive(Clone, Copy)]
+pub struct FileId {
+    volume: u64,
+    index: u128,
+    #[cfg(windows)]
+    extended: Option<(u64, u128)>,
+}
+
+impl PartialEq for FileId {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(windows)]
+        match (self.extended, other.extended) {
+            (Some(left), Some(right)) => return left == right,
+            (None, None) => {}
+            _ => return false,
+        }
+        self.volume == other.volume && self.index == other.index
+    }
+}
+
+impl Eq for FileId {}
+
+impl FileId {
+    fn supported(self) -> io::Result<Self> {
+        #[cfg(windows)]
+        if self.extended.is_none() && self.index == 0 {
+            return Err(invalid("SIWC bind target identity changed"));
+        }
+        Ok(self)
+    }
+
+    /// Scan-only conservative matching: a possible alias must be refused.
+    /// Unlike strict equality for change checks, a mixed-mode pair can still
+    /// alias when its legacy IDs match, even if path resolution differs by driver.
+    fn may_alias(self, other: Self) -> io::Result<bool> {
+        self.supported()?;
+        other.supported()?;
+        #[cfg(windows)]
+        if let (Some(left), Some(right)) = (self.extended, other.extended) {
+            return Ok(left == right);
+        }
+        Ok(self.volume == other.volume && self.index == other.index)
+    }
+}
+
+/// Computes the volume/file identity on Windows or device/inode on Unix.
+pub fn file_id(file: &fs::File) -> io::Result<FileId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(FileId {
+            volume: metadata.dev(),
+            index: u128::from(metadata.ino()),
+        })
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Information {
+            volume: u64,
+            id: [u8; 16],
+        }
+        let mut info = Information::default();
+        let extended = query_file_information(file, 18, &mut info)
+            .map(|()| (info.volume, u128::from_le_bytes(info.id)));
+        windows_file_id(file, extended)
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_id(file: &fs::File, extended: io::Result<(u64, u128)>) -> io::Result<FileId> {
+    use std::os::windows::io::AsRawHandle as _;
+    let extended = match extended {
+        Ok(id) => Some(id),
+        Err(error) if matches!(error.raw_os_error(), Some(1 | 87 | 50)) => None,
+        Err(error) => return Err(error),
+    };
+    #[repr(C)]
+    #[derive(Default)]
+    struct Information {
+        attributes: u32,
+        creation: [u32; 2],
+        access: [u32; 2],
+        write: [u32; 2],
+        volume: u32,
+        size: [u32; 2],
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut std::ffi::c_void,
+            information: *mut Information,
+        ) -> i32;
+    }
+    let mut info = Information::default();
+    // SAFETY: file owns a live handle and info has the writable Win32
+    // BY_HANDLE_FILE_INFORMATION layout for the duration of the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Preserve extended IDs without truncation. An unsupported query uses a
+    // separate legacy mode; a mode change during a bind requires retry.
+    FileId {
+        volume: u64::from(info.volume),
+        index: u128::from((u64::from(info.index_high) << 32) | u64::from(info.index_low)),
+        extended,
+    }
+    .supported()
+}
+
+#[cfg(windows)]
+fn query_file_information<T>(file: &fs::File, class: i32, info: &mut T) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle as _;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            handle: *mut std::ffi::c_void,
+            class: i32,
+            information: *mut std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    // SAFETY: file owns a live handle; callers supply the Win32 layout for
+    // class, and info remains writable for its complete size during the call.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            class,
+            std::ptr::from_mut(info).cast(),
+            std::mem::size_of::<T>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn name_surrogate(tag: u32) -> bool {
+    tag & 0x2000_0000 != 0
+}
+
+#[cfg(windows)]
+fn reparse_tag(file: &fs::File) -> io::Result<u32> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Information {
+        attributes: u32,
+        tag: u32,
+    }
+    let mut info = Information::default();
+    query_file_information(file, 9, &mut info)?;
+    Ok(if info.attributes & 0x400 == 0 {
+        0
+    } else {
+        info.tag
+    })
+}
+
+/// The selected outer identity and a private grant fingerprint for the
+/// no-user fallback. Neither values nor fingerprints are Debug-printable.
+/// This detects substitution, not ID-token authenticity or SIWC matching.
+pub struct BindIdentity {
+    evidence: [Option<String>; 6],
+    grant: [u8; 32],
+    file: FileId,
+}
+
+impl BindIdentity {
+    /// Captures the outer identity without keeping the credential file open.
+    pub fn capture(metadata: &Map<String, Value>, file: FileId) -> Self {
+        Self {
+            evidence: bind_account(metadata),
+            grant: bind_grant(metadata),
+            file,
+        }
+    }
+
+    /// Refuses changed account or independent user claims. With no user
+    /// evidence, requires both the same file and the unchanged outer grant.
+    pub fn check(&self, metadata: &Map<String, Value>, file: FileId) -> io::Result<()> {
+        self.file.supported()?;
+        file.supported()?;
+        let evidence = bind_account(metadata);
+        let same = self
+            .evidence
+            .iter()
+            .zip(&evidence)
+            .all(|(before, after)| before.is_none() || before == after);
+        let has_user = self.evidence[2..].iter().any(Option::is_some);
+        if same && (has_user || (self.file == file && self.grant == bind_grant(metadata))) {
+            Ok(())
+        } else {
+            Err(invalid("SIWC bind target identity changed"))
+        }
+    }
+}
+
+fn bind_grant(metadata: &Map<String, Value>) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(
+        metadata
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .as_bytes(),
+    )
+    .into()
+}
+
+fn bind_account(metadata: &Map<String, Value>) -> [Option<String>; 6] {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let claims = metadata
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(|token| token.split('.').nth(1))
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let claims = claims.as_ref();
+    let auth = claims.and_then(|c| c.get("https://api.openai.com/auth"));
+    [
+        text(metadata.get("account_id")),
+        text(auth.and_then(|a| a.get("chatgpt_account_id"))),
+        text(metadata.get("email")),
+        text(claims.and_then(|c| c.get("email"))),
+        text(claims.and_then(|c| c.get("sub"))),
+        text(auth.and_then(|a| a.get("chatgpt_user_id"))),
+    ]
+}
+
+/// Refuses leaf-link aliases that would use a different upstream lock pathname.
+/// Called under the target's credential lock in a trusted auth directory.
+fn refuse_siwc_bind_aliases(
+    directory: &Path,
+    target_path: &Path,
+    target: FileId,
+) -> io::Result<()> {
+    target
+        .supported()
+        .map_err(|_| invalid("SIWC bind alias scan failed"))?;
+    let Some(parent) = scan_optional(
+        target_path
+            .parent()
+            .ok_or_else(|| invalid("SIWC bind alias scan failed"))?
+            .canonicalize(),
+    )?
+    else {
+        return Err(invalid("SIWC bind alias scan failed"));
+    };
+    let target_destination = parent.join(
+        target_path
+            .file_name()
+            .ok_or_else(|| invalid("SIWC bind alias scan failed"))?,
+    );
+    let root = directory;
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let Some(entries) = scan_optional(fs::read_dir(&directory))? else {
+            if directory == root {
+                return Err(invalid("SIWC bind alias scan failed"));
+            }
+            continue;
+        };
+        for entry in entries {
+            let Some(entry) = scan_optional(entry)? else {
+                continue;
+            };
+            let path = entry.path();
+            #[cfg(test)]
+            super::credential_lock::test_event(
+                &super::credential_lock::credential_lock_path(&path)?,
+                "bind-scan-entry",
+            );
+            let Some(metadata) = scan_optional(fs::symlink_metadata(&path))? else {
+                continue;
+            };
+            #[cfg(windows)]
+            let (is_directory, linked) = {
+                use std::os::windows::fs::MetadataExt;
+                let tag = if metadata.file_attributes() & 0x400 != 0 {
+                    let Some(file) = scan_optional(open_bind_attributes(&path, false))? else {
+                        continue;
+                    };
+                    let Some(tag) = scan_optional(reparse_tag(&file))? else {
+                        continue;
+                    };
+                    tag
+                } else {
+                    0
+                };
+                (metadata.file_attributes() & 0x10 != 0, name_surrogate(tag))
+            };
+            #[cfg(not(windows))]
+            let (is_directory, linked) = (metadata.is_dir(), metadata.file_type().is_symlink());
+            if is_directory {
+                if !linked {
+                    directories.push(path);
+                }
+                continue;
+            }
+            if !linked {
+                continue;
+            }
+            let Some(destination) = scan_optional(path.canonicalize())? else {
+                continue;
+            };
+            #[cfg(unix)]
+            let id = {
+                use std::os::unix::fs::MetadataExt;
+                let Some(metadata) = scan_optional(fs::metadata(&path))? else {
+                    continue;
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                FileId {
+                    volume: metadata.dev(),
+                    index: u128::from(metadata.ino()),
+                }
+            };
+            #[cfg(windows)]
+            let id = {
+                let Some(file) = scan_optional(open_bind_attributes(&path, true))? else {
+                    continue;
+                };
+                let Some(metadata) = scan_optional(file.metadata())? else {
+                    continue;
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                let Some(id) = scan_optional(file_id(&file))? else {
+                    continue;
+                };
+                id
+            };
+            refuse_bind_alias(&destination, &target_destination, id, target)?;
+        }
+    }
+    Ok(())
+}
+
+fn refuse_bind_alias(
+    destination: &Path,
+    target_destination: &Path,
+    id: FileId,
+    target: FileId,
+) -> io::Result<()> {
+    let matches = id
+        .may_alias(target)
+        .map_err(|_| invalid("SIWC bind alias scan failed"))?;
+    if destination == target_destination || matches {
+        return Err(invalid("SIWC bind target has a linked alias"));
+    }
+    Ok(())
+}
+
+// Directory churn and dangling/looping links are not alias evidence. Other
+// errors fail closed, without carrying a credential path into the error.
+fn scan_optional<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Ok(None),
+        #[cfg(windows)]
+        Err(error) if error.raw_os_error() == Some(1921) => Ok(None),
+        Err(error) => Err(io::Error::new(error.kind(), "SIWC bind alias scan failed")),
+    }
+}
+
+#[cfg(windows)]
+fn open_bind_attributes(path: &Path, follow: bool) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .access_mode(0x80) // FILE_READ_ATTRIBUTES, never a data-stream read.
+        .custom_flags(if follow { 0x0200_0000 } else { 0x0220_0000 })
+        .open(path)
+}
+
+/// Reads and validates a bind target through one no-follow handle, then closes it.
+/// The caller must independently check containment in a trusted auth directory.
+pub fn read_siwc_bind_target(path: &Path) -> io::Result<(Map<String, Value>, FileId)> {
+    let (_file, metadata, id) = open_siwc_bind_target(path)?;
+    Ok((metadata, id))
+}
+
+fn open_siwc_bind_target(path: &Path) -> io::Result<(fs::File, Map<String, Value>, FileId)> {
+    require_bind_file(&fs::symlink_metadata(path)?)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    require_bind_file(&file.metadata()?)?;
+    let id = file_id(&file)?;
+    #[cfg(windows)]
+    let file = {
+        let tag = reparse_tag(&file)?;
+        if name_surrogate(tag) {
+            return Err(invalid("SIWC bind target is a leaf link"));
+        }
+        if tag != 0 {
+            let reopened = fs::File::open(path)?;
+            if file_id(&reopened)? != id {
+                return Err(invalid("SIWC bind target identity changed"));
+            }
+            require_bind_file(&reopened.metadata()?)?;
+            reopened
+        } else {
+            file
+        }
+    };
+    let mut data = Vec::new();
+    (&file)
+        .take(MAX_AUTH_FILE_SIZE + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_AUTH_FILE_SIZE {
+        return Err(invalid("SIWC bind target exceeds size cap"));
+    }
+    let metadata = unmarshal_object(&data)
+        .map_err(|_| invalid("invalid SIWC bind target JSON"))?
+        .ok_or_else(|| invalid("invalid SIWC bind target JSON"))?;
+    if !metadata
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("codex"))
+    {
+        return Err(invalid("SIWC bind requires a Codex credential"));
+    }
+    for key in ["access_token", "refresh_token"] {
+        if !metadata
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(invalid("SIWC bind requires outer tokens"));
+        }
+    }
+    validate_weights(&Default::default(), &metadata)
+        .map_err(|_| invalid("invalid SIWC bind settings"))?;
+    Ok((file, metadata, id))
+}
+
+fn require_bind_file(metadata: &fs::Metadata) -> io::Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Err(invalid("SIWC bind target is a leaf link"));
+    }
+    if !metadata.is_file() {
+        return Err(invalid("invalid SIWC bind target"));
+    }
+    Ok(())
+}
+
+type BindCheck<'a> = dyn Fn(&Map<String, Value>, FileId) -> io::Result<()> + 'a;
+
 /// Credentials kept as JSON files under an auth directory (upstream's
 /// `FileTokenStore`).
 #[derive(Debug, Default)]
@@ -103,6 +586,204 @@ pub struct FileStore {
 }
 
 impl FileStore {
+    /// Test-only bind: skips account identity checking, but uses strict no-follow I/O.
+    /// Replaces only `siwc`, sets `use_siwc`, and returns the persisted record.
+    /// Caller validates path containment and OAuth grant; no account matching
+    /// or ID-token signature/nonce verification is performed here.
+    /// The owned blocking operation continues if its awaiting caller cancels.
+    #[cfg(test)]
+    pub(crate) async fn bind_siwc(
+        self: &std::sync::Arc<Self>,
+        auth: Auth,
+        siwc: Map<String, Value>,
+    ) -> io::Result<Auth> {
+        let store = self.clone();
+        run_codex_write(move || {
+            store
+                .persist_codex_partition(
+                    &auth,
+                    &super::codex_refresh::CodexPersistIntent::SiwcBind(siwc),
+                )
+                .map(|p| p.auth)
+        })
+        .await
+    }
+
+    /// Binds SIWC while the caller holds this credential's lock. The check
+    /// runs under the save mutex on metadata read through a no-follow handle,
+    /// which is closed before atomic replacement. The auth directory must be
+    /// trusted against uncooperative writers changing its entries.
+    /// Never reacquires that lock. A guard for any other path is refused.
+    /// This synchronous API performs blocking file I/O; async callers must offload it.
+    pub fn bind_siwc_locked(
+        &self,
+        auth: &Auth,
+        siwc: Map<String, Value>,
+        guard: &super::credential_lock::CredentialLock,
+        check: &BindCheck<'_>,
+    ) -> io::Result<Auth> {
+        let _permit = self.permit()?;
+        self.persist_codex_partition_with_permit(
+            auth,
+            &super::codex_refresh::CodexPersistIntent::SiwcBind(siwc),
+            guard,
+            Some(check),
+        )
+        .map(|p| p.auth)
+    }
+
+    /// Applies successful rotations against the locked, fresh disk baseline.
+    /// Returns the record actually persisted and per-partition match results;
+    /// a superseded rotation never replaces a newer disk partition.
+    pub async fn apply_codex_refresh(
+        self: &std::sync::Arc<Self>,
+        auth: Auth,
+        patch: super::codex_refresh::CredentialRefreshPatch,
+    ) -> io::Result<CodexPersisted> {
+        let store = self.clone();
+        run_codex_write(move || {
+            store.persist_codex_partition(
+                &auth,
+                &super::codex_refresh::CodexPersistIntent::Refresh(patch),
+            )
+        })
+        .await
+    }
+
+    fn persist_codex_partition(
+        &self,
+        auth: &Auth,
+        intent: &super::codex_refresh::CodexPersistIntent,
+    ) -> io::Result<CodexPersisted> {
+        let path = self.resolve_auth_path(auth)?;
+        refuse_lock_name(&path)?;
+        let _permit = self.permit()?;
+        let credential = super::credential_lock::acquire_sync(&path)?;
+        self.persist_codex_partition_with_permit(auth, intent, &credential, None)
+    }
+
+    /// Persists a refresh while the caller holds this credential's lock.
+    /// Never reacquires that lock. A guard for any other path is refused.
+    /// This synchronous API performs blocking file I/O; async callers must offload it.
+    pub fn apply_codex_refresh_locked(
+        &self,
+        auth: &Auth,
+        patch: &super::codex_refresh::CredentialRefreshPatch,
+        guard: &super::credential_lock::CredentialLock,
+    ) -> io::Result<CodexPersisted> {
+        self.persist_codex_partition_locked(
+            auth,
+            &super::codex_refresh::CodexPersistIntent::Refresh(patch.clone()),
+            guard,
+        )
+    }
+
+    fn persist_codex_partition_locked(
+        &self,
+        auth: &Auth,
+        intent: &super::codex_refresh::CodexPersistIntent,
+        guard: &super::credential_lock::CredentialLock,
+    ) -> io::Result<CodexPersisted> {
+        let _permit = self.permit()?;
+        self.persist_codex_partition_with_permit(auth, intent, guard, None)
+    }
+
+    // Both callers retain one write permit across the whole write.
+    fn persist_codex_partition_with_permit(
+        &self,
+        auth: &Auth,
+        intent: &super::codex_refresh::CodexPersistIntent,
+        guard: &super::credential_lock::CredentialLock,
+        check: Option<&BindCheck<'_>>,
+    ) -> io::Result<CodexPersisted> {
+        let path = self.resolve_auth_path(auth)?;
+        refuse_lock_name(&path)?;
+        if !guard.guards(&path)? {
+            return Err(invalid(
+                "auth filestore: credential lock guard is for another file",
+            ));
+        }
+        let _save = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(
+            intent,
+            super::codex_refresh::CodexPersistIntent::SiwcBind(_)
+        ) {
+            let (file, disk, file_id) = open_siwc_bind_target(&path)?;
+            drop(file);
+            #[cfg(test)]
+            super::credential_lock::test_event(
+                &super::credential_lock::credential_lock_path(&path)?,
+                "bind-read",
+            );
+            refuse_siwc_bind_aliases(&self.base_dir(), &path, file_id)?;
+            if let Some(check) = check {
+                check(&disk, file_id)?;
+            }
+            let (metadata, applied) =
+                super::codex_refresh::merge_persist(Some(&disk), &auth.metadata, intent);
+            write_atomic_no_follow(&path, marshal_map(&metadata).as_bytes(), file_id)?;
+            #[cfg(test)]
+            super::credential_lock::test_event(
+                &super::credential_lock::credential_lock_path(&path)?,
+                "bind-written",
+            );
+            let persisted = auth_from_metadata(
+                &path,
+                &self.base_dir(),
+                metadata,
+                fs::symlink_metadata(&path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .map(chrono::DateTime::<chrono::Utc>::from),
+            )?
+            .ok_or_else(|| invalid("auth filestore: persisted credential is empty"))?;
+            return Ok(CodexPersisted {
+                auth: persisted,
+                applied,
+            });
+        }
+        // Partition APIs update an existing file; explicit login creation uses save_new.
+        fs::metadata(&path).map_err(|error| at(&error, "stat", &path))?;
+        let disk = self
+            .codex_disk(&path, false)?
+            .unwrap_or_else(|| auth.metadata.clone());
+        #[cfg(test)]
+        super::credential_lock::test_event(
+            &super::credential_lock::credential_lock_path(&path)?,
+            "read",
+        );
+        if !disk
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case("codex"))
+        {
+            return Err(invalid(
+                "auth filestore: SIWC requires an existing Codex credential",
+            ));
+        }
+        let intent = match intent {
+            super::codex_refresh::CodexPersistIntent::Refresh(patch) => {
+                super::codex_refresh::CodexPersistIntent::Refresh(
+                    patch.with_pending_operations(&auth.codex_pending_refresh),
+                )
+            }
+            intent => intent.clone(),
+        };
+        let (metadata, applied) =
+            super::codex_refresh::merge_persist(Some(&disk), &auth.metadata, &intent);
+        let raw = marshal_map(&metadata);
+        write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())?;
+        let persisted = read_auth_file(&path, &self.base_dir())?
+            .ok_or_else(|| invalid("auth filestore: persisted credential is empty"))?;
+        Ok(CodexPersisted {
+            auth: persisted,
+            applied,
+        })
+    }
+
     /// A store over `base_dir`. An empty directory leaves the store
     /// unconfigured: it can then only save to absolute paths.
     pub fn new(base_dir: impl AsRef<Path>) -> Self {
@@ -316,21 +997,29 @@ impl FileStore {
     /// its mode (on Unix). A symlink at `name` is written through to its
     /// target, and a dangling one is replaced by the file, unless a file
     /// guard is configured, which refuses links before any write. Writes
-    /// and saves of this store take turns.
+    /// and saves of this store take turns. Codex uploads take the credential's
+    /// process and OS locks, but retain this API's explicit byte replacement
+    /// semantics. Names ending in `.lock` are reserved and refused.
     pub fn write_file(&self, name: &str, data: &[u8]) -> io::Result<PathBuf> {
         let path = self.file_path(name)?;
+        refuse_lock_name(&path)?;
         let _permit = self.permit()?;
+        self.check_file(&path)?;
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent).map_err(|err| wrap(err, "auth filestore: create dir failed"))?;
+        }
+        let _credential = if codex_file_mutation(&path, Some(data)) {
+            Some(super::credential_lock::acquire_sync(&path)?)
+        } else {
+            None
+        };
         let _guard = self
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         self.check_file(&path)?;
-        if let Some(parent) = path.parent() {
-            create_dir_all(parent)
-                .map_err(|err| wrap(&err, "auth filestore: create dir failed"))?;
-        }
         write_atomic(&path, data, self.file_guard.is_none())
-            .map_err(|err| wrap(&err, "auth filestore: write file failed"))?;
+            .map_err(|err| wrap(err, "auth filestore: write file failed"))?;
         Ok(path)
     }
 
@@ -341,16 +1030,32 @@ impl FileStore {
     /// target.
     pub fn remove_file(&self, name: &str) -> io::Result<PathBuf> {
         let path = self.file_path(name)?;
+        refuse_lock_name(&path)?;
         let _permit = self.permit()?;
+        let _credential = if codex_file_mutation(&path, None) {
+            Some(super::credential_lock::acquire_sync(&path)?)
+        } else {
+            None
+        };
         let _guard = self
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        fs::remove_file(&path).map_err(|err| wrap(&err, "auth filestore: delete failed"))?;
+        fs::remove_file(&path).map_err(|err| wrap(err, "auth filestore: delete failed"))?;
         Ok(path)
     }
 
     fn save_with(&self, auth: &mut Auth, creation_intent: bool) -> io::Result<String> {
+        // A SIWC bind is saved only by bind_siwc_locked, whose strict
+        // persistence refuses links, aliases and corrupt files.
+        if matches!(
+            auth.codex_persist_intent,
+            super::codex_refresh::CodexPersistIntent::SiwcBind(_)
+        ) {
+            return Err(invalid(
+                "auth filestore: a SIWC bind is saved only through bind_siwc_locked",
+            ));
+        }
         normalize_credential_metadata(&mut auth.metadata);
         validate_weights(&auth.attributes, &auth.metadata)
             .map_err(|err| invalid(format!("auth filestore: {err}")))?;
@@ -362,6 +1067,7 @@ impl FileStore {
                 auth.id
             )));
         }
+        refuse_lock_name(&path)?;
         let Some(path_str) = path.to_str().map(str::to_owned) else {
             return Err(invalid("auth filestore: path is not valid UTF-8"));
         };
@@ -378,15 +1084,29 @@ impl FileStore {
         }
 
         let _permit = self.permit()?;
+        let codex = super::codex_refresh::is_codex_auth(auth);
+        let _credential_lock = if codex {
+            Some(super::credential_lock::acquire_sync(&path)?)
+        } else {
+            None
+        };
         let _guard = self
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
 
         self.check_file(&path)?;
+        // Recheck after both locks: deletion while acquisition waited must not
+        // be undone by a runtime save of a disabled credential.
+        if auth.disabled
+            && !creation_intent
+            && fs::metadata(&path).is_err_and(|err| err.kind() == io::ErrorKind::NotFound)
+        {
+            return Ok(String::new());
+        }
+
         if let Some(parent) = path.parent() {
-            create_dir_all(parent)
-                .map_err(|err| wrap(&err, "auth filestore: create dir failed"))?;
+            create_dir_all(parent).map_err(|err| wrap(err, "auth filestore: create dir failed"))?;
         }
 
         if auth.metadata.is_empty() {
@@ -397,25 +1117,91 @@ impl FileStore {
         }
         auth.metadata
             .insert("disabled".to_owned(), Value::Bool(auth.disabled));
+        if codex {
+            let explicit = creation_intent
+                || matches!(
+                    auth.codex_persist_intent,
+                    super::codex_refresh::CodexPersistIntent::OuterLogin
+                );
+            let disk = self.codex_disk(&path, explicit)?;
+            #[cfg(test)]
+            super::credential_lock::test_event(
+                &super::credential_lock::credential_lock_path(&path)?,
+                "read",
+            );
+            let intent = if creation_intent {
+                super::codex_refresh::CodexPersistIntent::OuterLogin
+            } else {
+                match &auth.codex_persist_intent {
+                    super::codex_refresh::CodexPersistIntent::Refresh(patch) => {
+                        super::codex_refresh::CodexPersistIntent::Refresh(
+                            patch.with_pending_operations(&auth.codex_pending_refresh),
+                        )
+                    }
+                    intent => intent.clone(),
+                }
+            };
+            auth.metadata =
+                super::codex_refresh::merge_persist(disk.as_ref(), &auth.metadata, &intent).0;
+            if matches!(
+                intent,
+                super::codex_refresh::CodexPersistIntent::Configuration
+            ) && !auth.codex_pending_refresh.is_empty()
+            {
+                // Check the original locked disk, not the settings merge's token fields.
+                let baseline = disk.as_ref().unwrap_or(&auth.metadata);
+                let patch = super::codex_refresh::CredentialRefreshPatch::default()
+                    .with_pending_operations(&auth.codex_pending_refresh);
+                let (rotated, applied) = patch.apply(baseline);
+                if applied.outer == Some(true) {
+                    for key in super::codex_refresh::OUTER_KEYS {
+                        if let Some(value) = rotated.get(*key) {
+                            auth.metadata.insert((*key).into(), value.clone());
+                        }
+                    }
+                }
+                if applied.siwc == Some(true)
+                    && let Some(value) = rotated.get("siwc")
+                {
+                    auth.metadata.insert("siwc".into(), value.clone());
+                }
+                normalize_credential_metadata(&mut auth.metadata);
+            }
+            if let Some(disabled) = auth.metadata.get("disabled").and_then(Value::as_bool) {
+                auth.disabled = disabled;
+            }
+        }
         let raw = marshal_map(&auth.metadata);
         match read_capped(&path) {
             Ok(existing) => {
                 if !json_equal(&existing, raw.as_bytes()) {
                     write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
-                        .map_err(|err| wrap(&err, "auth filestore: write existing failed"))?;
+                        .map_err(|err| wrap(err, "auth filestore: write existing failed"))?;
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
-                    .map_err(|err| wrap(&err, "auth filestore: write file failed"))?;
+                    .map_err(|err| wrap(err, "auth filestore: write file failed"))?;
             }
-            Err(err) if err.kind() == io::ErrorKind::FileTooLarge => {
+            Err(err)
+                if err.kind() == io::ErrorKind::FileTooLarge
+                    || (codex
+                        && (creation_intent
+                            || matches!(
+                                auth.codex_persist_intent,
+                                super::codex_refresh::CodexPersistIntent::OuterLogin
+                            ))) =>
+            {
                 write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
-                    .map_err(|err| wrap(&err, "auth filestore: write existing failed"))?;
+                    .map_err(|err| wrap(err, "auth filestore: write existing failed"))?;
             }
-            Err(err) => return Err(wrap(&err, "auth filestore: read existing failed")),
+            Err(err) => return Err(wrap(err, "auth filestore: read existing failed")),
         }
 
+        if codex {
+            auth.codex_persist_intent = Default::default();
+            auth.codex_pending_refresh.clear();
+        }
         for key in [ATTRIBUTE_PATH, ATTRIBUTE_SOURCE] {
             auth.attributes.insert(key.to_owned(), path_str.clone());
         }
@@ -427,6 +1213,25 @@ impl FileStore {
             auth.file_name = auth.id.clone();
         }
         Ok(path_str)
+    }
+
+    fn codex_disk(&self, path: &Path, explicit: bool) -> io::Result<Option<Map<String, Value>>> {
+        let result = read_capped(path).and_then(|bytes| {
+            unmarshal_object(&bytes)
+                .map_err(|_| invalid("invalid JSON"))?
+                .ok_or_else(|| invalid("invalid JSON"))
+        });
+        match result {
+            Ok(map) => Ok(Some(map)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound || explicit => Ok(None),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "auth filestore: cannot read existing credential {}",
+                    path.display()
+                ),
+            )),
+        }
     }
 
     /// The path a save writes `auth` to: its `path` attribute, else its
@@ -531,14 +1336,50 @@ impl FileStore {
             return Err(invalid("auth filestore: id is empty"));
         }
         let path = self.resolve_delete_path(id)?;
+        refuse_lock_name(&path)?;
         let _permit = self.permit()?;
+        let _credential = if codex_file_mutation(&path, None) {
+            Some(super::credential_lock::acquire_sync(&path)?)
+        } else {
+            None
+        };
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         match fs::remove_file(&path) {
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
-                Err(wrap(&err, "auth filestore: delete failed"))
+                Err(wrap(err, "auth filestore: delete failed"))
             }
             _ => Ok(()),
         }
     }
+}
+
+/// A partition write's actual persisted record and baseline check results.
+#[derive(Debug)]
+pub struct CodexPersisted {
+    /// Disk state after the operation, including concurrent settings.
+    pub auth: Auth,
+    /// Which requested partitions matched; false means disk was newer.
+    pub applied: super::codex_refresh::PatchApplied,
+}
+
+async fn run_codex_write<T: Send + 'static>(
+    write: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return write();
+    }
+    let result = if let Some(operation) = crate::gate::Operation::current() {
+        operation.run_blocking(write).await
+    } else {
+        // Standalone callers have no operation; the store takes its write permit
+        // before acquiring either lock or writing the credential.
+        #[allow(clippy::disallowed_methods)]
+        tokio::task::spawn_blocking(write).await
+    };
+    result.map_err(|_| io::Error::other("credential persistence task failed"))?
 }
 
 impl AuthStore for FileStore {
@@ -558,8 +1399,49 @@ impl AuthStore for FileStore {
         self.delete_auth(id)
     }
 
+    fn supports_codex_refresh_patches(&self) -> bool {
+        true
+    }
+
+    fn same_record(&self, a: &Auth, b: &Auth) -> io::Result<bool> {
+        let a = fs::canonicalize(self.resolve_auth_path(a)?)?;
+        let b = fs::canonicalize(self.resolve_auth_path(b)?)?;
+        #[cfg(windows)]
+        {
+            Ok(a.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy()))
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(a == b)
+        }
+    }
+
     fn binding_generation(&self) -> u64 {
         self.binding_generation.load(Ordering::SeqCst)
+    }
+
+    fn read_for_adoption(&self, auth: &Auth) -> io::Result<super::AdoptionRead> {
+        use super::AdoptionRead;
+        // Only Codex records have the partitioned fresh-read contract. A
+        // requested Gemini record stays unsupported even if its file changes.
+        if !super::codex_refresh::is_codex_auth(auth) {
+            return Ok(AdoptionRead::Unsupported);
+        }
+        let path = self.resolve_auth_path(auth)?;
+        match read_auth_file_for_adoption(&path, &self.base_dir()) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(AdoptionRead::Missing),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
+                ) =>
+            {
+                Ok(AdoptionRead::Invalid)
+            }
+            other => other,
+        }
     }
 
     fn read_back(&self, auth: &Auth) -> io::Result<Option<Auth>> {
@@ -571,6 +1453,76 @@ impl AuthStore for FileStore {
             other => other,
         }
     }
+}
+
+/// Mirrors upstream, where only Codex credentials take the credential lock.
+/// An upload locks if either its new object or the existing regular file is Codex.
+/// Classification is advisory: a credential whose kind changes before the
+/// mutation can be written or removed without the Codex lock. This provides
+/// no cross-process exclusion across kind changes, but never less locking
+/// than upstream's unlocked management mutations and FileTokenStore.Delete.
+fn codex_file_mutation(path: &Path, uploaded: Option<&[u8]>) -> bool {
+    let is_codex = |bytes: &[u8]| {
+        unmarshal_object(bytes)
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| {
+                super::codex_refresh::is_codex_auth(&Auth {
+                    metadata,
+                    ..Auth::default()
+                })
+            })
+    };
+    let codex = uploaded.is_some_and(is_codex)
+        || read_regular_capped(path).is_ok_and(|bytes| is_codex(&bytes));
+    #[cfg(test)]
+    tests::MUTATION_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(path);
+        }
+    });
+    codex
+}
+
+fn read_regular_capped(path: &Path) -> io::Result<Vec<u8>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A swap to a FIFO must not block before the handle can be inspected.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    #[cfg(not(unix))]
+    if !fs::metadata(path)?.is_file() {
+        return Err(invalid("not a regular credential file"));
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(invalid("not a regular credential file"));
+    }
+    let mut data = Vec::new();
+    file.take(MAX_AUTH_FILE_SIZE + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_AUTH_FILE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            "credential file exceeds read cap",
+        ));
+    }
+    Ok(data)
+}
+
+fn refuse_lock_name(path: &Path) -> io::Result<()> {
+    if path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.to_lowercase().ends_with(".lock"))
+    {
+        return Err(invalid(
+            "auth filestore: credential lock files are reserved",
+        ));
+    }
+    Ok(())
 }
 
 /// The entries of `dir` sorted by name, each with whether it is a
@@ -595,19 +1547,79 @@ fn is_json_name(name: Option<&std::ffi::OsStr>) -> bool {
         .is_some_and(|name| open_ferry_translate::go::to_lower(name).ends_with(".json"))
 }
 
-/// Reads one credential file into a record, or `None` for a file to skip
-/// quietly: empty, `null`, or of type `gemini`.
+/// Reads one credential file into a record, skipping empty and Gemini files.
+/// Legacy read-back still treats JSON null as an unknown record; adoption does not.
 fn read_auth_file(path: &Path, base_dir: &Path) -> io::Result<Option<Auth>> {
-    let Some(path_str) = path.to_str() else {
+    read_auth_file_classified(path, base_dir, false).map(|read| match read {
+        super::AdoptionRead::Record(auth) => Some(auth),
+        _ => None,
+    })
+}
+
+fn read_auth_file_for_adoption(path: &Path, base_dir: &Path) -> io::Result<super::AdoptionRead> {
+    read_auth_file_classified(path, base_dir, true)
+}
+
+fn read_auth_file_classified(
+    path: &Path,
+    base_dir: &Path,
+    adoption: bool,
+) -> io::Result<super::AdoptionRead> {
+    use super::AdoptionRead;
+    if path.to_str().is_none() {
         return Err(invalid("path is not valid UTF-8"));
-    };
-    let data = read_capped(path).map_err(|err| wrap(&err, "read file"))?;
-    if data.is_empty() {
-        return Ok(None);
     }
-    let mut metadata = unmarshal_object(&data)
-        .map_err(|err| invalid(format!("unmarshal auth json: {err}")))?
-        .unwrap_or_default();
+    let data = read_capped(path).map_err(|err| wrap(err, "read file"))?;
+    if data.is_empty() {
+        return Ok(AdoptionRead::Invalid);
+    }
+    let metadata =
+        unmarshal_object(&data).map_err(|err| invalid(format!("unmarshal auth json: {err}")))?;
+    if adoption && metadata.as_ref().is_none_or(|metadata| metadata.is_empty()) {
+        return Ok(AdoptionRead::Invalid);
+    }
+    record_from_metadata(
+        path,
+        base_dir,
+        metadata.unwrap_or_default(),
+        adoption,
+        || {
+            Ok(fs::metadata(path)
+                .map_err(|err| wrap(err, "stat file"))?
+                .modified()
+                .ok()
+                .map(chrono::DateTime::<chrono::Utc>::from))
+        },
+    )
+}
+
+/// The record for credential metadata already in hand, built as a file read
+/// builds it.
+fn auth_from_metadata(
+    path: &Path,
+    base_dir: &Path,
+    metadata: Map<String, Value>,
+    modified: Option<chrono::DateTime<chrono::Utc>>,
+) -> io::Result<Option<Auth>> {
+    record_from_metadata(path, base_dir, metadata, false, || Ok(modified)).map(|read| match read {
+        super::AdoptionRead::Record(auth) => Some(auth),
+        _ => None,
+    })
+}
+
+/// Classifies credential metadata. `modified` runs only once the provider
+/// checks pass, where upstream stats the file.
+fn record_from_metadata(
+    path: &Path,
+    base_dir: &Path,
+    mut metadata: Map<String, Value>,
+    adoption: bool,
+    modified: impl FnOnce() -> io::Result<Option<chrono::DateTime<chrono::Utc>>>,
+) -> io::Result<super::AdoptionRead> {
+    use super::AdoptionRead;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| invalid("path is not valid UTF-8"))?;
     normalize_credential_metadata(&mut metadata);
     validate_weights(&Default::default(), &metadata).map_err(|err| invalid(err.to_string()))?;
 
@@ -617,19 +1629,18 @@ fn read_auth_file(path: &Path, base_dir: &Path) -> io::Result<Option<Auth>> {
         .unwrap_or_default()
         .trim()
         .to_owned();
+    if adoption && !equal_fold(&provider, "codex") {
+        return Ok(AdoptionRead::Invalid);
+    }
     if equal_fold(&provider, "gemini") {
-        return Ok(None);
+        return Ok(AdoptionRead::Unsupported);
     }
     let provider = if provider.is_empty() {
         "unknown".to_owned()
     } else {
         provider
     };
-    let info = fs::metadata(path).map_err(|err| wrap(&err, "stat file"))?;
-    let modified = info
-        .modified()
-        .ok()
-        .map(chrono::DateTime::<chrono::Utc>::from);
+    let modified = modified()?;
 
     let id = id_for(path, path_str, base_dir);
     let disabled = metadata
@@ -682,12 +1693,14 @@ fn read_auth_file(path: &Path, base_dir: &Path) -> io::Result<Option<Auth>> {
         auth.attributes.insert("email".to_owned(), email);
     }
     apply_custom_headers_from_metadata(&mut auth);
-    Ok(Some(auth))
+    Ok(AdoptionRead::Record(auth))
 }
 
 /// A credential file's ID: its path relative to the auth directory, else
 /// the path itself; lowercased on Windows, whose paths ignore case.
-pub(crate) fn id_for(path: &Path, path_str: &str, base_dir: &Path) -> String {
+/// The stable credential id used by file reads and synthesis.
+#[doc(hidden)]
+pub fn id_for(path: &Path, path_str: &str, base_dir: &Path) -> String {
     let mut id = path_str.to_owned();
     if !base_dir.as_os_str().is_empty()
         && let Some(relative) = rel(base_dir, path)
@@ -741,6 +1754,37 @@ pub fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
+// Bind-only replacement: never resolve a link destination. The directory must
+// be trusted against uncooperative writers; rename replaces the leaf entry.
+fn write_atomic_no_follow(path: &Path, data: &[u8], expected: FileId) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    require_bind_file(&metadata)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| invalid("invalid SIWC bind directory"))?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".")
+        .suffix(".tmp")
+        .tempfile_in(directory)?;
+    #[cfg(unix)]
+    temp.as_file().set_permissions(metadata.permissions())?;
+    temp.write_all(data)?;
+    temp.as_file().sync_all()?;
+    #[cfg(test)]
+    super::credential_lock::test_event(
+        &super::credential_lock::credential_lock_path(path)?,
+        "bind-before-replace",
+    );
+    let (file, _, current) = open_siwc_bind_target(path)
+        .map_err(|_| invalid("SIWC bind target changed before replacement"))?;
+    if current != expected {
+        return Err(invalid("SIWC bind target changed before replacement"));
+    }
+    drop(file);
+    temp.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
 /// Replaces the file at `path` with `data` through a temporary file in the
 /// same directory, so readers see the old file or the new one, never a
 /// partial write.
@@ -771,7 +1815,7 @@ fn write_atomic(path: &Path, data: &[u8], follow_links: bool) -> io::Result<()> 
 }
 
 #[cfg(unix)]
-fn create_dir_all(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_dir_all(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new()
         .recursive(true)
@@ -780,7 +1824,7 @@ fn create_dir_all(dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_dir_all(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_dir_all(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
@@ -799,8 +1843,32 @@ fn not_configured() -> io::Error {
     io::Error::other("auth filestore: directory not configured")
 }
 
-fn wrap(err: &io::Error, context: &str) -> io::Error {
-    io::Error::new(err.kind(), format!("{context}: {err}"))
+#[derive(Debug)]
+struct ContextError {
+    context: String,
+    source: io::Error,
+}
+
+impl std::fmt::Display for ContextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.context, self.source)
+    }
+}
+
+impl std::error::Error for ContextError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn wrap(err: io::Error, context: &str) -> io::Error {
+    io::Error::new(
+        err.kind(),
+        ContextError {
+            context: context.to_owned(),
+            source: err,
+        },
+    )
 }
 
 fn at(err: &io::Error, op: &str, path: &Path) -> io::Error {
@@ -918,6 +1986,642 @@ mod tests {
         path.to_str().unwrap().to_owned()
     }
 
+    #[test]
+    fn bind_identity_tolerates_refresh_but_checks_the_user_and_file_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"test","refresh_token":"test","account_id":"workspace","email":"first@example.test"}"#,
+        );
+        let (before, id) = read_siwc_bind_target(&path).unwrap();
+        let identity = BindIdentity::capture(&before, id);
+        let mut after = before.clone();
+        after.insert("access_token".into(), json!("rotated-test"));
+        write_atomic_no_follow(&path, marshal_map(&after).as_bytes(), id).unwrap();
+        let (fresh, fresh_id) = read_siwc_bind_target(&path).unwrap();
+        assert!(id != fresh_id);
+        assert!(identity.check(&fresh, fresh_id).is_ok());
+        after.insert("email".into(), json!("second@example.test"));
+        assert!(identity.check(&after, fresh_id).is_err());
+        after = before.clone();
+        after.insert("account_id".into(), json!("other-workspace"));
+        assert!(identity.check(&after, fresh_id).is_err());
+        after.remove("email");
+        let fallback = BindIdentity::capture(&after, id);
+        assert!(fallback.check(&after, id).is_ok());
+        assert!(fallback.check(&after, fresh_id).is_err());
+        // JWT user claims are usable substitution markers, not verified identity.
+        use base64::Engine as _;
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"first-test"}"#);
+        after.insert("id_token".into(), json!(format!("x.{payload}.x")));
+        let claims = BindIdentity::capture(&after, id);
+        assert!(claims.check(&after, fresh_id).is_ok());
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"second-test"}"#);
+        after.insert("id_token".into(), json!(format!("x.{payload}.x")));
+        assert!(claims.check(&after, fresh_id).is_err());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn bind_reader_and_writer_refuse_leaf_file_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        let link = dir.path().join("link.json");
+        let data = br#"{"type":"codex","access_token":"test","refresh_token":"test"}"#;
+        fs::write(&target, data).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!("UNVERIFIED: Windows file-symlink coverage needs privilege (OS 1314)");
+                return;
+            }
+            panic!(
+                "file-symlink fixture failed ({:?}, OS {:?})",
+                error.kind(),
+                error.raw_os_error()
+            );
+        }
+        let (_, id) = read_siwc_bind_target(&target).unwrap();
+        let guard = super::super::credential_lock::acquire_sync(&target).unwrap();
+        assert_eq!(
+            refuse_siwc_bind_aliases(dir.path(), &target, id)
+                .err()
+                .unwrap()
+                .to_string(),
+            "SIWC bind target has a linked alias"
+        );
+        let store = FileStore::new(dir.path());
+        let auth = Auth {
+            file_name: "target.json".into(),
+            ..Auth::default()
+        };
+        assert_eq!(
+            store
+                .bind_siwc_locked(&auth, Map::new(), &guard, &|_, _| Ok(()))
+                .err()
+                .unwrap()
+                .to_string(),
+            "SIWC bind target has a linked alias"
+        );
+        drop(guard);
+        assert!(read_siwc_bind_target(&link).is_err());
+        assert!(write_atomic_no_follow(&link, b"replacement-test", id).is_err());
+        assert!(fs::read(&target).unwrap() == data);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn bind_refuses_alias_refresh_between_read_and_scan() {
+        use std::sync::{Arc, Mutex, mpsc};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("real.json");
+        let alias = dir.path().join("alias.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"selected","refresh_token":"selected"}"#,
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        #[cfg(windows)]
+        if let Err(error) = std::os::windows::fs::symlink_file(&path, &alias) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!(
+                    "UNVERIFIED: alias-refresh race needs Windows symlink privilege (OS 1314)"
+                );
+                return;
+            }
+            panic!("file-symlink fixture failed");
+        }
+        let store = FileStore::new(dir.path());
+        let auth = Auth {
+            file_name: "real.json".into(),
+            ..Auth::default()
+        };
+        let guard = super::super::credential_lock::acquire_sync(&path).unwrap();
+        let (read, reached) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let done = Mutex::new(done);
+        super::super::credential_lock::set_test_hook(
+            &path,
+            Some(Arc::new(move |event| {
+                if event == "bind-read" {
+                    read.send(())
+                        .expect("alias writer stopped before bind read");
+                    done.lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("alias writer did not finish");
+                }
+            })),
+        );
+        let directory = dir.path().to_owned();
+        let writer = std::thread::spawn(move || {
+            reached
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|_| io::Error::other("bind did not reach its read barrier"))?;
+            let result = (|| {
+                let store = FileStore::new(directory);
+                let original = meta(
+                    json!({"type":"codex", "access_token":"selected", "refresh_token":"selected"}),
+                );
+                let rotated = meta(
+                    json!({"type":"codex", "access_token":"rotated", "refresh_token":"rotated"}),
+                );
+                let patch = super::super::codex_refresh::CredentialRefreshPatch::new(
+                    &original, &rotated, true, false,
+                );
+                let auth = Auth {
+                    file_name: "alias.json".into(),
+                    metadata: rotated,
+                    ..Auth::default()
+                };
+                let guard = super::super::credential_lock::acquire_sync(&alias)?;
+                store
+                    .apply_codex_refresh_locked(&auth, &patch, &guard)
+                    .map(|_| ())
+            })();
+            let _ = finished.send(());
+            result
+        });
+        let result = store.bind_siwc_locked(&auth, Map::new(), &guard, &|_, _| Ok(()));
+        super::super::credential_lock::set_test_hook(&path, None);
+        assert!(writer.join().unwrap().is_ok(), "alias refresh failed");
+        let Err(error) = result else {
+            panic!("bind accepted an alias");
+        };
+        assert_eq!(error.to_string(), "SIWC bind target has a linked alias");
+        let saved = read_json(&path);
+        assert!(saved["access_token"] == "rotated");
+        assert!(saved["refresh_token"] == "rotated");
+        assert!(saved.get("use_siwc").is_none());
+    }
+
+    #[tokio::test]
+    async fn bind_refuses_replacement_after_scan_before_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bind.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"selected","refresh_token":"selected"}"#,
+        );
+        let store = FileStore::new(dir.path());
+        let auth = store.list().unwrap().remove(0);
+        let replacement = path.clone();
+        super::super::credential_lock::set_test_hook(
+            &path,
+            Some(std::sync::Arc::new(move |event| {
+                if event == "bind-before-replace" {
+                    write_atomic(
+                        &replacement,
+                        br#"{"type":"codex","access_token":"rotated","refresh_token":"rotated"}"#,
+                        true,
+                    )
+                    .unwrap();
+                }
+            })),
+        );
+        let result = std::sync::Arc::new(store).bind_siwc(auth, Map::new()).await;
+        super::super::credential_lock::set_test_hook(&path, None);
+        let Err(error) = result else {
+            panic!("bind overwrote a replacement");
+        };
+        assert_eq!(
+            error.to_string(),
+            "SIWC bind target changed before replacement"
+        );
+        let saved = read_json(&path);
+        assert!(saved["access_token"] == "rotated");
+        assert!(saved["refresh_token"] == "rotated");
+        assert!(saved.get("use_siwc").is_none());
+    }
+
+    #[test]
+    fn bind_alias_scan_refuses_missing_parent_or_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"test","refresh_token":"test"}"#,
+        );
+        let (_, id) = read_siwc_bind_target(&path).unwrap();
+        let missing = dir.path().join("missing");
+        for (root, target) in [
+            (dir.path().to_owned(), missing.join("target.json")),
+            (missing, path),
+        ] {
+            let Err(error) = refuse_siwc_bind_aliases(&root, &target, id) else {
+                panic!("missing scan boundary was accepted");
+            };
+            assert_eq!(error.to_string(), "SIWC bind alias scan failed");
+        }
+    }
+
+    #[test]
+    fn bind_alias_scan_ignores_absence_but_fails_closed_with_fixed_errors() {
+        assert!(
+            scan_optional::<()>(Err(io::Error::from(io::ErrorKind::NotFound)))
+                .unwrap()
+                .is_none()
+        );
+        #[cfg(unix)]
+        assert!(
+            scan_optional::<()>(Err(io::Error::from_raw_os_error(libc::ELOOP)))
+                .unwrap()
+                .is_none()
+        );
+        #[cfg(windows)]
+        assert!(
+            scan_optional::<()>(Err(io::Error::from_raw_os_error(1921)))
+                .unwrap()
+                .is_none()
+        );
+        let error = scan_optional::<()>(Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private path",
+        )))
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "SIWC bind alias scan failed");
+    }
+
+    #[tokio::test]
+    async fn bind_ignores_entries_vanishing_during_alias_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bind.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"selected","refresh_token":"selected"}"#,
+        );
+        let store = FileStore::new(dir.path());
+        let auth = store.list().unwrap().remove(0);
+        let fleeting = dir.path().join("fleeting.tmp");
+        write(&fleeting, "unrelated");
+        let remove = fleeting.clone();
+        super::super::credential_lock::set_test_hook(
+            &fleeting,
+            Some(std::sync::Arc::new(move |event| {
+                if event == "bind-scan-entry" {
+                    fs::remove_file(&remove).unwrap();
+                }
+            })),
+        );
+        let result = std::sync::Arc::new(store).bind_siwc(auth, Map::new()).await;
+        super::super::credential_lock::set_test_hook(&fleeting, None);
+        assert!(result.is_ok(), "vanished scan entry failed the bind");
+        assert!(!fleeting.exists(), "scan barrier did not execute");
+        assert!(read_json(&path)["use_siwc"] == true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_alias_scan_never_opens_an_unrelated_fifo_stream() {
+        use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bind.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"selected","refresh_token":"selected"}"#,
+        );
+        let store = FileStore::new(dir.path());
+        let auth = store.list().unwrap().remove(0);
+        let fifo = dir.path().join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a live, NUL-terminated fixture path, with no aliasing.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        std::os::unix::fs::symlink(&fifo, dir.path().join("fifo-link")).unwrap();
+        let store = std::sync::Arc::new(store);
+        let binding = store.bind_siwc(auth, Map::new());
+        tokio::pin!(binding);
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut binding).await;
+        if result.is_err() {
+            // Unblock a regressed blocking reader before failing, so the test
+            // runtime can shut down instead of retaining a stuck worker.
+            let wake = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo);
+            assert!(wake.is_ok(), "FIFO cleanup could not wake a blocked scan");
+            // Hold a writer even if a loaded host has not scheduled the reader yet.
+            let stopped = tokio::time::timeout(Duration::from_secs(5), &mut binding).await;
+            drop(wake);
+            assert!(stopped.is_ok(), "FIFO scan did not shut down");
+        }
+        assert!(result.is_ok(), "alias scan opened a FIFO data stream");
+        assert!(
+            result.unwrap().is_ok(),
+            "FIFO alias failed an unrelated bind"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_alias_scan_refuses_mixed_mode_identity_matches() {
+        let extended = FileId {
+            volume: 7,
+            index: 11,
+            extended: Some((7, 1 << 80)),
+        };
+        let legacy = FileId {
+            extended: None,
+            ..extended
+        };
+        let destination = Path::new("other-destination");
+        let target = Path::new("target-destination");
+        for (id, selected) in [(legacy, extended), (extended, legacy)] {
+            let Err(error) = refuse_bind_alias(destination, target, id, selected) else {
+                panic!("mixed-mode alias was accepted");
+            };
+            assert_eq!(error.to_string(), "SIWC bind target has a linked alias");
+        }
+        let different = FileId {
+            index: 12,
+            ..legacy
+        };
+        assert!(refuse_bind_alias(destination, target, different, extended).is_ok());
+        assert!(refuse_bind_alias(destination, target, extended, different).is_ok());
+        let different = FileId {
+            extended: Some((7, (1 << 80) + 1)),
+            ..extended
+        };
+        assert!(refuse_bind_alias(destination, target, different, extended).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_legacy_zero_identity_is_unsupported_for_scans_and_changes() {
+        let legacy = FileId {
+            volume: 7,
+            index: 0,
+            extended: None,
+        };
+        let extended = FileId {
+            extended: Some((7, 1 << 80)),
+            ..legacy
+        };
+        assert!(legacy.supported().is_err());
+        assert!(extended.supported().is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"test","refresh_token":"test"}"#,
+        );
+        let Err(error) = refuse_siwc_bind_aliases(dir.path(), &path, legacy) else {
+            panic!("unsupported scan target was accepted");
+        };
+        assert_eq!(error.to_string(), "SIWC bind alias scan failed");
+        for (id, target) in [(legacy, legacy), (legacy, extended), (extended, legacy)] {
+            let Err(error) = refuse_bind_alias(Path::new("other"), Path::new("target"), id, target)
+            else {
+                panic!("unsupported scan identity was accepted");
+            };
+            assert_eq!(error.to_string(), "SIWC bind alias scan failed");
+        }
+        let metadata = meta(json!({"account_id":"workspace", "email":"same@example.test"}));
+        for (selected, current) in [(legacy, legacy), (legacy, extended), (extended, legacy)] {
+            let identity = BindIdentity::capture(&metadata, selected);
+            let Err(error) = identity.check(&metadata, current) else {
+                panic!("unsupported change-check identity was accepted");
+            };
+            assert_eq!(error.to_string(), "SIWC bind target identity changed");
+        }
+        assert!(
+            BindIdentity::capture(&metadata, extended)
+                .check(&metadata, extended)
+                .is_ok()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_file_id_equality_never_mixes_extended_and_legacy_modes() {
+        let first = FileId {
+            volume: 7,
+            index: 11,
+            extended: Some((7, 1 << 80)),
+        };
+        let second = FileId {
+            extended: Some((7, (1 << 80) + 1)),
+            ..first
+        };
+        let legacy = FileId {
+            extended: None,
+            ..first
+        };
+        assert!(
+            first != second,
+            "different extended IDs shared a legacy identity"
+        );
+        assert!(first != legacy, "extended and legacy modes compared equal");
+        assert!(legacy != first, "mixed-mode comparison was asymmetric");
+        assert!(
+            second != legacy,
+            "a legacy identity bridged different extended IDs"
+        );
+        assert!(
+            legacy
+                == FileId {
+                    volume: 7,
+                    index: 11,
+                    extended: None
+                }
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_file_id_falls_back_only_for_unsupported_queries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        write(&path, "identity fixture");
+        let file = fs::File::open(&path).unwrap();
+        let selected = file_id(&file).unwrap();
+        let legacy = windows_file_id(&file, Err(io::Error::from_raw_os_error(87))).unwrap();
+        for code in [1, 87, 50] {
+            let fallback = windows_file_id(&file, Err(io::Error::from_raw_os_error(code))).unwrap();
+            assert!(legacy == fallback, "legacy identities did not compare");
+        }
+        if selected.extended.is_some() {
+            assert!(selected != legacy, "mixed identity modes compared equal");
+        }
+        assert!(windows_file_id(&file, Err(io::Error::from_raw_os_error(5))).is_err());
+    }
+
+    #[test]
+    fn bind_identity_refuses_disappearing_claims_and_accepts_new_claims() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        let mut original = meta(
+            json!({"type":"codex", "access_token":"test", "refresh_token":"test", "account_id":"workspace", "email":"same@example.test"}),
+        );
+        write(&path, &marshal_map(&original));
+        let (_, id) = read_siwc_bind_target(&path).unwrap();
+        let before_claims = BindIdentity::capture(&original, id);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"stable","email":"same@example.test","https://api.openai.com/auth":{"chatgpt_account_id":"workspace","chatgpt_user_id":"stable"}}"#);
+        original.insert("id_token".into(), json!(format!("x.{payload}.x")));
+        assert!(
+            before_claims.check(&original, id).is_ok(),
+            "new claims rejected unchanged evidence"
+        );
+        let identity = BindIdentity::capture(&original, id);
+        for key in ["account_id", "email", "id_token"] {
+            let mut changed = original.clone();
+            changed.remove(key);
+            assert!(
+                identity.check(&changed, id).is_err(),
+                "captured claim disappearance accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_returns_written_map_when_target_vanishes_after_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bind.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"selected","refresh_token":"selected"}"#,
+        );
+        let store = FileStore::new(dir.path());
+        let auth = store.list().unwrap().remove(0);
+        let remove = path.clone();
+        super::super::credential_lock::set_test_hook(
+            &path,
+            Some(std::sync::Arc::new(move |event| {
+                if event == "bind-written" {
+                    fs::remove_file(&remove).unwrap();
+                }
+            })),
+        );
+        let result = std::sync::Arc::new(store).bind_siwc(auth, Map::new()).await;
+        super::super::credential_lock::set_test_hook(&path, None);
+        assert!(
+            result.is_ok(),
+            "optional timestamp turned a completed bind into failure"
+        );
+        assert!(result.unwrap().metadata["use_siwc"] == true);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn bind_reparse_tag_classifies_only_name_surrogates() {
+        assert!(name_surrogate(0xa000_000c)); // symlink
+        assert!(name_surrogate(0xa000_0003)); // mount point
+        assert!(!name_surrogate(0x9000_001a)); // cloud
+        assert!(!name_surrogate(0x8000_0013)); // dedup
+        assert!(!name_surrogate(0));
+    }
+
+    #[test]
+    fn bind_identity_refuses_same_file_account_subject_and_grant_changes() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        let mut original = meta(
+            json!({"type":"codex","access_token":"test", "refresh_token":"test", "account_id":"first"}),
+        );
+        write(&path, &marshal_map(&original));
+        let (_, id) = read_siwc_bind_target(&path).unwrap();
+        let identity = BindIdentity::capture(&original, id);
+        let mut changed = original.clone();
+        changed.insert("account_id".into(), json!("second"));
+        write(&path, &marshal_map(&changed));
+        let (disk, same_id) = read_siwc_bind_target(&path).unwrap();
+        assert!(same_id == id);
+        assert!(
+            identity.check(&disk, same_id).is_err(),
+            "same-file account substitution accepted"
+        );
+        changed = original.clone();
+        changed.insert("refresh_token".into(), json!("different-grant"));
+        write(&path, &marshal_map(&changed));
+        let (disk, same_id) = read_siwc_bind_target(&path).unwrap();
+        assert!(same_id == id);
+        assert!(
+            identity.check(&disk, same_id).is_err(),
+            "same-file grant substitution accepted"
+        );
+        original.insert("email".into(), json!("same@example.test"));
+        let token = |sub| {
+            format!("x.{}.x", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{sub}","https://api.openai.com/auth":{{"chatgpt_account_id":"first","chatgpt_user_id":"stable"}}}}"#)))
+        };
+        original.insert("id_token".into(), json!(token("first")));
+        let identity = BindIdentity::capture(&original, id);
+        changed = original.clone();
+        changed.insert("id_token".into(), json!(token("second")));
+        assert!(
+            identity.check(&changed, id).is_err(),
+            "email masked changed subject"
+        );
+        changed = original.clone();
+        changed.insert("refresh_token".into(), json!("normal-rotation"));
+        assert!(
+            identity
+                .check(
+                    &changed,
+                    FileId {
+                        volume: 99,
+                        index: 99,
+                        #[cfg(windows)]
+                        extended: None
+                    }
+                )
+                .is_ok()
+        );
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"first","https://api.openai.com/auth":{"chatgpt_account_id":"second","chatgpt_user_id":"stable"}}"#);
+        changed.insert("id_token".into(), json!(format!("x.{payload}.x")));
+        assert!(
+            identity.check(&changed, id).is_err(),
+            "top-level account masked changed JWT account"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_returns_written_map_not_a_post_write_path_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bind.json");
+        write(
+            &path,
+            r#"{"type":"codex","access_token":"selected","refresh_token":"selected"}"#,
+        );
+        let store = FileStore::new(dir.path());
+        let auth = store.list().unwrap().remove(0);
+        let replacement = path.clone();
+        super::super::credential_lock::set_test_hook(
+            &path,
+            Some(std::sync::Arc::new(move |event| {
+                if event == "bind-written" {
+                    write(
+                        &replacement,
+                        r#"{"type":"codex","access_token":"substituted","refresh_token":"substituted"}"#,
+                    );
+                }
+            })),
+        );
+        let saved = std::sync::Arc::new(store)
+            .bind_siwc(auth, Map::new())
+            .await
+            .unwrap();
+        super::super::credential_lock::set_test_hook(&path, None);
+        assert!(saved.metadata["access_token"] == "selected");
+        assert!(saved.metadata["use_siwc"] == true);
+        assert!(read_json(&path)["access_token"] == "substituted");
+    }
+
     // Not upstream's: a store under a closed gate refuses every mutator and
     // changes no file, and reading still works.
     #[tokio::test]
@@ -1018,6 +2722,310 @@ mod tests {
                     "{mark} at byte {at} has no permit in its function"
                 );
             }
+        }
+    }
+
+    type MutationHook = Box<dyn FnOnce(&Path)>;
+    thread_local! {
+        pub(super) static MUTATION_HOOK: std::cell::RefCell<Option<MutationHook>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_json_delete_does_not_block_classification() {
+        use std::os::unix::ffi::OsStrExt;
+        for store_delete in [false, true] {
+            let dir = mutation_scratch();
+            let path = dir.path().join("x.json");
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            // SAFETY: name is a valid NUL-terminated pathname and no pointers escape.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let store = FileStore::new(dir.path());
+            let worker = std::thread::spawn(move || {
+                let result = if store_delete {
+                    store.delete_auth("x.json")
+                } else {
+                    store.remove_file("x.json").map(drop)
+                };
+                tx.send(result).unwrap();
+            });
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("FIFO deletion returns promptly")
+                .unwrap();
+            worker.join().unwrap();
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn kind_change_after_classification_completes_without_codex_lock() {
+        for mutation in ["write", "remove", "delete"] {
+            let dir = mutation_scratch();
+            let store = FileStore::new(dir.path());
+            let path = dir.path().join("x.json");
+            write(&path, r#"{"type":"gemini"}"#);
+            // Hold the Codex lock: a reclassification/reacquisition would deadlock.
+            let guard = super::super::credential_lock::acquire_sync(&path).unwrap();
+            MUTATION_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(|path| {
+                    write(path, r#"{"type":"codex"}"#);
+                }))
+            });
+            match mutation {
+                "write" => {
+                    store.write_file("x.json", br#"{"type":"gemini"}"#).unwrap();
+                }
+                "remove" => {
+                    store.remove_file("x.json").unwrap();
+                }
+                _ => {
+                    store.delete_auth("x.json").unwrap();
+                }
+            }
+            // Success while the guard is still held proves no Codex lock was
+            // reacquired; filesystem latency is not part of this guarantee.
+            if mutation == "write" {
+                assert_eq!(read_json(&path)["type"], "gemini");
+            } else {
+                assert!(!path.exists());
+            }
+            drop(guard);
+        }
+    }
+
+    #[test]
+    fn deleted_disabled_credential_is_not_recreated_after_lock_wait() {
+        let dir = mutation_scratch();
+        let store = std::sync::Arc::new(FileStore::new(dir.path()));
+        let path = dir.path().join("x.json");
+        // Classification of this record is deliberately non-Codex, so deletion
+        // can land while the Codex runtime snapshot waits for its lock.
+        write(&path, r#"{"type":"gemini"}"#);
+        let guard = super::super::credential_lock::acquire_sync(&path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        super::super::credential_lock::set_test_hook(
+            &path,
+            Some(std::sync::Arc::new(move |event| {
+                if event == "waiting" {
+                    let _ = tx.send(());
+                }
+            })),
+        );
+        let saving = store.clone();
+        let worker = std::thread::spawn(move || {
+            let auth = Auth {
+                id: "x.json".into(),
+                provider: "codex".into(),
+                disabled: true,
+                metadata: meta(json!({"type":"codex", "access_token":"snapshot"})),
+                ..Auth::default()
+            };
+            saving.save(&auth).unwrap()
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        store.delete_auth("x.json").unwrap();
+        assert!(!path.exists());
+        drop(guard);
+        assert!(worker.join().unwrap().is_empty());
+        super::super::credential_lock::set_test_hook(&path, None);
+        assert!(
+            !path.exists(),
+            "a deleted disabled credential must stay deleted"
+        );
+    }
+
+    #[test]
+    fn partition_write_keeps_one_permit_through_lock_wait_and_quiesce() {
+        let dir = mutation_scratch();
+        let store = std::sync::Arc::new(FileStore::new(dir.path()));
+        let gate = ActiveGate::open();
+        store.set_gate(gate.clone());
+        let auth = Auth {
+            id: "x.json".into(),
+            provider: "codex".into(),
+            metadata: meta(json!({"type":"codex", "access_token":"before"})),
+            ..Auth::default()
+        };
+        store.save_new(&auth).unwrap();
+        let path = dir.path().join("x.json");
+        let held = super::super::credential_lock::acquire_sync(&path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        super::super::credential_lock::set_test_hook(
+            &path,
+            Some(std::sync::Arc::new(move |event| {
+                if event == "waiting" {
+                    let _ = tx.send(());
+                }
+            })),
+        );
+        let writing = store.clone();
+        let worker = std::thread::spawn(move || {
+            let after = meta(json!({"type":"codex", "access_token":"after"}));
+            let intent = super::super::codex_refresh::CodexPersistIntent::Refresh(
+                super::super::codex_refresh::CredentialRefreshPatch::new(
+                    &auth.metadata,
+                    &after,
+                    true,
+                    false,
+                ),
+            );
+            writing.persist_codex_partition(&auth, &intent)
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        gate.quiesce(gate.epoch()).unwrap();
+        drop(held);
+        worker
+            .join()
+            .unwrap()
+            .expect("the original write permit survives quiesce");
+        super::super::credential_lock::set_test_hook(&path, None);
+        assert_eq!(read_json(&path)["access_token"], "after");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "investigates Windows/tempfile replacement behavior; susceptible to external readers"]
+    fn open_read_handles_block_atomic_replace_until_closed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = mutation_scratch();
+        let path = dir.path().join("reader.json");
+        write_atomic(&path, b"old", true).unwrap();
+        let reader = fs::File::open(&path).unwrap();
+        // Exercise the exact reader and replacement used by list/save. On
+        // Windows an overlapping default reader also prevents this replacement.
+        let error = write_atomic(&path, b"new", true).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.raw_os_error(), Some(5));
+        drop(reader);
+        write_atomic(&path, b"new", true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let deny_delete = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&path)
+            .unwrap();
+        assert!(
+            write_atomic(&path, b"blocked", true).is_err(),
+            "a handle denying delete sharing blocks replacement"
+        );
+        drop(deny_delete);
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn wrapped_error_preserves_os_error_source() {
+        let error = wrap(io::Error::from_raw_os_error(5), "write failed");
+        let original = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(error.kind(), original.kind());
+        assert_eq!(original.raw_os_error(), Some(5));
+    }
+
+    fn mutation_scratch() -> tempfile::TempDir {
+        let root = std::env::var_os("OFP_TEST_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+            });
+        fs::create_dir_all(&root).unwrap();
+        tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn non_codex_upload_and_delete_leave_no_lock() {
+        for store_delete in [false, true] {
+            for data in [
+                br#"{"type":"gemini"}"#.as_slice(),
+                br#"{"type":"antigravity"}"#.as_slice(),
+                b"{}".as_slice(),
+                b"not JSON".as_slice(),
+            ] {
+                let dir = mutation_scratch();
+                let store = FileStore::new(dir.path());
+                let path = store.write_file("a.json", data).unwrap();
+                let lock = dir.path().join("a.json.lock");
+                assert!(!lock.exists());
+                if store_delete {
+                    store.delete_auth("a.json").unwrap();
+                } else {
+                    store.remove_file("a.json").unwrap();
+                }
+                assert!(!path.exists());
+                assert!(!lock.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn codex_upload_and_delete_keep_permanent_lock() {
+        for store_delete in [false, true] {
+            let dir = mutation_scratch();
+            let store = FileStore::new(dir.path());
+            let path = store
+                .write_file("a.json", br#"{"type":" CoDeX "}"#)
+                .unwrap();
+            let lock = dir.path().join("a.json.lock");
+            assert!(lock.is_file());
+            if store_delete {
+                store.delete_auth("a.json").unwrap();
+            } else {
+                store.remove_file("a.json").unwrap();
+            }
+            assert!(!path.exists());
+            assert!(lock.is_file());
+        }
+    }
+
+    #[test]
+    fn replacing_existing_codex_with_non_codex_takes_lock() {
+        let dir = mutation_scratch();
+        let store = FileStore::new(dir.path());
+        let path = dir.path().join("a.json");
+        write(&path, r#"{"type":"codex"}"#);
+        store.write_file("a.json", br#"{"type":"gemini"}"#).unwrap();
+        assert!(dir.path().join("a.json.lock").is_file());
+    }
+
+    #[test]
+    fn deleting_codex_waits_for_held_lock() {
+        for store_delete in [false, true] {
+            let dir = mutation_scratch();
+            let store = std::sync::Arc::new(FileStore::new(dir.path()));
+            let path = store.write_file("a.json", br#"{"type":"codex"}"#).unwrap();
+            let guard = super::super::credential_lock::acquire_sync(&path).unwrap();
+            let (waiting, waited) = std::sync::mpsc::channel();
+            super::super::credential_lock::set_test_hook(
+                &path,
+                Some(std::sync::Arc::new(move |event| {
+                    if event == "waiting" {
+                        let _ = waiting.send(());
+                    }
+                })),
+            );
+            let (finished, done) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                if store_delete {
+                    store.delete_auth("a.json").unwrap();
+                } else {
+                    store.remove_file("a.json").unwrap();
+                }
+                finished.send(()).unwrap();
+            });
+            waited.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                done.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            assert!(path.exists());
+            drop(guard);
+            done.recv_timeout(Duration::from_secs(5)).unwrap();
+            worker.join().unwrap();
+            super::super::credential_lock::set_test_hook(&path, None);
+            assert!(!path.exists());
+            assert!(dir.path().join("a.json.lock").is_file());
         }
     }
 
@@ -1127,6 +3135,30 @@ mod tests {
             "auth filestore: invalid metadata weight: weight must be an integer"
         );
         assert!(!dir.path().join("invalid.json").exists());
+    }
+
+    #[test]
+    fn save_refuses_a_siwc_bind_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        let path = dir.path().join("codex.json");
+        std::fs::write(&path, b"{corrupt").unwrap();
+        let bind = || Auth {
+            id: "codex.json".into(),
+            file_name: "codex.json".into(),
+            provider: "codex".into(),
+            metadata: meta(json!({"type": "codex", "access_token": "a", "refresh_token": "r"})),
+            codex_persist_intent: super::super::codex_refresh::CodexPersistIntent::SiwcBind(
+                Map::new(),
+            ),
+            ..Auth::default()
+        };
+        // Neither save may replace the corrupt file a strict bind refuses.
+        let err = store.save_auth(&mut bind()).unwrap_err();
+        assert!(err.to_string().contains("bind_siwc_locked"), "{err}");
+        let err = store.save_new_auth(&mut bind()).unwrap_err();
+        assert!(err.to_string().contains("bind_siwc_locked"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{corrupt");
     }
 
     #[test]
@@ -1413,11 +3445,13 @@ mod tests {
             };
             store.save_auth(&mut auth).unwrap();
         }
-        let names: Vec<_> = fs::read_dir(dir.path())
+        let mut names: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(names, ["a.json"]);
+        names.sort();
+        // The credential lock is permanent; temporary replacement files aren't.
+        assert_eq!(names, ["a.json", "a.json.lock"]);
     }
 
     #[test]
@@ -1525,7 +3559,8 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"{\"type\":\"codex\"}");
         store.write_file("codex-a.json", b"not json").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"not json");
-        assert_eq!(fs::read_dir(&auth_dir).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&auth_dir).unwrap().count(), 2);
+        assert!(auth_dir.join("codex-a.json.lock").is_file());
 
         assert_eq!(store.remove_file("codex-a.json").unwrap(), path);
         assert!(!path.exists());

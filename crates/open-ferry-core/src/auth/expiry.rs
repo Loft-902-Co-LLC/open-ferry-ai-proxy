@@ -46,7 +46,19 @@ impl Auth {
     /// When the credential expires: the access token's JWT `exp` claim, or
     /// else an expiry in the metadata.
     pub fn expiration_time(&self) -> Option<Timestamp> {
-        let token = self.access_token();
+        if self.use_siwc() {
+            return if self.is_rejected_access_token(self.access_token()) {
+                Some(DateTime::<Utc>::UNIX_EPOCH)
+            } else {
+                self.siwc_expiration_time()
+            };
+        }
+        self.outer_expiration_time()
+    }
+
+    /// The outer expiry, independent of the active SIWC switch.
+    pub fn outer_expiration_time(&self) -> Option<Timestamp> {
+        let token = self.outer_access_token();
         if self.is_rejected_access_token(token) {
             return Some(DateTime::<Utc>::UNIX_EPOCH);
         }
@@ -88,7 +100,95 @@ impl Auth {
     }
 
     /// The access token in the metadata, trimmed, or empty.
-    pub(crate) fn access_token(&self) -> &str {
+    pub fn access_token(&self) -> &str {
+        if self.use_siwc() {
+            let token = self.siwc_token_field("access_token");
+            return if token.is_empty() {
+                self.siwc_token_field("access")
+            } else {
+                token
+            };
+        }
+        self.outer_access_token()
+    }
+
+    /// Whether Codex selects its nested SIWC bearer token. No outer fallback.
+    pub fn use_siwc(&self) -> bool {
+        super::codex_refresh::is_codex_auth(self)
+            && (self.attributes.get("use_siwc").is_some_and(|raw| {
+                super::parse_bool_any(&Value::String(raw.clone())).unwrap_or(false)
+            }) || super::codex_refresh::parse_use_siwc(self.metadata.get("use_siwc"))
+                .unwrap_or(false))
+    }
+
+    /// A trimmed string in SIWC, or empty. Device IDs must never be logged.
+    pub fn siwc_token_field(&self, key: &str) -> &str {
+        self.metadata
+            .get("siwc")
+            .and_then(Value::as_object)
+            .and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+            .map_or("", str::trim)
+    }
+
+    /// SIWC's stored expiry (already margin-adjusted) wins over JWT expiry.
+    pub fn siwc_expiration_time(&self) -> Option<Timestamp> {
+        let map = self.metadata.get("siwc")?.as_object()?;
+        expiration_from_map(map)
+            .filter(|t| *t != zero_time())
+            .or_else(|| parse_jwt_exp(self.siwc_token_field("access_token")))
+    }
+
+    /// Due time for stored refreshable SIWC, even when the switch is off.
+    /// Refreshes five minutes before the stored, margin-adjusted expiry.
+    pub fn siwc_refresh_due_at(&self, now: Timestamp) -> Option<Timestamp> {
+        if !super::codex_refresh::is_codex_auth(self)
+            || self.siwc_token_field("refresh_token").is_empty()
+            || self.siwc_token_field("client_id").is_empty()
+        {
+            return None;
+        }
+        if self
+            .codex_refresh_failure
+            .as_ref()
+            .is_some_and(|failure| failure.partition == super::CodexCredentialPartition::Siwc)
+        {
+            return Some(now);
+        }
+        let access = self.siwc_token_field("access_token");
+        if access.is_empty() || self.is_rejected_access_token(access) {
+            return Some(now);
+        }
+        let lead = TimeDelta::minutes(5);
+        let due = self
+            .siwc_expiration_time()
+            .map(|t| {
+                t.checked_sub_signed(lead)
+                    .unwrap_or(DateTime::<Utc>::MIN_UTC)
+            })
+            .or_else(|| {
+                self.metadata
+                    .get("siwc")?
+                    .get("last_refresh")
+                    .and_then(parse_time_value)
+                    .or_else(|| {
+                        self.metadata
+                            .get("siwc")?
+                            .get("lastRefresh")
+                            .and_then(parse_time_value)
+                    })
+                    .filter(|t| *t != zero_time())
+                    .map(|t| {
+                        t.checked_add_signed(lead)
+                            .unwrap_or(DateTime::<Utc>::MAX_UTC)
+                    })
+            })
+            .unwrap_or(now);
+        Some(due.max(now))
+    }
+
+    /// The outer access token, irrespective of the active switch.
+    pub fn outer_access_token(&self) -> &str {
         let token = self.trimmed_metadata_str("access_token");
         if token.is_empty() {
             self.trimmed_metadata_str("accessToken")

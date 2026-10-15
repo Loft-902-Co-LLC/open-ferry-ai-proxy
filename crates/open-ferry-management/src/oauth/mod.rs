@@ -33,6 +33,7 @@ mod callback;
 mod flows;
 mod forwarder;
 pub(crate) mod sessions;
+mod siwc_bind;
 
 use std::fmt;
 use std::future::Future;
@@ -137,6 +138,10 @@ pub(crate) struct Overrides {
     pub(crate) exchange: Option<Duration>,
     /// How long a callback page waits for its login to end.
     pub(crate) page: Option<Duration>,
+    /// Notified only after acquiring the bind's credential lock polls Pending.
+    pub(crate) bind_lock_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Holds a persisted bind after revision allocation, before releasing its lock.
+    pub(crate) bind_after_sync: Option<std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
 }
 
 #[cfg(test)]
@@ -148,11 +153,17 @@ impl Default for Overrides {
             wait: None,
             exchange: None,
             page: None,
+            bind_lock_wait: None,
+            bind_after_sync: None,
         }
     }
 }
 
 impl Sessions {
+    pub(super) fn is_shut_down(&self) -> bool {
+        self.logins().shut_down
+    }
+
     /// The sessions.
     pub(crate) fn store(&self) -> &Store {
         &self.store
@@ -233,6 +244,14 @@ impl Sessions {
             return codex::Endpoints::with_base(&base);
         }
         codex::Endpoints::default()
+    }
+
+    fn siwc_endpoints(&self) -> open_ferry_providers::codex::siwc::Endpoints {
+        #[cfg(test)]
+        if let Some(base) = self.overrides().endpoints.clone() {
+            return open_ferry_providers::codex::siwc::Endpoints::with_base(&base);
+        }
+        open_ferry_providers::codex::siwc::Endpoints::default()
     }
 
     /// The port `provider`'s forwarder listens on.

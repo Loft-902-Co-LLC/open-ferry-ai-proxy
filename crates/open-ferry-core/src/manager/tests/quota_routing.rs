@@ -190,6 +190,9 @@ impl Pool {
                     ..auth
                 }),
                 refresh_failures: 0,
+                discard_epoch: 0,
+                undurable: Default::default(),
+                undurable_baselines: Default::default(),
             },
         );
     }
