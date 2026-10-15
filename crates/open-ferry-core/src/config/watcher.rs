@@ -1379,6 +1379,20 @@ mod tests {
     }
 
     #[test]
+    fn siwc_lock_file_triggers_no_auth_reload() {
+        let fixture = Fixture::new();
+        let credential = fixture.write_auth("codex.json", DEMO);
+        let lock = fixture.write_auth("codex.json.lock", DEMO);
+        let mut state = fixture.state();
+        assert_eq!(state.initial_scan().len(), 1);
+        assert!(known(&state, &credential).is_some());
+        assert!(known(&state, &lock).is_none());
+        for op in [Op::Create, Op::Write, Op::Remove, Op::Rename] {
+            assert_eq!(state.handle_event(&lock, op, Instant::now()), Step::Nothing);
+        }
+    }
+
+    #[test]
     fn initial_scan_of_a_missing_dir_finds_nothing() {
         let fixture = Fixture::new();
         let mut state = WatchState::new(fixture.config_path.clone(), fixture.dir.join("gone"));

@@ -66,6 +66,22 @@ pub trait CredentialSync: Send + Sync {
     /// the file.
     fn file_written(&self, file: AuthFile) -> SyncFuture<'_>;
 
+    /// Reports a successful login/bind write with token-free authority captured
+    /// before that write. Failed or empty writes must drop the command unused.
+    /// Older implementors retain their ordinary file/upsert behavior.
+    fn completed_token_command(
+        &self,
+        auth: Auth,
+        file: Option<AuthFile>,
+        command: open_ferry_core::manager::CompletedTokenCommand,
+    ) -> SyncFuture<'_> {
+        drop(command);
+        match file {
+            Some(file) => self.file_written(file),
+            None => self.upsert(auth),
+        }
+    }
+
     /// Unregisters the credential registered for the auth file at `path`,
     /// just removed, as the watcher does for a file that is removed.
     fn file_removed(&self, path: PathBuf) -> SyncFuture<'_>;

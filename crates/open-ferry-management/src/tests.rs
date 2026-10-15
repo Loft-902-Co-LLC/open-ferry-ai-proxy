@@ -500,50 +500,53 @@ impl FakeSync {
 
     fn call(&self, call: SyncCall) -> SyncFuture<'_> {
         let held_at_call = self.lock_held_now();
-        let result = if self.stopped.load(Ordering::SeqCst) {
-            Err(SyncError::Stopped)
-        } else {
-            self.apply(&call);
-            self.calls.lock().unwrap().push(call);
-            Ok(())
-        };
+        let stopped = self.stopped.load(Ordering::SeqCst);
         Box::pin(async move {
             if let Some(at_call) = held_at_call {
                 let at_await = self.lock_held_now().unwrap_or_default();
                 self.lock_held.lock().unwrap().push((at_call, at_await));
             }
-            result
+            if stopped {
+                return Err(SyncError::Stopped);
+            }
+            let applying = call.clone();
+            self.manager
+                .run_persistence(move |manager| Self::apply(&manager, &applying))
+                .await
+                .unwrap();
+            self.calls.lock().unwrap().push(call);
+            Ok(())
         })
     }
 
-    fn apply(&self, call: &SyncCall) {
+    fn apply(manager: &Manager, call: &SyncCall) {
         match call {
-            SyncCall::Upsert(auth) => self.upsert(Auth::clone(auth)),
+            SyncCall::Upsert(auth) => Self::apply_upsert(manager, Auth::clone(auth)),
             SyncCall::FileWritten(file) => {
                 let dir = file.path.parent().unwrap_or(Path::new(""));
                 let ctx = SynthesisContext::new(dir, Utc::now());
                 match synthesize_auth_file(&ctx, &file.path, &file.data) {
-                    Ok(Some(auth)) => self.upsert(auth),
-                    _ => self.remove_file(&file.path),
+                    Ok(Some(auth)) => Self::apply_upsert(manager, auth),
+                    _ => Self::remove_file(manager, &file.path),
                 }
             }
-            SyncCall::FileRemoved(path) => self.remove_file(path),
+            SyncCall::FileRemoved(path) => Self::remove_file(manager, path),
         }
     }
 
-    fn upsert(&self, auth: Auth) {
-        if self.manager.get(&auth.id).is_some() {
-            self.manager.update_unsaved(auth).unwrap();
+    fn apply_upsert(manager: &Manager, auth: Auth) {
+        if manager.get(&auth.id).is_some() {
+            manager.update_unsaved(auth).unwrap();
         } else {
-            self.manager.register_unsaved(auth).unwrap();
+            manager.register_unsaved(auth).unwrap();
         }
     }
 
     /// Removes every credential from the file at `path`.
-    fn remove_file(&self, path: &Path) {
-        for auth in self.manager.list() {
+    fn remove_file(manager: &Manager, path: &Path) {
+        for auth in manager.list() {
             if auth.attribute("path").map(Path::new) == Some(path) {
-                self.manager.remove(&auth.id);
+                manager.remove(&auth.id);
             }
         }
     }
@@ -560,6 +563,120 @@ impl CredentialSync for FakeSync {
 
     fn file_removed(&self, path: PathBuf) -> SyncFuture<'_> {
         self.call(SyncCall::FileRemoved(path))
+    }
+}
+
+/// A [`CredentialSync`] that counts the completed token commands it is
+/// given and adopts each when awaited, as the service does once the writer
+/// has released its locks. Every other change it only counts, as an
+/// observation, and applies nothing.
+struct CommandSync {
+    manager: Manager,
+    commands: AtomicUsize,
+    observations: AtomicUsize,
+}
+
+impl CredentialSync for CommandSync {
+    fn upsert(&self, _auth: Auth) -> SyncFuture<'_> {
+        self.observations.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn file_written(&self, _file: AuthFile) -> SyncFuture<'_> {
+        self.observations.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn file_removed(&self, _path: PathBuf) -> SyncFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn completed_token_command(
+        &self,
+        auth: Auth,
+        file: Option<AuthFile>,
+        command: open_ferry_core::manager::CompletedTokenCommand,
+    ) -> SyncFuture<'_> {
+        self.commands.fetch_add(1, Ordering::SeqCst);
+        // As the service does, a written file names the credential, not the
+        // record, whose id a login may not have been given yet.
+        let hint = file
+            .as_ref()
+            .and_then(|file| {
+                let name = file.path.file_name()?.to_str()?.to_owned();
+                self.manager
+                    .list()
+                    .into_iter()
+                    .find(|live| live.file_name == name || live.id == name)
+                    .map(|live| Auth::clone(&live))
+            })
+            .unwrap_or(auth);
+        Box::pin(async move {
+            self.manager
+                .adopt_completed_token_command(&hint, command)
+                .unwrap();
+            Ok(())
+        })
+    }
+}
+
+type CommandFuture<'a, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, open_ferry_core::exec::ExecError>> + Send + 'a>,
+>;
+
+/// A Codex executor whose refresh rotates the outer tokens, or with `siwc`
+/// the SIWC ones, to `discarded-live`. It never runs a request.
+struct CommandRefresh {
+    siwc: bool,
+}
+
+impl open_ferry_core::executor::ProviderExecutor for CommandRefresh {
+    fn id(&self) -> &str {
+        "codex"
+    }
+
+    fn execute(
+        &self,
+        _: Arc<Auth>,
+        _: open_ferry_core::exec::Request,
+        _: open_ferry_core::exec::Options,
+    ) -> CommandFuture<'_, open_ferry_core::exec::Response> {
+        Box::pin(async { panic!("command regression never executes requests") })
+    }
+
+    fn execute_stream(
+        &self,
+        _: Arc<Auth>,
+        _: open_ferry_core::exec::Request,
+        _: open_ferry_core::exec::Options,
+    ) -> CommandFuture<'_, open_ferry_core::exec::StreamResponse> {
+        Box::pin(async { panic!("command regression never streams requests") })
+    }
+
+    fn count_tokens(
+        &self,
+        _: Arc<Auth>,
+        _: open_ferry_core::exec::Request,
+        _: open_ferry_core::exec::Options,
+    ) -> CommandFuture<'_, open_ferry_core::exec::Response> {
+        Box::pin(async { panic!("command regression never counts tokens") })
+    }
+
+    fn refresh(&self, auth: Arc<Auth>) -> CommandFuture<'_, Auth> {
+        Box::pin(async move {
+            let mut auth = (*auth).clone();
+            let tokens = if self.siwc {
+                auth.metadata["siwc"].as_object_mut().unwrap()
+            } else {
+                &mut auth.metadata
+            };
+            tokens.insert("access_token".into(), Value::from("discarded-live"));
+            tokens.insert(
+                "refresh_token".into(),
+                Value::from("discarded-live-refresh"),
+            );
+            Ok(auth)
+        })
     }
 }
 

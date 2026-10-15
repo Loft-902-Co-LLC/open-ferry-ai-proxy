@@ -653,3 +653,102 @@ Not routes the app calls, but what it can count on:
   - **The proxy's port** doesn't have their routes: `/dashboard/` and below, `/dashboard` and `/management.html` answer an empty 404, as while `management.disable-control-panel` is set; every path under `/open-ferry/`, the dashboard API's routes among them, 404 `not_found` ("no such route"), whatever the method, as a path that isn't a route does; and every path under `/v0/management/` and `/v8/management/` an empty 404, as while no management key is set. Everything else there is as before, the sign-in callback pages (`/anthropic/callback`, `/codex/callback`) among it: the management API's callback forwarders send the browser to them on the proxy's port.
   - **The management address** answers every other path, the proxy's routes, `/` and `/healthz` among them, with a 404, `404 page not found` in plain text. The link in safe mode's message, `/management.html?safe-mode=configure`, is then at the management address, not on the proxy's port that gives the message.
   - Both use `server.tls`, the same certificate and key.
+
+## Sign in with ChatGPT binding
+
+Start an explicit bind on the **authenticated** v8 management route:
+
+```http
+GET /v8/management/oauth/auth-url?provider=codex&mode=siwc-bind&name=codex-existing.json
+Authorization: Bearer <management-key>
+```
+
+`name` is an existing top-level `*.json` filename, not a path. The target must be
+a regular Codex credential with non-empty outer access and refresh tokens. Links
+and Windows reparse points are refused. A successful start answers 200:
+
+```json
+{"status":"ok","url":"<authorize URL>","state":"<pending sign-in state>"}
+```
+
+Open `url`, then hand back the callback through either route:
+
+```http
+GET /v8/management/oauth/callback?state=<state>&code=<code>&client_id=<issued-client-id>
+POST /v8/management/oauth/callback
+```
+
+The POST JSON is `{"state":"...","code":"...","client_id":"..."}`, with
+optional `provider: "codex"`, or `{"redirect_url":"<full pasted redirect>"}`.
+For bind sessions the pasted redirect accepts query or fragment fields, with
+query fields taking precedence. GET, POST and `/codex/callback` all keep the
+issued `client_id`; `is_webui=1` starts the loopback callback forwarder, which
+keeps it too. An accepted management callback answers 200 `{"status":"ok"}`;
+that means delivery, **not** successful persistence.
+
+Poll `GET /v8/management/oauth/status?state=...`: `{"status":"wait"}` while
+pending, `{"status":"ok"}` after persistence and credential sync, or
+`{"status":"error","error":"<reason>"}` on failure. Cancel with
+`DELETE /v8/management/oauth/session?state=...`, which answers
+`{"status":"ok","cancelled":true}` when it removed the pending session.
+Once persistence has been admitted, cancellation answers
+`{"status":"ok","cancelled":false}` and the bind completes.
+The callback wait is five minutes; exchange has a 60-second deadline.
+
+Start errors use `{"error":"<reason>"}`:
+
+| Status | Reason |
+|---|---|
+| 400 | `invalid SIWC bind target` (missing/unsafe name, unavailable or invalid file, links, non-Codex type, missing outer tokens), or `unsupported oauth mode` for a non-empty unrecognized mode |
+| 503 | `credential store unavailable` or `server shutting down` |
+| 429 | `too many oauth sessions` |
+| 500 | Authorization URL or callback forwarder could not be started |
+
+The existing callback validation errors remain: 400 for invalid state, missing
+code/error or invalid pasted redirect; 404 for unknown/expired state; 409 for a
+completed, failed or no-longer-pending flow. A bind callback without an issued
+client ID fails the **session**, without exchanging or saving. Exchange failures,
+timeouts, write-gate refusal, cancellation before admission, shutdown and a
+target substituted, deleted or corrupted since start cannot bind. The selected
+file is read through a validated no-follow handle inside the persistence primitive
+under the credential lock. No handle remains open while waiting for sign-in,
+so atomic saves remain possible. Outer account plus per-user fields (email or
+ID-token user claims) detect substitution while allowing token rotations for
+the same user. Every captured claim must remain present; a disappearing claim
+fails closed, and retrying recaptures the current claims. A newly appearing
+claim is allowed if the captured evidence and any file/grant fallback still
+match. Email cannot mask changed subject/user or account claims.
+When no per-user field exists, file identity plus an unchanged private SHA-256
+fingerprint of the outer refresh grant are required, and
+an atomic save requires restarting the bind. This is not ID-token verification
+or SIWC-to-outer account matching. Missing or corrupt files are refused without
+restoring the selection snapshot; the bind writer never follows a leaf link.
+The auth directory must be trusted against uncooperative writers changing its
+entries; other open-ferry writers participate in the credential lock. A leaf
+link target is refused, as is a regular target with another auth-directory leaf
+link resolving to its destination path or file identity. The final identity
+check is best-effort under the trusted-directory rule, not an atomic
+identity-conditional replacement: a writer bypassing the credential lock can
+still swap the file between the check and replacement.
+The bind can also fail if the filesystem's file-identity support changes; retry the bind.
+
+Persistence admission occurs inside the locked bind, after the strict read and
+identity checks. **Once admitted, cancellation is refused (`cancelled:false`)
+and the bind completes.** The
+operation's gate lease lasts through blocking persistence. Binding changes only `siwc` and
+`use_siwc`, never the outer tokens or settings, and notifies credential sync so
+the running service serves the saved credential. A post-save sync failure fails
+the session but cannot undo the already saved file. Unknown nonempty modes and
+`siwc-bind` with any provider other than Codex return 400. Ordinary Codex and
+Claude sign-ins with no mode are unchanged. Bind persistence failures return a
+fixed session error; only the server log reports the I/O category and numeric
+OS code, never credential filenames.
+The sync revision is reserved while the credential lock is still held, then
+that lock is released before awaiting sync.
+
+The device ID is a random v4 UUID generated by open-ferry and reused when valid;
+it is sent only in the authorize URL and stored only per credential in
+`siwc.device_id`, never as a session/request identity. The start response carries
+it **only inside that private authorize URL**; there is no device-ID response
+field, status/error exposure or log entry. The ID token's signature and nonce
+are not verified, and the SIWC account is not matched to the outer account.

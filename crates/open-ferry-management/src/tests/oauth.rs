@@ -36,6 +36,8 @@
 //! - The v8 contract's OAuth checks are ported here rather than with the
 //!   rest of `TestManagementV8IndependentContract`.
 
+mod siwc_bind;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -100,6 +102,7 @@ fn failed(message: &str) -> String {
 /// A callback with `code`.
 fn code(code: &str) -> Callback {
     Callback {
+        client_id: String::new(),
         code: code.to_owned(),
         error: String::new(),
     }
@@ -169,6 +172,8 @@ fn files(auth_dir: &AuthDir) -> Vec<String> {
     std::fs::read_dir(auth_dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        // Codex credentials keep a permanent lock file, as upstream does.
+        .filter(|name| !name.to_ascii_lowercase().ends_with(".json.lock"))
         .collect()
 }
 
@@ -801,6 +806,7 @@ async fn oauth_callback_checks_and_hands_over_the_callback() {
     assert_eq!(
         codex.try_recv(),
         Ok(Callback {
+            client_id: String::new(),
             code: "the-code".into(),
             error: "denied".into(),
         })
@@ -875,6 +881,7 @@ async fn callback_pages_hand_over_the_callback() {
     assert_eq!(
         codex.try_recv(),
         Ok(Callback {
+            client_id: String::new(),
             code: String::new(),
             error: "access_denied".into(),
         })
@@ -907,7 +914,8 @@ async fn callback_pages_say_how_the_login_ended() {
         "{}",
         answer.body
     );
-    saved_file(&auth_dir, "codex-");
+    let codex_file = saved_file(&auth_dir, "codex-");
+    assert!(auth_dir.path().join(format!("{codex_file}.lock")).exists());
     let answer = open_page(&api, &path).await;
     assert_page(&answer, StatusCode::OK, "Signed in to Codex", &path);
     let path = format!("/anthropic/callback?state={state}&code=the-code");
@@ -1651,6 +1659,7 @@ async fn callback_errors_are_logged_without_what_they_carry() {
 #[test]
 fn debug_hides_what_logins_hold() {
     let callback = Callback {
+        client_id: String::new(),
         code: "MARKER-code".into(),
         error: "MARKER-error".into(),
     };

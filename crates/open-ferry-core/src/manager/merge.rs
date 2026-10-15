@@ -87,14 +87,152 @@ fn meta_proxy(metadata: &Map<String, Value>) -> String {
     }
 }
 
+/// Reconciles a successful partition save after another live mutation. Valid
+/// rotations still land; concurrent settings and newer token identities win.
+pub(crate) fn reconcile_persisted_codex(snapshot: &Auth, current: &Auth, disk: &Auth) -> Auth {
+    use crate::auth::codex_refresh::{
+        CodexPersistIntent, CredentialRefreshPatch, OUTER_KEYS, SIWC_KEYS, same_version,
+    };
+    let mut current = current.clone();
+    let mut baseline = snapshot.metadata.clone();
+    if let CodexPersistIntent::Refresh(patch) = &snapshot.codex_persist_intent {
+        current.metadata = patch.apply(&current.metadata).0;
+        baseline = patch.apply(&baseline).0;
+    }
+    let mut updated = disk.clone();
+    updated.attributes = snapshot.attributes.clone();
+    updated
+        .attributes
+        .retain(|key, _| !key.starts_with("header:") || disk.attributes.contains_key(key));
+    updated.attributes.extend(disk.attributes.clone());
+    updated.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+        &snapshot.metadata,
+        &disk.metadata,
+        true,
+        snapshot.metadata.contains_key("siwc") || disk.metadata.contains_key("siwc"),
+    ));
+    let mut merged = merge_auth_content(snapshot, &current, &updated);
+    if current.metadata.get("use_siwc") == snapshot.metadata.get("use_siwc") {
+        match disk.metadata.get("use_siwc") {
+            Some(value) => {
+                merged.metadata.insert("use_siwc".into(), value.clone());
+            }
+            None => {
+                merged.metadata.remove("use_siwc");
+            }
+        }
+    }
+    // Disk is authoritative for unchanged identities, including absent keys.
+    // Upstream assigns the merged disk map directly (sdk/cliproxy/auth/codex_persist.go:63-68).
+    if same_version(&baseline, &current.metadata) {
+        for key in OUTER_KEYS {
+            match disk.metadata.get(*key) {
+                Some(value) => {
+                    merged.metadata.insert((*key).into(), value.clone());
+                }
+                None => {
+                    merged.metadata.remove(*key);
+                }
+            }
+        }
+    }
+    let empty = Map::new();
+    let baseline_siwc = baseline
+        .get("siwc")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let current_siwc = current
+        .metadata
+        .get("siwc")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if same_version(baseline_siwc, current_siwc) {
+        if let Some(Value::Object(disk_siwc)) = disk.metadata.get("siwc") {
+            let target = merged
+                .metadata
+                .entry("siwc")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !target.is_object() {
+                *target = Value::Object(Map::new());
+            }
+            let target = target.as_object_mut().unwrap();
+            for key in SIWC_KEYS {
+                match disk_siwc.get(*key) {
+                    Some(value) => {
+                        target.insert((*key).into(), value.clone());
+                    }
+                    None => {
+                        target.remove(*key);
+                    }
+                }
+            }
+        } else if snapshot.metadata.contains_key("siwc") {
+            merged.metadata.remove("siwc");
+        }
+    }
+    let base = snapshot
+        .metadata
+        .get("siwc")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let live = current
+        .metadata
+        .get("siwc")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let disk = disk
+        .metadata
+        .get("siwc")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if let Some(Value::Object(target)) = merged.metadata.get_mut("siwc") {
+        for key in base.keys().chain(disk.keys()) {
+            if !SIWC_KEYS.contains(&key.as_str()) && live.get(key) == base.get(key) {
+                match disk.get(key) {
+                    Some(value) => {
+                        target.insert(key.clone(), value.clone());
+                    }
+                    None => {
+                        target.remove(key);
+                    }
+                }
+            }
+        }
+    }
+    merged.disabled = merged
+        .metadata
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(current.disabled);
+    merged
+}
+
 /// Merges the content of a refreshed credential: metadata, proxy URL,
 /// prefix and attributes (upstream's `mergeAuthContent`).
 pub(crate) fn merge_auth_content(base: &Auth, current: &Auth, updated: &Auth) -> Auth {
     let mut merged = current.clone();
+    let patch = match &updated.codex_persist_intent {
+        crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) => Some(patch.clone()),
+        _ if crate::auth::codex_refresh::is_codex_auth(updated) => {
+            Some(crate::auth::codex_refresh::CredentialRefreshPatch::new(
+                &base.metadata,
+                &updated.metadata,
+                crate::auth::codex_refresh::OUTER_KEYS
+                    .iter()
+                    .any(|key| base.metadata.get(*key) != updated.metadata.get(*key)),
+                base.metadata.get("siwc") != updated.metadata.get("siwc")
+                    && updated.metadata.contains_key("siwc"),
+            ))
+        }
+        _ => None,
+    };
 
     if !updated.metadata.is_empty() {
         for (key, value) in &updated.metadata {
             if equal_fold(key.trim(), "proxy_url") {
+                continue;
+            }
+            if patch.is_some() && crate::auth::codex_refresh::is_credential_key(key) {
                 continue;
             }
             let base_value = base.metadata.get(key);
@@ -107,7 +245,11 @@ pub(crate) fn merge_auth_content(base: &Auth, current: &Auth, updated: &Auth) ->
             }
         }
         for (key, base_value) in &base.metadata {
-            if equal_fold(key.trim(), "proxy_url") || updated.metadata.contains_key(key) {
+            if equal_fold(key.trim(), "proxy_url")
+                || updated.metadata.contains_key(key)
+                || matches!(key.as_str(), "siwc" | "use_siwc")
+                || (patch.is_some() && crate::auth::codex_refresh::is_credential_key(key))
+            {
                 continue;
             }
             if current.metadata.get(key) == Some(base_value) {
@@ -115,6 +257,25 @@ pub(crate) fn merge_auth_content(base: &Auth, current: &Auth, updated: &Auth) ->
             }
         }
     }
+
+    let unattempted_failure = current
+        .codex_refresh_failure
+        .as_ref()
+        .filter(|failure| {
+            patch
+                .as_ref()
+                .is_some_and(|patch| !patch.includes_partition(failure.partition))
+        })
+        .cloned();
+    if let Some(patch) = patch {
+        merged.metadata = patch.apply(&merged.metadata).0;
+        merged.codex_persist_intent =
+            crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch);
+    }
+    merged.codex_refresh_failure = updated
+        .codex_refresh_failure
+        .clone()
+        .or(unattempted_failure);
 
     let base_struct = base.proxy_url.trim();
     let current_struct = current.proxy_url.trim();
@@ -211,7 +372,20 @@ pub(crate) fn merge_refreshed_auth(
         merged.last_refreshed_at = updated.last_refreshed_at;
     }
     if updated.next_refresh_after.is_some() || base.next_refresh_after.is_some() {
-        merged.next_refresh_after = updated.next_refresh_after;
+        merged.next_refresh_after =
+            if current
+                .codex_refresh_failure
+                .as_ref()
+                .is_some_and(|failure| {
+                    matches!(&merged.codex_persist_intent,
+                crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch)
+                    if !patch.includes_partition(failure.partition))
+                })
+            {
+                current.next_refresh_after.max(updated.next_refresh_after)
+            } else {
+                updated.next_refresh_after
+            };
     }
 
     let base_err = base.last_error.as_ref().map_or("", |e| e.message.as_str());

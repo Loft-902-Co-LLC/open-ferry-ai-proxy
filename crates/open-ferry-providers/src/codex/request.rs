@@ -25,6 +25,12 @@
 //! count's included; the answer is translated against the body as it was
 //! before the prompt cache key, the item IDs and the rules.
 //!
+//! SIWC selects the nested direct-access token and OpenAI API base, never an
+//! outer token or API key fallback. Its body rules run before payload rules;
+//! it adds neither default instructions nor an unsolicited image tool.
+//! SIWC headers always use the fixed open-ferry OS/architecture user agent,
+//! strip Codex identity, and carry only independent caller session/request IDs.
+//!
 //! Deviations from upstream:
 //! - No `User-Agent`, `Originator`, `Session-Id` or `X-Codex-Routing-Hint`
 //!   is made up: the client's own `User-Agent` and `Originator` pass through,
@@ -184,8 +190,20 @@ pub(crate) fn original_request(request: &Request, options: &Options) -> Value {
 }
 
 /// The credential's token and base URL (`codexCreds`): the `api_key`
-/// attribute, or else the OAuth access token.
+/// attribute, or else the OAuth access token. SIWC instead selects only its
+/// nested token, and defaults its base to the direct OpenAI API.
 pub(crate) fn credentials(auth: &Auth) -> (&str, &str) {
+    if auth.use_siwc() {
+        let base = auth.attribute("base_url").unwrap_or_default();
+        return (
+            auth.access_token(),
+            if base.trim().is_empty() {
+                super::siwc_request::DEFAULT_BASE_URL
+            } else {
+                base
+            },
+        );
+    }
     let mut token = auth.attribute("api_key").unwrap_or_default();
     if token.is_empty() {
         token = auth.metadata_str("access_token").unwrap_or_default();
@@ -196,6 +214,9 @@ pub(crate) fn credentials(auth: &Auth) -> (&str, &str) {
 /// Whether the credential is an API key rather than a ChatGPT sign-in
 /// (`codexAuthUsesAPIKey`).
 pub(crate) fn uses_api_key(auth: &Auth) -> bool {
+    if auth.use_siwc() {
+        return false;
+    }
     let kind = [
         auth.attribute("auth_kind").unwrap_or_default(),
         auth.metadata_str("auth_kind").unwrap_or_default(),
@@ -488,8 +509,16 @@ pub(crate) fn prepare_body(
             set_bool_if_different(&mut body, "stream", false);
         }
     }
-    normalize_instructions(&mut body, native);
-    if matches!(kind, Kind::Execute | Kind::Stream) {
+    if kind != Kind::CountTokens && context.auth.is_some_and(Auth::use_siwc) {
+        super::siwc_request::apply_body(
+            &mut body,
+            super::siwc_request::explicit_instructions(&payload),
+            kind == Kind::Compact,
+        );
+    } else {
+        normalize_instructions(&mut body, native);
+    }
+    if matches!(kind, Kind::Execute | Kind::Stream) && !context.auth.is_some_and(Auth::use_siwc) {
         ensure_image_generation_tool(&mut body, base, context, &options.headers);
     }
     if kind == Kind::CountTokens {
@@ -591,7 +620,10 @@ pub(crate) fn build_headers(
     ensure_header(&mut headers, client, HeaderName::from_static("originator"));
 
     if !uses_api_key(auth)
-        && let Some(account) = auth.metadata_str("account_id")
+        && let Some(account) = auth
+            .metadata_str("account_id")
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
     {
         match HeaderValue::from_str(account) {
             Ok(value) => {
@@ -603,6 +635,9 @@ pub(crate) fn build_headers(
         }
     }
     custom_headers::apply(&mut headers, &auth.attributes, client, "codex");
+    if auth.use_siwc() {
+        super::siwc_request::enforce_headers(&mut headers, auth, client)?;
+    }
     Ok(headers)
 }
 

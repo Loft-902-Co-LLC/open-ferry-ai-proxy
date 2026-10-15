@@ -28,7 +28,9 @@
 //!   [`AuthStore::save_new`].
 
 pub mod classification;
+pub mod codex_refresh;
 pub mod compat;
+pub mod credential_lock;
 mod expiry;
 pub mod file_guard;
 pub mod file_store;
@@ -194,6 +196,18 @@ pub struct Auth {
     /// A proxy for this credential's calls, or empty for the global one.
     pub proxy_url: String,
     /// Fixed settings for executors, such as `api_key` and `base_url`.
+    /// `runtime_only=true` permanently discards existing refresh save work.
+    /// Discard keeps rotated live tokens: supported observations cannot restore
+    /// consumed disk tokens, even after the flag is removed. An explicit token
+    /// command or a verified later rotation write repairs durability using the
+    /// discarded-chain baseline sets without eviction while marked. Each set
+    /// holds one representative per identity, keeping only its variants' agreement.
+    /// Marker clearing empties the sets. Patch snapshots can still take quadratic
+    /// aggregate history storage across failed saves. A different disk identity
+    /// is preserved and leaves the partition marked rather than overwriting another writer.
+    /// Opaque stores without read-back and no-store whole-record Replace can
+    /// still restore stale tokens after cleanup; these are compatibility
+    /// exceptions, not safety guarantees (see [`AuthStore::read_for_adoption`]).
     pub attributes: BTreeMap<String, String>,
     /// The credential's saved state, tokens included.
     pub metadata: Map<String, Value>,
@@ -224,9 +238,107 @@ pub struct Auth {
     /// has no expiry of its own, it counts as expired (upstream's
     /// `RejectedAccessToken`). Never saved.
     pub rejected_access_token: String,
+    /// Transient Codex save intent; never part of credential JSON or Debug.
+    pub codex_persist_intent: codex_refresh::CodexPersistIntent,
+    /// Unwritten rotations, oldest first; transient, never serialized or debugged.
+    pub codex_pending_refresh: Vec<codex_refresh::CredentialRefreshPatch>,
+    /// A partial refresh's failure. Executors return successful rotations in
+    /// `Ok(Auth)` with a Refresh intent and this failure. The manager persists
+    /// those rotations before reporting the active failure and retrying.
+    /// Executors clear this marker on complete success and replace it on
+    /// partial failure; due helpers mark the failed partition for retry.
+    pub codex_refresh_failure: Option<CodexRefreshFailure>,
 }
 
+/// A transient partition failure accompanying successful Codex rotations.
+#[derive(Clone)]
+pub struct CodexRefreshFailure {
+    /// Provider failure, scrubbed before it is logged or returned.
+    pub error: crate::exec::ExecError,
+    /// Which partition failed. The manager computes whether it is active
+    /// against the live switch, and marks this partition due after backoff.
+    pub partition: CodexCredentialPartition,
+}
+
+/// One independently refreshed Codex token set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodexCredentialPartition {
+    /// The ordinary outer OAuth credential.
+    Outer,
+    /// The nested direct-access OAuth credential.
+    Siwc,
+}
+
+impl CodexCredentialPartition {
+    /// Whether this partition supplies `auth`'s active bearer token.
+    pub fn is_active(self, auth: &Auth) -> bool {
+        match self {
+            Self::Outer => !auth.use_siwc(),
+            Self::Siwc => auth.use_siwc(),
+        }
+    }
+}
+
+/// Resolved origin equivalence, asserted only by save-serialized core callers.
+#[derive(Clone, Copy)]
+pub(crate) struct ResolvedOriginProof(pub(crate) bool);
+
 impl Auth {
+    /// Reapply unwritten rotations when adopting the same credential record.
+    /// Only captured credential baselines match; new login identities and
+    /// unrelated incoming settings are left intact. Disk-synthesized records
+    /// need not carry the live registration epoch or generation. Public callers
+    /// use source attributes; only core store callers can supply resolved proof.
+    pub fn rebase_pending_refreshes_from(&mut self, live: &Self) {
+        self.rebase_pending_refreshes_with_origin(live, None);
+    }
+
+    pub(crate) fn rebase_pending_refreshes_with_origin(
+        &mut self,
+        live: &Self,
+        same_origin: Option<ResolvedOriginProof>,
+    ) {
+        let same_origin = same_origin.map(|proof| proof.0).unwrap_or_else(|| {
+            match (
+                self.attribute(classification::ATTRIBUTE_PATH)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty()),
+                live.attribute(classification::ATTRIBUTE_PATH)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty()),
+            ) {
+                // FileStore resolves an explicit path before file_name. A bind
+                // result can use a relative ID where synthesis uses a basename.
+                (Some(incoming), Some(existing)) => incoming == existing,
+                (None, None) => self.file_name.trim() == live.file_name.trim(),
+                _ => false,
+            }
+        });
+        if self.id != live.id || !equal_fold(self.provider.trim(), live.provider.trim()) {
+            return;
+        }
+        if !same_origin {
+            tracing::debug!(auth_id = %self.id, "skipping refresh rebase for a different origin");
+            return;
+        }
+        let current = match &live.codex_persist_intent {
+            codex_refresh::CodexPersistIntent::Refresh(patch)
+                if !live
+                    .codex_pending_refresh
+                    .iter()
+                    .any(|p| p.same_operation(patch)) =>
+            {
+                Some(patch)
+            }
+            _ => None,
+        };
+        for patch in live.codex_pending_refresh.iter().chain(current) {
+            if !patch.is_written() {
+                self.metadata = patch.apply(&self.metadata).0;
+            }
+        }
+    }
+
     /// The metadata value at `key`, if it is a string.
     pub fn metadata_str(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).and_then(Value::as_str)
@@ -259,6 +371,17 @@ impl fmt::Debug for Auth {
     }
 }
 
+/// The outcome of reading the requested record for observational adoption.
+/// Capability is determined by the requested record, not newly read contents.
+#[doc(hidden)]
+#[allow(clippy::large_enum_variant)] // one owned record per synchronous read, as in read_back
+pub enum AdoptionRead {
+    Unsupported,
+    Missing,
+    Invalid,
+    Record(Auth),
+}
+
 /// Keeps credentials (upstream's `auth.Store`).
 pub trait AuthStore: Send + Sync + 'static {
     /// Every credential the store holds.
@@ -285,6 +408,38 @@ pub trait AuthStore: Send + Sync + 'static {
     /// token the active process refreshed.
     fn read_back(&self, _auth: &Auth) -> io::Result<Option<Auth>> {
         Ok(None)
+    }
+
+    /// Reads the current record for save-serialized adoption. Opaque stores
+    /// preserve compatibility: `None` means unsupported, not missing.
+    /// Implement this classification to protect replacements with fresh reads.
+    /// Without read-back, a stale whole-record replacement after a written save
+    /// can still restore consumed tokens. With no store, replacement after an
+    /// ineligible cleanup has the same compatibility limit, not a safety guarantee.
+    fn read_for_adoption(&self, auth: &Auth) -> io::Result<AdoptionRead> {
+        if !codex_refresh::is_codex_auth(auth) {
+            return Ok(AdoptionRead::Unsupported);
+        }
+        Ok(match self.read_back(auth)? {
+            Some(record) => AdoptionRead::Record(record),
+            None => AdoptionRead::Unsupported,
+        })
+    }
+
+    /// Whether saves honor Codex's scoped, baseline-checked refresh intents.
+    /// Opaque stores retain the ordinary generation watermark protection.
+    fn supports_codex_refresh_patches(&self) -> bool {
+        false
+    }
+
+    /// Not upstream's: whether two snapshots address the same backing record.
+    /// Scoped refreshes use this when a newer settings save has completed.
+    /// Opaque stores keep the conservative path/name comparison; file stores
+    /// compare resolved paths so equivalent source attributes are accepted.
+    fn same_record(&self, a: &Auth, b: &Auth) -> io::Result<bool> {
+        Ok(a.file_name == b.file_name
+            && a.attributes.get(classification::ATTRIBUTE_PATH)
+                == b.attributes.get(classification::ATTRIBUTE_PATH))
     }
 
     /// Not upstream's: a counter that changes whenever the store's mapping

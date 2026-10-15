@@ -41,12 +41,14 @@ async fn list_auth_files_filters_by_name_and_auth_index() {
     assert_eq!(files[0]["auth_index"], json!("idx-b"));
 }
 
-/// An API over `dir` with an active Codex credential for each `(id, index)`,
-/// all from file `shared-codex.json`.
+/// An API over `dir` with an active credential for each `(id, index)`, all
+/// from file `shared-codex.json`. These artificial shared-file registrations
+/// use Gemini's Unsupported adoption path: a Codex file has one record identity.
 fn shared_credentials(dir: &AuthDir, credentials: &[(&str, &str)]) -> Api {
     let api = Api::over(dir);
     for (id, index) in credentials {
         let mut auth = file_auth(&dir.path(), id, "shared-codex.json", "{}");
+        auth.provider = "gemini".into();
         auth.index = (*index).into();
         api.register(auth);
     }

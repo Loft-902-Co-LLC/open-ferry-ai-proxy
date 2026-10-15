@@ -56,8 +56,8 @@
 //! A startup failure after opening the gate closes it before failure shutdown.
 //! At take over, a failed `resume_accept` means the gate has already opened:
 //! W3 must close the gate and clean up, send `take_failed`, and stay alive
-//! holding the lease until `stop` (L9.16). A filesystem-blocked `close_sync`
-//! at take over is bounded only by the supervisor's kill by handle. A failed
+//! holding the lease until `stop` (L9.16). `close_sync` refuses pending
+//! credential work without starting filesystem reads. A failed
 //! take over that stays alive until `stop` exits with failure, intentionally:
 //! it failed.
 //! A hand over first turns cleaning off, a step that cannot fail (L9.3).
@@ -2043,11 +2043,8 @@ async fn activate_unless_cancelled(
         // gate; no background work started. Retain the lease until exit.
         let deadline = tokio::time::Instant::now() + timing.activation_stop_budget;
         control.cut();
-        // Settlement does synchronous credential work on this task. A
-        // stalled filesystem here is bounded by the supervisor's load timeout,
-        // which ends a loading worker by its handle. At take over, a blocked
-        // close_sync is bounded only by the supervisor's kill by handle. A
-        // failed take over held until stop intentionally exits with failure.
+        // Refuse queued credential work without waiting for observation I/O.
+        // A failed take over held until stop intentionally exits with failure.
         service.close_sync();
         service.close_reloads();
         let _ = tokio::time::timeout_at(deadline, service.gate.close(service.gate.epoch())).await;
@@ -2255,7 +2252,20 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
     let mut commands = Some(commands);
     let mut server = Some(server);
     tokio::pin!(stop);
+    let mut settlement = None;
     let deadline = loop {
+        if service.reads.is_empty()
+            && let Some(command) = settlement.take()
+        {
+            match command {
+                Command::Reload(done) => {
+                    let _ = done.send(());
+                }
+                Command::ApplyDeferred(done) => {
+                    let _ = done.send(Ok(()));
+                }
+            }
+        }
         tokio::select! {
             deadline = &mut stop => match deadline {
                 Ok(deadline) => break deadline,
@@ -2291,14 +2301,16 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
                     Some(commands) => commands.recv().await,
                     None => pending().await,
                 }
-            } => match command {
+            }, if settlement.is_none() => match command {
                 Some(Command::Reload(done)) => {
                     service.reload_from_disk(&config_path, &mut events).await;
-                    let _ = done.send(());
+                    settlement = Some(Command::Reload(done));
                 }
                 Some(Command::ApplyDeferred(done)) => {
-                    let applied = service.apply_deferred(&config_path, &mut events).await;
-                    let _ = done.send(applied);
+                    match service.apply_deferred(&config_path, &mut events).await {
+                        Ok(()) => settlement = Some(Command::ApplyDeferred(done)),
+                        Err(error) => { let _ = done.send(Err(error)); }
+                    }
                 }
                 // Every sender is gone: nothing will ask again.
                 None => commands = None,
@@ -2306,6 +2318,8 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
             () = service.work(&config_path, &mut events) => {}
         }
     };
+    drop(settlement);
+    drop(commands);
     service.close_sync();
     service.close_reloads();
     if super::shut_down_by(
@@ -2325,4 +2339,48 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
     if cut > 0 {
         tracing::warn!("cut {cut} connection(s) left at the stop");
     }
+}
+
+#[cfg(test)]
+pub(super) fn settlement_test_loop(
+    service: Service,
+    relist: bool,
+) -> (
+    oneshot::Sender<tokio::time::Instant>,
+    oneshot::Receiver<Result<(), String>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (commands, command_rx) = mpsc::unbounded_channel();
+    let (done, settled) = oneshot::channel();
+    if relist {
+        let _ = commands.send(Command::ApplyDeferred(done));
+    } else {
+        let (reload_done, reloaded) = oneshot::channel();
+        let _ = commands.send(Command::Reload(reload_done));
+        tokio::spawn(async move {
+            // Dropping this sender on stop preserves the actual command error.
+            if reloaded.await.is_ok() {
+                let _ = done.send(Ok(()));
+            }
+        });
+    }
+    let (stop, stop_rx) = oneshot::channel();
+    let (stop_server, _) = watch::channel(false);
+    let (ended, _) = mpsc::unbounded_channel();
+    let serving = Serving {
+        service,
+        failed: Arc::new(AtomicBool::new(false)),
+        config_path: PathBuf::new(),
+        events: None,
+        server: tokio::spawn(pending()),
+        stop_server,
+        control: ServeControl::new(),
+        ended,
+        commands: command_rx,
+        shutdown_reserve: Duration::ZERO,
+        wedge: None,
+        server_failure_seen: None,
+    };
+    let task = tokio::spawn(service_loop(serving, stop_rx));
+    (stop, settled, task)
 }

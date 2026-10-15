@@ -291,7 +291,7 @@ impl Secrets {
     /// read as [`Self::add_header`] reads them), its proxy URL's password
     /// (see [`Self::add_proxy`]), and the keys and tokens its metadata
     /// keeps, at the top level or in a
-    /// nested `token` object (`api_key`, `access_token`, `refresh_token`
+    /// nested `token` or `siwc` object (`api_key`, `access_token`, `refresh_token`
     /// and `id_token`, in snake or camel case).
     pub fn add_auth(&mut self, auth: &Auth) {
         if let Some(key) = auth.attributes.get("api_key") {
@@ -304,9 +304,17 @@ impl Secrets {
         }
         self.add_url(&auth.proxy_url);
         self.add_tokens(&auth.metadata);
-        for nested in ["token", "Token"] {
+        for nested in ["token", "Token", "siwc"] {
             if let Some(Value::Object(object)) = auth.metadata.get(nested) {
                 self.add_tokens(object);
+                if nested == "siwc" {
+                    if let Some(id) = object.get("device_id").and_then(Value::as_str) {
+                        self.add(id);
+                    }
+                    if let Some(access) = object.get("access").and_then(Value::as_str) {
+                        self.add(access);
+                    }
+                }
             }
         }
     }

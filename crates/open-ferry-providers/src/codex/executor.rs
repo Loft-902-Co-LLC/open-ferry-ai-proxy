@@ -53,6 +53,10 @@
 //!   HTTP and a WebSocket executor in a `CodexAutoExecutor`.
 //! - Plain HTTP requests, which Codex Alpha Search sends, are in the
 //!   `http_request` module.
+//! - SIWC refreshes due outer and nested partitions independently, attaching
+//!   successful baseline-checked patches and partial failures. The manager
+//!   owns refresh-then-save in a task that survives a disconnected caller.
+//!   Cross-process refresh serialization remains a core follow-up.
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it. Upstream also updates the typed token
 //!   storage, which [`Auth`] doesn't have.
@@ -77,7 +81,7 @@ use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
     ErrorKind, ExecError, Format, HttpCall, HttpReply, Options, Request, Response, StreamResponse,
 };
-use open_ferry_core::executor::ProviderExecutor;
+use open_ferry_core::executor::{ProviderExecutor, RefreshOptions};
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::go::trim_space;
@@ -122,6 +126,7 @@ pub struct CodexExecutor {
     models: Option<Arc<dyn ModelCatalog>>,
     base_url: String,
     oauth_endpoints: Endpoints,
+    siwc_endpoints: super::siwc::Endpoints,
     /// The clock of stream bootstrap buffering's time limit.
     bootstrap_clock: Clock,
     /// The Responses WebSocket sessions.
@@ -139,6 +144,7 @@ impl CodexExecutor {
             models: None,
             base_url: DEFAULT_BASE_URL.to_owned(),
             oauth_endpoints: Endpoints::default(),
+            siwc_endpoints: super::siwc::Endpoints::default(),
             bootstrap_clock: Arc::new(Instant::now),
             websockets: Arc::new(websocket::Store::new()),
         }
@@ -177,6 +183,13 @@ impl CodexExecutor {
     /// Refreshes tokens at `endpoints` instead of OpenAI's auth server.
     pub fn with_oauth_endpoints(mut self, endpoints: Endpoints) -> Self {
         self.oauth_endpoints = endpoints;
+        self
+    }
+
+    /// Test seam for SIWC refresh; production uses the fixed auth endpoint.
+    #[cfg(test)]
+    fn with_siwc_endpoints(mut self, endpoints: super::siwc::Endpoints) -> Self {
+        self.siwc_endpoints = endpoints;
         self
     }
 
@@ -383,6 +396,7 @@ impl CodexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
+        super::siwc_request::ensure_credentials(auth)?;
         if options.alt == COMPACT_ALT {
             return self.execute_compact(auth, request, options).await;
         }
@@ -491,6 +505,7 @@ impl CodexExecutor {
         request: Request,
         options: Options,
     ) -> Result<StreamResponse, ExecError> {
+        super::siwc_request::ensure_credentials(auth)?;
         if options.alt == COMPACT_ALT {
             return Err(
                 StatusError::new(400, "streaming not supported for /responses/compact").into(),
@@ -603,9 +618,12 @@ impl CodexExecutor {
         })
     }
 
-    async fn refresh_inner(&self, auth: Arc<Auth>) -> Result<Auth, ExecError> {
+    async fn refresh_outer(&self, auth: Arc<Auth>) -> Result<Auth, ExecError> {
         tracing::debug!("codex executor: refresh called");
-        let refresh_token = auth.metadata_str("refresh_token").unwrap_or_default();
+        let refresh_token = auth
+            .metadata_str("refresh_token")
+            .unwrap_or_default()
+            .trim();
         if refresh_token.is_empty() {
             return Ok((*auth).clone());
         }
@@ -617,31 +635,32 @@ impl CodexExecutor {
 
         let mut refreshed = (*auth).clone();
         let metadata = &mut refreshed.metadata;
-        metadata.insert("id_token".into(), tokens.id_token.clone().into());
+        // An omitted ID token keeps its derived identity and plan together.
+        if !tokens.id_token.is_empty() {
+            metadata.insert("id_token".into(), tokens.id_token.clone().into());
+            if !tokens.account_id.is_empty() {
+                metadata.insert("account_id".into(), tokens.account_id.into());
+            }
+            metadata.insert("email".into(), tokens.email.into());
+            let mut plan_type = tokens.plan_type.trim().to_owned();
+            if plan_type.is_empty()
+                && let Ok(claims) = parse_jwt_token(&tokens.id_token)
+            {
+                plan_type = claims.plan_type();
+            }
+            if plan_type.is_empty() {
+                plan_type = DEFAULT_PLAN_TYPE.to_owned();
+            }
+            metadata.insert("plan_type".into(), plan_type.clone().into());
+            refreshed.attributes.insert("plan_type".into(), plan_type);
+        }
         metadata.insert("access_token".into(), tokens.access_token.into());
         if !tokens.refresh_token.is_empty() {
             metadata.insert("refresh_token".into(), tokens.refresh_token.into());
         }
-        if !tokens.account_id.is_empty() {
-            metadata.insert("account_id".into(), tokens.account_id.into());
-        }
-        metadata.insert("email".into(), tokens.email.into());
         metadata.insert("expired".into(), tokens.expire.into());
         metadata.insert("type".into(), CREDENTIAL_TYPE.into());
         metadata.insert("last_refresh".into(), now_rfc3339().into());
-
-        let mut plan_type = tokens.plan_type.trim().to_owned();
-        if plan_type.is_empty()
-            && !tokens.id_token.is_empty()
-            && let Ok(claims) = parse_jwt_token(&tokens.id_token)
-        {
-            plan_type = claims.plan_type();
-        }
-        if plan_type.is_empty() {
-            plan_type = DEFAULT_PLAN_TYPE.to_owned();
-        }
-        metadata.insert("plan_type".into(), plan_type.clone().into());
-        refreshed.attributes.insert("plan_type".into(), plan_type);
         Ok(refreshed)
     }
 }
@@ -667,7 +686,8 @@ impl ProviderExecutor for CodexExecutor {
         options: Options,
     ) -> BoxFuture<'_, Result<Response, ExecError>> {
         async move {
-            if websocket::routes(&auth, &options) {
+            // SIWC stays on HTTP until its WebSocket transport is ported.
+            if !auth.use_siwc() && websocket::routes(&auth, &options) {
                 return websocket::execute(self, &auth, &request, &options).await;
             }
             self.execute_inner(&auth, &request, &options).await
@@ -682,7 +702,8 @@ impl ProviderExecutor for CodexExecutor {
         options: Options,
     ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
         async move {
-            if websocket::routes(&auth, &options) {
+            // SIWC stays on HTTP until its WebSocket transport is ported.
+            if !auth.use_siwc() && websocket::routes(&auth, &options) {
                 return websocket::execute_stream(self, &auth, request, options).await;
             }
             self.execute_stream_inner(&auth, request, options).await
@@ -700,7 +721,15 @@ impl ProviderExecutor for CodexExecutor {
     }
 
     fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
-        self.refresh_inner(auth).boxed()
+        self.refresh_with_options(auth, RefreshOptions::default())
+    }
+
+    fn refresh_with_options(
+        &self,
+        auth: Arc<Auth>,
+        options: RefreshOptions,
+    ) -> BoxFuture<'_, Result<Auth, ExecError>> {
+        self.refresh_inner(auth, options).boxed()
     }
 
     fn refresh_lead(&self) -> Option<Duration> {
@@ -737,6 +766,7 @@ impl ProviderExecutor for CodexExecutor {
     }
 }
 
+mod auth;
 mod http_request;
 mod images;
 

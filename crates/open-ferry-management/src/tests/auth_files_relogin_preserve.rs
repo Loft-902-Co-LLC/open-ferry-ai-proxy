@@ -16,16 +16,17 @@
 //!   aren't ported.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use http::StatusCode;
-use open_ferry_core::auth::{Auth, AuthKind, Status};
+use open_ferry_core::auth::{Auth, AuthKind, AuthStore, Status};
 use open_ferry_providers::claude::token::{
     TokenStorage as ClaudeTokenStorage, credential_file_name,
 };
 use open_ferry_providers::codex::token::TokenStorage as CodexTokenStorage;
 use serde_json::{Map, Value, json};
 
-use super::{Api, AuthDir, SyncCall};
+use super::{Api, AuthDir, CommandRefresh, CommandSync, SyncCall};
 use crate::token_record::{SaveError, save_token_record};
 
 fn map(value: Value) -> Map<String, Value> {
@@ -252,4 +253,152 @@ async fn save_token_record_needs_the_store_and_the_service() {
     );
     assert_eq!(auth_dir.read_json(file_name)["access_token"], "new");
     assert!(api.manager.list().is_empty());
+}
+
+#[tokio::test]
+async fn login_dispatches_completed_commands_only_after_success() {
+    use std::sync::atomic::Ordering;
+    let dir = AuthDir::new();
+    let api = Api::over(&dir);
+    let original = record(
+        "codex",
+        "command.json",
+        map(
+            json!({"type":"codex", "access_token":"A", "refresh_token":"A-refresh", "siwc":{"access_token":"S","refresh_token":"S-refresh"}}),
+        ),
+    );
+    dir.store.save_new(&original).unwrap();
+    api.manager.register_unsaved(original.clone()).unwrap();
+    let sync = std::sync::Arc::new(CommandSync {
+        manager: api.manager.clone(),
+        commands: Default::default(),
+        observations: Default::default(),
+    });
+    let state = api.state.clone().with_sync(sync.clone());
+    let mut login = original.clone();
+    login.id.clear(); // The store assigns the canonical id only after capture.
+    login.metadata["access_token"] = json!("L");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        save_token_record(&state, login),
+    )
+    .await
+    .expect("management login command writes within 5s")
+    .unwrap();
+    assert_eq!(
+        sync.commands.load(Ordering::SeqCst),
+        1,
+        "successful login dispatches command-aware sync"
+    );
+    assert_eq!(
+        api.manager.get("command.json").unwrap().metadata["access_token"],
+        "L"
+    );
+    // A runtime-only rotation is discarded without reaching disk, establishing
+    // an outer marker which a failed login must not clear.
+    api.manager
+        .register_executor(Arc::new(CommandRefresh { siwc: false }));
+    api.manager
+        .edit_unsaved("command.json", |auth| {
+            auth.attributes.insert("runtime_only".into(), "true".into());
+            Ok::<_, ()>(true)
+        })
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api.manager.force_refresh("command.json"),
+    )
+    .await
+    .expect("management fixture rotation finishes within 5s")
+    .unwrap();
+    api.manager
+        .edit_unsaved("command.json", |auth| {
+            auth.attributes
+                .insert("runtime_only".into(), "false".into());
+            Ok::<_, ()>(true)
+        })
+        .unwrap()
+        .unwrap();
+    // A directory at the destination makes the next login write fail.
+    let path = dir.store.resolve_auth_path(&original).unwrap();
+    let disk_before = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let before = api.manager.get("command.json").unwrap().metadata.clone();
+    let failed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        save_token_record(&state, original.clone()),
+    )
+    .await
+    .expect("failed login answers within 5s");
+    assert!(
+        matches!(failed, Err(SaveError::Save(_))),
+        "failed login writes nothing"
+    );
+    assert_eq!(
+        sync.commands.load(Ordering::SeqCst),
+        1,
+        "failed login drops command without dispatch"
+    );
+    assert_eq!(sync.observations.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        api.manager.get("command.json").unwrap().metadata,
+        before,
+        "failed login adopts no credentials"
+    );
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, disk_before).unwrap();
+    api.manager
+        .adopt_observed(&original, None, |auth| {
+            dir.store
+                .read_for_adoption(auth)
+                .map_err(open_ferry_core::manager::ManagerError::Store)
+        })
+        .unwrap();
+    assert_eq!(
+        api.manager.get("command.json").unwrap().metadata["access_token"],
+        "discarded-live",
+        "failed login leaves outer marker intact"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_login_destination_dispatches_plain_sync() {
+    use std::sync::atomic::Ordering;
+    let dir = AuthDir::new();
+    let api = Api::over(&dir);
+    let original = record(
+        "codex",
+        "ambiguous.json",
+        map(json!({"type":"codex", "access_token":"A", "refresh_token":"R"})),
+    );
+    dir.store.save_new(&original).unwrap();
+    api.manager.register_unsaved(original.clone()).unwrap();
+    let mut alias = original.clone();
+    alias.id = "alias".into();
+    api.manager.register_unsaved(alias).unwrap();
+    let sync = std::sync::Arc::new(CommandSync {
+        manager: api.manager.clone(),
+        commands: Default::default(),
+        observations: Default::default(),
+    });
+    let state = api.state.clone().with_sync(sync.clone());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        save_token_record(&state, original),
+    )
+    .await
+    .expect("ambiguous login writes within 5s")
+    .unwrap();
+    assert_eq!(
+        sync.commands.load(Ordering::SeqCst),
+        0,
+        "ambiguous destination captures no command"
+    );
+    assert_eq!(
+        sync.observations.load(Ordering::SeqCst),
+        1,
+        "ambiguous destination dispatches plain sync"
+    );
 }

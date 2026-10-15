@@ -207,7 +207,7 @@ async fn sign_in(login: Login, config: &Config, options: Options, store: FileSto
             .map_err(claude_failure)
         }
     };
-    let (mut auth, server) = match result {
+    let (auth, server) = match result {
         Ok(login) => login,
         Err(failure) => return report(login, failure, options),
     };
@@ -219,7 +219,29 @@ async fn sign_in(login: Login, config: &Config, options: Options, store: FileSto
             "Codex"
         }
     );
-    let (outcome, code) = match credentials::save(&store, &mut auth) {
+    // The save takes the credential's OS lock, so it runs off the runtime.
+    let save = move || {
+        let mut auth = auth;
+        let saved = credentials::save(&store, &mut auth);
+        (auth, saved)
+    };
+    let (auth, saved) = if tokio::runtime::Handle::try_current().is_ok() {
+        let handle = match open_ferry_core::gate::Operation::current() {
+            Some(operation) => operation.run_blocking(save),
+            #[allow(clippy::disallowed_methods)]
+            None => tokio::task::spawn_blocking(save),
+        };
+        match handle.await {
+            Ok(value) => value,
+            Err(error) => match error.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(error) => panic!("blocking task failed: {error}"),
+            },
+        }
+    } else {
+        save()
+    };
+    let (outcome, code) = match saved {
         Ok(path) => {
             if !path.is_empty() {
                 println!("Authentication saved to {path}");
@@ -314,7 +336,7 @@ fn friendly_message(kind: &str, port: Option<u16>) -> String {
 }
 
 /// Shows a browser login's URL, opening it unless `no_browser`.
-fn present_url(provider: &str, url: &str, port: u16, no_browser: bool) {
+pub(crate) fn present_url(provider: &str, url: &str, port: u16, no_browser: bool) {
     if !no_browser {
         let probe = crate::scope::runtime_probe();
         if let Some(reason) = browser::refusal(probe.as_ref()) {

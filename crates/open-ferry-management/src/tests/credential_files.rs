@@ -117,6 +117,8 @@ fn listing(auth_dir: &AuthDir) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(auth_dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        // Codex credentials keep a permanent lock file, as upstream does.
+        .filter(|name| !name.to_ascii_lowercase().ends_with(".json.lock"))
         .collect();
     names.sort();
     names
@@ -864,7 +866,7 @@ async fn junctions_are_never_followed() {
 async fn delete_all_removes_only_top_level_json_files() {
     let auth_dir = AuthDir::new();
     let alpha = auth_dir.write("alpha.json", CODEX);
-    let beta = auth_dir.write("BETA.JSON", OTHER);
+    let beta = auth_dir.write("BETA.JSON", CODEX);
     auth_dir.write("notes.txt", "keep");
     std::fs::create_dir(auth_dir.path().join("nested")).unwrap();
     std::fs::write(auth_dir.path().join("nested").join("gamma.json"), CODEX).unwrap();

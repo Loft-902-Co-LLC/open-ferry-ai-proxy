@@ -39,6 +39,7 @@ const MAX_HASH_TEXT: usize = 100;
 
 /// The keys a call's session binds under (upstream's primary and fallback
 /// session IDs).
+#[derive(Clone)]
 pub(crate) struct Session {
     /// The session, bounded (upstream's `BoundSessionIdentity`).
     pub(super) primary: String,

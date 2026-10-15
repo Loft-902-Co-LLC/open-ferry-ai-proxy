@@ -23,6 +23,7 @@ use crate::json::{exists, get};
 
 mod images;
 mod replay;
+mod siwc;
 
 /// One request the mock received.
 #[derive(Clone, Debug)]
@@ -420,6 +421,33 @@ async fn sends_account_header_for_chatgpt_sign_ins() {
         .await
         .unwrap();
     assert!(mock.last().header("chatgpt-account-id").is_none());
+}
+
+#[tokio::test]
+async fn skips_empty_account_header_for_chatgpt_sign_ins() {
+    for account in ["", " \t "] {
+        for streaming in [false, true] {
+            let mock = Mock::start(Reply::sse(COMPLETED_WITH_USAGE)).await;
+            let mut auth = (*oauth_auth()).clone();
+            auth.metadata.insert("account_id".into(), account.into());
+            let exec = executor().with_base_url(&mock.url);
+            let req = request("gpt-5.4", r#"{"input":"hi"}"#);
+            let mut opts = options("openai-response");
+            opts.stream = streaming;
+            if streaming {
+                let (_, error) = collect(
+                    exec.execute_stream(Arc::new(auth), req, opts)
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                assert!(error.is_none());
+            } else {
+                exec.execute(Arc::new(auth), req, opts).await.unwrap();
+            }
+            assert!(mock.last().header("chatgpt-account-id").is_none());
+        }
+    }
 }
 
 // TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID.
@@ -2276,14 +2304,36 @@ async fn refresh_leaves_the_original_attributes_alone() {
 }
 
 #[tokio::test]
-async fn refresh_without_a_refresh_token_changes_nothing() {
+async fn refresh_api_key_without_a_refresh_token_is_unchanged() {
     let server = token_server(&id_token("", "acct")).await;
     let executor = refresh_executor(&server);
-    for auth in [api_key_auth("http://127.0.0.1:9"), oauth_auth()] {
-        let refreshed = executor.refresh(auth.clone()).await.unwrap();
-        assert_eq!(refreshed.metadata, auth.metadata);
-        assert_eq!(refreshed.attributes, auth.attributes);
+    let auth = api_key_auth("http://127.0.0.1:9");
+    for force in [false, true] {
+        let refreshed = executor
+            .refresh_with_options(auth.clone(), RefreshOptions { force })
+            .await
+            .unwrap();
+        assert!(
+            refreshed.metadata == auth.metadata,
+            "API-key metadata changed"
+        );
+        assert!(
+            refreshed.attributes == auth.attributes,
+            "API-key attributes changed"
+        );
     }
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn refresh_oauth_without_a_refresh_token_is_an_error_and_sends_nothing() {
+    let server = token_server(&id_token("", "acct")).await;
+    let error = refresh_executor(&server)
+        .refresh(oauth_auth())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Upstream);
+    assert_eq!(error.message, "codex executor: no refreshable token");
     assert!(server.requests().is_empty());
 }
 

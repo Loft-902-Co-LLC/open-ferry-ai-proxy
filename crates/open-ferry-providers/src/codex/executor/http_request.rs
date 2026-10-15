@@ -61,6 +61,9 @@ impl CodexExecutor {
         auth: &Auth,
         call: HttpCall,
     ) -> Result<HttpReply, ExecError> {
+        if auth.use_siwc() {
+            return Err(ExecError::new(ErrorKind::Upstream, "codex executor: plain HTTP passthrough and Alpha Search are not supported with use_siwc").with_status(400));
+        }
         let HttpCall {
             method,
             target,

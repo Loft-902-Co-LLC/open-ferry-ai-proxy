@@ -56,6 +56,7 @@ pub(crate) mod replay;
 mod replay_cache;
 pub(crate) mod request;
 pub mod siwc;
+pub(crate) mod siwc_request;
 pub(crate) mod stream;
 pub(crate) mod terminal;
 pub mod thinking;

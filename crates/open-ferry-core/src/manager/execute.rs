@@ -1001,7 +1001,7 @@ impl Manager {
                 let err = match outcome {
                     Ok(mut resp) => {
                         let session = attempt.session.map(Arc::as_ref);
-                        self.mark_call_result(
+                        self.mark_call_result_async(
                             &CallResult {
                                 auth_id: auth.id.clone(),
                                 provider: provider.clone(),
@@ -1016,7 +1016,8 @@ impl Manager {
                                 ..CallResult::default()
                             },
                             session,
-                        );
+                        )
+                        .await;
                         let attempt_alias =
                             self.attempt_alias(&auth, &route_model, upstream_model, &alias);
                         rewrite_force_mapped_response(&mut resp, &attempt_alias);
@@ -1035,9 +1036,10 @@ impl Manager {
                             view,
                             result.error.as_ref(),
                         ) {
-                            self.record_availability_neutral_result(&result);
+                            self.record_availability_neutral_result_async(&result).await;
                         } else {
-                            self.mark_call_result(&result, attempt.session());
+                            self.mark_call_result_async(&result, attempt.session())
+                                .await;
                         }
                         result.credential_scope
                     }
@@ -1053,10 +1055,11 @@ impl Manager {
                                 .as_ref()
                                 .is_none_or(|e| e.code != CODE_FORCE_COOLDOWN)
                         {
-                            self.record_availability_neutral_result(&result);
+                            self.record_availability_neutral_result_async(&result).await;
                         } else {
                             result.credential_scope = is_credential_scoped_error(view);
-                            self.mark_call_result(&result, attempt.session());
+                            self.mark_call_result_async(&result, attempt.session())
+                                .await;
                         }
                         result.credential_scope
                     }
@@ -1271,7 +1274,8 @@ impl Manager {
                     let settings = self.settings();
                     let action = match_request_scoped_error_action(&auth, &err, &settings);
                     let result = failure_result(&attempt, &auth, &err, action, true);
-                    self.mark_call_result(&result, attempt.session());
+                    self.mark_call_result_async(&result, attempt.session())
+                        .await;
                     if action.is_some_and(ScopedAction::is_stop) {
                         return Err(Failure::stop(err));
                     }
@@ -1330,7 +1334,8 @@ impl Manager {
                     let action = match_request_scoped_error_action(&auth, &err, &settings);
                     let mut result = failure_result(&attempt, &auth, &err, action, true);
                     result.response_headers = stream_failure_headers(&headers, &err);
-                    self.mark_call_result(&result, attempt.session());
+                    self.mark_call_result_async(&result, attempt.session())
+                        .await;
                     if let Some(action) = action {
                         if action.is_stop() {
                             return Err(Failure::stop(err));
@@ -1356,7 +1361,7 @@ impl Manager {
                 Bootstrap::Closed { saw_chunk: false } => {
                     let empty = ExecError::empty_stream();
                     let session = attempt.session.map(Arc::as_ref);
-                    self.mark_call_result(
+                    self.mark_call_result_async(
                         &CallResult {
                             auth_id: auth.id.clone(),
                             provider: prepared.provider.clone(),
@@ -1370,7 +1375,8 @@ impl Manager {
                             ..CallResult::default()
                         },
                         session,
-                    );
+                    )
+                    .await;
                     let current = Failure::bootstrap(empty.clone(), headers);
                     upstream = Some(current.clone());
                     if !is_last_model {
@@ -1484,20 +1490,23 @@ impl Manager {
                 return;
             }
             if !forwarder.failed && !forwarder.tx.is_closed() {
-                forwarder.manager.mark_call_result(
-                    &CallResult {
-                        auth_id: forwarder.auth.id.clone(),
-                        provider: forwarder.provider.clone(),
-                        model: forwarder.result_model.clone(),
-                        route_model: forwarder.route_model.clone(),
-                        success: true,
-                        response_headers: forwarder.headers.clone(),
-                        credential_version: forwarder.auth.credential_version,
-                        registration_epoch: forwarder.auth.registration_epoch,
-                        ..CallResult::default()
-                    },
-                    forwarder.session.as_deref(),
-                );
+                forwarder
+                    .manager
+                    .mark_call_result_async(
+                        &CallResult {
+                            auth_id: forwarder.auth.id.clone(),
+                            provider: forwarder.provider.clone(),
+                            model: forwarder.result_model.clone(),
+                            route_model: forwarder.route_model.clone(),
+                            success: true,
+                            response_headers: forwarder.headers.clone(),
+                            credential_version: forwarder.auth.credential_version,
+                            registration_epoch: forwarder.auth.registration_epoch,
+                            ..CallResult::default()
+                        },
+                        forwarder.session.as_deref(),
+                    )
+                    .await;
             }
         };
         // A request's own stream, not a unit of work the gate waits for: the
@@ -1549,7 +1558,9 @@ impl Forwarder {
                     };
                     let mut result = failure_result(&attempt, &self.auth, &err, action, true);
                     result.response_headers = stream_failure_headers(&self.headers, &err);
-                    self.manager.mark_call_result(&result, attempt.session());
+                    self.manager
+                        .mark_call_result_async(&result, attempt.session())
+                        .await;
                 }
                 return self.tx.send(Err(err)).await.is_ok();
             }
