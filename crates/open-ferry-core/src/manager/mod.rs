@@ -652,6 +652,10 @@ impl Dispatcher for Manager {
         self.websocket_support_for(providers, model, auth_id)
     }
 
+    fn websocket_auth(&self, auth_id: &str) -> Option<Arc<Auth>> {
+        self.websocket_auth_for(auth_id)
+    }
+
     fn codex_alpha_search(
         &self,
         request: AlphaSearch,

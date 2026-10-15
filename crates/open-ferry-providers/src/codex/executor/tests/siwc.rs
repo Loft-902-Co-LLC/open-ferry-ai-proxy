@@ -197,6 +197,33 @@ async fn siwc_all_http_egress_has_fixed_identity_and_responses_body() {
 }
 
 #[tokio::test]
+async fn siwc_http_prefers_the_callers_hyphenated_session_header() {
+    for streaming in [false, true] {
+        for both in [false, true] {
+            let mock = Mock::start(Reply::sse(SSE)).await;
+            let auth = Arc::new(siwc_auth(&mock.url));
+            let mut opts = attempted_headers(options("openai-response"), true);
+            if both {
+                opts = with_header(opts, "session_id", "underscore-loses");
+            }
+            let req = request("gpt-5", r#"{"input":"hello"}"#);
+            let exec = executor();
+            if streaming {
+                assert!(
+                    collect(exec.execute_stream(auth, req, opts).await.unwrap())
+                        .await
+                        .1
+                        .is_none()
+                );
+            } else {
+                exec.execute(auth, req, opts).await.unwrap();
+            }
+            assert_identity(&mock.last(), true);
+        }
+    }
+}
+
+#[tokio::test]
 async fn siwc_websockets_enabled_routes_to_websocket_and_missing_token_sends_nothing() {
     use crate::codex::websocket::mock::Server;
     for streaming in [false, true] {

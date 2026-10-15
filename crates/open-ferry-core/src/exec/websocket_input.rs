@@ -15,6 +15,8 @@
 //! Deviations from upstream:
 //! - The input and its credential check travel in the call's options, where
 //!   upstream puts them in the call's context.
+//! - The check returns the live enabled credential, not only a boolean, so
+//!   SIWC duplex creates can refuse a changed token or credential mode.
 
 use std::fmt;
 use std::sync::Arc;
@@ -23,6 +25,7 @@ use bytes::Bytes;
 use tokio::sync::{Mutex, mpsc};
 
 use super::ExecError;
+use crate::auth::Auth;
 
 /// A frame from the client (`WebsocketInput`).
 #[derive(Debug)]
@@ -33,8 +36,9 @@ pub enum InputFrame {
     Err(ExecError),
 }
 
-/// Whether a credential, by ID, may still send on a connection it holds.
-pub type AuthCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+/// The live enabled credential, by ID, or `None` when gone or disabled.
+/// The credential stays in-process, for checking a connection's authorization.
+pub type AuthCheck = Arc<dyn Fn(&str) -> Option<Arc<Auth>> + Send + Sync>;
 
 /// The client's frames, and the check a call makes before it sends one on
 /// (`WithWebsocketInput` and `WithWebsocketAuthCheck`). Clones share the
@@ -54,9 +58,8 @@ impl WebsocketInput {
         }
     }
 
-    /// The same frames, with `check` saying whether a credential may still
-    /// send on its connection. It may refuse further frames but never pick
-    /// another credential.
+    /// The same frames, with `check` returning the live enabled credential.
+    /// It may refuse further frames but never pick another credential.
     #[must_use]
     pub fn with_auth_check(mut self, check: AuthCheck) -> Self {
         self.auth_check = Some(check);
@@ -66,7 +69,18 @@ impl WebsocketInput {
     /// Whether the credential `auth_id` may still send: always, with no
     /// check (`WebsocketAuthEnabled`).
     pub fn auth_enabled(&self, auth_id: &str) -> bool {
-        self.auth_check.as_ref().is_none_or(|check| check(auth_id))
+        self.auth_check
+            .as_ref()
+            .is_none_or(|check| check(auth_id).is_some())
+    }
+
+    /// The live credential, or the call's snapshot when no check was installed.
+    /// `None` means the installed check found it gone or disabled.
+    pub fn live_auth(&self, snapshot: &Auth) -> Option<Arc<Auth>> {
+        self.auth_check.as_ref().map_or_else(
+            || Some(Arc::new(snapshot.clone())),
+            |check| check(&snapshot.id),
+        )
     }
 
     /// The next frame, or `None` once the client's reader has stopped.
@@ -112,8 +126,33 @@ mod tests {
         let (_tx, rx) = mpsc::channel(1);
         let input = WebsocketInput::new(rx);
         assert!(input.auth_enabled("any"));
-        let input = input.with_auth_check(Arc::new(|id: &str| id == "good"));
+        let auth = Arc::new(Auth {
+            id: "good".into(),
+            ..Auth::default()
+        });
+        assert_eq!(input.live_auth(&auth).unwrap().id, "good");
+        let input = input.with_auth_check(Arc::new(move |id: &str| {
+            (id == "good").then(|| auth.clone())
+        }));
         assert!(input.auth_enabled("good"));
         assert!(!input.auth_enabled("bad"));
+        assert_eq!(
+            input
+                .live_auth(&Auth {
+                    id: "good".into(),
+                    ..Auth::default()
+                })
+                .unwrap()
+                .id,
+            "good"
+        );
+        assert!(
+            input
+                .live_auth(&Auth {
+                    id: "bad".into(),
+                    ..Auth::default()
+                })
+                .is_none()
+        );
     }
 }

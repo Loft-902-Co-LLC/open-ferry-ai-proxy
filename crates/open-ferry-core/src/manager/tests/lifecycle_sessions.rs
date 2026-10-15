@@ -61,7 +61,7 @@ impl ProviderExecutor for Shared {
         _: &'a [u8],
         check: AuthCheck,
     ) -> BoxFuture<'a, Result<bool, ExecError>> {
-        Box::pin(async move { Ok(check("credential")) })
+        Box::pin(async move { Ok(check("credential").is_some()) })
     }
 }
 
@@ -111,6 +111,14 @@ async fn replacement_with_a_shared_store_keeps_sessions_and_removal_is_targeted(
     assert!(!disabled.disabled);
     manager.update(disabled).unwrap();
     assert!(!manager.get("credential").unwrap().disabled);
+    assert!(dispatcher.websocket_auth("credential").is_none());
+    assert!(
+        dispatcher
+            .websocket_support(&[], "", Some("credential"))
+            .auth
+            .unwrap()
+            .disabled
+    );
     assert!(
         !dispatcher
             .interrupt_execution_session("session", b"{}")
@@ -126,7 +134,23 @@ async fn replacement_with_a_shared_store_keeps_sessions_and_removal_is_targeted(
             .await
             .unwrap()
     );
+    assert_eq!(
+        dispatcher.websocket_auth("credential").unwrap().id,
+        "credential"
+    );
+    let mut disabled = (*manager.get("credential").unwrap()).clone();
+    disabled.disabled = true;
+    manager.update(disabled).unwrap();
+    assert!(dispatcher.websocket_auth("credential").is_none());
+    assert!(
+        dispatcher
+            .websocket_support(&[], "", Some("credential"))
+            .auth
+            .unwrap()
+            .disabled
+    );
     manager.remove("credential");
+    assert!(dispatcher.websocket_auth("credential").is_none());
     assert_eq!(*removed.lock().unwrap(), ["credential"]);
     assert!(current.lock().unwrap().is_empty());
     assert!(

@@ -58,6 +58,7 @@ use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use http::HeaderMap;
 
+use crate::auth::Auth;
 use crate::observe::Observation;
 
 pub use download::{Download, Downloaded};
@@ -277,6 +278,12 @@ pub trait Dispatcher: Send + Sync + 'static {
         _auth_id: Option<&str>,
     ) -> WebsocketSupport {
         WebsocketSupport::default()
+    }
+
+    /// The live credential for a retained WebSocket, unless gone or disabled.
+    /// The snapshot stays in-process; dispatchers without credentials return `None`.
+    fn websocket_auth(&self, _auth_id: &str) -> Option<Arc<Auth>> {
+        None
     }
 
     /// A Codex Alpha Search call: picks a credential the

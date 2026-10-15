@@ -64,15 +64,21 @@
 //! - SIWC session and request IDs come only from the caller, independently;
 //!   upstream copies its session ID into the request ID and can derive both
 //!   from a prompt cache key. No IDs are generated, and the SIWC device ID
-//!   is never sent. Custom headers run before these invariants here, whereas
-//!   upstream applies them after its SIWC defaults.
+//!   is never sent. The caller's hyphenated session header wins over its
+//!   underscore form, as upstream. Protocol beta and timing-metrics overrides
+//!   from credential headers run after defaults, as upstream; only identity
+//!   invariants (UA, bearer and caller-only IDs included) run after custom headers.
 //! - SIWC uses the direct OpenAI API base unless the credential configures
 //!   one, omits instruction normalization and image-tool injection, and
 //!   strips unsupported fields before payload rules, for later duplex creates
 //!   too. A missing SIWC access token fails before preparation or connection.
 //!   A mode change reconnects even if both modes have the same token text;
-//!   token rotation reconnects as for ordinary credentials. The ID token's
-//!   signature and nonce aren't verified, and no account matching is done.
+//!   token rotation reconnects between calls as for ordinary credentials.
+//!   Each later duplex create uses the live credential: a missing SIWC token
+//!   fails closed, and a mode change or SIWC token rotation ends the duplex
+//!   with replay required, without replaying consumed frames. Ordinary outer
+//!   token refresh mid-duplex still keeps its connection, unchanged.
+//!   The ID token's signature and nonce aren't verified, and no account matching is done.
 
 pub(crate) mod dial;
 mod duplex;

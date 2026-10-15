@@ -29,7 +29,15 @@ use super::{Manager, State};
 use crate::auth::{Auth, Status, Timestamp};
 use crate::exec::{ProviderId, WebsocketAuth, WebsocketSupport};
 
+fn auth_disabled(auth: &Auth) -> bool {
+    auth.disabled || auth.status == Status::Disabled
+}
+
 impl Manager {
+    pub(super) fn websocket_auth_for(&self, auth_id: &str) -> Option<std::sync::Arc<Auth>> {
+        self.get(auth_id).filter(|auth| !auth_disabled(auth))
+    }
+
     /// Forwards an interrupt on the retained Codex connection, if active.
     pub async fn interrupt_execution_session(
         &self,
@@ -45,11 +53,7 @@ impl Manager {
             .interrupt_execution_session(
                 session_id,
                 payload,
-                std::sync::Arc::new(move |id| {
-                    manager.lock().auths.get(id).is_some_and(|entry| {
-                        !entry.auth.disabled && entry.auth.status != Status::Disabled
-                    })
-                }),
+                std::sync::Arc::new(move |id| manager.websocket_auth_for(id)),
             )
             .await
     }
@@ -76,7 +80,7 @@ impl Manager {
                 provider,
                 serves_model,
                 websockets: websockets_enabled(auth),
-                disabled: auth.disabled || auth.status == Status::Disabled,
+                disabled: auth_disabled(auth),
             })
         });
         WebsocketSupport {

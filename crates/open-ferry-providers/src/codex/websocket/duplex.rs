@@ -544,6 +544,20 @@ impl Duplex {
     /// An explicit create or append, prepared as the first request was
     /// (`processCreatePayload`).
     fn process_create(&mut self, mut payload: Value) {
+        let Some(auth) = self.input.live_auth(&self.auth) else {
+            self.fail_connection(connection_failure(CREDENTIAL_DISABLED));
+            return;
+        };
+        if let Err(error) = crate::codex::siwc_request::ensure_credentials(&auth) {
+            self.fail_connection(error);
+            return;
+        }
+        if auth.use_siwc() != self.auth.use_siwc()
+            || (auth.use_siwc() && auth.access_token() != self.auth.access_token())
+        {
+            self.fail_connection(ExecError::replay_required());
+            return;
+        }
         let is_append = str_at(&payload, "type") == "response.append";
         let mut previous = str_at(&payload, "previous_response_id").trim().to_owned();
         if is_append && previous.is_empty() && !self.response_id.is_empty() {
@@ -592,14 +606,14 @@ impl Duplex {
         let mut options = self.options.clone();
         options.original_request = body;
         let context = Context {
-            auth: Some(&self.auth),
+            auth: Some(&auth),
             config: self.config.as_deref(),
             models: self.models.as_deref(),
         };
         let prepared = match prepare(
             Kind::Stream,
             context,
-            &self.auth,
+            &auth,
             &self.base_url,
             &request,
             &options,

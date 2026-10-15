@@ -166,7 +166,7 @@ impl Store {
         };
         let conn = session.state().conn.clone();
         let Some(conn) = conn else { return Ok(false) };
-        let enabled = auth_check(&conn.target.auth_id);
+        let enabled = auth_check(&conn.target.auth_id).is_some();
         let response_id = serde_json::from_slice::<serde_json::Value>(payload)
             .ok()
             .and_then(|v| v.get("response_id")?.as_str().map(str::to_owned))
@@ -229,7 +229,7 @@ impl Store {
                 return Ok(false);
             }
         }
-        if !auth_check(&conn.target.auth_id) {
+        if auth_check(&conn.target.auth_id).is_none() {
             return Err(open_ferry_core::exec::ExecError::upstream(
                 400,
                 "websocket credential is no longer enabled",
