@@ -10,6 +10,11 @@ export interface DialogProps {
   children?: ReactNode;
   /** Called when the dialog closes by Escape or a close button. */
   onClose: () => void;
+  /**
+   * When given, Escape doesn't close the dialog: this runs instead, and the
+   * dialog stays open until its owner sets `open` to false.
+   */
+  onCancel?: () => void;
   /** The buttons at the bottom. */
   footer?: ReactNode;
   /** "lg" for wide content, such as a diff. */
@@ -22,7 +27,15 @@ export interface DialogProps {
  * injected styles or scroll lock. Mark the control to focus first with
  * `data-autofocus`.
  */
-export function Dialog({ open, title, children, onClose, footer, size = "md" }: DialogProps) {
+export function Dialog({
+  open,
+  title,
+  children,
+  onClose,
+  onCancel,
+  footer,
+  size = "md",
+}: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
 
@@ -45,6 +58,15 @@ export function Dialog({ open, title, children, onClose, footer, size = "md" }: 
       ref={ref}
       aria-labelledby={titleId}
       onClose={onClose}
+      onCancel={
+        onCancel === undefined
+          ? undefined
+          : (event) => {
+              // The browser would close it now; its owner decides when.
+              event.preventDefault();
+              onCancel();
+            }
+      }
       className={cn(
         "m-auto rounded-lg border border-line bg-surface p-0 text-fg shadow-xl backdrop:bg-backdrop",
         size === "lg" ? "w-[min(56rem,calc(100vw-2rem))]" : "w-[min(32rem,calc(100vw-2rem))]",

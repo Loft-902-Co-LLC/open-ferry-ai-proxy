@@ -365,6 +365,49 @@ describe("the sign-in messages", () => {
       /^That address has no sign-in code/,
     );
   });
+
+  it("read a bind's pasted address as the server does", () => {
+    const state = "s-123";
+    const bind = (pasted: string) => pastedAddressProblem(pasted, state, true);
+    // An empty query field falls back to the fragment, and values are trimmed.
+    expect(bind("http://localhost:1455/cb?state=&code=C#state=s-123&client_id=I")).toBeNull();
+    expect(bind("http://localhost:1455/cb?state=%20s-123%20&code=C&client_id=I")).toBeNull();
+    expect(bind("http://localhost:1455/cb?state=s-123&code=C&client_id=%20I")).toBeNull();
+    expect(bind("http://localhost:1455/cb?state=s-123&code=%20&client_id=I#code=F")).toBeNull();
+    // A non-empty query field wins over the fragment.
+    expect(bind("http://localhost:1455/cb?state=other&code=C&client_id=I#state=s-123")).toMatch(
+      /^That address isn't from this sign-in/,
+    );
+    // A code needs the issued client ID, in the query or the fragment.
+    expect(bind("http://localhost:1455/cb?state=s-123&code=C&client_id=%20")).toMatch(
+      /^That address has no client ID in it/,
+    );
+    expect(bind("http://localhost:1455/cb?state=s-123&code=C")).toMatch(
+      /^That address has no client ID in it/,
+    );
+    expect(bind("http://localhost:1455/cb?state=s-123&code=C#client_id=I")).toBeNull();
+    // An error needs no client ID, and error_description alone says it.
+    expect(bind("http://localhost:1455/cb?state=s-123&error=access_denied")).toBeNull();
+    expect(bind("http://localhost:1455/cb?state=s-123&error_description=Denied")).toBeNull();
+    expect(bind("http://localhost:1455/cb?state=s-123&error=%20&code=%20")).toMatch(
+      /^That address has no sign-in code/,
+    );
+  });
+
+  it("keep the ordinary sign-in's pasted address as it was", () => {
+    const state = "s-123";
+    // No fragment, and no client ID needed.
+    expect(pastedAddressProblem("http://localhost:54545/cb?state=s-123&code=C", state)).toBeNull();
+    expect(pastedAddressProblem("http://localhost:54545/cb#state=s-123&code=C", state)).toMatch(
+      /^That address isn't from this sign-in/,
+    );
+    expect(pastedAddressProblem("http://localhost:54545/cb?state=s-123#code=C", state)).toMatch(
+      /^That address has no sign-in code/,
+    );
+    expect(
+      pastedAddressProblem("http://localhost:54545/cb?state=s-123&error_description=Denied", state),
+    ).toBeNull();
+  });
 });
 
 describe("the small words", () => {
