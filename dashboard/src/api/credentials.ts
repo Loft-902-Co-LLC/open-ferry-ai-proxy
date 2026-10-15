@@ -227,6 +227,40 @@ export interface SignInStatus {
   error?: string;
 }
 
+// ------------------------------------------- Sign in with ChatGPT binding
+
+/**
+ * `GET ?provider=codex&mode=siwc-bind&name=<file>[&is_webui=1]`: starts the
+ * bind of Sign in with ChatGPT to one Codex credential's file; answers
+ * `{"url", "state"}` like a sign-in, or 400 `invalid SIWC bind target`.
+ */
+export const BIND_START = "/v8/management/oauth/auth-url";
+/** `GET ?state=`: `wait`, `ok` once the bind is saved, or `error` with why. */
+export const BIND_STATUS = "/v8/management/oauth/status";
+/** `POST {"provider", "redirect_url"}`: finishes a bind by hand. */
+export const BIND_CALLBACK = "/v8/management/oauth/callback";
+/**
+ * `DELETE ?state=`: gives a bind up. `{"status":"ok","cancelled":false}`
+ * means the server was already saving it, and finishes it.
+ */
+export const BIND_SESSION = "/v8/management/oauth/session";
+
+/** `DELETE oauth/session`. */
+export interface CancelAnswer {
+  status: "ok";
+  cancelled?: boolean;
+}
+
+/** Whether `credential` is a Codex sign-in with a file, which a bind can target. */
+export function canBind(credential: Credential): boolean {
+  return (
+    credential.provider === "codex" &&
+    credential.account_type === "oauth" &&
+    credential.source === "file" &&
+    credential.name.endsWith(".json")
+  );
+}
+
 // -------------------------------------------------- provider API keys
 
 /** The provider key lists the dashboard adds to, in config.yaml. */

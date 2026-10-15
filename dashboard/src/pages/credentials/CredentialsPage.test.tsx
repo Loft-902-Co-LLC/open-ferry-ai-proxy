@@ -5,6 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AUTH_FILES,
   AUTH_FILE_STATUS,
+  BIND_CALLBACK,
+  BIND_SESSION,
+  BIND_START,
+  BIND_STATUS,
   KEY_LISTS,
   KEY_PROVIDERS,
   QUOTA_FETCH,
@@ -969,6 +973,202 @@ describe("signing in with Claude or ChatGPT", () => {
     const calls = state.api.callsTo("GET", SIGN_IN_START.claude);
     expect(calls).toHaveLength(2);
     expect(calls[1]?.url.searchParams.has("is_webui")).toBe(false);
+  });
+});
+
+describe("adding OpenAI API access to a Codex credential", () => {
+  const FILE = "codex-grace+test@example.com.json";
+  const OPEN = /^Add OpenAI API access/;
+  const BIND_URL = `https://sign-in.example/oauth/authorize?state=${STATE}`;
+  const BIND_REDIRECT = `http://localhost:1455/auth/callback?code=bind-code&state=${STATE}`;
+
+  function codex(overrides: Partial<Credential> = {}): Credential {
+    return credential({
+      name: FILE,
+      id: FILE,
+      type: "codex",
+      provider: "codex",
+      auth_index: "c0dec0dec0dec0de",
+      account: "grace@example.com",
+      label: "grace@example.com",
+      ...overrides,
+    });
+  }
+
+  /** A bind whose status calls answer from `statuses`, the last one for good. */
+  function bindServer(statuses: SignInStatus[], cancel: unknown = { status: "ok", cancelled: true }) {
+    const state = server([codex()]);
+    let polls = 0;
+    state.api.use(
+      route("GET", BIND_START, { json: { status: "ok", url: BIND_URL, state: STATE } }),
+      route("GET", BIND_STATUS, () => {
+        const status = statuses[Math.min(polls, statuses.length - 1)] ?? { status: "wait" };
+        polls += 1;
+        return { json: status };
+      }),
+      route("POST", BIND_CALLBACK, { json: { status: "ok" } }),
+      route("DELETE", BIND_SESSION, { json: cancel }),
+    );
+    return state;
+  }
+
+  async function openBind(user: UserEvent, tally = "1 ready"): Promise<HTMLElement> {
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await openFolded(user, card, tally, "grace@example.com");
+    await user.click(within(item).getByRole("button", { name: OPEN }));
+    return screen.getByRole("dialog", { name: "Add OpenAI API access" });
+  }
+
+  it("is offered only on Codex sign-ins with a file, and names its item", async () => {
+    server([
+      codex(),
+      credential(),
+      codex({ name: "codex-key", id: "codex-key", account_type: "api_key", account: "sk-x", auth_index: "beef" }),
+      codex({
+        name: "codex-memory",
+        id: "codex-memory",
+        source: "memory",
+        runtime_only: true,
+        auth_index: "ffff",
+        account: "memory@example.com",
+      }),
+    ]);
+    const { user } = renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const grace = await openFolded(user, card, "4 ready", "grace@example.com");
+    expect(
+      within(grace).getByRole("button", { name: "Add OpenAI API access grace@example.com" }),
+    ).toBeVisible();
+    expect(shownText(within(grace).getByRole("button", { name: OPEN })).trim()).toBe(
+      "Add OpenAI API access",
+    );
+    // No other item, hidden or not, has the button.
+    expect(screen.getAllByRole("button", { name: OPEN, hidden: true })).toHaveLength(1);
+    // The ordinary sign-in button is the page's one, unchanged.
+    expect(screen.getByRole("button", { name: "Sign in with ChatGPT" })).toBeVisible();
+  });
+
+  it("explains the bind, starts it with the bind query, and finishes with the pasted address", async () => {
+    const state = bindServer([{ status: "wait" }, { status: "wait" }, { status: "ok" }]);
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    expect(dialog).toHaveTextContent("keeps its Codex sign-in and gains Sign in with ChatGPT tokens");
+    expect(dialog).toHaveTextContent("go to the OpenAI API, under your ChatGPT plan");
+    expect(state.api.callsTo("GET", BIND_START)).toEqual([]);
+    expect(within(dialog).getByRole("button", { name: "Start" })).toHaveFocus();
+
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    const link = await within(dialog).findByRole("link", { name: /^Open ChatGPT's sign-in page/ });
+    expect(link).toHaveAttribute("href", BIND_URL);
+    const start = state.api.callsTo("GET", BIND_START)[0];
+    expect(start?.url.searchParams.get("provider")).toBe("codex");
+    expect(start?.url.searchParams.get("mode")).toBe("siwc-bind");
+    expect(start?.url.searchParams.get("name")).toBe(FILE);
+    expect(start?.url.searchParams.get("is_webui")).toBe("1");
+    expect(start?.url.search).toContain("name=codex-grace%2Btest%40example.com.json");
+    expect(state.api.callsTo("GET", SIGN_IN_START.codex)).toEqual([]);
+
+    const field = within(dialog).getByLabelText("Address of the page it sent you to");
+    await user.click(field);
+    await user.paste(BIND_REDIRECT);
+    const listed = state.api.callsTo("GET", AUTH_FILES).length;
+    await user.click(within(dialog).getByRole("button", { name: "Finish signing in" }));
+    expect(await within(dialog).findByText("OpenAI API access added")).toBeVisible();
+    expect(state.api.callsTo("POST", BIND_CALLBACK)[0]?.json()).toEqual({
+      provider: "codex",
+      redirect_url: BIND_REDIRECT,
+    });
+    expect(state.api.callsTo("GET", BIND_STATUS)[0]?.url.searchParams.get("state")).toBe(STATE);
+    expect(within(dialog).getByRole("button", { name: "Done" })).toHaveFocus();
+    await waitFor(() => {
+      expect(state.api.callsTo("GET", AUTH_FILES).length).toBeGreaterThan(listed);
+    });
+    expect(dialog).not.toHaveTextContent("bind-code");
+
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(state.api.callsTo("DELETE", BIND_SESSION)).toEqual([]);
+  });
+
+  it("says what to do when the server refuses to start", async () => {
+    const state = server([codex()]);
+    state.api.use(
+      route("GET", BIND_START, { status: 400, json: { error: "invalid SIWC bind target" } }),
+    );
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    expect(
+      await within(dialog).findByText("This credential can't take OpenAI API access"),
+    ).toBeVisible();
+    expect(dialog).toHaveTextContent("What to do: Check the credential in the list");
+    expect(within(dialog).getByRole("button", { name: "Try again" })).toHaveFocus();
+  });
+
+  it("says what to do when the bind fails after the sign-in", async () => {
+    bindServer([{ status: "error", error: "Failed to save authentication tokens" }]);
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    expect(await within(dialog).findByText("The server couldn't add the access")).toBeVisible();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("What to do: Start again.");
+    expect(within(dialog).getByRole("button", { name: "Start again" })).toHaveFocus();
+  });
+
+  it("gives a waiting bind up when asked", async () => {
+    const state = bindServer([{ status: "wait" }]);
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+    await user.click(within(dialog).getByRole("button", { name: "Give up" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(state.api.callsTo("DELETE", BIND_SESSION)[0]?.url.searchParams.get("state")).toBe(STATE);
+  });
+
+  it("keeps following a bind the server was already saving when it was given up", async () => {
+    const state = bindServer([{ status: "wait" }, { status: "ok" }], {
+      status: "ok",
+      cancelled: false,
+    });
+    const { user } = renderApp("/credentials");
+    const dialog = await openBind(user);
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByText("Waiting for you to sign in…");
+    await user.click(within(dialog).getByRole("button", { name: "Give up" }));
+
+    expect(await within(dialog).findByText("The server is already saving it")).toBeVisible();
+    expect(within(dialog).queryByText(/cancelled/i)).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Add OpenAI API access" })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+    // It goes on to the end, and says the access was added.
+    expect(
+      await within(dialog).findByText("OpenAI API access added", undefined, { timeout: 4000 }),
+    ).toBeVisible();
+    expect(state.api.callsTo("DELETE", BIND_SESSION)).toHaveLength(1);
+  });
+});
+
+describe("signing in with ChatGPT, not binding", () => {
+  it("starts without a mode, a name or a provider", async () => {
+    const state = server([]);
+    state.api.use(
+      route("GET", SIGN_IN_START.codex, { json: { status: "ok", url: SIGN_IN_URL, state: STATE } }),
+      route("GET", SIGN_IN_STATUS, { json: { status: "wait" } }),
+    );
+    const { user } = renderApp("/credentials?start=codex");
+    const dialog = await screen.findByRole("dialog", { name: "Sign in with ChatGPT" });
+    await user.click(within(dialog).getByRole("button", { name: "Start" }));
+    await within(dialog).findByRole("link", { name: /^Open ChatGPT's sign-in page/ });
+    const params = state.api.callsTo("GET", SIGN_IN_START.codex)[0]?.url.searchParams;
+    expect(params?.has("mode")).toBe(false);
+    expect(params?.has("name")).toBe(false);
+    expect(params?.has("provider")).toBe(false);
+    expect(state.api.callsTo("GET", BIND_START)).toEqual([]);
   });
 });
 

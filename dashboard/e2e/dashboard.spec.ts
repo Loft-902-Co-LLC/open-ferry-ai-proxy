@@ -173,6 +173,25 @@ test("renders every screen under the policy", async ({ page }) => {
   await signInDialog.getByRole("button", { name: "Give up" }).click();
   await expect(signInDialog).toBeHidden();
 
+  // Sign in with ChatGPT binds to a Codex credential, from its own action.
+  await page.getByRole("button", { name: "Add OpenAI API access grace@example.com" }).click();
+  const bindDialog = page.getByRole("dialog", { name: "Add OpenAI API access" });
+  await expect(bindDialog).toContainText("keeps its Codex sign-in and gains Sign in with ChatGPT tokens");
+  await shot(page, "29-credentials-bind");
+  await bindDialog.getByRole("button", { name: "Start", exact: true }).click();
+  await expect(bindDialog.getByRole("link", { name: /^Open ChatGPT's sign-in page/ })).toBeFocused();
+  expect(watched.server.binds).toEqual([
+    "provider=codex&mode=siwc-bind&name=codex-grace%40example.com-pro.json&is_webui=1",
+  ]);
+  await bindDialog
+    .getByLabel("Address of the page it sent you to")
+    .fill("http://localhost:1455/auth/callback?code=e2e-code&state=e2e-bind-0001");
+  await bindDialog.getByRole("button", { name: "Finish signing in" }).click();
+  await expect(bindDialog.getByText("OpenAI API access added")).toBeVisible();
+  await shot(page, "30-credentials-bind-done");
+  await bindDialog.getByRole("button", { name: "Done" }).click();
+  await expect(bindDialog).toBeHidden();
+
   await page.getByRole("button", { name: "Add an API key" }).click();
   const addKey = page.getByRole("dialog", { name: "Add a provider API key" });
   await expect(addKey.getByLabel("API key", { exact: true })).toBeFocused();
