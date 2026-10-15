@@ -21,7 +21,7 @@ import {
   type SignInStart,
   type SignInStatus,
 } from "../../api/credentials";
-import { useApiCall, useApiQuery } from "../../api/hooks";
+import { useApiCall, useApiQuery, useApiResponse } from "../../api/hooks";
 import { Alert } from "../../components/Alert";
 import { Button, buttonClasses } from "../../components/Button";
 import { CopyButton } from "../../components/CopyButton";
@@ -349,6 +349,7 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
   const name = signInName(provider);
   const account = provider === "codex" ? "your ChatGPT account (for Codex)" : name;
   const call = useApiCall();
+  const respond = useApiResponse();
   const client = useQueryClient();
   const [session, setSession] = useState<Session | null>(null);
   // The server was already saving the bind when it was given up: it finishes.
@@ -382,14 +383,24 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
   /**
    * Gives `state` up: "stopped" when the server stopped it, "saving" when it
    * was already saving the bind (which it can't stop), "failed" when the call
-   * itself failed, so the server may still finish it.
+   * failed or its answer wasn't the server's cancel answer (a 2xx saying
+   * `status: "ok"`), so the server may still finish it.
    */
   const cancelBind = async (state: string): Promise<"stopped" | "saving" | "failed"> => {
     try {
-      const answer = await call<CancelAnswer>(routes.session, {
+      const { status: code, data } = await respond<CancelAnswer | null>(routes.session, {
         method: "DELETE",
         query: { state },
       });
+      const answer = typeof data === "object" ? data : null;
+      if (code < 200 || code >= 300 || answer?.status !== "ok") {
+        setCancelProblem({
+          kind: "unexpected",
+          status: code,
+          message: "It didn't answer as it does when it stops a sign-in.",
+        });
+        return "failed";
+      }
       return answer.cancelled === false ? "saving" : "stopped";
     } catch (error) {
       setCancelProblem(callProblem(error));
@@ -477,11 +488,13 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
               ? "checking"
               : "waiting";
   useEffect(() => {
+    const dialog = content.current?.closest("dialog");
     if (step === "start-failed" || step === "ok" || step === "error" || step === "finishing") {
-      content.current
-        ?.closest("dialog")
-        ?.querySelector<HTMLElement>("[data-autofocus]")
-        ?.focus();
+      dialog?.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    } else if (step === "checking" && !dialog?.contains(document.activeElement)) {
+      // The step took away the control that had focus (the address field);
+      // one that is still there keeps it.
+      dialog?.querySelector<HTMLElement>("[data-autofocus]")?.focus();
     }
   }, [step]);
 
@@ -665,7 +678,12 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
           The five minutes are up here, but the server may still be finishing a sign-in it already
           has. It says in a moment how it ended.
         </p>
-        <p role="status" className="flex items-center gap-2 text-muted">
+        <p
+          role="status"
+          tabIndex={-1}
+          data-autofocus
+          className="flex items-center gap-2 text-muted"
+        >
           <Spinner /> Checking with the server…
         </p>
         {status.isError && <ProblemNotice problem={callProblem(status.error)} />}
