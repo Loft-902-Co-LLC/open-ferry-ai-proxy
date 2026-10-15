@@ -596,6 +596,69 @@ export function explainStartError(
   return null;
 }
 
+/** What the start of a bind answers where the target or the server is the problem. */
+const BIND_START_ERRORS = new Set([
+  "invalid SIWC bind target",
+  "unsupported oauth mode",
+  "credential store unavailable",
+]);
+
+/**
+ * Why a bind of Sign in with ChatGPT failed, from the `error` the server
+ * gave at its start or in its status, in plain words. Anything a bind has no
+ * words of its own for is explained as a sign-in is.
+ */
+export function explainBindError(error: string): ReasonText {
+  const message = error.trim();
+  switch (message) {
+    case "invalid SIWC bind target":
+      return {
+        title: "This credential can't take OpenAI API access",
+        meaning:
+          "The server binds only a Codex sign-in file in its auth directory that still has its Codex tokens. This one is missing, has changed, or isn't one.",
+        action:
+          "Check the credential in the list. If its file is gone or broken, sign in with ChatGPT to make a new one.",
+      };
+    case "unsupported oauth mode":
+      return {
+        title: "The server doesn't know this kind of sign-in",
+        meaning: "It is probably older than this dashboard.",
+        action: "Update the server, then try again.",
+      };
+    case "credential store unavailable":
+      return {
+        title: "The server can't reach its credential store",
+        meaning: "It can't read or save credential files right now.",
+        action: "Try again in a minute. If it keeps happening, the server's log says more.",
+      };
+    case "Failed to save authentication tokens":
+      return {
+        title: "The server couldn't add the access",
+        meaning:
+          "The sign-in worked, but the server didn't save it to the credential's file. The file may have changed, been replaced or been deleted while you signed in, or the server can't write it.",
+        action:
+          "Start again. If it keeps failing, check that the server can write to its auth directory; its log says more.",
+      };
+    case "callback did not contain an issued client ID":
+      return {
+        title: "That address is missing part of the sign-in",
+        meaning:
+          "The address ChatGPT sent you to has to carry the client ID the server issued for this sign-in, and this one didn't.",
+        action: "Start again, and if you paste the address, copy all of it.",
+      };
+    default:
+      return explainSignInError(message);
+  }
+}
+
+/** Why a bind couldn't start, when the page can explain it; else null. */
+export function explainBindStartError(status: number, error: string | null): StartProblem | null {
+  if (error !== null && BIND_START_ERRORS.has(error)) {
+    return { pasteOnly: false, reason: explainBindError(error) };
+  }
+  return explainStartError("codex", status, error);
+}
+
 /**
  * Whether `pasted` is the address a sign-in with `state` sent the browser
  * to: why not, or null when it is.

@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Power, PowerOff, RotateCcw, Trash2 } from "lucide-react";
+import { KeyRound, Power, PowerOff, RotateCcw, Trash2 } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
 
 import { callProblem, type CallProblem } from "../../api/access";
@@ -7,6 +7,7 @@ import {
   AUTH_FILES,
   AUTH_FILE_STATUS,
   RESET_COOLDOWN,
+  canBind,
   type Cooldown,
   type Credential,
   type ResetAnswer,
@@ -26,6 +27,7 @@ import {
   formatShortDateTime,
 } from "../../lib/format";
 import { QuotaButton } from "./QuotaDialog";
+import { SignInDialog } from "./SignInDialog";
 import { DetailsButton, useOpenWhenTargeted } from "./TriageList";
 import {
   canReset,
@@ -381,6 +383,7 @@ export function CredentialItem({
   const client = useQueryClient();
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [binding, setBinding] = useState(false);
   const [open, setOpen] = useOpenWhenTargeted(targeted);
   const health = credentialHealth(credential);
   const models = modelCooldowns(credential);
@@ -518,6 +521,20 @@ export function CredentialItem({
             </Button>
           )}
           {credential.supports_quota === true && <QuotaButton credential={credential} name={name} />}
+          {canBind(credential) && (
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                setProblem(null);
+                setBinding(true);
+              }}
+            >
+              <KeyRound aria-hidden="true" className="size-4" />
+              Add OpenAI API access
+              {itemName}
+            </Button>
+          )}
           {credential.source === "file" && (
             <Button
               size="sm"
@@ -537,6 +554,16 @@ export function CredentialItem({
 
         {problem !== null && <ProblemNotice problem={problem} live />}
       </div>
+
+      {binding && (
+        <SignInDialog
+          provider="codex"
+          bind={{ file: credential.name, name }}
+          onClose={() => {
+            setBinding(false);
+          }}
+        />
+      )}
 
       <ConfirmDialog
         open={confirmDelete}

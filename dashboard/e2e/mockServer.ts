@@ -511,6 +511,14 @@ const SIGN_IN = {
   state: "e2e-state-0001",
 };
 
+/** What a bind of Sign in with ChatGPT to a Codex credential starts with. */
+const BIND_STATE = "e2e-bind-0001";
+const BIND = {
+  status: "ok",
+  url: `https://sign-in.example/oauth/authorize?client_id=e2e&state=${BIND_STATE}`,
+  state: BIND_STATE,
+};
+
 export interface MockOptions {
   /** Whether the server has credentials and keys; else it's a first run. Default true. */
   credentials?: boolean;
@@ -532,6 +540,8 @@ export interface MockServer {
   offOrigin: string[];
   /** The settings writes it took, as "METHOD /path", with the body for a setting's route. */
   writes: string[];
+  /** The queries of the binds it started, such as "provider=codex&mode=siwc-bind&name=…". */
+  binds: string[];
 }
 
 /**
@@ -562,11 +572,14 @@ export async function mockServer(
   const clientKeys = [...CLIENT_KEYS];
   let configYaml = CONFIG_YAML;
   const calls = recentCalls(now);
+  // Whether a pasted address has come back for the bind it started.
+  let bound = false;
   const logs = recentLogs(calls).map((entry) => ({ ...entry, size: logFile(entry).length }));
   const server: MockServer = {
     unhandled: [],
     offOrigin: [],
     writes: [],
+    binds: [],
     logBytes: (name) => {
       const entry = logs.find((log) => log.name === name);
       return entry === undefined ? undefined : logFile(entry);
@@ -704,6 +717,24 @@ export async function mockServer(
         return json(route, SIGN_IN);
       case "GET /v0/management/get-auth-status":
         return json(route, { status: "wait" });
+      case "GET /v8/management/oauth/auth-url": {
+        const query = url.searchParams;
+        const target = query.get("name") ?? "";
+        const known = connected && credentials(now).some((entry) => entry.name === target);
+        if (query.get("mode") !== "siwc-bind" || query.get("provider") !== "codex" || !known) {
+          return json(route, { error: "invalid SIWC bind target" }, 400);
+        }
+        server.binds.push(url.search.slice(1));
+        bound = false;
+        return json(route, BIND);
+      }
+      case "GET /v8/management/oauth/status":
+        return json(route, { status: bound ? "ok" : "wait" });
+      case "POST /v8/management/oauth/callback":
+        bound = true;
+        return json(route, { status: "ok" });
+      case "DELETE /v8/management/oauth/session":
+        return json(route, { status: "ok", cancelled: true });
       case "DELETE /v0/management/oauth-session":
         return json(route, { status: "ok" });
       default:
