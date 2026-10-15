@@ -384,7 +384,8 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
    * Gives `state` up: "stopped" when the server stopped it, "saving" when it
    * was already saving the bind (which it can't stop), "failed" when the call
    * failed or its answer wasn't the server's cancel answer (a 2xx saying
-   * `status: "ok"`), so the server may still finish it.
+   * `status: "ok"`, with `cancelled` true, false or left out), so the server
+   * may still finish it.
    */
   const cancelBind = async (state: string): Promise<"stopped" | "saving" | "failed"> => {
     try {
@@ -393,7 +394,13 @@ export function SignInDialog({ provider, bind, onClose }: SignInDialogProps) {
         query: { state },
       });
       const answer = typeof data === "object" ? data : null;
-      if (code < 200 || code >= 300 || answer?.status !== "ok") {
+      const cancelled: unknown = answer?.cancelled;
+      if (
+        code < 200 ||
+        code >= 300 ||
+        answer?.status !== "ok" ||
+        (cancelled !== undefined && typeof cancelled !== "boolean")
+      ) {
         setCancelProblem({
           kind: "unexpected",
           status: code,
