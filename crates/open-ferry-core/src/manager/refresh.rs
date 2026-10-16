@@ -1332,7 +1332,7 @@ impl Manager {
             return Err(ManagerError::NotActive(NotActive { state }));
         }
         let outcome = executor
-            .refresh_with_options(auth.clone(), crate::executor::RefreshOptions { force })
+            .refresh_with_options(auth.clone(), crate::executor::RefreshOptions::forced(force))
             .await
             .map_err(|mut error| {
                 let mut secrets = crate::observe::redact::Secrets::new();
