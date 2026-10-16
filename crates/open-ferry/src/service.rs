@@ -11170,7 +11170,7 @@ port: {port}
         use std::time::Duration;
 
         use axum::body::Bytes;
-        use open_ferry_core::config::{Config, ConfigWatcher, WatchEvent};
+        use open_ferry_core::config::{Config, ConfigWatcher, ReadGuard, WatchEvent};
         use open_ferry_core::observe::usage;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::{TcpListener, TcpStream};
@@ -11854,7 +11854,28 @@ port: {port}
             );
             service.register_executors();
             service.management = service.management.clone().with_config_sha256(&sha256);
-            let (watcher, events) = ConfigWatcher::start(&path, &service.config).unwrap();
+            // The watcher's reads of the file wait while `held` is set, so its
+            // debounced reload can't load Y in the moment before the file holds
+            // X again, as it could on a busy runner.
+            let held = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+            let guard: ReadGuard = {
+                let held = Arc::clone(&held);
+                Arc::new(move |_: &Path| -> Result<(), String> {
+                    let (on, changed) = &*held;
+                    let on = on.lock().unwrap();
+                    let _on = changed
+                        .wait_timeout_while(on, Duration::from_secs(10), |on| *on)
+                        .unwrap();
+                    Ok(())
+                })
+            };
+            let hold = |value: bool| {
+                let (on, changed) = &*held;
+                *on.lock().unwrap() = value;
+                changed.notify_all();
+            };
+            let (watcher, events) =
+                ConfigWatcher::start_guarded(&path, &service.config, Some(guard)).unwrap();
             service.watcher = Some(watcher);
             let mut events = Some(events);
             let (addr, _stop) = start(&service).await;
@@ -11878,32 +11899,26 @@ port: {port}
             assert_eq!(service.management.config_sha256(), x_sha256);
 
             // The API saves Y, and the file holds X again before the service
-            // reloads. When the watcher's debounced reload loaded Y first,
-            // the service has X again: try again.
-            let mut tries = 0;
-            loop {
-                tries += 1;
-                let saving = tokio::spawn(async move {
-                    let keys = r#"["y-key"]"#;
-                    send(addr, "PUT", "/v0/management/api-keys", &[key], keys).await
-                });
-                let request = next_reload(&mut service).await;
-                assert!(!request.force);
-                open_ferry_core::config::save::write_file(&path, x.as_bytes()).unwrap();
-                apply_reload(&mut service, &mut events, &path, request).await;
-                let answer = tokio::time::timeout(Duration::from_secs(5), saving)
-                    .await
-                    .expect("management save task answers within 5s (case 1)")
-                    .unwrap();
-                assert_eq!(
-                    (answer.status, answer.body.as_str()),
-                    (200, r#"{"status":"ok"}"#)
-                );
-                if service.management.config_sha256() != x_sha256 {
-                    break;
-                }
-                assert!(tries < 5, "the watcher loaded Y first every time");
-            }
+            // reloads. The watcher reads nothing until it does.
+            hold(true);
+            let saving = tokio::spawn(async move {
+                let keys = r#"["y-key"]"#;
+                send(addr, "PUT", "/v0/management/api-keys", &[key], keys).await
+            });
+            let request = next_reload(&mut service).await;
+            assert!(!request.force);
+            open_ferry_core::config::save::write_file(&path, x.as_bytes()).unwrap();
+            hold(false);
+            apply_reload(&mut service, &mut events, &path, request).await;
+            let answer = tokio::time::timeout(Duration::from_secs(5), saving)
+                .await
+                .expect("management save task answers within 5s (case 1)")
+                .unwrap();
+            assert_eq!(
+                (answer.status, answer.body.as_str()),
+                (200, r#"{"status":"ok"}"#)
+            );
+            assert_ne!(service.management.config_sha256(), x_sha256);
             assert_eq!(service.config.api_keys, ["x-key"]);
             assert_eq!(service.management.config().api_keys, ["y-key"]);
 
