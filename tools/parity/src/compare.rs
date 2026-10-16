@@ -107,9 +107,10 @@ fn compact(value: &Value) -> String {
 /// `read` gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Numbers {
-    /// As `serde_json` reads them, which writes `-0` as `0` and an exponent
-    /// with a small `e` and a sign (`1E20` as `1e+20`). No suite's: only
-    /// [`json_parts`], which wants the strings, and tests read this way.
+    /// Respelled with `-0` as `0` and an exponent with a small `e` and a sign
+    /// (`1E20` as `1e+20`), independent of the `serde_json` patch version.
+    /// The generators, [`json_parts`] (which wants the strings), and tests
+    /// read this way; suites use [`Self::AsWritten`].
     Respelled,
     /// Exactly as written, `-0` and exponents included (see [`exact`]).
     /// Every suite's, as the proxy hands each translator the client's JSON
@@ -126,7 +127,7 @@ impl Numbers {
     /// `serde_json`'s, where `text` isn't one JSON value.
     pub fn parse(self, text: &str) -> serde_json::Result<Value> {
         match self {
-            Self::Respelled => serde_json::from_str(text),
+            Self::Respelled => serde_json::from_str(text).map(respell_zero),
             Self::AsWritten => exact::from_str(text),
         }
     }
@@ -135,6 +136,26 @@ impl Numbers {
     pub fn read(self, text: &str) -> Option<Value> {
         self.parse(text).ok()
     }
+}
+
+/// The historical respelled form, which drops only an integer zero's sign.
+/// `serde_json` 1.0.154 keeps that sign where earlier patches dropped it.
+fn respell_zero(mut value: Value) -> Value {
+    match &mut value {
+        Value::Number(number) if number.to_string() == "-0" => *number = 0.into(),
+        Value::Array(items) => {
+            for item in items {
+                *item = respell_zero(std::mem::take(item));
+            }
+        }
+        Value::Object(fields) => {
+            for item in fields.values_mut() {
+                *item = respell_zero(std::mem::take(item));
+            }
+        }
+        _ => {}
+    }
+    value
 }
 
 /// A string where a translator writes JSON in a [`JsonForm`]: its path, with
@@ -207,8 +228,8 @@ pub struct Comparison {
     pub differences: Vec<Difference>,
 }
 
-/// [`compare_numbers`] with JSON in a string read as `serde_json` reads it,
-/// its numbers respelled, as most tests compare.
+/// [`compare_numbers`] with JSON in a string read with [`Numbers::Respelled`],
+/// as most tests compare.
 #[cfg(test)]
 pub fn compare(go: &Value, rust: &Value, embedded_json: &[JsonAt]) -> Comparison {
     compare_numbers(go, rust, embedded_json, Numbers::Respelled)
@@ -525,7 +546,7 @@ fn parts(text: &str, numbers: Numbers) -> Vec<(&str, Option<Value>)> {
         }
         let end = start + values.byte_offset();
         let value = match numbers {
-            Numbers::Respelled => Some(value),
+            Numbers::Respelled => Some(respell_zero(value)),
             Numbers::AsWritten => numbers.read(&text[start..end]),
         };
         parts.push((&text[start..end], value));
@@ -708,10 +729,20 @@ mod tests {
     }
 
     #[test]
+    fn respelled_zero_is_explicit_and_only_changes_integer_numbers() {
+        let text = r#"{"n":-0,"a":[-0,-0.0,-0e0],"s":"-0"}"#;
+        assert_eq!(
+            Numbers::Respelled.parse(text).unwrap().to_string(),
+            r#"{"n":0,"a":[0,-0.0,-0e+0],"s":"-0"}"#
+        );
+        assert_eq!(Numbers::AsWritten.parse(text).unwrap().to_string(), text);
+    }
+
+    #[test]
     fn number_text_in_listed_json_counts_where_kept() {
-        // Upstream copies `-0`, `1E20` and `1e5` as written. Read as
-        // `serde_json` reads them, compact JSON respells them; where the
-        // translators keep them, it must not.
+        // Upstream copies `-0`, `1E20` and `1e5` as written. The historical
+        // respelled form changes them; where the translators keep them,
+        // it must not.
         let go = json!({ "arguments": "{ \"x\": -0, \"y\": 1E20, \"z\": [1e5] }" });
         let respelled = json!({ "arguments": r#"{"x":0,"y":1e+20,"z":[1e+5]}"# });
         let kept = json!({ "arguments": r#"{"x":-0,"y":1E20,"z":[1e5]}"# });

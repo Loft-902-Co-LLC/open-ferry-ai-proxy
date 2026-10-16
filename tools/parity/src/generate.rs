@@ -1262,12 +1262,14 @@ fn to_object(fields: Vec<(&str, Value)>) -> Value {
     )
 }
 
-/// Parses a number literal as `serde_json` reads it, which keeps its digits
-/// (`arbitrary_precision` is on) but writes `-0` as `0` and an exponent with
-/// a small `e` and a sign (`1E+2` as `1e+2`, `1e3` as `1e+3`). For a place
-/// upstream reads as a number, where it converts the value anyway.
+/// Parses a number literal with the historical respelled form: `-0` as `0`
+/// and an exponent with a small `e` and a sign (`1E+2` as `1e+2`, `1e3` as
+/// `1e+3`). For a place upstream reads as a number, where it converts the
+/// value anyway.
 fn num(text: &str) -> Value {
-    serde_json::from_str(text).expect("number literals are valid JSON")
+    crate::compare::Numbers::Respelled
+        .parse(text)
+        .expect("number literals are valid JSON")
 }
 
 /// Parses a number literal keeping its text exactly as written, `-0` and

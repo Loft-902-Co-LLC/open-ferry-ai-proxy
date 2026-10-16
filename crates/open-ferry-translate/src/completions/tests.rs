@@ -12,7 +12,7 @@ const EMPTY_RESPONSE: &str =
 
 /// Reads `text` as JSON, keeping its number text.
 fn parse(text: &str) -> Value {
-    serde_json::from_str(text).unwrap()
+    crate::json::exact::from_str(text).unwrap()
 }
 
 /// The translated request for the request `text`, as JSON text.
@@ -118,6 +118,9 @@ fn integer_parameters_are_coerced_as_gjson_does() {
     assert_eq!(max_tokens("16"), "16");
     assert_eq!(max_tokens("16.9"), "16");
     assert_eq!(max_tokens("-3"), "-3");
+    for value in ["-0", "-0.0", "-0e0", r#""-0""#] {
+        assert_eq!(max_tokens(value), "0", "{value}");
+    }
     assert_eq!(max_tokens(r#""16""#), "16");
     assert_eq!(max_tokens(r#""16.5""#), "0");
     assert_eq!(max_tokens(r#""+16""#), "0");
@@ -157,7 +160,9 @@ fn float_parameters_are_coerced_as_gjson_does() {
     assert_eq!(temperature("null"), "0");
     assert_eq!(temperature("{}"), "0");
     // Go writes -0.
-    assert_eq!(temperature("-0.0"), "0");
+    for value in ["-0", "-0.0", "-0e0", r#""-0""#] {
+        assert_eq!(temperature(value), "-0", "{value}");
+    }
 }
 
 #[test]

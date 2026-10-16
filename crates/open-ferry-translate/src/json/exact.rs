@@ -3,8 +3,9 @@
 //!
 //! With `arbitrary_precision` on, a [`Number`] holds its text and writes it
 //! back unchanged. `serde_json`'s reader respells a few numbers as it reads
-//! them, though: `-0` becomes `0`, and an exponent is written with a small
-//! `e` and a sign, so `1E20` becomes `1e+20` and `1e5` becomes `1e+5`.
+//! them, though: an exponent is written with a small `e` and a sign, so
+//! `1E20` becomes `1e+20` and `1e5` becomes `1e+5`. Before 1.0.154, `-0`
+//! also became `0`.
 //! Upstream copies a client's JSON text byte for byte where it moves a value
 //! (gjson's `Raw` into sjson's `SetRaw`), so text read here keeps every
 //! number's spelling, whatever the translator then does with it.
@@ -81,7 +82,7 @@ fn respells_a_number(bytes: &[u8]) -> bool {
     false
 }
 
-/// Whether `serde_json` writes the number `token` other than as written:
+/// Whether a supported `serde_json` patch respells the number `token`:
 /// `-0`, or one with an `E`, or with an exponent without its sign.
 fn respelled(token: &[u8]) -> bool {
     token == b"-0"
@@ -274,7 +275,7 @@ mod tests {
             let exact = from_str(text).unwrap();
             assert_eq!(
                 exact.to_string().replace("-0", "0").replace("1E2", "1e+2"),
-                serde.to_string(),
+                serde.to_string().replace("-0", "0"),
                 "{text}"
             );
         }
