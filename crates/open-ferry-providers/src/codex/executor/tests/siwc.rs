@@ -474,7 +474,7 @@ async fn siwc_refresh_selective_dual_forced_and_disabled() {
         auth.metadata.insert("use_siwc".into(), json!(active));
         let before = auth.metadata.clone();
         let after = dual_executor(&outer, &siwc)
-            .refresh_with_options(Arc::new(auth), RefreshOptions { force })
+            .refresh_with_options(Arc::new(auth), RefreshOptions::forced(force))
             .await
             .unwrap();
         let explicit_unscheduled = !outer_due && !siwc_due;

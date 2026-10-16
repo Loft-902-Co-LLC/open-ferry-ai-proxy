@@ -2310,7 +2310,7 @@ async fn refresh_api_key_without_a_refresh_token_is_unchanged() {
     let auth = api_key_auth("http://127.0.0.1:9");
     for force in [false, true] {
         let refreshed = executor
-            .refresh_with_options(auth.clone(), RefreshOptions { force })
+            .refresh_with_options(auth.clone(), RefreshOptions::forced(force))
             .await
             .unwrap();
         assert!(

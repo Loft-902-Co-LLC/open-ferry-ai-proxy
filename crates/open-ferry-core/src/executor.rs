@@ -41,6 +41,13 @@ pub struct RefreshOptions {
     pub force: bool,
 }
 
+impl RefreshOptions {
+    /// Options that set `force` and leave every other option at its default.
+    pub fn forced(force: bool) -> Self {
+        Self { force }
+    }
+}
+
 /// Calls one provider with a credential (upstream's `ProviderExecutor`).
 pub trait ProviderExecutor: Send + Sync + 'static {
     /// The provider served, such as `codex`; [`Auth::provider`] of the
