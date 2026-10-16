@@ -543,7 +543,13 @@ pub(crate) fn hash_disabled_installed(path: &Path) -> io::Result<(Option<String>
         }
         hash.update(&buffer[..count]);
     }
-    Ok((Some(format!("{:x}", hash.finalize())), metadata.len()))
+    use std::fmt::Write as _;
+    let digest: [u8; 32] = hash.finalize().into();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    Ok((Some(out), metadata.len()))
 }
 
 fn open_regular_file(path: &Path) -> io::Result<std::fs::File> {
