@@ -260,19 +260,17 @@ fn off_while_waiting_for_sign_ins_cancels() {
         },
     );
     sw.accepted();
-    // The switch is in the sign-in wait, and A is the one holding it.
-    let seen = fx.wait_for("the sign-in wait", || {
+    // The switch is in the sign-in wait, and A is the one holding it. The status
+    // says the switch waits before A's next answer brings in its count, so this
+    // waits for both.
+    fx.wait_for("the sign-in wait, with A's pending sign-ins", || {
         let status = fx.status()?;
-        (status["switch"]["status"] == "waiting-for-signins").then_some(status)
-    });
-    assert!(
-        seen["workers"]
-            .as_array()
-            .unwrap()
+        let held = status["workers"]
+            .as_array()?
             .iter()
-            .any(|w| w["role"] == "active" && w["signins_pending"] == 3),
-        "A does not report its pending sign-ins: {seen}"
-    );
+            .any(|w| w["role"] == "active" && w["signins_pending"] == 3);
+        (status["switch"]["status"] == "waiting-for-signins" && held).then_some(())
+    });
     // B is not loaded while it waits.
     assert_eq!(fx.pid_of(2), None, "B was loaded during the sign-in wait");
     fx.mode(true, 1);
