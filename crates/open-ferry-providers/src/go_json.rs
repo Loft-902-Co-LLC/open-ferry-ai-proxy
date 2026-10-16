@@ -329,7 +329,13 @@ fn any_at(raw: Raw<'_>, depth: usize) -> Result<Value, String> {
                     raw.0
                 ));
             }
-            Value::Number(raw.0.parse::<Number>().map_err(|e| e.to_string())?)
+            // Go keeps negative zero's sign; serde_json before 1.0.154 drops it.
+            let number = if raw.0 == "-0" {
+                Number::from_string_unchecked(raw.0.to_owned())
+            } else {
+                raw.0.parse::<Number>().map_err(|e| e.to_string())?
+            };
+            Value::Number(number)
         }
         _ if depth == MAX_ANY_DEPTH => {
             return Err(format!("json: value nested more than {MAX_ANY_DEPTH} deep"));
@@ -543,6 +549,12 @@ mod tests {
         assert!(any_value(raw("[1e400]")).is_err());
         assert!(any_value(raw("-1e309")).is_err());
         assert_eq!(any_value(raw("1e-400")).unwrap().as_f64(), Some(0.0));
+        assert_eq!(any_value(raw("-0")).unwrap().to_string(), "-0");
+        for text in ["-0", "-0.0", "-0e0", "-1e-400"] {
+            let float = any_value(raw(text)).unwrap().as_f64().unwrap();
+            assert_eq!(float, 0.0, "{text}");
+            assert!(float.is_sign_negative(), "{text}");
+        }
         let nested = |depth| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
         assert!(any_value(raw(&nested(MAX_ANY_DEPTH))).is_ok());
         assert!(any_value(raw(&nested(MAX_ANY_DEPTH + 1))).is_err());

@@ -18,7 +18,7 @@
 
 use serde_json::{Value, json};
 
-use super::super::{Rng, TEXTS, to_gemini, to_object};
+use super::super::{Rng, TEXTS, num, to_gemini, to_object};
 use crate::cases::Case;
 
 /// `count` Claude Messages requests, each with a `stream` option.
@@ -29,7 +29,7 @@ pub fn claude_request_cases(seed: u64, count: usize) -> Vec<Case> {
         .map(|(index, mut case)| {
             let mut rng = rng(seed, index as u64);
             if rng.chance(25)
-                && let Ok(mut request) = serde_json::from_str::<Value>(&case.request)
+                && let Ok(mut request) = open_ferry_translate::json::exact::from_str(&case.request)
                 && let Some(Value::Array(messages)) = request.get_mut("messages")
             {
                 let at = rng.below(messages.len() + 1);
@@ -126,7 +126,7 @@ fn count(rng: &mut Rng) -> Value {
     if rng.chance(70) {
         json!(rng.below(5000))
     } else {
-        serde_json::from_str(rng.pick(COUNTS)).expect("counts are JSON numbers")
+        num(rng.pick(COUNTS))
     }
 }
 

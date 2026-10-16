@@ -31,9 +31,9 @@ impl<'a> Raw<'a> {
         }
     }
 
-    /// The value, read as serde_json reads it.
+    /// The value with its number text kept, as the proxy reads a request.
     pub fn value(&self) -> Value {
-        serde_json::from_str(self.text()).unwrap_or(Value::Null)
+        open_ferry_translate::json::exact::from_str(self.text()).unwrap_or(Value::Null)
     }
 }
 
@@ -140,6 +140,12 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn values_keep_the_number_text_used_to_derive_call_ids() {
+        let text = r#"{"n":-0,"a":[1E2,-0.0]}"#;
+        assert_eq!(parse(text).unwrap().value().to_string(), text);
+    }
 
     #[test]
     fn keeps_the_text_of_each_value() {

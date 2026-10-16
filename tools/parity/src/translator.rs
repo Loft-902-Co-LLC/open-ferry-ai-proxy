@@ -2858,7 +2858,7 @@ mod tests {
             let case = Case::new("derived", "gpt-5", request);
             let mut rust = convert_gemini_request_to_openai(
                 "gpt-5",
-                &serde_json::from_str(request).unwrap(),
+                &exact::from_str(request).unwrap(),
                 false,
             );
             let call = &mut rust["messages"][0]["tool_calls"][0]["id"];
@@ -2886,6 +2886,18 @@ mod tests {
         assert_eq!(ours, derived_call_id("call", 0, 0, "f", r#"{"a":1}"#));
         assert_eq!(id, derived_call_id("call", 0, 0, "f", r#"{ "a" : 1 }"#));
         assert_eq!(read(spaced_args, Some(wrong)).1, wrong);
+        // The proxy keeps number text in requests, including negative zero.
+        let numbered_args = r#"{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{ "n": -0, "e": 1E2 }}}]}]}"#;
+        let (ours, id) = read(numbered_args, None);
+        assert_eq!(
+            ours,
+            derived_call_id("call", 0, 0, "f", r#"{"n":-0,"e":1E2}"#)
+        );
+        assert_eq!(
+            id,
+            derived_call_id("call", 0, 0, "f", r#"{ "n": -0, "e": 1E2 }"#)
+        );
+        assert_eq!(read(numbered_args, Some(wrong)).1, wrong);
         // A name that's an object is hashed as its text too.
         assert_eq!(
             derived_call_ids(
