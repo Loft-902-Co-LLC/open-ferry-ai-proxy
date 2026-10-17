@@ -209,8 +209,9 @@ pub(crate) fn reconcile_persisted_codex(snapshot: &Auth, current: &Auth, disk: &
 
 /// Whether a response's credentials are merged into the live record or
 /// refused: under `Refused` the policy forbade persisting the received
-/// rotation, so no credential patch is synthesized from the response and its
-/// credential keys never reach the merged record.
+/// rotation, so no credential patch is taken or synthesized from the response
+/// (an explicit `Refresh` intent on it is ignored too) and its credential keys
+/// never reach the merged record. `current`'s intent is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResponseCredentials {
     Merge,
@@ -233,8 +234,10 @@ pub(crate) fn merge_auth_content_with(
     let refused = credentials == ResponseCredentials::Refused;
     let mut merged = current.clone();
     let patch = match &updated.codex_persist_intent {
+        // A refused response takes no patch, not even an explicit one.
+        _ if refused => None,
         crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) => Some(patch.clone()),
-        _ if !refused && crate::auth::codex_refresh::is_codex_auth(updated) => {
+        _ if crate::auth::codex_refresh::is_codex_auth(updated) => {
             Some(crate::auth::codex_refresh::CredentialRefreshPatch::new(
                 &base.metadata,
                 &updated.metadata,
@@ -696,5 +699,211 @@ mod tests {
         assert_eq!(merged.status, Status::Error);
         assert!(merged.unavailable);
         assert_eq!(merged.metadata.get("access_token"), Some(&json!("t0")));
+    }
+
+    fn outer_patch(before: &Auth, after: &Auth) -> CodexPersistIntent {
+        CodexPersistIntent::Refresh(crate::auth::codex_refresh::CredentialRefreshPatch::new(
+            &before.metadata,
+            &after.metadata,
+            true,
+            false,
+        ))
+    }
+
+    fn failure(
+        partition: crate::auth::CodexCredentialPartition,
+        message: &str,
+    ) -> crate::auth::CodexRefreshFailure {
+        crate::auth::CodexRefreshFailure {
+            error: crate::exec::ExecError::new(crate::exec::ErrorKind::Upstream, message),
+            partition,
+        }
+    }
+
+    #[test]
+    fn a_refused_response_ignores_an_explicit_refresh_intent() {
+        let base = codex(json!({"access_token": "t-base", "refresh_token": "r-base"}));
+        let current = Auth {
+            codex_persist_intent: CodexPersistIntent::OuterLogin,
+            ..codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}))
+        };
+        let mut updated = codex(json!({"access_token": "t-upd", "refresh_token": "r-upd"}));
+        updated.codex_persist_intent = outer_patch(&base, &updated);
+
+        let merged =
+            merge_auth_content_with(&base, &current, &updated, ResponseCredentials::Refused);
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t-cur")));
+        assert_eq!(merged.metadata.get("refresh_token"), Some(&json!("r-cur")));
+        assert_eq!(merged.codex_persist_intent, CodexPersistIntent::OuterLogin);
+
+        // Under `Merge` the patch is taken: its intent lands, and the patch
+        // writes a partition only where `current` still holds `base`'s tokens.
+        let merged = merge_auth_content_with(&base, &current, &updated, ResponseCredentials::Merge);
+        assert!(matches!(
+            merged.codex_persist_intent,
+            CodexPersistIntent::Refresh(_)
+        ));
+        let merged = merge_auth_content_with(&base, &base, &updated, ResponseCredentials::Merge);
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t-upd")));
+        assert_eq!(merged.metadata.get("refresh_token"), Some(&json!("r-upd")));
+        assert!(matches!(
+            merged.codex_persist_intent,
+            CodexPersistIntent::Refresh(_)
+        ));
+    }
+
+    #[test]
+    fn a_refused_response_merges_the_refresh_failure_without_a_patch() {
+        use crate::auth::CodexCredentialPartition::{Outer, Siwc};
+        let base = codex(json!({"access_token": "t-base"}));
+        let mut updated = codex(json!({"access_token": "t-upd"}));
+        updated.codex_persist_intent = outer_patch(&base, &updated);
+        updated.codex_refresh_failure = Some(failure(Siwc, "updated failure"));
+        let current = Auth {
+            codex_refresh_failure: Some(failure(Outer, "current failure")),
+            ..codex(json!({"access_token": "t-cur"}))
+        };
+
+        // The response's failure lands, and `current`'s credentials stay.
+        let merged =
+            merge_auth_content_with(&base, &current, &updated, ResponseCredentials::Refused);
+        let landed = merged.codex_refresh_failure.as_ref();
+        assert_eq!(landed.map(|f| f.partition), Some(Siwc));
+        assert_eq!(
+            landed.map(|f| f.error.message.as_str()),
+            Some("updated failure")
+        );
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t-cur")));
+
+        // With no patch, no `current` failure is carried over as unattempted.
+        updated.codex_refresh_failure = None;
+        let merged =
+            merge_auth_content_with(&base, &current, &updated, ResponseCredentials::Refused);
+        assert!(merged.codex_refresh_failure.is_none());
+
+        // A merged response with an outer-only patch keeps an unattempted
+        // failure of the other partition.
+        let current = Auth {
+            codex_refresh_failure: Some(failure(Siwc, "current failure")),
+            ..current
+        };
+        let merged = merge_auth_content_with(&base, &current, &updated, ResponseCredentials::Merge);
+        assert_eq!(
+            merged.codex_refresh_failure.as_ref().map(|f| f.partition),
+            Some(Siwc)
+        );
+    }
+
+    fn secs(n: i64) -> Timestamp {
+        now() + chrono::Duration::seconds(n)
+    }
+
+    fn lasting_error(message: &str) -> Option<AuthError> {
+        Some(AuthError {
+            message: message.into(),
+            ..AuthError::default()
+        })
+    }
+
+    /// Merges a refused refresh shaped as `refresh_owned` leaves `updated`
+    /// (refreshed now, no error, available, Active), against a `current` the
+    /// closure shapes. Every input differs in timestamps and credential keys.
+    fn refused_refresh_against(shape: impl FnOnce(&mut Auth)) -> (Auth, Auth) {
+        let base = Auth {
+            status: Status::Active,
+            last_refreshed_at: Some(secs(-3600)),
+            next_refresh_after: Some(secs(-1800)),
+            last_error: lasting_error("old"),
+            ..codex(json!({"access_token": "t-base", "refresh_token": "r-base"}))
+        };
+        let mut current = Auth {
+            status: Status::Error,
+            unavailable: true,
+            status_message: "held".into(),
+            last_error: lasting_error("old"),
+            last_refreshed_at: Some(secs(-1200)),
+            next_refresh_after: Some(secs(-900)),
+            ..codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}))
+        };
+        shape(&mut current);
+        let mut updated = Auth {
+            status: Status::Active,
+            last_refreshed_at: Some(now()),
+            next_refresh_after: Some(secs(300)),
+            ..codex(json!({"access_token": "t-upd", "refresh_token": "r-upd"}))
+        };
+        updated.codex_persist_intent = outer_patch(&base, &updated);
+        let merged = merge_refreshed_auth_with(
+            &base,
+            &current,
+            &updated,
+            now(),
+            ResponseCredentials::Refused,
+        );
+        (merged, current)
+    }
+
+    fn assert_refused_refresh_bookkeeping(merged: &Auth, current: &Auth) {
+        assert_eq!(merged.last_refreshed_at, Some(now()));
+        assert_eq!(merged.next_refresh_after, Some(secs(300)));
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t-cur")));
+        assert_eq!(merged.metadata.get("refresh_token"), Some(&json!("r-cur")));
+        assert_eq!(merged.codex_persist_intent, current.codex_persist_intent);
+    }
+
+    #[test]
+    fn a_refused_refresh_keeps_a_new_concurrent_error() {
+        let (merged, current) = refused_refresh_against(|current| {
+            current.last_error = lasting_error("new concurrent");
+            current.next_retry_after = None;
+        });
+        assert_refused_refresh_bookkeeping(&merged, &current);
+        assert_eq!(
+            merged.last_error.as_ref().map(|e| e.message.as_str()),
+            Some("new concurrent")
+        );
+        assert_eq!(merged.status, Status::Error);
+        assert!(merged.unavailable);
+        assert_eq!(merged.status_message, "held");
+    }
+
+    #[test]
+    fn a_refused_refresh_keeps_an_active_cooldown() {
+        let (merged, current) = refused_refresh_against(|current| {
+            current.next_retry_after = Some(secs(60));
+        });
+        assert_refused_refresh_bookkeeping(&merged, &current);
+        assert!(merged.unavailable);
+        assert_eq!(merged.status, Status::Error);
+        assert_eq!(merged.status_message, "held");
+    }
+
+    #[test]
+    fn a_refused_refresh_keeps_an_active_credential_quota() {
+        let (merged, current) = refused_refresh_against(|current| {
+            current.next_retry_after = Some(secs(-60));
+            current.quota.exceeded = true;
+            current.quota.reason = "credential_quota".into();
+            current.quota.next_recover_at = Some(secs(60));
+        });
+        assert_refused_refresh_bookkeeping(&merged, &current);
+        assert!(merged.unavailable);
+        assert_eq!(merged.status, Status::Error);
+        assert_eq!(merged.status_message, "held");
+    }
+
+    #[test]
+    fn a_refused_refresh_clears_a_stale_error_and_cooldown() {
+        let (merged, current) = refused_refresh_against(|current| {
+            current.next_retry_after = Some(secs(-60));
+            current.quota.exceeded = true;
+            current.quota.reason = "credential_quota".into();
+            current.quota.next_recover_at = Some(secs(-60));
+        });
+        assert_refused_refresh_bookkeeping(&merged, &current);
+        assert_eq!(merged.status, Status::Active);
+        assert!(!merged.unavailable);
+        assert!(merged.status_message.is_empty());
+        assert!(merged.last_error.is_none());
     }
 }
