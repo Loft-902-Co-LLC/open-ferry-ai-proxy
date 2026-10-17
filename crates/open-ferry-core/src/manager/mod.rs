@@ -477,6 +477,13 @@ pub(crate) struct Shared {
     /// with the attempt number (1-based).
     #[cfg(test)]
     origin_check_hook: Mutex<Option<OriginCheckHook>>,
+    /// Test seam: overrides the rotation commit's retry window.
+    #[cfg(test)]
+    lease_retry_window: Mutex<Option<std::time::Duration>>,
+    /// Test seam: the send fence signals the first notify when a pass is
+    /// about to take the fence, and waits for the second before it does.
+    #[cfg(test)]
+    send_fence_pause: Mutex<Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>>,
 }
 
 /// What a test runs after each proof of a leased origin check.
@@ -638,6 +645,10 @@ impl Manager {
             adopt_hook: Mutex::new(None),
             #[cfg(test)]
             origin_check_hook: Mutex::new(None),
+            #[cfg(test)]
+            lease_retry_window: Mutex::new(None),
+            #[cfg(test)]
+            send_fence_pause: Mutex::new(None),
         });
         let owner = Some(Arc::new(Owner(Arc::downgrade(&shared))));
         Self {
