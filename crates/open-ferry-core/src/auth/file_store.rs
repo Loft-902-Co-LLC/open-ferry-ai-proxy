@@ -2925,8 +2925,9 @@ mod tests {
 
     /// The names of the functions in `src` that hold a physical write or
     /// removal without a write permit: `self.permit()?` before the mark, or a
-    /// `WritePermit` parameter. Not upstream's: a new writer can't skip the
-    /// gate.
+    /// `WritePermit` parameter. A mark's call may be split across lines after
+    /// its parenthesis, as rustfmt splits a long call. Not upstream's: a new
+    /// writer can't skip the gate.
     fn audit_permits(src: &str) -> Vec<String> {
         let src = src.replace("\r\n", "\n");
         assert_eq!(
@@ -2938,13 +2939,18 @@ mod tests {
         let lines: Vec<&str> = code.lines().collect();
         let mut offenders = Vec::new();
         for mark in WRITE_MARKS {
+            let (call, arg) = mark.split_at(mark.find('(').unwrap() + 1);
             let mut found = false;
-            for (at, line) in lines.iter().enumerate() {
-                // The primitives' own definitions spell the marks too.
-                if !line.contains(mark) || starts_function(line) {
+            for (offset, _) in code.match_indices(call) {
+                // The primitives' own definitions spell the marks too, as
+                // `fn write_atomic(path`; any other occurrence is a call.
+                if code[..offset].ends_with("fn ")
+                    || !code[offset + call.len()..].trim_start().starts_with(arg)
+                {
                     continue;
                 }
                 found = true;
+                let at = code[..offset].matches('\n').count();
                 let Some(start) = lines[..=at].iter().rposition(|l| starts_function(l)) else {
                     offenders.push(format!("(no function before `{mark}` at line {})", at + 1));
                     continue;
@@ -3279,11 +3285,44 @@ mod tests {
         assert_eq!(offenders.len(), 1, "{offenders:?}");
         assert!(offenders[0].contains("no function"), "{offenders:?}");
 
-        // (e): a respelled mark fails the at-least-once assertion.
+        // (e): a respelled mark fails the at-least-once assertion. A space
+        // after the parenthesis is not a respelling (see (g)), so the
+        // argument is renamed.
         assert!(panics(source.replace(
             "write_atomic_no_follow(path",
-            "write_atomic_no_follow( path"
+            "write_atomic_no_follow(target"
         )));
+
+        // (f): a writer whose body shares its `fn` line is named, whether
+        // the write is direct or in a closure.
+        let with_writer = |writer: &str| {
+            source.replacen(
+                TEST_MODULE_MARKER,
+                &format!("{writer}{TEST_MODULE_MARKER}"),
+                1,
+            )
+        };
+        assert_eq!(
+            audit_permits(&with_writer(
+                "fn unpermitted(path: &Path) -> io::Result<()> { fs::remove_file(&path) }"
+            )),
+            ["unpermitted"]
+        );
+        assert_eq!(
+            audit_permits(&with_writer(
+                "fn in_closure(path: &Path) { let _ = || fs::remove_file(&path); }"
+            )),
+            ["in_closure"]
+        );
+
+        // (g): a call split after its parenthesis is still a write.
+        let split = r"fn split_writer(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic(
+        &path,
+        bytes,
+    )
+}";
+        assert_eq!(audit_permits(&with_writer(split)), ["split_writer"]);
 
         // CRLF line endings are normalized.
         assert_eq!(
