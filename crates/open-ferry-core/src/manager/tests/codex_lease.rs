@@ -13,6 +13,7 @@ use super::siwc_persistence::{
 };
 use super::support::*;
 use crate::auth::Auth;
+use crate::auth::codex_refresh::OUTER_KEYS;
 use crate::manager::{Manager, ManagerError, Settings, lock};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -118,6 +119,15 @@ fn unproven(rig: &Rig) -> Option<u32> {
         .unresolved_origin
         .as_ref()
         .map(|u| u.unproven)
+}
+
+/// The pending rotations no save has written.
+fn unwritten_pending(rig: &Rig) -> usize {
+    rig.live()
+        .codex_pending_refresh
+        .iter()
+        .filter(|patch| !patch.is_written())
+        .count()
 }
 
 fn marked_outer(rig: &Rig) -> bool {
@@ -239,6 +249,7 @@ async fn an_unprovable_admission_defers_before_the_send() {
     // B-26 (a): the record names a fresh empty directory at every proof, so no
     // attempt can prove it. Three proofs, then the pass defers.
     bounded(async {
+        let (logs, _guard) = capture_logs();
         let (rig, probe) = rotating_rig("c");
         let (calls, made) = (Arc::new(AtomicU32::new(0)), Made::default());
         let rebind = fresh_binder(&rig, &made);
@@ -246,6 +257,12 @@ async fn an_unprovable_admission_defers_before_the_send() {
         let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
         disarm(&rig);
         assert!(is_unresolved_deferral(&error), "{error}");
+        // No rotation was received, so the line says none is held.
+        let line = only_line(&logs.since(0), "rotation_held=");
+        assert_eq!(line.0, tracing::Level::WARN);
+        assert!(line.1.contains("auth_id=codex.json"), "{}", line.1);
+        assert!(line.1.contains("rotation_held=false"), "{}", line.1);
+        assert_logs_clean(&logs, &rig, &[]);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(probe.sent(), 0, "nothing was sent");
         assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
@@ -387,6 +404,7 @@ async fn an_unprovable_publication_records_the_state_and_saves_nothing() {
     // every proof. The commit has landed B in D/f; the tail may not save to
     // any of them.
     bounded(async {
+        let (logs, _guard) = capture_logs();
         let Lost {
             rig,
             probe,
@@ -394,6 +412,17 @@ async fn an_unprovable_publication_records_the_state_and_saves_nothing() {
             made,
             ..
         } = published_unproven().await;
+        // Step 13 holds the next pass back and warns, naming the id only; the
+        // pass itself succeeded, so no deferral was counted.
+        let held = only_line(&logs.since(0), "a received rotation is held");
+        assert_eq!(held.0, tracing::Level::WARN);
+        assert!(held.1.contains("auth_id=codex.json"), "{}", held.1);
+        assert!(
+            logs.since(0)
+                .iter()
+                .all(|l| !l.1.contains("rotation_held="))
+        );
+        assert_logs_clean(&logs, &rig, &[]);
         assert_eq!(calls, 6, "the proofs after the send");
         assert_eq!(probe.sent(), 1);
         assert_eq!(rig.live().metadata["refresh_token"], "b-refresh");
@@ -426,8 +455,13 @@ async fn an_unprovable_save_target_records_the_state_and_keeps_the_file() {
     // B-26 (g): the file the tail was to write went away and another took its
     // place before the save, so fence 2 cannot prove it.
     bounded(async {
+        let (logs, _guard) = capture_logs();
         let (lost, e_path) = fenced_unproven().await;
         let Lost { rig, probe, .. } = lost;
+        let held = only_line(&logs.since(0), "a received rotation is held");
+        assert_eq!(held.0, tracing::Level::WARN);
+        assert!(held.1.contains("auth_id=codex.json"), "{}", held.1);
+        let seen = logs.len();
         assert_eq!(probe.sent(), 1);
         assert_eq!(rig.live().metadata["refresh_token"], "b-refresh");
         assert!(!marked_outer(&rig), "the rotation is not marked");
@@ -444,6 +478,10 @@ async fn an_unprovable_save_target_records_the_state_and_keeps_the_file() {
         assert_eq!(probe.sent(), 1, "the executor was not called");
         assert_eq!(unresolved(&rig), Some((true, false)));
         assert_eq!(unproven(&rig), Some(1), "a new deferral was counted");
+        let line = only_line(&logs.since(seen), "rotation_held=");
+        assert_eq!(line.0, tracing::Level::WARN);
+        assert!(line.1.contains("rotation_held=true"), "{}", line.1);
+        assert_logs_clean(&logs, &rig, &[&e_path]);
         assert_eq!(
             read_file(&e_path.join("codex.json"))["refresh_token"],
             "outer-refresh-old"
@@ -457,6 +495,7 @@ async fn a_read_back_without_identity_records_the_state_without_deciding() {
     // B-26 (h): the record's file has no resolvable identity when the save is
     // read back, so fence 3 cannot call it the file that was written.
     bounded(async {
+        let (logs, _guard) = capture_logs();
         let (rig, probe, _clock) = clocked_rig("b");
         let flag = rig.store.clone();
         *lock(&rig.manager.shared.read_back_hook) = Some(Arc::new(move |_: &Auth| {
@@ -468,9 +507,17 @@ async fn a_read_back_without_identity_records_the_state_without_deciding() {
         assert_eq!(rig.live().metadata["refresh_token"], "b-refresh");
         assert!(!marked_outer(&rig), "the read-back marks nothing");
         assert_eq!(unresolved(&rig), Some((true, false)));
+        let held = only_line(&logs.since(0), "a received rotation is held");
+        assert_eq!(held.0, tracing::Level::WARN);
+        assert!(held.1.contains("auth_id=codex.json"), "{}", held.1);
+        let seen = logs.len();
         // With the identity still unresolvable the next pass defers.
         let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
         assert!(is_unresolved_deferral(&error), "{error}");
+        let line = only_line(&logs.since(seen), "rotation_held=");
+        assert_eq!(line.0, tracing::Level::WARN);
+        assert!(line.1.contains("rotation_held=true"), "{}", line.1);
+        assert_logs_clean(&logs, &rig, &[]);
         assert_eq!(probe.sent(), 1, "the executor was not called");
         assert_eq!(unresolved(&rig), Some((true, false)));
         // Once the identity is back the file is proven the same one, and the
@@ -756,42 +803,160 @@ fn hold_secs(rig: &Rig, clock: &TestClock) -> i64 {
     (until - clock.now()).num_seconds()
 }
 
-/// The fields a deferral must leave alone.
-fn status_fields(rig: &Rig) -> (String, String, bool, Option<String>, bool) {
+/// The fields a deferral must leave alone, whole.
+fn status_fields(rig: &Rig) -> (String, String, bool, Option<String>, String) {
     let auth = rig.live();
     (
         format!("{:?}", auth.status),
         auth.status_message.clone(),
         auth.unavailable,
         auth.next_retry_after.map(|t| t.to_rfc3339()),
-        auth.last_error.is_some(),
+        format!("{:?}", auth.last_error),
     )
+}
+
+/// What a scoped subscriber saw: each event's level and its fields as text.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+impl Logs {
+    fn len(&self) -> usize {
+        lock(&self.0).len()
+    }
+
+    /// The events from the `from`th on.
+    fn since(&self, from: usize) -> Vec<(tracing::Level, String)> {
+        lock(&self.0)[from..].to_vec()
+    }
+}
+
+struct Fields(String);
+
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(&format!("{}={value:?} ", field.name()));
+    }
+}
+
+struct Capture(Logs);
+
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        lock(&(self.0).0).push((*event.metadata().level(), fields.0));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Captures what this thread logs until the guard drops. The tests that use it
+/// run on one thread (`current_thread`), so every event the async code emits is
+/// seen; one emitted on a blocking thread is not.
+fn capture_logs() -> (Logs, tracing::subscriber::DefaultGuard) {
+    crate::test_tracing::keep_every_callsite_open();
+    let logs = Logs::default();
+    let guard = tracing::subscriber::set_default(Capture(logs.clone()));
+    (logs, guard)
+}
+
+/// The one line among `lines` that holds `needle`. It fails when none or more
+/// than one does, so an assertion on the line cannot pass for want of it.
+fn only_line(lines: &[(tracing::Level, String)], needle: &str) -> (tracing::Level, String) {
+    let found: Vec<_> = lines
+        .iter()
+        .filter(|(_, text)| text.contains(needle))
+        .collect();
+    assert_eq!(found.len(), 1, "lines holding {needle:?}: {}", found.len());
+    found[0].clone()
+}
+
+/// No captured line carries a token of the fixture or a test directory.
+fn assert_logs_clean(logs: &Logs, rig: &Rig, extra: &[&Path]) {
+    let mut secrets: Vec<String> = [
+        "outer-old",
+        "outer-refresh-old",
+        "siwc-old",
+        "siwc-refresh-old",
+        "b-access",
+        "b-refresh",
+        "c-access",
+        "c-refresh",
+        "n-access",
+        "n-refresh",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    secrets.push(rig.dir.path().to_string_lossy().into_owned());
+    secrets.extend(extra.iter().map(|p| p.to_string_lossy().into_owned()));
+    for (level, text) in logs.since(0) {
+        for secret in &secrets {
+            assert!(
+                !text.contains(secret.as_str()),
+                "a {level} line holds a secret"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn deferrals_back_off_and_surface_without_touching_status() {
-    // B-31 steps 1 to 4: seventeen passes that cannot prove the state. Each
-    // counts, holds the next refresh with the backoff, and leaves the status
-    // fields alone; the hold is surfaced from the tenth.
+    // B-31 steps 1 to 4: sixteen passes that cannot prove the state, the last
+    // of them forced while the hold from the one before is in the future, then
+    // a seventeenth. Each counts, holds the next refresh with the backoff, and
+    // leaves the status fields alone; the hold is surfaced from the tenth, and
+    // the lines are warn up to it and debug after.
     bounded(async {
+        let (logs, _guard) = capture_logs();
         let (lost, e_path) = fenced_unproven().await;
         let Lost {
             rig, probe, clock, ..
         } = lost;
+        let recorded = only_line(&logs.since(0), "a received rotation is held");
+        assert_eq!(recorded.0, tracing::Level::WARN);
+        assert!(recorded.1.contains("auth_id=codex.json"), "{}", recorded.1);
         rig.manager
             .edit_unsaved("codex.json", |auth| {
+                auth.status = crate::auth::Status::Error;
                 auth.status_message = "kept".into();
+                auth.unavailable = true;
+                auth.next_retry_after = Some(chrono::Utc::now() + chrono::TimeDelta::days(30));
+                auth.last_error = Some(crate::auth::AuthError {
+                    code: "kept_code".into(),
+                    message: "kept error".into(),
+                    retryable: true,
+                    http_status: 503,
+                });
                 Ok::<_, ()>(true)
             })
             .unwrap();
         let before = status_fields(&rig);
+        assert_ne!(before.4, "None", "the error is seeded");
         assert_eq!(hold_name(&rig), None);
         let expected = [
             30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 60, 120, 240, 480, 960, 1800, 1800,
         ];
+        let mut seen = logs.len();
         for (index, want) in expected.iter().enumerate() {
             let pass = index as u32 + 1;
-            let error = state_pass(&rig).await.unwrap_err();
+            // The sixteenth is forced while the hold from the fifteenth, 960 s,
+            // is still in the future: it runs the resolution at once.
+            let error = if pass == 16 {
+                let remaining = hold_secs(&rig, &clock);
+                assert!((957..=960).contains(&remaining), "held {remaining} s");
+                rig.manager.force_refresh("codex.json").await.unwrap_err()
+            } else {
+                state_pass(&rig).await.unwrap_err()
+            };
             assert!(is_unresolved_deferral(&error), "pass {pass}: {error}");
             assert_eq!(unproven(&rig), Some(pass));
             let held = hold_secs(&rig, &clock);
@@ -806,21 +971,100 @@ async fn deferrals_back_off_and_surface_without_touching_status() {
             assert_eq!(status_fields(&rig), before, "pass {pass}");
             assert_eq!(probe.sent(), 1, "pass {pass} sent");
             assert_eq!(unresolved(&rig), Some((true, false)));
-            clock.advance(Duration::from_secs(*want as u64 + 1));
+            assert_eq!(rig.live().metadata["refresh_token"], "b-refresh");
+            let lines = logs.since(seen);
+            seen = logs.len();
+            let line = only_line(&lines, "rotation_held=");
+            let level = if pass > 10 {
+                tracing::Level::DEBUG
+            } else {
+                tracing::Level::WARN
+            };
+            assert_eq!(line.0, level, "pass {pass}: {}", line.1);
+            assert!(line.1.contains("auth_id=codex.json"), "{}", line.1);
+            assert!(line.1.contains("rotation_held=true"), "{}", line.1);
+            assert_eq!(
+                line.1.contains("refresh paused"),
+                pass == 10,
+                "pass {pass}: {}",
+                line.1
+            );
+            // The hold of pass 15 must still be in the future at the sixteenth.
+            if pass != 15 {
+                clock.advance(Duration::from_secs(*want as u64 + 1));
+            }
         }
-        assert_eq!(
-            read_file(&e_path.join("codex.json"))["refresh_token"],
-            "outer-refresh-old"
-        );
+        let e_file = read_file(&e_path.join("codex.json"));
+        assert_eq!(e_file["refresh_token"], "outer-refresh-old");
+        assert!(e_file.get("refresh_hold").is_none(), "memory only");
+        assert!(rig.live().metadata.get("refresh_hold").is_none());
         assert!(!marked_outer(&rig));
+        assert_logs_clean(&logs, &rig, &[&e_path]);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_request_result_and_the_hold_leave_each_other_alone() {
+    // B-31 step 5: a request failure sets its own message before the hold is
+    // surfaced; from the tenth pass the message is still there beside the hold,
+    // and a later success clears the message and leaves the hold.
+    bounded(async {
+        let (lost, _e_path) = fenced_unproven().await;
+        let Lost {
+            rig, probe, clock, ..
+        } = lost;
+        let live = rig.live();
+        let failure = crate::manager::CallResult {
+            auth_id: live.id.clone(),
+            provider: live.provider.clone(),
+            success: false,
+            error: Some(crate::auth::AuthError {
+                code: String::new(),
+                message: "upstream down".into(),
+                retryable: true,
+                http_status: 503,
+            }),
+            credential_version: live.credential_version,
+            registration_epoch: live.registration_epoch,
+            ..Default::default()
+        };
+        rig.manager.mark_result(&failure);
+        let message = rig.live().status_message.clone();
+        assert!(!message.is_empty(), "the failure set a message");
+        assert!(rig.live().last_error.is_some());
+        for pass in 1..=10u32 {
+            let error = state_pass(&rig).await.unwrap_err();
+            assert!(is_unresolved_deferral(&error), "pass {pass}: {error}");
+            assert_eq!(rig.live().status_message, message, "pass {pass}");
+            assert_eq!(hold_name(&rig).is_some(), pass >= 10, "pass {pass}");
+            clock.advance(Duration::from_secs(31));
+        }
+        assert_eq!(hold_name(&rig), Some("origin_unresolved"));
+        assert_eq!(probe.sent(), 1);
+        let live = rig.live();
+        let success = crate::manager::CallResult {
+            auth_id: live.id.clone(),
+            provider: live.provider.clone(),
+            success: true,
+            credential_version: live.credential_version,
+            registration_epoch: live.registration_epoch,
+            ..Default::default()
+        };
+        rig.manager.mark_result(&success);
+        assert_eq!(rig.live().status_message, "", "the success cleared it");
+        assert!(rig.live().last_error.is_none());
+        assert_eq!(hold_name(&rig), Some("origin_unresolved"), "the hold stays");
+        assert_eq!(unresolved(&rig), Some((true, false)));
     })
     .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_surfaced_deferral_state_is_left_by_a_proof() {
-    // B-31 step 5: after the hold is surfaced, a forced pass still runs the
-    // resolution at once and a `Same` proof clears the state and the hold.
+    // B-31 step 6, by a proof: after the hold is surfaced, a forced pass still
+    // runs the resolution at once and a `Same` proof clears the state and the
+    // hold.
     bounded(async {
         let (lost, e_path) = fenced_unproven().await;
         let Lost {
@@ -844,6 +1088,41 @@ async fn a_surfaced_deferral_state_is_left_by_a_proof() {
         assert_eq!(hold_name(&rig), None);
         assert_eq!(probe.sent(), 2);
         assert_eq!(probe.sent_refresh(1), "b-refresh");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_surfaced_deferral_state_is_left_by_a_token_command() {
+    // B-31 step 6, by a token command: B-29 step 4's sequence after the hold is
+    // surfaced clears the state and the hold, and live holds the login's chain.
+    bounded(async {
+        let (lost, e_path) = fenced_unproven().await;
+        let Lost {
+            rig, probe, clock, ..
+        } = lost;
+        for _ in 0..10 {
+            state_pass(&rig).await.unwrap_err();
+            clock.advance(Duration::from_secs(31));
+        }
+        assert_eq!(hold_name(&rig), Some("origin_unresolved"));
+        let command = rig
+            .manager
+            .capture_token_command("codex.json", partition(true))
+            .unwrap();
+        let e_file = e_path.join("codex.json");
+        std::fs::write(&e_file, with_outer(read_file(&e_file), "n")).unwrap();
+        let mut login = fixture();
+        login.metadata["access_token"] = json!("n-access");
+        login.metadata["refresh_token"] = json!("n-refresh");
+        rig.manager
+            .adopt_completed_token_command(&login, command)
+            .unwrap();
+        assert_eq!(unresolved(&rig), None);
+        assert_eq!(hold_name(&rig), None);
+        assert_eq!(rig.live().metadata["refresh_token"], "n-refresh");
+        assert!(!marked_outer(&rig));
+        assert_eq!(probe.sent(), 1);
     })
     .await;
 }
@@ -911,10 +1190,12 @@ async fn a_saved_edit_does_not_write_the_protected_partition() {
     bounded(async {
         let (lost, e_path) = fenced_unproven().await;
         let Lost { rig, probe, .. } = lost;
-        let _ = rig.manager.edit("codex.json", |auth| {
-            auth.metadata.insert("note".into(), json!("saved"));
-            Ok::<_, ()>(true)
-        });
+        rig.manager
+            .edit("codex.json", |auth| {
+                auth.metadata.insert("note".into(), json!("saved"));
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
         let file = read_file(&e_path.join("codex.json"));
         assert_eq!(file["note"], "saved", "the setting is written");
         assert_eq!(file["refresh_token"], "outer-refresh-old", "B is not");
@@ -922,6 +1203,50 @@ async fn a_saved_edit_does_not_write_the_protected_partition() {
         assert_eq!(rig.live().metadata["refresh_token"], "b-refresh");
         assert_eq!(unresolved(&rig), Some((true, false)));
         assert!(!marked_outer(&rig));
+        assert_eq!(probe.sent(), 1);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_saved_edit_read_back_keeps_the_protected_partition_by_the_state() {
+    // B-29 step 2, the read-back: a save is read back only when it carries an
+    // unwritten rotation, so B stays pending here (every lease commit fails).
+    // The mark is taken off so that only the state protects B, as when the
+    // mark has been cleared by a verified write of the outer partition while
+    // the state remains. The read-back of the file, which holds A, must not
+    // take A over the live B.
+    bounded(async {
+        let Lost {
+            rig, probe, made, ..
+        } = pending_unproven().await;
+        let q = sibling_dir(&rig);
+        chain_a_in(&rig, q.path());
+        rig.store.files.set_base_dir(q.path());
+        let q_file = q.path().join("codex.json");
+        lock(&made).push(q);
+        rig.manager
+            .lock()
+            .auths
+            .get_mut("codex.json")
+            .unwrap()
+            .undurable
+            .outer = false;
+        assert!(unwritten_pending(&rig) > 0, "B waits to be saved");
+        rig.manager
+            .edit("codex.json", |auth| {
+                auth.metadata.insert("note".into(), json!("saved"));
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        let file = read_file(&q_file);
+        assert_eq!(file["note"], "saved", "the setting is written");
+        assert_eq!(file["refresh_token"], "outer-refresh-old", "B is not");
+        let live = rig.live();
+        assert_eq!(live.metadata["refresh_token"], "b-refresh", "live is B");
+        assert_eq!(live.metadata["access_token"], "b-access");
+        assert_eq!(live.metadata["note"], "saved");
+        assert_eq!(unresolved(&rig), Some((true, false)));
         assert_eq!(probe.sent(), 1);
     })
     .await;
@@ -1009,20 +1334,30 @@ async fn a_pending_rotation_waits_for_the_resolution_to_land() {
         assert_eq!(probe.sent(), 1);
         assert_eq!(unresolved(&rig), Some((true, false)));
         assert_eq!(rig.live().metadata["refresh_token"], "b-refresh");
-        assert!(!rig.live().codex_pending_refresh.is_empty(), "B is pending");
+        assert!(unwritten_pending(&rig) > 0, "B is pending");
         let q = sibling_dir(&rig);
         chain_a_in(&rig, q.path());
         rig.store.files.set_base_dir(q.path());
         let q_file = q.path().join("codex.json");
         lock(&made).push(q);
-        let _ = rig.manager.edit("codex.json", |auth| {
-            auth.metadata.insert("note".into(), json!("saved"));
-            Ok::<_, ()>(true)
-        });
+        assert!(marked_outer(&rig), "B is marked while it is pending");
+        rig.manager
+            .edit("codex.json", |auth| {
+                auth.metadata.insert("note".into(), json!("saved"));
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
         let file = read_file(&q_file);
+        assert_eq!(file["note"], "saved", "the setting is written");
         assert_eq!(
             file["refresh_token"], "outer-refresh-old",
             "B is not written"
+        );
+        assert_eq!(owed_reason(&rig), None, "the save was written, not owed");
+        assert!(marked_outer(&rig), "the edit did not clear the mark");
+        assert!(
+            unwritten_pending(&rig) > 0,
+            "B is still an unwritten pending operation"
         );
         assert_eq!(unresolved(&rig), Some((true, false)));
         // The commit works again; the resolution finds a different file.
@@ -1033,6 +1368,14 @@ async fn a_pending_rotation_waits_for_the_resolution_to_land() {
         assert_eq!(probe.sent(), 1, "nothing more was sent");
         assert_eq!(read_file(&q_file)["refresh_token"], "b-refresh", "B landed");
         assert!(!marked_outer(&rig));
+        // The landed commit is what writes the operation: had the edit written
+        // B, this would have held before the resolution. (A written operation
+        // stays on the record until a later edit prunes it.)
+        assert_eq!(
+            unwritten_pending(&rig),
+            0,
+            "no unwritten pending operation is left"
+        );
         // A peer's later chain is adopted and sent from.
         std::fs::write(&q_file, with_outer(read_file(&q_file), "c")).unwrap();
         let probe = probe.rotating("d");
@@ -1065,7 +1408,11 @@ async fn a_saved_edit_to_a_missing_file_is_owed_and_creates_nothing() {
     // record back at D lets a pass settle it.
     bounded(async {
         let Lost {
-            rig, clock, made, ..
+            rig,
+            probe,
+            clock,
+            made,
+            ..
         } = pending_unproven().await;
         let q = sibling_dir(&rig);
         rig.store.files.set_base_dir(q.path());
@@ -1075,13 +1422,32 @@ async fn a_saved_edit_to_a_missing_file_is_owed_and_creates_nothing() {
         assert_eq!(owed_reason(&rig).as_deref(), Some("MissingFile"));
         assert!(!q_file.exists(), "no file was created");
         assert_eq!(unresolved(&rig), Some((true, false)));
+        // The scheduler's pass cannot settle it while the file is missing: it
+        // sends nothing and the save stays owed.
+        clock.advance(Duration::from_secs(60));
+        let error = state_pass(&rig).await.unwrap_err();
+        assert!(
+            error.to_string().contains("credential file is missing"),
+            "{error}"
+        );
+        assert_eq!(probe.sent(), 1, "the pass sent nothing");
+        assert_eq!(owed_reason(&rig).as_deref(), Some("MissingFile"));
+        assert!(!q_file.exists(), "still no file");
+        // The record names D again, which holds A: the pass proves it, lands
+        // B and the owed setting there, and ends the state.
         rig.store.fail_lease_commit.store(0, Ordering::SeqCst);
         rig.store.files.set_base_dir(rig.dir.path());
-        std::fs::write(rig.path(), with_outer(read_file(&rig.path()), "outer-old")).ok();
         chain_a_in(&rig, rig.dir.path());
-        clock.advance(Duration::from_secs(60));
+        clock.advance(Duration::from_secs(3600));
         state_pass(&rig).await.unwrap();
-        assert_eq!(unresolved(&rig), None, "the pass settled the state");
+        let file = read_file(&rig.path());
+        assert_eq!(file["refresh_token"], "b-refresh", "B landed");
+        assert_eq!(file["note"], "saved", "the owed setting landed");
+        assert_eq!(owed_reason(&rig), None, "the owed save is settled");
+        assert_eq!(unresolved(&rig), None, "the state ended");
+        assert!(!marked_outer(&rig), "the mark ended");
+        assert_eq!(probe.sent(), 1, "the executor was not called again");
+        assert!(!q_file.exists(), "the missing file was never created");
     })
     .await;
 }
@@ -1091,7 +1457,13 @@ async fn a_saved_edit_to_a_file_without_the_partition_is_owed_and_changes_nothin
     // B-30 (c): the file lacks the withheld partition, so the save is owed and
     // the file is exactly as it was.
     bounded(async {
-        let Lost { rig, made, .. } = pending_unproven().await;
+        let Lost {
+            rig,
+            probe,
+            clock,
+            made,
+            ..
+        } = pending_unproven().await;
         let q = sibling_dir(&rig);
         let q_file = q.path().join("codex.json");
         let mut bare = read_file(&rig.path());
@@ -1106,32 +1478,49 @@ async fn a_saved_edit_to_a_file_without_the_partition_is_owed_and_changes_nothin
         assert_eq!(owed_reason(&rig).as_deref(), Some("MissingPartition"));
         assert_eq!(std::fs::read(&q_file).unwrap(), bytes, "byte for byte");
         assert_eq!(unresolved(&rig), Some((true, false)));
+        // The record names D again, which holds A: the pass proves it and lands
+        // B and the owed setting there, and the other file is never touched.
+        rig.store.fail_lease_commit.store(0, Ordering::SeqCst);
+        rig.store.files.set_base_dir(rig.dir.path());
+        chain_a_in(&rig, rig.dir.path());
+        clock.advance(Duration::from_secs(60));
+        state_pass(&rig).await.unwrap();
+        let file = read_file(&rig.path());
+        assert_eq!(file["refresh_token"], "b-refresh", "B landed");
+        assert_eq!(file["note"], "saved", "the owed setting landed");
+        assert_eq!(owed_reason(&rig), None, "the owed save is settled");
+        assert_eq!(unresolved(&rig), None, "the state ended");
+        assert!(!marked_outer(&rig), "the mark ended");
+        assert_eq!(probe.sent(), 1, "the executor was not called again");
+        assert_eq!(std::fs::read(&q_file).unwrap(), bytes, "still untouched");
     })
     .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_saved_edit_to_a_file_without_markers_leaves_its_chain_alone() {
-    // B-30 (d): the file has no OAuth markers, so the save is written and the
-    // withheld keys are untouched; with no state the same save would add the
-    // live chain.
+    // B-30 (d): the file has no OAuth markers, so the save is written and every
+    // key the file had before, the outer chain's included, is as it was; with
+    // no state the same save would add the live chain.
     bounded(async {
         let Lost { rig, made, .. } = pending_unproven().await;
-        // Holds one identity key, so the save is not deferred, but not the
-        // refresh chain the state withholds.
-        let plain = json!({ "type": "codex", "id_token": "q-id" });
+        // Holds an access token and an account id, so the save is not deferred,
+        // but not the refresh token or the refresh time.
+        let plain = json!({ "type": "codex", "access_token": "a-token", "account_id": "acct" });
         let q = sibling_dir(&rig);
         let q_file = q.path().join("codex.json");
         std::fs::write(&q_file, serde_json::to_vec(&plain).unwrap()).unwrap();
         rig.store.files.set_base_dir(q.path());
         lock(&made).push(q);
+        let before = read_file(&q_file);
         save_note(&rig);
         let file = read_file(&q_file);
         assert_eq!(file["note"], "saved", "the setting is written");
-        assert_eq!(file["id_token"], "q-id", "its own key is kept");
-        assert!(file.get("refresh_token").is_none(), "no chain was added");
-        assert!(file.get("access_token").is_none());
         assert_eq!(owed_reason(&rig), None);
+        for key in OUTER_KEYS {
+            assert_eq!(file.get(key), before.get(key), "{key} is as it was");
+        }
+        assert!(file.get("refresh_token").is_none(), "no chain was added");
 
         let control = super::siwc_persistence::rig();
         let other = sibling_dir(&control);
@@ -1148,10 +1537,13 @@ async fn a_saved_edit_to_a_file_without_markers_leaves_its_chain_alone() {
     .await;
 }
 
-/// B-33's start: a record whose pass rotated the SIWC partition only and could
-/// not prove where it landed, so the state holds the SIWC partition.
-async fn siwc_state_record() -> (Rig, Made) {
+/// B-33's start: a record whose pass rotated the SIWC partition only. Every
+/// lease commit of it fails, so the rotation stays pending and marked, and the
+/// publication cannot prove where the record's file is, so the state holds the
+/// SIWC partition beside the mark.
+async fn siwc_state_record() -> (Rig, crate::gate::ActiveGate, Made) {
     let seeded = seeded();
+    let gate = seeded.gate.clone();
     let store = observe(seeded.files.clone(), false);
     let models = Arc::new(FakeModels::default());
     models.register("codex.json", &["gpt-5"]);
@@ -1164,6 +1556,10 @@ async fn siwc_state_record() -> (Rig, Made) {
         manager,
         models,
     };
+    rig.store
+        .fail_lease_commit
+        .store(u32::MAX, Ordering::SeqCst);
+    *lock(&rig.manager.shared.lease_retry_window) = Some(Duration::from_millis(1));
     let entered = Arc::new(AtomicBool::new(false));
     let seen = entered.clone();
     let executor = FakeExecutor::new("codex");
@@ -1191,44 +1587,88 @@ async fn siwc_state_record() -> (Rig, Made) {
             rebind();
         }
     });
-    rig.manager.force_refresh("codex.json").await.unwrap();
+    let _ = rig.manager.force_refresh("codex.json").await;
     disarm(&rig);
-    (rig, made)
+    (rig, gate, made)
+}
+
+fn siwc_baselines(rig: &Rig) -> usize {
+    rig.manager.lock().auths["codex.json"]
+        .undurable_baselines
+        .siwc
+        .len()
+}
+
+fn marked_siwc(rig: &Rig) -> bool {
+    rig.manager.lock().auths["codex.json"].undurable.siwc
+}
+
+/// The file the record names after a 401 adopts it: the record's own file with
+/// the outer chain replaced, as OAuth or as an API key.
+fn write_adoptable_file(rig: &Rig, name: &str, api_key: bool) {
+    let mut file = read_file(&rig.path());
+    file["use_siwc"] = json!(false);
+    if api_key {
+        file["auth_kind"] = json!("apikey");
+    }
+    std::fs::write(rig.path(), with_outer(file, name)).unwrap();
+}
+
+async fn adopt_after_rejection(rig: &Rig) -> Option<Arc<Auth>> {
+    let failed = rig.live();
+    rig.manager
+        .try_refresh_after_unauthorized(
+            &failed,
+            &crate::exec::ExecError::upstream(401, "synthetic rejection"),
+            false,
+        )
+        .await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_record_that_becomes_ineligible_drops_the_state_and_keeps_its_marks() {
     // B-33: an ineligible record is never leased, so the state it carries could
-    // never resolve; it goes, and the marks beside it stay. An edit that leaves
-    // the record eligible keeps the state.
+    // never resolve; it goes, and the marks beside it stay. Adoption of a file
+    // that keeps the record eligible keeps the state.
     bounded(async {
-        let (rig, _made) = siwc_state_record().await;
+        let (rig, gate, _made) = siwc_state_record().await;
         assert_eq!(unresolved(&rig), Some((false, true)), "SIWC only");
-        rig.manager
-            .lock()
-            .auths
-            .get_mut("codex.json")
-            .unwrap()
-            .undurable
-            .siwc = true;
+        assert!(marked_siwc(&rig), "the rotation is marked");
+        assert!(!marked_outer(&rig));
+        let baselines = siwc_baselines(&rig);
+        assert!(baselines > 0, "the mark has baselines");
+        // The record is a config entry on the outer chain. Its metadata still
+        // says OAuth, so these edits leave it eligible; only the file read by
+        // the adoption below makes it an API key.
         rig.manager
             .edit_unsaved("codex.json", |auth| {
-                auth.metadata.insert("note".into(), json!("still eligible"));
+                auth.metadata.insert("use_siwc".into(), json!(false));
+                auth.attributes.remove("source_backend");
+                auth.attributes.insert("source".into(), "config:rig".into());
                 Ok::<_, ()>(true)
             })
             .unwrap();
+        assert!(!rig.manager.permanently_ineligible(&rig.live()));
+        assert_eq!(unresolved(&rig), Some((false, true)), "the edit keeps it");
+        rig.store.files.set_base_dir(rig.dir.path());
+        gate.close(gate.epoch()).await.unwrap();
+
+        // Control: the file is still OAuth, so the adoption keeps the state.
+        write_adoptable_file(&rig, "peer", false);
+        let adopted = adopt_after_rejection(&rig).await.expect("adopted");
+        assert_eq!(adopted.metadata["access_token"], "peer-access");
+        assert!(!rig.manager.permanently_ineligible(&rig.live()));
         assert_eq!(unresolved(&rig), Some((false, true)), "control keeps it");
-        rig.manager
-            .edit_unsaved("codex.json", |auth| {
-                auth.attributes.insert("runtime_only".into(), "true".into());
-                Ok::<_, ()>(true)
-            })
-            .unwrap();
+
+        // The file is now an API key: the adoption makes the record ineligible.
+        write_adoptable_file(&rig, "api", true);
+        let adopted = adopt_after_rejection(&rig).await.expect("adopted");
+        assert_eq!(adopted.metadata["access_token"], "api-access");
+        assert!(rig.manager.permanently_ineligible(&rig.live()));
         assert_eq!(unresolved(&rig), None, "the state is dropped");
-        assert!(
-            rig.manager.lock().auths["codex.json"].undurable.siwc,
-            "the mark stays"
-        );
+        assert!(marked_siwc(&rig), "the mark stays");
+        assert_eq!(siwc_baselines(&rig), baselines, "so do its baselines");
+        assert!(!marked_outer(&rig));
         assert_eq!(hold_name(&rig), None, "no hold is left");
     })
     .await;
