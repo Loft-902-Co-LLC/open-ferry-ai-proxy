@@ -49,19 +49,19 @@ const BLOCKED: Duration = Duration::from_secs(3600);
 
 /// One refresh loop driven by hand (upstream's `authAutoRefreshLoop` as the
 /// tests use it).
-struct TestLoop {
-    shared: Arc<LoopShared>,
-    jobs: mpsc::Sender<RefreshJob>,
-    queue: Arc<tokio::sync::Mutex<mpsc::Receiver<RefreshJob>>>,
-    stop_tx: watch::Sender<bool>,
-    stop: watch::Receiver<bool>,
+pub(super) struct TestLoop {
+    pub(super) shared: Arc<LoopShared>,
+    pub(super) jobs: mpsc::Sender<RefreshJob>,
+    pub(super) queue: Arc<tokio::sync::Mutex<mpsc::Receiver<RefreshJob>>>,
+    pub(super) stop_tx: watch::Sender<bool>,
+    pub(super) stop: watch::Receiver<bool>,
 }
 
 impl TestLoop {
     /// A loop, installed as the manager's so reschedules reach it
     /// (upstream's `newAuthAutoRefreshLoop` then `manager.refreshLoop =
     /// loop`).
-    fn install(manager: &Manager) -> Self {
+    pub(super) fn install(manager: &Manager) -> Self {
         let shared = Arc::new(LoopShared::new(INTERVAL));
         let (jobs, queue) = mpsc::channel(JOB_BUFFER);
         let (stop_tx, stop) = watch::channel(false);
@@ -81,31 +81,31 @@ impl TestLoop {
         }
     }
 
-    fn rebuild(&self, manager: &Manager, now: Timestamp) {
+    pub(super) fn rebuild(&self, manager: &Manager, now: Timestamp) {
         manager.rebuild_refresh_queue(&self.shared, now);
     }
 
-    fn apply_dirty(&self, manager: &Manager, now: Timestamp) {
+    pub(super) fn apply_dirty(&self, manager: &Manager, now: Timestamp) {
         manager.apply_dirty(&self.shared, now);
     }
 
-    fn handle_due(&self, manager: &Manager, now: Timestamp) {
+    pub(super) fn handle_due(&self, manager: &Manager, now: Timestamp) {
         manager.handle_due(&self.shared, &self.jobs, &self.stop, now);
     }
 
     /// How many jobs wait in the queue (upstream's `len(loop.jobs)`).
-    fn queued(&self) -> usize {
+    pub(super) fn queued(&self) -> usize {
         self.jobs.max_capacity() - self.jobs.capacity()
     }
 
     /// Takes every waiting job off the queue without running it.
-    async fn drain(&self) {
+    pub(super) async fn drain(&self) {
         let mut queue = self.queue.lock().await;
         while queue.try_recv().is_ok() {}
     }
 
     /// Starts a worker (upstream's `go loop.worker(ctx)`).
-    fn worker(&self, manager: &Manager) -> JoinHandle<()> {
+    pub(super) fn worker(&self, manager: &Manager) -> JoinHandle<()> {
         tokio::spawn(run_worker(
             Arc::downgrade(&manager.shared),
             self.queue.clone(),
@@ -114,13 +114,13 @@ impl TestLoop {
     }
 
     /// Stops the loop and its workers (upstream's `cancelCtx()`).
-    fn cancel(&self) {
+    pub(super) fn cancel(&self) {
         self.stop_tx.send_replace(true);
     }
 
     /// Runs the loop until it stops (upstream's `loop.run(ctx)`), with two
     /// workers.
-    async fn run(&self, manager: &Manager) {
+    pub(super) async fn run(&self, manager: &Manager) {
         let _workers = [self.worker(manager), self.worker(manager)];
         run_loop(
             Arc::downgrade(&manager.shared),
