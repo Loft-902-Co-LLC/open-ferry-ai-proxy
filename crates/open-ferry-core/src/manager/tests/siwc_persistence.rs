@@ -9817,10 +9817,10 @@ async fn a_deferred_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_
     // the newer pass's ordinary save queues behind it while the pass holds the
     // refresh lock. Released, the edit's guard therefore refuses with
     // `RefreshInFlight` before any patch is applied, and the change is owed
-    // and flushed by the pass. This does not reach the replay layers (the
-    // delayed case does, see the next test); it pins that the consumed
-    // operation is written when the edit is released and that the deferral
-    // loses nothing. Mutations guarded: the pass never marks the held
+    // and flushed by the pass. Neither this case nor the delayed one (the
+    // next test) reaches the store's replay checks; this one pins that the
+    // consumed operation is written when the edit is released and that the
+    // deferral loses nothing. Mutations guarded: the pass never marks the held
     // snapshot's operation written, or the deferred save is never flushed.
     bounded(async {
         let rig = rig();
@@ -9937,11 +9937,12 @@ async fn a_delayed_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_l
     // snapshot exists and before the persist locks, the save lock and the
     // guard. The newer leased refresh then runs to its end: it sends B, commits
     // and publishes C and saves. Released, the edit carries a stale snapshot
-    // (op A -> B, token B) older than the pass's write, so `persist_inner`
-    // skips it on generation order before the store's guard runs (no guarded
-    // entry is recorded); the written flag and the baseline guard stay behind
-    // that. Mutations guarded: the pass never marks the held operation written,
-    // or the stale snapshot writes B over C or leaves the operation owed.
+    // (op A -> B, token B) older than the pass's write. `persist_inner` drops
+    // its written operation, then skips it on generation order, before the
+    // store's guard and patch application run (no guarded entry is recorded),
+    // so the store's replay checks are not reached. Mutations guarded: the
+    // pass never marks the held operation written, or the stale snapshot
+    // writes B over C or leaves the operation owed.
     // Single-layer mutations of generation order, the written filter, the
     // baseline guard or the overlay each survive this test; only the combined
     // removal of the written filter and the baseline guard breaks it, and then
