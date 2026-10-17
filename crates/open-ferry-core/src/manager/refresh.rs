@@ -38,7 +38,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::StreamExt;
@@ -49,28 +49,33 @@ use super::classify::{
     is_invalid_grant_error, is_request_scoped_error, is_unauthorized_error,
     refresh_error_from_error,
 };
-use super::cooldown::{add, reset_model_state, update_aggregated_availability};
+use super::cooldown::{
+    add, is_credential_quota_active, reset_model_state, update_aggregated_availability,
+};
 use super::credential::{
-    KIND_API_KEY, access_token, auth_kind, has_refresh_credential, is_zero, last_refresh_timestamp,
-    preferred_interval, refresh_token,
+    KIND_API_KEY, access_token, auth_kind, credentials_changed, has_refresh_credential, is_zero,
+    last_refresh_timestamp, preferred_interval, refresh_token,
 };
 use super::lifecycle::{
-    LeasedTail, ORIGIN_CHECK_ATTEMPTS, OriginCheck, OriginMoved, clear_verified_partitions,
-    mark_undurable_except, pending_for_edit,
+    LeasedDisposition, LeasedTail, ORIGIN_CHECK_ATTEMPTS, OriginCheck, OriginMoved,
+    clear_verified_partitions, mark_undurable, mark_undurable_except, pending_for_edit,
 };
-use super::merge::normalize_credential_metadata;
+use super::merge::{ResponseCredentials, merge_refreshed_auth_with, normalize_credential_metadata};
 use super::text::{equal_fold, go_lower};
 use super::{
     Entry, Manager, ManagerError, MarkCause, Shared, State, UndurableBaselines,
     UndurablePartitions, UnresolvedOrigin, lock,
 };
 use crate::auth::classification::ATTRIBUTE_PATH;
-use crate::auth::codex_refresh::{CredentialRefreshPatch, OUTER_KEYS, SIWC_KEYS, same_version};
+use crate::auth::codex_refresh::{
+    CodexPartitions, CredentialRefreshPatch, OUTER_KEYS, SIWC_KEYS, is_codex_auth, same_version,
+};
 use crate::auth::{
-    Auth, AuthError, CodexCredentialPartition, CodexOrigin, CodexPersisted, OriginProof, Status,
-    Timestamp,
+    Auth, AuthError, CodexCredentialPartition, CodexLeaseToken, CodexOrigin, CodexPersisted,
+    OriginProof, Status, Timestamp,
 };
 use crate::exec::{ErrorKind, ExecError};
+use crate::executor::ProviderExecutor;
 use crate::gate::{GateState, NotActive};
 use serde_json::{Map, Value};
 
@@ -1397,22 +1402,49 @@ impl Manager {
 
         // A waiter that got the lock after the switch began declines before
         // it calls the provider.
-        let state = self.gate().state();
-        if state != GateState::Open {
-            return Err(ManagerError::NotActive(NotActive { state }));
-        }
-        let outcome = executor
-            .refresh_with_options(auth.clone(), crate::executor::RefreshOptions::forced(force))
-            .await
-            .map_err(|mut error| {
-                let mut secrets = crate::observe::redact::Secrets::new();
-                secrets.add_auth(&auth);
-                error.message = secrets.text(error.message, crate::observe::redact::Policy::Disk);
-                if let Some(cause) = error.cause.take() {
-                    error.cause = Some(secrets.text(cause, crate::observe::redact::Policy::Disk));
+        let sent = match self
+            .send_refresh(
+                id,
+                base_epoch,
+                &executor,
+                &auth,
+                crate::executor::RefreshOptions::forced(force),
+            )
+            .await?
+        {
+            SendOutcome::Sent(sent) => *sent,
+            SendOutcome::Deferred(kind) => {
+                return Err(self.defer_refresh(
+                    id,
+                    base_epoch,
+                    kind,
+                    io::Error::other("refresh deferred before the send"),
+                ));
+            }
+            SendOutcome::Superseded(live) => {
+                // A token command replaced a refresh token since the
+                // snapshot, so the snapshot's tokens must not be sent. With
+                // a failed token, the live credential answers the caller
+                // only when its access token is a different, non-empty one.
+                if failed_token.is_empty() {
+                    return Ok(live);
                 }
-                error
-            });
+                let current = access_token(&live);
+                if !current.is_empty() && current != failed_token {
+                    return Ok(live);
+                }
+                return Err(ManagerError::Other("auth changed before refresh".into()));
+            }
+        };
+        let outcome = sent.map_err(|mut error| {
+            let mut secrets = crate::observe::redact::Secrets::new();
+            secrets.add_auth(&auth);
+            error.message = secrets.text(error.message, crate::observe::redact::Policy::Disk);
+            if let Some(cause) = error.cause.take() {
+                error.cause = Some(secrets.text(cause, crate::observe::redact::Policy::Disk));
+            }
+            error
+        });
         let now = self.now();
         let mut updated = match outcome {
             Ok(updated) => updated,
@@ -1930,6 +1962,118 @@ enum Deferral {
     OriginUnresolved,
     LandingUnconfirmed,
     ReadBackUnsettled,
+}
+
+/// How many times the rotation commit is tried before it confirms the file.
+const LEASE_COMMIT_ATTEMPTS: u32 = 6;
+/// The wait before each retry of the rotation commit.
+const LEASE_COMMIT_BACKOFF: [Duration; 5] = [
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+    Duration::from_millis(1600),
+    Duration::from_millis(3200),
+];
+/// No retry of the rotation commit starts after this long from the first
+/// failure.
+const LEASE_COMMIT_RETRY_WINDOW: Duration = Duration::from_secs(10);
+
+/// Whether a retry may start: there is no deadline yet, or it has not passed.
+fn may_start_retry(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_none_or(|deadline| now < deadline)
+}
+
+/// How the rotation commit ended.
+enum Outcome {
+    Committed(Box<CodexPersisted>),
+    /// Every attempt failed. `confirmed` is the requested partitions a
+    /// confirmation read found landed; `read` is whether that read worked, and
+    /// `map` the file's content when it did.
+    Exhausted {
+        err: io::Error,
+        confirmed: CodexPartitions,
+        read: bool,
+        map: Option<Map<String, Value>>,
+    },
+    /// The blocking task failed; what is on disk is unknown.
+    LeaseLost,
+    /// Admission refused the commit by policy; nothing was written.
+    PolicyRefused,
+}
+
+/// What publishing a rotation did.
+enum Publication {
+    Published {
+        snapshot: Arc<Auth>,
+        generation: u64,
+        tail: Box<LeasedTail>,
+    },
+    /// The registration changed: the live record is untouched.
+    Refused,
+}
+
+/// The decision of the send fence, made under one hold of the state lock.
+enum SendFence {
+    Send,
+    /// The entry is gone or at another registration epoch.
+    Changed,
+    Defer(Deferral),
+    /// A token command replaced a refresh token the pass would send; the live
+    /// record is handed back.
+    Superseded(Arc<Auth>),
+}
+
+/// What [`Manager::send_refresh`] did.
+enum SendOutcome {
+    Sent(Box<Result<Auth, ExecError>>),
+    Deferred(Deferral),
+    Superseded(Arc<Auth>),
+}
+
+/// The partitions of `auth` a refresh would send: those holding a refresh
+/// token (SIWC also needs its client id).
+fn refreshable_partitions(auth: &Auth) -> UndurablePartitions {
+    UndurablePartitions {
+        outer: !outer_refresh_token(auth).is_empty(),
+        siwc: !auth.siwc_token_field("refresh_token").is_empty()
+            && !auth.siwc_token_field("client_id").is_empty(),
+    }
+}
+
+/// The outer partition's refresh token, trimmed; empty when absent.
+fn outer_refresh_token(auth: &Auth) -> &str {
+    auth.metadata_str("refresh_token")
+        .map_or("", |token| token.trim())
+}
+
+/// Settles the availability a refused rotation leaves on `merged`, the merge
+/// of the response with `current`. The refreshed credential is not published,
+/// but a 401 the provider's refresh disproves is cleared and a quota hold that
+/// `current` carries is kept.
+fn settle_refused_availability(current: &Auth, merged: &mut Auth, now: Timestamp) {
+    if is_disabled(current) || is_disabled(merged) {
+        return;
+    }
+    let unauthorized = has_unauthorized_auth_failure(current)
+        || merged
+            .last_error
+            .as_ref()
+            .is_some_and(|error| is_unauthorized_error(ErrView::Auth(error)));
+    if unauthorized {
+        merged.unavailable = false;
+        merged.last_error = None;
+        merged.status_message.clear();
+        merged.status = Status::Active;
+    }
+    clear_unauthorized_model_states(merged, now);
+    if is_credential_quota_active(&current.quota, now) {
+        merged.unavailable = current.unavailable;
+        merged.next_retry_after = current.next_retry_after;
+        merged.quota = current.quota.clone();
+        if merged.status == Status::Active {
+            merged.status = current.status;
+        }
+    }
 }
 
 /// When to look again: `max` from `now`, but no later than a future `expiry`,
@@ -2669,6 +2813,425 @@ impl Manager {
         }
         ManagerError::Store(error)
     }
+
+    /// The one place a refresh is sent. Right before the call, one hold of the
+    /// state lock decides whether the pass may send (see
+    /// [`fence_send_locked`](Self::fence_send_locked)). The result is handed
+    /// back as it is; the caller redacts it.
+    async fn send_refresh(
+        &self,
+        id: &str,
+        base_epoch: u64,
+        executor: &Arc<dyn ProviderExecutor>,
+        auth: &Arc<Auth>,
+        options: crate::executor::RefreshOptions,
+    ) -> Result<SendOutcome, ManagerError> {
+        // A waiter that got the lock after the switch began declines before
+        // it calls the provider.
+        let state = self.gate().state();
+        if state != GateState::Open {
+            return Err(ManagerError::NotActive(NotActive { state }));
+        }
+        #[cfg(test)]
+        {
+            let pause = lock(&self.shared.send_fence_pause).clone();
+            if let Some(pause) = pause {
+                pause.0.notify_one();
+                pause.1.notified().await;
+            }
+        }
+        match self.locked(|s| self.fence_send_locked(s, id, base_epoch, auth)) {
+            SendFence::Send => {}
+            SendFence::Changed => {
+                return Err(ManagerError::Other(
+                    "auth registration changed before refresh".into(),
+                ));
+            }
+            SendFence::Defer(kind) => return Ok(SendOutcome::Deferred(kind)),
+            SendFence::Superseded(live) => return Ok(SendOutcome::Superseded(live)),
+        }
+        Ok(SendOutcome::Sent(Box::new(
+            executor
+                .refresh_with_options(Arc::clone(auth), options)
+                .await,
+        )))
+    }
+
+    /// Whether the pass whose snapshot is `auth` may send now. A refresh token
+    /// is spent once sent, so nothing is sent that the live entry no longer
+    /// holds, or that a mark says may already have been spent. Decided on the
+    /// partitions the pass would send.
+    fn fence_send_locked(
+        &self,
+        state: &State,
+        id: &str,
+        base_epoch: u64,
+        auth: &Auth,
+    ) -> SendFence {
+        if !is_codex_auth(auth) {
+            return SendFence::Send;
+        }
+        let Some(entry) = state
+            .auths
+            .get(id)
+            .filter(|entry| entry.auth.registration_epoch == base_epoch)
+        else {
+            return SendFence::Changed;
+        };
+        let to_send = refreshable_partitions(auth);
+        let hit = |held: UndurablePartitions| {
+            (held.outer && to_send.outer) || (held.siwc && to_send.siwc)
+        };
+        if hit(entry.landing_unconfirmed) {
+            return SendFence::Defer(Deferral::LandingUnconfirmed);
+        }
+        if hit(entry.read_back_partitions()) {
+            return SendFence::Defer(Deferral::ReadBackUnsettled);
+        }
+        if hit(entry.unresolved_partitions()) {
+            return SendFence::Defer(Deferral::OriginUnresolved);
+        }
+        let live = &entry.auth;
+        if (to_send.outer && outer_refresh_token(auth) != outer_refresh_token(live))
+            || (to_send.siwc
+                && auth.siwc_token_field("refresh_token") != live.siwc_token_field("refresh_token"))
+        {
+            return SendFence::Superseded(Arc::clone(live));
+        }
+        SendFence::Send
+    }
+
+    /// Commits the pass's final rotation to the leased file. Each attempt is
+    /// admitted again first, since the live record can move between them. A
+    /// failed attempt is retried after a backoff while the retry window is
+    /// open; when the attempts or the window run out, one read of the file
+    /// says which partitions landed. The token comes back with the outcome
+    /// unless the blocking task was lost, which leaves `None`.
+    async fn commit_rotation_with_retry(
+        &self,
+        id: &str,
+        prep: &LeasePrep,
+        token: CodexLeaseToken,
+        final_patch: &CredentialRefreshPatch,
+    ) -> (Option<CodexLeaseToken>, Outcome) {
+        let Some(store) = self.shared.store.clone() else {
+            return (None, Outcome::LeaseLost);
+        };
+        #[cfg(test)]
+        let window = lock(&self.shared.lease_retry_window).unwrap_or(LEASE_COMMIT_RETRY_WINDOW);
+        #[cfg(not(test))]
+        let window = LEASE_COMMIT_RETRY_WINDOW;
+        let mut auth_no_pending = prep.live.clone();
+        auth_no_pending.codex_pending_refresh.clear();
+        auth_no_pending.codex_persist_intent = Default::default();
+
+        let mut token = token;
+        let mut deadline: Option<Instant> = None;
+        let mut last: Option<io::Error> = None;
+        let mut attempt = 0usize;
+        loop {
+            if let Some(error) = last.take()
+                && !may_start_retry(deadline, Instant::now())
+            {
+                return confirm_commit(store, token, final_patch, error).await;
+            }
+            let admission = self
+                .leased_origin_check(id, token.origin(), |s, check| {
+                    self.admit_leased_locked(
+                        s,
+                        id,
+                        prep,
+                        token.origin(),
+                        check,
+                        std::slice::from_ref(final_patch),
+                    )
+                })
+                .await;
+            match admission {
+                LeaseAdmission::PolicyRefused => return (Some(token), Outcome::PolicyRefused),
+                // A moved or lost record does not stop the commit: the token
+                // is a lease on the file the rotation was read from, and the
+                // rotation is spent either way.
+                LeaseAdmission::Admitted
+                | LeaseAdmission::RegistrationChanged
+                | LeaseAdmission::OriginLost
+                | LeaseAdmission::OriginUnproven => {}
+            }
+            let (commit_store, commit_auth, commit_patch) = (
+                Arc::clone(&store),
+                auth_no_pending.clone(),
+                final_patch.clone(),
+            );
+            let committed = run_leased(move || {
+                let result = commit_store.codex_lease_commit(&token, &commit_auth, &commit_patch);
+                (token, result)
+            })
+            .await;
+            let (returned, result) = match committed {
+                Ok(done) => done,
+                Err(_) => return (None, Outcome::LeaseLost),
+            };
+            token = returned;
+            let error = match result {
+                Ok(persisted) => return (Some(token), Outcome::Committed(Box::new(persisted))),
+                Err(error) => error,
+            };
+            let now = Instant::now();
+            let until = *deadline.get_or_insert_with(|| now + window);
+            attempt += 1;
+            if attempt >= LEASE_COMMIT_ATTEMPTS as usize || !may_start_retry(Some(until), now) {
+                return confirm_commit(store, token, final_patch, error).await;
+            }
+            let wait = LEASE_COMMIT_BACKOFF[attempt - 1];
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::time::sleep(wait).await;
+            } else {
+                std::thread::sleep(wait);
+            }
+            last = Some(error);
+        }
+    }
+
+    /// Publishes the pass's rotation into the live record, after admission of
+    /// the final operation. `Err(OriginMoved)` changes nothing. What the
+    /// commit `outcome` says landed decides the marks, the pending operation
+    /// and whether the rotation counts as written. The caller publishes
+    /// projections and reschedules after the lock drops.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_rotation_locked(
+        &self,
+        state: &mut State,
+        id: &str,
+        prep: &LeasePrep,
+        origin: &CodexOrigin,
+        check: &OriginCheck,
+        base: &Auth,
+        updated: &mut Auth,
+        outcome: &Outcome,
+        now: Timestamp,
+    ) -> Result<Publication, OriginMoved> {
+        // A Codex pass always carries its rotation as the intent.
+        let Some(final_patch) = updated.codex_persist_intent.refresh_patch().cloned() else {
+            return Ok(Publication::Refused);
+        };
+        let admission = self.admit_leased_locked(
+            state,
+            id,
+            prep,
+            origin,
+            check,
+            std::slice::from_ref(&final_patch),
+        )?;
+        let landed = match outcome {
+            Outcome::Committed(persisted) => CodexPartitions {
+                outer: persisted.applied.outer == Some(true),
+                siwc: persisted.applied.siwc == Some(true),
+            },
+            Outcome::Exhausted { confirmed, .. } => *confirmed,
+            Outcome::LeaseLost | Outcome::PolicyRefused => CodexPartitions::default(),
+        };
+        if admission == LeaseAdmission::RegistrationChanged {
+            if landed.any() {
+                tracing::debug!(
+                    auth_id = %id,
+                    "refreshed Codex credential landed in the file; registration changed during refresh"
+                );
+            } else {
+                tracing::error!(
+                    auth_id = %id,
+                    "refreshed Codex credential lost: registration changed during refresh and the rotation was not committed"
+                );
+            }
+            return Ok(Publication::Refused);
+        }
+        let Some(entry) = state.auths.get_mut(id) else {
+            return Ok(Publication::Refused);
+        };
+        let before = Arc::clone(&entry.auth);
+        let requested = final_patch.requested();
+        let all_landed = (!requested.outer || landed.outer) && (!requested.siwc || landed.siwc);
+        let landed_marks = UndurablePartitions {
+            outer: landed.outer,
+            siwc: landed.siwc,
+        };
+        let cause = match outcome {
+            Outcome::Exhausted { read: false, .. } | Outcome::LeaseLost => MarkCause::ReadBack {
+                origin: origin.clone(),
+            },
+            _ => MarkCause::Different,
+        };
+        let disk_from_map;
+        let disk: Option<&Auth> = match outcome {
+            Outcome::Committed(persisted) => Some(&persisted.auth),
+            Outcome::Exhausted { map: Some(map), .. } => {
+                disk_from_map = Auth {
+                    metadata: map.clone(),
+                    ..Default::default()
+                };
+                Some(&disk_from_map)
+            }
+            _ => None,
+        };
+
+        let mut disposition = LeasedDisposition::Persist;
+        let mut refused = false;
+        match admission {
+            LeaseAdmission::RegistrationChanged => return Ok(Publication::Refused),
+            LeaseAdmission::OriginLost => {
+                let live = Arc::make_mut(&mut entry.auth);
+                live.metadata = final_patch.apply(&live.metadata).0;
+                mark_undurable(
+                    &final_patch,
+                    &mut entry.undurable,
+                    &mut entry.undurable_baselines,
+                    &mut entry.undurable_causes,
+                    &MarkCause::Different,
+                );
+            }
+            LeaseAdmission::PolicyRefused => {
+                refused = true;
+                disposition = LeasedDisposition::PolicyRefused;
+                let mut merged = merge_refreshed_auth_with(
+                    base,
+                    &entry.auth,
+                    updated,
+                    now,
+                    ResponseCredentials::Refused,
+                );
+                normalize_credential_metadata(&mut merged.metadata);
+                settle_refused_availability(&entry.auth, &mut merged, now);
+                *Arc::make_mut(&mut entry.auth) = merged;
+                let live = Arc::make_mut(&mut entry.auth);
+                live.metadata = final_patch.apply(&live.metadata).0;
+                mark_undurable(
+                    &final_patch,
+                    &mut entry.undurable,
+                    &mut entry.undurable_baselines,
+                    &mut entry.undurable_causes,
+                    &MarkCause::Different,
+                );
+                updated.codex_persist_intent = Default::default();
+                updated.codex_pending_refresh.clear();
+            }
+            LeaseAdmission::Admitted | LeaseAdmission::OriginUnproven => {
+                let live = Arc::make_mut(&mut entry.auth);
+                live.metadata = final_patch.apply(&live.metadata).0;
+                if !all_landed {
+                    mark_undurable(
+                        &final_patch,
+                        &mut entry.undurable,
+                        &mut entry.undurable_baselines,
+                        &mut entry.undurable_causes,
+                        &cause,
+                    );
+                }
+                if landed.any()
+                    && let Some(disk) = disk
+                {
+                    clear_verified_partitions(
+                        &mut entry.undurable,
+                        &mut entry.undurable_baselines,
+                        &mut entry.undurable_causes,
+                        &mut entry.read_back_warned,
+                        landed_marks,
+                        &entry.auth,
+                        disk,
+                    );
+                }
+                if admission == LeaseAdmission::OriginUnproven {
+                    entry.record_unresolved(origin, &final_patch);
+                    self.drop_unresolved_if_ineligible(entry);
+                    disposition = LeasedDisposition::OriginUnresolved;
+                }
+            }
+        }
+
+        if !refused {
+            let reported = match outcome {
+                Outcome::Committed(_) => true,
+                Outcome::Exhausted { .. } => all_landed,
+                Outcome::LeaseLost | Outcome::PolicyRefused => false,
+            };
+            let live = Arc::make_mut(&mut entry.auth);
+            if reported {
+                final_patch.mark_written();
+            } else if !live
+                .codex_pending_refresh
+                .iter()
+                .any(|patch| patch.same_operation(&final_patch))
+            {
+                live.codex_pending_refresh.push(final_patch.clone());
+            }
+            live.codex_persist_intent =
+                crate::auth::codex_refresh::CodexPersistIntent::Refresh(final_patch.clone());
+        }
+
+        let live = Arc::make_mut(&mut entry.auth);
+        if credentials_changed(&before, live) {
+            live.credential_version = live.credential_version.saturating_add(1);
+        }
+        live.generation = live.generation.saturating_add(1);
+        if !refused
+            && !updated
+                .codex_refresh_failure
+                .as_ref()
+                .is_some_and(|failure| failure.partition.is_active(live))
+        {
+            live.rejected_access_token.clear();
+        }
+        live.updated_at = Some(now);
+        let generation = live.generation;
+        let snapshot = Arc::clone(&entry.auth);
+        state.sync_scheduler(self.models(), id, now);
+        Ok(Publication::Published {
+            snapshot,
+            generation,
+            tail: Box::new(LeasedTail {
+                origin: origin.clone(),
+                rotation: final_patch,
+                disposition,
+            }),
+        })
+    }
+}
+
+/// Reads the leased file once after the commit gave up, to learn which
+/// requested partitions landed. A failed read leaves them unknown.
+async fn confirm_commit(
+    store: Arc<dyn crate::auth::AuthStore>,
+    token: CodexLeaseToken,
+    final_patch: &CredentialRefreshPatch,
+    err: io::Error,
+) -> (Option<CodexLeaseToken>, Outcome) {
+    let read = run_leased(move || {
+        let result = store.codex_lease_read(&token);
+        (token, result)
+    })
+    .await;
+    match read {
+        Err(_) => (None, Outcome::LeaseLost),
+        Ok((token, Ok(Some(map)))) => {
+            let confirmed = final_patch.landed_in(&map);
+            (
+                Some(token),
+                Outcome::Exhausted {
+                    err,
+                    confirmed,
+                    read: true,
+                    map: Some(map),
+                },
+            )
+        }
+        Ok((token, _)) => (
+            Some(token),
+            Outcome::Exhausted {
+                err,
+                confirmed: CodexPartitions::default(),
+                read: false,
+                map: None,
+            },
+        ),
+    }
 }
 
 /// Test seam: awaited after a Codex refresh was saved and published, before
@@ -2721,10 +3284,20 @@ mod tests {
 
     use chrono::{TimeDelta, Utc};
 
+    use serde_json::json;
+
     use super::super::lifecycle::{OriginCheck, OriginMoved};
-    use super::super::{Manager, Settings, State};
-    use super::{Deferral, add, bounded_retry_delay, deferral_backoff};
-    use crate::auth::CodexOrigin;
+    use super::super::merge::{ResponseCredentials, merge_refreshed_auth_with};
+    use super::super::{Entry, Manager, MarkCause, Settings, State, UndurablePartitions};
+    use super::{
+        Deferral, LeasePrep, SendFence, add, bounded_retry_delay, deferral_backoff,
+        has_unauthorized_auth_failure, settle_refused_availability,
+    };
+    use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
+    use crate::auth::{
+        Auth, AuthError, CodexLeaseToken, CodexOrigin, ModelState, Status, Timestamp,
+    };
+    use crate::executor::ProviderExecutor;
 
     fn require_send<T: Send>(_: T) {}
 
@@ -2778,5 +3351,376 @@ mod tests {
             |_: &mut State, _: &OriginCheck| -> Result<(), OriginMoved> { Ok(()) },
         );
         require_send(future);
+    }
+
+    /// The futures of `send_refresh` and `commit_rotation_with_retry` are
+    /// `Send`. The closure is type-checked and never called.
+    #[test]
+    fn send_refresh_and_commit_futures_are_send() {
+        let _ = |manager: &Manager,
+                 executor: &Arc<dyn ProviderExecutor>,
+                 auth: &Arc<Auth>,
+                 prep: &LeasePrep,
+                 token: CodexLeaseToken,
+                 patch: &CredentialRefreshPatch| {
+            require_send(manager.send_refresh(
+                "id",
+                1,
+                executor,
+                auth,
+                crate::executor::RefreshOptions::forced(false),
+            ));
+            require_send(manager.commit_rotation_with_retry("id", prep, token, patch));
+        };
+    }
+
+    fn codex(metadata: serde_json::Value) -> Auth {
+        Auth {
+            id: "codex-1".into(),
+            provider: "codex".into(),
+            status: Status::Active,
+            metadata: metadata.as_object().cloned().unwrap_or_default(),
+            ..Auth::default()
+        }
+    }
+
+    fn unauthorized() -> Option<AuthError> {
+        Some(AuthError {
+            code: "unauthorized".into(),
+            message: "unauthorized".into(),
+            http_status: 401,
+            ..AuthError::default()
+        })
+    }
+
+    fn model_401(retry: Option<Timestamp>) -> ModelState {
+        ModelState {
+            status: Status::Error,
+            status_message: "unauthorized".into(),
+            unavailable: true,
+            next_retry_after: retry,
+            last_error: unauthorized(),
+            ..ModelState::default()
+        }
+    }
+
+    /// `current` merged with a refused refresh shaped as `refresh_owned`
+    /// leaves `updated`: the state step 1b of a refused publication starts
+    /// from.
+    fn refused_merge(current: &Auth, now: Timestamp) -> Auth {
+        let base = codex(json!({"access_token": "t-base", "refresh_token": "r-base"}));
+        let mut updated = codex(json!({"access_token": "t-upd", "refresh_token": "r-upd"}));
+        updated.last_refreshed_at = Some(now);
+        updated.next_refresh_after = Some(add(now, Duration::from_secs(300)));
+        updated.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+            &base.metadata,
+            &updated.metadata,
+            true,
+            false,
+        ));
+        merge_refreshed_auth_with(&base, current, &updated, now, ResponseCredentials::Refused)
+    }
+
+    fn settled(current: &Auth, now: Timestamp) -> (Auth, Auth) {
+        let before = refused_merge(current, now);
+        let mut after = before.clone();
+        settle_refused_availability(current, &mut after, now);
+        (before, after)
+    }
+
+    /// B-U3: a kept non-401 error stays, and a model 401 that is the only
+    /// model state is reset with it.
+    #[test]
+    fn refused_availability_keeps_a_non_401_error_and_resets_a_model_401() {
+        let now = Utc::now();
+        let mut current = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        current.status = Status::Error;
+        current.unavailable = true;
+        current.status_message = "held".into();
+        current.last_error = Some(AuthError {
+            message: "boom".into(),
+            http_status: 500,
+            ..AuthError::default()
+        });
+        current.model_states.insert(
+            "m".into(),
+            model_401(Some(add(now, Duration::from_secs(60)))),
+        );
+        let (before, after) = settled(&current, now);
+        assert_eq!(
+            before.last_error.as_ref().map(|e| e.message.as_str()),
+            Some("boom")
+        );
+        assert_eq!(
+            after.last_error.as_ref().map(|e| e.message.as_str()),
+            Some("boom")
+        );
+        assert_eq!(after.status, Status::Error);
+        let state = &after.model_states["m"];
+        assert_eq!(state.status, Status::Active);
+        assert!(!state.unavailable);
+        assert!(state.last_error.is_none());
+        assert!(state.status_message.is_empty());
+    }
+
+    /// B-U3, the oracle's unit case: the merge carries the hold a model's 401
+    /// derived, and step 1b releases it.
+    #[test]
+    fn refused_availability_releases_the_hold_a_model_401_derived() {
+        let now = Utc::now();
+        let retry = add(now, Duration::from_secs(1800));
+        let mut current = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        current
+            .model_states
+            .insert("m".into(), model_401(Some(retry)));
+        current.unavailable = true;
+        current.next_retry_after = Some(retry);
+        let (before, after) = settled(&current, now);
+        assert!(before.unavailable, "the merge carries the derived hold");
+        assert_eq!(before.next_retry_after, Some(retry));
+        assert!(!after.unavailable);
+        assert!(after.next_retry_after.is_none());
+        assert_eq!(after.model_states["m"].status, Status::Active);
+    }
+
+    /// B-U3: a concurrent cooldown with no unauthorized model state is left
+    /// as the merge made it.
+    #[test]
+    fn refused_availability_leaves_a_cooldown_without_a_model_401() {
+        let now = Utc::now();
+        let mut current = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        current.status = Status::Error;
+        current.unavailable = true;
+        current.status_message = "held".into();
+        current.next_retry_after = Some(add(now, Duration::from_secs(60)));
+        current.last_error = Some(AuthError {
+            message: "rate limited".into(),
+            http_status: 429,
+            ..AuthError::default()
+        });
+        let (before, after) = settled(&current, now);
+        assert_eq!(after.unavailable, before.unavailable);
+        assert_eq!(after.next_retry_after, before.next_retry_after);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.status_message, before.status_message);
+        assert_eq!(
+            after.last_error.as_ref().map(|e| e.message.as_str()),
+            before.last_error.as_ref().map(|e| e.message.as_str())
+        );
+        assert!(after.model_states.is_empty());
+    }
+
+    /// B-U3: a model 401 under an active model quota loses only its error.
+    #[test]
+    fn refused_availability_keeps_a_model_quota_under_a_model_401() {
+        let now = Utc::now();
+        let recover = add(now, Duration::from_secs(600));
+        let mut current = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        let mut state = model_401(Some(recover));
+        state.quota.exceeded = true;
+        state.quota.reason = "quota".into();
+        state.quota.next_recover_at = Some(recover);
+        current.model_states.insert("m".into(), state);
+        let (_, after) = settled(&current, now);
+        let state = &after.model_states["m"];
+        assert!(state.last_error.is_none());
+        assert_eq!(state.status_message, "quota");
+        assert_eq!(state.updated_at, Some(now));
+        assert!(state.quota.exceeded);
+        assert_eq!(state.quota.next_recover_at, Some(recover));
+        assert!(state.unavailable);
+    }
+
+    /// B-U3: a top-level 401 on `current` is cleared.
+    #[test]
+    fn refused_availability_clears_a_top_level_401() {
+        let now = Utc::now();
+        let mut current = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        current.status = Status::Error;
+        current.unavailable = true;
+        current.status_message = "unauthorized".into();
+        current.last_error = unauthorized();
+        assert!(has_unauthorized_auth_failure(&current));
+        let (_, after) = settled(&current, now);
+        assert_eq!(after.status, Status::Active);
+        assert!(!after.unavailable);
+        assert!(after.last_error.is_none());
+        assert!(after.status_message.is_empty());
+    }
+
+    /// B-U3: an active credential quota on `current` is restored over the
+    /// availability the model-state reset derived.
+    #[test]
+    fn refused_availability_restores_an_active_credential_quota() {
+        let now = Utc::now();
+        let recover = add(now, Duration::from_secs(600));
+        let mut current = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        current.status = Status::Error;
+        current.unavailable = true;
+        current.next_retry_after = Some(recover);
+        current.quota.exceeded = true;
+        current.quota.reason = "credential_quota".into();
+        current.quota.next_recover_at = Some(recover);
+        current.model_states.insert("m".into(), model_401(None));
+        let (_, after) = settled(&current, now);
+        assert!(after.unavailable);
+        assert_eq!(after.next_retry_after, Some(recover));
+        assert_eq!(after.quota, current.quota);
+        assert_eq!(after.model_states["m"].status, Status::Active);
+    }
+
+    /// B-U3: a disabled `current`, or a disabled merge, is left alone.
+    #[test]
+    fn refused_availability_leaves_a_disabled_credential() {
+        let now = Utc::now();
+        let mut current = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        current.disabled = true;
+        current.status = Status::Disabled;
+        current.model_states.insert("m".into(), model_401(None));
+        current.last_error = unauthorized();
+        let before = refused_merge(&current, now);
+        let mut after = before.clone();
+        settle_refused_availability(&current, &mut after, now);
+        assert_eq!(after.model_states, before.model_states);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.last_error.is_some(), before.last_error.is_some());
+
+        let mut enabled = codex(json!({"access_token": "t-cur", "refresh_token": "r-cur"}));
+        enabled.model_states.insert("m".into(), model_401(None));
+        let mut merged = refused_merge(&enabled, now);
+        merged.disabled = true;
+        let before = merged.clone();
+        settle_refused_availability(&enabled, &mut merged, now);
+        assert_eq!(merged.model_states, before.model_states);
+        assert_eq!(merged.status, before.status);
+    }
+
+    fn fence_manager() -> Manager {
+        Manager::new(
+            Settings::default(),
+            Arc::new(crate::registry::ModelRegistry::new()),
+            None,
+        )
+    }
+
+    /// Registers a Codex record with the given outer and SIWC refresh tokens
+    /// and returns its registered snapshot.
+    fn register_codex(manager: &Manager, outer: &str, siwc: &str) -> Arc<Auth> {
+        let auth = codex(json!({
+            "type": "codex",
+            "access_token": "t",
+            "refresh_token": outer,
+            "siwc": {"refresh_token": siwc, "client_id": "client"},
+        }));
+        manager.register_unsaved(auth).expect("register")
+    }
+
+    fn fence(manager: &Manager, snapshot: &Auth) -> SendFence {
+        manager.locked(|s| {
+            manager.fence_send_locked(s, "codex-1", snapshot.registration_epoch, snapshot)
+        })
+    }
+
+    fn mutate(manager: &Manager, f: impl FnOnce(&mut Entry)) {
+        let mut state = manager.lock();
+        f(state.auths.get_mut("codex-1").expect("registered"));
+    }
+
+    #[test]
+    fn fence_sends_a_non_codex_record_without_looking() {
+        let manager = fence_manager();
+        let other = Auth {
+            id: "other".into(),
+            provider: "claude".into(),
+            ..Auth::default()
+        };
+        let decision = manager.locked(|s| manager.fence_send_locked(s, "other", 9, &other));
+        assert!(matches!(decision, SendFence::Send));
+    }
+
+    #[test]
+    fn fence_reports_a_changed_registration() {
+        let manager = fence_manager();
+        let snapshot = register_codex(&manager, "r1", "s1");
+        assert!(matches!(fence(&manager, &snapshot), SendFence::Send));
+        let epoch = snapshot.registration_epoch;
+        let decision =
+            manager.locked(|s| manager.fence_send_locked(s, "codex-1", epoch + 1, &snapshot));
+        assert!(matches!(decision, SendFence::Changed));
+        let decision = manager.locked(|s| manager.fence_send_locked(s, "gone", epoch, &snapshot));
+        assert!(matches!(decision, SendFence::Changed));
+    }
+
+    #[test]
+    fn fence_defers_on_a_mark_of_a_partition_it_would_send() {
+        let manager = fence_manager();
+        let snapshot = register_codex(&manager, "r1", "s1");
+        let outer = UndurablePartitions {
+            outer: true,
+            siwc: false,
+        };
+        mutate(&manager, |e| e.landing_unconfirmed = outer);
+        assert!(matches!(
+            fence(&manager, &snapshot),
+            SendFence::Defer(Deferral::LandingUnconfirmed)
+        ));
+        mutate(&manager, |e| {
+            e.landing_unconfirmed = UndurablePartitions::default();
+            e.undurable_causes.siwc = Some(MarkCause::ReadBack {
+                origin: CodexOrigin::of(&std::env::current_exe().expect("exe")).expect("origin"),
+            });
+        });
+        assert!(matches!(
+            fence(&manager, &snapshot),
+            SendFence::Defer(Deferral::ReadBackUnsettled)
+        ));
+    }
+
+    #[test]
+    fn fence_ignores_a_mark_of_a_partition_it_would_not_send() {
+        let manager = fence_manager();
+        // The snapshot has no SIWC client id, so only outer would be sent.
+        let auth = codex(json!({
+            "type": "codex",
+            "refresh_token": "r1",
+            "siwc": {"refresh_token": "s1"},
+        }));
+        let snapshot = manager.register_unsaved(auth).expect("register");
+        mutate(&manager, |e| {
+            e.landing_unconfirmed = UndurablePartitions {
+                outer: false,
+                siwc: true,
+            }
+        });
+        assert!(matches!(fence(&manager, &snapshot), SendFence::Send));
+    }
+
+    #[test]
+    fn fence_returns_the_live_record_when_a_refresh_token_was_replaced() {
+        let manager = fence_manager();
+        let snapshot = register_codex(&manager, "r1", "s1");
+        mutate(&manager, |e| {
+            Arc::make_mut(&mut e.auth)
+                .metadata
+                .insert("refresh_token".into(), json!("r2"));
+        });
+        match fence(&manager, &snapshot) {
+            SendFence::Superseded(live) => {
+                assert_eq!(live.metadata_str("refresh_token"), Some("r2"))
+            }
+            _ => panic!("expected the outer replacement to supersede the pass"),
+        }
+        mutate(&manager, |e| {
+            let live = Arc::make_mut(&mut e.auth);
+            live.metadata.insert("refresh_token".into(), json!("r1"));
+            live.metadata.insert(
+                "siwc".into(),
+                json!({"refresh_token": "s2", "client_id": "client"}),
+            );
+        });
+        assert!(matches!(
+            fence(&manager, &snapshot),
+            SendFence::Superseded(_)
+        ));
     }
 }
