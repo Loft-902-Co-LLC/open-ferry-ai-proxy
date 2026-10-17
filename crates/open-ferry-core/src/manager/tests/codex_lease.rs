@@ -1240,6 +1240,7 @@ async fn a_saved_edit_read_back_keeps_a_partition_confirmed_but_unmarked() {
         rig.store.files.set_base_dir(q.path());
         let q_file = q.path().join("codex.json");
         lock(&made).push(q);
+        let before = read_file(&q_file);
         rig.manager
             .edit("codex.json", |auth| {
                 auth.metadata.insert("note".into(), json!("saved"));
@@ -1255,6 +1256,21 @@ async fn a_saved_edit_read_back_keeps_a_partition_confirmed_but_unmarked() {
         assert_eq!(live.metadata["siwc"]["refresh_token"], "siwc-refresh-new");
         assert_eq!(live.metadata["note"], "saved");
         assert_eq!(unresolved(&rig), Some((true, true)));
+        // Nothing else in the file moved: the tokens are compared without
+        // being printed.
+        for key in OUTER_KEYS {
+            assert!(file.get(key) == before.get(key), "outer key {key} moved");
+        }
+        assert!(
+            file.get("siwc") == before.get("siwc"),
+            "the siwc object moved"
+        );
+        assert!(!marked_outer(&rig), "outer is still unmarked");
+        assert!(marked_siwc(&rig), "SIWC is still marked");
+        assert!(
+            unwritten_pending(&rig) > 0,
+            "the operation is still pending"
+        );
     })
     .await;
 }
