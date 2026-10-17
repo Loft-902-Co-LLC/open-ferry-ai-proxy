@@ -1331,9 +1331,14 @@ impl Manager {
                 .await;
             // Whatever the pass returned, a save it refused while it held the
             // refresh lock is owed, and is saved again now that it is free.
-            if let Some(epoch) =
-                manager.locked(|s| s.auths.get(&id).map(|entry| entry.auth.registration_epoch))
-            {
+            // With nothing owed the flush would return at once, so the pass
+            // skips its trip to a blocking thread.
+            if let Some(epoch) = manager.locked(|s| {
+                s.auths
+                    .get(&id)
+                    .filter(|entry| entry.owed_save.is_some())
+                    .map(|entry| entry.auth.registration_epoch)
+            }) {
                 let (flusher, flush_id) = (manager.clone(), id.clone());
                 if run_leased(move || flusher.flush_owed_save(&flush_id, epoch))
                     .await
