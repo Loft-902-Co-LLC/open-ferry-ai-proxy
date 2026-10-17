@@ -3043,6 +3043,15 @@ impl Manager {
             check,
             std::slice::from_ref(&final_patch),
         )?;
+        // The commit's refusal is carried through the pass, as a refusal after
+        // release is: an edit that lifts the policy since then must not let the
+        // ordinary save write a rotation the commit refused.
+        let admission =
+            if matches!(outcome, Outcome::PolicyRefused) && admission == LeaseAdmission::Admitted {
+                LeaseAdmission::PolicyRefused
+            } else {
+                admission
+            };
         let landed = match outcome {
             Outcome::Committed(persisted) => CodexPartitions {
                 outer: persisted.applied.outer == Some(true),
@@ -3124,6 +3133,7 @@ impl Manager {
                 *Arc::make_mut(&mut entry.auth) = merged;
                 let live = Arc::make_mut(&mut entry.auth);
                 live.metadata = final_patch.apply(&live.metadata).0;
+                live.codex_persist_intent = Default::default();
                 mark_undurable(
                     &final_patch,
                     &mut entry.undurable,
@@ -3788,7 +3798,16 @@ mod tests {
         current.quota.reason = "credential_quota".into();
         current.quota.next_recover_at = Some(recover);
         current.model_states.insert("m".into(), model_401(None));
-        let (_, after) = settled(&current, now);
+        // The top-level 401 makes step 1b's unauthorized reset set the merged
+        // record Active and available, so only the quota restore brings
+        // `current`'s status and hold back.
+        current.last_error = unauthorized();
+        let (before, after) = settled(&current, now);
+        assert_eq!(before.status, Status::Error, "the merge before step 1b");
+        assert!(before.unavailable, "the merge before step 1b");
+        assert_eq!(before.next_retry_after, Some(recover));
+        assert!(after.last_error.is_none(), "the reset ran");
+        assert_eq!(after.status, Status::Error);
         assert!(after.unavailable);
         assert_eq!(after.next_retry_after, Some(recover));
         assert_eq!(after.quota, current.quota);
@@ -3819,6 +3838,19 @@ mod tests {
         settle_refused_availability(&enabled, &mut merged, now);
         assert_eq!(merged.model_states, before.model_states);
         assert_eq!(merged.status, before.status);
+
+        // A disabled `current` with an enabled merge that holds a model 401:
+        // only the `current` guard keeps step 1b from resetting it.
+        let mut merged = refused_merge(&current, now);
+        merged.disabled = false;
+        merged.status = Status::Active;
+        merged.model_states.insert("m".into(), model_401(None));
+        let before = merged.clone();
+        settle_refused_availability(&current, &mut merged, now);
+        assert_eq!(merged.model_states, before.model_states);
+        assert_eq!(merged.status, before.status);
+        assert_eq!(merged.unavailable, before.unavailable);
+        assert_eq!(merged.next_retry_after, before.next_retry_after);
     }
 
     fn fence_manager() -> Manager {
@@ -3918,6 +3950,58 @@ mod tests {
                 siwc: true,
             }
         });
+        assert!(matches!(fence(&manager, &snapshot), SendFence::Send));
+    }
+
+    /// Records an unresolved-origin state for the partitions in `held` on the
+    /// registered entry.
+    fn hold_unresolved(manager: &Manager, held: UndurablePartitions) {
+        let origin = CodexOrigin::of(&std::env::current_exe().expect("exe")).expect("origin");
+        let before = json!({"refresh_token": "r1"});
+        let after = json!({"refresh_token": "r-next"});
+        let rotation = CredentialRefreshPatch::new(
+            before.as_object().expect("object"),
+            after.as_object().expect("object"),
+            held.outer,
+            held.siwc,
+        );
+        mutate(manager, |e| e.record_unresolved(&origin, &rotation));
+    }
+
+    #[test]
+    fn fence_defers_on_an_unresolved_origin_of_a_partition_it_would_send() {
+        let manager = fence_manager();
+        let snapshot = register_codex(&manager, "r1", "s1");
+        hold_unresolved(
+            &manager,
+            UndurablePartitions {
+                outer: true,
+                siwc: false,
+            },
+        );
+        assert!(matches!(
+            fence(&manager, &snapshot),
+            SendFence::Defer(Deferral::OriginUnresolved)
+        ));
+    }
+
+    #[test]
+    fn fence_ignores_an_unresolved_origin_of_a_partition_it_would_not_send() {
+        let manager = fence_manager();
+        // The snapshot has no SIWC client id, so only outer would be sent.
+        let auth = codex(json!({
+            "type": "codex",
+            "refresh_token": "r1",
+            "siwc": {"refresh_token": "s1"},
+        }));
+        let snapshot = manager.register_unsaved(auth).expect("register");
+        hold_unresolved(
+            &manager,
+            UndurablePartitions {
+                outer: false,
+                siwc: true,
+            },
+        );
         assert!(matches!(fence(&manager, &snapshot), SendFence::Send));
     }
 
