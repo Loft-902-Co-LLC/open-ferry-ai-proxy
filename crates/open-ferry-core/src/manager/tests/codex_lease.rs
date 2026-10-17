@@ -262,7 +262,7 @@ async fn an_unprovable_admission_defers_before_the_send() {
         assert_eq!(line.0, tracing::Level::WARN);
         assert!(line.1.contains("auth_id=codex.json"), "{}", line.1);
         assert!(line.1.contains("rotation_held=false"), "{}", line.1);
-        assert_logs_clean(&logs, &rig, &[]);
+        assert_logs_clean(&logs, &rig, &made);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(probe.sent(), 0, "nothing was sent");
         assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
@@ -422,7 +422,7 @@ async fn an_unprovable_publication_records_the_state_and_saves_nothing() {
                 .iter()
                 .all(|l| !l.1.contains("rotation_held="))
         );
-        assert_logs_clean(&logs, &rig, &[]);
+        assert_logs_clean(&logs, &rig, &made);
         assert_eq!(calls, 6, "the proofs after the send");
         assert_eq!(probe.sent(), 1);
         assert_eq!(rig.live().metadata["refresh_token"], "b-refresh");
@@ -457,7 +457,9 @@ async fn an_unprovable_save_target_records_the_state_and_keeps_the_file() {
     bounded(async {
         let (logs, _guard) = capture_logs();
         let (lost, e_path) = fenced_unproven().await;
-        let Lost { rig, probe, .. } = lost;
+        let Lost {
+            rig, probe, made, ..
+        } = lost;
         let held = only_line(&logs.since(0), "a received rotation is held");
         assert_eq!(held.0, tracing::Level::WARN);
         assert!(held.1.contains("auth_id=codex.json"), "{}", held.1);
@@ -481,7 +483,7 @@ async fn an_unprovable_save_target_records_the_state_and_keeps_the_file() {
         let line = only_line(&logs.since(seen), "rotation_held=");
         assert_eq!(line.0, tracing::Level::WARN);
         assert!(line.1.contains("rotation_held=true"), "{}", line.1);
-        assert_logs_clean(&logs, &rig, &[&e_path]);
+        assert_logs_clean(&logs, &rig, &made);
         assert_eq!(
             read_file(&e_path.join("codex.json"))["refresh_token"],
             "outer-refresh-old"
@@ -517,7 +519,7 @@ async fn a_read_back_without_identity_records_the_state_without_deciding() {
         let line = only_line(&logs.since(seen), "rotation_held=");
         assert_eq!(line.0, tracing::Level::WARN);
         assert!(line.1.contains("rotation_held=true"), "{}", line.1);
-        assert_logs_clean(&logs, &rig, &[]);
+        assert_logs_clean(&logs, &rig, &Made::default());
         assert_eq!(probe.sent(), 1, "the executor was not called");
         assert_eq!(unresolved(&rig), Some((true, false)));
         // Once the identity is back the file is proven the same one, and the
@@ -879,8 +881,10 @@ fn only_line(lines: &[(tracing::Level, String)], needle: &str) -> (tracing::Leve
     found[0].clone()
 }
 
-/// No captured line carries a token of the fixture or a test directory.
-fn assert_logs_clean(logs: &Logs, rig: &Rig, extra: &[&Path]) {
+/// No captured line carries a token of the fixture, the rig directory or any
+/// directory in `made`, as the path prints or in its escaped `Debug` form (a
+/// Windows path doubles its backslashes there).
+fn assert_logs_clean(logs: &Logs, rig: &Rig, made: &Made) {
     let mut secrets: Vec<String> = [
         "outer-old",
         "outer-refresh-old",
@@ -896,8 +900,13 @@ fn assert_logs_clean(logs: &Logs, rig: &Rig, extra: &[&Path]) {
     .iter()
     .map(|s| (*s).to_owned())
     .collect();
-    secrets.push(rig.dir.path().to_string_lossy().into_owned());
-    secrets.extend(extra.iter().map(|p| p.to_string_lossy().into_owned()));
+    let mut dirs = vec![rig.dir.path().to_path_buf()];
+    dirs.extend(lock(made).iter().map(|d| d.path().to_path_buf()));
+    for dir in &dirs {
+        secrets.push(dir.to_string_lossy().into_owned());
+        let debug = format!("{dir:?}");
+        secrets.push(debug[1..debug.len() - 1].to_owned());
+    }
     for (level, text) in logs.since(0) {
         for secret in &secrets {
             assert!(
@@ -919,7 +928,11 @@ async fn deferrals_back_off_and_surface_without_touching_status() {
         let (logs, _guard) = capture_logs();
         let (lost, e_path) = fenced_unproven().await;
         let Lost {
-            rig, probe, clock, ..
+            rig,
+            probe,
+            clock,
+            made,
+            ..
         } = lost;
         let recorded = only_line(&logs.since(0), "a received rotation is held");
         assert_eq!(recorded.0, tracing::Level::WARN);
@@ -999,7 +1012,7 @@ async fn deferrals_back_off_and_surface_without_touching_status() {
         assert!(e_file.get("refresh_hold").is_none(), "memory only");
         assert!(rig.live().metadata.get("refresh_hold").is_none());
         assert!(!marked_outer(&rig));
-        assert_logs_clean(&logs, &rig, &[&e_path]);
+        assert_logs_clean(&logs, &rig, &made);
     })
     .await;
 }
@@ -1209,30 +1222,24 @@ async fn a_saved_edit_does_not_write_the_protected_partition() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_saved_edit_read_back_keeps_the_protected_partition_by_the_state() {
-    // B-29 step 2, the read-back: a save is read back only when it carries an
-    // unwritten rotation, so B stays pending here (every lease commit fails).
-    // The mark is taken off so that only the state protects B, as when the
-    // mark has been cleared by a verified write of the outer partition while
-    // the state remains. The read-back of the file, which holds A, must not
-    // take A over the live B.
+async fn a_saved_edit_read_back_keeps_a_partition_confirmed_but_unmarked() {
+    // B-29 step 2, the read-back, from a natural state: a pass rotated both
+    // partitions and the commits failed, the confirming read showed the outer
+    // one landed, so its mark was cleared and the whole operation stayed
+    // pending for the SIWC one. The state covers both. A settings edit saved
+    // to a file holding the old chains is read back, and only the state keeps
+    // the unmarked outer B from the file's A.
     bounded(async {
-        let Lost {
-            rig, probe, made, ..
-        } = pending_unproven().await;
+        let (rig, _gate, made) = rotated_record(true).await;
+        assert_eq!(unresolved(&rig), Some((true, true)));
+        assert!(!marked_outer(&rig), "outer is confirmed and unmarked");
+        assert!(marked_siwc(&rig), "SIWC is not confirmed");
+        assert!(unwritten_pending(&rig) > 0, "the operation is unwritten");
         let q = sibling_dir(&rig);
         chain_a_in(&rig, q.path());
         rig.store.files.set_base_dir(q.path());
         let q_file = q.path().join("codex.json");
         lock(&made).push(q);
-        rig.manager
-            .lock()
-            .auths
-            .get_mut("codex.json")
-            .unwrap()
-            .undurable
-            .outer = false;
-        assert!(unwritten_pending(&rig) > 0, "B waits to be saved");
         rig.manager
             .edit("codex.json", |auth| {
                 auth.metadata.insert("note".into(), json!("saved"));
@@ -1245,9 +1252,9 @@ async fn a_saved_edit_read_back_keeps_the_protected_partition_by_the_state() {
         let live = rig.live();
         assert_eq!(live.metadata["refresh_token"], "b-refresh", "live is B");
         assert_eq!(live.metadata["access_token"], "b-access");
+        assert_eq!(live.metadata["siwc"]["refresh_token"], "siwc-refresh-new");
         assert_eq!(live.metadata["note"], "saved");
-        assert_eq!(unresolved(&rig), Some((true, false)));
-        assert_eq!(probe.sent(), 1);
+        assert_eq!(unresolved(&rig), Some((true, true)));
     })
     .await;
 }
@@ -1542,6 +1549,14 @@ async fn a_saved_edit_to_a_file_without_markers_leaves_its_chain_alone() {
 /// publication cannot prove where the record's file is, so the state holds the
 /// SIWC partition beside the mark.
 async fn siwc_state_record() -> (Rig, crate::gate::ActiveGate, Made) {
+    rotated_record(false).await
+}
+
+/// [`siwc_state_record`], or with `partial`: the pass rotates both partitions,
+/// and the file read after the failed commits shows the outer one landed and
+/// the SIWC one not. The outer mark is cleared by that read, the SIWC one is
+/// set, and the operation stays pending with the state over both partitions.
+async fn rotated_record(partial: bool) -> (Rig, crate::gate::ActiveGate, Made) {
     let seeded = seeded();
     let gate = seeded.gate.clone();
     let store = observe(seeded.files.clone(), false);
@@ -1566,6 +1581,10 @@ async fn siwc_state_record() -> (Rig, crate::gate::ActiveGate, Made) {
     executor.set_refresh(move |before| {
         seen.store(true, Ordering::SeqCst);
         let mut after = before.clone();
+        if partial {
+            after.metadata["access_token"] = json!("b-access");
+            after.metadata["refresh_token"] = json!("b-refresh");
+        }
         after.metadata["siwc"]["access_token"] = json!("siwc-new");
         after.metadata["siwc"]["refresh_token"] = json!("siwc-refresh-new");
         after.codex_refresh_failure = None;
@@ -1573,13 +1592,27 @@ async fn siwc_state_record() -> (Rig, crate::gate::ActiveGate, Made) {
             crate::auth::codex_refresh::CredentialRefreshPatch::new(
                 &before.metadata,
                 &after.metadata,
-                false,
+                partial,
                 true,
             ),
         );
         Ok(after)
     });
     rig.manager.register_executor(executor);
+    if partial {
+        // From the first commit attempt on, the confirming read finds the
+        // outer chain at B and the SIWC chain as it was.
+        let committing = Arc::new(AtomicBool::new(false));
+        let flag = committing.clone();
+        *lock(&rig.store.before_lease_commit_hook) =
+            Some(Arc::new(move |_: &Auth| flag.store(true, Ordering::SeqCst)));
+        *lock(&rig.store.lease_read_hook) = Some(Arc::new(move |map| {
+            if committing.load(Ordering::SeqCst) {
+                map.insert("access_token".into(), json!("b-access"));
+                map.insert("refresh_token".into(), json!("b-refresh"));
+            }
+        }));
+    }
     let made = Made::default();
     let rebind = fresh_binder(&rig, &made);
     on_origin_checks(&rig, Arc::new(AtomicU32::new(0)), move |_| {
@@ -1589,14 +1622,18 @@ async fn siwc_state_record() -> (Rig, crate::gate::ActiveGate, Made) {
     });
     let _ = rig.manager.force_refresh("codex.json").await;
     disarm(&rig);
+    *lock(&rig.store.before_lease_commit_hook) = None;
+    *lock(&rig.store.lease_read_hook) = None;
     (rig, gate, made)
 }
 
-fn siwc_baselines(rig: &Rig) -> usize {
+/// The SIWC baseline maps themselves, to compare by value. They hold token
+/// values, so a test compares them with a fixed message and never prints them.
+fn siwc_baselines(rig: &Rig) -> Vec<serde_json::Map<String, serde_json::Value>> {
     rig.manager.lock().auths["codex.json"]
         .undurable_baselines
         .siwc
-        .len()
+        .clone()
 }
 
 fn marked_siwc(rig: &Rig) -> bool {
@@ -1636,7 +1673,7 @@ async fn a_record_that_becomes_ineligible_drops_the_state_and_keeps_its_marks() 
         assert!(marked_siwc(&rig), "the rotation is marked");
         assert!(!marked_outer(&rig));
         let baselines = siwc_baselines(&rig);
-        assert!(baselines > 0, "the mark has baselines");
+        assert!(!baselines.is_empty(), "the mark has baselines");
         // The record is a config entry on the outer chain. Its metadata still
         // says OAuth, so these edits leave it eligible; only the file read by
         // the adoption below makes it an API key.
@@ -1659,6 +1696,10 @@ async fn a_record_that_becomes_ineligible_drops_the_state_and_keeps_its_marks() 
         assert_eq!(adopted.metadata["access_token"], "peer-access");
         assert!(!rig.manager.permanently_ineligible(&rig.live()));
         assert_eq!(unresolved(&rig), Some((false, true)), "control keeps it");
+        assert!(
+            siwc_baselines(&rig) == baselines,
+            "the control leaves the baselines as they were"
+        );
 
         // The file is now an API key: the adoption makes the record ineligible.
         write_adoptable_file(&rig, "api", true);
@@ -1667,7 +1708,10 @@ async fn a_record_that_becomes_ineligible_drops_the_state_and_keeps_its_marks() 
         assert!(rig.manager.permanently_ineligible(&rig.live()));
         assert_eq!(unresolved(&rig), None, "the state is dropped");
         assert!(marked_siwc(&rig), "the mark stays");
-        assert_eq!(siwc_baselines(&rig), baselines, "so do its baselines");
+        assert!(
+            siwc_baselines(&rig) == baselines,
+            "the dropped state leaves the baselines as they were"
+        );
         assert!(!marked_outer(&rig));
         assert_eq!(hold_name(&rig), None, "no hold is left");
     })
