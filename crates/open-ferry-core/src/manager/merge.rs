@@ -207,13 +207,34 @@ pub(crate) fn reconcile_persisted_codex(snapshot: &Auth, current: &Auth, disk: &
     merged
 }
 
+/// Whether a response's credentials are merged into the live record or
+/// refused: under `Refused` the policy forbade persisting the received
+/// rotation, so no credential patch is synthesized from the response and its
+/// credential keys never reach the merged record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResponseCredentials {
+    Merge,
+    Refused,
+}
+
 /// Merges the content of a refreshed credential: metadata, proxy URL,
 /// prefix and attributes (upstream's `mergeAuthContent`).
 pub(crate) fn merge_auth_content(base: &Auth, current: &Auth, updated: &Auth) -> Auth {
+    merge_auth_content_with(base, current, updated, ResponseCredentials::Merge)
+}
+
+/// [`merge_auth_content`] with the response's credentials merged or refused.
+pub(crate) fn merge_auth_content_with(
+    base: &Auth,
+    current: &Auth,
+    updated: &Auth,
+    credentials: ResponseCredentials,
+) -> Auth {
+    let refused = credentials == ResponseCredentials::Refused;
     let mut merged = current.clone();
     let patch = match &updated.codex_persist_intent {
         crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) => Some(patch.clone()),
-        _ if crate::auth::codex_refresh::is_codex_auth(updated) => {
+        _ if !refused && crate::auth::codex_refresh::is_codex_auth(updated) => {
             Some(crate::auth::codex_refresh::CredentialRefreshPatch::new(
                 &base.metadata,
                 &updated.metadata,
@@ -232,7 +253,7 @@ pub(crate) fn merge_auth_content(base: &Auth, current: &Auth, updated: &Auth) ->
             if equal_fold(key.trim(), "proxy_url") {
                 continue;
             }
-            if patch.is_some() && crate::auth::codex_refresh::is_credential_key(key) {
+            if (patch.is_some() || refused) && crate::auth::codex_refresh::is_credential_key(key) {
                 continue;
             }
             let base_value = base.metadata.get(key);
@@ -248,7 +269,8 @@ pub(crate) fn merge_auth_content(base: &Auth, current: &Auth, updated: &Auth) ->
             if equal_fold(key.trim(), "proxy_url")
                 || updated.metadata.contains_key(key)
                 || matches!(key.as_str(), "siwc" | "use_siwc")
-                || (patch.is_some() && crate::auth::codex_refresh::is_credential_key(key))
+                || ((patch.is_some() || refused)
+                    && crate::auth::codex_refresh::is_credential_key(key))
             {
                 continue;
             }
@@ -357,13 +379,25 @@ pub(crate) fn merge_auth_content(base: &Auth, current: &Auth, updated: &Auth) ->
 
 /// Folds a refresh result into the live credential, keeping concurrent
 /// changes and active cooldowns (upstream's `MergeRefreshedAuth`).
+#[cfg(test)]
 pub(crate) fn merge_refreshed_auth(
     base: &Auth,
     current: &Auth,
     updated: &Auth,
     now: Timestamp,
 ) -> Auth {
-    let mut merged = merge_auth_content(base, current, updated);
+    merge_refreshed_auth_with(base, current, updated, now, ResponseCredentials::Merge)
+}
+
+/// [`merge_refreshed_auth`] with the response's credentials merged or refused.
+pub(crate) fn merge_refreshed_auth_with(
+    base: &Auth,
+    current: &Auth,
+    updated: &Auth,
+    now: Timestamp,
+    credentials: ResponseCredentials,
+) -> Auth {
+    let mut merged = merge_auth_content_with(base, current, updated, credentials);
     merged
         .rejected_access_token
         .clone_from(&updated.rejected_access_token);
@@ -564,5 +598,103 @@ mod tests {
         assert!(merged.unavailable);
         let merged = merge_refreshed_auth(&base, &base, &updated, now());
         assert_eq!(merged.status, Status::Active);
+    }
+
+    fn codex(meta: Value) -> Auth {
+        Auth {
+            provider: "codex".into(),
+            ..with_meta(meta)
+        }
+    }
+
+    use crate::auth::codex_refresh::CodexPersistIntent;
+
+    #[test]
+    fn a_merged_codex_response_synthesizes_a_refresh_patch() {
+        let base = codex(json!({"access_token": "t0", "refresh_token": "r0"}));
+        let updated = codex(json!({"access_token": "t1", "refresh_token": "r1"}));
+        let merged = merge_auth_content_with(&base, &base, &updated, ResponseCredentials::Merge);
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t1")));
+        assert!(matches!(
+            merged.codex_persist_intent,
+            CodexPersistIntent::Refresh(_)
+        ));
+    }
+
+    #[test]
+    fn a_refused_response_leaves_the_credentials_and_makes_no_patch() {
+        let base = codex(json!({"access_token": "t0", "refresh_token": "r0"}));
+        let current = codex(json!({"access_token": "t-live", "refresh_token": "r0"}));
+        let updated = codex(json!({"access_token": "t1", "refresh_token": "r1"}));
+        let merged =
+            merge_auth_content_with(&base, &current, &updated, ResponseCredentials::Refused);
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t-live")));
+        assert_eq!(merged.metadata.get("refresh_token"), Some(&json!("r0")));
+        assert_eq!(
+            merged.codex_persist_intent,
+            CodexPersistIntent::Configuration
+        );
+    }
+
+    #[test]
+    fn a_refused_response_still_merges_its_other_changes() {
+        let base = codex(json!({"access_token": "t0", "note": "n0", "gone": 1}));
+        let current = codex(json!({"access_token": "t0", "note": "n0", "gone": 1}));
+        let updated = codex(json!({"access_token": "t1", "note": "n1"}));
+        let merged =
+            merge_auth_content_with(&base, &current, &updated, ResponseCredentials::Refused);
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t0")));
+        assert_eq!(merged.metadata.get("note"), Some(&json!("n1")));
+        assert!(!merged.metadata.contains_key("gone"));
+    }
+
+    #[test]
+    fn a_refused_response_keeps_credential_keys_it_omits_and_siwc() {
+        let base = codex(json!({
+            "access_token": "t0",
+            "expired": "2099-01-01T00:00:00Z",
+            "siwc": {"access_token": "s0"},
+            "use_siwc": true
+        }));
+        let updated = codex(json!({"note": "n1"}));
+        let merged = merge_auth_content_with(&base, &base, &updated, ResponseCredentials::Refused);
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t0")));
+        assert_eq!(
+            merged.metadata.get("expired"),
+            Some(&json!("2099-01-01T00:00:00Z"))
+        );
+        assert_eq!(merged.metadata["siwc"]["access_token"], json!("s0"));
+        assert_eq!(merged.metadata.get("use_siwc"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn a_refused_refresh_keeps_bookkeeping_merges_like_a_merged_one() {
+        let base = Auth {
+            status: Status::Active,
+            ..codex(json!({"access_token": "t0"}))
+        };
+        let current = Auth {
+            status: Status::Error,
+            unavailable: true,
+            last_error: Some(AuthError {
+                message: "boom".into(),
+                ..AuthError::default()
+            }),
+            ..codex(json!({"access_token": "t0"}))
+        };
+        let updated = Auth {
+            status: Status::Active,
+            ..codex(json!({"access_token": "t1"}))
+        };
+        let merged = merge_refreshed_auth_with(
+            &base,
+            &current,
+            &updated,
+            now(),
+            ResponseCredentials::Refused,
+        );
+        assert_eq!(merged.status, Status::Error);
+        assert!(merged.unavailable);
+        assert_eq!(merged.metadata.get("access_token"), Some(&json!("t0")));
     }
 }
