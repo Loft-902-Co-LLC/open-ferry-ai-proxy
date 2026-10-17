@@ -58,8 +58,8 @@ use super::credential::{
 };
 use super::lifecycle::{
     LeasedDisposition, LeasedTail, ORIGIN_CHECK_ATTEMPTS, OriginCheck, OriginMoved,
-    clear_verified_partitions, mark_undurable, mark_undurable_except, pending_for_edit,
-    verified_partitions,
+    clear_verified_partitions, mark_undurable, mark_undurable_except, overlay_undurable,
+    pending_for_edit, verified_partitions,
 };
 use super::merge::{ResponseCredentials, merge_refreshed_auth_with, normalize_credential_metadata};
 use super::text::{equal_fold, go_lower};
@@ -73,11 +73,11 @@ use crate::auth::codex_refresh::{
     is_codex_auth, same_version,
 };
 use crate::auth::{
-    Auth, AuthError, CodexCredentialPartition, CodexLeaseToken, CodexOrigin, CodexPersisted,
-    OriginProof, Status, Timestamp,
+    Auth, AuthError, CodexCredentialPartition, CodexLease, CodexLeaseToken, CodexOrigin,
+    CodexPersisted, OriginProof, Status, Timestamp,
 };
 use crate::exec::{ErrorKind, ExecError};
-use crate::executor::ProviderExecutor;
+use crate::executor::{AdoptedPartitions, ProviderExecutor};
 use crate::gate::{GateState, NotActive};
 use serde_json::{Map, Value};
 
@@ -1325,9 +1325,23 @@ impl Manager {
         let id = id.to_owned();
         let failed_token = failed_token.to_owned();
         let work = async move {
-            manager
+            let result = manager
                 .refresh_owned(&id, &failed_token, epoch, force, resolution_only)
-                .await
+                .await;
+            // Whatever the pass returned, a save it refused while it held the
+            // refresh lock is owed, and is saved again now that it is free.
+            if let Some(epoch) =
+                manager.locked(|s| s.auths.get(&id).map(|entry| entry.auth.registration_epoch))
+            {
+                let (flusher, flush_id) = (manager.clone(), id.clone());
+                if run_leased(move || flusher.flush_owed_save(&flush_id, epoch))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(auth_id = %id, "owed save did not run");
+                }
+            }
+            result
         };
         if tokio::runtime::Handle::try_current().is_err() {
             // No runtime to own the task: run it here, still as the
@@ -1361,7 +1375,7 @@ impl Manager {
             .clone();
         let _serialized = id_lock.lock().await;
 
-        let (auth, base_epoch, executor) = {
+        let (auth, base_epoch, executor, landing) = {
             let state = self.lock();
             let Some(entry) = state.auths.get(id) else {
                 return Err(ManagerError::Other("auth or executor not found".into()));
@@ -1369,7 +1383,12 @@ impl Manager {
             let Some(executor) = Self::executor_for(&state, &entry.auth) else {
                 return Err(ManagerError::Other("auth or executor not found".into()));
             };
-            (entry.auth.clone(), entry.auth.registration_epoch, executor)
+            (
+                entry.auth.clone(),
+                entry.auth.registration_epoch,
+                executor,
+                entry.landing_unconfirmed,
+            )
         };
         if epoch != 0 && base_epoch != epoch {
             return Err(ManagerError::Other(
@@ -1392,6 +1411,18 @@ impl Manager {
             }
         }
 
+        // Only a Codex record under a store takes the credential lock. For any
+        // other, a landing hold still defers the pass, forced or not.
+        let lease_store = self.shared.store.clone().filter(|_| is_codex_auth(&auth));
+        if lease_store.is_none() && (landing.outer || landing.siwc) {
+            return Err(self.defer_refresh(
+                id,
+                base_epoch,
+                Deferral::LandingUnconfirmed,
+                io::Error::other("refresh deferred: landing unconfirmed"),
+            ));
+        }
+
         // A job queued only for the unresolved origin must not rotate a token
         // that is not due, whatever deferral holds its next check back.
         if resolution_only && !force && failed_token.is_empty() {
@@ -1402,20 +1433,413 @@ impl Manager {
             }
         }
 
-        // A waiter that got the lock after the switch began declines before
-        // it calls the provider.
+        // Steps 0b to 6b of the transaction: a Codex record under a store
+        // takes the credential lock for the whole pass. Anything else, and a
+        // record the lease cannot serve, refreshes as it always did.
+        let mut leased: Option<LeasedPass> = None;
+        let mut options = crate::executor::RefreshOptions::forced(force);
+        let mut auth = auth;
+        if let Some(store) = lease_store.as_ref() {
+            'leased: {
+                let Some(prep) =
+                    self.locked(|s| self.prepare_leased_refresh_locked(s, id, base_epoch))
+                else {
+                    return Err(changed_before_refresh());
+                };
+                if prep.landing_unconfirmed.outer || prep.landing_unconfirmed.siwc {
+                    return Err(self.defer_refresh(
+                        id,
+                        base_epoch,
+                        Deferral::LandingUnconfirmed,
+                        io::Error::other("refresh deferred: landing unconfirmed"),
+                    ));
+                }
+                if prep.ineligible {
+                    break 'leased;
+                }
+                let (lease_store, lease_auth) = (Arc::clone(store), Arc::clone(&auth));
+                let lease = run_leased(move || lease_store.codex_refresh_lease(&lease_auth))
+                    .await
+                    .unwrap_or_else(|error| Err(lease_task_error(error)));
+                let mut token = match lease {
+                    // lease: held
+                    Ok(CodexLease::Held(token)) => token,
+                    Ok(CodexLease::Unsupported) => {
+                        if prep.unresolved.is_some() {
+                            return Err(self.defer_refresh(
+                                id,
+                                base_epoch,
+                                Deferral::OriginUnresolved,
+                                io::Error::other("origin unresolved: no credential lock"),
+                            ));
+                        }
+                        break 'leased;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                        return Err(self.defer_refresh(id, base_epoch, Deferral::LockBusy, error));
+                    }
+                    Err(error) => {
+                        return Err(self.defer_refresh(
+                            id,
+                            base_epoch,
+                            Deferral::LeaseError,
+                            error,
+                        ));
+                    }
+                };
+
+                // 3: what the file holds now.
+                let (read_store, read_token) = (Arc::clone(store), token);
+                let read = run_leased(move || {
+                    let read = read_store.codex_lease_read(&read_token);
+                    (read_token, read)
+                })
+                .await;
+                let (back, read) = match read {
+                    Ok(done) => done,
+                    Err(error) => {
+                        return Err(self.defer_refresh(
+                            id,
+                            base_epoch,
+                            Deferral::LeaseError,
+                            lease_task_error(error),
+                        ));
+                    }
+                };
+                token = back;
+                let file = match read {
+                    Err(error) => {
+                        drop(token);
+                        return Err(self.defer_refresh(
+                            id,
+                            base_epoch,
+                            Deferral::LeaseError,
+                            error,
+                        ));
+                    }
+                    Ok(None) => {
+                        drop(token);
+                        return Err(self.defer_refresh(
+                            id,
+                            base_epoch,
+                            Deferral::MissingFile,
+                            io::Error::new(io::ErrorKind::NotFound, "credential file is missing"),
+                        ));
+                    }
+                    Ok(Some(file)) => file,
+                };
+                if !file
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("codex"))
+                {
+                    drop(token);
+                    return Err(self.defer_refresh(
+                        id,
+                        base_epoch,
+                        Deferral::NotCodexFile,
+                        io::Error::other("credential file is not a Codex file"),
+                    ));
+                }
+
+                // 4: the gate may have closed during the wait.
+                let state = self.gate().state();
+                if state != GateState::Open {
+                    drop(token);
+                    return Err(ManagerError::NotActive(NotActive { state }));
+                }
+
+                // 4b: settle the unresolved origin against the file just locked.
+                let mut resolved = false;
+                let mut settled: Option<Protection> = None;
+                if let Some(held) = prep.unresolved.as_ref() {
+                    let (pinned, here) = (held.origin.clone(), token.origin().clone());
+                    let proof = run_leased(move || pinned.prove(&here))
+                        .await
+                        .unwrap_or(OriginProof::Unproven);
+                    match self.locked(|s| {
+                        self.resolve_unresolved_locked(s, id, base_epoch, token.origin(), proof)
+                    }) {
+                        Resolution::Same => resolved = true,
+                        Resolution::Different(protection) => {
+                            resolved = true;
+                            settled = Some(protection);
+                        }
+                        Resolution::Unproven => {
+                            drop(token);
+                            return Err(self.defer_refresh(
+                                id,
+                                base_epoch,
+                                Deferral::OriginUnresolved,
+                                io::Error::other("origin unresolved"),
+                            ));
+                        }
+                        Resolution::RegistrationChanged => {
+                            drop(token);
+                            return Err(changed_before_refresh());
+                        }
+                    }
+                }
+
+                // 4c: settle the read-back marks against the same file.
+                if !prep.read_back.is_empty() {
+                    let mut proofs = Vec::with_capacity(prep.read_back.len());
+                    for (partition, origin) in &prep.read_back {
+                        let proof = if origin == token.origin() {
+                            OriginProof::Same
+                        } else {
+                            let (pinned, here) = (origin.clone(), token.origin().clone());
+                            run_leased(move || pinned.prove(&here))
+                                .await
+                                .unwrap_or(OriginProof::Unproven)
+                        };
+                        proofs.push((*partition, proof));
+                    }
+                    match self.locked(|s| {
+                        self.settle_read_back_locked(
+                            s,
+                            id,
+                            base_epoch,
+                            token.origin(),
+                            &proofs,
+                            &file,
+                        )
+                    }) {
+                        ReadBackSettlement::Hold => {
+                            drop(token);
+                            return Err(self.defer_refresh(
+                                id,
+                                base_epoch,
+                                Deferral::LandingUnconfirmed,
+                                io::Error::other("landing unconfirmed"),
+                            ));
+                        }
+                        ReadBackSettlement::Unproven => {
+                            drop(token);
+                            return Err(self.defer_refresh(
+                                id,
+                                base_epoch,
+                                Deferral::OriginUnresolved,
+                                io::Error::other("origin unresolved"),
+                            ));
+                        }
+                        ReadBackSettlement::RegistrationChanged => {
+                            drop(token);
+                            return Err(changed_before_refresh());
+                        }
+                        ReadBackSettlement::Settled(protection) => settled = Some(protection),
+                    }
+                }
+
+                // 5: commit the work the entry still owes the file.
+                let mut prot = settled.unwrap_or_else(|| Protection {
+                    undurable: prep.undurable,
+                    undurable_baselines: prep.undurable_baselines.clone(),
+                });
+                let mut disk = file;
+                if !prep.ops.is_empty() {
+                    let admission = self
+                        .leased_origin_check(id, token.origin(), |s, check| {
+                            self.admit_leased_locked(s, id, &prep, token.origin(), check, &prep.ops)
+                        })
+                        .await;
+                    if let Some(error) = self.refuse_admission(id, base_epoch, admission) {
+                        drop(token);
+                        return Err(error);
+                    }
+                    let composed = CredentialRefreshPatch::default()
+                        .with_pending_operations(&prep.ops)
+                        .with_durable_baselines(
+                            &prep.undurable_baselines.outer,
+                            &prep.undurable_baselines.siwc,
+                        );
+                    let mut auth_no_pending = prep.live.clone();
+                    auth_no_pending.codex_pending_refresh.clear();
+                    auth_no_pending.codex_persist_intent = Default::default();
+                    let (commit_store, commit_token) = (Arc::clone(store), token);
+                    let committed = run_leased(move || {
+                        let result = commit_store.codex_lease_commit(
+                            &commit_token,
+                            &auth_no_pending,
+                            &composed,
+                        );
+                        (commit_token, result)
+                    })
+                    .await;
+                    let (back, result) = match committed {
+                        Ok(done) => done,
+                        Err(error) => {
+                            return Err(self.defer_refresh(
+                                id,
+                                base_epoch,
+                                Deferral::PendingWriteFailed,
+                                lease_task_error(error),
+                            ));
+                        }
+                    };
+                    token = back;
+                    let persisted = match result {
+                        Ok(persisted) => persisted,
+                        Err(error) => {
+                            drop(token);
+                            return Err(self.defer_refresh(
+                                id,
+                                base_epoch,
+                                Deferral::PendingWriteFailed,
+                                error,
+                            ));
+                        }
+                    };
+                    match self
+                        .leased_origin_check(id, token.origin(), |s, check| {
+                            self.apply_pending_outcomes_locked(
+                                s,
+                                id,
+                                &prep,
+                                token.origin(),
+                                check,
+                                &persisted,
+                            )
+                        })
+                        .await
+                    {
+                        PendingOutcome::Applied(protection) => {
+                            prot = protection;
+                            disk = persisted.auth.metadata;
+                        }
+                        PendingOutcome::Refused(admission) => {
+                            drop(token);
+                            return Err(self
+                                .refuse_admission(id, base_epoch, admission)
+                                .unwrap_or_else(changed_before_refresh));
+                        }
+                    }
+                }
+
+                // 6: adopt what a peer wrote, never a protected predecessor.
+                let mut merged = Auth {
+                    metadata: disk,
+                    ..prep.live.clone()
+                };
+                overlay_undurable(&mut merged, &prep.live, prot.undurable);
+                let still: Vec<CredentialRefreshPatch> = prep
+                    .ops
+                    .iter()
+                    .filter(|patch| !patch.is_written())
+                    .cloned()
+                    .collect();
+                if !still.is_empty() {
+                    let composed =
+                        CredentialRefreshPatch::default().with_pending_operations(&still);
+                    let (rotated, applied) = composed.apply(&merged.metadata);
+                    if applied.outer == Some(true) {
+                        for key in OUTER_KEYS {
+                            match rotated.get(*key) {
+                                Some(value) => {
+                                    merged.metadata.insert((*key).to_owned(), value.clone());
+                                }
+                                None => {
+                                    merged.metadata.remove(*key);
+                                }
+                            }
+                        }
+                    }
+                    if applied.siwc == Some(true) {
+                        match rotated.get("siwc") {
+                            Some(value) => {
+                                merged.metadata.insert("siwc".to_owned(), value.clone());
+                            }
+                            None => {
+                                merged.metadata.remove("siwc");
+                            }
+                        }
+                    }
+                }
+                let disk_effective = merged.metadata;
+                let adopted = disk_rotated_partitions(&auth.metadata, &disk_effective);
+                let was_due = self.due_ignoring_hold(&auth, &executor);
+                if adopted.any() {
+                    let published = self
+                        .leased_origin_check(id, token.origin(), |s, check| {
+                            self.publish_adoption_locked(
+                                s,
+                                id,
+                                &prep,
+                                token.origin(),
+                                check,
+                                &disk_effective,
+                                adopted,
+                            )
+                        })
+                        .await;
+                    match published {
+                        Ok((snapshot, generation)) => {
+                            self.publish_projections(&snapshot, generation, self.now(), true);
+                            self.queue_refresh_reschedule(id);
+                            auth = snapshot;
+                        }
+                        Err(admission) => {
+                            drop(token);
+                            return Err(self
+                                .refuse_admission(id, base_epoch, admission)
+                                .unwrap_or_else(changed_before_refresh));
+                        }
+                    }
+                    if !failed_token.is_empty() {
+                        let current = access_token(&auth);
+                        if !current.is_empty() && current != failed_token {
+                            drop(token);
+                            return Ok(auth);
+                        }
+                    }
+                }
+
+                // 6c: a pass that only settled the origin sends nothing that is not due.
+                if (resolved || resolution_only)
+                    && !force
+                    && failed_token.is_empty()
+                    && !self.due_ignoring_hold(&auth, &executor)
+                {
+                    drop(token);
+                    return Ok(auth);
+                }
+
+                // 6b: the record still names this file, whatever happened meanwhile.
+                let admission = self
+                    .leased_origin_check(id, token.origin(), |s, check| {
+                        self.admit_leased_locked(s, id, &prep, token.origin(), check, &still)
+                    })
+                    .await;
+                if let Some(error) = self.refuse_admission(id, base_epoch, admission) {
+                    drop(token);
+                    return Err(error);
+                }
+
+                options = crate::executor::RefreshOptions {
+                    force,
+                    adopted: Some(AdoptedPartitions {
+                        outer: adopted.outer,
+                        siwc: adopted.siwc,
+                        was_due,
+                    }),
+                };
+                leased = Some(LeasedPass {
+                    token,
+                    prep,
+                    prot,
+                    disk_effective,
+                });
+            }
+        }
+
+        // 7: the one send. Every way out but a send drops the lease first.
         let sent = match self
-            .send_refresh(
-                id,
-                base_epoch,
-                &executor,
-                &auth,
-                crate::executor::RefreshOptions::forced(force),
-            )
-            .await?
+            .send_refresh(id, base_epoch, &executor, &auth, options)
+            .await
         {
-            SendOutcome::Sent(sent) => *sent,
-            SendOutcome::Deferred(kind) => {
+            Ok(SendOutcome::Sent(sent)) => *sent,
+            Ok(SendOutcome::Deferred(kind)) => {
+                drop(leased.take());
                 return Err(self.defer_refresh(
                     id,
                     base_epoch,
@@ -1423,7 +1847,8 @@ impl Manager {
                     io::Error::other("refresh deferred before the send"),
                 ));
             }
-            SendOutcome::Superseded(live) => {
+            Ok(SendOutcome::Superseded(live)) => {
+                drop(leased.take());
                 // A token command replaced a refresh token since the
                 // snapshot, so the snapshot's tokens must not be sent. With
                 // a failed token, the live credential answers the caller
@@ -1437,6 +1862,10 @@ impl Manager {
                 }
                 return Err(ManagerError::Other("auth changed before refresh".into()));
             }
+            Err(error) => {
+                drop(leased.take());
+                return Err(error);
+            }
         };
         let outcome = sent.map_err(|mut error| {
             let mut secrets = crate::observe::redact::Secrets::new();
@@ -1447,24 +1876,15 @@ impl Manager {
             }
             error
         });
+        if outcome.is_err() {
+            drop(leased.take());
+        }
         let now = self.now();
         let mut updated = match outcome {
             Ok(updated) => updated,
             Err(err) if err.kind == ErrorKind::Canceled => {
                 tracing::debug!(auth_id = %id, "refresh canceled");
-                // Try again shortly, as the loop would have.
-                {
-                    let mut state = self.lock();
-                    if let Some(entry) = state.auths.get_mut(id) {
-                        let next = entry.auth.next_refresh_after;
-                        if is_zero(next) || next.is_some_and(|t| t < now) {
-                            Arc::make_mut(&mut entry.auth).next_refresh_after =
-                                Some(add(now, REFRESH_CANCELED_RETRY));
-                        }
-                        state.sync_scheduler(self.models(), id, now);
-                    }
-                }
-                self.queue_refresh_reschedule(id);
+                self.retry_after_cancel(id, now);
                 return Err(ManagerError::Refresh(err));
             }
             Err(err) => {
@@ -1539,6 +1959,88 @@ impl Manager {
         if should_refresh(&updated, executor.refresh_lead(), now) {
             updated.next_refresh_after = Some(add(now, REFRESH_INEFFECTIVE_BACKOFF));
         }
+
+        // 8 to 11: commit the rotation to the leased file, publish it, and
+        // release the lease before any ordinary save.
+        let was_leased = leased.is_some();
+        let mut tail: Option<LeasedTail> = None;
+        if let Some(pass) = leased.take() {
+            let rotated = updated
+                .codex_persist_intent
+                .refresh_patch()
+                .map(CredentialRefreshPatch::requested)
+                .unwrap_or_default();
+            if rotated.any() {
+                let LeasedPass {
+                    token,
+                    prep,
+                    prot,
+                    disk_effective,
+                } = pass;
+                let origin = token.origin().clone();
+                let final_patch = CredentialRefreshPatch::with_disk_baseline(
+                    &auth.metadata,
+                    Some(&disk_effective),
+                    &updated.metadata,
+                    rotated.outer,
+                    rotated.siwc,
+                )
+                .with_durable_baselines(
+                    &prot.undurable_baselines.outer,
+                    &prot.undurable_baselines.siwc,
+                );
+                updated.codex_persist_intent =
+                    crate::auth::codex_refresh::CodexPersistIntent::Refresh(final_patch.clone());
+                let (token, committed) = self
+                    .commit_rotation_with_retry(id, &prep, token, &final_patch)
+                    .await;
+                let publication = self
+                    .leased_origin_check(id, &origin, |s, check| {
+                        self.publish_rotation_locked(
+                            s,
+                            id,
+                            &prep,
+                            &origin,
+                            check,
+                            &auth,
+                            &mut updated,
+                            &committed,
+                            now,
+                        )
+                    })
+                    .await;
+                match publication {
+                    Publication::Published {
+                        snapshot,
+                        generation,
+                        tail: published,
+                    } => {
+                        self.publish_projections(&snapshot, generation, now, true);
+                        self.queue_refresh_reschedule(id);
+                        drop(token);
+                        // lease: released
+                        #[cfg(test)]
+                        {
+                            let hook = lock(&self.shared.lease_tail_hook).clone();
+                            if let Some(hook) = hook {
+                                hook(snapshot.as_ref());
+                            }
+                        }
+                        tail = Some(*published);
+                    }
+                    Publication::Refused => {
+                        drop(token);
+                        return Err(changed_during_refresh(id));
+                    }
+                }
+            } else {
+                // Nothing was rotated, so there is nothing to commit; the
+                // ordinary save below runs without a leased tail.
+                drop(pass);
+            }
+        }
+
+        // 12: the ordinary save, with the tail the publication left.
         #[cfg(feature = "blue-green-test")]
         let save_result = {
             if save_failure.is_none() {
@@ -1549,13 +2051,17 @@ impl Manager {
             if save_failure.is_some() {
                 // The common update path logs one generic injected save
                 // failure; the barrier-specific cause is not carried into it.
-                self.update_refreshed_after_save_failure(&auth, base_epoch, updated, None)
+                self.update_refreshed_after_save_failure(&auth, base_epoch, updated, tail)
             } else {
-                self.save_refreshed(&auth, base_epoch, updated, None).await
+                self.save_refreshed(&auth, base_epoch, updated, tail).await
             }
         };
         #[cfg(not(feature = "blue-green-test"))]
-        let save_result = self.save_refreshed(&auth, base_epoch, updated, None).await;
+        let save_result = self.save_refreshed(&auth, base_epoch, updated, tail).await;
+        // 13: a state the publication or a fence recorded holds the next pass back.
+        if was_leased {
+            self.schedule_unresolved(id, base_epoch);
+        }
         let (saved, generation) = match save_result {
             Ok(Some(saved)) => saved,
             Ok(None) => return Err(ManagerError::Other(format!("auth {id} not found"))),
@@ -1591,6 +2097,57 @@ impl Manager {
             return self.record_partial_failure(id, partial, &attempt, now);
         }
         Ok(saved)
+    }
+
+    /// Schedules the retry a canceled refresh asks for, as the loop would have.
+    fn retry_after_cancel(&self, id: &str, now: Timestamp) {
+        {
+            let mut state = self.lock();
+            if let Some(entry) = state.auths.get_mut(id) {
+                let next = entry.auth.next_refresh_after;
+                if is_zero(next) || next.is_some_and(|t| t < now) {
+                    Arc::make_mut(&mut entry.auth).next_refresh_after =
+                        Some(add(now, REFRESH_CANCELED_RETRY));
+                }
+                state.sync_scheduler(self.models(), id, now);
+            }
+        }
+        self.queue_refresh_reschedule(id);
+    }
+
+    /// Whether `auth` is due for a refresh, whatever hold its next check has.
+    fn due_ignoring_hold(&self, auth: &Auth, executor: &Arc<dyn ProviderExecutor>) -> bool {
+        let mut probe = auth.clone();
+        probe.next_refresh_after = None;
+        should_refresh(&probe, executor.refresh_lead(), self.now())
+    }
+
+    /// What a refused admission makes of the pass: the error to hand back, or
+    /// `None` when the admission holds. The caller drops the lease first.
+    fn refuse_admission(
+        &self,
+        id: &str,
+        base_epoch: u64,
+        admission: LeaseAdmission,
+    ) -> Option<ManagerError> {
+        match admission {
+            LeaseAdmission::Admitted => None,
+            LeaseAdmission::RegistrationChanged | LeaseAdmission::OriginLost => {
+                Some(changed_before_refresh())
+            }
+            LeaseAdmission::OriginUnproven => Some(self.defer_refresh(
+                id,
+                base_epoch,
+                Deferral::OriginUnresolved,
+                io::Error::other("origin unresolved"),
+            )),
+            LeaseAdmission::PolicyRefused => Some(self.defer_refresh(
+                id,
+                base_epoch,
+                Deferral::PolicyChanged,
+                io::Error::other("refresh deferred: policy changed"),
+            )),
+        }
     }
 
     /// Persists a refreshed credential and folds it in, off the runtime
@@ -1966,6 +2523,33 @@ enum Deferral {
     ReadBackUnsettled,
 }
 
+/// What a pass that holds the lease carries from the read to the release.
+struct LeasedPass {
+    token: CodexLeaseToken,
+    prep: LeasePrep,
+    prot: Protection,
+    /// The file's content with the unwritten work and the marks overlaid.
+    disk_effective: Map<String, Value>,
+}
+
+/// The error of a pass whose entry is gone or at another epoch.
+fn changed_before_refresh() -> ManagerError {
+    ManagerError::Other("auth registration changed before refresh".into())
+}
+
+/// The error of a pass whose entry moved while it held the lease.
+fn changed_during_refresh(id: &str) -> ManagerError {
+    ManagerError::Other(format!("auth {id} registration changed during refresh"))
+}
+
+/// The io error of a lease task that failed outright.
+fn lease_task_error(error: ManagerError) -> io::Error {
+    match error {
+        ManagerError::Store(error) => error,
+        other => io::Error::other(other.to_string()),
+    }
+}
+
 /// How many times the rotation commit is tried before it confirms the file.
 const LEASE_COMMIT_ATTEMPTS: u32 = 6;
 /// The wait before each retry of the rotation commit.
@@ -1992,7 +2576,6 @@ enum Outcome {
     /// confirmation read found landed; `read` is whether that read worked, and
     /// `map` the file's content when it did.
     Exhausted {
-        err: io::Error,
         confirmed: CodexPartitions,
         read: bool,
         map: Option<Map<String, Value>>,
@@ -3239,6 +3822,7 @@ async fn confirm_commit(
         (token, result)
     })
     .await;
+    tracing::warn!("codex lease commit failed after every attempt: {err}");
     match read {
         Err(_) => (None, Outcome::LeaseLost),
         Ok((token, Ok(Some(map)))) => {
@@ -3246,7 +3830,6 @@ async fn confirm_commit(
             (
                 Some(token),
                 Outcome::Exhausted {
-                    err,
                     confirmed,
                     read: true,
                     map: Some(map),
@@ -3256,7 +3839,6 @@ async fn confirm_commit(
         Ok((token, _)) => (
             Some(token),
             Outcome::Exhausted {
-                err,
                 confirmed: CodexPartitions::default(),
                 read: false,
                 map: None,

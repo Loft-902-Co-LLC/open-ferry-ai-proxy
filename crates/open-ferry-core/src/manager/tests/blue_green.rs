@@ -356,11 +356,11 @@ async fn a_refresh_whose_caller_gave_up_still_saves() {
 
 // Not upstream's: the case the rule above is for. A full `load()` while the
 // refresh is held bumps the registration epoch, so the finished refresh is
-// stale and the rotated token is lost; the file keeps a refresh token the
-// provider has already rotated, and the next refresh is flagged as reuse.
-// This is why a resume with the lease still held does not reload.
+// stale for memory; under the lease the rotated token is committed to the
+// file first, so the file keeps the token the provider issued and the next
+// refresh is not flagged as reuse.
 #[tokio::test(start_paused = true)]
-async fn a_full_load_during_a_held_refresh_loses_the_rotated_token() {
+async fn a_full_load_during_a_held_refresh_keeps_the_committed_token() {
     let env = Env::new();
     let (epoch, _) = env.versions();
     env.provider.hold();
@@ -376,13 +376,17 @@ async fn a_full_load_during_a_held_refresh_loses_the_rotated_token() {
 
     let lost = refresh.await.expect("task");
     let message = lost.expect_err("the refresh is stale").to_string();
-    assert!(message.contains("stale registration epoch"), "{message}");
-    assert_eq!(env.on_disk()["refresh_token"], "refresh-0", "not saved");
+    assert!(message.contains("registration"), "{message}");
+    assert_eq!(env.on_disk()["refresh_token"], "refresh-1", "committed");
     assert_ne!(env.provider.current(), "refresh-0", "the provider moved on");
 
-    let again = env.manager.force_refresh(ID).await;
-    assert!(again.is_err());
-    assert_eq!(env.provider.reused(), 1, "the old token is presented again");
+    // The hold was for the first refresh only.
+    env.provider.hold.store(false, Ordering::SeqCst);
+    env.manager
+        .force_refresh(ID)
+        .await
+        .expect("the next refresh succeeds");
+    assert_eq!(env.provider.reused(), 0, "the old token is not presented");
 }
 
 /// What another process leaves in the credential file: the tokens a refresh
@@ -1042,7 +1046,7 @@ fn hold_save(manager: &Manager, when: impl Fn(&Auth) -> bool + Send + Sync + 'st
 // job. It is held after the provider rotated the token and before it
 // publishes. The gate quiesces and a 401 on a request that used the old token
 // reaches D3: the refresh holds the credential's refresh lock, so nothing is
-// adopted. L27 keeps the newer disk tokens and reconciles memory after saving.
+// adopted. The leased commit then finds the file superseded and marks it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_401_adopts_nothing_while_a_refresh_without_a_job_is_in_flight() {
     for request_path in [false, true] {
@@ -1074,9 +1078,12 @@ async fn a_401_adopts_nothing_while_a_refresh_without_a_job_is_in_flight() {
         env.provider.release();
         let refreshed = refresh.await.expect("task").expect("the refresh finishes");
         closing.await.expect("task").expect("closes");
-        // L27: the Codex disk baseline keeps newer tokens and reconciles memory.
-        assert_eq!(access_token(&refreshed), "access-9");
-        assert_eq!(env.token(), "access-9", "request path {request_path}");
+        // The peer wrote the file outside the lease, which a write that skips
+        // the lease is not protected from. The refresh's commit sees a
+        // superseded partition and marks it, not adopts it: the file keeps
+        // the peer's tokens and memory keeps the refresh's.
+        assert_eq!(access_token(&refreshed), "access-1");
+        assert_eq!(env.token(), "access-1", "request path {request_path}");
         assert_eq!(env.on_disk()["refresh_token"], "refresh-9");
         assert_eq!(env.on_disk()["access_token"], "access-9");
         assert_eq!(env.provider.reused(), 0);
@@ -1104,7 +1111,7 @@ async fn a_refused_save_does_not_hide_an_admitted_one() {
     outcome.credential_version = env.manager.get(ID).expect("credential").credential_version;
     env.manager.mark_result(&outcome);
     assert!(env.versions().1 > published, "the outcome was published");
-    assert_eq!(env.on_disk()["refresh_token"], "refresh-0", "refused");
+    assert_eq!(env.on_disk()["refresh_token"], "refresh-1", "committed");
 
     hold.release();
     refresh.await.expect("task").expect("the refresh finishes");

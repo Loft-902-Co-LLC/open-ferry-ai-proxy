@@ -625,6 +625,9 @@ impl Manager {
     /// since `base` was read (upstream's `UpdateRefreshedAuth`). Fails when
     /// the credential was registered again since `base_epoch`. Returns the
     /// credential and its new generation.
+    ///
+    /// Only a refresh pass calls this, for its unleased tail, while it holds
+    /// the refresh lock; the save is therefore exempt from check (vi).
     pub(crate) fn update_refreshed(
         &self,
         base: &Auth,
@@ -1617,6 +1620,9 @@ impl Manager {
                 discard_epoch,
                 save,
                 lease.as_deref(),
+                // Only a refresh pass reaches here with `is_refresh`, and
+                // without a lease it is saving its own tail under lock 1.
+                is_refresh && lease.is_none(),
             ) {
                 Ok((persisted, written)) => (Ok(persisted), written),
                 Err(error) => (Err(error), None),
@@ -2083,13 +2089,14 @@ impl Manager {
         discard_epoch: u64,
         save: Save,
     ) -> Result<super::Persisted, ManagerError> {
-        self.persist_bound(auth, epoch, generation, discard_epoch, save, None)
+        self.persist_bound(auth, epoch, generation, discard_epoch, save, None, false)
             .map(|(persisted, _)| persisted)
     }
 
     /// [`Self::persist`], saving a leased pass's tail to the lease's origin file
     /// when `lease` is set. The path the save wrote, as an origin, is returned
     /// beside the result.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn persist_bound(
         &self,
         auth: &Auth,
@@ -2098,6 +2105,7 @@ impl Manager {
         discard_epoch: u64,
         save: Save,
         lease: Option<&LeasedTail>,
+        own_tail: bool,
     ) -> Result<(super::Persisted, Option<CodexOrigin>), ManagerError> {
         let mut written_origin = None;
         let persisted = self.persist_inner(
@@ -2107,6 +2115,7 @@ impl Manager {
             discard_epoch,
             save,
             lease,
+            own_tail,
             &mut written_origin,
         )?;
         Ok((persisted, written_origin))
@@ -2121,6 +2130,7 @@ impl Manager {
         discard_epoch: u64,
         save: Save,
         lease: Option<&LeasedTail>,
+        own_tail: bool,
         written_origin: &mut Option<CodexOrigin>,
     ) -> Result<super::Persisted, ManagerError> {
         #[cfg(test)]
@@ -2262,8 +2272,12 @@ impl Manager {
                     None => return Ok(super::Persisted::Skipped),
                 }
             } else {
-                let mut guard =
-                    |dest: Option<&CodexOrigin>| self.save_guard(&writing, epoch, withheld, dest);
+                // Check (vi)'s hold on the refresh mutex lives here, so it lasts
+                // through the write and is released when this block ends.
+                let mut held: Option<tokio::sync::OwnedMutexGuard<()>> = None;
+                let mut guard = |dest: Option<&CodexOrigin>| {
+                    self.save_guard(&writing, epoch, withheld, dest, own_tail, &mut held)
+                };
                 match store
                     .save_guarded(&writing, &mut guard)
                     .map_err(ManagerError::Store)?
@@ -2275,6 +2289,14 @@ impl Manager {
                     }
                 }
             };
+            // The unleased block has ended, so check (vi)'s hold is dropped.
+            #[cfg(test)]
+            if lease.is_none() {
+                let hook = lock(&self.shared.unleased_saved_hook).clone();
+                if let Some(hook) = hook {
+                    hook(auth);
+                }
+            }
             if saved.is_empty() {
                 return Ok(super::Persisted::Skipped);
             }
@@ -2432,9 +2454,30 @@ impl Manager {
         epoch: u64,
         admitted: super::UndurablePartitions,
         dest: Option<&CodexOrigin>,
+        own_tail: bool,
+        held: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<WithheldPartitions, SaveDeferral> {
         if !crate::auth::codex_refresh::is_codex_auth(writing) {
             return Ok(WithheldPartitions::default());
+        }
+        // (vi) No refresh pass of this id is in flight. Not waited for: the
+        // guard is kept in `held` until the write has returned, so a pass
+        // cannot start meanwhile and the save cannot recreate a file a pass
+        // moved away from.
+        //
+        // A refresh pass's own unleased tail is exempt (`own_tail`): the pass
+        // holds lock 1 from its snapshot through that save, so no other pass
+        // can be in flight, and this one has finished its send. Only
+        // `finish_update` sets the flag, for `is_refresh` without a lease.
+        if !own_tail {
+            let refresh_lock = lock(&self.shared.refresh_locks)
+                .entry(writing.id.clone())
+                .or_default()
+                .clone();
+            match refresh_lock.try_lock_owned() {
+                Ok(guard) => *held = Some(guard),
+                Err(_) => return Err(SaveDeferral::RefreshInFlight),
+            }
         }
         let state = self.lock();
         let Some(entry) = state.auths.get(&writing.id) else {
@@ -2535,7 +2578,7 @@ impl Manager {
     /// Saves again what a refused save left owed, once, after the caller's
     /// permits are released. It never clears the flag: only a covering
     /// Configuration save does.
-    fn flush_owed_save(&self, id: &str, epoch: u64) {
+    pub(super) fn flush_owed_save(&self, id: &str, epoch: u64) {
         let _gate = self.mutation_gate();
         let (snapshot, discard_epoch) = {
             let state = self.lock();
