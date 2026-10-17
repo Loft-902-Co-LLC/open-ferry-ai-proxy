@@ -1014,3 +1014,78 @@ async fn siwc_force_with_adoption_refreshes_both_partitions() {
     assert_eq!(which.outer, Some(true));
     assert_eq!(which.siwc, Some(true));
 }
+
+// C1-2b: an outer-only record with its outer partition adopted sends nothing.
+#[tokio::test]
+async fn siwc_adopted_outer_only_record_sends_nothing() {
+    let outer = token_server("").await;
+    let siwc = siwc_token_server(false).await;
+    let mut auth = (*dual_auth(false, false)).clone();
+    auth.metadata.remove("siwc");
+    let auth = Arc::new(auth);
+    let after = dual_executor(&outer, &siwc)
+        .refresh_with_options(
+            auth.clone(),
+            RefreshOptions {
+                force: false,
+                adopted: adopted(true, false, false),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(outer.requests().is_empty());
+    assert!(siwc.requests().is_empty());
+    assert!(after.metadata == auth.metadata);
+    assert!(!matches!(
+        after.codex_persist_intent,
+        CodexPersistIntent::Refresh(_)
+    ));
+    assert!(after.codex_refresh_failure.is_none());
+}
+
+// C1-2c: `was_due` is the manager's pre-adoption reading. With it true, the
+// call is not unscheduled even though nothing is due on the adopted record.
+#[tokio::test]
+async fn siwc_adopted_was_due_keeps_an_unadopted_partition_unsent() {
+    let outer = token_server("").await;
+    let siwc = siwc_token_server(false).await;
+    let auth = dual_auth(false, false);
+    let after = dual_executor(&outer, &siwc)
+        .refresh_with_options(
+            auth.clone(),
+            RefreshOptions {
+                force: false,
+                adopted: adopted(true, false, true),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(outer.requests().is_empty());
+    assert!(siwc.requests().is_empty());
+    assert!(after.metadata == auth.metadata);
+    assert!(!matches!(
+        after.codex_persist_intent,
+        CodexPersistIntent::Refresh(_)
+    ));
+    assert!(after.codex_refresh_failure.is_none());
+}
+
+// C1-2d: adoption never hides a failed refresh of the other partition.
+#[tokio::test]
+async fn siwc_adopted_outer_with_failing_siwc_is_an_error() {
+    let outer = token_server("").await;
+    // A reused-token error is not retried, so the endpoint sees one request.
+    let siwc = Mock::start(Reply::error(400, r#"{"error":"refresh_token_reused"}"#)).await;
+    let result = dual_executor(&outer, &siwc)
+        .refresh_with_options(
+            dual_auth(false, true),
+            RefreshOptions {
+                force: false,
+                adopted: adopted(true, false, true),
+            },
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(outer.requests().is_empty());
+    assert_eq!(siwc.requests().len(), 1);
+}
