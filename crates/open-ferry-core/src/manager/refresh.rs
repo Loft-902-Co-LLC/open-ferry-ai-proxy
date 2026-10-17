@@ -1423,16 +1423,6 @@ impl Manager {
             ));
         }
 
-        // A job queued only for the unresolved origin must not rotate a token
-        // that is not due, whatever deferral holds its next check back.
-        if resolution_only && !force && failed_token.is_empty() {
-            let mut probe = Auth::clone(&auth);
-            probe.next_refresh_after = None;
-            if !should_refresh(&probe, executor.refresh_lead(), self.now()) {
-                return Ok(auth);
-            }
-        }
-
         // Steps 0b to 6b of the transaction: a Codex record under a store
         // takes the credential lock for the whole pass. Anything else, and a
         // record the lease cannot serve, refreshes as it always did.
@@ -1639,7 +1629,7 @@ impl Manager {
                 let mut disk = file;
                 if !prep.ops.is_empty() {
                     let admission = self
-                        .leased_origin_check(id, token.origin(), |s, check| {
+                        .leased_origin_check(id, token.origin(), true, |s, check| {
                             self.admit_leased_locked(s, id, &prep, token.origin(), check, &prep.ops)
                         })
                         .await;
@@ -1691,7 +1681,7 @@ impl Manager {
                         }
                     };
                     match self
-                        .leased_origin_check(id, token.origin(), |s, check| {
+                        .leased_origin_check(id, token.origin(), true, |s, check| {
                             self.apply_pending_outcomes_locked(
                                 s,
                                 id,
@@ -1760,7 +1750,7 @@ impl Manager {
                 let was_due = self.due_ignoring_hold(&auth, &executor);
                 if adopted.any() {
                     let published = self
-                        .leased_origin_check(id, token.origin(), |s, check| {
+                        .leased_origin_check(id, token.origin(), true, |s, check| {
                             self.publish_adoption_locked(
                                 s,
                                 id,
@@ -1806,7 +1796,7 @@ impl Manager {
 
                 // 6b: the record still names this file, whatever happened meanwhile.
                 let admission = self
-                    .leased_origin_check(id, token.origin(), |s, check| {
+                    .leased_origin_check(id, token.origin(), true, |s, check| {
                         self.admit_leased_locked(s, id, &prep, token.origin(), check, &still)
                     })
                     .await;
@@ -1829,6 +1819,20 @@ impl Manager {
                     prot,
                     disk_effective,
                 });
+            }
+        }
+
+        // 0c: a job queued only for the unresolved origin must not rotate a
+        // token that is not due, whatever deferral holds its next check back.
+        // Only today's path gets here without the lease: a record under no
+        // store, one the lease cannot serve, and one whose store has no
+        // credential lock and no unresolved origin. A leased pass has its own
+        // exit at 6c, after it resolved the origin.
+        if leased.is_none() && resolution_only && !force && failed_token.is_empty() {
+            let mut probe = Auth::clone(&auth);
+            probe.next_refresh_after = None;
+            if !should_refresh(&probe, executor.refresh_lead(), self.now()) {
+                return Ok(auth);
             }
         }
 
@@ -1995,7 +1999,9 @@ impl Manager {
                     .commit_rotation_with_retry(id, &prep, token, &final_patch)
                     .await;
                 let publication = self
-                    .leased_origin_check(id, &origin, |s, check| {
+                    // The commit loses its token with a lost blocking task, and
+                    // the lock with it.
+                    .leased_origin_check(id, &origin, token.is_some(), |s, check| {
                         self.publish_rotation_locked(
                             s,
                             id,
@@ -2778,10 +2784,15 @@ impl Manager {
     /// outside the lock; `decide` returns `Err(OriginMoved)` before it changes
     /// anything when the record moved since, and is then run again after a new
     /// proof, at most `ORIGIN_CHECK_ATTEMPTS` times in all.
+    ///
+    /// `lock_held` says whether the caller still holds the credential lock.
+    /// A proof made without it can only be `Unproven`, never `Different`
+    /// (`CodexOrigin::prove`), so a `Different` result is used as `Unproven`.
     async fn leased_origin_check<T>(
         &self,
         id: &str,
         origin: &CodexOrigin,
+        lock_held: bool,
         mut decide: impl FnMut(&mut State, &OriginCheck) -> Result<T, OriginMoved>,
     ) -> T {
         let store = self.shared.store.as_deref();
@@ -2794,9 +2805,11 @@ impl Manager {
                 Some(c) if c == origin => OriginProof::Same,
                 Some(c) => {
                     let (pinned, other) = (origin.clone(), c.clone());
-                    run_leased(move || pinned.prove(&other))
-                        .await
-                        .unwrap_or(OriginProof::Unproven)
+                    match run_leased(move || pinned.prove(&other)).await {
+                        Ok(OriginProof::Different) if !lock_held => OriginProof::Unproven,
+                        Ok(proof) => proof,
+                        Err(_) => OriginProof::Unproven,
+                    }
                 }
             };
             let check = OriginCheck::proved(current, proof, attempt >= ORIGIN_CHECK_ATTEMPTS);
@@ -3537,10 +3550,10 @@ impl Manager {
             if let Some(error) = last.take()
                 && !may_start_retry(deadline, Instant::now())
             {
-                return confirm_commit(store, token, final_patch, error).await;
+                return confirm_commit(id, store, token, final_patch, error).await;
             }
             let admission = self
-                .leased_origin_check(id, token.origin(), |s, check| {
+                .leased_origin_check(id, token.origin(), true, |s, check| {
                     self.admit_leased_locked(
                         s,
                         id,
@@ -3584,7 +3597,7 @@ impl Manager {
             let until = *deadline.get_or_insert_with(|| now + window);
             attempt += 1;
             if attempt >= LEASE_COMMIT_ATTEMPTS as usize || !may_start_retry(Some(until), now) {
-                return confirm_commit(store, token, final_patch, error).await;
+                return confirm_commit(id, store, token, final_patch, error).await;
             }
             let wait = LEASE_COMMIT_BACKOFF[attempt - 1];
             if tokio::runtime::Handle::try_current().is_ok() {
@@ -3812,6 +3825,7 @@ impl Manager {
 /// Reads the leased file once after the commit gave up, to learn which
 /// requested partitions landed. A failed read leaves them unknown.
 async fn confirm_commit(
+    id: &str,
     store: Arc<dyn crate::auth::AuthStore>,
     token: CodexLeaseToken,
     final_patch: &CredentialRefreshPatch,
@@ -3822,7 +3836,11 @@ async fn confirm_commit(
         (token, result)
     })
     .await;
-    tracing::warn!("codex lease commit failed after every attempt: {err}");
+    tracing::warn!(
+        auth_id = %id,
+        kind = ?err.kind(),
+        "codex lease commit failed after every attempt"
+    );
     match read {
         Err(_) => (None, Outcome::LeaseLost),
         Ok((token, Ok(Some(map)))) => {
@@ -3962,6 +3980,7 @@ mod tests {
         let future = manager.leased_origin_check(
             "id",
             &origin,
+            true,
             |_: &mut State, _: &OriginCheck| -> Result<(), OriginMoved> { Ok(()) },
         );
         require_send(future);
@@ -4381,8 +4400,10 @@ mod tests {
         current.quota.next_recover_at = Some(recover);
         current.model_states.insert("m".into(), model_401(None));
         // The top-level 401 makes step 1b's unauthorized reset set the merged
-        // record Active and available, so only the quota restore brings
-        // `current`'s status and hold back.
+        // record Active and available. `status` pins the quota restore block:
+        // only that block brings `current`'s Error status back. `unavailable`
+        // returns anyway, through `clear_unauthorized_model_states` ->
+        // `update_aggregated_availability`, so it doesn't pin the block.
         current.last_error = unauthorized();
         let (before, after) = settled(&current, now);
         assert_eq!(before.status, Status::Error, "the merge before step 1b");

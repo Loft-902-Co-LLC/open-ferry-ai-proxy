@@ -2086,9 +2086,25 @@ async fn pending_siwc_success_does_not_clear_newer_siwc_failure() {
 #[tokio::test(flavor = "multi_thread")]
 async fn consumed_pending_outer_is_not_embedded_in_later_siwc_refresh() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault is on the unleased refresh save, so the first refresh gets no
+    // lease; with a lease its commit would land the patch and leave no pending
+    // operation. The SIWC refresh below runs leased.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
+    assert!(
+        !store.fail_refresh.load(Ordering::SeqCst),
+        "the refresh save fault fired"
+    );
+    let pending = manager
+        .get("codex.json")
+        .unwrap()
+        .codex_pending_refresh
+        .clone();
+    assert_eq!(pending.len(), 1, "an outer operation is pending");
+    assert!(!pending[0].is_written(), "and it is not written");
+    store.lease_unsupported.store(false, Ordering::SeqCst);
     let mut counter = (*manager.get("codex.json").unwrap()).clone();
     counter.success = 1;
     // The counter save writes and consumes the outer patch. Check (vi) holds
@@ -6094,6 +6110,15 @@ async fn live_record_save_after_empty_replace(saving_replace: bool, reset_quota:
         rotate_partition(&manager, &store, outer, "self-older", true);
         let older = manager.get("codex.json").unwrap().codex_pending_refresh[0].clone();
         assert!(!older.is_written(), "older rotation starts unwritten");
+        // The partition's tokens in the file before the pass.
+        let original = {
+            let saved = disk(&dir);
+            let partition = if outer { &saved } else { &saved["siwc"] };
+            (
+                partition["access_token"].clone(),
+                partition["refresh_token"].clone(),
+            )
+        };
         manager.register_executor(partition_rotation_executor(outer, "self-newer"));
         let held = hold_matching_save(&manager, |auth| {
             matches!(auth.codex_persist_intent, CodexPersistIntent::Refresh(_))
@@ -6146,9 +6171,12 @@ async fn live_record_save_after_empty_replace(saving_replace: bool, reset_quota:
         .expect("the refused live-record save is owed");
         let saved = disk(&dir);
         let partition = if outer { &saved } else { &saved["siwc"] };
-        assert!(
-            partition["access_token"] != json!("self-newer-access")
-                && partition["refresh_token"] != json!("self-newer-refresh"),
+        assert_eq!(
+            (
+                partition["access_token"].clone(),
+                partition["refresh_token"].clone()
+            ),
+            original,
             "the live-record save has not written while the pass is in flight"
         );
         drop(held);
@@ -6166,6 +6194,12 @@ async fn live_record_save_after_empty_replace(saving_replace: bool, reset_quota:
                 && partition["access_token"] == json!("self-newer-access")
                 && partition["refresh_token"] == json!("self-newer-refresh"),
             "eligible rotations are consumed only after the composed tokens reach disk"
+        );
+        // Step 14 ran inside the pass: the covering Configuration save cleared
+        // the owed save, with no wait for it.
+        assert!(
+            manager.lock().auths["codex.json"].owed_save.is_none(),
+            "the pass's owed save was saved again once the lock was free"
         );
     }
 }
@@ -7119,22 +7153,36 @@ fn refused_for_refresh(store: &ObservedStore) -> bool {
         .any(|(_, deferral)| matches!(deferral, Some(SaveDeferral::RefreshInFlight)))
 }
 
-/// The calls of a recording, without the lease and origin queries.
+/// The calls of a recording, without the lease query (step 2's, which a pass
+/// makes before it learns the store is `Unsupported`).
 fn without_lease_queries(calls: &[&'static str]) -> Vec<&'static str> {
     calls
         .iter()
         .copied()
-        .filter(|call| !matches!(*call, "codex_refresh_lease" | "codex_origin"))
+        .filter(|call| *call != "codex_refresh_lease")
         .collect()
 }
 
-// The sequences below were recorded at the commit before the lease went live
-// (where no pass asked for a lease or an origin), with the same wrapper.
+// The sequences below are today's, with one addition to those recorded at the
+// commit before the lease went live (with the same wrapper): the origin query
+// `codex_origin` that the pass's own tail makes after its save, to resolve the
+// record's file. It is pinned here, in place, not filtered out.
 /// The store calls of an unleased pass that rotates the outer partition.
-const ROTATING_UNLEASED_CALLS: &[&str] =
-    &["save_guarded", "read_back", "same_record", "same_record"];
+const ROTATING_UNLEASED_CALLS: &[&str] = &[
+    "save_guarded",
+    "codex_origin",
+    "read_back",
+    "same_record",
+    "same_record",
+];
 /// The store calls of an unleased pass that rotates nothing.
-const IDLE_UNLEASED_CALLS: &[&str] = &["save_guarded", "read_back", "same_record", "same_record"];
+const IDLE_UNLEASED_CALLS: &[&str] = &[
+    "save_guarded",
+    "codex_origin",
+    "read_back",
+    "same_record",
+    "same_record",
+];
 /// The store calls of a refresh of a non-Codex record.
 const GEMINI_CALLS: &[&str] = &["save_guarded"];
 
@@ -7275,7 +7323,25 @@ async fn lease_timeout_defers_without_touching_routing_state() {
         let probe = Probe::new("codex", false).rotating("c");
         rig.manager.register_executor(probe.clone());
         *lock(&recording.lease_error) = Some(io::ErrorKind::TimedOut);
+        // Routing state that differs from the defaults, so an unchanged field
+        // is not just an unchanged default. The error is not a 401, which
+        // would let the refresh clear it.
+        let mut seeded = fixture();
+        seeded.status = crate::auth::Status::Error;
+        seeded.unavailable = true;
+        seeded.status_message = "seeded upstream failure".into();
+        seeded.last_error = Some(crate::auth::AuthError {
+            code: "upstream".into(),
+            message: "seeded upstream failure".into(),
+            retryable: true,
+            http_status: 502,
+        });
+        rig.manager.register_unsaved(seeded.clone()).unwrap();
         let before = rig.live();
+        assert_eq!(before.status, seeded.status, "the seed took");
+        assert!(before.unavailable, "the seed took");
+        assert_eq!(before.status_message, seeded.status_message);
+        assert_eq!(before.last_error, seeded.last_error);
         let started = chrono::Utc::now();
         let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
         let ManagerError::Store(error) = error else {
@@ -7287,7 +7353,7 @@ async fn lease_timeout_defers_without_touching_routing_state() {
         assert_eq!(after.status, before.status);
         assert_eq!(after.unavailable, before.unavailable);
         assert_eq!(after.status_message, before.status_message);
-        assert_eq!(after.last_error.is_some(), before.last_error.is_some());
+        assert_eq!(after.last_error, before.last_error);
         let held = after.next_refresh_after.expect("a wait was set");
         assert!(held >= started + chrono::Duration::seconds(5), "{held}");
         assert!(
@@ -7568,6 +7634,196 @@ async fn rebinding_to_the_same_directory_while_leased_is_admitted() {
         assert_eq!(probe.sent(), 1);
         assert_eq!(probe.reused(), 0, "a spent token was presented again");
         assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_lost_commit_task_never_marks_a_different_file() {
+    // P1: the commit's blocking task is lost, so the pass has no lease and its
+    // proof of the record's file is made without the credential lock. The
+    // record now names another file, which a proof under the lock would call
+    // `Different`. Without the lock it is `Unproven`: the rotation is marked
+    // for read-back, not as lost to a different file.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let other = tempfile::tempdir_in(rig.dir.path().parent().unwrap()).unwrap();
+        let (files, target) = (rig.store.files.clone(), other.path().to_path_buf());
+        let armed = Arc::new(AtomicBool::new(true));
+        *lock(&rig.store.before_lease_commit_hook) = Some(Arc::new(move |_: &Auth| {
+            if armed.swap(false, Ordering::SeqCst) {
+                // The record's file moves, then the task dies holding the lease.
+                files.set_base_dir(&target);
+                panic!("the commit's blocking task is lost");
+            }
+        }));
+        let origin = crate::auth::CodexOrigin::of(&rig.path()).unwrap();
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        *lock(&rig.store.before_lease_commit_hook) = None;
+        assert_eq!(probe.sent(), 1);
+        assert_eq!(rig.store.lease_commit_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+        // The commit never wrote: the file is as it was, and the rotation is
+        // owed from memory.
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        let live = rig.live();
+        assert_eq!(live.metadata["refresh_token"], "c-refresh");
+        assert!(
+            !live.codex_pending_refresh.is_empty(),
+            "the rotation is owed"
+        );
+        let state = rig.manager.lock();
+        let entry = &state.auths["codex.json"];
+        assert!(entry.undurable.outer, "the rotation is marked");
+        assert!(
+            matches!(
+                &entry.undurable_causes.outer,
+                Some(crate::manager::MarkCause::ReadBack { origin: marked }) if *marked == origin
+            ),
+            "marked for read-back of the leased file, not as a different one: {:?}",
+            entry.undurable_causes.outer
+        );
+        assert!(
+            entry.unresolved_partitions().outer,
+            "the origin is left unresolved"
+        );
+    })
+    .await;
+}
+
+/// Gives `id` an unresolved origin (its file, the outer rotation A -> B), the
+/// way a published pass whose proof failed leaves it, then runs the scheduler
+/// until the one job it queues for that state alone has finished. The tokens
+/// of every record here are not due, so that job is `resolution_only`.
+async fn run_resolution_only_job(rig: &Rig, id: &str, file: &std::path::Path) {
+    let CodexPersistIntent::Refresh(patch) = outer_b_intent().codex_persist_intent else {
+        panic!("the fixture carries an intent");
+    };
+    let origin = crate::auth::CodexOrigin::of(file).unwrap();
+    let before = {
+        let mut state = rig.manager.lock();
+        let entry = state.auths.get_mut(id).unwrap();
+        entry.record_unresolved(&origin, &patch);
+        entry.auth.generation
+    };
+    rig.manager
+        .start_auto_refresh(Duration::from_millis(1))
+        .unwrap();
+    // Queuing the job and finishing it each advance the generation.
+    loop {
+        {
+            let state = rig.manager.lock();
+            if state.refresh_jobs.is_empty() && state.auths[id].auth.generation >= before + 2 {
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    rig.manager.stop_auto_refresh();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_resolution_job_on_a_leased_store_resolves_before_it_exits() {
+    // P2 (a): a leased pass queued only for the unresolved origin takes the
+    // lease and resolves it (step 6c is its exit). Step 0c must not end it
+    // first: that would leave the state in place, and the scheduler would
+    // queue the same job again at once.
+    bounded(async {
+        let (rig, recording) = recording_rig(false);
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        run_resolution_only_job(&rig, "codex.json", &rig.path()).await;
+        assert_eq!(probe.sent(), 0, "tokens that are not due are not sent");
+        assert!(
+            recording.count("codex_refresh_lease") >= 1,
+            "the pass took the lease"
+        );
+        assert!(
+            rig.manager.lock().auths["codex.json"]
+                .unresolved_origin
+                .is_none(),
+            "the proof of the file cleared the state"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_resolution_job_on_an_unsupported_store_defers_as_unresolved() {
+    // P2 (b): a store that cannot lease cannot resolve the origin. The pass
+    // defers at step 2, which counts the deferral on the state; step 0c must
+    // not return `Ok` before that.
+    bounded(async {
+        let (rig, recording) = recording_rig(true);
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        run_resolution_only_job(&rig, "codex.json", &rig.path()).await;
+        assert_eq!(probe.sent(), 0);
+        assert!(recording.count("codex_refresh_lease") >= 1);
+        let state = rig.manager.lock();
+        let unresolved = state.auths["codex.json"]
+            .unresolved_origin
+            .as_ref()
+            .expect("the state stays: nothing could prove the file");
+        assert!(
+            unresolved.unproven >= 1,
+            "the deferral was counted: {}",
+            unresolved.unproven
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_resolution_job_on_a_non_codex_record_keeps_the_not_due_exit() {
+    // P2 (c): off the lease path (0b), a job for the unresolved state alone
+    // still ends at step 0c and sends nothing for tokens that are not due.
+    bounded(async {
+        let (rig, recording, gemini) = gemini_rig();
+        let sent = Arc::new(AtomicU32::new(0));
+        let executor = FakeExecutor::new("gemini");
+        // Without a lead the scheduler never checks a non-Codex record.
+        executor.set_lead(Some(Duration::from_secs(60)));
+        let counter = sent.clone();
+        executor.set_refresh(move |before| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(before.clone())
+        });
+        rig.manager.register_executor(executor.clone());
+        lock(&recording.calls).clear();
+        run_resolution_only_job(&rig, &gemini.id, &rig.dir.path().join("codex.json")).await;
+        assert_eq!(sent.load(Ordering::SeqCst), 0, "the exit sent nothing");
+        assert_eq!(recording.count("codex_refresh_lease"), 0);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_resolution_job_on_an_ineligible_record_keeps_the_not_due_exit() {
+    // P2 (c): step 1's ineligible branch also leaves the leased block with no
+    // lease, and ends at step 0c the same way.
+    bounded(async {
+        let (rig, recording) = recording_rig(false);
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let mut runtime_only = fixture();
+        runtime_only
+            .attributes
+            .insert("runtime_only".into(), "true".into());
+        rig.manager.register_unsaved(runtime_only).unwrap();
+        lock(&recording.calls).clear();
+        run_resolution_only_job(&rig, "codex.json", &rig.path()).await;
+        assert_eq!(probe.sent(), 0, "the exit sent nothing");
+        assert_eq!(recording.count("codex_refresh_lease"), 0);
+        // The send fence would also keep this record's unresolved partitions
+        // from a send, but as a deferral that sets a wait. Step 0c returns
+        // `Ok` and leaves the credential's next check clear.
+        assert!(
+            rig.live().next_refresh_after.is_none(),
+            "the pass ended without a deferral"
+        );
     })
     .await;
 }
