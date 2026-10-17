@@ -59,6 +59,7 @@ use super::credential::{
 use super::lifecycle::{
     LeasedDisposition, LeasedTail, ORIGIN_CHECK_ATTEMPTS, OriginCheck, OriginMoved,
     clear_verified_partitions, mark_undurable, mark_undurable_except, pending_for_edit,
+    verified_partitions,
 };
 use super::merge::{ResponseCredentials, merge_refreshed_auth_with, normalize_credential_metadata};
 use super::text::{equal_fold, go_lower};
@@ -68,7 +69,8 @@ use super::{
 };
 use crate::auth::classification::ATTRIBUTE_PATH;
 use crate::auth::codex_refresh::{
-    CodexPartitions, CredentialRefreshPatch, OUTER_KEYS, SIWC_KEYS, is_codex_auth, same_version,
+    CodexPartitions, CredentialRefreshPatch, OUTER_KEYS, SIWC_KEYS, disk_rotated_partitions,
+    is_codex_auth, same_version,
 };
 use crate::auth::{
     Auth, AuthError, CodexCredentialPartition, CodexLeaseToken, CodexOrigin, CodexPersisted,
@@ -2625,7 +2627,20 @@ impl Manager {
             else {
                 continue;
             };
-            let live = partition_map(&entry.auth.metadata, partition);
+            let rotated = disk_rotated_partitions(&entry.auth.metadata, d);
+            let rotated = match partition {
+                CodexCredentialPartition::Outer => rotated.outer,
+                CodexCredentialPartition::Siwc => rotated.siwc,
+            };
+            let only = UndurablePartitions {
+                outer: partition == CodexCredentialPartition::Outer,
+                siwc: partition == CodexCredentialPartition::Siwc,
+            };
+            let verified = verified_partitions(only, &entry.auth.metadata, d);
+            let verified = match partition {
+                CodexCredentialPartition::Outer => verified.outer,
+                CodexCredentialPartition::Siwc => verified.siwc,
+            };
             let (marked, baselines, cause, warned, landing) = match partition {
                 CodexCredentialPartition::Outer => (
                     &mut entry.undurable.outer,
@@ -2648,12 +2663,18 @@ impl Manager {
             let hold = match proof {
                 OriginProof::Same => {
                     let disk = partition_map(d, partition);
-                    if has_partition(d, partition) && same_version(&disk, &live) {
-                        // The write landed.
-                        *marked = false;
-                        baselines.clear();
-                        *cause = None;
-                        *warned = false;
+                    if has_partition(d, partition) && !rotated {
+                        // The write landed when every token field matches.
+                        // With equal identities but another field (the expiry,
+                        // the scopes), nothing changes: the mark and its cause
+                        // stay, so the send fence refuses with
+                        // `ReadBackUnsettled` and sends nothing.
+                        if verified {
+                            *marked = false;
+                            baselines.clear();
+                            *cause = None;
+                            *warned = false;
+                        }
                         false
                     } else if has_partition(d, partition)
                         && baselines.iter().any(|known| same_version(&disk, known))
@@ -3290,12 +3311,13 @@ mod tests {
     use super::super::merge::{ResponseCredentials, merge_refreshed_auth_with};
     use super::super::{Entry, Manager, MarkCause, Settings, State, UndurablePartitions};
     use super::{
-        Deferral, LeasePrep, SendFence, add, bounded_retry_delay, deferral_backoff,
-        has_unauthorized_auth_failure, settle_refused_availability,
+        Deferral, LeasePrep, ReadBackSettlement, SendFence, add, bounded_retry_delay,
+        deferral_backoff, has_unauthorized_auth_failure, settle_refused_availability,
     };
     use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
     use crate::auth::{
-        Auth, AuthError, CodexLeaseToken, CodexOrigin, ModelState, Status, Timestamp,
+        Auth, AuthError, AuthStore, CodexCredentialPartition, CodexLeaseToken, CodexOrigin,
+        FileStore, ModelState, OriginProof, Status, Timestamp,
     };
     use crate::executor::ProviderExecutor;
 
@@ -3351,6 +3373,210 @@ mod tests {
             |_: &mut State, _: &OriginCheck| -> Result<(), OriginMoved> { Ok(()) },
         );
         require_send(future);
+    }
+
+    /// A registered Codex credential over a real file store and the origin of
+    /// its file, with the ids the read-back settlement tests use.
+    fn read_back_fixture() -> (tempfile::TempDir, Manager, CodexOrigin) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("codex.json"), b"{}").expect("credential file");
+        let store = Arc::new(FileStore::new(dir.path()));
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(crate::registry::ModelRegistry::new()),
+            Some(store.clone()),
+        );
+        let mut auth = codex(json!({
+            "type": "codex",
+            "access_token": "t-live",
+            "refresh_token": "r-live",
+            "id_token": "i-live",
+            "account_id": "acct",
+            "expired": "2099-01-01T00:00:00Z",
+            "siwc": {
+                "access_token": "st-live",
+                "refresh_token": "sr-live",
+                "id_token": "si-live",
+                "client_id": "client",
+                "device_id": "device",
+                "expired": "2099-01-01T00:00:00Z",
+                "scope": "openid",
+                "scopes": ["openid"],
+            },
+        }));
+        auth.file_name = "codex.json".into();
+        let registered = manager.register_unsaved(auth).expect("register");
+        let origin = store
+            .codex_origin(&registered)
+            .expect("origin")
+            .expect("a file store names an origin");
+        (dir, manager, origin)
+    }
+
+    /// Marks `partition` of the fixture with a `ReadBack` cause on `origin`,
+    /// one baseline, and the warned flag.
+    fn mark_read_back(
+        manager: &Manager,
+        partition: CodexCredentialPartition,
+        origin: &CodexOrigin,
+    ) {
+        let mut guard = manager.lock();
+        let entry = guard.auths.get_mut("codex-1").expect("entry");
+        let baseline = serde_json::Map::from_iter([("refresh_token".to_owned(), json!("r-old"))]);
+        let (marked, baselines, cause, warned) = match partition {
+            CodexCredentialPartition::Outer => (
+                &mut entry.undurable.outer,
+                &mut entry.undurable_baselines.outer,
+                &mut entry.undurable_causes.outer,
+                &mut entry.read_back_warned.outer,
+            ),
+            CodexCredentialPartition::Siwc => (
+                &mut entry.undurable.siwc,
+                &mut entry.undurable_baselines.siwc,
+                &mut entry.undurable_causes.siwc,
+                &mut entry.read_back_warned.siwc,
+            ),
+        };
+        *marked = true;
+        baselines.push(baseline);
+        *cause = Some(MarkCause::ReadBack {
+            origin: origin.clone(),
+        });
+        *warned = true;
+    }
+
+    /// The partition's mark, baseline count, whether the cause is `ReadBack`,
+    /// the warned flag and the landing hold.
+    fn read_back_marks(
+        manager: &Manager,
+        partition: CodexCredentialPartition,
+    ) -> (bool, usize, bool, bool, bool) {
+        let guard = manager.lock();
+        let entry = guard.auths.get("codex-1").expect("entry");
+        match partition {
+            CodexCredentialPartition::Outer => (
+                entry.undurable.outer,
+                entry.undurable_baselines.outer.len(),
+                matches!(
+                    entry.undurable_causes.outer,
+                    Some(MarkCause::ReadBack { .. })
+                ),
+                entry.read_back_warned.outer,
+                entry.landing_unconfirmed.outer,
+            ),
+            CodexCredentialPartition::Siwc => (
+                entry.undurable.siwc,
+                entry.undurable_baselines.siwc.len(),
+                matches!(
+                    entry.undurable_causes.siwc,
+                    Some(MarkCause::ReadBack { .. })
+                ),
+                entry.read_back_warned.siwc,
+                entry.landing_unconfirmed.siwc,
+            ),
+        }
+    }
+
+    /// Settles the fixture's `partition` against `d` with a `Same` proof.
+    fn settle_same(
+        manager: &Manager,
+        partition: CodexCredentialPartition,
+        origin: &CodexOrigin,
+        d: &serde_json::Map<String, serde_json::Value>,
+    ) -> ReadBackSettlement {
+        let mut guard = manager.lock();
+        let state = &mut *guard;
+        let epoch = state.auths["codex-1"].auth.registration_epoch;
+        manager.settle_read_back_locked(
+            state,
+            "codex-1",
+            epoch,
+            origin,
+            &[(partition, OriginProof::Same)],
+            d,
+        )
+    }
+
+    /// The live metadata with the partition's `expired` changed, which leaves
+    /// every identity key as it was.
+    fn disk_with_other_expiry(
+        manager: &Manager,
+        partition: CodexCredentialPartition,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut d = manager.lock().auths["codex-1"].auth.metadata.clone();
+        match partition {
+            CodexCredentialPartition::Outer => {
+                d.insert("expired".into(), json!("2099-02-02T00:00:00Z"));
+            }
+            CodexCredentialPartition::Siwc => {
+                d.get_mut("siwc")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .expect("siwc")
+                    .insert("expired".into(), json!("2099-02-02T00:00:00Z"));
+            }
+        }
+        d
+    }
+
+    const BOTH_PARTITIONS: [CodexCredentialPartition; 2] = [
+        CodexCredentialPartition::Outer,
+        CodexCredentialPartition::Siwc,
+    ];
+
+    /// A read-back mark settles when the file equals live in every token field.
+    #[test]
+    fn read_back_mark_clears_when_every_token_field_matches() {
+        for partition in BOTH_PARTITIONS {
+            let (_dir, manager, origin) = read_back_fixture();
+            mark_read_back(&manager, partition, &origin);
+            let d = manager.lock().auths["codex-1"].auth.metadata.clone();
+            let settled = settle_same(&manager, partition, &origin, &d);
+            let ReadBackSettlement::Settled(protection) = settled else {
+                panic!("{partition:?}: expected Settled");
+            };
+            let (outer, siwc) = (protection.undurable.outer, protection.undurable.siwc);
+            assert!(!outer && !siwc, "{partition:?}: the mark leaves Protection");
+            let baselines = &protection.undurable_baselines;
+            assert!(
+                baselines.outer.is_empty() && baselines.siwc.is_empty(),
+                "{partition:?}: the baselines leave Protection"
+            );
+            assert_eq!(
+                read_back_marks(&manager, partition),
+                (false, 0, false, false, false),
+                "{partition:?}"
+            );
+        }
+    }
+
+    /// Equal identities with another `expired` do not verify: the mark, its
+    /// baselines, its cause and the warned flag stay, with no landing hold.
+    #[test]
+    fn read_back_mark_stays_when_only_the_expiry_differs() {
+        for partition in BOTH_PARTITIONS {
+            let (_dir, manager, origin) = read_back_fixture();
+            mark_read_back(&manager, partition, &origin);
+            let d = disk_with_other_expiry(&manager, partition);
+            let settled = settle_same(&manager, partition, &origin, &d);
+            let ReadBackSettlement::Settled(protection) = settled else {
+                panic!("{partition:?}: expected Settled");
+            };
+            let held = match partition {
+                CodexCredentialPartition::Outer => protection.undurable.outer,
+                CodexCredentialPartition::Siwc => protection.undurable.siwc,
+            };
+            assert!(held, "{partition:?}: the mark stays in Protection");
+            let kept = match partition {
+                CodexCredentialPartition::Outer => protection.undurable_baselines.outer.len(),
+                CodexCredentialPartition::Siwc => protection.undurable_baselines.siwc.len(),
+            };
+            assert_eq!(kept, 1, "{partition:?}: the baseline stays in Protection");
+            assert_eq!(
+                read_back_marks(&manager, partition),
+                (true, 1, true, true, false),
+                "{partition:?}"
+            );
+        }
     }
 
     /// The futures of `send_refresh` and `commit_rotation_with_retry` are
