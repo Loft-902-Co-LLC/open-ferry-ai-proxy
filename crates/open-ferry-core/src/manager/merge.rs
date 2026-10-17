@@ -392,7 +392,9 @@ pub(crate) fn merge_refreshed_auth(
     merge_refreshed_auth_with(base, current, updated, now, ResponseCredentials::Merge)
 }
 
-/// [`merge_refreshed_auth`] with the response's credentials merged or refused.
+/// Folds a refresh result into the live credential, as upstream's
+/// `MergeRefreshedAuth` does, with the response's credentials merged or
+/// refused.
 pub(crate) fn merge_refreshed_auth_with(
     base: &Auth,
     current: &Auth,
