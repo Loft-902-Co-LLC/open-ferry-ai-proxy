@@ -5,7 +5,7 @@
 use open_ferry_core::auth::codex_refresh::CodexPersistIntent;
 use open_ferry_core::auth::{CodexCredentialPartition, CodexRefreshFailure};
 use open_ferry_core::exec::HttpTarget;
-use open_ferry_core::executor::RefreshOptions;
+use open_ferry_core::executor::{AdoptedPartitions, RefreshOptions};
 
 use super::*;
 
@@ -893,4 +893,124 @@ async fn siwc_manager_refresh_persists_after_the_waiter_is_cancelled() {
         Some("new-mock-access-token")
     );
     server.abort();
+}
+
+// C1-1: without adoption the decision is the pre-adoption formula, for every
+// combination of force, refreshable partitions and due partitions.
+#[test]
+fn siwc_refresh_decision_without_adoption_is_the_unadopted_formula() {
+    use crate::codex::executor::auth::refresh_decision;
+
+    for bits in 0..32u8 {
+        let [force, has_outer, has_siwc, outer_due, siwc_due] =
+            std::array::from_fn(|bit| bits & (1 << bit) != 0);
+        // Due implies refreshable, as in `refresh_inner`.
+        if (outer_due && !has_outer) || (siwc_due && !has_siwc) {
+            continue;
+        }
+        let explicit_unscheduled = !force && !outer_due && !siwc_due;
+        let expected = (
+            has_outer && (force || explicit_unscheduled || outer_due),
+            has_siwc && (force || explicit_unscheduled || siwc_due),
+        );
+        assert_eq!(
+            refresh_decision(
+                RefreshOptions::forced(force),
+                (has_outer, outer_due),
+                (has_siwc, siwc_due)
+            ),
+            expected,
+            "force={force} outer={has_outer}/{outer_due} siwc={has_siwc}/{siwc_due}"
+        );
+    }
+}
+
+fn adopted(outer: bool, siwc: bool, was_due: bool) -> Option<AdoptedPartitions> {
+    Some(AdoptedPartitions {
+        outer,
+        siwc,
+        was_due,
+    })
+}
+
+// C1-2: the executor half of TestCodexExecutorRefreshSerializesUnderFileLockAndSkipsAlreadyRotatedToken.
+// Both partitions were rotated by another process, so nothing is sent and the
+// record comes back as passed with no persist intent.
+#[tokio::test]
+async fn siwc_adopted_partitions_that_were_not_due_send_nothing() {
+    let outer = token_server("").await;
+    let siwc = siwc_token_server(false).await;
+    let auth = dual_auth(false, false);
+    let after = dual_executor(&outer, &siwc)
+        .refresh_with_options(
+            auth.clone(),
+            RefreshOptions {
+                force: false,
+                adopted: adopted(true, true, false),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(outer.requests().is_empty());
+    assert!(siwc.requests().is_empty());
+    assert!(after.metadata == auth.metadata);
+    assert!(!matches!(
+        after.codex_persist_intent,
+        CodexPersistIntent::Refresh(_)
+    ));
+    assert!(after.codex_refresh_failure.is_none());
+}
+
+// C1-3: an adopted outer partition is left alone while a due SIWC partition
+// on the adopted record is still refreshed.
+#[tokio::test]
+async fn siwc_adopted_outer_still_refreshes_a_due_siwc() {
+    let outer = token_server("").await;
+    let siwc = siwc_token_server(false).await;
+    let auth = dual_auth(false, true);
+    let after = dual_executor(&outer, &siwc)
+        .refresh_with_options(
+            auth.clone(),
+            RefreshOptions {
+                force: false,
+                adopted: adopted(true, false, true),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(outer.requests().is_empty());
+    assert_eq!(siwc.requests().len(), 1);
+    assert_eq!(after.siwc_token_field("access_token"), "new-siwc-access");
+    let CodexPersistIntent::Refresh(patch) = &after.codex_persist_intent else {
+        panic!("missing refresh patch");
+    };
+    let (_, which) = patch.apply(&auth.metadata);
+    assert_eq!(which.outer, None);
+    assert_eq!(which.siwc, Some(true));
+}
+
+// C1-4: force overrides adoption and refreshes both partitions.
+#[tokio::test]
+async fn siwc_force_with_adoption_refreshes_both_partitions() {
+    let outer = token_server("").await;
+    let siwc = siwc_token_server(false).await;
+    let auth = dual_auth(false, false);
+    let after = dual_executor(&outer, &siwc)
+        .refresh_with_options(
+            auth.clone(),
+            RefreshOptions {
+                force: true,
+                adopted: adopted(true, true, false),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outer.requests().len(), 1);
+    assert_eq!(siwc.requests().len(), 1);
+    let CodexPersistIntent::Refresh(patch) = &after.codex_persist_intent else {
+        panic!("missing refresh patch");
+    };
+    let (_, which) = patch.apply(&auth.metadata);
+    assert_eq!(which.outer, Some(true));
+    assert_eq!(which.siwc, Some(true));
 }
