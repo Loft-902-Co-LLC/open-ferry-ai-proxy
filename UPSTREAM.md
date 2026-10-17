@@ -459,6 +459,8 @@ Deviations, each also noted in its module:
 
 - **A credential without an email isn't saved.** The session fails with `Failed to save authentication tokens:` and the reason, where upstream saves it under a name without an email. A Codex account ID is trimmed before it is hashed for the file name. A Claude login saves no device IDs.
 
+- **A Codex sign-in never writes Sign in with ChatGPT.** Over an existing file, the new outer tokens are saved and the file keeps its own `siwc` and `use_siwc`. A missing file, or one that can't be read or isn't valid JSON, is written with the new outer tokens and neither key, whatever the sign-in copied from the old file or the running credential. Sign in with ChatGPT must then be bound again, with the dashboard's **Add OpenAI API access** or `-siwc-bind`. The CLI's `-codex-login` and `-codex-device-login` save the same way. Upstream's login save (`SaveTokenToFile` in `internal/auth/codex/token.go`) writes an incoming `siwc` or `use_siwc` that the file lacks, and writes the whole record, SIWC included, when there is no file. The SIWC tokens a sign-in copied may be spent by a refresh before it saves, and writing them back would fail the credential.
+
 - **There is no `State code error` status**, as a callback can't carry another login's state, and a login's status never polls a plugin.
 
 - **A code that isn't UTF-8**, once decoded from the query, is read with each bad byte as U+FFFD; Go keeps its bytes.

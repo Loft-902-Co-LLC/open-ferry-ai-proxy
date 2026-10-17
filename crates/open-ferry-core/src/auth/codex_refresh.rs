@@ -581,6 +581,10 @@ pub(crate) fn holds_partition(
     })
 }
 
+/// Composes a save of `incoming` over `disk` for `intent`. Not upstream's for a
+/// sign-in (`OuterLogin`): it never writes an incoming `siwc` or `use_siwc`, so a
+/// file keeps its own and a new file has neither, where upstream's login save
+/// writes them when the file lacks them.
 pub(crate) fn merge_persist(
     disk: Option<&Map<String, Value>>,
     incoming: &Map<String, Value>,
