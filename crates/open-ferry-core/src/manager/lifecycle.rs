@@ -519,6 +519,7 @@ impl Manager {
                 undurable_causes: Default::default(),
                 landing_unconfirmed: Default::default(),
                 owed_save: None,
+                read_back_warned: Default::default(),
             },
         );
         state.sync_scheduler(self.models(), &snapshot.id, now);
@@ -1206,6 +1207,7 @@ impl Manager {
         let mut undurable_causes = existing.undurable_causes.clone();
         let mut landing_unconfirmed = existing.landing_unconfirmed;
         let owed_save = existing.owed_save;
+        let mut read_back_warned = existing.read_back_warned;
         let mut unresolved_origin = existing.unresolved_origin.clone();
         if let Some(command) = context.command
             && command.id == existing_auth.id
@@ -1225,6 +1227,7 @@ impl Manager {
                     undurable_baselines.outer.clear();
                     undurable_causes.outer = None;
                     landing_unconfirmed.outer = false;
+                    read_back_warned.outer = false;
                     if let Some(u) = unresolved_origin.as_mut() {
                         u.partitions.outer = false;
                     }
@@ -1234,6 +1237,7 @@ impl Manager {
                     undurable_baselines.siwc.clear();
                     undurable_causes.siwc = None;
                     landing_unconfirmed.siwc = false;
+                    read_back_warned.siwc = false;
                     if let Some(u) = unresolved_origin.as_mut() {
                         u.partitions.siwc = false;
                     }
@@ -1539,6 +1543,7 @@ impl Manager {
             undurable_causes,
             landing_unconfirmed,
             owed_save,
+            read_back_warned,
         };
         // An ineligible record is never leased, so its state could never resolve.
         if ineligible {
@@ -1746,6 +1751,7 @@ impl Manager {
                                 &mut entry.undurable,
                                 &mut entry.undurable_baselines,
                                 &mut entry.undurable_causes,
+                                &mut entry.read_back_warned,
                                 requested,
                                 &entry.auth,
                                 disk,
@@ -1917,6 +1923,7 @@ impl Manager {
                 return false;
             }
             state.save_sequence.remove(id);
+            state.missing_file_deferrals.remove(id);
             let Some(existing) = state.auths.remove(id) else {
                 return false;
             };
@@ -2003,6 +2010,7 @@ impl Manager {
                     undurable_causes: Default::default(),
                     landing_unconfirmed: Default::default(),
                     owed_save: None,
+                    read_back_warned: Default::default(),
                 },
             );
         }
@@ -2266,6 +2274,10 @@ impl Manager {
             if lease.is_some() {
                 *written_origin = CodexOrigin::of(std::path::Path::new(&saved)).ok();
             }
+            // A file now exists, so a missing-file episode is over.
+            if crate::auth::codex_refresh::is_codex_auth(&writing) {
+                self.lock().missing_file_deferrals.remove(&auth.id);
+            }
             if has_unwritten_refresh_work(&writing)
                 && self
                     .lock()
@@ -2301,6 +2313,7 @@ impl Manager {
                         &mut entry.undurable,
                         &mut entry.undurable_baselines,
                         &mut entry.undurable_causes,
+                        &mut entry.read_back_warned,
                         requested,
                         &entry.auth,
                         &disk,
@@ -2613,6 +2626,7 @@ impl Manager {
                     &mut entry.undurable,
                     &mut entry.undurable_baselines,
                     &mut entry.undurable_causes,
+                    &mut entry.read_back_warned,
                     requested,
                     &entry.auth,
                     disk,
@@ -3267,17 +3281,20 @@ pub(crate) fn clear_verified_partitions(
     marked: &mut super::UndurablePartitions,
     baselines: &mut super::UndurableBaselines,
     causes: &mut super::MarkCauses,
+    read_back_warned: &mut super::UndurablePartitions,
     requested: super::UndurablePartitions,
     live: &Auth,
     disk: &Auth,
 ) {
     let verified = verified_partitions(requested, &live.metadata, &disk.metadata);
     if verified.outer {
+        read_back_warned.outer = false;
         marked.outer = false;
         baselines.outer.clear();
         causes.outer = None;
     }
     if verified.siwc {
+        read_back_warned.siwc = false;
         marked.siwc = false;
         baselines.siwc.clear();
         causes.siwc = None;

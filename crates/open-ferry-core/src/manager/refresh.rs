@@ -35,6 +35,7 @@
 //!   proxy override to strip.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -53,14 +54,25 @@ use super::credential::{
     KIND_API_KEY, access_token, auth_kind, has_refresh_credential, is_zero, last_refresh_timestamp,
     preferred_interval, refresh_token,
 };
-use super::lifecycle::LeasedTail;
+use super::lifecycle::{
+    LeasedTail, ORIGIN_CHECK_ATTEMPTS, OriginCheck, OriginMoved, clear_verified_partitions,
+    mark_undurable_except, pending_for_edit,
+};
 use super::merge::normalize_credential_metadata;
 use super::text::{equal_fold, go_lower};
-use super::{Entry, Manager, ManagerError, Shared, State, lock};
+use super::{
+    Entry, Manager, ManagerError, MarkCause, Shared, State, UndurableBaselines,
+    UndurablePartitions, UnresolvedOrigin, lock,
+};
 use crate::auth::classification::ATTRIBUTE_PATH;
-use crate::auth::{Auth, AuthError, Status, Timestamp};
+use crate::auth::codex_refresh::{CredentialRefreshPatch, OUTER_KEYS, SIWC_KEYS, same_version};
+use crate::auth::{
+    Auth, AuthError, CodexCredentialPartition, CodexOrigin, CodexPersisted, OriginProof, Status,
+    Timestamp,
+};
 use crate::exec::{ErrorKind, ExecError};
 use crate::gate::{GateState, NotActive};
+use serde_json::{Map, Value};
 
 /// How often the loop checks when no interval is given
 /// (upstream's `refreshCheckInterval`).
@@ -1835,6 +1847,830 @@ impl Manager {
     }
 }
 
+/// The longest wait before an unresolved origin's pass is tried again once it
+/// has deferred `ORIGIN_UNRESOLVED_SURFACE_AFTER` times, and before a landing
+/// hold's next check.
+const ORIGIN_UNRESOLVED_BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
+/// The shortest wait after an unsettled read-back mark deferred a refresh.
+const READ_BACK_UNSETTLED_FLOOR: Duration = Duration::from_secs(60);
+/// The longest wait after an unsettled read-back mark deferred a refresh.
+const READ_BACK_UNSETTLED_CAP: Duration = Duration::from_secs(30 * 60);
+
+/// What a leased pass reads from the entry before it takes any I/O step.
+/// Owned: the state lock is released before the lease is taken.
+struct LeasePrep {
+    base_epoch: u64,
+    discard_epoch: u64,
+    undurable: UndurablePartitions,
+    undurable_baselines: UndurableBaselines,
+    /// `permanently_ineligible(&entry.auth)`.
+    ineligible: bool,
+    live: Auth,
+    /// The unwritten operations the pass must commit first.
+    ops: Vec<CredentialRefreshPatch>,
+    /// The entry's unresolved state, copied. Only the `*_locked` functions
+    /// that resolve it change the live state.
+    unresolved: Option<UnresolvedOrigin>,
+    /// The partitions whose mark has a `ReadBack` cause, with that origin.
+    read_back: Vec<(CodexCredentialPartition, CodexOrigin)>,
+    landing_unconfirmed: UndurablePartitions,
+}
+
+/// Whether the leased file is still the live registration's, and may be
+/// written for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaseAdmission {
+    Admitted,
+    /// The entry is absent or at another registration epoch.
+    RegistrationChanged,
+    /// Same epoch, and the live record is proven to name another file.
+    OriginLost,
+    /// Same epoch, and the live record's file identity is not established.
+    OriginUnproven,
+    PolicyRefused,
+}
+
+/// The marks a transaction carries forward.
+#[derive(Clone)]
+struct Protection {
+    undurable: UndurablePartitions,
+    undurable_baselines: UndurableBaselines,
+}
+
+enum PendingOutcome {
+    Applied(Protection),
+    /// Registration or origin refused it; nothing was marked or cleared.
+    Refused(LeaseAdmission),
+}
+
+enum Resolution {
+    Same,
+    Different(Protection),
+    Unproven,
+    RegistrationChanged,
+}
+
+enum ReadBackSettlement {
+    Settled(Protection),
+    /// A landing hold was set; nothing may be sent.
+    Hold,
+    Unproven,
+    RegistrationChanged,
+}
+
+/// Why a refresh pass sent nothing and waits (see [`Manager::defer_refresh`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Deferral {
+    LockBusy,
+    MissingFile,
+    NotCodexFile,
+    LeaseError,
+    PendingWriteFailed,
+    PolicyChanged,
+    OriginUnresolved,
+    LandingUnconfirmed,
+    ReadBackUnsettled,
+}
+
+/// When to look again: `max` from `now`, but no later than a future `expiry`,
+/// and never sooner than `floor`. An expiry already past does not shorten the
+/// wait, so a record with an expired token cannot loop at once.
+fn bounded_retry_delay(
+    now: Timestamp,
+    expiry: Option<Timestamp>,
+    max: Duration,
+    floor: Duration,
+) -> Timestamp {
+    let mut delay = max;
+    if let Some(expiry) = expiry
+        && expiry > now
+    {
+        delay = delay.min((expiry - now).to_std().unwrap_or(Duration::ZERO));
+    }
+    add(now, delay.max(floor))
+}
+
+/// The maximum and the floor of a deferral's wait. `unproven` is the
+/// unresolved state's count after this deferral, when the state is present.
+fn deferral_backoff(kind: Deferral, unproven: Option<u32>) -> (Duration, Duration) {
+    match kind {
+        Deferral::LockBusy | Deferral::PendingWriteFailed | Deferral::PolicyChanged => {
+            (REFRESH_INEFFECTIVE_BACKOFF, REFRESH_CHECK_INTERVAL)
+        }
+        Deferral::OriginUnresolved => match unproven {
+            Some(n) if n >= ORIGIN_UNRESOLVED_SURFACE_AFTER => {
+                // The cap is reached at n = 16; the shift is bounded so it cannot overflow.
+                let shift = (n - ORIGIN_UNRESOLVED_SURFACE_AFTER).min(10);
+                (
+                    REFRESH_INEFFECTIVE_BACKOFF
+                        .saturating_mul(1u32 << shift)
+                        .min(ORIGIN_UNRESOLVED_BACKOFF_CAP),
+                    REFRESH_CHECK_INTERVAL,
+                )
+            }
+            _ => (REFRESH_INEFFECTIVE_BACKOFF, REFRESH_CHECK_INTERVAL),
+        },
+        Deferral::MissingFile | Deferral::NotCodexFile | Deferral::LeaseError => {
+            (REFRESH_FAILURE_BACKOFF, REFRESH_PENDING_BACKOFF)
+        }
+        Deferral::LandingUnconfirmed => (ORIGIN_UNRESOLVED_BACKOFF_CAP, REFRESH_PENDING_BACKOFF),
+        Deferral::ReadBackUnsettled => (READ_BACK_UNSETTLED_CAP, READ_BACK_UNSETTLED_FLOOR),
+    }
+}
+
+/// Runs blocking lease work off the async thread, under the current gate
+/// operation when there is one. A failed or panicked task is an error, never
+/// a panic here. Outside a runtime the work runs inline.
+async fn run_leased<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ManagerError> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Ok(work());
+    }
+    let joined = match crate::gate::Operation::current() {
+        Some(operation) => operation.run_blocking(work).await,
+        None =>
+        {
+            #[allow(clippy::disallowed_methods)]
+            tokio::task::spawn_blocking(work).await
+        }
+    };
+    joined.map_err(|error| {
+        ManagerError::Store(io::Error::other(format!("lease task failed: {error}")))
+    })
+}
+
+/// One partition's token fields: the top level for outer, the nested `siwc`
+/// object for SIWC.
+fn partition_map(
+    metadata: &Map<String, Value>,
+    partition: CodexCredentialPartition,
+) -> Map<String, Value> {
+    match partition {
+        CodexCredentialPartition::Outer => metadata.clone(),
+        CodexCredentialPartition::Siwc => metadata
+            .get("siwc")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+/// Whether `metadata` holds any token field of the partition.
+fn has_partition(metadata: &Map<String, Value>, partition: CodexCredentialPartition) -> bool {
+    match partition {
+        CodexCredentialPartition::Outer => OUTER_KEYS.iter().any(|key| metadata.contains_key(*key)),
+        CodexCredentialPartition::Siwc => metadata
+            .get("siwc")
+            .and_then(Value::as_object)
+            .is_some_and(|nested| SIWC_KEYS.iter().any(|key| nested.contains_key(*key))),
+    }
+}
+
+fn partition_name(partition: CodexCredentialPartition) -> &'static str {
+    match partition {
+        CodexCredentialPartition::Outer => "outer",
+        CodexCredentialPartition::Siwc => "siwc",
+    }
+}
+
+impl Manager {
+    /// Runs `f` under the state lock. The closure calls exactly one `*_locked`
+    /// function, or reads one entry, and returns an owned value. It never
+    /// awaits, takes the lock again, does I/O or calls `publish_projections`
+    /// or `queue_refresh_reschedule`.
+    fn locked<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
+        let mut state = self.lock();
+        f(&mut state)
+    }
+
+    /// Runs `decide` under the state lock against a fresh proof that the live
+    /// record's file is `origin`'s. The proof is blocking I/O, so it is made
+    /// outside the lock; `decide` returns `Err(OriginMoved)` before it changes
+    /// anything when the record moved since, and is then run again after a new
+    /// proof, at most `ORIGIN_CHECK_ATTEMPTS` times in all.
+    async fn leased_origin_check<T>(
+        &self,
+        id: &str,
+        origin: &CodexOrigin,
+        mut decide: impl FnMut(&mut State, &OriginCheck) -> Result<T, OriginMoved>,
+    ) -> T {
+        let store = self.shared.store.as_deref();
+        let mut record = self.locked(|s| s.auths.get(id).map(|e| e.auth.clone()));
+        let mut attempt = 1;
+        loop {
+            let current = OriginCheck::resolve(store, record.as_deref());
+            let proof = match &current {
+                None => OriginProof::Unproven,
+                Some(c) if c == origin => OriginProof::Same,
+                Some(c) => {
+                    let (pinned, other) = (origin.clone(), c.clone());
+                    run_leased(move || pinned.prove(&other))
+                        .await
+                        .unwrap_or(OriginProof::Unproven)
+                }
+            };
+            let check = OriginCheck::proved(current, proof, attempt >= ORIGIN_CHECK_ATTEMPTS);
+            #[cfg(test)]
+            {
+                let hook = lock(&self.shared.origin_check_hook).clone();
+                if let Some(hook) = hook {
+                    hook(attempt);
+                }
+            }
+            match self.locked(|s| match decide(s, &check) {
+                Ok(value) => Ok(value),
+                Err(OriginMoved) => Err(s.auths.get(id).map(|e| e.auth.clone())),
+            }) {
+                Ok(value) => return value,
+                Err(next) => {
+                    record = next;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// The entry's state for a leased pass, or `None` when the entry is gone
+    /// or no longer at `base_epoch`.
+    fn prepare_leased_refresh_locked(
+        &self,
+        state: &State,
+        id: &str,
+        base_epoch: u64,
+    ) -> Option<LeasePrep> {
+        let entry = state.auths.get(id)?;
+        if entry.auth.registration_epoch != base_epoch {
+            return None;
+        }
+        let mut ops: Vec<CredentialRefreshPatch> = entry
+            .auth
+            .codex_pending_refresh
+            .iter()
+            .filter(|patch| !patch.is_written())
+            .cloned()
+            .collect();
+        if let Some(intent) = entry.auth.codex_persist_intent.refresh_patch()
+            && !intent.is_written()
+            && !ops.iter().any(|patch| patch.same_operation(intent))
+        {
+            ops.push(intent.clone());
+        }
+        let mut read_back = Vec::new();
+        for (partition, cause) in [
+            (
+                CodexCredentialPartition::Outer,
+                &entry.undurable_causes.outer,
+            ),
+            (CodexCredentialPartition::Siwc, &entry.undurable_causes.siwc),
+        ] {
+            if let Some(MarkCause::ReadBack { origin }) = cause {
+                read_back.push((partition, origin.clone()));
+            }
+        }
+        Some(LeasePrep {
+            base_epoch,
+            discard_epoch: entry.discard_epoch,
+            undurable: entry.undurable,
+            undurable_baselines: entry.undurable_baselines.clone(),
+            ineligible: self.permanently_ineligible(&entry.auth),
+            live: (*entry.auth).clone(),
+            ops,
+            unresolved: entry.unresolved_origin.clone(),
+            read_back,
+            landing_unconfirmed: entry.landing_unconfirmed,
+        })
+    }
+
+    /// Rules 1 and 2 of admission: the registration is unchanged, and the live
+    /// record still names the leased file. `Admitted` here means both hold.
+    fn admit_registration_and_origin(
+        &self,
+        state: &State,
+        id: &str,
+        base_epoch: u64,
+        origin: &CodexOrigin,
+        check: &OriginCheck,
+    ) -> Result<LeaseAdmission, OriginMoved> {
+        let Some(entry) = state
+            .auths
+            .get(id)
+            .filter(|entry| entry.auth.registration_epoch == base_epoch)
+        else {
+            return Ok(LeaseAdmission::RegistrationChanged);
+        };
+        match check.verdict(self.shared.store.as_deref(), origin, &entry.auth)? {
+            OriginProof::Same => Ok(LeaseAdmission::Admitted),
+            OriginProof::Different => Ok(LeaseAdmission::OriginLost),
+            OriginProof::Unproven => Ok(LeaseAdmission::OriginUnproven),
+        }
+    }
+
+    /// The one admission predicate. `submitted` is the operations the stage
+    /// would write; the discard rule is keyed on its unwritten ones.
+    fn admit_leased_locked(
+        &self,
+        state: &State,
+        id: &str,
+        prep: &LeasePrep,
+        origin: &CodexOrigin,
+        check: &OriginCheck,
+        submitted: &[CredentialRefreshPatch],
+    ) -> Result<LeaseAdmission, OriginMoved> {
+        let admission =
+            self.admit_registration_and_origin(state, id, prep.base_epoch, origin, check)?;
+        if admission != LeaseAdmission::Admitted {
+            return Ok(admission);
+        }
+        let Some(entry) = state.auths.get(id) else {
+            return Ok(LeaseAdmission::RegistrationChanged);
+        };
+        if (entry.discard_epoch != prep.discard_epoch
+            && submitted.iter().any(|patch| !patch.is_written()))
+            || self.permanently_ineligible(&entry.auth)
+        {
+            return Ok(LeaseAdmission::PolicyRefused);
+        }
+        Ok(LeaseAdmission::Admitted)
+    }
+
+    /// Records what the pending commit wrote: marks each fully landed
+    /// operation written, and clears the marks of the landed partitions the
+    /// disk verifies. Checks registration and origin only.
+    fn apply_pending_outcomes_locked(
+        &self,
+        state: &mut State,
+        id: &str,
+        prep: &LeasePrep,
+        origin: &CodexOrigin,
+        check: &OriginCheck,
+        persisted: &CodexPersisted,
+    ) -> Result<PendingOutcome, OriginMoved> {
+        let admission =
+            self.admit_registration_and_origin(state, id, prep.base_epoch, origin, check)?;
+        if admission != LeaseAdmission::Admitted {
+            return Ok(PendingOutcome::Refused(admission));
+        }
+        let Some(entry) = state.auths.get_mut(id) else {
+            return Ok(PendingOutcome::Refused(LeaseAdmission::RegistrationChanged));
+        };
+        let applied = persisted.applied;
+        for op in &prep.ops {
+            let requested = op.requested();
+            if requested.any()
+                && (!requested.outer || applied.outer == Some(true))
+                && (!requested.siwc || applied.siwc == Some(true))
+            {
+                op.mark_written();
+            }
+        }
+        let landed = UndurablePartitions {
+            outer: applied.outer == Some(true),
+            siwc: applied.siwc == Some(true),
+        };
+        clear_verified_partitions(
+            &mut entry.undurable,
+            &mut entry.undurable_baselines,
+            &mut entry.undurable_causes,
+            &mut entry.read_back_warned,
+            landed,
+            &entry.auth,
+            &persisted.auth,
+        );
+        Ok(PendingOutcome::Applied(Protection {
+            undurable: entry.undurable,
+            undurable_baselines: entry.undurable_baselines.clone(),
+        }))
+    }
+
+    /// Publishes the partitions adopted from `disk_effective` into the live
+    /// record, after admission of the still-unwritten operations. The outer
+    /// `Err` is a moved origin (nothing changed); the inner `Err` is a
+    /// refusal. No watermark moves; the caller publishes projections and
+    /// reschedules after the lock drops.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_adoption_locked(
+        &self,
+        state: &mut State,
+        id: &str,
+        prep: &LeasePrep,
+        origin: &CodexOrigin,
+        check: &OriginCheck,
+        disk_effective: &Map<String, Value>,
+        adopted: crate::auth::codex_refresh::CodexPartitions,
+    ) -> Result<Result<(Arc<Auth>, u64), LeaseAdmission>, OriginMoved> {
+        let still: Vec<CredentialRefreshPatch> = prep
+            .ops
+            .iter()
+            .filter(|patch| !patch.is_written())
+            .cloned()
+            .collect();
+        let admission = self.admit_leased_locked(state, id, prep, origin, check, &still)?;
+        if admission != LeaseAdmission::Admitted {
+            return Ok(Err(admission));
+        }
+        let now = self.now();
+        let no_pending_save = state.pending_saves.get(id).copied().unwrap_or(0) == 0;
+        let Some(entry) = state.auths.get_mut(id) else {
+            return Ok(Err(LeaseAdmission::RegistrationChanged));
+        };
+        let mut metadata = entry.auth.metadata.clone();
+        if adopted.outer {
+            for key in OUTER_KEYS {
+                match disk_effective.get(*key) {
+                    Some(value) => {
+                        metadata.insert((*key).to_owned(), value.clone());
+                    }
+                    None => {
+                        metadata.remove(*key);
+                    }
+                }
+            }
+        }
+        if adopted.siwc {
+            let disk_siwc = disk_effective.get("siwc").and_then(Value::as_object);
+            let mut nested = metadata
+                .get("siwc")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for key in SIWC_KEYS {
+                match disk_siwc.and_then(|map| map.get(*key)) {
+                    Some(value) => {
+                        nested.insert((*key).to_owned(), value.clone());
+                    }
+                    None => {
+                        nested.remove(*key);
+                    }
+                }
+            }
+            metadata.insert("siwc".to_owned(), Value::Object(nested));
+        }
+        if no_pending_save {
+            match disk_effective.get("use_siwc") {
+                Some(value) => {
+                    metadata.insert("use_siwc".to_owned(), value.clone());
+                }
+                None => {
+                    metadata.remove("use_siwc");
+                }
+            }
+        }
+        let pending = pending_for_edit(&entry.auth, &metadata, false);
+        let previous_token = access_token(&entry.auth);
+        let auth = Arc::make_mut(&mut entry.auth);
+        auth.metadata = metadata;
+        auth.codex_pending_refresh = pending;
+        auth.codex_persist_intent = Default::default();
+        if access_token(auth) != previous_token {
+            auth.rejected_access_token.clear();
+        }
+        if auth
+            .codex_refresh_failure
+            .as_ref()
+            .is_some_and(|failure| match failure.partition {
+                CodexCredentialPartition::Outer => adopted.outer,
+                CodexCredentialPartition::Siwc => adopted.siwc,
+            })
+        {
+            auth.codex_refresh_failure = None;
+        }
+        auth.credential_version = auth.credential_version.saturating_add(1);
+        auth.generation = auth.generation.saturating_add(1);
+        auth.updated_at = Some(now);
+        let generation = auth.generation;
+        let snapshot = entry.auth.clone();
+        state.sync_scheduler(self.models(), id, now);
+        Ok(Ok((snapshot, generation)))
+    }
+
+    /// Settles the entry's unresolved state against the proof just made under
+    /// the lease. A proof is about `token_origin` and decides only while the
+    /// live record still names it.
+    fn resolve_unresolved_locked(
+        &self,
+        state: &mut State,
+        id: &str,
+        base_epoch: u64,
+        token_origin: &CodexOrigin,
+        proof: OriginProof,
+    ) -> Resolution {
+        let Some(entry) = state.auths.get_mut(id) else {
+            return Resolution::RegistrationChanged;
+        };
+        if entry.auth.registration_epoch != base_epoch {
+            return Resolution::RegistrationChanged;
+        }
+        if entry.unresolved_origin.is_none() {
+            // A token command cleared it.
+            return Resolution::Same;
+        }
+        if OriginCheck::resolve(self.shared.store.as_deref(), Some(entry.auth.as_ref())).as_ref()
+            != Some(token_origin)
+        {
+            return Resolution::Unproven;
+        }
+        match proof {
+            OriginProof::Same => {
+                entry.clear_unresolved();
+                Resolution::Same
+            }
+            OriginProof::Different => {
+                let Some(held) = entry.unresolved_origin.clone() else {
+                    return Resolution::Same;
+                };
+                entry.clear_unresolved();
+                let except = UndurablePartitions {
+                    outer: !held.partitions.outer,
+                    siwc: !held.partitions.siwc,
+                };
+                mark_undurable_except(
+                    &held.rotation,
+                    &mut entry.undurable,
+                    &mut entry.undurable_baselines,
+                    &mut entry.undurable_causes,
+                    &MarkCause::Different,
+                    except,
+                );
+                Resolution::Different(Protection {
+                    undurable: entry.undurable,
+                    undurable_baselines: entry.undurable_baselines.clone(),
+                })
+            }
+            OriginProof::Unproven => Resolution::Unproven,
+        }
+    }
+
+    /// After a pass that ends with the unresolved state present: holds the
+    /// next refresh back as an `OriginUnresolved` deferral does, without its
+    /// count, and wakes the loop. Records nothing when the state is absent.
+    fn schedule_unresolved(&self, id: &str, base_epoch: u64) {
+        let now = self.now();
+        {
+            let mut guard = self.lock();
+            let state = &mut *guard;
+            let present = state.auths.get(id).is_some_and(|entry| {
+                entry.auth.registration_epoch == base_epoch && entry.unresolved_origin.is_some()
+            });
+            if !present {
+                return;
+            }
+            let (max, floor) = deferral_backoff(Deferral::OriginUnresolved, None);
+            self.hold_next_refresh_locked(state, id, now, max, floor);
+        }
+        self.queue_refresh_reschedule(id);
+        tracing::warn!(auth_id = %id, "origin unresolved: a received rotation is held until the credential file is confirmed");
+    }
+
+    /// Steps 2 and 3 of a deferral: the next refresh waits `max`, bounded by
+    /// the token's expiry and `floor`; the record's generation moves and the
+    /// scheduler is told. Changes no status, availability or error field.
+    fn hold_next_refresh_locked(
+        &self,
+        state: &mut State,
+        id: &str,
+        now: Timestamp,
+        max: Duration,
+        floor: Duration,
+    ) {
+        let Some(entry) = state.auths.get_mut(id) else {
+            return;
+        };
+        let auth = Arc::make_mut(&mut entry.auth);
+        let expiry = non_zero(auth.access_token_expiration_time());
+        auth.next_refresh_after = Some(bounded_retry_delay(now, expiry, max, floor));
+        auth.generation = auth.generation.saturating_add(1);
+        auth.updated_at = Some(now);
+        state.sync_scheduler(self.models(), id, now);
+    }
+
+    /// Step 4c: settles each read-back mark against the leased file's
+    /// contents `d`, given one proof per marked partition.
+    fn settle_read_back_locked(
+        &self,
+        state: &mut State,
+        id: &str,
+        base_epoch: u64,
+        token_origin: &CodexOrigin,
+        proofs: &[(CodexCredentialPartition, OriginProof)],
+        d: &Map<String, Value>,
+    ) -> ReadBackSettlement {
+        let Some(entry) = state.auths.get_mut(id) else {
+            return ReadBackSettlement::RegistrationChanged;
+        };
+        if entry.auth.registration_epoch != base_epoch {
+            return ReadBackSettlement::RegistrationChanged;
+        }
+        // The contents are the leased file's; they say nothing about a record
+        // that now resolves elsewhere.
+        if OriginCheck::resolve(self.shared.store.as_deref(), Some(entry.auth.as_ref())).as_ref()
+            != Some(token_origin)
+        {
+            return ReadBackSettlement::Unproven;
+        }
+        let mut any_landing = false;
+        let mut any_unproven = false;
+        for partition in [
+            CodexCredentialPartition::Outer,
+            CodexCredentialPartition::Siwc,
+        ] {
+            let Some(proof) = proofs
+                .iter()
+                .find(|(p, _)| *p == partition)
+                .map(|(_, proof)| *proof)
+            else {
+                continue;
+            };
+            let live = partition_map(&entry.auth.metadata, partition);
+            let (marked, baselines, cause, warned, landing) = match partition {
+                CodexCredentialPartition::Outer => (
+                    &mut entry.undurable.outer,
+                    &mut entry.undurable_baselines.outer,
+                    &mut entry.undurable_causes.outer,
+                    &mut entry.read_back_warned.outer,
+                    &mut entry.landing_unconfirmed.outer,
+                ),
+                CodexCredentialPartition::Siwc => (
+                    &mut entry.undurable.siwc,
+                    &mut entry.undurable_baselines.siwc,
+                    &mut entry.undurable_causes.siwc,
+                    &mut entry.read_back_warned.siwc,
+                    &mut entry.landing_unconfirmed.siwc,
+                ),
+            };
+            if !*marked || !matches!(cause, Some(MarkCause::ReadBack { .. })) {
+                continue;
+            }
+            let hold = match proof {
+                OriginProof::Same => {
+                    let disk = partition_map(d, partition);
+                    if has_partition(d, partition) && same_version(&disk, &live) {
+                        // The write landed.
+                        *marked = false;
+                        baselines.clear();
+                        *cause = None;
+                        *warned = false;
+                        false
+                    } else if has_partition(d, partition)
+                        && baselines.iter().any(|known| same_version(&disk, known))
+                    {
+                        // The write did not land: the file holds another value.
+                        *cause = Some(MarkCause::Different);
+                        *warned = false;
+                        false
+                    } else {
+                        true
+                    }
+                }
+                OriginProof::Different => true,
+                OriginProof::Unproven => {
+                    any_unproven = true;
+                    false
+                }
+            };
+            if hold {
+                if !*landing {
+                    *landing = true;
+                    tracing::warn!(
+                        auth_id = %id,
+                        partition = partition_name(partition),
+                        "landing unconfirmed: refresh paused until the user signs in again"
+                    );
+                }
+                any_landing = true;
+            }
+        }
+        if any_landing {
+            ReadBackSettlement::Hold
+        } else if any_unproven {
+            ReadBackSettlement::Unproven
+        } else {
+            ReadBackSettlement::Settled(Protection {
+                undurable: entry.undurable,
+                undurable_baselines: entry.undurable_baselines.clone(),
+            })
+        }
+    }
+
+    /// Records that a pass sent nothing and waits, and returns the error to
+    /// hand back. Changes no status, availability, error or failure-count
+    /// field, so routing is unaffected. Logs ids, partition names and the io
+    /// kind only.
+    fn defer_refresh(
+        &self,
+        id: &str,
+        base_epoch: u64,
+        kind: Deferral,
+        error: io::Error,
+    ) -> ManagerError {
+        let now = self.now();
+        let mut recorded = false;
+        let mut unproven = None;
+        let mut first_missing = false;
+        let mut newly_warned: Vec<&'static str> = Vec::new();
+        {
+            let mut guard = self.lock();
+            let state = &mut *guard;
+            if let Some(entry) = state.auths.get_mut(id)
+                && entry.auth.registration_epoch == base_epoch
+            {
+                recorded = true;
+                if kind == Deferral::OriginUnresolved
+                    && let Some(origin) = entry.unresolved_origin.as_mut()
+                {
+                    origin.unproven = origin.unproven.saturating_add(1);
+                    unproven = Some(origin.unproven);
+                }
+                if kind == Deferral::ReadBackUnsettled {
+                    let held = entry.read_back_partitions();
+                    for (partition, is_held, warned) in [
+                        (
+                            CodexCredentialPartition::Outer,
+                            held.outer,
+                            &mut entry.read_back_warned.outer,
+                        ),
+                        (
+                            CodexCredentialPartition::Siwc,
+                            held.siwc,
+                            &mut entry.read_back_warned.siwc,
+                        ),
+                    ] {
+                        if is_held && !*warned {
+                            *warned = true;
+                            newly_warned.push(partition_name(partition));
+                        }
+                    }
+                }
+                if kind == Deferral::MissingFile {
+                    let epoch = entry.auth.registration_epoch;
+                    first_missing = state.missing_file_deferrals.get(id) != Some(&epoch);
+                    state.missing_file_deferrals.insert(id.to_owned(), epoch);
+                }
+            }
+            if recorded {
+                let (max, floor) = deferral_backoff(kind, unproven);
+                self.hold_next_refresh_locked(state, id, now, max, floor);
+            }
+        }
+        self.queue_refresh_reschedule(id);
+        if recorded {
+            let io_kind = error.kind();
+            match kind {
+                Deferral::LockBusy => {
+                    tracing::debug!(auth_id = %id, ?io_kind, "credential lock busy; refresh deferred");
+                }
+                Deferral::NotCodexFile
+                | Deferral::LeaseError
+                | Deferral::PendingWriteFailed
+                | Deferral::PolicyChanged => {
+                    tracing::warn!(auth_id = %id, ?kind, ?io_kind, "refresh deferred");
+                }
+                Deferral::OriginUnresolved => {
+                    let held = unproven.is_some();
+                    match unproven {
+                        Some(n) if n > ORIGIN_UNRESOLVED_SURFACE_AFTER => {
+                            tracing::debug!(auth_id = %id, rotation_held = held, "origin unresolved");
+                        }
+                        Some(n) if n == ORIGIN_UNRESOLVED_SURFACE_AFTER => {
+                            tracing::warn!(
+                                auth_id = %id,
+                                rotation_held = held,
+                                "origin unresolved: refresh paused until the credential file is confirmed or the user signs in again"
+                            );
+                        }
+                        _ => {
+                            tracing::warn!(auth_id = %id, rotation_held = held, "origin unresolved");
+                        }
+                    }
+                }
+                Deferral::LandingUnconfirmed => {
+                    tracing::debug!(auth_id = %id, "landing unconfirmed; refresh deferred");
+                }
+                Deferral::ReadBackUnsettled => {
+                    if newly_warned.is_empty() {
+                        tracing::debug!(auth_id = %id, "refresh paused until the credential file's last write is confirmed");
+                    }
+                    for partition in newly_warned {
+                        tracing::warn!(
+                            auth_id = %id,
+                            partition,
+                            "refresh paused until the credential file's last write is confirmed"
+                        );
+                    }
+                }
+                Deferral::MissingFile => {
+                    if first_missing {
+                        tracing::warn!(auth_id = %id, ?io_kind, "credential file is missing; refresh deferred");
+                    } else {
+                        tracing::debug!(auth_id = %id, ?io_kind, "credential file is missing; refresh deferred");
+                    }
+                }
+            }
+        }
+        ManagerError::Store(error)
+    }
+}
+
 /// Test seam: awaited after a Codex refresh was saved and published, before
 /// its partial failure is checked against the live credential. Keyed by the
 /// manager's shared state, so parallel tests don't see each other's hooks.
@@ -1875,5 +2711,72 @@ pub(super) mod partial_failure_seam {
         if let Some(hook) = hook {
             hook().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use chrono::{TimeDelta, Utc};
+
+    use super::super::lifecycle::{OriginCheck, OriginMoved};
+    use super::super::{Manager, Settings, State};
+    use super::{Deferral, add, bounded_retry_delay, deferral_backoff};
+    use crate::auth::CodexOrigin;
+
+    fn require_send<T: Send>(_: T) {}
+
+    /// B-8: the deferral wait is `max` from now, shortened by a future token
+    /// expiry, and never shorter than the floor.
+    #[test]
+    fn bounded_retry_delay_follows_expiry_between_floor_and_max() {
+        let now = Utc::now();
+        let secs = Duration::from_secs;
+        let rows = [
+            (Some(now - TimeDelta::seconds(1)), 300, 5, 300),
+            (Some(now + TimeDelta::seconds(2)), 300, 5, 5),
+            (Some(now + TimeDelta::seconds(60)), 300, 5, 60),
+            (None, 300, 5, 300),
+            (Some(now + TimeDelta::seconds(60)), 30, 5, 30),
+        ];
+        for (expiry, max, floor, expected) in rows {
+            assert_eq!(
+                bounded_retry_delay(now, expiry, secs(max), secs(floor)),
+                add(now, secs(expected)),
+                "expiry {expiry:?} max {max} floor {floor}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_backoff_grows_after_the_surface_count_and_is_capped() {
+        let wait = |n| deferral_backoff(Deferral::OriginUnresolved, Some(n)).0;
+        assert_eq!(wait(1), Duration::from_secs(30));
+        assert_eq!(wait(9), Duration::from_secs(30));
+        assert_eq!(wait(10), Duration::from_secs(30));
+        assert_eq!(wait(11), Duration::from_secs(60));
+        assert_eq!(wait(16), Duration::from_secs(1800));
+        assert_eq!(wait(u32::MAX), Duration::from_secs(1800));
+    }
+
+    /// The future of `leased_origin_check` is `Send`. It is built and
+    /// never polled, so no lease is needed.
+    #[test]
+    fn leased_origin_check_future_is_send() {
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(crate::registry::ModelRegistry::new()),
+            None,
+        );
+        let exe = std::env::current_exe().expect("current exe");
+        let origin = CodexOrigin::of(&exe).expect("origin of the test binary");
+        let future = manager.leased_origin_check(
+            "id",
+            &origin,
+            |_: &mut State, _: &OriginCheck| -> Result<(), OriginMoved> { Ok(()) },
+        );
+        require_send(future);
     }
 }

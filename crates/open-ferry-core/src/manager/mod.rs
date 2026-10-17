@@ -190,6 +190,10 @@ pub(crate) struct Entry {
     pub(crate) landing_unconfirmed: UndurablePartitions,
     /// A refused save whose change is still owed. Memory only.
     pub(crate) owed_save: Option<OwedSave>,
+    /// Partitions whose unsettled read-back mark has already been warned about.
+    /// Memory only; cleared wherever the partition's `ReadBack` cause ends, so a
+    /// later cause warns again.
+    pub(crate) read_back_warned: UndurablePartitions,
 }
 
 /// A post-send origin that could not be proved. Memory only, like `undurable`.
@@ -420,6 +424,10 @@ pub(crate) struct State {
     pub(crate) save_sequence: HashMap<String, u64>,
     /// The quota rests capped by `routing.quota.check-after`.
     pub(crate) quota_checks: quota_check::QuotaChecks,
+    /// For each credential whose refresh was deferred for a missing file, the
+    /// registration epoch of the episode that was logged at warn. The episode
+    /// ends with a non-empty Codex save or the registration's removal.
+    pub(crate) missing_file_deferrals: HashMap<String, u64>,
 }
 
 pub(crate) struct Shared {
@@ -465,7 +473,15 @@ pub(crate) struct Shared {
     /// and before it takes the state lock to apply it.
     #[cfg(test)]
     adopt_hook: Mutex<Option<AdoptHook>>,
+    /// Test seam: called after each origin proof of a leased origin check,
+    /// with the attempt number (1-based).
+    #[cfg(test)]
+    origin_check_hook: Mutex<Option<OriginCheckHook>>,
 }
+
+/// What a test runs after each proof of a leased origin check.
+#[cfg(test)]
+pub(crate) type OriginCheckHook = Arc<dyn Fn(u32) + Send + Sync>;
 
 /// What a test runs before a save takes the persist lock.
 #[cfg(test)]
@@ -595,6 +611,7 @@ impl Manager {
             save_publications: 0,
             save_sequence: HashMap::new(),
             quota_checks: quota_check::QuotaChecks::default(),
+            missing_file_deferrals: HashMap::new(),
         };
         let shared = Arc::new(Shared {
             state: Mutex::new(state),
@@ -619,6 +636,8 @@ impl Manager {
             read_back_hook: Mutex::new(None),
             #[cfg(test)]
             adopt_hook: Mutex::new(None),
+            #[cfg(test)]
+            origin_check_hook: Mutex::new(None),
         });
         let owner = Some(Arc::new(Owner(Arc::downgrade(&shared))));
         Self {
