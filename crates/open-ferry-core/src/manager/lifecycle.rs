@@ -1713,26 +1713,33 @@ impl Manager {
                         .and(disk.as_ref())
                         .and_then(|disk| OriginCheck::resolve(store_ref, Some(disk)));
                     let mut state = self.lock();
+                    // A leased tail keeps the read only if live and the
+                    // read-back both still name the origin or the file the
+                    // tail wrote. Without a lease the binding decides. The
+                    // recording ignores `discard_epoch`: a discard during the
+                    // save fails the gate below, but the token's home is
+                    // still not established.
+                    let kept = lease.as_deref().map(|tail| {
+                        let Some(entry) = state.auths.get_mut(&snapshot.id) else {
+                            return false;
+                        };
+                        if entry.auth.registration_epoch != epoch {
+                            return false;
+                        }
+                        let now = OriginCheck::resolve(store_ref, Some(&entry.auth));
+                        let live_same = tail_verdict(now.as_ref(), &tail.origin, written.as_ref())
+                            == OriginProof::Same;
+                        let read_same = tail_verdict(read.as_ref(), &tail.origin, written.as_ref())
+                            == OriginProof::Same;
+                        if !live_same && !self.permanently_ineligible(&entry.auth) {
+                            entry.record_unresolved(&tail.origin, &tail.rotation);
+                        }
+                        live_same && read_same
+                    });
                     if let Some(entry) = state.auths.get_mut(&snapshot.id)
                         && entry.auth.registration_epoch == epoch
                         && entry.discard_epoch == discard_epoch
                     {
-                        // A leased tail keeps the read only if live and the
-                        // read-back both still name the origin or the file the
-                        // tail wrote. Without a lease the binding decides.
-                        let kept = lease.as_deref().map(|tail| {
-                            let now = OriginCheck::resolve(store_ref, Some(&entry.auth));
-                            let live_same =
-                                tail_verdict(now.as_ref(), &tail.origin, written.as_ref())
-                                    == OriginProof::Same;
-                            let read_same =
-                                tail_verdict(read.as_ref(), &tail.origin, written.as_ref())
-                                    == OriginProof::Same;
-                            if !live_same && !self.permanently_ineligible(&entry.auth) {
-                                entry.record_unresolved(&tail.origin, &tail.rotation);
-                            }
-                            live_same && read_same
-                        });
                         let owed = entry.owed_save.is_some();
                         if same_record
                             && raw_origin
