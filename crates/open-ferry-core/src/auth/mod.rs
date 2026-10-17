@@ -46,6 +46,7 @@ pub mod weight;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -53,7 +54,7 @@ use serde_json::{Map, Value};
 pub use classification::{AuthKind, AuthSource};
 pub use expiry::parse_go_rfc3339;
 pub(crate) use expiry::{parse_time_value, zero_time};
-pub use file_store::FileStore;
+pub use file_store::{CodexPersisted, FileStore};
 pub(crate) use go::{atoi, equal_fold, parse_bool};
 pub(crate) use metadata::{parse_bool_any, parse_int_any};
 pub use recent::{RecentRequestBucket, RecentRequests};
@@ -371,6 +372,105 @@ impl fmt::Debug for Auth {
     }
 }
 
+/// The identity of a credential file as a save would name it: the resolved
+/// path made absolute with [`std::path::absolute`]. No trim (the store has
+/// already trimmed), no lexical cleaning, no symlink resolution. It is not
+/// the lock path, which [`credential_lock::credential_lock_path`] still names.
+/// Equal paths prove one file; unequal paths prove nothing, and
+/// [`prove`](Self::prove) decides. Never logged; `Debug` serves test asserts
+/// only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexOrigin {
+    path: PathBuf,
+}
+
+/// The result of comparing a pinned origin with a current one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginProof {
+    /// One file: lexically equal, or both opens gave equal handles.
+    Same,
+    /// Two files, established under the credential lock of one of the two
+    /// paths: unequal handles, or the current path is `NotFound` while the
+    /// pinned path opened. A file created there later is a different file.
+    Different,
+    /// Nothing established: any other open error, the pinned path failing to
+    /// open included. A caller also uses it for a failed or panicked proof
+    /// task and for an exhausted bound.
+    Unproven,
+}
+
+impl CodexOrigin {
+    /// No file I/O. Fails only when [`std::path::absolute`] does: an empty
+    /// path, or no current directory for a relative path.
+    pub fn of(path: &Path) -> io::Result<Self> {
+        std::path::absolute(path).map(|path| Self { path })
+    }
+
+    /// The absolute path this origin names.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Blocking: opens both files, pinned (`self`) first, unless the paths
+    /// are lexically equal. Never call it under the manager's state lock.
+    /// The caller holds the credential lock of one of the two paths. A peer
+    /// that names the file through a same-lock alias is serialized by that
+    /// lock, so it cannot replace either file between the two opens. A caller
+    /// that holds neither lock may rely only on `Same`; it must treat
+    /// `Different` as `Unproven`.
+    pub fn prove(&self, current: &Self) -> OriginProof {
+        if self.path == current.path {
+            return OriginProof::Same;
+        }
+        let Ok(pinned) = same_file::Handle::from_path(&self.path) else {
+            return OriginProof::Unproven;
+        };
+        #[cfg(test)]
+        if let Ok(lock) = credential_lock::credential_lock_path(&current.path) {
+            credential_lock::test_event(&lock, "origin-between");
+        }
+        match same_file::Handle::from_path(&current.path) {
+            Ok(handle) if handle == pinned => OriginProof::Same,
+            Ok(_) => OriginProof::Different,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => OriginProof::Different,
+            Err(_) => OriginProof::Unproven,
+        }
+    }
+}
+
+/// Owned lease on one credential file. Not `Clone`. Dropping it releases the
+/// credential lock.
+pub struct CodexLeaseToken {
+    /// Resolved once; the only path the lease touches.
+    path: PathBuf,
+    guard: credential_lock::CredentialLock,
+    /// `CodexOrigin::of(&path)`, computed before the lock is taken.
+    origin: CodexOrigin,
+}
+
+impl CodexLeaseToken {
+    /// The file the lease reads and writes.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The identity of [`path`](Self::path), fixed when the lease was taken.
+    pub fn origin(&self) -> &CodexOrigin {
+        &self.origin
+    }
+
+    pub(crate) fn guard(&self) -> &credential_lock::CredentialLock {
+        &self.guard
+    }
+}
+
+/// What [`AuthStore::codex_refresh_lease`] gave.
+pub enum CodexLease {
+    Held(CodexLeaseToken),
+    /// Not Codex, or the store has no file identity for this record.
+    Unsupported,
+}
+
 /// The outcome of reading the requested record for observational adoption.
 /// Capability is determined by the requested record, not newly read contents.
 #[doc(hidden)]
@@ -449,6 +549,54 @@ pub trait AuthStore: Send + Sync + 'static {
     fn binding_generation(&self) -> u64 {
         0
     }
+
+    /// Not upstream's. Blocking. `Ok(Unsupported)` first when `auth` is not a
+    /// Codex record, with no lock file created. Then resolves `auth` to its
+    /// file (any resolve error is `Ok(Unsupported)`), refuses lock names,
+    /// checks the file guard, fixes the origin identity, and acquires the
+    /// credential lock, waiting at most `CREDENTIAL_LOCK_TIMEOUT`. Fails with
+    /// `TimedOut` or a lock or guard error. The default has no file identity.
+    fn codex_refresh_lease(&self, _auth: &Auth) -> io::Result<CodexLease> {
+        Ok(CodexLease::Unsupported)
+    }
+
+    /// Not upstream's. Blocking. Reads the leased file's metadata object, or
+    /// `None` when the file does not exist. Never re-resolves: it reads
+    /// `token.path()`.
+    fn codex_lease_read(&self, _token: &CodexLeaseToken) -> io::Result<Option<Map<String, Value>>> {
+        Err(unsupported())
+    }
+
+    /// Not upstream's. Blocking. Applies `patch`, composed with
+    /// `auth.codex_pending_refresh`, to the leased file and writes it
+    /// atomically. Never re-resolves: it writes `token.path()`. Needs an
+    /// existing file with `type` codex. Returns the read-back record and the
+    /// per-partition outcomes.
+    fn codex_lease_commit(
+        &self,
+        _token: &CodexLeaseToken,
+        _auth: &Auth,
+        _patch: &codex_refresh::CredentialRefreshPatch,
+    ) -> io::Result<CodexPersisted> {
+        Err(unsupported())
+    }
+
+    /// Not upstream's. Does no file I/O, so it is callable under the
+    /// manager's state lock. The absolute path a save of `auth` would write
+    /// now, under the store's current binding; `None` when the store has no
+    /// file identity for the record. Whether two origins name one file is
+    /// [`CodexOrigin::prove`]'s question, asked outside the state lock and
+    /// under a credential lock.
+    fn codex_origin(&self, _auth: &Auth) -> io::Result<Option<CodexOrigin>> {
+        Ok(None)
+    }
+}
+
+fn unsupported() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "auth store: no credential lease for this store",
+    )
 }
 
 #[cfg(test)]

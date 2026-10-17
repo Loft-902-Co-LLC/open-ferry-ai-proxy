@@ -88,7 +88,7 @@ use super::metadata::{
 };
 use super::path::{join, rel};
 use super::weight::validate_weights;
-use super::{Auth, AuthStore, Status};
+use super::{Auth, AuthStore, CodexLease, CodexLeaseToken, CodexOrigin, Status};
 
 /// The largest credential file read.
 pub const MAX_AUTH_FILE_SIZE: u64 = 8 << 20;
@@ -628,8 +628,9 @@ impl FileStore {
         guard: &super::credential_lock::CredentialLock,
         check: &BindCheck<'_>,
     ) -> io::Result<Auth> {
-        let _permit = self.permit()?;
+        let permit = self.permit()?;
         self.persist_codex_partition_with_permit(
+            &permit,
             auth,
             &super::codex_refresh::CodexPersistIntent::SiwcBind(siwc),
             guard,
@@ -664,9 +665,9 @@ impl FileStore {
         let path = self.resolve_auth_path(auth)?;
         refuse_lock_name(&path)?;
         self.check_file(&path)?;
-        let _permit = self.permit()?;
+        let permit = self.permit()?;
         let credential = super::credential_lock::acquire_sync(&path)?;
-        self.persist_codex_partition_with_permit(auth, intent, &credential, None)
+        self.persist_codex_partition_with_permit(&permit, auth, intent, &credential, None)
     }
 
     /// Persists a refresh while the caller holds this credential's lock.
@@ -691,21 +692,40 @@ impl FileStore {
         intent: &super::codex_refresh::CodexPersistIntent,
         guard: &super::credential_lock::CredentialLock,
     ) -> io::Result<CodexPersisted> {
-        let _permit = self.permit()?;
-        self.persist_codex_partition_with_permit(auth, intent, guard, None)
+        let permit = self.permit()?;
+        self.persist_codex_partition_with_permit(&permit, auth, intent, guard, None)
     }
 
-    // Both callers retain one write permit across the whole write.
+    // The caller retains one write permit across the whole write. Resolves
+    // after the caller's lock wait, so a rebind during the wait is caught by
+    // the guard check in the body.
     fn persist_codex_partition_with_permit(
         &self,
+        permit: &WritePermit,
         auth: &Auth,
         intent: &super::codex_refresh::CodexPersistIntent,
         guard: &super::credential_lock::CredentialLock,
         check: Option<&BindCheck<'_>>,
     ) -> io::Result<CodexPersisted> {
         let path = self.resolve_auth_path(auth)?;
-        refuse_lock_name(&path)?;
-        if !guard.guards(&path)? {
+        self.persist_codex_partition_at(permit, &path, auth, intent, guard, check)
+    }
+
+    /// The write body: the caller holds `_permit` for the whole write (the
+    /// gate's permit survives a quiesce only when it was granted inside an
+    /// operation or before the quiesce began). Takes no permit and never
+    /// resolves: `path` is the file the caller means.
+    fn persist_codex_partition_at(
+        &self,
+        _permit: &WritePermit,
+        path: &Path,
+        auth: &Auth,
+        intent: &super::codex_refresh::CodexPersistIntent,
+        guard: &super::credential_lock::CredentialLock,
+        check: Option<&BindCheck<'_>>,
+    ) -> io::Result<CodexPersisted> {
+        refuse_lock_name(path)?;
+        if !guard.guards(path)? {
             return Err(invalid(
                 "auth filestore: credential lock guard is for another file",
             ));
@@ -714,35 +734,35 @@ impl FileStore {
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        self.check_file(&path)?;
+        self.check_file(path)?;
         if matches!(
             intent,
             super::codex_refresh::CodexPersistIntent::SiwcBind(_)
         ) {
-            let (file, disk, file_id) = open_siwc_bind_target(&path)?;
+            let (file, disk, file_id) = open_siwc_bind_target(path)?;
             drop(file);
             #[cfg(test)]
             super::credential_lock::test_event(
-                &super::credential_lock::credential_lock_path(&path)?,
+                &super::credential_lock::credential_lock_path(path)?,
                 "bind-read",
             );
-            refuse_siwc_bind_aliases(&self.base_dir(), &path, file_id)?;
+            refuse_siwc_bind_aliases(&self.base_dir(), path, file_id)?;
             if let Some(check) = check {
                 check(&disk, file_id)?;
             }
             let (metadata, applied) =
                 super::codex_refresh::merge_persist(Some(&disk), &auth.metadata, intent);
-            write_atomic_no_follow(&path, marshal_map(&metadata).as_bytes(), file_id)?;
+            write_atomic_no_follow(path, marshal_map(&metadata).as_bytes(), file_id)?;
             #[cfg(test)]
             super::credential_lock::test_event(
-                &super::credential_lock::credential_lock_path(&path)?,
+                &super::credential_lock::credential_lock_path(path)?,
                 "bind-written",
             );
             let persisted = auth_from_metadata(
-                &path,
+                path,
                 &self.base_dir(),
                 metadata,
-                fs::symlink_metadata(&path)
+                fs::symlink_metadata(path)
                     .ok()
                     .and_then(|metadata| metadata.modified().ok())
                     .map(chrono::DateTime::<chrono::Utc>::from),
@@ -754,13 +774,13 @@ impl FileStore {
             });
         }
         // Partition APIs update an existing file; explicit login creation uses save_new.
-        fs::metadata(&path).map_err(|error| at(&error, "stat", &path))?;
+        fs::metadata(path).map_err(|error| at(&error, "stat", path))?;
         let disk = self
-            .codex_disk(&path, false)?
+            .codex_disk(path, false)?
             .unwrap_or_else(|| auth.metadata.clone());
         #[cfg(test)]
         super::credential_lock::test_event(
-            &super::credential_lock::credential_lock_path(&path)?,
+            &super::credential_lock::credential_lock_path(path)?,
             "read",
         );
         if !disk
@@ -783,8 +803,8 @@ impl FileStore {
         let (metadata, applied) =
             super::codex_refresh::merge_persist(Some(&disk), &auth.metadata, &intent);
         let raw = marshal_map(&metadata);
-        write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())?;
-        let persisted = read_auth_file(&path, &self.base_dir())?
+        write_atomic(path, raw.as_bytes(), self.file_guard.is_none())?;
+        let persisted = read_auth_file(path, &self.base_dir())?
             .ok_or_else(|| invalid("auth filestore: persisted credential is empty"))?;
         Ok(CodexPersisted {
             auth: persisted,
@@ -1468,6 +1488,62 @@ impl AuthStore for FileStore {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             other => other,
         }
+    }
+
+    fn codex_refresh_lease(&self, auth: &Auth) -> io::Result<CodexLease> {
+        // No lock file is made for a record that is not Codex.
+        if !super::codex_refresh::is_codex_auth(auth) {
+            return Ok(CodexLease::Unsupported);
+        }
+        // A resolve error means the record has no file identity: no id, or a
+        // relative id with no base directory.
+        let Ok(path) = self.resolve_auth_path(auth) else {
+            return Ok(CodexLease::Unsupported);
+        };
+        refuse_lock_name(&path)?;
+        self.check_file(&path)?;
+        // The file may not exist yet: the lock file is separate.
+        let origin = CodexOrigin::of(&path)?;
+        let guard = super::credential_lock::acquire_sync(&path)?;
+        Ok(CodexLease::Held(CodexLeaseToken {
+            path,
+            guard,
+            origin,
+        }))
+    }
+
+    fn codex_origin(&self, auth: &Auth) -> io::Result<Option<CodexOrigin>> {
+        let Ok(path) = self.resolve_auth_path(auth) else {
+            return Ok(None);
+        };
+        CodexOrigin::of(&path).map(Some)
+    }
+
+    fn codex_lease_read(&self, token: &CodexLeaseToken) -> io::Result<Option<Map<String, Value>>> {
+        if !token.guard().guards(token.path())? {
+            return Err(invalid(
+                "auth filestore: credential lock guard is for another file",
+            ));
+        }
+        self.check_read(token.path())?;
+        self.codex_disk(token.path(), false)
+    }
+
+    fn codex_lease_commit(
+        &self,
+        token: &CodexLeaseToken,
+        auth: &Auth,
+        patch: &super::codex_refresh::CredentialRefreshPatch,
+    ) -> io::Result<CodexPersisted> {
+        let permit = self.permit()?;
+        self.persist_codex_partition_at(
+            &permit,
+            token.path(),
+            auth,
+            &super::codex_refresh::CodexPersistIntent::Refresh(patch.clone()),
+            token.guard(),
+            None,
+        )
     }
 }
 
@@ -2813,34 +2889,649 @@ mod tests {
         assert!(dir.path().join("a.json").exists());
     }
 
-    // Not upstream's: every physical write or removal sits in a function
-    // that takes a permit first, so a new writer can't skip the gate.
+    /// The marks that start a physical write or removal in the audited code.
+    const WRITE_MARKS: [&str; 4] = [
+        "write_atomic(&path",
+        "write_atomic(path",
+        "write_atomic_no_follow(path",
+        "fs::remove_file(&path)",
+    ];
+    const TEST_MODULE_MARKER: &str = "\n#[cfg(test)]\nmod tests";
+
+    /// Whether `line` starts a function at column 0 or 4 (nested functions
+    /// at 8 are part of their enclosing function).
+    fn starts_function(line: &str) -> bool {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent != 0 && indent != 4 {
+            return false;
+        }
+        let mut rest = &line[indent..];
+        if let Some(after) = rest.strip_prefix("pub") {
+            rest = match after.strip_prefix(' ') {
+                Some(after) => after,
+                None => match after.strip_prefix('(').and_then(|a| a.split_once(") ")) {
+                    Some((scope, after))
+                        if !scope.is_empty() && scope.bytes().all(|b| b.is_ascii_lowercase()) =>
+                    {
+                        after
+                    }
+                    _ => return false,
+                },
+            };
+        }
+        let rest = rest.strip_prefix("async ").unwrap_or(rest);
+        rest.starts_with("fn ")
+    }
+
+    /// The names of the functions in `src` that hold a physical write or
+    /// removal without a write permit: `self.permit()?` before the mark, or a
+    /// `WritePermit` parameter. Not upstream's: a new writer can't skip the
+    /// gate.
+    fn audit_permits(src: &str) -> Vec<String> {
+        let src = src.replace("\r\n", "\n");
+        assert_eq!(
+            src.matches(TEST_MODULE_MARKER).count(),
+            1,
+            "the test-module marker must occur exactly once"
+        );
+        let code = src.split(TEST_MODULE_MARKER).next().unwrap();
+        let lines: Vec<&str> = code.lines().collect();
+        let mut offenders = Vec::new();
+        for mark in WRITE_MARKS {
+            let mut found = false;
+            for (at, line) in lines.iter().enumerate() {
+                // The primitives' own definitions spell the marks too.
+                if !line.contains(mark) || starts_function(line) {
+                    continue;
+                }
+                found = true;
+                let Some(start) = lines[..=at].iter().rposition(|l| starts_function(l)) else {
+                    offenders.push(format!("(no function before `{mark}` at line {})", at + 1));
+                    continue;
+                };
+                let name = lines[start]
+                    .split_once("fn ")
+                    .and_then(|(_, rest)| rest.split(['(', '<']).next())
+                    .unwrap_or("?")
+                    .to_string();
+                let span = lines[start..=at].join("\n");
+                let signature: String = lines[start..=at]
+                    .iter()
+                    .take_while(|l| !l.ends_with('{'))
+                    .chain(lines[start..=at].iter().find(|l| l.ends_with('{')))
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let covered = span.contains("self.permit()?")
+                    || signature.contains("&crate::gate::WritePermit")
+                    || signature.contains("&WritePermit");
+                if !covered && !offenders.contains(&name) {
+                    offenders.push(name);
+                }
+            }
+            assert!(
+                found,
+                "write mark `{mark}` matches nothing in the audited code"
+            );
+        }
+        offenders
+    }
+
+    // Part A1: the lease, the origin identity and the permit audit.
+
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, mpsc};
+
+    use super::super::OriginProof;
+
+    /// The scratch directory's path, lexically cleaned as the store joins it.
+    fn clean_dir(dir: &tempfile::TempDir) -> PathBuf {
+        super::super::path::clean(dir.path())
+    }
+
+    fn lease_record(file_name: &str, token: &str) -> Auth {
+        Auth {
+            id: file_name.into(),
+            file_name: file_name.into(),
+            provider: "codex".into(),
+            metadata: meta(json!({
+                "type": "codex",
+                "access_token": token,
+                "refresh_token": "refresh-test",
+            })),
+            ..Auth::default()
+        }
+    }
+
+    fn write_lease_file(path: &Path, token: &str) {
+        write(
+            path,
+            &json!({"type": "codex", "access_token": token, "refresh_token": "refresh-test"})
+                .to_string(),
+        );
+    }
+
+    fn held(lease: io::Result<CodexLease>) -> CodexLeaseToken {
+        match lease {
+            Ok(CodexLease::Held(token)) => token,
+            Ok(CodexLease::Unsupported) => panic!("lease is unsupported"),
+            Err(error) => panic!("lease failed: {error}"),
+        }
+    }
+
+    /// A second spelling of the directory `dir`: on Windows a case variant
+    /// (needs a case-insensitive directory, the NTFS default), on Unix a
+    /// directory symlink made inside `holder`.
+    #[cfg(any(unix, windows))]
+    fn alias_dir(dir: &Path, holder: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let _ = holder;
+            let name = dir.file_name().unwrap().to_string_lossy().to_uppercase();
+            dir.with_file_name(name)
+        }
+        #[cfg(unix)]
+        {
+            let alias = holder.join("alias");
+            std::os::unix::fs::symlink(dir, &alias).unwrap();
+            alias
+        }
+    }
+
+    /// The precondition of every alias test, made with the crate directly so
+    /// that it does not assume what `prove` does: both spellings open to one
+    /// file. A case-sensitive directory fails here instead of passing vacuously.
+    #[cfg(any(unix, windows))]
+    fn assert_alias(dir: &Path, alias: &Path) {
+        assert_ne!(dir, alias, "the alias must differ lexically");
+        let a = same_file::Handle::from_path(dir).unwrap();
+        let b = same_file::Handle::from_path(alias).unwrap();
+        assert!(a == b, "{alias:?} is not an alias of {dir:?}");
+    }
+
     #[test]
-    fn every_physical_write_follows_a_permit() {
-        let source = include_str!("file_store.rs");
-        let code = source.split("#[cfg(test)]").next().unwrap();
-        let marks = ["write_atomic(&path", "fs::remove_file(&path)"];
-        for mark in marks {
-            for (at, _) in code.match_indices(mark) {
-                let before = &code[..at];
-                let start = before
-                    .rfind(
-                        "
-    pub fn ",
-                    )
-                    .or_else(|| {
-                        before.rfind(
-                            "
-    fn ",
-                        )
-                    })
-                    .unwrap();
-                assert!(
-                    before[start..].contains("self.permit()?"),
-                    "{mark} at byte {at} has no permit in its function"
-                );
+    fn lease_fixes_path_and_origin_before_the_lock() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let e = mutation_scratch();
+        let ep = clean_dir(&e);
+        let store = Arc::new(FileStore::new(dp.as_path()));
+        let auth = lease_record("f", "t");
+        let file = dp.join("f");
+        let blocker = super::super::credential_lock::acquire_sync(&file).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let rebinding = store.clone();
+        let target = ep.clone();
+        super::super::credential_lock::set_test_hook(
+            &file,
+            Some(Arc::new(move |event| {
+                if event == "waiting" {
+                    rebinding.set_base_dir(&target);
+                    let _ = tx.send(());
+                }
+            })),
+        );
+        let leasing = store.clone();
+        let record = auth.clone();
+        let worker = std::thread::spawn(move || leasing.codex_refresh_lease(&record));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(blocker);
+        let token = held(worker.join().unwrap());
+        super::super::credential_lock::set_test_hook(&file, None);
+        assert_eq!(token.path(), file);
+        assert_eq!(*token.origin(), CodexOrigin::of(token.path()).unwrap());
+        assert!(token.guard().guards(token.path()).unwrap());
+        // The rebind moved the registration, and not the lease.
+        assert_eq!(
+            store.codex_origin(&auth).unwrap().unwrap(),
+            CodexOrigin::of(&ep.join("f")).unwrap()
+        );
+        assert_ne!(*token.origin(), store.codex_origin(&auth).unwrap().unwrap());
+    }
+
+    #[test]
+    fn lease_read_reports_missing_corrupt_and_foreign_guards() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        let auth = lease_record("f", "t");
+        let file = dp.join("f");
+        let token = held(store.codex_refresh_lease(&auth));
+        assert!(store.codex_lease_read(&token).unwrap().is_none());
+        write(&file, "{not json");
+        assert!(store.codex_lease_read(&token).is_err());
+        write_lease_file(&file, "t");
+        let read = store.codex_lease_read(&token).unwrap().unwrap();
+        assert_eq!(read["access_token"], "t");
+        drop(token);
+        // A token whose guard is for another file.
+        let other = dp.join("g");
+        let foreign = CodexLeaseToken {
+            origin: CodexOrigin::of(&other).unwrap(),
+            path: other,
+            guard: super::super::credential_lock::acquire_sync(&file).unwrap(),
+        };
+        let error = store.codex_lease_read(&foreign).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn lease_commit_writes_the_leased_path_after_a_rebind() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let e = mutation_scratch();
+        let ep = clean_dir(&e);
+        let store = FileStore::new(dp.as_path());
+        let auth = lease_record("f", "before");
+        let file = dp.join("f");
+        write_lease_file(&file, "before");
+        let token = held(store.codex_refresh_lease(&auth));
+        store.set_base_dir(ep.as_path());
+        let after = meta(json!({
+            "type": "codex",
+            "access_token": "after",
+            "refresh_token": "refresh-test",
+        }));
+        let patch = super::super::codex_refresh::CredentialRefreshPatch::new(
+            &auth.metadata,
+            &after,
+            true,
+            false,
+        );
+        let persisted = store.codex_lease_commit(&token, &auth, &patch).unwrap();
+        assert_eq!(persisted.applied.outer, Some(true));
+        assert_eq!(read_json(&file)["access_token"], "after");
+        assert!(!ep.join("f").exists());
+        assert_eq!(fs::read_dir(ep.as_path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn partition_write_re_resolves_after_the_lock_wait() {
+        let p = mutation_scratch();
+        let pp = clean_dir(&p);
+        let q = mutation_scratch();
+        let qp = clean_dir(&q);
+        let store = Arc::new(FileStore::new(pp.as_path()));
+        let auth = lease_record("f", "before");
+        let file = pp.join("f");
+        write_lease_file(&file, "before");
+        let blocker = super::super::credential_lock::acquire_sync(&file).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let rebinding = store.clone();
+        let target = qp.clone();
+        super::super::credential_lock::set_test_hook(
+            &file,
+            Some(Arc::new(move |event| {
+                if event == "waiting" {
+                    rebinding.set_base_dir(&target);
+                    let _ = tx.send(());
+                }
+            })),
+        );
+        let after = meta(json!({
+            "type": "codex",
+            "access_token": "after",
+            "refresh_token": "refresh-test",
+        }));
+        let intent = super::super::codex_refresh::CodexPersistIntent::Refresh(
+            super::super::codex_refresh::CredentialRefreshPatch::new(
+                &auth.metadata,
+                &after,
+                true,
+                false,
+            ),
+        );
+        let writing = store.clone();
+        let record = auth.clone();
+        let worker = std::thread::spawn(move || writing.persist_codex_partition(&record, &intent));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(blocker);
+        let error = worker.join().unwrap().unwrap_err();
+        super::super::credential_lock::set_test_hook(&file, None);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(read_json(&file)["access_token"], "before");
+        assert!(!qp.join("f").exists());
+    }
+
+    #[test]
+    fn lease_is_unsupported_without_a_file_identity() {
+        struct Bare;
+        impl AuthStore for Bare {
+            fn list(&self) -> io::Result<Vec<Auth>> {
+                Ok(Vec::new())
+            }
+            fn save(&self, _auth: &Auth) -> io::Result<String> {
+                Ok(String::new())
+            }
+            fn delete(&self, _id: &str) -> io::Result<()> {
+                Ok(())
             }
         }
+        let auth = lease_record("f", "t");
+        assert!(matches!(
+            Bare.codex_refresh_lease(&auth),
+            Ok(CodexLease::Unsupported)
+        ));
+        assert!(Bare.codex_origin(&auth).unwrap().is_none());
+
+        // A record that is not Codex gets no lease and no lock file.
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        let mut gemini = lease_record("f", "t");
+        gemini.provider = "gemini".into();
+        gemini.metadata.insert("type".into(), json!("gemini"));
+        assert!(matches!(
+            store.codex_refresh_lease(&gemini),
+            Ok(CodexLease::Unsupported)
+        ));
+        assert_eq!(fs::read_dir(dp.as_path()).unwrap().count(), 0);
+
+        // No base dir and a relative id: no file identity, `Unsupported`.
+        let unconfigured = FileStore::new("");
+        let relative = Auth {
+            id: "unconfigured-lease-test.json".into(),
+            provider: "codex".into(),
+            ..Auth::default()
+        };
+        assert!(matches!(
+            unconfigured.codex_refresh_lease(&relative),
+            Ok(CodexLease::Unsupported)
+        ));
+        assert!(!Path::new("unconfigured-lease-test.json.lock").exists());
+        assert!(unconfigured.codex_origin(&relative).unwrap().is_none());
+    }
+
+    #[test]
+    fn audit_permits_accepts_the_source_and_names_offenders() {
+        let source = include_str!("file_store.rs");
+        assert_eq!(audit_permits(source), Vec::<String>::new());
+
+        // (a), (b): a function whose permit is gone is named.
+        let without_permit = |header: &str| {
+            let at = source.find(header).unwrap();
+            let permit = at + source[at..].find("self.permit()?").unwrap();
+            format!(
+                "{}self.gate(){}",
+                &source[..permit],
+                &source[permit + "self.permit()?".len()..]
+            )
+        };
+        assert_eq!(
+            audit_permits(&without_permit("    pub fn write_file(")),
+            ["write_file"]
+        );
+        assert_eq!(
+            audit_permits(&without_permit("    fn save_with(")),
+            ["save_with"]
+        );
+
+        // (c): a missing or duplicated test-module marker fails loudly.
+        let panics = |source: String| std::panic::catch_unwind(|| audit_permits(&source)).is_err();
+        assert!(panics(
+            source.replace(TEST_MODULE_MARKER, "\n#[cfg(test)]\nmod elsewhere")
+        ));
+        assert!(panics(format!("{source}{TEST_MODULE_MARKER}")));
+
+        // (d): a write mark before any function is reported.
+        let early = format!("let _ = fs::remove_file(&path);\n{source}");
+        let offenders = audit_permits(&early);
+        assert_eq!(offenders.len(), 1, "{offenders:?}");
+        assert!(offenders[0].contains("no function"), "{offenders:?}");
+
+        // (e): a respelled mark fails the at-least-once assertion.
+        assert!(panics(source.replace(
+            "write_atomic_no_follow(path",
+            "write_atomic_no_follow( path"
+        )));
+
+        // CRLF line endings are normalized.
+        assert_eq!(
+            audit_permits(&source.replace('\n', "\r\n")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn codex_origin_names_the_file_a_save_would_write() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let e = mutation_scratch();
+        let ep = clean_dir(&e);
+        let store = FileStore::new(dp.as_path());
+        let file = dp.join("f");
+        let origin = |store: &FileStore, auth: &Auth| store.codex_origin(auth).unwrap().unwrap();
+        let of = |path: &Path| CodexOrigin::of(path).unwrap();
+        let relative = lease_record("f", "t");
+        let mut absolute = lease_record("f", "t");
+        absolute
+            .attributes
+            .insert(ATTRIBUTE_PATH.into(), path_string(&file));
+        assert_eq!(origin(&store, &relative), of(&file));
+        assert_eq!(origin(&store, &absolute), of(&file));
+        assert_eq!(of(&file).path(), std::path::absolute(&file).unwrap());
+
+        store.set_base_dir(ep.as_path());
+        assert_eq!(origin(&store, &relative), of(&ep.join("f")));
+        assert_ne!(origin(&store, &relative), of(&file));
+        assert_eq!(origin(&store, &absolute), of(&file));
+
+        assert_eq!(of(&dp.join(".").join("f")), of(&file));
+        let dotdot = of(&dp.join("sub").join("..").join("f"));
+        #[cfg(unix)]
+        assert_ne!(dotdot, of(&file));
+        #[cfg(windows)]
+        assert_eq!(dotdot, of(&file));
+        #[cfg(not(any(unix, windows)))]
+        let _ = dotdot;
+        #[cfg(unix)]
+        assert_ne!(of(&dp.join(" f")), of(&file));
+        // The resolver trims, so a padded attribute still names the file.
+        let mut padded = lease_record("f", "t");
+        padded
+            .attributes
+            .insert(ATTRIBUTE_PATH.into(), format!("  {}  ", path_string(&file)));
+        assert_eq!(origin(&store, &padded), of(&file));
+        // Equality is lexical on every platform; `prove` decides sameness.
+        assert_ne!(of(&dp.join("F")), of(&file));
+
+        let nameless = Auth {
+            provider: "codex".into(),
+            ..Auth::default()
+        };
+        assert!(store.codex_origin(&nameless).unwrap().is_none());
+        let relative_id = Auth {
+            id: "x.json".into(),
+            provider: "codex".into(),
+            ..Auth::default()
+        };
+        assert!(
+            FileStore::new("")
+                .codex_origin(&relative_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn prove_decides_sameness_under_a_lock() {
+        use super::super::credential_lock::acquire_sync;
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let h = mutation_scratch();
+        let hp = clean_dir(&h);
+        let of = |path: &Path| CodexOrigin::of(path).unwrap();
+        let f = dp.join("f");
+        let g = dp.join("g");
+        let missing = dp.join("h");
+        write_lease_file(&f, "t");
+        write_lease_file(&g, "t");
+
+        // Lexically equal: no lock, no I/O, even when the file is missing.
+        assert_eq!(of(&missing).prove(&of(&missing)), OriginProof::Same);
+
+        let alias = alias_dir(dp.as_path(), hp.as_path());
+        assert_alias(dp.as_path(), &alias);
+        let via = alias.join("f");
+        {
+            let _lock = acquire_sync(&via).unwrap();
+            assert_eq!(of(&f).prove(&of(&via)), OriginProof::Same);
+        }
+        #[cfg(unix)]
+        {
+            fs::create_dir(dp.join("sub")).unwrap();
+            let dotdot = dp.join("sub").join("..").join("f");
+            let _lock = acquire_sync(&dotdot).unwrap();
+            assert_eq!(of(&f).prove(&of(&dotdot)), OriginProof::Same);
+        }
+
+        // Two files.
+        {
+            let _lock = acquire_sync(&g).unwrap();
+            assert_eq!(of(&f).prove(&of(&g)), OriginProof::Different);
+        }
+        // A missing current path is Different; a missing pinned path is not.
+        {
+            let _lock = acquire_sync(&missing).unwrap();
+            assert_eq!(of(&f).prove(&of(&missing)), OriginProof::Different);
+        }
+        {
+            let _lock = acquire_sync(&f).unwrap();
+            assert_eq!(of(&missing).prove(&of(&f)), OriginProof::Unproven);
+        }
+
+        // Any other open error is never Different. Without a lock to take.
+        #[cfg(unix)]
+        {
+            let below = f.join("x");
+            let error = fs::File::open(&below).unwrap_err();
+            assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error:?}");
+            assert_ne!(of(&f).prove(&of(&below)), OriginProof::Different);
+        }
+
+        // A hard link names one file until a save renames a new file over it.
+        let link = dp.join("link");
+        fs::hard_link(&f, &link).unwrap();
+        {
+            let _lock = acquire_sync(&link).unwrap();
+            assert_eq!(of(&f).prove(&of(&link)), OriginProof::Same);
+        }
+        FileStore::new(dp.as_path())
+            .save(&lease_record("link", "split"))
+            .unwrap();
+        {
+            let _lock = acquire_sync(&link).unwrap();
+            assert_eq!(of(&f).prove(&of(&link)), OriginProof::Different);
+        }
+    }
+
+    /// Saves a Codex record `f` with `token` as an outer login, from a store
+    /// of its own bound to `dir`, on a thread of its own.
+    #[cfg(any(unix, windows))]
+    fn peer_login(dir: &Path, token: &str) -> std::thread::JoinHandle<()> {
+        let dir = dir.to_path_buf();
+        let token = token.to_owned();
+        std::thread::spawn(move || {
+            let mut auth = lease_record("f", &token);
+            auth.codex_persist_intent = super::super::codex_refresh::CodexPersistIntent::OuterLogin;
+            FileStore::new(&dir).save(&auth).unwrap();
+        })
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_peer_cannot_replace_the_file_between_the_opens_while_the_lock_is_held() {
+        use super::super::credential_lock::{acquire_sync, set_test_hook};
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let h = mutation_scratch();
+        let hp = clean_dir(&h);
+        let file = dp.join("f");
+        write_lease_file(&file, "T1");
+        let alias = alias_dir(dp.as_path(), hp.as_path());
+        assert_alias(dp.as_path(), &alias);
+        let via = alias.join("f");
+
+        let (tx, rx) = mpsc::channel::<()>();
+        set_test_hook(
+            &file,
+            Some(Arc::new(move |event| {
+                if event == "waiting" {
+                    let _ = tx.send(());
+                }
+            })),
+        );
+        let rx = std::sync::Mutex::new(rx);
+        let peer = Arc::new(std::sync::Mutex::new(None));
+        let between = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let (peer, between, file, dir) =
+                (peer.clone(), between.clone(), file.clone(), dp.clone());
+            move |event: &str| {
+                if event != "origin-between" || between.fetch_add(1, AtomicOrdering::SeqCst) > 0 {
+                    return;
+                }
+                *peer.lock().unwrap() = Some(peer_login(&dir, "T2"));
+                rx.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the peer reaches the lock wait");
+                // The peer waits on the shared lock, so the file is still T1.
+                assert_eq!(read_json(&file)["access_token"], "T1");
+            }
+        };
+        set_test_hook(&via, Some(Arc::new(hook)));
+
+        let lock = acquire_sync(&via).unwrap();
+        let proof = CodexOrigin::of(&file)
+            .unwrap()
+            .prove(&CodexOrigin::of(&via).unwrap());
+        assert_eq!(proof, OriginProof::Same);
+        assert_eq!(between.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(read_json(&file)["access_token"], "T1");
+        drop(lock);
+        peer.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!(read_json(&file)["access_token"], "T2");
+        set_test_hook(&file, None);
+        set_test_hook(&via, None);
+    }
+
+    /// The control: with no lock held, a peer that replaces the file between
+    /// the opens makes `prove` say Different for one directory entry. This is
+    /// why `prove` needs the lock. Unix only: a rename over a file that
+    /// another handle holds open on Windows depends on the share mode.
+    #[cfg(unix)]
+    #[test]
+    fn without_the_lock_a_replacement_between_the_opens_looks_like_two_files() {
+        use super::super::credential_lock::set_test_hook;
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let h = mutation_scratch();
+        let hp = clean_dir(&h);
+        let file = dp.join("f");
+        write_lease_file(&file, "T1");
+        let alias = alias_dir(dp.as_path(), hp.as_path());
+        assert_alias(dp.as_path(), &alias);
+        let via = alias.join("f");
+        let between = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let (between, dir) = (between.clone(), dp.clone());
+            move |event: &str| {
+                if event == "origin-between" && between.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    // Nothing holds the lock, so the peer finishes inside the hook.
+                    peer_login(&dir, "T2").join().unwrap();
+                }
+            }
+        };
+        set_test_hook(&via, Some(Arc::new(hook)));
+        let proof = CodexOrigin::of(&file)
+            .unwrap()
+            .prove(&CodexOrigin::of(&via).unwrap());
+        set_test_hook(&via, None);
+        assert_eq!(between.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(proof, OriginProof::Different);
+        assert_eq!(read_json(&file)["access_token"], "T2");
     }
 
     type MutationHook = Box<dyn FnOnce(&Path)>;
