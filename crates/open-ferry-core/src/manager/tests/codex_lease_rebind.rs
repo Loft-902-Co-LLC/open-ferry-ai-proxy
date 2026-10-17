@@ -58,6 +58,25 @@ fn write_outer(path: &Path, name: &str) {
     std::fs::write(path, serde_json::to_vec(&map).unwrap()).unwrap();
 }
 
+/// The disk-only `note` the Reconcile seam writes into the file the
+/// read-back reads. Live carries it after the pass only if the overlay ran.
+const NOTE: &str = "disk-only";
+
+fn write_note(path: &Path, note: &str) {
+    let mut map = file(path);
+    map.insert("note".into(), json!(note));
+    std::fs::write(path, serde_json::to_vec(&map).unwrap()).unwrap();
+}
+
+/// `act`, after writing [`NOTE`] into `path`.
+fn noted(path: &Path, act: impl Fn() + Send + Sync + 'static) -> impl Fn() + Send + Sync + 'static {
+    let path = path.to_path_buf();
+    move || {
+        write_note(&path, NOTE);
+        act();
+    }
+}
+
 /// A peer process: takes `path`'s credential lock, writes `name`'s outer
 /// tokens over the file and releases.
 async fn peer_writes(path: &Path, name: &str) {
@@ -383,10 +402,12 @@ async fn without_a_rebind_the_leased_save_is_kept() {
     bounded(async {
         let scene = Scene::new();
         let (_guard, lines) = capture_logs();
+        at(&scene.rig, Seam::Reconcile, noted(&scene.rig.path(), || {}));
         scene.rig.manager.force_refresh(ID).await.unwrap();
         scene.assert_written_once();
         scene.assert_clean();
         assert_eq!(scene.rig.live().metadata["refresh_token"], "b-refresh");
+        assert_eq!(scene.live_note(), NOTE, "the read-back overlay ran");
         assert_eq!(logged(&lines, tracing::Level::WARN, "origin unresolved"), 0);
     })
     .await;
@@ -415,6 +436,7 @@ async fn a_rebind_before_the_read_back_records_the_origin() {
     bounded(async {
         let scene = Scene::new();
         let (_guard, lines) = capture_logs();
+        at(&scene.rig, Seam::Reconcile, noted(&scene.rig.path(), || {}));
         at(&scene.rig, Seam::ReadBack, scene.rebind(scene.q.path()));
         let started = chrono::Utc::now();
         scene.rig.manager.force_refresh(ID).await.unwrap();
@@ -458,10 +480,12 @@ async fn an_alias_bound_before_the_save_resolves_is_kept() {
         let alias = alias_dir(scene.rig.dir.path(), scene.q.path());
         assert_alias(&scene.rig.path(), &alias.join(ID));
         at(&scene.rig, Seam::Admitted, scene.rebind(&alias));
+        at(&scene.rig, Seam::Reconcile, noted(&alias.join(ID), || {}));
         scene.rig.manager.force_refresh(ID).await.unwrap();
         scene.assert_written_once();
         scene.assert_clean();
         assert_eq!(scene.rig.live().metadata["refresh_token"], "b-refresh");
+        assert_eq!(scene.live_note(), NOTE, "the read-back overlay ran");
         assert_eq!(logged(&lines, tracing::Level::WARN, "origin unresolved"), 0);
         scene.assert_peer_follow_up().await;
     })
@@ -496,6 +520,7 @@ async fn an_alias_bound_before_the_read_back_records_the_origin() {
         let (_guard, lines) = capture_logs();
         let alias = alias_dir(scene.rig.dir.path(), scene.q.path());
         assert_alias(&scene.rig.path(), &alias.join(ID));
+        at(&scene.rig, Seam::Reconcile, noted(&scene.rig.path(), || {}));
         at(&scene.rig, Seam::ReadBack, scene.rebind(&alias));
         let started = chrono::Utc::now();
         scene.rig.manager.force_refresh(ID).await.unwrap();
@@ -533,11 +558,24 @@ async fn lexical_case(seam: Seam, form: Lexical) {
         }
         Lexical::SameDirectory => scene.rebind(scene.rig.dir.path()),
     };
-    at(&scene.rig, seam, rebind);
+    // The overlay reads P in every form: the registration still names it.
+    let path = scene.rig.path();
+    match seam {
+        Seam::Reconcile => at(&scene.rig, seam, noted(&path, rebind)),
+        _ => {
+            at(&scene.rig, Seam::Reconcile, noted(&path, || {}));
+            at(&scene.rig, seam, rebind);
+        }
+    }
     scene.rig.manager.force_refresh(ID).await.unwrap();
     scene.assert_written_once();
     scene.assert_clean();
     assert_eq!(scene.rig.live().metadata["refresh_token"], "b-refresh");
+    assert_eq!(
+        scene.live_note(),
+        NOTE,
+        "the read-back overlay ran, {form:?}"
+    );
     assert_eq!(
         logged(&lines, tracing::Level::WARN, "origin unresolved"),
         0,
@@ -619,6 +657,31 @@ async fn the_commit_retry_stops_when_the_window_closes_during_the_backoff() {
         assert_eq!(seen, Some((1, true)));
         assert_eq!(scene.probe.sent(), 1);
         assert_eq!(file(&scene.rig.path())["refresh_token"], "b-refresh");
+        assert_eq!(scene.rig.live().metadata["refresh_token"], "b-refresh");
+        scene.assert_clean();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_commit_retry_does_not_back_off_when_the_window_is_already_closed() {
+    // B-22, the pre-sleep check: with a zero window the first failure ends the
+    // loop before any backoff. The clock is paused, so a backoff would show as
+    // 200 ms of virtual time, with no real waiting and no ordering by sleep.
+    bounded(async {
+        let scene = Scene::new();
+        scene.exhaust_commits_within(Duration::ZERO);
+        let started = tokio::time::Instant::now();
+        scene.rig.manager.force_refresh(ID).await.unwrap();
+        assert_eq!(
+            scene.rig.store.lease_commit_attempts.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "a backoff ran although the window had closed"
+        );
         assert_eq!(scene.rig.live().metadata["refresh_token"], "b-refresh");
         scene.assert_clean();
     })
@@ -804,18 +867,22 @@ fn model_state(http_status: u16, message: &str) -> ModelState {
 }
 
 /// The registration before the refresh: (f) starts with model m in a 500.
+/// Every case also starts with a prior `next_refresh_after`, so that the
+/// merge's rule for it (the response's value replaces it) is observable.
 fn prepare(scene: &Scene, change: Change) {
-    if change == Change::ModelChanged {
-        scene
-            .rig
-            .manager
-            .edit_unsaved(ID, |auth| {
+    let prior = Utc::now() + chrono::Duration::hours(1);
+    scene
+        .rig
+        .manager
+        .edit_unsaved(ID, |auth| {
+            auth.next_refresh_after = Some(prior);
+            if change == Change::ModelChanged {
                 auth.model_states
                     .insert("m".into(), model_state(500, "upstream failed"));
-                Ok::<_, ()>(true)
-            })
-            .unwrap();
-    }
+            }
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
 }
 
 fn apply(change: Change, auth: &mut Auth, now: DateTime<Utc>) {
@@ -886,15 +953,27 @@ struct Availability {
     status: Status,
     status_message: String,
     last_error: Option<AuthError>,
+    next_refresh_after: Option<DateTime<Utc>>,
 }
 
-/// Runs one B-24 case. With `runtime_only` the record becomes permanently
+impl Availability {
+    /// Without the schedule, which a refused run and an ordinary run set
+    /// differently.
+    fn without_schedule(mut self) -> Self {
+        self.next_refresh_after = None;
+        self
+    }
+}
+
+/// Runs one B-24 case and returns the live availability with the deadline the
+/// change seeded. With `runtime_only` the record becomes permanently
 /// ineligible at `entered`, so the tail is refused; without it the tail is the
 /// ordinary save.
-async fn availability_run(change: Change, runtime_only: bool) -> Availability {
+async fn availability_run(change: Change, runtime_only: bool) -> (Availability, DateTime<Utc>) {
     let scene = Scene::new();
     prepare(&scene, change);
     let now = Utc::now();
+    let later = now + chrono::Duration::seconds(60);
     let derived = Arc::new(Mutex::new(None));
     let (manager, sink) = (scene.rig.manager.clone(), Arc::clone(&derived));
     scene.at_entered(move || {
@@ -935,6 +1014,10 @@ async fn availability_run(change: Change, runtime_only: bool) -> Availability {
             scene.rig.store.lease_commit_attempts.load(Ordering::SeqCst),
             0
         );
+        assert!(
+            live.next_refresh_after.is_none(),
+            "the response's schedule replaced the prior one"
+        );
         assert_eq!(
             file(&scene.rig.path())["refresh_token"],
             "outer-refresh-old"
@@ -952,7 +1035,7 @@ async fn availability_run(change: Change, runtime_only: bool) -> Availability {
     if let Some(model) = &mut model {
         model.updated_at = None;
     }
-    Availability {
+    let seen = Availability {
         model,
         unavailable: live.unavailable,
         next_retry_after: live.next_retry_after,
@@ -960,19 +1043,28 @@ async fn availability_run(change: Change, runtime_only: bool) -> Availability {
         status: live.status,
         status_message: live.status_message.clone(),
         last_error: live.last_error.clone(),
+        next_refresh_after: live.next_refresh_after,
+    };
+    (seen, later)
+}
+
+/// Model m after `reset_model_state`: active, with nothing else set.
+fn reset_model() -> ModelState {
+    ModelState {
+        status: Status::Active,
+        ..ModelState::default()
     }
 }
 
 fn assert_reset(seen: &Availability) {
-    let model = seen.model.as_ref().expect("model m is kept, reset");
-    assert!(model.last_error.is_none(), "the 401 is cleared: {model:?}");
+    assert_eq!(seen.model, Some(reset_model()), "model m is reset");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_concurrent_error_survives_a_refused_refresh() {
     // B-24 (a): live keeps the concurrent error and its status fields.
     bounded(async {
-        let seen = availability_run(Change::NewError, true).await;
+        let (seen, _) = availability_run(Change::NewError, true).await;
         assert_eq!(seen.last_error, Some(auth_error("upstream failed", 500)));
         assert_eq!(seen.status, Status::Error);
         assert!(seen.unavailable);
@@ -985,9 +1077,9 @@ async fn a_concurrent_error_survives_a_refused_refresh() {
 async fn a_concurrent_cooldown_survives_a_refused_refresh() {
     // B-24 (b): live keeps the concurrent hold and its status fields.
     bounded(async {
-        let seen = availability_run(Change::Cooldown, true).await;
+        let (seen, seeded) = availability_run(Change::Cooldown, true).await;
         assert!(seen.unavailable);
-        assert!(seen.next_retry_after.is_some());
+        assert_eq!(seen.next_retry_after, Some(seeded));
         // The fixture is `Unknown` and the change leaves it so; the ordinary
         // result would make it `Active`.
         assert_eq!(seen.status, Status::Unknown);
@@ -1000,9 +1092,12 @@ async fn a_concurrent_cooldown_survives_a_refused_refresh() {
 async fn a_concurrent_credential_quota_survives_a_refused_refresh() {
     // B-24 (c): live keeps the concurrent quota.
     bounded(async {
-        let seen = availability_run(Change::CredentialQuota, true).await;
+        let (seen, seeded) = availability_run(Change::CredentialQuota, true).await;
         assert!(seen.quota.exceeded);
         assert_eq!(seen.quota.reason, "credential_quota");
+        assert_eq!(seen.quota.next_recover_at, Some(seeded));
+        assert_eq!(seen.status, Status::Unknown);
+        assert!(!seen.unavailable);
         assert!(seen.last_error.is_none());
     })
     .await;
@@ -1012,7 +1107,7 @@ async fn a_concurrent_credential_quota_survives_a_refused_refresh() {
 async fn a_refused_refresh_with_no_concurrent_change_leaves_the_record_active() {
     // B-24 (d): the control.
     bounded(async {
-        let seen = availability_run(Change::Nothing, true).await;
+        let (seen, _) = availability_run(Change::Nothing, true).await;
         assert_eq!(seen.status, Status::Active);
         assert!(!seen.unavailable);
         assert!(seen.last_error.is_none());
@@ -1026,7 +1121,7 @@ async fn a_new_model_401_is_reset_by_a_refused_refresh() {
     // B-24 (e) and (f).
     bounded(async {
         for change in [Change::ModelUnauthorized, Change::ModelChanged] {
-            let seen = availability_run(change, true).await;
+            let (seen, _) = availability_run(change, true).await;
             assert_reset(&seen);
             assert!(!seen.unavailable, "{change:?}");
             assert!(seen.next_retry_after.is_none(), "{change:?}");
@@ -1040,11 +1135,21 @@ async fn a_model_401_under_a_model_quota_keeps_the_quota_when_refused() {
     // B-24 (g): the 401 is cleared, the quota stays, and the status message is
     // the reason of the quota.
     bounded(async {
-        let seen = availability_run(Change::ModelQuota, true).await;
-        assert_reset(&seen);
-        let model = seen.model.unwrap();
-        assert!(model.quota.exceeded);
-        assert_eq!(model.status_message, "model quota");
+        let (seen, seeded) = availability_run(Change::ModelQuota, true).await;
+        // The quota branch: the 401 is gone and the message is the quota's
+        // reason, but the status and the quota stay as the change set them.
+        let held = ModelState {
+            status: Status::Error,
+            status_message: "model quota".into(),
+            quota: QuotaState {
+                exceeded: true,
+                reason: "model quota".into(),
+                next_recover_at: Some(seeded),
+                ..QuotaState::default()
+            },
+            ..ModelState::default()
+        };
+        assert_eq!(seen.model, Some(held));
     })
     .await;
 }
@@ -1053,12 +1158,13 @@ async fn a_model_401_under_a_model_quota_keeps_the_quota_when_refused() {
 async fn a_model_401_with_a_top_level_cooldown_gives_the_ordinary_result_when_refused() {
     // B-24 (h): the refused run and the ordinary run agree.
     bounded(async {
-        let refused = availability_run(Change::ModelAndCooldown, true).await;
+        let (refused, _) = availability_run(Change::ModelAndCooldown, true).await;
         assert_reset(&refused);
         assert!(!refused.unavailable);
         assert!(refused.next_retry_after.is_none());
-        let ordinary = availability_run(Change::ModelAndCooldown, false).await;
-        assert_eq!(refused, ordinary);
+        let (ordinary, _) = availability_run(Change::ModelAndCooldown, false).await;
+        assert_reset(&ordinary);
+        assert_eq!(refused.without_schedule(), ordinary.without_schedule());
     })
     .await;
 }
@@ -1067,7 +1173,7 @@ async fn a_model_401_with_a_top_level_cooldown_gives_the_ordinary_result_when_re
 async fn a_concurrent_top_level_401_is_not_kept_by_a_refused_refresh() {
     // B-24 (i).
     bounded(async {
-        let seen = availability_run(Change::TopLevel401, true).await;
+        let (seen, _) = availability_run(Change::TopLevel401, true).await;
         assert_eq!(seen.status, Status::Active);
         assert!(!seen.unavailable);
         assert!(seen.last_error.is_none());
@@ -1081,8 +1187,9 @@ async fn a_credential_quota_under_a_concurrent_401_is_kept_when_refused() {
     // Beyond B-24: the 401 is cleared and the quota hold it sat under is
     // restored, which only the refusal's own settling does.
     bounded(async {
-        let seen = availability_run(Change::TopLevel401UnderQuota, true).await;
+        let (seen, seeded) = availability_run(Change::TopLevel401UnderQuota, true).await;
         assert!(seen.quota.exceeded);
+        assert_eq!(seen.quota.next_recover_at, Some(seeded));
         assert!(seen.unavailable);
         assert!(seen.next_retry_after.is_some());
         assert!(seen.last_error.is_none());
@@ -1095,13 +1202,13 @@ async fn a_hold_derived_only_from_a_model_401_does_not_survive_a_refused_refresh
     // B-24 (j), the case from the oracle: the refused run and the ordinary run
     // agree.
     bounded(async {
-        let refused = availability_run(Change::ModelOwnCooldown, true).await;
+        let (refused, _) = availability_run(Change::ModelOwnCooldown, true).await;
         assert_reset(&refused);
-        assert!(!refused.model.as_ref().unwrap().unavailable);
         assert!(!refused.unavailable);
         assert!(refused.next_retry_after.is_none());
-        let ordinary = availability_run(Change::ModelOwnCooldown, false).await;
-        assert_eq!(refused, ordinary);
+        let (ordinary, _) = availability_run(Change::ModelOwnCooldown, false).await;
+        assert_reset(&ordinary);
+        assert_eq!(refused.without_schedule(), ordinary.without_schedule());
     })
     .await;
 }
@@ -1269,7 +1376,10 @@ async fn assert_peer_won(scene: &Scene) {
     assert_eq!(file(&scene.rig.path())["refresh_token"], "c-refresh");
     scene.assert_clean();
     let live = scene.rig.live().metadata["refresh_token"].clone();
-    assert!(live == "b-refresh" || live == "c-refresh", "{live}");
+    assert!(
+        live == "b-refresh" || live == "c-refresh",
+        "live outer is neither B nor C"
+    );
     scene.rig.manager.force_refresh(ID).await.unwrap();
     assert_eq!(scene.probe.sent(), 2);
     assert_eq!(scene.probe.sent_refresh(1), "c-refresh", "C is sent, not B");
