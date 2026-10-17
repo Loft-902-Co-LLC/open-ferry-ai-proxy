@@ -861,8 +861,9 @@ impl Manager {
         self.mark_refresh_pending_with(loop_id, id, epoch, now, false)
     }
 
-    /// [`mark_refresh_pending`](Self::mark_refresh_pending), recording whether
-    /// the job exists only for the entry's unresolved origin.
+    /// Records a queued refresh and holds the credential's next check while
+    /// it waits, noting whether the job exists only for the entry's
+    /// unresolved origin.
     fn mark_refresh_pending_with(
         &self,
         loop_id: u64,
