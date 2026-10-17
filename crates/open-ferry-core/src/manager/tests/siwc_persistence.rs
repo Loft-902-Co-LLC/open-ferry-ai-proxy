@@ -7163,10 +7163,10 @@ fn without_lease_queries(calls: &[&'static str]) -> Vec<&'static str> {
         .collect()
 }
 
-// The sequences below are today's, with one addition to those recorded at the
-// commit before the lease went live (with the same wrapper): the origin query
-// `codex_origin` that the pass's own tail makes after its save, to resolve the
-// record's file. It is pinned here, in place, not filtered out.
+// The sequences below are the ones recorded at the commit before the lease
+// went live, with the same wrapper. `codex_origin` is the guarded save's own
+// origin check, which resolves the record's file before the save writes; it
+// was made then too, and is pinned here, in place, not filtered out.
 /// The store calls of an unleased pass that rotates the outer partition.
 const ROTATING_UNLEASED_CALLS: &[&str] = &[
     "save_guarded",
