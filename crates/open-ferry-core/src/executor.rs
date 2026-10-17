@@ -39,12 +39,27 @@ use crate::exec::{
 pub struct RefreshOptions {
     /// Refresh every refreshable partition even if it is not due.
     pub force: bool,
+    /// Partitions another process has already refreshed, and that this call
+    /// adopts instead of sending. `None` adopts nothing.
+    pub adopted: Option<AdoptedPartitions>,
+}
+
+/// The partitions a refresh adopts from disk rather than sending, and
+/// whether the outer partition was due when the pass began.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdoptedPartitions {
+    pub outer: bool,
+    pub siwc: bool,
+    pub was_due: bool,
 }
 
 impl RefreshOptions {
     /// Options that set `force` and leave every other option at its default.
     pub fn forced(force: bool) -> Self {
-        Self { force }
+        Self {
+            force,
+            adopted: None,
+        }
     }
 }
 
