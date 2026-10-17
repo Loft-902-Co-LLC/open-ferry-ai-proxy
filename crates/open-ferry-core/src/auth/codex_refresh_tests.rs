@@ -35,6 +35,21 @@ fn fixture() -> Auth {
     }
 }
 
+/// Creates the file as a login does, then seeds the fixture's SIWC keys with a
+/// raw write: a login no longer writes them.
+fn create(store: &FileStore, dir: &std::path::Path, auth: &Auth) {
+    store.save_new_auth(&mut auth.clone()).unwrap();
+    let path = dir.join(&auth.file_name);
+    let mut on_disk: Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for key in ["siwc", "use_siwc"] {
+        if let Some(value) = auth.metadata.get(key) {
+            on_disk.insert(key.into(), value.clone());
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+}
+
 fn rotate(auth: &mut Auth, outer: bool, siwc: bool) {
     if outer {
         auth.metadata
@@ -229,8 +244,8 @@ fn codex_refresh_preserves_disk_configuration() {
 fn ordinary_save_preserves_siwc_and_allows_deleting_settings() {
     let dir = scratch();
     let store = FileStore::new(dir.path());
-    let mut auth = fixture();
-    store.save_new_auth(&mut auth).unwrap();
+    let auth = fixture();
+    create(&store, dir.path(), &auth);
     let mut incoming = fixture();
     incoming.metadata.remove("siwc");
     incoming.metadata.remove("use_siwc");
@@ -255,7 +270,7 @@ fn outer_login_replacement_is_explicit() {
     let dir = scratch();
     let store = FileStore::new(dir.path());
     let mut before = fixture();
-    store.save_new_auth(&mut before).unwrap();
+    create(&store, dir.path(), &before);
     let mut login = fixture();
     rotate(&mut login, true, true);
     login.metadata.remove("note");
@@ -271,7 +286,7 @@ fn outer_login_replacement_is_explicit() {
 fn concurrent_two_stores_same_timestamp_preserve_both_rotations() {
     let dir = scratch();
     let before = fixture();
-    FileStore::new(dir.path()).save_new(&before).unwrap();
+    create(&FileStore::new(dir.path()), dir.path(), &before);
     let path = dir.path().join("codex.json");
     let (read, read_rx) = std::sync::mpsc::channel();
     let (waiting, waiting_rx) = std::sync::mpsc::channel();
@@ -427,7 +442,7 @@ fn synthesizer_and_store_ignore_lock_and_round_trip_siwc() {
     let dir = scratch();
     let store = FileStore::new(dir.path());
     let before = fixture();
-    store.save_new(&before).unwrap();
+    create(&store, dir.path(), &before);
     std::fs::write(
         dir.path().join("codex.json.lock"),
         serde_json::to_vec(&before.metadata).unwrap(),
@@ -608,7 +623,7 @@ fn siwc_attributes_and_timestamp_alias_match_upstream() {
 }
 
 #[test]
-fn login_skips_empty_settings_and_takes_only_missing_switch() {
+fn login_skips_empty_settings_and_writes_no_switch() {
     let mut disk = fixture().metadata;
     disk.remove("use_siwc");
     disk.remove("siwc");
@@ -618,8 +633,154 @@ fn login_skips_empty_settings_and_takes_only_missing_switch() {
     let (saved, _) = merge_persist(Some(&disk), &incoming, &CodexPersistIntent::OuterLogin);
     assert_eq!(saved["note"], "original");
     assert_eq!(saved["proxy_url"], "http://original");
-    assert_eq!(saved["use_siwc"], true);
+    assert!(!saved.contains_key("use_siwc"));
     assert!(!saved.contains_key("siwc"));
+}
+
+fn object(value: Value) -> Map<String, Value> {
+    value.as_object().unwrap().clone()
+}
+
+fn incoming_b() -> Map<String, Value> {
+    let mut incoming = fixture().metadata;
+    incoming.insert("access_token".into(), json!("outer-B"));
+    incoming.insert("refresh_token".into(), json!("outer-ref-B"));
+    incoming.insert("siwc".into(), json!({"refresh_token": "siwc-ref-B"}));
+    incoming
+}
+
+#[test]
+fn login_over_no_disk_writes_neither_siwc_key() {
+    let incoming = incoming_b();
+    let (saved, _) = merge_persist(None, &incoming, &CodexPersistIntent::OuterLogin);
+    assert_eq!(saved["refresh_token"], "outer-ref-B");
+    assert_eq!(saved["note"], "original");
+    assert!(!saved.contains_key("siwc"));
+    assert!(!saved.contains_key("use_siwc"));
+}
+
+#[test]
+fn login_over_siwc_disk_keeps_disks_siwc_and_switch() {
+    let mut disk = fixture().metadata;
+    disk.insert("use_siwc".into(), json!(false));
+    let (saved, _) = merge_persist(Some(&disk), &incoming_b(), &CodexPersistIntent::OuterLogin);
+    assert_eq!(saved["refresh_token"], "outer-ref-B");
+    assert_eq!(saved["siwc"], disk["siwc"]);
+    assert_eq!(saved["use_siwc"], false);
+}
+
+#[test]
+fn only_a_login_loses_siwc_when_there_is_no_disk() {
+    let incoming = incoming_b();
+    let refresh = CredentialRefreshPatch::new(&fixture().metadata, &incoming, true, false);
+    for intent in [
+        CodexPersistIntent::Configuration,
+        CodexPersistIntent::SiwcBind(object(json!({"refresh_token": "bound"}))),
+        CodexPersistIntent::Refresh(refresh),
+    ] {
+        let (saved, _) = merge_persist(None, &incoming, &intent);
+        assert_eq!(saved, incoming, "{intent:?}");
+    }
+}
+
+#[test]
+fn constrain_withheld_makes_each_withheld_partition_disks() {
+    let disk = object(json!({
+        "access_token": "disk-access", "refresh_token": "disk-ref", "plan_type": "pro",
+        "use_siwc": false, "note": "disk-note",
+        "siwc": {"refresh_token": "disk-siwc"}
+    }));
+    let merged = object(json!({
+        "access_token": "live-access", "refresh_token": "live-ref", "email": "live@example.com",
+        "use_siwc": true, "note": "live-note",
+        "siwc": {"refresh_token": "live-siwc"}
+    }));
+    let run = |outer, siwc| {
+        let mut merged = merged.clone();
+        constrain_withheld(
+            &mut merged,
+            &disk,
+            crate::auth::WithheldPartitions { outer, siwc },
+        );
+        merged
+    };
+    assert_eq!(run(false, false), merged);
+
+    let both = run(true, true);
+    assert_eq!(both["access_token"], "disk-access");
+    assert_eq!(both["refresh_token"], "disk-ref");
+    assert_eq!(both["plan_type"], "pro");
+    // A key disk lacks is removed.
+    assert!(!both.contains_key("email"));
+    assert_eq!(both["siwc"], disk["siwc"]);
+    // No other key changes, the switch included.
+    assert_eq!(both["use_siwc"], true);
+    assert_eq!(both["note"], "live-note");
+
+    let outer = run(true, false);
+    assert_eq!(outer["refresh_token"], "disk-ref");
+    assert_eq!(outer["siwc"], merged["siwc"]);
+
+    let siwc = run(false, true);
+    assert_eq!(siwc["siwc"], disk["siwc"]);
+    assert_eq!(siwc["refresh_token"], "live-ref");
+    assert_eq!(siwc["email"], "live@example.com");
+
+    // A disk without a siwc object removes the merged one.
+    let mut bare = disk.clone();
+    bare.remove("siwc");
+    let mut merged = merged.clone();
+    constrain_withheld(
+        &mut merged,
+        &bare,
+        crate::auth::WithheldPartitions {
+            outer: false,
+            siwc: true,
+        },
+    );
+    assert!(!merged.contains_key("siwc"));
+}
+
+#[test]
+fn holds_partition_needs_a_non_empty_identity_string() {
+    use crate::auth::CodexCredentialPartition::{Outer, Siwc};
+    for key in [
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "account_id",
+        "client_id",
+        "device_id",
+    ] {
+        let outer = object(json!({ key: "x" }));
+        assert!(holds_partition(&outer, Outer), "{key}");
+        assert!(!holds_partition(&outer, Siwc), "{key}");
+        let nested = object(json!({"siwc": { key: "x" }}));
+        assert!(holds_partition(&nested, Siwc), "{key}");
+        assert!(!holds_partition(&nested, Outer), "{key}");
+    }
+    assert!(!holds_partition(
+        &object(json!({"refresh_token": ""})),
+        Outer
+    ));
+    assert!(!holds_partition(&object(json!({"note": "x"})), Outer));
+    assert!(!holds_partition(
+        &object(json!({"refresh_token": 5})),
+        Outer
+    ));
+    assert!(!holds_partition(
+        &object(json!({"refresh_token": null})),
+        Outer
+    ));
+    assert!(!holds_partition(
+        &object(json!({"refresh_token": "x"})),
+        Siwc
+    ));
+    assert!(!holds_partition(
+        &object(json!({"siwc": {"refresh_token": ""}})),
+        Siwc
+    ));
+    assert!(!holds_partition(&object(json!({"siwc": "x"})), Siwc));
 }
 
 #[test]
@@ -927,7 +1088,7 @@ fn later_refresh_preserves_pending_partition_and_chains_its_disk_baseline() {
                 let dir = scratch();
                 let store = FileStore::new(dir.path());
                 let before = fixture();
-                store.save_new(&before).unwrap();
+                create(&store, dir.path(), &before);
                 let mut memory = before.clone();
                 if disk_baseline {
                     memory

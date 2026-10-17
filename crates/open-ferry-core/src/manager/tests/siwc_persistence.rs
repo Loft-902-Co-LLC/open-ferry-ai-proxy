@@ -146,7 +146,15 @@ fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate
     let files = Arc::new(FileStore::new(dir.path()));
     let gate = ActiveGate::open();
     files.set_gate(gate.clone());
+    // A login no longer writes SIWC, so seed the fixture's keys with a raw write.
     files.save_new(&fixture()).unwrap();
+    let path = dir.path().join("codex.json");
+    let mut seeded: serde_json::Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for key in ["siwc", "use_siwc"] {
+        seeded.insert(key.into(), fixture().metadata[key].clone());
+    }
+    std::fs::write(&path, serde_json::to_vec(&seeded).unwrap()).unwrap();
     let store = Arc::new(ObservedStore {
         files,
         error_once: Mutex::new(None),

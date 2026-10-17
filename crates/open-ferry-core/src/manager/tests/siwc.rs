@@ -32,6 +32,19 @@ fn fixture() -> Auth {
     )
 }
 
+/// Creates the file as a login does, then seeds the fixture's SIWC keys with a
+/// raw write: a login no longer writes them.
+fn create_with_siwc(store: &FileStore, dir: &tempfile::TempDir, auth: &Auth) {
+    store.save_new(auth).unwrap();
+    let path = dir.path().join(&auth.id);
+    let mut on_disk: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for key in ["siwc", "use_siwc"] {
+        on_disk.insert(key.into(), auth.metadata[key].clone());
+    }
+    std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+}
+
 fn at(text: &str) -> crate::auth::Timestamp {
     crate::auth::parse_go_rfc3339(text).unwrap()
 }
@@ -352,7 +365,7 @@ fn disk_manager() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
         Arc::new(FakeModels::default()),
         Some(store.clone()),
     );
-    store.save_new(&fixture()).unwrap();
+    create_with_siwc(&store, &dir, &fixture());
     manager.register(fixture()).unwrap();
     (dir, store, manager)
 }
@@ -757,7 +770,7 @@ fn disk_manager_at(now_text: &str, ids: &[&str]) -> (tempfile::TempDir, Arc<File
         clock.clock(),
     );
     for id in ids {
-        store.save_new(&fixture_named(id)).unwrap();
+        create_with_siwc(&store, &dir, &fixture_named(id));
         manager.register(fixture_named(id)).unwrap();
     }
     (dir, store, manager)

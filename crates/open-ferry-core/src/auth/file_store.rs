@@ -88,7 +88,35 @@ use super::metadata::{
 };
 use super::path::{join, rel};
 use super::weight::validate_weights;
-use super::{Auth, AuthStore, CodexLease, CodexLeaseToken, CodexOrigin, Status};
+use super::{
+    Auth, AuthStore, CodexCredentialPartition, CodexLease, CodexLeaseToken, CodexOrigin,
+    GuardedSave, OriginProof, SaveDeferral, Status, WithheldPartitions,
+};
+
+/// `save_guarded`'s guard, as `save_with` takes it.
+type RefusedFn<'a> = dyn FnMut(&CodexOrigin, OriginProof) + 'a;
+type SaveGuard<'a> =
+    dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral> + 'a;
+
+/// What `save_with` did.
+enum SaveWith {
+    /// Saved: the file's path, or empty for a disabled credential whose file is gone.
+    Written(String),
+    /// Fence 2 refused: the path was not the origin's file. Nothing was written.
+    OriginRefused,
+    /// Stage G or W refused. Nothing was written.
+    Deferred(SaveDeferral),
+}
+
+impl SaveWith {
+    /// The path for a save with no bound and no guard, which only writes.
+    fn into_path(self) -> String {
+        match self {
+            Self::Written(path) => path,
+            Self::OriginRefused | Self::Deferred(_) => String::new(),
+        }
+    }
+}
 
 /// The largest credential file read.
 pub const MAX_AUTH_FILE_SIZE: u64 = 8 << 20;
@@ -940,14 +968,14 @@ impl FileStore {
     /// path attributes. Returns the file's path, or an empty string when
     /// `auth` is disabled and its file is gone.
     pub fn save_auth(&self, auth: &mut Auth) -> io::Result<String> {
-        self.save_with(auth, false)
+        Ok(self.save_with(auth, false, None, None)?.into_path())
     }
 
     /// Saves a credential from a login or migration: as
     /// [`save_auth`](Self::save_auth), but creates the file even for a
     /// disabled credential.
     pub fn save_new_auth(&self, auth: &mut Auth) -> io::Result<String> {
-        self.save_with(auth, true)
+        Ok(self.save_with(auth, true, None, None)?.into_path())
     }
 
     /// Before a login saves `auth` over an existing file, copies that
@@ -1080,7 +1108,13 @@ impl FileStore {
         Ok(path)
     }
 
-    fn save_with(&self, auth: &mut Auth, creation_intent: bool) -> io::Result<String> {
+    fn save_with(
+        &self,
+        auth: &mut Auth,
+        creation_intent: bool,
+        bound: Option<(&CodexOrigin, &mut RefusedFn<'_>)>,
+        mut guard: Option<&mut SaveGuard<'_>>,
+    ) -> io::Result<SaveWith> {
         // A SIWC bind is saved only by bind_siwc_locked, whose strict
         // persistence refuses links, aliases and corrupt files.
         if matches!(
@@ -1115,7 +1149,7 @@ impl FileStore {
             && !creation_intent
             && fs::metadata(&path).is_err_and(|err| err.kind() == io::ErrorKind::NotFound)
         {
-            return Ok(String::new());
+            return Ok(SaveWith::Written(String::new()));
         }
 
         let _permit = self.permit()?;
@@ -1124,6 +1158,31 @@ impl FileStore {
             Some(super::credential_lock::acquire_sync(&path)?)
         } else {
             None
+        };
+        // Fence 2: the path this call locks and writes must be the origin's
+        // file. A record that is not Codex holds no credential lock, so its
+        // check is lexical and a difference is never `Different`.
+        if let Some((origin, refused)) = bound {
+            let current = CodexOrigin::of(&path)?;
+            let proof = if codex {
+                origin.prove(&current)
+            } else if *origin == current {
+                OriginProof::Same
+            } else {
+                OriginProof::Unproven
+            };
+            if proof != OriginProof::Same {
+                refused(&current, proof);
+                return Ok(SaveWith::OriginRefused);
+            }
+        }
+        // Stage G: the guard decides which partitions stay as disk holds them.
+        let withheld = match guard.as_mut() {
+            None => WithheldPartitions::default(),
+            Some(guard) => match guard(Some(&CodexOrigin::of(&path)?)) {
+                Ok(withheld) => withheld,
+                Err(reason) => return Ok(SaveWith::Deferred(reason)),
+            },
         };
         let _guard = self
             .save_lock
@@ -1137,7 +1196,31 @@ impl FileStore {
             && !creation_intent
             && fs::metadata(&path).is_err_and(|err| err.kind() == io::ErrorKind::NotFound)
         {
-            return Ok(String::new());
+            return Ok(SaveWith::Written(String::new()));
+        }
+
+        // Stage W: a withheld partition needs a destination that holds it.
+        // The read is made under the credential lock and is reused below.
+        let mut locked_read = None;
+        if withheld.any() {
+            if !codex {
+                return Ok(SaveWith::Deferred(SaveDeferral::Unsupported));
+            }
+            let Some(locked) = self.codex_disk(&path, false)? else {
+                return Ok(SaveWith::Deferred(SaveDeferral::MissingFile));
+            };
+            for (on, partition) in [
+                (withheld.outer, CodexCredentialPartition::Outer),
+                (withheld.siwc, CodexCredentialPartition::Siwc),
+            ] {
+                if on
+                    && super::codex_refresh::holds_partition(&auth.metadata, partition)
+                    && !super::codex_refresh::holds_partition(&locked, partition)
+                {
+                    return Ok(SaveWith::Deferred(SaveDeferral::MissingPartition));
+                }
+            }
+            locked_read = Some(Some(locked));
         }
 
         if let Some(parent) = path.parent() {
@@ -1158,7 +1241,10 @@ impl FileStore {
                     auth.codex_persist_intent,
                     super::codex_refresh::CodexPersistIntent::OuterLogin
                 );
-            let disk = self.codex_disk(&path, explicit)?;
+            let disk = match locked_read.take() {
+                Some(locked) => locked,
+                None => self.codex_disk(&path, explicit)?,
+            };
             #[cfg(test)]
             super::credential_lock::test_event(
                 &super::credential_lock::credential_lock_path(&path)?,
@@ -1201,6 +1287,12 @@ impl FileStore {
                     auth.metadata.insert("siwc".into(), value.clone());
                 }
                 normalize_credential_metadata(&mut auth.metadata);
+            }
+            // Stage C: each withheld partition is exactly what disk holds.
+            if withheld.any()
+                && let Some(locked) = disk.as_ref()
+            {
+                super::codex_refresh::constrain_withheld(&mut auth.metadata, locked, withheld);
             }
             if let Some(disabled) = auth.metadata.get("disabled").and_then(Value::as_bool) {
                 auth.disabled = disabled;
@@ -1247,7 +1339,7 @@ impl FileStore {
         if auth.file_name.trim().is_empty() {
             auth.file_name = auth.id.clone();
         }
-        Ok(path_str)
+        Ok(SaveWith::Written(path_str))
     }
 
     fn codex_disk(&self, path: &Path, explicit: bool) -> io::Result<Option<Map<String, Value>>> {
@@ -1428,6 +1520,35 @@ impl AuthStore for FileStore {
 
     fn save_new(&self, auth: &Auth) -> io::Result<String> {
         self.save_new_auth(&mut auth.clone())
+    }
+
+    fn save_bound(
+        &self,
+        auth: &Auth,
+        origin: &CodexOrigin,
+        refused: &mut dyn FnMut(&CodexOrigin, OriginProof),
+    ) -> io::Result<Option<String>> {
+        Ok(
+            match self.save_with(&mut auth.clone(), false, Some((origin, refused)), None)? {
+                SaveWith::Written(path) => Some(path),
+                SaveWith::OriginRefused | SaveWith::Deferred(_) => None,
+            },
+        )
+    }
+
+    fn save_guarded(
+        &self,
+        auth: &Auth,
+        guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
+    ) -> io::Result<GuardedSave> {
+        Ok(
+            match self.save_with(&mut auth.clone(), false, None, Some(guard))? {
+                SaveWith::Written(path) => GuardedSave::Written(path),
+                SaveWith::Deferred(reason) => GuardedSave::Deferred(reason),
+                // Only a bound save is refused by its origin.
+                SaveWith::OriginRefused => GuardedSave::Written(String::new()),
+            },
+        )
     }
 
     fn delete(&self, id: &str) -> io::Result<()> {
@@ -3220,6 +3341,13 @@ mod tests {
         ));
         assert!(Bare.codex_origin(&auth).unwrap().is_none());
 
+        // The default `save_bound` saves; it never calls the callback.
+        let origin = CodexOrigin::of(&std::env::temp_dir().join("bare-origin")).unwrap();
+        let saved = Bare
+            .save_bound(&auth, &origin, &mut |_, _| panic!("no callback"))
+            .unwrap();
+        assert_eq!(saved, Some(String::new()));
+
         // A record that is not Codex gets no lease and no lock file.
         let d = mutation_scratch();
         let dp = clean_dir(&d);
@@ -4474,5 +4602,605 @@ mod tests {
                 .unwrap()
                 .ends_with("Codex-A.JSON")
         );
+    }
+
+    // Part A2: the bound and guarded saves, and the sign-in compose rule.
+
+    type BoundCalls = Vec<(CodexOrigin, OriginProof)>;
+
+    /// `save_bound`, with the callback's calls collected.
+    fn bound(
+        store: &FileStore,
+        auth: &Auth,
+        origin: &CodexOrigin,
+    ) -> (io::Result<Option<String>>, BoundCalls) {
+        let mut calls = Vec::new();
+        let result = store.save_bound(auth, origin, &mut |current, proof| {
+            calls.push((current.clone(), proof));
+        });
+        (result, calls)
+    }
+
+    /// Whether another thread of this process times out waiting for the
+    /// credential lock of `path`, that is, whether somebody holds it.
+    fn lock_is_held(path: &Path) -> bool {
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(super::super::credential_lock::acquire_with_timeout(
+                path,
+                Duration::from_millis(50),
+            ))
+        })
+        .join()
+        .unwrap()
+        .is_err_and(|error| error.kind() == io::ErrorKind::TimedOut)
+    }
+
+    fn lock_file(path: &Path) -> PathBuf {
+        super::super::credential_lock::credential_lock_path(path).unwrap()
+    }
+
+    #[test]
+    fn save_bound_writes_the_origin_and_refuses_a_rebound_file() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let e = mutation_scratch();
+        let ep = clean_dir(&e);
+        let store = FileStore::new(dp.as_path());
+        let auth = lease_record("f", "t");
+        let origin = CodexOrigin::of(&dp.join("f")).unwrap();
+
+        // (a) The relative record resolves to the origin: lexical Same.
+        let (result, calls) = bound(&store, &auth, &origin);
+        assert_eq!(result.unwrap(), Some(path_string(&dp.join("f"))));
+        assert!(calls.is_empty());
+        let written = fs::read(dp.join("f")).unwrap();
+
+        // (b) After a rebind to E, with no E/f: Different, under E/f's lock.
+        store.set_base_dir(&ep);
+        let mut calls = Vec::new();
+        let mut held = None;
+        let result = store.save_bound(&auth, &origin, &mut |current, proof| {
+            held = Some(lock_is_held(&ep.join("f")));
+            calls.push((current.clone(), proof));
+        });
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            calls,
+            vec![(
+                CodexOrigin::of(&ep.join("f")).unwrap(),
+                OriginProof::Different
+            )]
+        );
+        assert_eq!(held, Some(true), "the callback runs under E/f's lock");
+        assert!(!ep.join("f").exists());
+        assert!(lock_file(&ep.join("f")).exists());
+        assert_eq!(fs::read(dp.join("f")).unwrap(), written);
+
+        // (c) Rebound to D again: it writes with no callback.
+        store.set_base_dir(&dp);
+        let mut changed = auth.clone();
+        changed
+            .metadata
+            .insert("note".into(), json!("written again"));
+        let (result, calls) = bound(&store, &changed, &origin);
+        assert_eq!(result.unwrap(), Some(path_string(&dp.join("f"))));
+        assert!(calls.is_empty());
+        assert_eq!(read_json(&dp.join("f"))["note"], "written again");
+
+        // (d) An absolute path attribute names D/f whatever the base dir.
+        store.set_base_dir(&ep);
+        let mut absolute = lease_record("f", "t");
+        absolute
+            .attributes
+            .insert(ATTRIBUTE_PATH.into(), path_string(&dp.join("f")));
+        absolute.metadata.insert("note".into(), json!("by path"));
+        let (result, calls) = bound(&store, &absolute, &origin);
+        assert_eq!(result.unwrap(), Some(path_string(&dp.join("f"))));
+        assert!(calls.is_empty());
+        assert_eq!(read_json(&dp.join("f"))["note"], "by path");
+        assert!(!ep.join("f").exists());
+    }
+
+    /// A record whose path attribute names `file`.
+    #[cfg(any(unix, windows))]
+    fn at_path(record: Auth, file: &Path) -> Auth {
+        let mut record = record;
+        record
+            .attributes
+            .insert(ATTRIBUTE_PATH.into(), path_string(file));
+        record
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn save_bound_proves_an_alias_under_its_lock() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let h = mutation_scratch();
+        let hp = clean_dir(&h);
+        let store = FileStore::new(dp.as_path());
+        let alias = alias_dir(dp.as_path(), hp.as_path());
+        assert_alias(dp.as_path(), &alias);
+        let via = alias.join("f");
+        let origin = CodexOrigin::of(&dp.join("f")).unwrap();
+        let auth = lease_record("f", "t");
+        let (result, _) = bound(&store, &auth, &origin);
+        assert!(result.unwrap().is_some());
+
+        // (e) The alias differs lexically; the proof finds Same and it writes.
+        let mut by_alias = at_path(auth.clone(), &via);
+        by_alias.metadata.insert("note".into(), json!("via alias"));
+        let (result, calls) = bound(&store, &by_alias, &origin);
+        assert_eq!(result.unwrap(), Some(path_string(&via)));
+        assert!(calls.is_empty());
+        assert_eq!(read_json(&dp.join("f"))["note"], "via alias");
+
+        // (f) With D/f removed the pinned open fails: Unproven, nothing written.
+        fs::remove_file(dp.join("f")).unwrap();
+        let (result, calls) = bound(&store, &by_alias, &origin);
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            calls,
+            vec![(CodexOrigin::of(&via).unwrap(), OriginProof::Unproven)]
+        );
+        assert!(!dp.join("f").exists());
+        assert!(!via.exists());
+    }
+
+    #[test]
+    fn save_bound_does_not_call_a_pinned_origin_that_never_existed_different() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        write_lease_file(&dp.join("f"), "disk");
+        let before = fs::read(dp.join("f")).unwrap();
+        // (g) The pinned D/h never existed.
+        let origin = CodexOrigin::of(&dp.join("h")).unwrap();
+        let (result, calls) = bound(&store, &lease_record("f", "t"), &origin);
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            calls,
+            vec![(
+                CodexOrigin::of(&dp.join("f")).unwrap(),
+                OriginProof::Unproven
+            )]
+        );
+        assert_eq!(fs::read(dp.join("f")).unwrap(), before);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn save_bound_checks_a_record_that_is_not_codex_lexically_only() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let h = mutation_scratch();
+        let hp = clean_dir(&h);
+        let store = FileStore::new(dp.as_path());
+        let alias = alias_dir(dp.as_path(), hp.as_path());
+        assert_alias(dp.as_path(), &alias);
+        write_lease_file(&dp.join("f"), "disk");
+        let before = fs::read(dp.join("f")).unwrap();
+        let via = alias.join("f");
+        // (h) No credential lock for it, so the alias is Unproven, never Different.
+        let mut gemini = at_path(lease_record("f", "t"), &via);
+        gemini.provider = "gemini".into();
+        gemini.metadata.insert("type".into(), json!("gemini"));
+        let origin = CodexOrigin::of(&dp.join("f")).unwrap();
+        let (result, calls) = bound(&store, &gemini, &origin);
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            calls,
+            vec![(CodexOrigin::of(&via).unwrap(), OriginProof::Unproven)]
+        );
+        assert_eq!(fs::read(dp.join("f")).unwrap(), before);
+        let locks = fs::read_dir(dp.as_path())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".lock")
+            })
+            .count();
+        assert_eq!(locks, 0);
+    }
+
+    /// A-10 (b): the same proof through the store, with a peer that cannot
+    /// replace the file while the save holds the alias's lock.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_bound_save_proves_under_the_lock_while_a_peer_waits() {
+        use super::super::credential_lock::set_test_hook;
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let h = mutation_scratch();
+        let hp = clean_dir(&h);
+        let file = dp.join("f");
+        write_lease_file(&file, "T1");
+        let alias = alias_dir(dp.as_path(), hp.as_path());
+        assert_alias(dp.as_path(), &alias);
+        let via = alias.join("f");
+
+        let (tx, rx) = mpsc::channel::<()>();
+        set_test_hook(
+            &file,
+            Some(Arc::new(move |event| {
+                if event == "waiting" {
+                    let _ = tx.send(());
+                }
+            })),
+        );
+        let rx = std::sync::Mutex::new(rx);
+        let peer = Arc::new(std::sync::Mutex::new(None));
+        let between = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let (peer, between, file, dir) =
+                (peer.clone(), between.clone(), file.clone(), dp.clone());
+            move |event: &str| {
+                if event != "origin-between" || between.fetch_add(1, AtomicOrdering::SeqCst) > 0 {
+                    return;
+                }
+                *peer.lock().unwrap() = Some(peer_login(&dir, "T2"));
+                rx.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the peer reaches the lock wait");
+                assert_eq!(read_json(&file)["access_token"], "T1");
+            }
+        };
+        set_test_hook(&via, Some(Arc::new(hook)));
+
+        let store = FileStore::new(alias.as_path());
+        // The Configuration intent keeps the file's tokens, T1.
+        let auth = lease_record("f", "other");
+        let origin = CodexOrigin::of(&file).unwrap();
+        let (result, calls) = bound(&store, &auth, &origin);
+        set_test_hook(&file, None);
+        set_test_hook(&via, None);
+        assert_eq!(result.unwrap(), Some(path_string(&via)));
+        assert!(calls.is_empty());
+        assert_eq!(between.load(AtomicOrdering::SeqCst), 1);
+        peer.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!(read_json(&file)["access_token"], "T2");
+    }
+
+    /// A full set of `OUTER_KEYS` for `token`.
+    fn full_outer(token: &str) -> Value {
+        json!({
+            "id_token": format!("id-{token}"),
+            "access_token": format!("access-{token}"),
+            "refresh_token": format!("refresh-{token}"),
+            "account_id": format!("account-{token}"),
+            "last_refresh": "2026-10-12T12:00:00Z",
+            "email": format!("{token}@example.com"),
+            "expired": "2099-01-01T00:00:00Z",
+            "plan_type": "plus",
+        })
+    }
+
+    /// A Codex record `f` holding `parts` (objects merged over `type`).
+    fn codex_holding(parts: &[Value]) -> Auth {
+        let mut metadata = meta(json!({"type": "codex"}));
+        for part in parts {
+            metadata.extend(part.as_object().unwrap().clone());
+        }
+        Auth {
+            id: "f".into(),
+            file_name: "f".into(),
+            provider: "codex".into(),
+            metadata,
+            ..Auth::default()
+        }
+    }
+
+    fn disk_with(path: &Path, parts: &[Value]) {
+        write(
+            path,
+            &Value::Object(codex_holding(parts).metadata).to_string(),
+        );
+    }
+
+    type GuardSeen = Vec<Option<CodexOrigin>>;
+
+    /// `save_guarded`, with the origins the guard received collected.
+    fn guarded(
+        store: &FileStore,
+        auth: &Auth,
+        result: Result<WithheldPartitions, SaveDeferral>,
+    ) -> (io::Result<GuardedSave>, GuardSeen) {
+        let mut seen = Vec::new();
+        let saved = store.save_guarded(auth, &mut |origin| {
+            seen.push(origin.cloned());
+            result
+        });
+        (saved, seen)
+    }
+
+    const OUTER_ONLY: WithheldPartitions = WithheldPartitions {
+        outer: true,
+        siwc: false,
+    };
+    const SIWC_ONLY: WithheldPartitions = WithheldPartitions {
+        outer: false,
+        siwc: true,
+    };
+
+    #[test]
+    fn a_guard_that_withholds_nothing_saves_as_save_does() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let e = mutation_scratch();
+        let ep = clean_dir(&e);
+        let start = [full_outer("A"), json!({"prefix": "old"})];
+        disk_with(&dp.join("f"), &start);
+        disk_with(&ep.join("f"), &start);
+        let record = codex_holding(&[full_outer("B"), json!({"prefix": "new"})]);
+
+        let store = FileStore::new(dp.as_path());
+        let mut held = None;
+        let mut seen = Vec::new();
+        let saved = store
+            .save_guarded(&record, &mut |origin| {
+                held = Some(lock_is_held(&dp.join("f")));
+                seen.push(origin.cloned());
+                Ok(WithheldPartitions::default())
+            })
+            .unwrap();
+        assert!(matches!(saved, GuardedSave::Written(path) if path == path_string(&dp.join("f"))));
+        assert_eq!(seen, vec![Some(CodexOrigin::of(&dp.join("f")).unwrap())]);
+        assert_eq!(held, Some(true), "the guard runs under the credential lock");
+
+        FileStore::new(ep.as_path())
+            .save_auth(&mut record.clone())
+            .unwrap();
+        assert_eq!(
+            fs::read(dp.join("f")).unwrap(),
+            fs::read(ep.join("f")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_guard_refusal_writes_nothing() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        let record = codex_holding(&[full_outer("B")]);
+        disk_with(&dp.join("f"), &[full_outer("A")]);
+        let before = fs::read(dp.join("f")).unwrap();
+        let (saved, seen) = guarded(&store, &record, Err(SaveDeferral::Stale));
+        assert!(matches!(
+            saved.unwrap(),
+            GuardedSave::Deferred(SaveDeferral::Stale)
+        ));
+        assert_eq!(seen.len(), 1);
+        assert_eq!(fs::read(dp.join("f")).unwrap(), before);
+
+        // With no file, none is made; the lock file is.
+        fs::remove_file(dp.join("f")).unwrap();
+        let (saved, _) = guarded(&store, &record, Err(SaveDeferral::Stale));
+        assert!(matches!(
+            saved.unwrap(),
+            GuardedSave::Deferred(SaveDeferral::Stale)
+        ));
+        assert!(!dp.join("f").exists());
+        assert!(lock_file(&dp.join("f")).exists());
+    }
+
+    #[test]
+    fn a_withheld_outer_partition_is_written_as_the_file_holds_it() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        disk_with(&dp.join("f"), &[full_outer("A"), json!({"prefix": "old"})]);
+        // Outer B, a changed prefix, and no plan_type.
+        let mut incoming = full_outer("B");
+        incoming.as_object_mut().unwrap().remove("plan_type");
+        let record = codex_holding(&[incoming, json!({"prefix": "new"})]);
+        let (saved, _) = guarded(&store, &record, Ok(OUTER_ONLY));
+        assert!(matches!(saved.unwrap(), GuardedSave::Written(_)));
+        let on_disk = read_json(&dp.join("f"));
+        let want = full_outer("A");
+        for key in crate::auth::codex_refresh::OUTER_KEYS {
+            assert_eq!(on_disk[*key], want[*key], "{key}");
+        }
+        assert_eq!(on_disk["plan_type"], "plus");
+        assert_eq!(on_disk["prefix"], "new");
+    }
+
+    #[test]
+    fn a_withheld_partition_of_a_missing_file_is_not_created() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let e = mutation_scratch();
+        let ep = clean_dir(&e);
+        let record = codex_holding(&[full_outer("B")]);
+        let (saved, _) = guarded(&FileStore::new(dp.as_path()), &record, Ok(OUTER_ONLY));
+        assert!(matches!(
+            saved.unwrap(),
+            GuardedSave::Deferred(SaveDeferral::MissingFile)
+        ));
+        assert!(!dp.join("f").exists());
+        // The control shows the creation the stage stops.
+        FileStore::new(ep.as_path())
+            .save_auth(&mut record.clone())
+            .unwrap();
+        assert_eq!(read_json(&ep.join("f"))["refresh_token"], "refresh-B");
+    }
+
+    #[test]
+    fn a_file_lacking_a_withheld_partition_the_record_holds_defers() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        disk_with(&dp.join("f"), &[full_outer("A")]);
+        let before = fs::read(dp.join("f")).unwrap();
+        let siwc = json!({"siwc": {"access_token": "s", "refresh_token": "s-refresh"}});
+        let record = codex_holding(&[full_outer("A"), siwc]);
+        let (saved, _) = guarded(&store, &record, Ok(SIWC_ONLY));
+        assert!(matches!(
+            saved.unwrap(),
+            GuardedSave::Deferred(SaveDeferral::MissingPartition)
+        ));
+        assert_eq!(fs::read(dp.join("f")).unwrap(), before);
+
+        // A record with no SIWC partition either is written, and gains none.
+        let record = codex_holding(&[full_outer("A"), json!({"prefix": "new"})]);
+        let (saved, _) = guarded(&store, &record, Ok(SIWC_ONLY));
+        assert!(matches!(saved.unwrap(), GuardedSave::Written(_)));
+        let on_disk = read_json(&dp.join("f"));
+        assert!(on_disk.get("siwc").is_none());
+        assert_eq!(on_disk["prefix"], "new");
+    }
+
+    #[test]
+    fn a_withheld_outer_partition_ignores_the_missing_oauth_markers() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let e = mutation_scratch();
+        let ep = clean_dir(&e);
+        let start = json!({"access_token": "access-A", "account_id": "account-A"});
+        disk_with(&dp.join("f"), std::slice::from_ref(&start));
+        disk_with(&ep.join("f"), std::slice::from_ref(&start));
+        let record = codex_holding(&[full_outer("B")]);
+
+        let (saved, _) = guarded(&FileStore::new(dp.as_path()), &record, Ok(OUTER_ONLY));
+        assert!(matches!(saved.unwrap(), GuardedSave::Written(_)));
+        let on_disk = read_json(&dp.join("f"));
+        for key in crate::auth::codex_refresh::OUTER_KEYS {
+            assert_eq!(on_disk.get(*key), start.get(*key), "{key}");
+        }
+        assert!(on_disk.get("refresh_token").is_none());
+
+        // Today's merge imports the record's refresh token from a markerless file.
+        FileStore::new(ep.as_path())
+            .save_auth(&mut record.clone())
+            .unwrap();
+        assert_eq!(read_json(&ep.join("f"))["refresh_token"], "refresh-B");
+    }
+
+    #[test]
+    fn a_withheld_siwc_partition_survives_an_outer_login_save() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        let siwc = |token: &str| json!({"siwc": {"refresh_token": token}, "use_siwc": true});
+        disk_with(&dp.join("f"), &[full_outer("A"), siwc("siwc-A")]);
+        let mut record = codex_holding(&[full_outer("B"), siwc("siwc-B")]);
+        record.codex_persist_intent = super::super::codex_refresh::CodexPersistIntent::OuterLogin;
+        let (saved, _) = guarded(&store, &record, Ok(SIWC_ONLY));
+        assert!(matches!(saved.unwrap(), GuardedSave::Written(_)));
+        let on_disk = read_json(&dp.join("f"));
+        assert_eq!(on_disk["refresh_token"], "refresh-B");
+        assert_eq!(on_disk["siwc"], json!({"refresh_token": "siwc-A"}));
+    }
+
+    #[test]
+    fn a_withheld_save_over_an_unreadable_file_fails_closed() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        write(&dp.join("f"), "{");
+        let record = codex_holding(&[full_outer("B")]);
+        let (saved, _) = guarded(&FileStore::new(dp.as_path()), &record, Ok(OUTER_ONLY));
+        assert!(saved.is_err());
+        assert_eq!(fs::read_to_string(dp.join("f")).unwrap(), "{");
+    }
+
+    #[test]
+    fn the_default_save_guarded_saves_or_refuses_a_withheld_set() {
+        struct Counting(AtomicUsize);
+        impl AuthStore for Counting {
+            fn list(&self) -> io::Result<Vec<Auth>> {
+                Ok(Vec::new())
+            }
+            fn save(&self, _auth: &Auth) -> io::Result<String> {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok("saved".into())
+            }
+            fn delete(&self, _id: &str) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let store = Counting(AtomicUsize::new(0));
+        let auth = lease_record("f", "t");
+        let saved = store
+            .save_guarded(&auth, &mut |origin| {
+                assert!(origin.is_none());
+                Ok(WithheldPartitions::default())
+            })
+            .unwrap();
+        assert!(matches!(saved, GuardedSave::Written(path) if path == "saved"));
+        assert_eq!(store.0.load(AtomicOrdering::SeqCst), 1);
+
+        let saved = store.save_guarded(&auth, &mut |_| Ok(OUTER_ONLY)).unwrap();
+        assert!(matches!(
+            saved,
+            GuardedSave::Deferred(SaveDeferral::Unsupported)
+        ));
+        let saved = store
+            .save_guarded(&auth, &mut |_| Err(SaveDeferral::Stale))
+            .unwrap();
+        assert!(matches!(saved, GuardedSave::Deferred(SaveDeferral::Stale)));
+        assert_eq!(store.0.load(AtomicOrdering::SeqCst), 1, "no further save");
+    }
+
+    /// A-12: the merge, a rotation and a delete, then the save, as
+    /// `credentials::save` makes them.
+    #[test]
+    fn a_login_never_writes_the_siwc_it_copied_from_an_earlier_read() {
+        let siwc = |token: &str| json!({"siwc": {"refresh_token": token}, "use_siwc": true});
+        let login = |dir: &Path| {
+            let store = FileStore::new(dir);
+            let mut record = codex_holding(&[full_outer("N")]);
+            store.merge_existing(&mut record);
+            (store, record)
+        };
+
+        // (a) A peer rotates B to C and a delete follows: the file is
+        // recreated with the login's outer tokens and no SIWC.
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        disk_with(&dp.join("f"), &[full_outer("A"), siwc("B")]);
+        let (store, mut record) = login(dp.as_path());
+        assert_eq!(record.metadata["siwc"], json!({"refresh_token": "B"}));
+        assert_eq!(record.metadata["use_siwc"], true);
+        disk_with(&dp.join("f"), &[full_outer("A"), siwc("C")]);
+        fs::remove_file(dp.join("f")).unwrap();
+        let path = store.save_new_auth(&mut record).unwrap();
+        assert_eq!(path, path_string(&dp.join("f")));
+        let on_disk = read_json(&dp.join("f"));
+        assert_eq!(on_disk["refresh_token"], "refresh-N");
+        assert!(on_disk.get("siwc").is_none());
+        assert!(on_disk.get("use_siwc").is_none());
+
+        // (b) With no delete the file keeps C and its switch.
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        disk_with(&dp.join("f"), &[full_outer("A"), siwc("B")]);
+        let (store, mut record) = login(dp.as_path());
+        disk_with(&dp.join("f"), &[full_outer("A"), siwc("C")]);
+        store.save_new_auth(&mut record).unwrap();
+        let on_disk = read_json(&dp.join("f"));
+        assert_eq!(on_disk["refresh_token"], "refresh-N");
+        assert_eq!(on_disk["siwc"], json!({"refresh_token": "C"}));
+        assert_eq!(on_disk["use_siwc"], true);
+
+        // (c) A record that copied SIWC from a file since rebound adds none.
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        disk_with(&dp.join("f"), &[full_outer("A")]);
+        let store = FileStore::new(dp.as_path());
+        let mut record = codex_holding(&[full_outer("N"), siwc("B")]);
+        store.save_new_auth(&mut record).unwrap();
+        let on_disk = read_json(&dp.join("f"));
+        assert_eq!(on_disk["refresh_token"], "refresh-N");
+        assert!(on_disk.get("siwc").is_none());
+        assert!(on_disk.get("use_siwc").is_none());
     }
 }
