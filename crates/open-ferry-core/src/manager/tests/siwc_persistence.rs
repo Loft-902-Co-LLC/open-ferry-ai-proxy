@@ -6595,3 +6595,1509 @@ async fn folded_provider_rejection_adopts_current_disk() {
         "folded provider rejection adopts disk across read and publish fences"
     );
 }
+
+// ---- B5: the leased transaction in `refresh_owned` ----
+//
+// Tests of the activation. Each runs under `bounded` (B-16). The leased path
+// is the default here: `ObservedStore` forwards the lease, so a Codex refresh
+// on its `FileStore` takes the credential lock. `lease_unsupported` and the
+// `Recording` store are the ways back to the unleased path.
+
+use crate::exec::{ExecError, Options, Request, Response, StreamResponse};
+use crate::executor::{ProviderExecutor, RefreshOptions};
+use crate::manager::ManagerError;
+use futures_core::future::BoxFuture;
+use std::future::Future;
+use tokio::sync::Semaphore;
+
+/// B-16: the longest any B test may run.
+pub(super) const B_TEST_LIMIT: Duration = Duration::from_secs(30);
+
+/// B-16: `future` under a limit, or `Err` when it runs past it.
+pub(super) async fn bounded_for<F: Future>(
+    limit: Duration,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tokio::time::timeout(limit, future).await
+}
+
+/// B-16: runs a B test body under the 30 s limit, so a deadlock fails the
+/// test instead of hanging it.
+pub(super) async fn bounded<F: Future>(future: F) -> F::Output {
+    // Boxed: a test body is a large future, and debug builds poll it on the
+    // test thread's small stack.
+    bounded_for(B_TEST_LIMIT, Box::pin(future))
+        .await
+        .expect("the test finishes within 30 s")
+}
+
+/// A seeded credential directory: `codex.json` holds the fixture's tokens (A).
+struct Seeded {
+    dir: tempfile::TempDir,
+    files: Arc<FileStore>,
+    gate: ActiveGate,
+}
+
+fn seeded() -> Seeded {
+    let root = std::env::var_os("OFP_TEST_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
+        });
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = tempfile::tempdir_in(root).unwrap();
+    let files = Arc::new(FileStore::new(dir.path()));
+    let gate = ActiveGate::open();
+    files.set_gate(gate.clone());
+    files.save_new(&fixture()).unwrap();
+    let path = dir.path().join("codex.json");
+    let mut seeded: Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for key in ["siwc", "use_siwc"] {
+        seeded.insert(key.into(), fixture().metadata[key].clone());
+    }
+    std::fs::write(&path, serde_json::to_vec(&seeded).unwrap()).unwrap();
+    Seeded { dir, files, gate }
+}
+
+/// A manager over a seeded directory, with the fixture registered unsaved.
+struct Rig {
+    dir: tempfile::TempDir,
+    store: Arc<ObservedStore>,
+    manager: Manager,
+    models: Arc<FakeModels>,
+}
+
+impl Rig {
+    fn path(&self) -> std::path::PathBuf {
+        self.dir.path().join("codex.json")
+    }
+
+    fn disk(&self) -> Value {
+        disk(&self.dir)
+    }
+
+    fn live(&self) -> Arc<Auth> {
+        self.manager.get("codex.json").unwrap()
+    }
+}
+
+/// The manager's store is `outer` when given (a wrapper over `store`).
+fn assemble(seeded: Seeded, store: Arc<ObservedStore>, outer: Option<Arc<dyn AuthStore>>) -> Rig {
+    let models = Arc::new(FakeModels::default());
+    models.register("codex.json", &["gpt-5"]);
+    let outer = outer.unwrap_or_else(|| store.clone());
+    let manager = Manager::new(Settings::default(), models.clone(), Some(outer));
+    manager.set_gate(seeded.gate.clone());
+    manager.register_unsaved(fixture()).unwrap();
+    Rig {
+        dir: seeded.dir,
+        store,
+        manager,
+        models,
+    }
+}
+
+fn rig() -> Rig {
+    let seeded = seeded();
+    let store = observe(seeded.files.clone(), false);
+    assemble(seeded, store, None)
+}
+
+/// A store that records every call the manager makes on it, in order, and
+/// forwards each to an `ObservedStore`. The two pure queries
+/// (`supports_codex_refresh_patches`, `binding_generation`) are not recorded.
+/// `lease_error` makes `codex_refresh_lease` fail with that kind.
+struct Recording {
+    inner: Arc<ObservedStore>,
+    calls: Mutex<Vec<&'static str>>,
+    lease_error: Mutex<Option<io::ErrorKind>>,
+    /// Notified at every `codex_refresh_lease` call.
+    leased: Notify,
+}
+
+impl Recording {
+    fn note(&self, call: &'static str) {
+        lock(&self.calls).push(call);
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        lock(&self.calls).clone()
+    }
+
+    fn count(&self, call: &str) -> usize {
+        lock(&self.calls).iter().filter(|c| **c == call).count()
+    }
+}
+
+impl AuthStore for Recording {
+    fn list(&self) -> io::Result<Vec<Auth>> {
+        self.note("list");
+        self.inner.list()
+    }
+
+    fn save(&self, auth: &Auth) -> io::Result<String> {
+        self.note("save");
+        self.inner.save(auth)
+    }
+
+    fn delete(&self, id: &str) -> io::Result<()> {
+        self.note("delete");
+        self.inner.delete(id)
+    }
+
+    fn read_back(&self, auth: &Auth) -> io::Result<Option<Auth>> {
+        self.note("read_back");
+        self.inner.read_back(auth)
+    }
+
+    fn read_for_adoption(&self, auth: &Auth) -> io::Result<crate::auth::AdoptionRead> {
+        self.note("read_for_adoption");
+        self.inner.read_for_adoption(auth)
+    }
+
+    fn supports_codex_refresh_patches(&self) -> bool {
+        self.inner.supports_codex_refresh_patches()
+    }
+
+    fn same_record(&self, a: &Auth, b: &Auth) -> io::Result<bool> {
+        self.note("same_record");
+        self.inner.same_record(a, b)
+    }
+
+    fn binding_generation(&self) -> u64 {
+        self.inner.binding_generation()
+    }
+
+    fn codex_refresh_lease(&self, auth: &Auth) -> io::Result<CodexLease> {
+        self.note("codex_refresh_lease");
+        self.leased.notify_one();
+        if let Some(kind) = *lock(&self.lease_error) {
+            return Err(io::Error::new(kind, "injected lease failure"));
+        }
+        self.inner.codex_refresh_lease(auth)
+    }
+
+    fn codex_lease_read(&self, token: &CodexLeaseToken) -> io::Result<Option<Map<String, Value>>> {
+        self.note("codex_lease_read");
+        self.inner.codex_lease_read(token)
+    }
+
+    fn codex_lease_commit(
+        &self,
+        token: &CodexLeaseToken,
+        auth: &Auth,
+        patch: &CredentialRefreshPatch,
+    ) -> io::Result<CodexPersisted> {
+        self.note("codex_lease_commit");
+        self.inner.codex_lease_commit(token, auth, patch)
+    }
+
+    fn codex_origin(&self, auth: &Auth) -> io::Result<Option<CodexOrigin>> {
+        self.note("codex_origin");
+        self.inner.codex_origin(auth)
+    }
+
+    fn save_bound(
+        &self,
+        auth: &Auth,
+        origin: &CodexOrigin,
+        refused: &mut dyn FnMut(&CodexOrigin, OriginProof),
+    ) -> io::Result<Option<String>> {
+        self.note("save_bound");
+        self.inner.save_bound(auth, origin, refused)
+    }
+
+    fn save_guarded(
+        &self,
+        auth: &Auth,
+        guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
+    ) -> io::Result<GuardedSave> {
+        self.note("save_guarded");
+        self.inner.save_guarded(auth, guard)
+    }
+}
+
+/// A rig whose manager's store is a `Recording` over the `ObservedStore`.
+fn recording_rig(lease_unsupported: bool) -> (Rig, Arc<Recording>) {
+    let seeded = seeded();
+    let store = observe(seeded.files.clone(), lease_unsupported);
+    let recording = Arc::new(Recording {
+        inner: store.clone(),
+        calls: Mutex::new(Vec::new()),
+        lease_error: Mutex::new(None),
+        leased: Notify::new(),
+    });
+    (assemble(seeded, store, Some(recording.clone())), recording)
+}
+
+/// A Codex executor that records what it is given, can park at the send, and
+/// answers through its `FakeExecutor`.
+struct Probe {
+    fake: Arc<FakeExecutor>,
+    id: String,
+    entered: Notify,
+    release: Semaphore,
+    hold: AtomicBool,
+    seen: Mutex<Vec<Arc<Auth>>>,
+    options: Mutex<Vec<RefreshOptions>>,
+    spent: Mutex<Vec<Value>>,
+    reused: AtomicU32,
+    at_entry: Mutex<Option<SaveHook>>,
+}
+
+impl Probe {
+    fn new(id: &str, hold: bool) -> Arc<Self> {
+        Arc::new(Self {
+            fake: FakeExecutor::new(id),
+            id: id.to_owned(),
+            entered: Notify::new(),
+            release: Semaphore::new(0),
+            hold: AtomicBool::new(hold),
+            seen: Mutex::new(Vec::new()),
+            options: Mutex::new(Vec::new()),
+            spent: Mutex::new(Vec::new()),
+            reused: AtomicU32::new(0),
+            at_entry: Mutex::new(None),
+        })
+    }
+
+    /// Answers each refresh with an outer rotation named `name`.
+    fn rotating(self: Arc<Self>, name: &'static str) -> Arc<Self> {
+        self.fake.set_refresh(move |before| {
+            let mut after = before.clone();
+            after
+                .metadata
+                .insert("access_token".into(), json!(format!("{name}-access")));
+            after
+                .metadata
+                .insert("refresh_token".into(), json!(format!("{name}-refresh")));
+            after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+                &before.metadata,
+                &after.metadata,
+                true,
+                false,
+            ));
+            Ok(after)
+        });
+        self
+    }
+
+    /// How many sends carried a refresh token an earlier send had spent.
+    fn reused(&self) -> u32 {
+        self.reused.load(Ordering::SeqCst)
+    }
+
+    fn sent(&self) -> usize {
+        lock(&self.seen).len()
+    }
+
+    /// The outer refresh token the nth send carried.
+    fn sent_refresh(&self, n: usize) -> Value {
+        lock(&self.seen)[n].metadata["refresh_token"].clone()
+    }
+
+    fn set_at_entry(&self, hook: impl Fn(&Auth) + Send + Sync + 'static) {
+        *lock(&self.at_entry) = Some(Arc::new(hook));
+    }
+
+    async fn wait_entered(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
+            .await
+            .expect("the refresh reaches the executor");
+    }
+
+    /// Lets a parked send go, and every later one.
+    fn release(&self) {
+        self.hold.store(false, Ordering::SeqCst);
+        self.release.add_permits(1);
+    }
+}
+
+impl ProviderExecutor for Probe {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn execute(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        self.fake.execute(auth, request, options)
+    }
+    fn execute_stream(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
+        self.fake.execute_stream(auth, request, options)
+    }
+    fn count_tokens(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        self.fake.count_tokens(auth, request, options)
+    }
+    fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
+        self.refresh_with_options(auth, RefreshOptions::default())
+    }
+    fn refresh_with_options(
+        &self,
+        auth: Arc<Auth>,
+        options: RefreshOptions,
+    ) -> BoxFuture<'_, Result<Auth, ExecError>> {
+        Box::pin(async move {
+            let token = auth.metadata["refresh_token"].clone();
+            if lock(&self.spent).contains(&token) {
+                self.reused.fetch_add(1, Ordering::SeqCst);
+            }
+            lock(&self.seen).push(auth.clone());
+            lock(&self.options).push(options);
+            let hook = lock(&self.at_entry).clone();
+            if let Some(hook) = hook {
+                hook(&auth);
+            }
+            self.entered.notify_one();
+            if self.hold.load(Ordering::SeqCst) {
+                self.release.acquire().await.unwrap().forget();
+            }
+            let answer = self.fake.refresh(auth).await;
+            if answer
+                .as_ref()
+                .is_ok_and(|after| after.metadata.get("refresh_token") != Some(&token))
+            {
+                lock(&self.spent).push(token);
+            }
+            answer
+        })
+    }
+}
+
+/// The fixture with its outer partition rotated A -> B, as a live refresh
+/// intent no store has seen.
+fn outer_b_intent() -> Auth {
+    let before = fixture();
+    let mut after = before.clone();
+    after
+        .metadata
+        .insert("access_token".into(), json!("b-access"));
+    after
+        .metadata
+        .insert("refresh_token".into(), json!("b-refresh"));
+    after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+        &before.metadata,
+        &after.metadata,
+        true,
+        false,
+    ));
+    after
+}
+
+/// The newest generation published for `codex.json`'s projections.
+fn projection_generation(models: &FakeModels) -> Option<u64> {
+    models
+        .published()
+        .iter()
+        .filter(|published| published.client_id == "codex.json")
+        .map(|published| published.generation)
+        .max()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bounded_wrapper_fails_a_test_that_runs_past_its_limit() {
+    // B-16: the wrapper is what makes a deadlocked test fail, so it must
+    // time out a future that never finishes and pass one that does.
+    let never = bounded_for(Duration::from_millis(50), std::future::pending::<()>()).await;
+    assert!(never.is_err(), "a pending future runs past the limit");
+    let done = bounded_for(Duration::from_secs(5), async { 7 }).await;
+    assert_eq!(done.ok(), Some(7));
+    assert_eq!(B_TEST_LIMIT, Duration::from_secs(30));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn leased_commit_lands_live_intent_before_the_send_and_projections_advance() {
+    // B-1 (F1) and B-16's projection check.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        let dir = rig.dir.path().to_path_buf();
+        let at_entry = Arc::new(Mutex::new(None));
+        let seen_disk = at_entry.clone();
+        probe.set_at_entry(move |_| {
+            let file: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("codex.json")).unwrap()).unwrap();
+            *lock(&seen_disk) = Some(file);
+        });
+        rig.manager.register_executor(probe.clone());
+        // Disk holds A; live holds B with the intent A -> B, in no pending list.
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        rig.manager.register_unsaved(outer_b_intent()).unwrap();
+        assert!(rig.live().codex_pending_refresh.is_empty());
+        let before = projection_generation(&rig.models);
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        let at_send = lock(&at_entry).clone().expect("the executor was entered");
+        assert_eq!(
+            at_send["refresh_token"], "b-refresh",
+            "disk holds B at the send"
+        );
+        assert_eq!(probe.sent(), 1);
+        assert_eq!(probe.sent_refresh(0), "b-refresh", "the executor got B");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+        assert_eq!(
+            rig.store.lease_calls.load(Ordering::SeqCst),
+            1,
+            "one lease for the pass"
+        );
+        let after = projection_generation(&rig.models);
+        assert!(
+            after > before,
+            "the leased rotation published a newer projection generation"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn leased_commit_composes_pending_and_live_intent_before_the_send() {
+    // B-1 variant: pending A -> B plus the live intent B -> C gives disk C.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("d");
+        let dir = rig.dir.path().to_path_buf();
+        let at_entry = Arc::new(Mutex::new(None));
+        let seen_disk = at_entry.clone();
+        probe.set_at_entry(move |_| {
+            let file: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("codex.json")).unwrap()).unwrap();
+            *lock(&seen_disk) = Some(file);
+        });
+        rig.manager.register_executor(probe.clone());
+        let a_to_b = outer_b_intent();
+        let CodexPersistIntent::Refresh(first) = a_to_b.codex_persist_intent.clone() else {
+            panic!("the fixture carries an intent");
+        };
+        let mut live = a_to_b.clone();
+        live.codex_persist_intent = CodexPersistIntent::default();
+        live.codex_pending_refresh.push(first);
+        let mut b_to_c = live.clone();
+        b_to_c
+            .metadata
+            .insert("access_token".into(), json!("c-access"));
+        b_to_c
+            .metadata
+            .insert("refresh_token".into(), json!("c-refresh"));
+        b_to_c.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+            &live.metadata,
+            &b_to_c.metadata,
+            true,
+            false,
+        ));
+        rig.manager.register_unsaved(b_to_c).unwrap();
+        assert_eq!(rig.live().codex_pending_refresh.len(), 1);
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        let at_send = lock(&at_entry).clone().expect("the executor was entered");
+        assert_eq!(
+            at_send["refresh_token"], "c-refresh",
+            "disk holds C at the send"
+        );
+        assert_eq!(probe.sent_refresh(0), "c-refresh");
+        assert_eq!(rig.disk()["refresh_token"], "d-refresh");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+/// Whether any save the store refused was refused for a refresh in flight.
+fn refused_for_refresh(store: &ObservedStore) -> bool {
+    lock(&store.guarded)
+        .iter()
+        .any(|(_, deferral)| matches!(deferral, Some(SaveDeferral::RefreshInFlight)))
+}
+
+/// The calls of a recording, without the lease and origin queries.
+fn without_lease_queries(calls: &[&'static str]) -> Vec<&'static str> {
+    calls
+        .iter()
+        .copied()
+        .filter(|call| !matches!(*call, "codex_refresh_lease" | "codex_origin"))
+        .collect()
+}
+
+// The sequences below were recorded at the commit before the lease went live
+// (where no pass asked for a lease or an origin), with the same wrapper.
+/// The store calls of an unleased pass that rotates the outer partition.
+const ROTATING_UNLEASED_CALLS: &[&str] =
+    &["save_guarded", "read_back", "same_record", "same_record"];
+/// The store calls of an unleased pass that rotates nothing.
+const IDLE_UNLEASED_CALLS: &[&str] = &["save_guarded", "read_back", "same_record", "same_record"];
+/// The store calls of a refresh of a non-Codex record.
+const GEMINI_CALLS: &[&str] = &["save_guarded"];
+
+#[tokio::test(flavor = "current_thread")]
+async fn unsupported_store_rotating_pass_keeps_todays_call_sequence() {
+    // B-9 (decision 13): with `Unsupported`, the pass's own tail is exempt from
+    // check (vi), so nothing is refused and nothing is replayed.
+    bounded(async {
+        let (rig, recording) = recording_rig(true);
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        lock(&recording.calls).clear();
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        let calls = recording.calls();
+        assert_eq!(recording.count("codex_refresh_lease"), 1, "{calls:?}");
+        for never in ["codex_lease_read", "codex_lease_commit", "save_bound"] {
+            assert_eq!(recording.count(never), 0, "{never} in {calls:?}");
+        }
+        assert!(!refused_for_refresh(&rig.store), "a refused tail save");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+        assert_eq!(
+            without_lease_queries(&calls),
+            ROTATING_UNLEASED_CALLS,
+            "{calls:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unsupported_store_pass_without_rotation_keeps_todays_call_sequence() {
+    // B-9: the same for a pass that rotates nothing.
+    bounded(async {
+        let (rig, recording) = recording_rig(true);
+        let probe = Probe::new("codex", false);
+        probe.fake.set_refresh(|before| Ok(before.clone()));
+        rig.manager.register_executor(probe.clone());
+        lock(&recording.calls).clear();
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        let calls = recording.calls();
+        assert_eq!(probe.sent(), 1);
+        assert_eq!(recording.count("codex_refresh_lease"), 1, "{calls:?}");
+        for never in ["codex_lease_read", "codex_lease_commit", "save_bound"] {
+            assert_eq!(recording.count(never), 0, "{never} in {calls:?}");
+        }
+        assert!(!refused_for_refresh(&rig.store), "a refused tail save");
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        assert_eq!(
+            without_lease_queries(&calls),
+            IDLE_UNLEASED_CALLS,
+            "{calls:?}"
+        );
+    })
+    .await;
+}
+
+/// A gemini record on a `FileStore`, under a `Recording` store.
+fn gemini_rig() -> (Rig, Arc<Recording>, Auth) {
+    let seeded = seeded();
+    let gemini = auth_with_metadata(
+        "gemini.json",
+        "gemini",
+        json!({
+            "type":"gemini", "access_token":"g-old", "refresh_token":"g-refresh-old",
+            "expired":"2099-01-01T00:00:00Z"
+        }),
+    );
+    seeded.files.save_new(&gemini).unwrap();
+    let store = observe(seeded.files.clone(), false);
+    let recording = Arc::new(Recording {
+        inner: store.clone(),
+        calls: Mutex::new(Vec::new()),
+        lease_error: Mutex::new(None),
+        leased: Notify::new(),
+    });
+    let rig = assemble(seeded, store, Some(recording.clone()));
+    rig.manager.register_unsaved(gemini.clone()).unwrap();
+    (rig, recording, gemini)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_codex_refresh_never_touches_the_lease() {
+    // B-18: only a Codex record under a store takes the lease.
+    bounded(async {
+        let (rig, recording, gemini) = gemini_rig();
+        // Any lease call would fail the refresh.
+        rig.store.fail_lease_read.store(u32::MAX, Ordering::SeqCst);
+        rig.store
+            .fail_lease_commit
+            .store(u32::MAX, Ordering::SeqCst);
+        let executor = FakeExecutor::new("gemini");
+        executor.set_refresh(|before| {
+            let mut after = before.clone();
+            after
+                .metadata
+                .insert("access_token".into(), json!("g-new-access"));
+            after
+                .metadata
+                .insert("refresh_token".into(), json!("g-new-refresh"));
+            Ok(after)
+        });
+        rig.manager.register_executor(executor.clone());
+        lock(&recording.calls).clear();
+        rig.manager.force_refresh("gemini.json").await.unwrap();
+        let calls = recording.calls();
+        assert_eq!(executor.refresh_count(), 1);
+        for never in [
+            "codex_refresh_lease",
+            "codex_lease_read",
+            "codex_lease_commit",
+            "save_bound",
+        ] {
+            assert_eq!(recording.count(never), 0, "{never} in {calls:?}");
+        }
+        assert_eq!(rig.store.lease_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(rig.store.lease_commit_attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(rig.store.save_bound_calls.load(Ordering::SeqCst), 0);
+        let path = rig.dir.path().join(&gemini.id);
+        assert!(
+            !credential_lock_path(&path).unwrap().exists(),
+            "a lock file was made for {}",
+            gemini.id
+        );
+        let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file["refresh_token"], "g-new-refresh");
+        assert_eq!(calls, GEMINI_CALLS, "{calls:?}");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lease_timeout_defers_without_touching_routing_state() {
+    // B-10: a lease that times out is `LockBusy`: no send, a short wait, and
+    // no change to status, availability or the recorded error.
+    bounded(async {
+        let (rig, recording) = recording_rig(false);
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        *lock(&recording.lease_error) = Some(io::ErrorKind::TimedOut);
+        let before = rig.live();
+        let started = chrono::Utc::now();
+        let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
+        let ManagerError::Store(error) = error else {
+            panic!("a deferral is a store error");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(probe.sent(), 0, "nothing was sent");
+        let after = rig.live();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.unavailable, before.unavailable);
+        assert_eq!(after.status_message, before.status_message);
+        assert_eq!(after.last_error.is_some(), before.last_error.is_some());
+        let held = after.next_refresh_after.expect("a wait was set");
+        assert!(held >= started + chrono::Duration::seconds(5), "{held}");
+        assert!(
+            held <= chrono::Utc::now() + chrono::Duration::seconds(30),
+            "{held}"
+        );
+        // A 401 retry does not refresh through the held lease either.
+        let unauthorized = ExecError::upstream(401, "unauthorized");
+        assert!(
+            rig.manager
+                .try_refresh_after_unauthorized(&rig.live(), &unauthorized, false)
+                .await
+                .is_none(),
+            "a deferred refresh yields no retry"
+        );
+        assert_eq!(probe.sent(), 0);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_refresh_job_keeps_the_lease_deferral() {
+    // B-10: the job that ends in a deferral does not overwrite its wait.
+    bounded(async {
+        let (rig, recording) = recording_rig(false);
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        *lock(&recording.lease_error) = Some(io::ErrorKind::TimedOut);
+        let mut due = fixture();
+        due.metadata
+            .insert("refresh_interval_seconds".into(), json!(0.001));
+        rig.manager.register_unsaved(due).unwrap();
+        let started = chrono::Utc::now();
+        rig.manager
+            .start_auto_refresh(Duration::from_millis(1))
+            .unwrap();
+        recording.leased.notified().await;
+        while !rig.manager.lock().refresh_jobs.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        rig.manager.stop_auto_refresh();
+        assert_eq!(probe.sent(), 0);
+        let held = rig.live().next_refresh_after.expect("a wait was set");
+        assert!(held >= started + chrono::Duration::seconds(5), "{held}");
+    })
+    .await;
+}
+
+/// The fixture with its outer partition rotated A -> B and the rotation held
+/// as a pending one, which no file has seen.
+fn pending_b() -> Auth {
+    let mut live = outer_b_intent();
+    let CodexPersistIntent::Refresh(patch) = std::mem::take(&mut live.codex_persist_intent) else {
+        panic!("the fixture carries an intent");
+    };
+    live.codex_pending_refresh.push(patch);
+    live
+}
+
+/// A contender for the credential lock of `path`, with a short wait.
+async fn contend_for_lock(path: std::path::PathBuf) -> io::Result<()> {
+    crate::auth::credential_lock::acquire_with_timeout(path, Duration::from_millis(200))
+        .await
+        .map(drop)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_write_failure_defers_before_the_send_and_frees_the_lock() {
+    // B-11 (N1): the step-5 commit fails, so nothing is sent and the lease is
+    // released; the next pass commits the pending write, then sends it.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        rig.manager.register_unsaved(pending_b()).unwrap();
+        rig.store.fail_lease_commit.store(1, Ordering::SeqCst);
+        let started = chrono::Utc::now();
+        let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
+        assert!(matches!(error, ManagerError::Store(_)), "{error}");
+        assert_eq!(probe.sent(), 0, "nothing was sent");
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        let live = rig.live();
+        assert_eq!(live.metadata["refresh_token"], "b-refresh");
+        assert_eq!(
+            live.codex_pending_refresh.len(),
+            1,
+            "the write is still owed"
+        );
+        let held = live.next_refresh_after.expect("a wait was set");
+        assert!(held >= started + chrono::Duration::seconds(5), "{held}");
+        contend_for_lock(rig.path())
+            .await
+            .expect("the lease was released");
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent(), 1);
+        assert_eq!(probe.sent_refresh(0), "b-refresh", "B was sent, never A");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        assert!(rig.live().codex_pending_refresh.is_empty());
+    })
+    .await;
+}
+
+fn missing_epoch(rig: &Rig) -> Option<u64> {
+    rig.manager
+        .lock()
+        .missing_file_deferrals
+        .get("codex.json")
+        .copied()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_file_deferral_follows_the_episode_and_the_registration() {
+    // B-14 (N4, Q1), steps 1 to 6. Log levels are not asserted.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let saved = (*rig.live()).clone();
+        rig.manager
+            .run_persistence(move |m| m.register(saved))
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(rig.path()).unwrap();
+        let started = chrono::Utc::now();
+        let epoch = rig.live().registration_epoch;
+        let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
+        let ManagerError::Store(error) = error else {
+            panic!("a deferral is a store error");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(probe.sent(), 0);
+        assert!(!rig.path().exists(), "nothing was written");
+        let held = rig.live().next_refresh_after.expect("a wait was set");
+        assert!(held >= started + chrono::Duration::seconds(60), "{held}");
+        assert_eq!(missing_epoch(&rig), Some(epoch));
+        // A second deferral in the episode leaves the map as it was.
+        rig.manager.force_refresh("codex.json").await.unwrap_err();
+        assert_eq!(missing_epoch(&rig), Some(epoch));
+        assert_eq!(probe.sent(), 0);
+        // A saved settings edit writes the file and ends the episode.
+        rig.manager
+            .run_persistence(|m| {
+                m.edit("codex.json", |auth| {
+                    auth.metadata.insert("note".into(), json!("edited"));
+                    Ok::<bool, ()>(true)
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rig.path().exists(), "the update wrote the file");
+        assert_eq!(missing_epoch(&rig), None, "the save ended the episode");
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent(), 1);
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        // A new episode in the same registration is first again.
+        std::fs::remove_file(rig.path()).unwrap();
+        rig.manager.force_refresh("codex.json").await.unwrap_err();
+        assert_eq!(missing_epoch(&rig), Some(epoch));
+        // Removal clears the entry; a new registration is a new epoch.
+        rig.manager.remove("codex.json");
+        assert_eq!(missing_epoch(&rig), None);
+        rig.manager.register_unsaved(fixture()).unwrap();
+        let renewed = rig.live().registration_epoch;
+        assert_ne!(renewed, epoch);
+        rig.manager.force_refresh("codex.json").await.unwrap_err();
+        assert_eq!(missing_epoch(&rig), Some(renewed));
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_non_codex_file_for_a_codex_record_defers_as_not_codex() {
+    // B-14 step 7.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        std::fs::write(
+            rig.path(),
+            serde_json::to_vec(&json!({"type":"gemini","refresh_token":"x"})).unwrap(),
+        )
+        .unwrap();
+        let started = chrono::Utc::now();
+        let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
+        let ManagerError::Store(error) = error else {
+            panic!("a deferral is a store error");
+        };
+        assert!(error.to_string().contains("not a Codex file"), "{error}");
+        assert_eq!(probe.sent(), 0);
+        let held = rig.live().next_refresh_after.expect("a wait was set");
+        assert!(held >= started + chrono::Duration::seconds(60), "{held}");
+        assert_eq!(missing_epoch(&rig), None);
+    })
+    .await;
+}
+
+/// Runs `act` once, on the thread that takes the credential lock, as the lock
+/// is acquired: while the pass holds the lease.
+fn on_lease_held(rig: &Rig, act: impl Fn() + Send + Sync + 'static) {
+    let armed = Arc::new(AtomicBool::new(true));
+    crate::auth::credential_lock::set_test_hook(
+        &rig.path(),
+        Some(Arc::new(move |event: &str| {
+            if event == "acquired" && armed.swap(false, Ordering::SeqCst) {
+                act();
+            }
+        })),
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rebinding_the_store_while_leased_refuses_before_the_send() {
+    // B-19 (i): the directory moved while the lease was taken, so the lease is
+    // for a file the registration no longer names.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let other = tempfile::tempdir_in(rig.dir.path().parent().unwrap()).unwrap();
+        let (files, target) = (rig.store.files.clone(), other.path().to_path_buf());
+        on_lease_held(&rig, move || files.set_base_dir(&target));
+        let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
+        crate::auth::credential_lock::set_test_hook(&rig.path(), None);
+        assert!(
+            error
+                .to_string()
+                .contains("registration changed before refresh"),
+            "{error}"
+        );
+        assert_eq!(probe.sent(), 0, "nothing was sent");
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        assert!(!other.path().join("codex.json").exists());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replacing_the_registration_while_leased_refuses_before_the_send() {
+    // B-19 (ii): the id was removed and registered again under the lease.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let manager = rig.manager.clone();
+        let epoch = rig.live().registration_epoch;
+        on_lease_held(&rig, move || {
+            manager.remove("codex.json");
+            manager.register_unsaved(fixture()).unwrap();
+        });
+        let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
+        crate::auth::credential_lock::set_test_hook(&rig.path(), None);
+        assert!(
+            error.to_string().contains("registration changed"),
+            "{error}"
+        );
+        assert_ne!(rig.live().registration_epoch, epoch);
+        assert_eq!(probe.sent(), 0, "nothing was sent");
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rebinding_to_the_same_directory_while_leased_is_admitted() {
+    // B-19 (iii): the same file under a rebind is the same origin.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let (files, same) = (rig.store.files.clone(), rig.dir.path().to_path_buf());
+        on_lease_held(&rig, move || files.set_base_dir(&same));
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        crate::auth::credential_lock::set_test_hook(&rig.path(), None);
+        assert_eq!(probe.sent(), 1);
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+    })
+    .await;
+}
+
+/// A second Codex credential, with its own file and so its own lock.
+fn other_codex(id: &str) -> Auth {
+    auth_with_metadata(
+        id,
+        "codex",
+        json!({"type":"codex", "access_token":"o-old", "refresh_token":"o-refresh-old",
+            "expired":"2099-01-01T00:00:00Z", "note":"other"}),
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn work_on_other_credentials_does_not_wait_for_a_held_lease() {
+    // B-7 (a): with the executor parked at the send, unrelated persistence
+    // completes, and so does a change to the leased credential that saves nothing.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", true).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let other = other_codex("codex2.json");
+        rig.store.files.save_new(&other).unwrap();
+        rig.manager.register_unsaved(other.clone()).unwrap();
+        let pass = {
+            let manager = rig.manager.clone();
+            tokio::spawn(async move { manager.force_refresh("codex.json").await })
+        };
+        probe.wait_entered().await;
+        let within = Duration::from_secs(5);
+
+        let mut changed = other.clone();
+        changed.metadata.insert("note".into(), json!("changed"));
+        let updated = bounded_for(
+            within,
+            rig.manager.run_persistence(move |m| m.update(changed)),
+        )
+        .await
+        .expect("an update of another credential completes");
+        assert!(updated.is_ok(), "update of codex2.json");
+
+        let third = auth_with_metadata(
+            "third.json",
+            "gemini",
+            json!({"type":"gemini","access_token":"t","refresh_token":"t-refresh"}),
+        );
+        bounded_for(
+            within,
+            rig.manager.run_persistence(move |m| m.register(third)),
+        )
+        .await
+        .expect("a register of a third credential completes")
+        .unwrap()
+        .unwrap();
+
+        let edited = bounded_for(
+            within,
+            rig.manager.run_persistence(|m| {
+                m.edit_unsaved("codex.json", |auth| {
+                    auth.metadata.insert("note".into(), json!("memory-only"));
+                    Ok::<bool, ()>(true)
+                })
+            }),
+        )
+        .await
+        .expect("an edit_unsaved of the leased credential completes");
+        assert!(edited.is_ok());
+        assert_eq!(probe.sent(), 1, "the pass is still parked at the send");
+
+        probe.release();
+        let done = bounded_for(within, pass)
+            .await
+            .expect("the refresh completes once released")
+            .unwrap();
+        assert!(done.is_ok(), "the refresh result");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn saved_update_of_the_leased_credential_waits_for_the_lease() {
+    // B-7 (b): a saved update of the leased credential waits on the credential
+    // lock, so it cannot finish while the pass is parked; it finishes after.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", true).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let pass = {
+            let manager = rig.manager.clone();
+            tokio::spawn(async move { manager.force_refresh("codex.json").await })
+        };
+        probe.wait_entered().await;
+        let mut changed = (*rig.live()).clone();
+        changed.metadata.insert("note".into(), json!("changed"));
+        let mut update = {
+            let manager = rig.manager.clone();
+            tokio::spawn(async move { manager.run_persistence(move |m| m.update(changed)).await })
+        };
+        // The one place a wall-clock wait is the point: the update must not
+        // complete. The lease is only released by the release below.
+        let early = bounded_for(Duration::from_secs(1), &mut update).await;
+        assert!(
+            early.is_err(),
+            "the update finished while the lease was held"
+        );
+        probe.release();
+        let within = Duration::from_secs(5);
+        bounded_for(within, pass)
+            .await
+            .expect("the refresh completes once released")
+            .unwrap()
+            .expect("the refresh result");
+        // Whether the update then publishes or asks for a retry is not the point.
+        let _ = bounded_for(within, update)
+            .await
+            .expect("the update completes once the lease is released")
+            .unwrap()
+            .expect("the update ran");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+// ---- B-7 (c): the lock-order audit of the source ----
+
+/// The production part of a source file: everything before its test module.
+fn production(src: &str) -> &str {
+    let cut = src
+        .find("#[cfg(test)]\nmod tests")
+        .expect("the source ends with a test module");
+    &src[..cut]
+}
+
+/// `src` without comments, string literals and character literals, ASCII
+/// only, whitespace collapsed and spaces around dots removed, so a token such
+/// as `self.lock()` is found however rustfmt broke the chain.
+fn code_only(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            let mut depth = 1;
+            i += 2;
+            while i < chars.len() && depth > 0 {
+                match (chars[i], chars.get(i + 1)) {
+                    ('/', Some('*')) => {
+                        depth += 1;
+                        i += 2;
+                    }
+                    ('*', Some('/')) => {
+                        depth -= 1;
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            out.push(' ');
+        } else if c == 'r' && (i == 0 || !ident(chars[i - 1])) && {
+            let mut j = i + 1;
+            while chars.get(j) == Some(&'#') {
+                j += 1;
+            }
+            chars.get(j) == Some(&'"')
+        } {
+            let mut hashes = 0;
+            let mut j = i + 1;
+            while chars[j] == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            j += 1;
+            while j < chars.len()
+                && !(chars[j] == '"' && (1..=hashes).all(|k| chars.get(j + k) == Some(&'#')))
+            {
+                j += 1;
+            }
+            i = j + 1 + hashes;
+            out.push_str("\"\"");
+        } else if c == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                i += if chars[i] == '\\' { 2 } else { 1 };
+            }
+            i += 1;
+            out.push_str("\"\"");
+        } else if c == '\'' {
+            if next == Some('\\') {
+                i += 3;
+                while i < chars.len() && chars[i] != '\'' {
+                    i += 1;
+                }
+                i += 1;
+                out.push_str("' '");
+            } else if chars.get(i + 2) == Some(&'\'') {
+                i += 3;
+                out.push_str("' '");
+            } else {
+                out.push('\'');
+                i += 1;
+            }
+        } else {
+            out.push(if c.is_ascii() { c } else { '?' });
+            i += 1;
+        }
+    }
+    let mut collapsed = String::with_capacity(out.len());
+    let mut space = false;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            space = true;
+        } else {
+            if space && !collapsed.is_empty() {
+                collapsed.push(' ');
+            }
+            space = false;
+            collapsed.push(c);
+        }
+    }
+    collapsed.replace(" .", ".").replace(". ", ".")
+}
+
+/// How many times `token` occurs in `code`, not as the tail of a longer
+/// identifier when it starts like one.
+fn token_count(code: &str, token: &str) -> usize {
+    let starts_like_ident = token
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    code.match_indices(token)
+        .filter(|(at, _)| {
+            !starts_like_ident
+                || code[..*at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        })
+        .count()
+}
+
+/// The forbidden tokens `text` holds, by name.
+fn forbidden_in(scope: &str, text: &str, forbidden: &[&str]) -> Vec<String> {
+    forbidden
+        .iter()
+        .filter(|token| token_count(text, token) > 0)
+        .map(|token| format!("{scope}: {token}"))
+        .collect()
+}
+
+/// The text between the bracket at `open` and its match, brackets excluded.
+fn bracketed(code: &str, open: usize) -> &str {
+    let bytes = code.as_bytes();
+    let (opener, closer) = match bytes[open] {
+        b'{' => (b'{', b'}'),
+        b'(' => (b'(', b')'),
+        other => panic!("not a bracket: {}", other as char),
+    };
+    let mut depth = 0;
+    for (at, byte) in bytes.iter().enumerate().skip(open) {
+        if *byte == opener {
+            depth += 1;
+        } else if *byte == closer {
+            depth -= 1;
+            if depth == 0 {
+                return &code[open + 1..at];
+            }
+        }
+    }
+    panic!("an unbalanced bracket");
+}
+
+/// The body of every `fn <name>` for which `named` holds.
+fn fn_bodies(code: &str, named: impl Fn(&str) -> bool) -> Vec<(String, &str)> {
+    let mut found = Vec::new();
+    for (at, _) in code.match_indices("fn ") {
+        if code[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let name: String = code[at + 3..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !named(&name) {
+            continue;
+        }
+        let brace = at + code[at..].find('{').expect("a function body");
+        found.push((name, bracketed(code, brace)));
+    }
+    found
+}
+
+/// The arguments of every `.<call>(` in `code`.
+fn call_args<'a>(code: &'a str, call: &str) -> Vec<&'a str> {
+    let needle = format!(".{call}(");
+    code.match_indices(&needle)
+        .map(|(at, _)| bracketed(code, at + needle.len() - 1))
+        .collect()
+}
+
+/// The text of `src` from `from` to `to`, the latter included.
+fn raw_between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+    let start = src
+        .find(from)
+        .unwrap_or_else(|| panic!("marker missing: {from}"));
+    let end = start
+        + src[start..]
+            .find(to)
+            .unwrap_or_else(|| panic!("marker missing: {to}"))
+        + to.len();
+    &src[start..end]
+}
+
+const LEASED_SECTION_FORBIDDEN: &[&str] = &[
+    "mutation_gate",
+    "reload_gate",
+    "with_adoption",
+    "with_persist_save_lock",
+    "persist(",
+    "persist_bound(",
+    "persist_detached",
+    "update_internal",
+    "register",
+    "load(",
+    "self.lock()",
+];
+
+const LOCKED_SCOPE_FORBIDDEN: &[&str] = &[
+    "publish_projections",
+    "queue_refresh_reschedule",
+    ".await",
+    "run_leased",
+    "prove(",
+    "Handle::from_path",
+    "is_same_file",
+    "self.lock()",
+];
+
+const TAIL_FENCE_FORBIDDEN: &[&str] = &[
+    "prove(",
+    "Handle::from_path",
+    "is_same_file",
+    ".await",
+    "run_leased",
+    "read_back(",
+    "std::fs::",
+    "fs::",
+];
+
+/// Audit 1: nothing between the lease markers takes a manager-wide lock,
+/// opens a gate, or persists.
+fn audit_leased_section(refresh: &str) -> Vec<String> {
+    let section = raw_between(production(refresh), "// lease: held", "// lease: released");
+    forbidden_in(
+        "leased section",
+        &code_only(section),
+        LEASED_SECTION_FORBIDDEN,
+    )
+}
+
+/// Audit 2: every `*_locked` function, `.locked(` closure and
+/// `.leased_origin_check(` argument list is short, synchronous and free of
+/// I/O. Also returns how many of each it examined.
+fn audit_locked_scopes(refresh: &str) -> (Vec<String>, [usize; 3]) {
+    let code = code_only(production(refresh));
+    let mut violations = Vec::new();
+    let bodies = fn_bodies(&code, |name| name.ends_with("_locked"));
+    for (name, body) in &bodies {
+        violations.extend(forbidden_in(
+            &format!("fn {name}"),
+            body,
+            LOCKED_SCOPE_FORBIDDEN,
+        ));
+    }
+    let closures = call_args(&code, "locked");
+    for body in &closures {
+        violations.extend(forbidden_in("locked closure", body, LOCKED_SCOPE_FORBIDDEN));
+    }
+    let checks = call_args(&code, "leased_origin_check");
+    for body in &checks {
+        violations.extend(forbidden_in(
+            "leased_origin_check argument",
+            body,
+            LOCKED_SCOPE_FORBIDDEN,
+        ));
+    }
+    (violations, [bodies.len(), closures.len(), checks.len()])
+}
+
+/// Audit 3: the two fences in `lifecycle.rs` that decide under the state lock.
+fn audit_tail_fences(lifecycle: &str) -> Vec<String> {
+    let lifecycle = production_or_all(lifecycle);
+    let mut violations = Vec::new();
+    // Fence 2: the `refused` closure only hands over to `record_refused_tail`.
+    let refused = code_only(raw_between(lifecycle, "let mut refused", ".save_bound("));
+    violations.extend(forbidden_in(
+        "refused closure",
+        &refused,
+        TAIL_FENCE_FORBIDDEN,
+    ));
+    if token_count(&refused, "self.lock()") != 0 {
+        violations.push("refused closure: self.lock()".into());
+    }
+    let code = code_only(lifecycle);
+    let tails = fn_bodies(&code, |name| name == "record_refused_tail");
+    assert_eq!(tails.len(), 1, "record_refused_tail is defined once");
+    violations.extend(forbidden_in(
+        "record_refused_tail",
+        tails[0].1,
+        TAIL_FENCE_FORBIDDEN,
+    ));
+    if token_count(tails[0].1, "self.lock()") != 1 {
+        violations.push("record_refused_tail: not exactly one self.lock()".into());
+    }
+    // Fence 3: the read-back is resolved before the state lock is taken.
+    let fence = code_only(raw_between(
+        lifecycle,
+        "// Fence 3 resolves",
+        "live_same && read_same",
+    ));
+    violations.extend(forbidden_in("fence 3", &fence, TAIL_FENCE_FORBIDDEN));
+    if token_count(&fence, "self.lock()") != 1 {
+        violations.push("fence 3: not exactly one self.lock()".into());
+    }
+    violations
+}
+
+fn production_or_all(src: &str) -> &str {
+    src.find("#[cfg(test)]\nmod tests")
+        .map_or(src, |cut| &src[..cut])
+}
+
+const REFRESH_SOURCE: &str = include_str!("../refresh.rs");
+const LIFECYCLE_SOURCE: &str = include_str!("../lifecycle.rs");
+
+#[test]
+fn lock_order_audit_of_the_sources_finds_nothing() {
+    // B-7 (c). The counts keep each audit from passing on an empty scan.
+    assert_eq!(audit_leased_section(REFRESH_SOURCE), Vec::<String>::new());
+    let (violations, [bodies, closures, checks]) = audit_locked_scopes(REFRESH_SOURCE);
+    assert_eq!(violations, Vec::<String>::new());
+    assert!(
+        bodies >= 5,
+        "only {bodies} *_locked functions were examined"
+    );
+    assert!(
+        closures >= 5,
+        "only {closures} locked closures were examined"
+    );
+    assert!(checks >= 3, "only {checks} origin checks were examined");
+    assert_eq!(audit_tail_fences(LIFECYCLE_SOURCE), Vec::<String>::new());
+}
+
+/// `src` with the first `from` replaced by `to`; the text must change.
+fn mutated(src: &str, from: &str, to: &str) -> String {
+    let changed = src.replacen(from, to, 1);
+    assert_ne!(changed, src, "the mutation target is missing: {from}");
+    changed
+}
+
+#[test]
+fn lock_order_audit_fails_on_mutated_copies() {
+    // B-7 (c) negative cases: each audit reports a forbidden call that is
+    // put into its scope.
+    let leased = mutated(
+        REFRESH_SOURCE,
+        "// lease: released",
+        "self.mutation_gate();\n// lease: released",
+    );
+    assert!(!audit_leased_section(&leased).is_empty(), "leased section");
+    let leased = mutated(
+        REFRESH_SOURCE,
+        "// lease: released",
+        "let _ = self.lock();\n// lease: released",
+    );
+    assert!(
+        !audit_leased_section(&leased).is_empty(),
+        "leased section lock"
+    );
+
+    let body = mutated(
+        REFRESH_SOURCE,
+        "fn publish_rotation_locked(",
+        "fn probe_locked() { run_leased(); }\nfn publish_rotation_locked(",
+    );
+    assert!(!audit_locked_scopes(&body).0.is_empty(), "locked fn body");
+    let closure = mutated(
+        REFRESH_SOURCE,
+        "self.locked(|s| self.prepare_leased_refresh_locked(",
+        "self.locked(|s| { s.prove(); self.prepare_leased_refresh_locked(",
+    );
+    assert!(
+        !audit_locked_scopes(&closure).0.is_empty(),
+        "locked closure"
+    );
+    let check = mutated(
+        REFRESH_SOURCE,
+        ".leased_origin_check(",
+        ".leased_origin_check(Handle::from_path(1), ",
+    );
+    assert!(!audit_locked_scopes(&check).0.is_empty(), "origin check");
+
+    let refused = mutated(
+        LIFECYCLE_SOURCE,
+        "self.record_refused_tail(&auth.id",
+        "pinned.prove(x); self.record_refused_tail(&auth.id",
+    );
+    assert!(!audit_tail_fences(&refused).is_empty(), "refused closure");
+    let fence = mutated(
+        LIFECYCLE_SOURCE,
+        "// Fence 3 resolves the read-back outside the state lock.",
+        "// Fence 3 resolves the read-back outside the state lock.\nlet _guard = self.lock();",
+    );
+    assert!(!audit_tail_fences(&fence).is_empty(), "fence 3");
+    let tail = mutated(
+        LIFECYCLE_SOURCE,
+        "let mut guard = self.lock();\n        let state = &mut *guard;\n        let Some(entry) = state.auths.get_mut(id) else {\n            return;\n        };\n        if entry.auth.registration_epoch != epoch || self.permanently_ineligible",
+        "let mut guard = self.lock();\n        let _again = self.lock();\n        let state = &mut *guard;\n        let Some(entry) = state.auths.get_mut(id) else {\n            return;\n        };\n        if entry.auth.registration_epoch != epoch || self.permanently_ineligible",
+    );
+    assert!(!audit_tail_fences(&tail).is_empty(), "record_refused_tail");
+}
