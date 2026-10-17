@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
-fn fixture() -> Auth {
+pub(super) fn fixture() -> Auth {
     auth_with_metadata(
         "codex.json",
         "codex",
@@ -30,10 +30,10 @@ fn fixture() -> Auth {
     )
 }
 
-type SameRecordHook = Arc<dyn Fn(&Auth, &Auth) + Send + Sync>;
-type SaveHook = Arc<dyn Fn(&Auth) + Send + Sync>;
+pub(super) type SameRecordHook = Arc<dyn Fn(&Auth, &Auth) + Send + Sync>;
+pub(super) type SaveHook = Arc<dyn Fn(&Auth) + Send + Sync>;
 /// Called with the map `codex_lease_read` is about to return; may edit it.
-type LeaseReadHook = Arc<dyn Fn(&mut Map<String, Value>) + Send + Sync>;
+pub(super) type LeaseReadHook = Arc<dyn Fn(&mut Map<String, Value>) + Send + Sync>;
 
 pub(super) struct ObservedStore {
     pub(super) files: Arc<FileStore>,
@@ -77,7 +77,7 @@ pub(super) struct ObservedStore {
 }
 
 /// Counts a fault counter down; `u32::MAX` stays armed. True when it was armed.
-fn take_fault(counter: &AtomicU32) -> bool {
+pub(super) fn take_fault(counter: &AtomicU32) -> bool {
     match counter.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
         0 | u32::MAX => None,
         n => Some(n - 1),
@@ -90,7 +90,7 @@ fn take_fault(counter: &AtomicU32) -> bool {
 impl ObservedStore {
     /// What every save method does first: the hook, `error_once`, then
     /// `fail_refresh` for a `Refresh` intent.
-    fn save_preamble(&self, auth: &Auth) -> io::Result<()> {
+    pub(super) fn save_preamble(&self, auth: &Auth) -> io::Result<()> {
         let hook = lock(&self.before_save_hook).clone();
         if let Some(hook) = hook {
             hook(auth);
@@ -107,7 +107,7 @@ impl ObservedStore {
     }
 
     /// What every save method does after a write.
-    fn after_write(&self, auth: &Auth) {
+    pub(super) fn after_write(&self, auth: &Auth) {
         let hook = lock(&self.save_hook).clone();
         if let Some(hook) = hook {
             hook(auth);
@@ -262,7 +262,7 @@ impl AuthStore for ObservedStore {
 }
 
 impl ObservedStore {
-    async fn wait_saved(&self, generation: u64) {
+    pub(super) async fn wait_saved(&self, generation: u64) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let notified = self.saved.notified();
@@ -309,7 +309,7 @@ pub(super) fn observe(files: Arc<FileStore>, lease_unsupported: bool) -> Arc<Obs
     })
 }
 
-fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate) {
+pub(super) fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate) {
     let root = std::env::var_os("OFP_TEST_SCRATCH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -340,11 +340,11 @@ fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate
     (dir, store, manager, gate)
 }
 
-fn disk(dir: &tempfile::TempDir) -> Value {
+pub(super) fn disk(dir: &tempfile::TempDir) -> Value {
     serde_json::from_slice(&std::fs::read(dir.path().join("codex.json")).unwrap()).unwrap()
 }
 
-fn set_note(manager: &Manager, note: &str) {
+pub(super) fn set_note(manager: &Manager, note: &str) {
     manager
         .edit_unsaved("codex.json", |auth| {
             auth.metadata.insert("note".into(), json!(note));
@@ -354,7 +354,7 @@ fn set_note(manager: &Manager, note: &str) {
         .unwrap();
 }
 
-fn success(manager: &Manager) -> CallResult {
+pub(super) fn success(manager: &Manager) -> CallResult {
     let auth = manager.get("codex.json").unwrap();
     CallResult {
         auth_id: auth.id.clone(),
@@ -368,13 +368,13 @@ fn success(manager: &Manager) -> CallResult {
 
 /// A raw OS holder, not our process mutex. The watchdog makes a regression
 /// fail promptly instead of leaving a blocked current-thread test for 30 s.
-struct OsHold {
-    release: Option<mpsc::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+pub(super) struct OsHold {
+    pub(super) release: Option<mpsc::Sender<()>>,
+    pub(super) thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OsHold {
-    fn new(dir: &tempfile::TempDir) -> Self {
+    pub(super) fn new(dir: &tempfile::TempDir) -> Self {
         let path = credential_lock_path(&dir.path().join("codex.json")).unwrap();
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -412,13 +412,13 @@ impl Drop for OsHold {
 
 /// Stops an older save before its persist watermark check. Dropping this
 /// releases the hook even when an assertion fails.
-struct SaveHold {
-    release: Option<mpsc::Sender<()>>,
-    entered: Arc<Notify>,
+pub(super) struct SaveHold {
+    pub(super) release: Option<mpsc::Sender<()>>,
+    pub(super) entered: Arc<Notify>,
 }
 
 impl SaveHold {
-    fn new(manager: &Manager) -> Self {
+    pub(super) fn new(manager: &Manager) -> Self {
         let (release_tx, release_rx) = mpsc::channel();
         let release_rx = Mutex::new(release_rx);
         let entered = Arc::new(Notify::new());
@@ -440,7 +440,7 @@ impl SaveHold {
         }
     }
 
-    async fn wait_entered(&self) {
+    pub(super) async fn wait_entered(&self) {
         tokio::time::timeout(Duration::from_secs(5), self.entered.notified())
             .await
             .expect("the older save reaches the hook");
@@ -1455,7 +1455,7 @@ async fn reconciliation_publishes_authoritative_disk_omissions() {
     }
 }
 
-async fn wait_pending_saves(manager: &Manager) {
+pub(super) async fn wait_pending_saves(manager: &Manager) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !manager.lock().pending_saves.is_empty() {
             tokio::task::yield_now().await;
@@ -1465,7 +1465,7 @@ async fn wait_pending_saves(manager: &Manager) {
     .expect("all admitted saves finish");
 }
 
-fn expiry_executor() -> Arc<FakeExecutor> {
+pub(super) fn expiry_executor() -> Arc<FakeExecutor> {
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(|before| {
         let mut after = before.clone();
@@ -1483,7 +1483,7 @@ fn expiry_executor() -> Arc<FakeExecutor> {
     executor
 }
 
-async fn refresh_with_result_during_save(store: &ObservedStore, manager: &Manager) {
+pub(super) async fn refresh_with_result_during_save(store: &ObservedStore, manager: &Manager) {
     manager.register_executor(expiry_executor());
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -1672,7 +1672,7 @@ async fn pending_explicit_null_survives_live_removal_and_sparse_refresh() {
     );
 }
 
-fn hold_counter_save(manager: &Manager, count: i64) -> SaveHold {
+pub(super) fn hold_counter_save(manager: &Manager, count: i64) -> SaveHold {
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
     let entered = Arc::new(Notify::new());
@@ -1692,7 +1692,7 @@ fn hold_counter_save(manager: &Manager, count: i64) -> SaveHold {
     }
 }
 
-fn rotation_executor(partial_failure: bool) -> Arc<FakeExecutor> {
+pub(super) fn rotation_executor(partial_failure: bool) -> Arc<FakeExecutor> {
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(move |before| {
         let mut after = before.clone();
@@ -1755,7 +1755,7 @@ async fn skipped_pending_save_keeps_rotation_and_unsaved_edit() {
     );
 }
 
-async fn failed_inactive_refresh(store: &ObservedStore, manager: &Manager) {
+pub(super) async fn failed_inactive_refresh(store: &ObservedStore, manager: &Manager) {
     manager
         .edit_unsaved("codex.json", |auth| {
             auth.metadata.insert("use_siwc".into(), json!(false));
@@ -1880,7 +1880,7 @@ async fn outer_only_refresh_preserves_unattempted_siwc_failure() {
     assert_eq!(live.next_refresh_after, backoff);
 }
 
-fn outside_expiry(dir: &tempfile::TempDir) {
+pub(super) fn outside_expiry(dir: &tempfile::TempDir) {
     let mut outside = disk(dir);
     outside["expired"] = json!("2099-03-01T00:00:00Z");
     std::fs::write(
@@ -2001,7 +2001,7 @@ async fn pending_reconciliation_without_siwc_does_not_create_empty_partition() {
 }
 
 // Fix 9: completion belongs to an operation, not its token values.
-fn hold_matching_save(
+pub(super) fn hold_matching_save(
     manager: &Manager,
     predicate: impl Fn(&Auth) -> bool + Send + Sync + 'static,
 ) -> SaveHold {
@@ -2024,7 +2024,7 @@ fn hold_matching_save(
     }
 }
 
-fn siwc_rotation_executor() -> Arc<FakeExecutor> {
+pub(super) fn siwc_rotation_executor() -> Arc<FakeExecutor> {
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(|before| {
         let mut after = before.clone();
@@ -2406,7 +2406,7 @@ async fn edit_writes_published_rotation_when_its_own_save_is_skipped() {
     assert_eq!(disk(&dir)["note"], "edit-during-refresh");
 }
 
-fn partition_rotation_executor(outer: bool, label: &'static str) -> Arc<FakeExecutor> {
+pub(super) fn partition_rotation_executor(outer: bool, label: &'static str) -> Arc<FakeExecutor> {
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(move |before| {
         let mut after = before.clone();
@@ -2485,7 +2485,7 @@ async fn pending_siwc_survives_later_outer_rotation_and_management_replace() {
     independent_pending_partition_survives_replace(false).await;
 }
 
-fn later_expiry_executor() -> Arc<FakeExecutor> {
+pub(super) fn later_expiry_executor() -> Arc<FakeExecutor> {
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(|before| {
         let mut after = before.clone();
@@ -3580,7 +3580,11 @@ async fn admitted_refresh_may_finish_after_discard_aba() {
 }
 
 // Fresh observations serialize with manager saves; payloads only supply settings.
-fn observed(manager: &Manager, files: &FileStore, hint: &Auth) -> crate::manager::AdoptionResult {
+pub(super) fn observed(
+    manager: &Manager,
+    files: &FileStore,
+    hint: &Auth,
+) -> crate::manager::AdoptionResult {
     manager
         .adopt_observed(hint, None, |live| {
             files
@@ -3590,7 +3594,7 @@ fn observed(manager: &Manager, files: &FileStore, hint: &Auth) -> crate::manager
         .unwrap()
 }
 
-fn outer_rotation(before: &Auth, name: &str) -> Auth {
+pub(super) fn outer_rotation(before: &Auth, name: &str) -> Auth {
     let mut after = before.clone();
     after
         .metadata
@@ -4176,7 +4180,13 @@ fn replace_origin_failure_retries_but_ineligible_policy_discards() {
 }
 
 // Manager-owned durability regressions. Synthetic credentials never leave the store.
-fn rotate_partition(manager: &Manager, store: &ObservedStore, outer: bool, name: &str, fail: bool) {
+pub(super) fn rotate_partition(
+    manager: &Manager,
+    store: &ObservedStore,
+    outer: bool,
+    name: &str,
+    fail: bool,
+) {
     let before = manager.get("codex.json").unwrap();
     let mut after = (*before).clone();
     if outer {
@@ -4207,7 +4217,7 @@ fn rotate_partition(manager: &Manager, store: &ObservedStore, outer: bool, name:
         .unwrap();
 }
 
-fn discard_work(manager: &Manager) {
+pub(super) fn discard_work(manager: &Manager) {
     for runtime_only in [true, false] {
         manager
             .edit_unsaved("codex.json", |auth| {
@@ -4219,7 +4229,7 @@ fn discard_work(manager: &Manager) {
     }
 }
 
-fn partition(outer: bool) -> crate::auth::CodexCredentialPartition {
+pub(super) fn partition(outer: bool) -> crate::auth::CodexCredentialPartition {
     if outer {
         crate::auth::CodexCredentialPartition::Outer
     } else {
@@ -4227,7 +4237,7 @@ fn partition(outer: bool) -> crate::auth::CodexCredentialPartition {
     }
 }
 
-fn partition_token(auth: &Auth, outer: bool) -> &Value {
+pub(super) fn partition_token(auth: &Auth, outer: bool) -> &Value {
     if outer {
         &auth.metadata["refresh_token"]
     } else {
@@ -5329,7 +5339,7 @@ fn policy_shortcut_rejects_binding_changed_during_capability_read() {
     );
 }
 
-fn hold_admitted_chain_save(manager: &Manager) -> SaveHold {
+pub(super) fn hold_admitted_chain_save(manager: &Manager) -> SaveHold {
     let (release, receiver) = mpsc::channel();
     let receiver = Mutex::new(receiver);
     let entered = Arc::new(Notify::new());
@@ -5744,7 +5754,10 @@ fn marked_written_result_is_recorded_when_readback_fails() {
     }
 }
 
-fn partition_map_mut(auth: &mut Auth, outer: bool) -> &mut serde_json::Map<String, Value> {
+pub(super) fn partition_map_mut(
+    auth: &mut Auth,
+    outer: bool,
+) -> &mut serde_json::Map<String, Value> {
     if outer {
         &mut auth.metadata
     } else {
@@ -5945,7 +5958,7 @@ async fn empty_supported_replace_keeps_held_refresh_operation() {
     }
 }
 
-fn sparse_identity_executor(outer: bool) -> Arc<FakeExecutor> {
+pub(super) fn sparse_identity_executor(outer: bool) -> Arc<FakeExecutor> {
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(move |before| {
         let mut after = before.clone();
@@ -6666,13 +6679,13 @@ pub(super) async fn bounded<F: Future>(future: F) -> F::Output {
 }
 
 /// A seeded credential directory: `codex.json` holds the fixture's tokens (A).
-struct Seeded {
-    dir: tempfile::TempDir,
-    files: Arc<FileStore>,
-    gate: ActiveGate,
+pub(super) struct Seeded {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) files: Arc<FileStore>,
+    pub(super) gate: ActiveGate,
 }
 
-fn seeded() -> Seeded {
+pub(super) fn seeded() -> Seeded {
     let root = std::env::var_os("OFP_TEST_SCRATCH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -6695,29 +6708,33 @@ fn seeded() -> Seeded {
 }
 
 /// A manager over a seeded directory, with the fixture registered unsaved.
-struct Rig {
-    dir: tempfile::TempDir,
-    store: Arc<ObservedStore>,
-    manager: Manager,
-    models: Arc<FakeModels>,
+pub(super) struct Rig {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) store: Arc<ObservedStore>,
+    pub(super) manager: Manager,
+    pub(super) models: Arc<FakeModels>,
 }
 
 impl Rig {
-    fn path(&self) -> std::path::PathBuf {
+    pub(super) fn path(&self) -> std::path::PathBuf {
         self.dir.path().join("codex.json")
     }
 
-    fn disk(&self) -> Value {
+    pub(super) fn disk(&self) -> Value {
         disk(&self.dir)
     }
 
-    fn live(&self) -> Arc<Auth> {
+    pub(super) fn live(&self) -> Arc<Auth> {
         self.manager.get("codex.json").unwrap()
     }
 }
 
 /// The manager's store is `outer` when given (a wrapper over `store`).
-fn assemble(seeded: Seeded, store: Arc<ObservedStore>, outer: Option<Arc<dyn AuthStore>>) -> Rig {
+pub(super) fn assemble(
+    seeded: Seeded,
+    store: Arc<ObservedStore>,
+    outer: Option<Arc<dyn AuthStore>>,
+) -> Rig {
     let models = Arc::new(FakeModels::default());
     models.register("codex.json", &["gpt-5"]);
     let outer = outer.unwrap_or_else(|| store.clone());
@@ -6732,7 +6749,7 @@ fn assemble(seeded: Seeded, store: Arc<ObservedStore>, outer: Option<Arc<dyn Aut
     }
 }
 
-fn rig() -> Rig {
+pub(super) fn rig() -> Rig {
     let seeded = seeded();
     let store = observe(seeded.files.clone(), false);
     assemble(seeded, store, None)
@@ -6742,24 +6759,24 @@ fn rig() -> Rig {
 /// forwards each to an `ObservedStore`. The two pure queries
 /// (`supports_codex_refresh_patches`, `binding_generation`) are not recorded.
 /// `lease_error` makes `codex_refresh_lease` fail with that kind.
-struct Recording {
-    inner: Arc<ObservedStore>,
-    calls: Mutex<Vec<&'static str>>,
-    lease_error: Mutex<Option<io::ErrorKind>>,
+pub(super) struct Recording {
+    pub(super) inner: Arc<ObservedStore>,
+    pub(super) calls: Mutex<Vec<&'static str>>,
+    pub(super) lease_error: Mutex<Option<io::ErrorKind>>,
     /// Notified at every `codex_refresh_lease` call.
-    leased: Notify,
+    pub(super) leased: Notify,
 }
 
 impl Recording {
-    fn note(&self, call: &'static str) {
+    pub(super) fn note(&self, call: &'static str) {
         lock(&self.calls).push(call);
     }
 
-    fn calls(&self) -> Vec<&'static str> {
+    pub(super) fn calls(&self) -> Vec<&'static str> {
         lock(&self.calls).clone()
     }
 
-    fn count(&self, call: &str) -> usize {
+    pub(super) fn count(&self, call: &str) -> usize {
         lock(&self.calls).iter().filter(|c| **c == call).count()
     }
 }
@@ -6853,7 +6870,7 @@ impl AuthStore for Recording {
 }
 
 /// A rig whose manager's store is a `Recording` over the `ObservedStore`.
-fn recording_rig(lease_unsupported: bool) -> (Rig, Arc<Recording>) {
+pub(super) fn recording_rig(lease_unsupported: bool) -> (Rig, Arc<Recording>) {
     let seeded = seeded();
     let store = observe(seeded.files.clone(), lease_unsupported);
     let recording = Arc::new(Recording {
@@ -6867,21 +6884,21 @@ fn recording_rig(lease_unsupported: bool) -> (Rig, Arc<Recording>) {
 
 /// A Codex executor that records what it is given, can park at the send, and
 /// answers through its `FakeExecutor`.
-struct Probe {
-    fake: Arc<FakeExecutor>,
-    id: String,
-    entered: Notify,
-    release: Semaphore,
-    hold: AtomicBool,
-    seen: Mutex<Vec<Arc<Auth>>>,
-    options: Mutex<Vec<RefreshOptions>>,
-    spent: Mutex<Vec<Value>>,
-    reused: AtomicU32,
-    at_entry: Mutex<Option<SaveHook>>,
+pub(super) struct Probe {
+    pub(super) fake: Arc<FakeExecutor>,
+    pub(super) id: String,
+    pub(super) entered: Notify,
+    pub(super) release: Semaphore,
+    pub(super) hold: AtomicBool,
+    pub(super) seen: Mutex<Vec<Arc<Auth>>>,
+    pub(super) options: Mutex<Vec<RefreshOptions>>,
+    pub(super) spent: Mutex<Vec<Value>>,
+    pub(super) reused: AtomicU32,
+    pub(super) at_entry: Mutex<Option<SaveHook>>,
 }
 
 impl Probe {
-    fn new(id: &str, hold: bool) -> Arc<Self> {
+    pub(super) fn new(id: &str, hold: bool) -> Arc<Self> {
         Arc::new(Self {
             fake: FakeExecutor::new(id),
             id: id.to_owned(),
@@ -6897,7 +6914,7 @@ impl Probe {
     }
 
     /// Answers each refresh with an outer rotation named `name`.
-    fn rotating(self: Arc<Self>, name: &'static str) -> Arc<Self> {
+    pub(super) fn rotating(self: Arc<Self>, name: &'static str) -> Arc<Self> {
         self.fake.set_refresh(move |before| {
             let mut after = before.clone();
             after
@@ -6918,31 +6935,31 @@ impl Probe {
     }
 
     /// How many sends carried a refresh token an earlier send had spent.
-    fn reused(&self) -> u32 {
+    pub(super) fn reused(&self) -> u32 {
         self.reused.load(Ordering::SeqCst)
     }
 
-    fn sent(&self) -> usize {
+    pub(super) fn sent(&self) -> usize {
         lock(&self.seen).len()
     }
 
     /// The outer refresh token the nth send carried.
-    fn sent_refresh(&self, n: usize) -> Value {
+    pub(super) fn sent_refresh(&self, n: usize) -> Value {
         lock(&self.seen)[n].metadata["refresh_token"].clone()
     }
 
-    fn set_at_entry(&self, hook: impl Fn(&Auth) + Send + Sync + 'static) {
+    pub(super) fn set_at_entry(&self, hook: impl Fn(&Auth) + Send + Sync + 'static) {
         *lock(&self.at_entry) = Some(Arc::new(hook));
     }
 
-    async fn wait_entered(&self) {
+    pub(super) async fn wait_entered(&self) {
         tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
             .await
             .expect("the refresh reaches the executor");
     }
 
     /// Lets a parked send go, and every later one.
-    fn release(&self) {
+    pub(super) fn release(&self) {
         self.hold.store(false, Ordering::SeqCst);
         self.release.add_permits(1);
     }
@@ -7013,7 +7030,7 @@ impl ProviderExecutor for Probe {
 
 /// The fixture with its outer partition rotated A -> B, as a live refresh
 /// intent no store has seen.
-fn outer_b_intent() -> Auth {
+pub(super) fn outer_b_intent() -> Auth {
     let before = fixture();
     let mut after = before.clone();
     after
@@ -7032,7 +7049,7 @@ fn outer_b_intent() -> Auth {
 }
 
 /// The newest generation published for `codex.json`'s projections.
-fn projection_generation(models: &FakeModels) -> Option<u64> {
+pub(super) fn projection_generation(models: &FakeModels) -> Option<u64> {
     models
         .published()
         .iter()
@@ -7147,7 +7164,7 @@ async fn leased_commit_composes_pending_and_live_intent_before_the_send() {
 }
 
 /// Whether any save the store refused was refused for a refresh in flight.
-fn refused_for_refresh(store: &ObservedStore) -> bool {
+pub(super) fn refused_for_refresh(store: &ObservedStore) -> bool {
     lock(&store.guarded)
         .iter()
         .any(|(_, deferral)| matches!(deferral, Some(SaveDeferral::RefreshInFlight)))
@@ -7155,7 +7172,7 @@ fn refused_for_refresh(store: &ObservedStore) -> bool {
 
 /// The calls of a recording, without the lease query (step 2's, which a pass
 /// makes before it learns the store is `Unsupported`).
-fn without_lease_queries(calls: &[&'static str]) -> Vec<&'static str> {
+pub(super) fn without_lease_queries(calls: &[&'static str]) -> Vec<&'static str> {
     calls
         .iter()
         .copied()
@@ -7168,7 +7185,7 @@ fn without_lease_queries(calls: &[&'static str]) -> Vec<&'static str> {
 // origin check, which resolves the record's file before the save writes; it
 // was made then too, and is pinned here, in place, not filtered out.
 /// The store calls of an unleased pass that rotates the outer partition.
-const ROTATING_UNLEASED_CALLS: &[&str] = &[
+pub(super) const ROTATING_UNLEASED_CALLS: &[&str] = &[
     "save_guarded",
     "codex_origin",
     "read_back",
@@ -7176,7 +7193,7 @@ const ROTATING_UNLEASED_CALLS: &[&str] = &[
     "same_record",
 ];
 /// The store calls of an unleased pass that rotates nothing.
-const IDLE_UNLEASED_CALLS: &[&str] = &[
+pub(super) const IDLE_UNLEASED_CALLS: &[&str] = &[
     "save_guarded",
     "codex_origin",
     "read_back",
@@ -7184,7 +7201,7 @@ const IDLE_UNLEASED_CALLS: &[&str] = &[
     "same_record",
 ];
 /// The store calls of a refresh of a non-Codex record.
-const GEMINI_CALLS: &[&str] = &["save_guarded"];
+pub(super) const GEMINI_CALLS: &[&str] = &["save_guarded"];
 
 #[tokio::test(flavor = "current_thread")]
 async fn unsupported_store_rotating_pass_keeps_todays_call_sequence() {
@@ -7241,7 +7258,7 @@ async fn unsupported_store_pass_without_rotation_keeps_todays_call_sequence() {
 }
 
 /// A gemini record on a `FileStore`, under a `Recording` store.
-fn gemini_rig() -> (Rig, Arc<Recording>, Auth) {
+pub(super) fn gemini_rig() -> (Rig, Arc<Recording>, Auth) {
     let seeded = seeded();
     let gemini = auth_with_metadata(
         "gemini.json",
@@ -7404,7 +7421,7 @@ async fn auto_refresh_job_keeps_the_lease_deferral() {
 
 /// The fixture with its outer partition rotated A -> B and the rotation held
 /// as a pending one, which no file has seen.
-fn pending_b() -> Auth {
+pub(super) fn pending_b() -> Auth {
     let mut live = outer_b_intent();
     let CodexPersistIntent::Refresh(patch) = std::mem::take(&mut live.codex_persist_intent) else {
         panic!("the fixture carries an intent");
@@ -7414,7 +7431,7 @@ fn pending_b() -> Auth {
 }
 
 /// A contender for the credential lock of `path`, with a short wait.
-async fn contend_for_lock(path: std::path::PathBuf) -> io::Result<()> {
+pub(super) async fn contend_for_lock(path: std::path::PathBuf) -> io::Result<()> {
     crate::auth::credential_lock::acquire_with_timeout(path, Duration::from_millis(200))
         .await
         .map(drop)
@@ -7457,7 +7474,7 @@ async fn pending_write_failure_defers_before_the_send_and_frees_the_lock() {
     .await;
 }
 
-fn missing_epoch(rig: &Rig) -> Option<u64> {
+pub(super) fn missing_epoch(rig: &Rig) -> Option<u64> {
     rig.manager
         .lock()
         .missing_file_deferrals
@@ -7556,7 +7573,7 @@ async fn a_non_codex_file_for_a_codex_record_defers_as_not_codex() {
 
 /// Runs `act` once, on the thread that takes the credential lock, as the lock
 /// is acquired: while the pass holds the lease.
-fn on_lease_held(rig: &Rig, act: impl Fn() + Send + Sync + 'static) {
+pub(super) fn on_lease_held(rig: &Rig, act: impl Fn() + Send + Sync + 'static) {
     let armed = Arc::new(AtomicBool::new(true));
     crate::auth::credential_lock::set_test_hook(
         &rig.path(),
@@ -7697,7 +7714,7 @@ async fn a_lost_commit_task_never_marks_a_different_file() {
 /// way a published pass whose proof failed leaves it, then runs the scheduler
 /// until the one job it queues for that state alone has finished. The tokens
 /// of every record here are not due, so that job is `resolution_only`.
-async fn run_resolution_only_job(rig: &Rig, id: &str, file: &std::path::Path) {
+pub(super) async fn run_resolution_only_job(rig: &Rig, id: &str, file: &std::path::Path) {
     let CodexPersistIntent::Refresh(patch) = outer_b_intent().codex_persist_intent else {
         panic!("the fixture carries an intent");
     };
@@ -7829,7 +7846,7 @@ async fn a_resolution_job_on_an_ineligible_record_keeps_the_not_due_exit() {
 }
 
 /// A second Codex credential, with its own file and so its own lock.
-fn other_codex(id: &str) -> Auth {
+pub(super) fn other_codex(id: &str) -> Auth {
     auth_with_metadata(
         id,
         "codex",
@@ -7952,7 +7969,7 @@ async fn saved_update_of_the_leased_credential_waits_for_the_lease() {
 // ---- B-7 (c): the lock-order audit of the source ----
 
 /// The production part of a source file: everything before its test module.
-fn production(src: &str) -> &str {
+pub(super) fn production(src: &str) -> &str {
     let cut = src
         .find("#[cfg(test)]\nmod tests")
         .expect("the source ends with a test module");
@@ -7962,7 +7979,7 @@ fn production(src: &str) -> &str {
 /// `src` without comments, string literals and character literals, ASCII
 /// only, whitespace collapsed and spaces around dots removed, so a token such
 /// as `self.lock()` is found however rustfmt broke the chain.
-fn code_only(src: &str) -> String {
+pub(super) fn code_only(src: &str) -> String {
     let chars: Vec<char> = src.chars().collect();
     let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let mut out = String::with_capacity(src.len());
@@ -8057,7 +8074,7 @@ fn code_only(src: &str) -> String {
 
 /// How many times `token` occurs in `code`, not as the tail of a longer
 /// identifier when it starts like one.
-fn token_count(code: &str, token: &str) -> usize {
+pub(super) fn token_count(code: &str, token: &str) -> usize {
     let starts_like_ident = token
         .chars()
         .next()
@@ -8074,7 +8091,7 @@ fn token_count(code: &str, token: &str) -> usize {
 }
 
 /// The forbidden tokens `text` holds, by name.
-fn forbidden_in(scope: &str, text: &str, forbidden: &[&str]) -> Vec<String> {
+pub(super) fn forbidden_in(scope: &str, text: &str, forbidden: &[&str]) -> Vec<String> {
     forbidden
         .iter()
         .filter(|token| token_count(text, token) > 0)
@@ -8083,7 +8100,7 @@ fn forbidden_in(scope: &str, text: &str, forbidden: &[&str]) -> Vec<String> {
 }
 
 /// The text between the bracket at `open` and its match, brackets excluded.
-fn bracketed(code: &str, open: usize) -> &str {
+pub(super) fn bracketed(code: &str, open: usize) -> &str {
     let bytes = code.as_bytes();
     let (opener, closer) = match bytes[open] {
         b'{' => (b'{', b'}'),
@@ -8105,7 +8122,7 @@ fn bracketed(code: &str, open: usize) -> &str {
 }
 
 /// The body of every `fn <name>` for which `named` holds.
-fn fn_bodies(code: &str, named: impl Fn(&str) -> bool) -> Vec<(String, &str)> {
+pub(super) fn fn_bodies(code: &str, named: impl Fn(&str) -> bool) -> Vec<(String, &str)> {
     let mut found = Vec::new();
     for (at, _) in code.match_indices("fn ") {
         if code[..at]
@@ -8129,7 +8146,7 @@ fn fn_bodies(code: &str, named: impl Fn(&str) -> bool) -> Vec<(String, &str)> {
 }
 
 /// The arguments of every `.<call>(` in `code`.
-fn call_args<'a>(code: &'a str, call: &str) -> Vec<&'a str> {
+pub(super) fn call_args<'a>(code: &'a str, call: &str) -> Vec<&'a str> {
     let needle = format!(".{call}(");
     code.match_indices(&needle)
         .map(|(at, _)| bracketed(code, at + needle.len() - 1))
@@ -8137,7 +8154,7 @@ fn call_args<'a>(code: &'a str, call: &str) -> Vec<&'a str> {
 }
 
 /// The text of `src` from `from` to `to`, the latter included.
-fn raw_between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+pub(super) fn raw_between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
     let start = src
         .find(from)
         .unwrap_or_else(|| panic!("marker missing: {from}"));
@@ -8149,7 +8166,7 @@ fn raw_between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
     &src[start..end]
 }
 
-const LEASED_SECTION_FORBIDDEN: &[&str] = &[
+pub(super) const LEASED_SECTION_FORBIDDEN: &[&str] = &[
     "mutation_gate",
     "reload_gate",
     "with_adoption",
@@ -8163,7 +8180,7 @@ const LEASED_SECTION_FORBIDDEN: &[&str] = &[
     "self.lock()",
 ];
 
-const LOCKED_SCOPE_FORBIDDEN: &[&str] = &[
+pub(super) const LOCKED_SCOPE_FORBIDDEN: &[&str] = &[
     "publish_projections",
     "queue_refresh_reschedule",
     ".await",
@@ -8174,7 +8191,7 @@ const LOCKED_SCOPE_FORBIDDEN: &[&str] = &[
     "self.lock()",
 ];
 
-const TAIL_FENCE_FORBIDDEN: &[&str] = &[
+pub(super) const TAIL_FENCE_FORBIDDEN: &[&str] = &[
     "prove(",
     "Handle::from_path",
     "is_same_file",
@@ -8187,7 +8204,7 @@ const TAIL_FENCE_FORBIDDEN: &[&str] = &[
 
 /// Audit 1: nothing between the lease markers takes a manager-wide lock,
 /// opens a gate, or persists.
-fn audit_leased_section(refresh: &str) -> Vec<String> {
+pub(super) fn audit_leased_section(refresh: &str) -> Vec<String> {
     let section = raw_between(production(refresh), "// lease: held", "// lease: released");
     forbidden_in(
         "leased section",
@@ -8199,7 +8216,7 @@ fn audit_leased_section(refresh: &str) -> Vec<String> {
 /// Audit 2: every `*_locked` function, `.locked(` closure and
 /// `.leased_origin_check(` argument list is short, synchronous and free of
 /// I/O. Also returns how many of each it examined.
-fn audit_locked_scopes(refresh: &str) -> (Vec<String>, [usize; 3]) {
+pub(super) fn audit_locked_scopes(refresh: &str) -> (Vec<String>, [usize; 3]) {
     let code = code_only(production(refresh));
     let mut violations = Vec::new();
     let bodies = fn_bodies(&code, |name| name.ends_with("_locked"));
@@ -8226,7 +8243,7 @@ fn audit_locked_scopes(refresh: &str) -> (Vec<String>, [usize; 3]) {
 }
 
 /// Audit 3: the two fences in `lifecycle.rs` that decide under the state lock.
-fn audit_tail_fences(lifecycle: &str) -> Vec<String> {
+pub(super) fn audit_tail_fences(lifecycle: &str) -> Vec<String> {
     let lifecycle = production_or_all(lifecycle);
     let mut violations = Vec::new();
     // Fence 2: the `refused` closure only hands over to `record_refused_tail`.
@@ -8263,13 +8280,13 @@ fn audit_tail_fences(lifecycle: &str) -> Vec<String> {
     violations
 }
 
-fn production_or_all(src: &str) -> &str {
+pub(super) fn production_or_all(src: &str) -> &str {
     src.find("#[cfg(test)]\nmod tests")
         .map_or(src, |cut| &src[..cut])
 }
 
-const REFRESH_SOURCE: &str = include_str!("../refresh.rs");
-const LIFECYCLE_SOURCE: &str = include_str!("../lifecycle.rs");
+pub(super) const REFRESH_SOURCE: &str = include_str!("../refresh.rs");
+pub(super) const LIFECYCLE_SOURCE: &str = include_str!("../lifecycle.rs");
 
 #[test]
 fn lock_order_audit_of_the_sources_finds_nothing() {
@@ -8290,7 +8307,7 @@ fn lock_order_audit_of_the_sources_finds_nothing() {
 }
 
 /// `src` with the first `from` replaced by `to`; the text must change.
-fn mutated(src: &str, from: &str, to: &str) -> String {
+pub(super) fn mutated(src: &str, from: &str, to: &str) -> String {
     let changed = src.replacen(from, to, 1);
     assert_ne!(changed, src, "the mutation target is missing: {from}");
     changed

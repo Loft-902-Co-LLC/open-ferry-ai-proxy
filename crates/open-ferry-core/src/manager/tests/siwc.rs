@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
 
-fn fixture() -> Auth {
+pub(super) fn fixture() -> Auth {
     auth_with_metadata(
         "codex.json",
         "codex",
@@ -34,7 +34,7 @@ fn fixture() -> Auth {
 
 /// Creates the file as a login does, then seeds the fixture's SIWC keys with a
 /// raw write: a login no longer writes them.
-fn create_with_siwc(store: &FileStore, dir: &tempfile::TempDir, auth: &Auth) {
+pub(super) fn create_with_siwc(store: &FileStore, dir: &tempfile::TempDir, auth: &Auth) {
     store.save_new(auth).unwrap();
     let path = dir.path().join(&auth.id);
     let mut on_disk: serde_json::Map<String, serde_json::Value> =
@@ -45,7 +45,7 @@ fn create_with_siwc(store: &FileStore, dir: &tempfile::TempDir, auth: &Auth) {
     std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
 }
 
-fn at(text: &str) -> crate::auth::Timestamp {
+pub(super) fn at(text: &str) -> crate::auth::Timestamp {
     crate::auth::parse_go_rfc3339(text).unwrap()
 }
 
@@ -230,19 +230,24 @@ fn merge_refreshed_metadata_preserves_siwc_and_concurrent_bind() {
 }
 
 pub(super) struct ControlledExecutor {
-    fake: Arc<FakeExecutor>,
-    entered: Notify,
-    release: Semaphore,
-    force: AtomicBool,
-    outer: bool,
-    siwc: bool,
-    failure_active: Option<bool>,
-    status: AtomicU16,
-    note: std::sync::Mutex<String>,
+    pub(super) fake: Arc<FakeExecutor>,
+    pub(super) entered: Notify,
+    pub(super) release: Semaphore,
+    pub(super) force: AtomicBool,
+    pub(super) outer: bool,
+    pub(super) siwc: bool,
+    pub(super) failure_active: Option<bool>,
+    pub(super) status: AtomicU16,
+    pub(super) note: std::sync::Mutex<String>,
 }
 
 impl ControlledExecutor {
-    fn new(outer: bool, siwc: bool, failure_active: Option<bool>, held: bool) -> Arc<Self> {
+    pub(super) fn new(
+        outer: bool,
+        siwc: bool,
+        failure_active: Option<bool>,
+        held: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             fake: FakeExecutor::new("codex"),
             entered: Notify::new(),
@@ -257,7 +262,7 @@ impl ControlledExecutor {
     }
 
     /// The status and message prefix of the partition failure it reports.
-    fn set_failure(&self, status: u16, note: &str) {
+    pub(super) fn set_failure(&self, status: u16, note: &str) {
         self.status.store(status, Ordering::SeqCst);
         *self.note.lock().unwrap() = note.into();
     }
@@ -351,7 +356,7 @@ impl ProviderExecutor for ControlledExecutor {
     }
 }
 
-fn disk_manager() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
+pub(super) fn disk_manager() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
     let root = std::env::var_os("OFP_TEST_SCRATCH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -373,7 +378,7 @@ fn disk_manager() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
 /// [`disk_manager`] with the manager over a store that gives no lease: the
 /// unleased refresh path these tests were written for. The returned store is
 /// the same files, for the peer's own writes.
-fn disk_manager_unleased() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
+pub(super) fn disk_manager_unleased() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
     let (dir, store, _leased) = disk_manager();
     let manager = Manager::new(
         Settings::default(),
@@ -384,8 +389,8 @@ fn disk_manager_unleased() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
     (dir, store, manager)
 }
 
-const NOON10: &str = "2026-10-13T12:10:00Z";
-const SECRETS: [&str; 4] = [
+pub(super) const NOON10: &str = "2026-10-13T12:10:00Z";
+pub(super) const SECRETS: [&str; 4] = [
     "siwc-old-token",
     "outer-old-token",
     "siwc-rotated-token",
@@ -444,7 +449,7 @@ async fn force_reaches_executor_and_partial_success_persists_both_directions() {
     }
 }
 
-fn error_os_code(error: &std::io::Error) -> Option<i32> {
+pub(super) fn error_os_code(error: &std::io::Error) -> Option<i32> {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(error) = source {
         if let Some(code) = error
@@ -459,10 +464,10 @@ fn error_os_code(error: &std::io::Error) -> Option<i32> {
 }
 
 // Observe completion without repeatedly opening the credential during rename.
-struct RefreshSaveEvent {
-    files: Arc<FileStore>,
-    completed: Notify,
-    last_error: std::sync::Mutex<Option<(std::io::ErrorKind, Option<i32>)>>,
+pub(super) struct RefreshSaveEvent {
+    pub(super) files: Arc<FileStore>,
+    pub(super) completed: Notify,
+    pub(super) last_error: std::sync::Mutex<Option<(std::io::ErrorKind, Option<i32>)>>,
 }
 
 impl AuthStore for RefreshSaveEvent {
@@ -764,7 +769,7 @@ async fn bind_during_refresh_save_reconciles_memory_and_obsoletes_old_failure() 
     assert!(live.codex_refresh_failure.is_none());
 }
 
-fn fixture_named(id: &str) -> Auth {
+pub(super) fn fixture_named(id: &str) -> Auth {
     let mut auth = fixture();
     auth.id = id.into();
     auth
@@ -772,7 +777,10 @@ fn fixture_named(id: &str) -> Auth {
 
 /// A store on disk and a manager whose clock reads `now_text`, with one
 /// registered Codex credential per id.
-fn disk_manager_at(now_text: &str, ids: &[&str]) -> (tempfile::TempDir, Arc<FileStore>, Manager) {
+pub(super) fn disk_manager_at(
+    now_text: &str,
+    ids: &[&str],
+) -> (tempfile::TempDir, Arc<FileStore>, Manager) {
     let root = std::env::var_os("OFP_TEST_SCRATCH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -799,7 +807,7 @@ fn disk_manager_at(now_text: &str, ids: &[&str]) -> (tempfile::TempDir, Arc<File
 /// A clocked disk manager whose executor rotates the `outer` and `siwc`
 /// partitions and reports a failure of the partition that is active (or not)
 /// when `use_siwc` is as given.
-fn partial_setup(
+pub(super) fn partial_setup(
     now_text: &str,
     use_siwc: bool,
     outer: bool,
@@ -828,7 +836,7 @@ fn partial_setup(
 
 /// Runs `hook` after a refresh was saved and before its partial failure is
 /// recorded, until the guard is dropped.
-fn race_hook<F, Fut>(
+pub(super) fn race_hook<F, Fut>(
     manager: &Manager,
     hook: F,
 ) -> crate::manager::refresh::partial_failure_seam::Guard
@@ -842,7 +850,7 @@ where
     )
 }
 
-fn set_use_siwc(manager: &Manager, value: bool) {
+pub(super) fn set_use_siwc(manager: &Manager, value: bool) {
     manager
         .edit_unsaved("codex.json", |auth| {
             auth.metadata.insert("use_siwc".into(), json!(value));
@@ -851,11 +859,11 @@ fn set_use_siwc(manager: &Manager, value: bool) {
         .unwrap();
 }
 
-fn refresh_failures(manager: &Manager, id: &str) -> u32 {
+pub(super) fn refresh_failures(manager: &Manager, id: &str) -> u32 {
     manager.lock().auths[id].refresh_failures
 }
 
-fn assert_retry_in(
+pub(super) fn assert_retry_in(
     auth: &Auth,
     before: crate::auth::Timestamp,
     after: crate::auth::Timestamp,
@@ -868,7 +876,7 @@ fn assert_retry_in(
     );
 }
 
-fn failed_partition(auth: &Auth) -> Option<crate::auth::CodexCredentialPartition> {
+pub(super) fn failed_partition(auth: &Auth) -> Option<crate::auth::CodexCredentialPartition> {
     auth.codex_refresh_failure
         .as_ref()
         .map(|failure| failure.partition)
@@ -1099,13 +1107,13 @@ async fn partial_failure_keeps_a_credential_that_became_terminal() {
 
 /// Holds a credential's lock the way another process of the store would, on
 /// a thread of its own, until released or dropped.
-struct HeldLock {
-    release: Option<std::sync::mpsc::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+pub(super) struct HeldLock {
+    pub(super) release: Option<std::sync::mpsc::Sender<()>>,
+    pub(super) thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HeldLock {
-    fn hold(path: std::path::PathBuf) -> Self {
+    pub(super) fn hold(path: std::path::PathBuf) -> Self {
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let thread = std::thread::spawn(move || {
@@ -1127,7 +1135,7 @@ impl HeldLock {
         }
     }
 
-    fn release(&mut self) {
+    pub(super) fn release(&mut self) {
         drop(self.release.take());
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
@@ -1142,7 +1150,7 @@ impl Drop for HeldLock {
 }
 
 /// Notifies once a save starts waiting for the credential's lock.
-fn lock_wait_signal(path: &std::path::Path) -> Arc<Notify> {
+pub(super) fn lock_wait_signal(path: &std::path::Path) -> Arc<Notify> {
     let waiting = Arc::new(Notify::new());
     let signal = waiting.clone();
     crate::auth::credential_lock::set_test_hook(
@@ -1232,7 +1240,7 @@ async fn refresh_save_waiting_for_one_credential_does_not_delay_another() {
 }
 
 /// Polls `future` on this thread, parking between polls: no runtime.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
+pub(super) fn block_on<F: std::future::Future>(future: F) -> F::Output {
     struct Unpark(std::thread::Thread);
     impl std::task::Wake for Unpark {
         fn wake(self: Arc<Self>) {
