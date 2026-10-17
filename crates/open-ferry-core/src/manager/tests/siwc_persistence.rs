@@ -635,6 +635,17 @@ fn settings_edit_during_record_comparison_does_not_discard_scoped_refresh() {
         true,
         false,
     ));
+    // A refresh publishes before it persists: live holds the refreshed tokens.
+    manager
+        .edit_unsaved("codex.json", |auth| {
+            auth.metadata
+                .insert("access_token".into(), json!("outer-new"));
+            auth.metadata
+                .insert("refresh_token".into(), json!("outer-refresh-new"));
+            Ok::<_, ()>(true)
+        })
+        .unwrap()
+        .unwrap();
     manager
         .edit("codex.json", |auth| {
             auth.metadata.insert("note".into(), json!("saved-newer"));
@@ -1875,8 +1886,67 @@ async fn pending_siwc_success_does_not_clear_newer_siwc_failure() {
     assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn consumed_pending_outer_is_not_embedded_in_later_siwc_refresh() {
+    let (dir, store, manager, _gate) = disk_manager();
+    manager.register_executor(expiry_executor());
+    store.fail_refresh.store(true, Ordering::SeqCst);
+    manager.force_refresh("codex.json").await.unwrap();
+    let mut counter = (*manager.get("codex.json").unwrap()).clone();
+    counter.success = 1;
+    // The SIWC refresh takes its base, which carries the pending outer patch,
+    // and is held inside the executor, before it publishes.
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let entered = Arc::new(Notify::new());
+    let notify = entered.clone();
+    let executor = FakeExecutor::new("codex");
+    executor.set_refresh(move |before| {
+        notify.notify_one();
+        lock(&release_rx)
+            .recv_timeout(Duration::from_secs(60))
+            .expect("refresh released");
+        let mut after = before.clone();
+        after.metadata["siwc"]["access_token"] = json!("siwc-new");
+        after.metadata["siwc"]["refresh_token"] = json!("siwc-refresh-new");
+        after.codex_refresh_failure = None;
+        after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+            &before.metadata,
+            &after.metadata,
+            false,
+            true,
+        ));
+        Ok(after)
+    });
+    manager.register_executor(executor);
+    let refreshing = manager.clone();
+    let refresh_task = tokio::spawn(async move { refreshing.force_refresh("codex.json").await });
+    entered.notified().await;
+    // The counter save writes and consumes the outer patch while the refresh waits.
+    let saving = manager.clone();
+    let counter_task = tokio::task::spawn_blocking(move || {
+        saving.persist(
+            &counter,
+            counter.registration_epoch,
+            counter.generation,
+            0,
+            crate::manager::lifecycle::Save::Yes,
+        )
+    });
+    assert!(matches!(
+        counter_task.await.unwrap().unwrap(),
+        super::super::Persisted::Written { .. }
+    ));
+    assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
+    outside_expiry(&dir);
+    release_tx.send(()).unwrap();
+    refresh_task.await.unwrap().unwrap();
+    assert_eq!(disk(&dir)["expired"], "2099-03-01T00:00:00Z");
+    assert_eq!(disk(&dir)["siwc"]["refresh_token"], "siwc-refresh-new");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_counter_save_parked_across_siwc_refresh_is_deferred() {
     let (dir, store, manager, _gate) = disk_manager();
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
@@ -1903,15 +1973,17 @@ async fn consumed_pending_outer_is_not_embedded_in_later_siwc_refresh() {
     let refresh_task = tokio::spawn(async move { refreshing.force_refresh("codex.json").await });
     refresh_hold.wait_entered().await;
     drop(counter_hold);
+    // The guard defers the stale save, so its pending outer patch is written
+    // by the refresh instead.
     assert!(matches!(
         counter_task.await.unwrap().unwrap(),
-        super::super::Persisted::Written { .. }
+        super::super::Persisted::Deferred(crate::auth::SaveDeferral::Stale)
     ));
-    assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
+    assert_eq!(disk(&dir)["expired"], "2099-01-01T00:00:00Z");
     outside_expiry(&dir);
     drop(refresh_hold);
     refresh_task.await.unwrap().unwrap();
-    assert_eq!(disk(&dir)["expired"], "2099-03-01T00:00:00Z");
+    assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
     assert_eq!(disk(&dir)["siwc"]["refresh_token"], "siwc-refresh-new");
 }
 

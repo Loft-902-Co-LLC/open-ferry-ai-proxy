@@ -53,6 +53,7 @@ use super::credential::{
     KIND_API_KEY, access_token, auth_kind, has_refresh_credential, is_zero, last_refresh_timestamp,
     preferred_interval, refresh_token,
 };
+use super::lifecycle::LeasedTail;
 use super::merge::normalize_credential_metadata;
 use super::text::{equal_fold, go_lower};
 use super::{Entry, Manager, ManagerError, Shared, State, lock};
@@ -1502,13 +1503,13 @@ impl Manager {
             if save_failure.is_some() {
                 // The common update path logs one generic injected save
                 // failure; the barrier-specific cause is not carried into it.
-                self.update_refreshed_after_save_failure(&auth, base_epoch, updated)
+                self.update_refreshed_after_save_failure(&auth, base_epoch, updated, None)
             } else {
-                self.save_refreshed(&auth, base_epoch, updated).await
+                self.save_refreshed(&auth, base_epoch, updated, None).await
             }
         };
         #[cfg(not(feature = "blue-green-test"))]
-        let save_result = self.save_refreshed(&auth, base_epoch, updated).await;
+        let save_result = self.save_refreshed(&auth, base_epoch, updated, None).await;
         let (saved, generation) = match save_result {
             Ok(Some(saved)) => saved,
             Ok(None) => return Err(ManagerError::Other(format!("auth {id} not found"))),
@@ -1556,28 +1557,30 @@ impl Manager {
         base: &Arc<Auth>,
         base_epoch: u64,
         updated: Auth,
+        lease: Option<LeasedTail>,
     ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
         let blocking =
             self.shared.store.is_some() && crate::auth::codex_refresh::is_codex_auth(&updated);
         #[cfg(feature = "blue-green-test")]
         let blocking = blocking || crate::test_hooks::is_installed();
+        let save = move |manager: &Self, base: &Auth, updated: Auth| match lease {
+            Some(tail) => manager.update_refreshed_leased(base, base_epoch, updated, tail),
+            None => manager.update_refreshed(base, base_epoch, updated),
+        };
         if !blocking || tokio::runtime::Handle::try_current().is_err() {
-            return self.update_refreshed(base, base_epoch, updated);
+            return save(self, base, updated);
         }
         let manager = self.clone();
         let base = base.clone();
         let saved = if let Some(operation) = crate::gate::Operation::current() {
             // run_blocking owns admission even if the caller drops its await.
             operation
-                .run_blocking(move || manager.update_refreshed(&base, base_epoch, updated))
+                .run_blocking(move || save(&manager, &base, updated))
                 .await
         } else {
             // No operation is in scope; the owned closure retains manager save admission.
             #[allow(clippy::disallowed_methods)]
-            tokio::task::spawn_blocking(move || {
-                manager.update_refreshed(&base, base_epoch, updated)
-            })
-            .await
+            tokio::task::spawn_blocking(move || save(&manager, &base, updated)).await
         };
         saved.map_err(|error| {
             ManagerError::Store(std::io::Error::other(format!(

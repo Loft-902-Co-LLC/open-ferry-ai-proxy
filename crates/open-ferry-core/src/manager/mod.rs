@@ -140,9 +140,24 @@ type PersistLock = Arc<Mutex<(u64, u64)>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Persisted {
-    Written { requested: UndurablePartitions },
+    Written {
+        requested: UndurablePartitions,
+    },
     Skipped,
     Ineligible,
+    /// The store refused a Codex save without writing; the change is owed.
+    Deferred(crate::auth::SaveDeferral),
+}
+
+/// A refused save whose change is still owed to the file. Memory only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OwedSave {
+    /// Why the latest refusal happened.
+    pub(crate) reason: crate::auth::SaveDeferral,
+    /// The snapshot generation of the refused save, raised to the largest seen
+    /// while owed. Only a `Written` Configuration save of this generation or a
+    /// later one covers it.
+    pub(crate) version: u64,
 }
 
 /// What the manager reads the time from.
@@ -173,6 +188,8 @@ pub(crate) struct Entry {
     /// Partitions held because a read-back mark's later pass found a third
     /// token. Memory only; only a token command ends it.
     pub(crate) landing_unconfirmed: UndurablePartitions,
+    /// A refused save whose change is still owed. Memory only.
+    pub(crate) owed_save: Option<OwedSave>,
 }
 
 /// A post-send origin that could not be proved. Memory only, like `undurable`.
@@ -219,6 +236,54 @@ impl Entry {
             .as_ref()
             .map(|u| u.partitions)
             .unwrap_or_default()
+    }
+
+    /// The partitions whose mark has a `ReadBack` cause.
+    pub(crate) fn read_back_partitions(&self) -> UndurablePartitions {
+        UndurablePartitions {
+            outer: matches!(
+                self.undurable_causes.outer,
+                Some(MarkCause::ReadBack { .. })
+            ),
+            siwc: matches!(self.undurable_causes.siwc, Some(MarkCause::ReadBack { .. })),
+        }
+    }
+
+    /// What every unleased save withholds: the unresolved state's partitions
+    /// and the partitions with a `ReadBack` cause.
+    pub(crate) fn withheld(&self) -> UndurablePartitions {
+        self.unresolved_partitions()
+            .union(self.read_back_partitions())
+    }
+
+    /// Records the state for `rotation.requested()`. A present state with the
+    /// same origin gains the partitions and takes the newer rotation; any
+    /// other present state is replaced. At most one setter runs per pass, so
+    /// neither happens in practice.
+    pub(crate) fn record_unresolved(
+        &mut self,
+        origin: &crate::auth::CodexOrigin,
+        rotation: &crate::auth::codex_refresh::CredentialRefreshPatch,
+    ) {
+        let requested = rotation.requested();
+        let partitions = UndurablePartitions {
+            outer: requested.outer,
+            siwc: requested.siwc,
+        };
+        match self.unresolved_origin.as_mut() {
+            Some(present) if present.origin == *origin => {
+                present.partitions = present.partitions.union(partitions);
+                present.rotation = rotation.clone();
+            }
+            _ => {
+                self.unresolved_origin = Some(UnresolvedOrigin {
+                    origin: origin.clone(),
+                    partitions,
+                    rotation: rotation.clone(),
+                    unproven: 0,
+                });
+            }
+        }
     }
 
     /// Sets the state to `None`. The record is not changed.

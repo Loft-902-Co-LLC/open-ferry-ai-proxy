@@ -82,13 +82,17 @@ use super::cooldown_store;
 use super::credential::{
     KIND_API_KEY, SOURCE_CONFIG, auth_kind, auth_source_kind, credentials_changed, validate_weight,
 };
-use super::merge::{merge_refreshed_auth, normalize_credential_metadata};
+use super::merge::{ResponseCredentials, merge_refreshed_auth_with, normalize_credential_metadata};
 use super::models::Resolver;
 use super::refresh::clear_unauthorized_model_states;
 use super::select::{executor_key_from_auth, lookup_executor};
 use super::text::{canonical_model_key, equal_fold, go_lower};
 use super::{EditError, Entry, Manager, ManagerError, ReloadGuard, State, lock};
-use crate::auth::{AdoptionRead, Auth, Status, Timestamp};
+use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
+use crate::auth::{
+    AdoptionRead, Auth, AuthStore, CodexOrigin, GuardedSave, OriginProof, SaveDeferral, Status,
+    Timestamp, WithheldPartitions,
+};
 use crate::executor::ProviderExecutor;
 
 /// How many times reconciliation re-reads the registry when its epoch moves
@@ -221,7 +225,113 @@ enum UpdateMode<'a> {
     Refresh {
         base: &'a Auth,
         base_epoch: u64,
+        /// Set only by a leased pass; every caller passes `None` until then.
+        lease: Option<&'a LeasedTail>,
     },
+}
+
+/// What the ordinary save after a leased refresh must respect.
+#[derive(Clone)]
+pub(crate) struct LeasedTail {
+    /// The lease's origin identity. Every fence compares against it.
+    pub(crate) origin: CodexOrigin,
+    /// The pass's final rotation; shares its `written` flag with every clone.
+    pub(crate) rotation: CredentialRefreshPatch,
+    pub(crate) disposition: LeasedDisposition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeasedDisposition {
+    /// The ordinary save may persist the rotation (idempotent once landed;
+    /// retried if not).
+    Persist,
+    /// Policy forbade persisting the received rotation: no Refresh patch is
+    /// synthesized from this response, and nothing persists it.
+    PolicyRefused,
+    /// Publication could not prove the record's origin: the rotation is live
+    /// and the origin is unresolved, and the ordinary save writes nothing and
+    /// synthesizes nothing, as for `PolicyRefused`, but merges with
+    /// `ResponseCredentials::Merge`.
+    OriginUnresolved,
+}
+
+/// Attempts per origin check before the result counts as `Unproven`.
+pub(crate) const ORIGIN_CHECK_ATTEMPTS: u32 = 3;
+
+/// The live record's origin moved between the proof and the decision.
+pub(crate) struct OriginMoved;
+
+/// One proof of origin identity: made outside the state lock and under the
+/// lease, checked under the state lock. The tail builds none; it calls only the
+/// I/O-free [`OriginCheck::resolve`].
+pub(crate) struct OriginCheck {
+    /// The record's origin when the proof was made.
+    current: Option<CodexOrigin>,
+    /// `pinned.prove(current)`, or `Unproven` for a failed task or no `current`.
+    proof: OriginProof,
+    /// The final permitted attempt.
+    last: bool,
+}
+
+impl OriginCheck {
+    /// I/O-free: the record's origin under the store's current binding. No
+    /// store, no record, an error, or an opaque store's `Ok(None)` give `None`.
+    pub(crate) fn resolve(
+        store: Option<&dyn AuthStore>,
+        record: Option<&Auth>,
+    ) -> Option<CodexOrigin> {
+        match (store, record) {
+            (Some(store), Some(record)) => store.codex_origin(record).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    /// For the caller that ran the proof.
+    pub(crate) fn proved(current: Option<CodexOrigin>, proof: OriginProof, last: bool) -> Self {
+        Self {
+            current,
+            proof,
+            last,
+        }
+    }
+
+    /// I/O-free; under the state lock. Does `live`, resolved now, name the
+    /// pinned origin's file? `Err(OriginMoved)` when live resolves to a path
+    /// this check did not prove and attempts remain.
+    pub(crate) fn verdict(
+        &self,
+        store: Option<&dyn AuthStore>,
+        origin: &CodexOrigin,
+        live: &Auth,
+    ) -> Result<OriginProof, OriginMoved> {
+        let Some(now) = Self::resolve(store, Some(live)) else {
+            return Ok(OriginProof::Unproven);
+        };
+        if now == *origin {
+            return Ok(OriginProof::Same);
+        }
+        if self.current.as_ref() == Some(&now) {
+            return Ok(self.proof);
+        }
+        if self.last {
+            return Ok(OriginProof::Unproven);
+        }
+        Err(OriginMoved)
+    }
+}
+
+/// Fence 3's I/O-free verdict on one resolution. `written` is the path fence 2
+/// proved `Same` under that path's credential lock and then wrote. Never
+/// `Different`: fence 3 holds no credential lock.
+pub(crate) fn tail_verdict(
+    x: Option<&CodexOrigin>,
+    origin: &CodexOrigin,
+    written: Option<&CodexOrigin>,
+) -> OriginProof {
+    match x {
+        Some(x) if x == origin || Some(x) == written => OriginProof::Same,
+        _ => OriginProof::Unproven,
+    }
 }
 
 /// Single-use, token-free authority captured before a login or bind writes.
@@ -255,6 +365,8 @@ struct PublishedUpdate {
     changed: bool,
     ineligible: bool,
     metadata_unchanged: bool,
+    /// The leased pass's tail; `None` for every other update.
+    lease: Option<Box<LeasedTail>>,
 }
 
 #[derive(Default)]
@@ -406,6 +518,7 @@ impl Manager {
                 unresolved_origin: None,
                 undurable_causes: Default::default(),
                 landing_unconfirmed: Default::default(),
+                owed_save: None,
             },
         );
         state.sync_scheduler(self.models(), &snapshot.id, now);
@@ -517,7 +630,40 @@ impl Manager {
         base_epoch: u64,
         updated: Auth,
     ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
-        self.update_internal(UpdateMode::Refresh { base, base_epoch }, updated, Save::Yes)
+        self.update_internal(
+            UpdateMode::Refresh {
+                base,
+                base_epoch,
+                lease: None,
+            },
+            updated,
+            Save::Yes,
+        )
+    }
+
+    /// [`update_refreshed`](Self::update_refreshed) for a leased pass: the
+    /// ordinary save respects the tail's fences. `PolicyRefused` and
+    /// `OriginUnresolved` write nothing.
+    pub(crate) fn update_refreshed_leased(
+        &self,
+        base: &Auth,
+        base_epoch: u64,
+        updated: Auth,
+        tail: LeasedTail,
+    ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
+        let save = match tail.disposition {
+            LeasedDisposition::Persist => Save::Yes,
+            LeasedDisposition::PolicyRefused | LeasedDisposition::OriginUnresolved => Save::No,
+        };
+        self.update_internal(
+            UpdateMode::Refresh {
+                base,
+                base_epoch,
+                lease: Some(&tail),
+            },
+            updated,
+            save,
+        )
     }
 
     // Not upstream's: a test save failure still publishes the rotated tokens
@@ -528,11 +674,25 @@ impl Manager {
         base: &Auth,
         base_epoch: u64,
         updated: Auth,
+        lease: Option<LeasedTail>,
     ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
+        // The doubt must not be written under either save mode.
+        let save = if lease
+            .as_ref()
+            .is_some_and(|tail| tail.disposition != LeasedDisposition::Persist)
+        {
+            Save::No
+        } else {
+            Save::Failed
+        };
         self.update_internal(
-            UpdateMode::Refresh { base, base_epoch },
+            UpdateMode::Refresh {
+                base,
+                base_epoch,
+                lease: lease.as_ref(),
+            },
             updated,
-            Save::Failed,
+            save,
         )
     }
 
@@ -751,6 +911,7 @@ impl Manager {
                 changed: true,
                 ineligible: false,
                 metadata_unchanged: false,
+                lease: None,
             }))
         })?;
         match result {
@@ -1016,6 +1177,10 @@ impl Manager {
     ) -> Result<Option<PublishedUpdate>, ManagerError> {
         let now = self.now();
         let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
+        let lease_tail = match &mode {
+            UpdateMode::Refresh { lease, .. } => lease.cloned().map(Box::new),
+            _ => None,
+        };
         if let Some((captured, binding)) = &context.origin
             && (state.auths.get(&auth.id).is_none_or(|entry| {
                 !equal_fold(entry.auth.provider.trim(), captured.provider.trim())
@@ -1040,6 +1205,7 @@ impl Manager {
         let mut undurable_baselines = existing.undurable_baselines.clone();
         let mut undurable_causes = existing.undurable_causes.clone();
         let mut landing_unconfirmed = existing.landing_unconfirmed;
+        let owed_save = existing.owed_save;
         let mut unresolved_origin = existing.unresolved_origin.clone();
         if let Some(command) = context.command
             && command.id == existing_auth.id
@@ -1138,6 +1304,7 @@ impl Manager {
                             changed: false,
                             ineligible: false,
                             metadata_unchanged: false,
+                            lease: None,
                         }));
                     }
                     Ok(true) => {}
@@ -1165,14 +1332,23 @@ impl Manager {
                 auth.codex_refresh_failure = None;
                 0
             }
-            UpdateMode::Refresh { base, base_epoch } => {
+            UpdateMode::Refresh {
+                base,
+                base_epoch,
+                lease,
+            } => {
+                // Under `PolicyRefused` no Refresh patch is synthesized from
+                // the response, and its credentials are never merged.
+                let refused =
+                    lease.is_some_and(|tail| tail.disposition == LeasedDisposition::PolicyRefused);
                 if existing_epoch != base_epoch {
                     return Err(ManagerError::Other(format!(
                         "update auth {}: stale registration epoch {base_epoch} != {existing_epoch}",
                         auth.id
                     )));
                 }
-                if crate::auth::codex_refresh::is_codex_auth(&auth)
+                if !refused
+                    && crate::auth::codex_refresh::is_codex_auth(&auth)
                     && !matches!(
                         auth.codex_persist_intent,
                         crate::auth::codex_refresh::CodexPersistIntent::Refresh(_)
@@ -1221,9 +1397,20 @@ impl Manager {
                         changed: false,
                         ineligible: false,
                         metadata_unchanged: false,
+                        lease: lease_tail.clone(),
                     }));
                 }
-                auth = merge_refreshed_auth(base, &existing_auth, &auth, now);
+                auth = merge_refreshed_auth_with(
+                    base,
+                    &existing_auth,
+                    &auth,
+                    now,
+                    if refused {
+                        ResponseCredentials::Refused
+                    } else {
+                        ResponseCredentials::Merge
+                    },
+                );
                 normalize_credential_metadata(&mut auth.metadata);
                 // A marked partition's admitted write can land even when its
                 // read-back fails. Retain its possible results before admission,
@@ -1351,6 +1538,7 @@ impl Manager {
             unresolved_origin,
             undurable_causes,
             landing_unconfirmed,
+            owed_save,
         };
         // An ineligible record is never leased, so its state could never resolve.
         if ineligible {
@@ -1369,6 +1557,7 @@ impl Manager {
             changed: true,
             ineligible,
             metadata_unchanged: context.metadata_unchanged,
+            lease: lease_tail,
         }))
     }
 
@@ -1388,6 +1577,7 @@ impl Manager {
             changed,
             ineligible,
             metadata_unchanged,
+            lease,
             ..
         } = published;
         if !changed {
@@ -1403,7 +1593,7 @@ impl Manager {
             writing.codex_persist_intent = Default::default();
             writing
         });
-        let persisted = if ineligible {
+        let (persisted, written) = if ineligible {
             // Keep the pre-admission seam even when publication already fixed
             // this outcome; it still precedes completion reconciliation.
             #[cfg(test)]
@@ -1413,15 +1603,19 @@ impl Manager {
                     hook(&snapshot);
                 }
             }
-            Ok(super::Persisted::Ineligible)
+            (Ok(super::Persisted::Ineligible), None)
         } else {
-            self.persist(
+            match self.persist_bound(
                 configuration.as_ref().unwrap_or(&snapshot),
                 epoch,
                 generation,
                 discard_epoch,
                 save,
-            )
+                lease.as_deref(),
+            ) {
+                Ok((persisted, written)) => (Ok(persisted), written),
+                Err(error) => (Err(error), None),
+            }
         };
         match persisted {
             Err(err) => {
@@ -1507,18 +1701,42 @@ impl Manager {
                                 store.same_record(&snapshot, disk).unwrap_or(false)
                             })
                     });
+                    // Fence 3 resolves the read-back outside the state lock.
+                    let store_ref = self.shared.store.as_deref();
+                    let read = lease
+                        .as_ref()
+                        .and(disk.as_ref())
+                        .and_then(|disk| OriginCheck::resolve(store_ref, Some(disk)));
                     let mut state = self.lock();
                     if let Some(entry) = state.auths.get_mut(&snapshot.id)
                         && entry.auth.registration_epoch == epoch
                         && entry.discard_epoch == discard_epoch
                     {
+                        // A leased tail keeps the read only if live and the
+                        // read-back both still name the origin or the file the
+                        // tail wrote. Without a lease the binding decides.
+                        let kept = lease.as_deref().map(|tail| {
+                            let now = OriginCheck::resolve(store_ref, Some(&entry.auth));
+                            let live_same =
+                                tail_verdict(now.as_ref(), &tail.origin, written.as_ref())
+                                    == OriginProof::Same;
+                            let read_same =
+                                tail_verdict(read.as_ref(), &tail.origin, written.as_ref())
+                                    == OriginProof::Same;
+                            if !live_same && !self.permanently_ineligible(&entry.auth) {
+                                entry.record_unresolved(&tail.origin, &tail.rotation);
+                            }
+                            live_same && read_same
+                        });
+                        let owed = entry.owed_save.is_some();
                         if same_record
                             && raw_origin
-                            && self
-                                .shared
-                                .store
-                                .as_ref()
-                                .is_some_and(|store| store.binding_generation() == binding)
+                            && kept.unwrap_or_else(|| {
+                                self.shared
+                                    .store
+                                    .as_ref()
+                                    .is_some_and(|store| store.binding_generation() == binding)
+                            })
                             && compared
                                 .as_ref()
                                 .is_some_and(|before| same_record_identity(before, &entry.auth))
@@ -1535,7 +1753,7 @@ impl Manager {
                         }
                         let undurable = entry.protected();
                         let live = Arc::make_mut(&mut entry.auth);
-                        if let Some(disk) = disk {
+                        if let Some(disk) = disk.filter(|_| kept.unwrap_or(true)) {
                             let disk = if live.generation == generation {
                                 Some(disk)
                             } else if same_record
@@ -1553,19 +1771,40 @@ impl Manager {
                             if let Some(mut disk) = disk {
                                 overlay_undurable(&mut disk, live, undurable);
                                 let changed = credentials_changed(live, &disk);
-                                live.metadata = disk.metadata;
-                                live.disabled = disk.disabled;
-                                if live.disabled {
-                                    live.status = Status::Disabled;
-                                } else if live.status == Status::Disabled {
-                                    live.status = Status::Active;
+                                if owed && is_refresh {
+                                    // A refused save left settings owed to the
+                                    // file: take only its token keys, so the
+                                    // live settings are not read back over.
+                                    for key in crate::auth::codex_refresh::OUTER_KEYS
+                                        .iter()
+                                        .copied()
+                                        .chain(["siwc"])
+                                    {
+                                        match disk.metadata.get(key) {
+                                            Some(value) => {
+                                                live.metadata.insert(key.to_owned(), value.clone());
+                                            }
+                                            None => {
+                                                live.metadata.remove(key);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    live.metadata = disk.metadata;
+                                    live.disabled = disk.disabled;
+                                    if live.disabled {
+                                        live.status = Status::Disabled;
+                                    } else if live.status == Status::Disabled {
+                                        live.status = Status::Active;
+                                    }
+                                    live.proxy_url = disk.proxy_url;
+                                    live.prefix = disk.prefix;
+                                    live.attributes.retain(|key, _| {
+                                        !key.starts_with("header:")
+                                            || disk.attributes.contains_key(key)
+                                    });
+                                    live.attributes.extend(disk.attributes);
                                 }
-                                live.proxy_url = disk.proxy_url;
-                                live.prefix = disk.prefix;
-                                live.attributes.retain(|key, _| {
-                                    !key.starts_with("header:") || disk.attributes.contains_key(key)
-                                });
-                                live.attributes.extend(disk.attributes);
                                 if changed {
                                     live.credential_version =
                                         live.credential_version.saturating_add(1);
@@ -1574,20 +1813,7 @@ impl Manager {
                         }
                         live.codex_pending_refresh
                             .retain(|patch| !patch.is_written());
-                        if live
-                            .codex_persist_intent
-                            .same_operation(&snapshot.codex_persist_intent)
-                        {
-                            live.codex_persist_intent = Default::default();
-                            if is_refresh
-                                && matches!(&snapshot.codex_persist_intent,
-                                crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch)
-                                    if live.codex_refresh_failure.as_ref().is_none_or(|failure|
-                                        patch.includes_partition(failure.partition)))
-                            {
-                                live.codex_refresh_failure = None;
-                            }
-                        }
+                        release_saved_intent(live, &snapshot.codex_persist_intent, is_refresh);
                         live.generation = live.generation.saturating_add(1);
                         generation = live.generation;
                         snapshot = entry.auth.clone();
@@ -1621,7 +1847,7 @@ impl Manager {
                     }
                 }
             }
-            Ok(super::Persisted::Skipped) => {
+            Ok(super::Persisted::Skipped | super::Persisted::Deferred(_)) => {
                 if !metadata_unchanged
                     && matches!(
                         snapshot.codex_persist_intent,
@@ -1653,6 +1879,7 @@ impl Manager {
         }
         drop(pending);
         drop(gate);
+        self.flush_owed_save(&snapshot.id, epoch);
         Ok(Some((snapshot, generation)))
     }
 
@@ -1775,6 +2002,7 @@ impl Manager {
                     unresolved_origin: None,
                     undurable_causes: Default::default(),
                     landing_unconfirmed: Default::default(),
+                    owed_save: None,
                 },
             );
         }
@@ -1840,6 +2068,46 @@ impl Manager {
         discard_epoch: u64,
         save: Save,
     ) -> Result<super::Persisted, ManagerError> {
+        self.persist_bound(auth, epoch, generation, discard_epoch, save, None)
+            .map(|(persisted, _)| persisted)
+    }
+
+    /// [`Self::persist`], saving a leased pass's tail to the lease's origin file
+    /// when `lease` is set. The path the save wrote, as an origin, is returned
+    /// beside the result.
+    pub(crate) fn persist_bound(
+        &self,
+        auth: &Auth,
+        epoch: u64,
+        generation: u64,
+        discard_epoch: u64,
+        save: Save,
+        lease: Option<&LeasedTail>,
+    ) -> Result<(super::Persisted, Option<CodexOrigin>), ManagerError> {
+        let mut written_origin = None;
+        let persisted = self.persist_inner(
+            auth,
+            epoch,
+            generation,
+            discard_epoch,
+            save,
+            lease,
+            &mut written_origin,
+        )?;
+        Ok((persisted, written_origin))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_inner(
+        &self,
+        auth: &Auth,
+        epoch: u64,
+        generation: u64,
+        discard_epoch: u64,
+        save: Save,
+        lease: Option<&LeasedTail>,
+        written_origin: &mut Option<CodexOrigin>,
+    ) -> Result<super::Persisted, ManagerError> {
         #[cfg(test)]
         {
             let hook = lock(&self.shared.persist_hook).clone();
@@ -1884,6 +2152,7 @@ impl Manager {
         }
         self.with_persist_save_lock(&auth.id, |save_lock| {
             let _saved = lock(save_lock);
+            let mut withheld = super::UndurablePartitions::default();
             if save == Save::Yes {
                 let state = self.lock();
                 let Some(entry) = state.auths.get(&auth.id) else {
@@ -1897,6 +2166,7 @@ impl Manager {
                 {
                     return Ok(super::Persisted::Ineligible);
                 }
+                withheld = entry.withheld();
                 // Admission is final: a later policy change may discard pending
                 // work, but this save may finish writing tokens live already holds.
             }
@@ -1918,6 +2188,11 @@ impl Manager {
             writing
                 .codex_pending_refresh
                 .retain(|patch| !patch.is_written());
+            // An unleased save leaves withheld partitions as the file holds
+            // them, so it carries no operation that would rewrite them.
+            if lease.is_none() {
+                withhold_unresolved(&mut writing, withheld);
+            }
             // Identity checks and storage below may perform I/O.
             drop(last);
             if epoch < last_epoch {
@@ -1960,9 +2235,36 @@ impl Manager {
             // still be written look stale.
             let requested = requested_partitions(&writing);
             let binding = store.binding_generation();
-            let saved = store.save(&writing).map_err(ManagerError::Store)?;
+            let saved = if let Some(tail) = lease {
+                let mut refused = |resolved: &CodexOrigin, proof: OriginProof| {
+                    self.record_refused_tail(&auth.id, epoch, tail, resolved, proof);
+                };
+                match store
+                    .save_bound(&writing, &tail.origin, &mut refused)
+                    .map_err(ManagerError::Store)?
+                {
+                    Some(path) => path,
+                    None => return Ok(super::Persisted::Skipped),
+                }
+            } else {
+                let mut guard =
+                    |dest: Option<&CodexOrigin>| self.save_guard(&writing, epoch, withheld, dest);
+                match store
+                    .save_guarded(&writing, &mut guard)
+                    .map_err(ManagerError::Store)?
+                {
+                    GuardedSave::Written(path) => path,
+                    GuardedSave::Deferred(reason) => {
+                        self.record_owed_save(&auth.id, epoch, generation, reason);
+                        return Ok(super::Persisted::Deferred(reason));
+                    }
+                }
+            };
             if saved.is_empty() {
                 return Ok(super::Persisted::Skipped);
+            }
+            if lease.is_some() {
+                *written_origin = CodexOrigin::of(std::path::Path::new(&saved)).ok();
             }
             if has_unwritten_refresh_work(&writing)
                 && self
@@ -2011,6 +2313,22 @@ impl Manager {
             };
             for patch in writing.codex_pending_refresh.iter().chain(refresh) {
                 patch.mark_written();
+            }
+            // Only a Configuration save of the owed generation, or a later one,
+            // covers what a refused save left owed to the file.
+            if matches!(
+                writing.codex_persist_intent,
+                crate::auth::codex_refresh::CodexPersistIntent::Configuration
+            ) {
+                let mut state = self.lock();
+                if let Some(entry) = state.auths.get_mut(&auth.id)
+                    && entry.auth.registration_epoch == epoch
+                    && entry
+                        .owed_save
+                        .is_some_and(|owed| generation >= owed.version)
+                {
+                    entry.owed_save = None;
+                }
             }
             let mut last = lock(&id_lock);
             *last = (*last).max((epoch, generation));
@@ -2081,6 +2399,154 @@ impl Manager {
             .await
         {
             tracing::warn!("record neutral call result failed: {error}");
+        }
+    }
+
+    /// The guard of an unleased save. Runs inside the store, under the write
+    /// permit and the destination's credential lock, before the store's save
+    /// mutex. Takes the state lock once, does no I/O, and calls only
+    /// `codex_origin`. `admitted` is what the save was admitted to withhold.
+    fn save_guard(
+        &self,
+        writing: &Auth,
+        epoch: u64,
+        admitted: super::UndurablePartitions,
+        dest: Option<&CodexOrigin>,
+    ) -> Result<WithheldPartitions, SaveDeferral> {
+        if !crate::auth::codex_refresh::is_codex_auth(writing) {
+            return Ok(WithheldPartitions::default());
+        }
+        let state = self.lock();
+        let Some(entry) = state.auths.get(&writing.id) else {
+            return Err(SaveDeferral::RegistrationChanged);
+        };
+        if entry.auth.registration_epoch != epoch {
+            return Err(SaveDeferral::RegistrationChanged);
+        }
+        if let Some(dest) = dest
+            && OriginCheck::resolve(self.shared.store.as_deref(), Some(&entry.auth)).as_ref()
+                != Some(dest)
+        {
+            return Err(SaveDeferral::OriginMoved);
+        }
+        let now = entry.withheld();
+        if (now.outer && !admitted.outer) || (now.siwc && !admitted.siwc) {
+            return Err(SaveDeferral::StateChanged);
+        }
+        let intent = writing.codex_persist_intent.refresh_patch();
+        if writing
+            .codex_pending_refresh
+            .iter()
+            .chain(intent)
+            .any(|patch| patch.is_written())
+        {
+            return Err(SaveDeferral::Stale);
+        }
+        let live = &entry.auth.metadata;
+        if !crate::auth::codex_refresh::same_version(&writing.metadata, live)
+            || !crate::auth::codex_refresh::same_version(
+                &nested_siwc(&writing.metadata),
+                &nested_siwc(live),
+            )
+        {
+            return Err(SaveDeferral::Stale);
+        }
+        Ok(WithheldPartitions {
+            outer: admitted.outer,
+            siwc: admitted.siwc,
+        })
+    }
+
+    /// Notes that a save was refused and its change is still owed to the file.
+    /// A registration change owes nothing: the new registration saves itself.
+    fn record_owed_save(&self, id: &str, epoch: u64, generation: u64, reason: SaveDeferral) {
+        if reason == SaveDeferral::RegistrationChanged {
+            return;
+        }
+        {
+            let mut state = self.lock();
+            if let Some(entry) = state.auths.get_mut(id)
+                && entry.auth.registration_epoch == epoch
+            {
+                let version = entry
+                    .owed_save
+                    .map_or(generation, |owed| owed.version.max(generation));
+                entry.owed_save = Some(super::OwedSave { reason, version });
+            }
+        }
+        tracing::warn!("credential save deferred for {id}: {reason:?}");
+    }
+
+    /// Fence 2: a leased tail's save was refused at the store. `resolved` is
+    /// the file the record resolved to, with `proof` of it against the origin.
+    fn record_refused_tail(
+        &self,
+        id: &str,
+        epoch: u64,
+        tail: &LeasedTail,
+        resolved: &CodexOrigin,
+        proof: OriginProof,
+    ) {
+        let mut guard = self.lock();
+        let state = &mut *guard;
+        let Some(entry) = state.auths.get_mut(id) else {
+            return;
+        };
+        if entry.auth.registration_epoch != epoch || self.permanently_ineligible(&entry.auth) {
+            return;
+        }
+        let live = OriginCheck::resolve(self.shared.store.as_deref(), Some(&entry.auth));
+        if live.as_ref() == Some(&tail.origin) {
+            return;
+        }
+        if proof == OriginProof::Different && live.as_ref() == Some(resolved) {
+            mark_undurable(
+                &tail.rotation,
+                &mut entry.undurable,
+                &mut entry.undurable_baselines,
+                &mut entry.undurable_causes,
+                &super::MarkCause::Different,
+            );
+        } else {
+            entry.record_unresolved(&tail.origin, &tail.rotation);
+        }
+    }
+
+    /// Saves again what a refused save left owed, once, after the caller's
+    /// permits are released. It never clears the flag: only a covering
+    /// Configuration save does.
+    fn flush_owed_save(&self, id: &str, epoch: u64) {
+        let _gate = self.mutation_gate();
+        let (snapshot, discard_epoch) = {
+            let state = self.lock();
+            let Some(entry) = state.auths.get(id) else {
+                return;
+            };
+            let Some(owed) = entry.owed_save else {
+                return;
+            };
+            let withheld = entry.withheld();
+            let state_caused = matches!(
+                owed.reason,
+                SaveDeferral::MissingFile
+                    | SaveDeferral::MissingPartition
+                    | SaveDeferral::StateChanged
+            );
+            if entry.auth.registration_epoch != epoch
+                || ((withheld.outer || withheld.siwc) && state_caused)
+            {
+                return;
+            }
+            (entry.auth.clone(), entry.discard_epoch)
+        };
+        if let Err(error) = self.persist(
+            &snapshot,
+            epoch,
+            snapshot.generation,
+            discard_epoch,
+            Save::Yes,
+        ) {
+            log_persist_failure(&snapshot, "failed to persist owed save", &error);
         }
     }
 
@@ -2174,12 +2640,7 @@ impl Manager {
             }
             live.codex_pending_refresh
                 .retain(|patch| !patch.is_written());
-            if live
-                .codex_persist_intent
-                .same_operation(&snapshot.codex_persist_intent)
-            {
-                live.codex_persist_intent = Default::default();
-            }
+            release_saved_intent(live, &snapshot.codex_persist_intent, false);
             self.drop_unresolved_if_ineligible(entry);
             state.sync_scheduler(self.models(), &snapshot.id, self.now());
         });
@@ -2197,6 +2658,7 @@ impl Manager {
             self.shared.store.is_some() && crate::auth::codex_refresh::is_codex_auth(&snapshot);
         let manager = self.clone();
         let work = move || {
+            let mut deferred = false;
             match manager.persist(
                 &snapshot,
                 snapshot.registration_epoch,
@@ -2212,10 +2674,14 @@ impl Manager {
                 {
                     manager.reconcile_pending_save(&snapshot, discard_epoch, requested);
                 }
+                Ok(super::Persisted::Deferred(_)) => deferred = true,
                 Ok(_) => {}
             }
             drop(pending);
             drop(gate);
+            if deferred {
+                manager.flush_owed_save(&snapshot.id, snapshot.registration_epoch);
+            }
         };
         if detach
             && tokio::runtime::Handle::try_current().is_ok()
@@ -2686,6 +3152,76 @@ pub(crate) fn overlay_undurable(
     }
 }
 
+/// The nested `siwc` object of a metadata map (empty without one).
+fn nested_siwc(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    metadata
+        .get("siwc")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Strips from `writing` every unwritten operation that touches a withheld
+/// partition: the unleased save must not rewrite what the file holds. A
+/// touching Refresh intent becomes a Configuration save. Whether anything was
+/// dropped.
+pub(crate) fn withhold_unresolved(
+    writing: &mut Auth,
+    withheld: super::UndurablePartitions,
+) -> bool {
+    use crate::auth::CodexCredentialPartition::{Outer, Siwc};
+    if !withheld.outer && !withheld.siwc {
+        return false;
+    }
+    let touches = |patch: &CredentialRefreshPatch| {
+        !patch.is_written()
+            && ((withheld.outer && patch.includes_partition(Outer))
+                || (withheld.siwc && patch.includes_partition(Siwc)))
+    };
+    let before = writing.codex_pending_refresh.len();
+    writing
+        .codex_pending_refresh
+        .retain(|patch| !touches(patch));
+    let mut dropped = writing.codex_pending_refresh.len() != before;
+    if matches!(&writing.codex_persist_intent, CodexPersistIntent::Refresh(patch) if touches(patch))
+    {
+        writing.codex_persist_intent = Default::default();
+        dropped = true;
+    }
+    dropped
+}
+
+/// Releases the intent a save carried from the live record. A Refresh intent
+/// the save did not write stays owed as a pending operation; the failure it
+/// answers is cleared only by a written patch in refresh mode.
+pub(crate) fn release_saved_intent(live: &mut Auth, saved: &CodexPersistIntent, is_refresh: bool) {
+    if !live.codex_persist_intent.same_operation(saved) {
+        return;
+    }
+    if let CodexPersistIntent::Refresh(patch) = &live.codex_persist_intent
+        && !patch.is_written()
+        && !live
+            .codex_pending_refresh
+            .iter()
+            .any(|pending| pending.same_operation(patch))
+    {
+        live.codex_pending_refresh.push(patch.clone());
+    }
+    live.codex_persist_intent = Default::default();
+    if is_refresh
+        && let CodexPersistIntent::Refresh(patch) = saved
+        && patch.is_written()
+        && live
+            .codex_refresh_failure
+            .as_ref()
+            .is_none_or(|failure| patch.includes_partition(failure.partition))
+    {
+        live.codex_refresh_failure = None;
+    }
+}
+
 fn requested_partitions(requested: &Auth) -> super::UndurablePartitions {
     use crate::auth::{CodexCredentialPartition, codex_refresh::CodexPersistIntent};
     let intent = match &requested.codex_persist_intent {
@@ -2898,5 +3434,219 @@ mod tests {
             Some('8' | '9' | 'a' | 'b')
         ));
         assert_ne!(new_uuid(), id);
+    }
+
+    /// A store whose records all resolve to one settable path; no file exists.
+    struct PathStore(Mutex<Option<std::path::PathBuf>>);
+
+    impl PathStore {
+        fn at(path: Option<&str>) -> Self {
+            Self(Mutex::new(path.map(Into::into)))
+        }
+    }
+
+    impl AuthStore for PathStore {
+        fn list(&self) -> std::io::Result<Vec<Auth>> {
+            Ok(Vec::new())
+        }
+
+        fn save(&self, _auth: &Auth) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+
+        fn delete(&self, _id: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn codex_origin(&self, _auth: &Auth) -> std::io::Result<Option<CodexOrigin>> {
+            match &*lock(&self.0) {
+                Some(path) => CodexOrigin::of(path).map(Some),
+                None => Ok(None),
+            }
+        }
+    }
+
+    fn origin(path: &str) -> CodexOrigin {
+        CodexOrigin::of(std::path::Path::new(path)).unwrap()
+    }
+
+    fn verdict(
+        live: Option<&str>,
+        check: &OriginCheck,
+        pinned: &CodexOrigin,
+    ) -> Result<OriginProof, OriginMoved> {
+        let store = PathStore::at(live);
+        check.verdict(Some(&store), pinned, &Auth::default())
+    }
+
+    #[test]
+    fn origin_resolution_is_none_without_a_store_a_record_or_an_identity() {
+        let store = PathStore::at(Some("p/a.json"));
+        let record = Auth::default();
+        assert_eq!(
+            OriginCheck::resolve(Some(&store), Some(&record)),
+            Some(origin("p/a.json"))
+        );
+        assert_eq!(OriginCheck::resolve(None, Some(&record)), None);
+        assert_eq!(OriginCheck::resolve(Some(&store), None), None);
+        let opaque = PathStore::at(None);
+        assert_eq!(OriginCheck::resolve(Some(&opaque), Some(&record)), None);
+    }
+
+    #[test]
+    fn a_verdict_is_same_when_live_names_the_pinned_origin() {
+        let pinned = origin("p/a.json");
+        for last in [false, true] {
+            let check = OriginCheck::proved(Some(origin("q/b.json")), OriginProof::Different, last);
+            assert!(matches!(
+                verdict(Some("p/a.json"), &check, &pinned),
+                Ok(OriginProof::Same)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_verdict_is_unproven_when_live_does_not_resolve() {
+        let pinned = origin("p/a.json");
+        let check = OriginCheck::proved(Some(origin("q/b.json")), OriginProof::Different, false);
+        assert!(matches!(
+            verdict(None, &check, &pinned),
+            Ok(OriginProof::Unproven)
+        ));
+    }
+
+    #[test]
+    fn a_verdict_carries_the_proof_made_for_the_current_origin() {
+        let pinned = origin("p/a.json");
+        for proof in [
+            OriginProof::Same,
+            OriginProof::Different,
+            OriginProof::Unproven,
+        ] {
+            let check = OriginCheck::proved(Some(origin("q/b.json")), proof, false);
+            assert!(matches!(verdict(Some("q/b.json"), &check, &pinned), Ok(got) if got == proof));
+        }
+    }
+
+    #[test]
+    fn a_verdict_for_an_unproved_path_is_moved_until_the_last_attempt() {
+        let pinned = origin("p/a.json");
+        for current in [Some(origin("q/b.json")), None] {
+            let check = OriginCheck::proved(current.clone(), OriginProof::Different, false);
+            assert!(matches!(
+                verdict(Some("r/c.json"), &check, &pinned),
+                Err(OriginMoved)
+            ));
+            let last = OriginCheck::proved(current, OriginProof::Different, true);
+            assert!(matches!(
+                verdict(Some("r/c.json"), &last, &pinned),
+                Ok(OriginProof::Unproven)
+            ));
+        }
+    }
+
+    #[test]
+    fn the_tail_verdict_is_same_only_for_the_origin_or_the_written_path() {
+        let pinned = origin("p/a.json");
+        let written = origin("q/b.json");
+        let other = origin("r/c.json");
+        assert_eq!(
+            tail_verdict(Some(&pinned), &pinned, None),
+            OriginProof::Same
+        );
+        assert_eq!(
+            tail_verdict(Some(&written), &pinned, Some(&written)),
+            OriginProof::Same
+        );
+        assert_eq!(
+            tail_verdict(Some(&written), &pinned, None),
+            OriginProof::Unproven
+        );
+        assert_eq!(
+            tail_verdict(Some(&other), &pinned, Some(&written)),
+            OriginProof::Unproven
+        );
+        assert_eq!(
+            tail_verdict(None, &pinned, Some(&written)),
+            OriginProof::Unproven
+        );
+    }
+
+    fn rotation(before: &str, after: &str) -> CredentialRefreshPatch {
+        let meta = |token: &str| {
+            serde_json::json!({"access_token": token})
+                .as_object()
+                .cloned()
+                .unwrap()
+        };
+        CredentialRefreshPatch::new(&meta(before), &meta(after), true, false)
+    }
+
+    fn outer_failure() -> crate::auth::CodexRefreshFailure {
+        crate::auth::CodexRefreshFailure {
+            partition: crate::auth::CodexCredentialPartition::Outer,
+            error: crate::exec::ExecError::upstream(500, "refresh failed"),
+        }
+    }
+
+    fn with_intent(intent: CodexPersistIntent) -> Auth {
+        Auth {
+            codex_persist_intent: intent,
+            ..Auth::default()
+        }
+    }
+
+    #[test]
+    fn release_ignores_an_intent_the_live_record_does_not_hold() {
+        let saved = CodexPersistIntent::Refresh(rotation("a", "b"));
+        let other = CodexPersistIntent::Refresh(rotation("a", "b"));
+        let mut live = with_intent(other.clone());
+        release_saved_intent(&mut live, &saved, true);
+        assert!(live.codex_persist_intent == other);
+        assert!(live.codex_pending_refresh.is_empty());
+    }
+
+    #[test]
+    fn release_resets_a_saved_configuration_intent() {
+        let saved = CodexPersistIntent::OuterLogin;
+        let mut live = with_intent(CodexPersistIntent::OuterLogin);
+        release_saved_intent(&mut live, &saved, true);
+        assert!(live.codex_persist_intent == CodexPersistIntent::Configuration);
+        assert!(live.codex_pending_refresh.is_empty());
+    }
+
+    #[test]
+    fn release_keeps_an_unwritten_refresh_as_pending_and_its_failure() {
+        let patch = rotation("a", "b");
+        let saved = CodexPersistIntent::Refresh(patch.clone());
+        let mut live = with_intent(saved.clone());
+        live.codex_refresh_failure = Some(outer_failure());
+        release_saved_intent(&mut live, &saved, true);
+        assert!(live.codex_persist_intent == CodexPersistIntent::Configuration);
+        assert_eq!(live.codex_pending_refresh.len(), 1);
+        assert!(live.codex_pending_refresh[0].same_operation(&patch));
+        assert!(live.codex_refresh_failure.is_some());
+        // Releasing it again does not queue it twice.
+        live.codex_persist_intent = saved.clone();
+        release_saved_intent(&mut live, &saved, true);
+        assert_eq!(live.codex_pending_refresh.len(), 1);
+    }
+
+    #[test]
+    fn release_clears_the_failure_only_for_a_written_patch_in_refresh_mode() {
+        let patch = rotation("a", "b");
+        patch.mark_written();
+        let saved = CodexPersistIntent::Refresh(patch);
+        let failure = outer_failure();
+        let mut live = with_intent(saved.clone());
+        live.codex_refresh_failure = Some(failure.clone());
+        release_saved_intent(&mut live, &saved, false);
+        assert!(live.codex_refresh_failure.is_some());
+        assert!(live.codex_pending_refresh.is_empty());
+        let mut live = with_intent(saved.clone());
+        live.codex_refresh_failure = Some(failure);
+        release_saved_intent(&mut live, &saved, true);
+        assert!(live.codex_refresh_failure.is_none());
+        assert!(live.codex_pending_refresh.is_empty());
     }
 }
