@@ -55,7 +55,7 @@ use super::credential::{
 };
 use super::merge::normalize_credential_metadata;
 use super::text::{equal_fold, go_lower};
-use super::{Manager, ManagerError, Shared, State, lock};
+use super::{Entry, Manager, ManagerError, Shared, State, lock};
 use crate::auth::classification::ATTRIBUTE_PATH;
 use crate::auth::{Auth, AuthError, Status, Timestamp};
 use crate::exec::{ErrorKind, ExecError};
@@ -86,6 +86,9 @@ const REFRESH_CANCELED_RETRY: Duration = Duration::from_secs(1);
 /// The longest the loop sleeps at once, so it notices a clock jump after
 /// the machine sleeps (upstream's `maxRefreshTimerWait`).
 const MAX_REFRESH_TIMER_WAIT: Duration = Duration::from_secs(30);
+/// How many deferrals in a row an unresolved origin makes before the
+/// credential's refresh hold is shown (see [`Entry::refresh_hold`]).
+pub(super) const ORIGIN_UNRESOLVED_SURFACE_AFTER: u32 = 10;
 
 static NEXT_LOOP_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_JOB_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -105,6 +108,9 @@ pub(crate) struct RefreshJob {
     seq: u64,
     /// Whether a worker took it.
     pub(crate) running: bool,
+    /// The job exists only because the entry has an unresolved origin: its
+    /// token is not due. Fixed when the job is queued.
+    pub(crate) resolution_only: bool,
 }
 
 /// The outcome of a forced refresh for one credential (upstream's
@@ -358,6 +364,22 @@ pub(crate) fn next_refresh_check_at(
     Some(now)
 }
 
+/// [`next_refresh_check_at`] for a registered entry: an entry with an
+/// unresolved origin is checked now, unless a deferral holds it. I/O-free;
+/// called under the state lock.
+fn next_check_for_entry(
+    now: Timestamp,
+    entry: &Entry,
+    lead: Option<Duration>,
+) -> Option<Timestamp> {
+    // None: a top-level 401 or a disabled invalid_grant.
+    let next = next_refresh_check_at(now, &entry.auth, lead)?;
+    if entry.unresolved_origin.is_some() && !refresh_held(&entry.auth, now) {
+        return Some(now);
+    }
+    Some(next)
+}
+
 impl Auth {
     /// Due time for the refreshable outer Codex partition. The outer metadata
     /// refresh timestamp wins over runtime time so SIWC rotations cannot
@@ -590,8 +612,9 @@ pub(super) async fn run_worker(
         };
         let mut retry_at = None;
         if manager.begin_refresh_job(&job, &stop)
-            && let Err(ManagerError::NotActive(_)) =
-                manager.refresh_at_epoch(&job.id, "", job.epoch).await
+            && let Err(ManagerError::NotActive(_)) = manager
+                .refresh_with(&job.id, "", job.epoch, false, job.resolution_only)
+                .await
         {
             // Refused by a gate that closed since the job was queued: try
             // again after a pause, not at once.
@@ -700,11 +723,7 @@ impl Manager {
     fn next_check_for(&self, id: &str, now: Timestamp) -> Option<Timestamp> {
         let state = self.lock();
         let entry = state.auths.get(id)?;
-        next_refresh_check_at(
-            now,
-            &entry.auth,
-            Self::refresh_lead_for(&state, &entry.auth),
-        )
+        next_check_for_entry(now, entry, Self::refresh_lead_for(&state, &entry.auth))
     }
 
     /// Upstream's `rebuild`.
@@ -716,7 +735,7 @@ impl Manager {
                 .iter()
                 .filter_map(|(id, entry)| {
                     let lead = Self::refresh_lead_for(&state, &entry.auth);
-                    next_refresh_check_at(now, &entry.auth, lead).map(|next| (id.clone(), next))
+                    next_check_for_entry(now, entry, lead).map(|next| (id.clone(), next))
                 })
                 .collect()
         };
@@ -759,7 +778,7 @@ impl Manager {
         if id.is_empty() {
             return;
         }
-        let (next, due, has_executor, epoch) = {
+        let (next, due, resolution_only, has_executor, epoch) = {
             let state = self.lock();
             let Some(entry) = state.auths.get(id) else {
                 return;
@@ -768,9 +787,13 @@ impl Manager {
             let lead = executor
                 .as_ref()
                 .and_then(|executor| executor.refresh_lead());
+            let token_due = should_refresh(&entry.auth, lead, now);
+            // Due for the unresolved state alone, not for its token.
+            let unresolved = entry.unresolved_origin.is_some() && !refresh_held(&entry.auth, now);
             (
-                next_refresh_check_at(now, &entry.auth, lead),
-                should_refresh(&entry.auth, lead, now),
+                next_check_for_entry(now, entry, lead),
+                token_due || unresolved,
+                !token_due && unresolved,
                 executor.is_some(),
                 entry.auth.registration_epoch,
             )
@@ -787,7 +810,8 @@ impl Manager {
             shared.upsert(id, add(now, shared.interval));
             return;
         }
-        let Some(job) = self.mark_refresh_pending(shared.id, id, epoch, now) else {
+        let Some(job) = self.mark_refresh_pending_with(shared.id, id, epoch, now, resolution_only)
+        else {
             match self.next_check_for(id, now) {
                 Some(next) if next <= now => shared.upsert(id, add(now, shared.interval)),
                 Some(next) => shared.upsert(id, next),
@@ -806,12 +830,26 @@ impl Manager {
 
     /// Records a queued refresh and holds the credential's next check while
     /// it waits (upstream's `markRefreshPending`).
+    #[cfg(test)]
     pub(crate) fn mark_refresh_pending(
         &self,
         loop_id: u64,
         id: &str,
         epoch: u64,
         now: Timestamp,
+    ) -> Option<RefreshJob> {
+        self.mark_refresh_pending_with(loop_id, id, epoch, now, false)
+    }
+
+    /// [`mark_refresh_pending`](Self::mark_refresh_pending), recording whether
+    /// the job exists only for the entry's unresolved origin.
+    fn mark_refresh_pending_with(
+        &self,
+        loop_id: u64,
+        id: &str,
+        epoch: u64,
+        now: Timestamp,
+        resolution_only: bool,
     ) -> Option<RefreshJob> {
         let job = {
             let mut guard = self.lock();
@@ -833,6 +871,7 @@ impl Manager {
                 loop_id,
                 seq: NEXT_JOB_SEQ.fetch_add(1, Ordering::Relaxed),
                 running: false,
+                resolution_only,
             };
             state.refresh_jobs.insert(id.to_owned(), job.clone());
             let auth = Arc::make_mut(&mut entry.auth);
@@ -1142,10 +1181,11 @@ impl Manager {
                 } else {
                     crate::auth::CodexCredentialPartition::Outer
                 };
-                if entry.undurable.contains(failed_partition) {
+                let protected = entry.protected();
+                if protected.contains(failed_partition) {
                     return None;
                 }
-                super::lifecycle::overlay_undurable(&mut disk, &entry.auth, entry.undurable);
+                super::lifecycle::overlay_undurable(&mut disk, &entry.auth, protected);
                 disk.rebase_pending_refreshes_with_origin(
                     &entry.auth,
                     Some(crate::auth::ResolvedOriginProof(same_origin)),
@@ -1170,6 +1210,7 @@ impl Manager {
                 auth.generation = auth.generation.saturating_add(1);
                 auth.updated_at = Some(now);
                 let snapshot = entry.auth.clone();
+                self.drop_unresolved_if_ineligible(entry);
                 state.sync_scheduler(self.models(), &failed.id, now);
                 snapshot
             };
@@ -1187,7 +1228,7 @@ impl Manager {
         if id.is_empty() {
             return Err(ManagerError::Other("auth id is empty".into()));
         }
-        self.refresh_with(id, "", 0, true).await
+        self.refresh_with(id, "", 0, true, false).await
     }
 
     /// Refreshes every enabled credential that has a refresh token,
@@ -1230,7 +1271,8 @@ impl Manager {
         failed_token: &str,
         epoch: u64,
     ) -> Result<Arc<Auth>, ManagerError> {
-        self.refresh_with(id, failed_token, epoch, false).await
+        self.refresh_with(id, failed_token, epoch, false, false)
+            .await
     }
 
     /// [`refresh_at_epoch`](Self::refresh_at_epoch); with `force`, as a
@@ -1242,12 +1284,16 @@ impl Manager {
     /// publication, and runs on when the caller is dropped, so a token the
     /// provider rotated is never lost to a hand-over. A gate that isn't open
     /// refuses with [`ManagerError::NotActive`] before any provider call.
+    ///
+    /// `resolution_only` is true only for a scheduler job queued solely for
+    /// the entry's unresolved origin.
     async fn refresh_with(
         &self,
         id: &str,
         failed_token: &str,
         epoch: u64,
         force: bool,
+        resolution_only: bool,
     ) -> Result<Arc<Auth>, ManagerError> {
         let id = id.trim();
         if id.is_empty() {
@@ -1260,7 +1306,7 @@ impl Manager {
         let failed_token = failed_token.to_owned();
         let work = async move {
             manager
-                .refresh_owned(&id, &failed_token, epoch, force)
+                .refresh_owned(&id, &failed_token, epoch, force, resolution_only)
                 .await
         };
         if tokio::runtime::Handle::try_current().is_err() {
@@ -1284,6 +1330,7 @@ impl Manager {
         failed_token: &str,
         epoch: u64,
         force: bool,
+        resolution_only: bool,
     ) -> Result<Arc<Auth>, ManagerError> {
         if !failed_token.is_empty() {
             self.mark_rejected_access_token(id, failed_token);
@@ -1321,6 +1368,16 @@ impl Manager {
         if !failed_token.is_empty() {
             let current = access_token(&auth);
             if !current.is_empty() && current != failed_token {
+                return Ok(auth);
+            }
+        }
+
+        // A job queued only for the unresolved origin must not rotate a token
+        // that is not due, whatever deferral holds its next check back.
+        if resolution_only && !force && failed_token.is_empty() {
+            let mut probe = Auth::clone(&auth);
+            probe.next_refresh_after = None;
+            if !should_refresh(&probe, executor.refresh_lead(), self.now()) {
                 return Ok(auth);
             }
         }

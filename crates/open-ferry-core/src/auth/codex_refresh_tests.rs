@@ -1563,3 +1563,85 @@ async fn strict_bind_check_and_missing_target_never_restore_a_snapshot() {
     );
     assert!(!path.exists());
 }
+
+/// B-U1: the partition helpers of the leased refresh.
+#[test]
+fn partition_helpers_report_requested_rotated_and_landed() {
+    let before = fixture();
+    let mut after = before.clone();
+    rotate(&mut after, true, true);
+
+    // requested(): outer only, SIWC only, both.
+    let outer_only = CredentialRefreshPatch::new(&before.metadata, &after.metadata, true, false);
+    let siwc_only = CredentialRefreshPatch::new(&before.metadata, &after.metadata, false, true);
+    let both = CredentialRefreshPatch::new(&before.metadata, &after.metadata, true, true);
+    let none = CredentialRefreshPatch::new(&before.metadata, &after.metadata, false, false);
+    let outer = CodexPartitions {
+        outer: true,
+        siwc: false,
+    };
+    let siwc = CodexPartitions {
+        outer: false,
+        siwc: true,
+    };
+    let all = CodexPartitions {
+        outer: true,
+        siwc: true,
+    };
+    assert_eq!(outer_only.requested(), outer);
+    assert_eq!(siwc_only.requested(), siwc);
+    assert_eq!(both.requested(), all);
+    assert!(outer.any() && siwc.any() && all.any());
+    assert!(!none.requested().any());
+    assert!(!CodexPartitions::default().any());
+
+    // refresh_patch(): Some only for the Refresh intent.
+    let bind = CodexPersistIntent::SiwcBind(Map::new());
+    for intent in [
+        CodexPersistIntent::Configuration,
+        CodexPersistIntent::OuterLogin,
+        bind,
+    ] {
+        assert!(intent.refresh_patch().is_none());
+    }
+    let refresh = CodexPersistIntent::Refresh(both.clone());
+    assert!(
+        refresh
+            .refresh_patch()
+            .is_some_and(|p| p.same_operation(&both))
+    );
+
+    // disk_rotated_partitions(): equal, outer differs, SIWC differs. A disk
+    // equal to the live predecessor is reported rotated: this function is
+    // identity inequality only, and the manager's overlays (4.2) decide
+    // whether the predecessor is protected (B-2 proves that).
+    let mut outer_rotated = before.clone();
+    rotate(&mut outer_rotated, true, false);
+    let mut siwc_rotated = before.clone();
+    rotate(&mut siwc_rotated, false, true);
+    assert_eq!(
+        disk_rotated_partitions(&before.metadata, &before.metadata),
+        CodexPartitions::default()
+    );
+    assert_eq!(
+        disk_rotated_partitions(&before.metadata, &outer_rotated.metadata),
+        outer
+    );
+    assert_eq!(
+        disk_rotated_partitions(&before.metadata, &siwc_rotated.metadata),
+        siwc
+    );
+    assert_eq!(
+        disk_rotated_partitions(&after.metadata, &before.metadata),
+        all
+    );
+
+    // landed_in(): per requested partition, the disk shows the patch's result.
+    assert_eq!(both.landed_in(&after.metadata), all);
+    assert_eq!(outer_only.landed_in(&after.metadata), outer);
+    assert_eq!(siwc_only.landed_in(&after.metadata), siwc);
+    assert_eq!(both.landed_in(&outer_rotated.metadata), outer);
+    assert_eq!(both.landed_in(&siwc_rotated.metadata), siwc);
+    assert!(!both.landed_in(&before.metadata).any());
+    assert!(!none.landed_in(&after.metadata).any());
+}

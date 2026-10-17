@@ -403,6 +403,9 @@ impl Manager {
                 discard_epoch: 0,
                 undurable: Default::default(),
                 undurable_baselines: Default::default(),
+                unresolved_origin: None,
+                undurable_causes: Default::default(),
+                landing_unconfirmed: Default::default(),
             },
         );
         state.sync_scheduler(self.models(), &snapshot.id, now);
@@ -1035,6 +1038,9 @@ impl Manager {
         let existing_discard_epoch = existing.discard_epoch;
         let mut undurable = existing.undurable;
         let mut undurable_baselines = existing.undurable_baselines.clone();
+        let mut undurable_causes = existing.undurable_causes.clone();
+        let mut landing_unconfirmed = existing.landing_unconfirmed;
+        let mut unresolved_origin = existing.unresolved_origin.clone();
         if let Some(command) = context.command
             && command.id == existing_auth.id
             && command.registration_epoch == existing_epoch
@@ -1051,13 +1057,38 @@ impl Manager {
                 crate::auth::CodexCredentialPartition::Outer => {
                     undurable.outer = false;
                     undurable_baselines.outer.clear();
+                    undurable_causes.outer = None;
+                    landing_unconfirmed.outer = false;
+                    if let Some(u) = unresolved_origin.as_mut() {
+                        u.partitions.outer = false;
+                    }
                 }
                 crate::auth::CodexCredentialPartition::Siwc => {
                     undurable.siwc = false;
                     undurable_baselines.siwc.clear();
+                    undurable_causes.siwc = None;
+                    landing_unconfirmed.siwc = false;
+                    if let Some(u) = unresolved_origin.as_mut() {
+                        u.partitions.siwc = false;
+                    }
                 }
             }
+            // The state ends with its last partition.
+            if unresolved_origin
+                .as_ref()
+                .is_some_and(|u| !u.partitions.outer && !u.partitions.siwc)
+            {
+                unresolved_origin = None;
+            }
         }
+        // Computed after the command's clear, so a token the command just
+        // installed is not replaced by an older rotation.
+        let protected = undurable.union(
+            unresolved_origin
+                .as_ref()
+                .map(|u| u.partitions)
+                .unwrap_or_default(),
+        );
         let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
         *slot = (*slot).max(existing_epoch);
         let live_epoch = *slot;
@@ -1067,7 +1098,7 @@ impl Manager {
                     auth.metadata = existing_auth.metadata.clone();
                 }
                 if crate::auth::codex_refresh::is_codex_auth(&existing_auth) {
-                    overlay_undurable(&mut auth, &existing_auth, undurable);
+                    overlay_undurable(&mut auth, &existing_auth, protected);
                 }
                 auth.rebase_pending_refreshes_with_origin(
                     &existing_auth,
@@ -1239,6 +1270,7 @@ impl Manager {
                 &mut discard_epoch,
                 &mut undurable,
                 &mut undurable_baselines,
+                &mut undurable_causes,
                 self.shared.store.is_some(),
                 &[&existing_auth, &auth],
             );
@@ -1310,16 +1342,21 @@ impl Manager {
         auth.registration_epoch = live_epoch;
         auth.generation = generation;
         let snapshot = Arc::new(auth);
-        state.auths.insert(
-            snapshot.id.clone(),
-            Entry {
-                auth: snapshot.clone(),
-                refresh_failures,
-                discard_epoch,
-                undurable,
-                undurable_baselines,
-            },
-        );
+        let mut entry = Entry {
+            auth: snapshot.clone(),
+            refresh_failures,
+            discard_epoch,
+            undurable,
+            undurable_baselines,
+            unresolved_origin,
+            undurable_causes,
+            landing_unconfirmed,
+        };
+        // An ineligible record is never leased, so its state could never resolve.
+        if ineligible {
+            entry.clear_unresolved();
+        }
+        state.auths.insert(snapshot.id.clone(), entry);
         state.sync_scheduler(self.models(), &snapshot.id, now);
         let pending = self.pending_save(state, &snapshot.id, save);
         Ok(Some(PublishedUpdate {
@@ -1490,12 +1527,13 @@ impl Manager {
                             clear_verified_partitions(
                                 &mut entry.undurable,
                                 &mut entry.undurable_baselines,
+                                &mut entry.undurable_causes,
                                 requested,
                                 &entry.auth,
                                 disk,
                             );
                         }
-                        let undurable = entry.undurable;
+                        let undurable = entry.protected();
                         let live = Arc::make_mut(&mut entry.auth);
                         if let Some(disk) = disk {
                             let disk = if live.generation == generation {
@@ -1553,6 +1591,7 @@ impl Manager {
                         live.generation = live.generation.saturating_add(1);
                         generation = live.generation;
                         snapshot = entry.auth.clone();
+                        self.drop_unresolved_if_ineligible(entry);
                         state.sync_scheduler(self.models(), &snapshot.id, now);
                     }
                 });
@@ -1561,20 +1600,25 @@ impl Manager {
                 let mut state = self.lock();
                 if let Some(entry) = state.auths.get_mut(&snapshot.id)
                     && entry.auth.registration_epoch == epoch
-                    && self.permanently_ineligible(&entry.auth)
-                    && has_unwritten_refresh_work(&entry.auth)
                 {
-                    discard_refresh_work(
-                        &mut entry.discard_epoch,
-                        &mut entry.undurable,
-                        &mut entry.undurable_baselines,
-                        self.shared.store.is_some(),
-                        &[&entry.auth],
-                    );
-                    let live = Arc::make_mut(&mut entry.auth);
-                    live.codex_pending_refresh.clear();
-                    live.codex_persist_intent = Default::default();
-                    snapshot = entry.auth.clone();
+                    // A record with the state and no unwritten work is cleared too.
+                    self.drop_unresolved_if_ineligible(entry);
+                    if self.permanently_ineligible(&entry.auth)
+                        && has_unwritten_refresh_work(&entry.auth)
+                    {
+                        discard_refresh_work(
+                            &mut entry.discard_epoch,
+                            &mut entry.undurable,
+                            &mut entry.undurable_baselines,
+                            &mut entry.undurable_causes,
+                            self.shared.store.is_some(),
+                            &[&entry.auth],
+                        );
+                        let live = Arc::make_mut(&mut entry.auth);
+                        live.codex_pending_refresh.clear();
+                        live.codex_persist_intent = Default::default();
+                        snapshot = entry.auth.clone();
+                    }
                 }
             }
             Ok(super::Persisted::Skipped) => {
@@ -1728,6 +1772,9 @@ impl Manager {
                     discard_epoch: 0,
                     undurable: Default::default(),
                     undurable_baselines: Default::default(),
+                    unresolved_origin: None,
+                    undurable_causes: Default::default(),
+                    landing_unconfirmed: Default::default(),
                 },
             );
         }
@@ -1764,6 +1811,18 @@ impl Manager {
                 .get("runtime_only")
                 .is_some_and(|value| go_lower(value.trim()) == "true")
             || auth.metadata.is_empty()
+    }
+
+    /// Clears the entry's unresolved state when its record is now permanently
+    /// ineligible: an ineligible record is never leased, so the state could
+    /// never resolve and would block adoption for good. Marks are not touched.
+    /// Returns whether it cleared.
+    pub(crate) fn drop_unresolved_if_ineligible(&self, entry: &mut Entry) -> bool {
+        if entry.unresolved_origin.is_some() && self.permanently_ineligible(&entry.auth) {
+            entry.clear_unresolved();
+            return true;
+        }
+        false
     }
 
     /// Saves a credential snapshot taken at (`epoch`, `generation`), unless a
@@ -1939,6 +1998,7 @@ impl Manager {
                     clear_verified_partitions(
                         &mut entry.undurable,
                         &mut entry.undurable_baselines,
+                        &mut entry.undurable_causes,
                         requested,
                         &entry.auth,
                         &disk,
@@ -2086,12 +2146,13 @@ impl Manager {
                 clear_verified_partitions(
                     &mut entry.undurable,
                     &mut entry.undurable_baselines,
+                    &mut entry.undurable_causes,
                     requested,
                     &entry.auth,
                     disk,
                 );
             }
-            let undurable = entry.undurable;
+            let undurable = entry.protected();
             let live = Arc::make_mut(&mut entry.auth);
             if same_record && let Some(disk) = disk {
                 let mut persisted = super::merge::reconcile_persisted_codex(snapshot, live, &disk);
@@ -2119,6 +2180,7 @@ impl Manager {
             {
                 live.codex_persist_intent = Default::default();
             }
+            self.drop_unresolved_if_ineligible(entry);
             state.sync_scheduler(self.models(), &snapshot.id, self.now());
         });
     }
@@ -2475,10 +2537,11 @@ fn discard_refresh_work(
     epoch: &mut u64,
     undurable: &mut super::UndurablePartitions,
     baselines: &mut super::UndurableBaselines,
+    causes: &mut super::MarkCauses,
     has_store: bool,
     sources: &[&Auth],
 ) {
-    use crate::auth::{CodexCredentialPartition, codex_refresh::CodexPersistIntent};
+    use crate::auth::codex_refresh::CodexPersistIntent;
     let mut operations = Vec::new();
     for auth in sources {
         let intent = match &auth.codex_persist_intent {
@@ -2497,33 +2560,76 @@ fn discard_refresh_work(
                 // Shared operation identity dedupes the epoch bookkeeping, not
                 // richer chain baselines attached to another clone.
                 if has_store {
-                    for (partition, marked, recorded) in [
-                        (
-                            CodexCredentialPartition::Outer,
-                            &mut undurable.outer,
-                            &mut baselines.outer,
-                        ),
-                        (
-                            CodexCredentialPartition::Siwc,
-                            &mut undurable.siwc,
-                            &mut baselines.siwc,
-                        ),
-                    ] {
-                        if patch.includes_partition(partition) {
-                            for baseline in patch.durable_baselines(partition) {
-                                crate::auth::codex_refresh::record_durable_baseline(
-                                    recorded, &baseline,
-                                );
-                            }
-                            *marked = true;
-                        }
-                    }
+                    mark_undurable(
+                        patch,
+                        undurable,
+                        baselines,
+                        causes,
+                        &super::MarkCause::Different,
+                    );
                 }
             }
         }
     }
     if !operations.is_empty() {
         *epoch = epoch.saturating_add(1);
+    }
+}
+
+/// Marks each partition `patch` includes, and records its durable baselines.
+/// A partition's `ReadBack` cause is kept, never relabelled.
+pub(crate) fn mark_undurable(
+    patch: &crate::auth::codex_refresh::CredentialRefreshPatch,
+    undurable: &mut super::UndurablePartitions,
+    baselines: &mut super::UndurableBaselines,
+    causes: &mut super::MarkCauses,
+    cause: &super::MarkCause,
+) {
+    mark_undurable_except(
+        patch,
+        undurable,
+        baselines,
+        causes,
+        cause,
+        super::UndurablePartitions::default(),
+    );
+}
+
+/// [`mark_undurable`], skipping each partition `except` names.
+pub(crate) fn mark_undurable_except(
+    patch: &crate::auth::codex_refresh::CredentialRefreshPatch,
+    undurable: &mut super::UndurablePartitions,
+    baselines: &mut super::UndurableBaselines,
+    causes: &mut super::MarkCauses,
+    cause: &super::MarkCause,
+    except: super::UndurablePartitions,
+) {
+    use crate::auth::CodexCredentialPartition;
+    for (partition, skipped, marked, recorded, slot) in [
+        (
+            CodexCredentialPartition::Outer,
+            except.outer,
+            &mut undurable.outer,
+            &mut baselines.outer,
+            &mut causes.outer,
+        ),
+        (
+            CodexCredentialPartition::Siwc,
+            except.siwc,
+            &mut undurable.siwc,
+            &mut baselines.siwc,
+            &mut causes.siwc,
+        ),
+    ] {
+        if !skipped && patch.includes_partition(partition) {
+            for baseline in patch.durable_baselines(partition) {
+                crate::auth::codex_refresh::record_durable_baseline(recorded, &baseline);
+            }
+            *marked = true;
+            if !matches!(slot, Some(super::MarkCause::ReadBack { .. })) {
+                *slot = Some(cause.clone());
+            }
+        }
     }
 }
 
@@ -2599,36 +2705,46 @@ fn requested_partitions(requested: &Auth) -> super::UndurablePartitions {
     }
 }
 
-fn clear_verified_partitions(
+/// The partitions of `requested` whose live token fields equal the disk's.
+pub(crate) fn verified_partitions(
+    requested: super::UndurablePartitions,
+    live: &serde_json::Map<String, serde_json::Value>,
+    disk: &serde_json::Map<String, serde_json::Value>,
+) -> super::UndurablePartitions {
+    let live_siwc = live.get("siwc").and_then(serde_json::Value::as_object);
+    let disk_siwc = disk.get("siwc").and_then(serde_json::Value::as_object);
+    super::UndurablePartitions {
+        outer: requested.outer
+            && crate::auth::codex_refresh::OUTER_KEYS
+                .iter()
+                .all(|key| live.get(*key) == disk.get(*key)),
+        siwc: requested.siwc
+            && crate::auth::codex_refresh::SIWC_KEYS.iter().all(|key| {
+                live_siwc.and_then(|m| m.get(*key)) == disk_siwc.and_then(|m| m.get(*key))
+            }),
+    }
+}
+
+/// Clears the mark, baselines and cause of each requested partition the disk
+/// verifies.
+pub(crate) fn clear_verified_partitions(
     marked: &mut super::UndurablePartitions,
     baselines: &mut super::UndurableBaselines,
+    causes: &mut super::MarkCauses,
     requested: super::UndurablePartitions,
     live: &Auth,
     disk: &Auth,
 ) {
-    if requested.outer
-        && crate::auth::codex_refresh::OUTER_KEYS
-            .iter()
-            .all(|key| live.metadata.get(*key) == disk.metadata.get(*key))
-    {
+    let verified = verified_partitions(requested, &live.metadata, &disk.metadata);
+    if verified.outer {
         marked.outer = false;
         baselines.outer.clear();
+        causes.outer = None;
     }
-    let live_siwc = live
-        .metadata
-        .get("siwc")
-        .and_then(serde_json::Value::as_object);
-    let disk_siwc = disk
-        .metadata
-        .get("siwc")
-        .and_then(serde_json::Value::as_object);
-    if requested.siwc
-        && crate::auth::codex_refresh::SIWC_KEYS
-            .iter()
-            .all(|key| live_siwc.and_then(|m| m.get(*key)) == disk_siwc.and_then(|m| m.get(*key)))
-    {
+    if verified.siwc {
         marked.siwc = false;
         baselines.siwc.clear();
+        causes.siwc = None;
     }
 }
 

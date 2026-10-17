@@ -164,6 +164,135 @@ pub(crate) struct Entry {
     /// each set. Clearing a marker empties its set. Patch snapshot copies can
     /// still use quadratic aggregate history storage across failed saves.
     pub(crate) undurable_baselines: UndurableBaselines,
+    /// A post-send origin that could not be proved. Memory only, like
+    /// `undurable`.
+    pub(crate) unresolved_origin: Option<UnresolvedOrigin>,
+    /// Why each marked partition is marked. Memory only; set exactly where
+    /// `undurable` is.
+    pub(crate) undurable_causes: MarkCauses,
+    /// Partitions held because a read-back mark's later pass found a third
+    /// token. Memory only; only a token command ends it.
+    pub(crate) landing_unconfirmed: UndurablePartitions,
+}
+
+/// A post-send origin that could not be proved. Memory only, like `undurable`.
+#[derive(Clone)]
+pub(crate) struct UnresolvedOrigin {
+    /// The pinned origin of the pass that published.
+    pub(crate) origin: crate::auth::CodexOrigin,
+    /// The partitions whose live tokens unleased adoption must keep.
+    pub(crate) partitions: UndurablePartitions,
+    /// The rotation whose baselines a `Different` resolution marks.
+    pub(crate) rotation: crate::auth::codex_refresh::CredentialRefreshPatch,
+    /// Deferrals in a row with the state present. 0 when the state is
+    /// recorded.
+    pub(crate) unproven: u32,
+}
+
+/// Why a partition is marked. Memory only.
+#[derive(Clone, Debug)]
+pub(crate) enum MarkCause {
+    /// The write of the rotation to `origin` may have landed: the commits were
+    /// exhausted and the confirmation read failed or found no file, or the
+    /// lease was lost. A later leased pass on that file settles it.
+    ReadBack { origin: crate::auth::CodexOrigin },
+    /// Every other mark.
+    Different,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MarkCauses {
+    pub(crate) outer: Option<MarkCause>,
+    pub(crate) siwc: Option<MarkCause>,
+}
+
+impl Entry {
+    /// The partitions unleased adoption must not replace: `undurable` plus
+    /// the unresolved state's.
+    pub(crate) fn protected(&self) -> UndurablePartitions {
+        self.undurable.union(self.unresolved_partitions())
+    }
+
+    /// The unresolved state's partitions (none without a state).
+    pub(crate) fn unresolved_partitions(&self) -> UndurablePartitions {
+        self.unresolved_origin
+            .as_ref()
+            .map(|u| u.partitions)
+            .unwrap_or_default()
+    }
+
+    /// Sets the state to `None`. The record is not changed.
+    pub(crate) fn clear_unresolved(&mut self) {
+        self.unresolved_origin = None;
+    }
+
+    /// Why this process has paused refreshing the credential, and which
+    /// partitions are held. Derived, so it clears with the state it reads.
+    pub(crate) fn refresh_hold(&self) -> Option<(RefreshHold, HeldPartitions)> {
+        let surfaced = self
+            .unresolved_origin
+            .as_ref()
+            .filter(|u| u.unproven >= refresh::ORIGIN_UNRESOLVED_SURFACE_AFTER);
+        let mut held = self.landing_unconfirmed;
+        if surfaced.is_some() {
+            let u = self.unresolved_partitions();
+            held.outer |= u.outer;
+            held.siwc |= u.siwc;
+        }
+        let parts = match (held.outer, held.siwc) {
+            (true, true) => HeldPartitions::Both,
+            (true, false) => HeldPartitions::Outer,
+            (false, true) => HeldPartitions::Siwc,
+            (false, false) => return None,
+        };
+        if self.landing_unconfirmed.outer || self.landing_unconfirmed.siwc {
+            return Some((RefreshHold::LandingUnconfirmed, parts));
+        }
+        surfaced.map(|_| (RefreshHold::OriginUnresolved, parts))
+    }
+}
+
+/// Why this process has paused refreshing a credential. Display only: memory
+/// only, never written to the auth file, and it carries no token, path or
+/// account data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefreshHold {
+    /// The unresolved state has deferred `ORIGIN_UNRESOLVED_SURFACE_AFTER`
+    /// times.
+    OriginUnresolved,
+    /// A read-back mark's later pass found a third token; only a token
+    /// command or a restart ends it.
+    LandingUnconfirmed,
+}
+
+impl RefreshHold {
+    /// The JSON value of `refresh_hold`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OriginUnresolved => "origin_unresolved",
+            Self::LandingUnconfirmed => "landing_unconfirmed",
+        }
+    }
+}
+
+/// Which partitions the standing holds cover, so a reader can say which
+/// sign-in or bind ends them. Memory only; no token, path or account data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldPartitions {
+    Outer,
+    Siwc,
+    Both,
+}
+
+impl HeldPartitions {
+    /// The JSON value of `refresh_hold_partitions`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Outer => "outer",
+            Self::Siwc => "siwc",
+            Self::Both => "both",
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -179,6 +308,13 @@ pub(crate) struct UndurablePartitions {
 }
 
 impl UndurablePartitions {
+    pub(crate) fn union(self, other: Self) -> Self {
+        Self {
+            outer: self.outer || other.outer,
+            siwc: self.siwc || other.siwc,
+        }
+    }
+
     pub(crate) fn contains(self, partition: crate::auth::CodexCredentialPartition) -> bool {
         match partition {
             crate::auth::CodexCredentialPartition::Outer => self.outer,
@@ -447,6 +583,12 @@ impl Manager {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.shared.state)
+    }
+
+    /// The credential's refresh hold and the partitions it covers, if any,
+    /// read in one short hold of the state lock. `None` for an unknown id.
+    pub fn refresh_hold(&self, id: &str) -> Option<(RefreshHold, HeldPartitions)> {
+        self.lock().auths.get(id)?.refresh_hold()
     }
 
     /// Takes the reload barrier for one change, to hold from before the
