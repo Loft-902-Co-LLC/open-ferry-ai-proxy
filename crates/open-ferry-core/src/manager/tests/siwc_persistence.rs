@@ -8374,3 +8374,1362 @@ fn lock_order_audit_fails_on_mutated_copies() {
     );
     assert!(!audit_tail_fences(&tail).is_empty(), "record_refused_tail");
 }
+
+// ---- B6a: the leased refresh's admission, commit and publication ----
+//
+// Tests of the lease's three stages against the live record: what the lease
+// admits (B-3), how the rotation is committed (B-2, B-5, B-6, B-17), and what
+// is published afterwards (B-4, B-12, B-13, B-15, B-20). Every test runs under
+// `bounded`, orders its events with hooks and the controlled executor, and
+// never sleeps to wait for one.
+
+use crate::manager::MarkCause;
+
+/// Whether the leased credential's outer partition is marked undurable.
+fn outer_marked(rig: &Rig) -> bool {
+    rig.manager.lock().auths["codex.json"].undurable.outer
+}
+
+/// Whether the leased credential carries an unresolved origin.
+fn unresolved_set(rig: &Rig) -> bool {
+    rig.manager.lock().auths["codex.json"]
+        .unresolved_origin
+        .is_some()
+}
+
+/// Whether the outer mark's cause is `Different`.
+fn outer_cause_is_different(rig: &Rig) -> bool {
+    matches!(
+        rig.manager.lock().auths["codex.json"]
+            .undurable_causes
+            .outer,
+        Some(MarkCause::Different)
+    )
+}
+
+/// Overrides the rotation commit's retry window.
+fn set_window(rig: &Rig, window: Duration) {
+    *lock(&rig.manager.shared.lease_retry_window) = Some(window);
+}
+
+type Pass = tokio::task::JoinHandle<Result<Arc<Auth>, ManagerError>>;
+
+/// A forced refresh of the leased credential, running as its own task.
+fn spawn_refresh(rig: &Rig) -> Pass {
+    let manager = rig.manager.clone();
+    tokio::spawn(async move { manager.force_refresh("codex.json").await })
+}
+
+/// A peer process that rotated the outer partition on disk.
+fn peer_writes_outer(path: &std::path::Path, name: &str) {
+    let mut file: Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    file.insert("access_token".into(), json!(format!("{name}-access")));
+    file.insert("refresh_token".into(), json!(format!("{name}-refresh")));
+    std::fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
+}
+
+/// The executor answers every later refresh with an outer rotation `name`.
+fn rotate_to(probe: &Arc<Probe>, name: &'static str) {
+    probe.clone().rotating(name);
+}
+
+/// The executor fails every later refresh.
+fn executor_fails(probe: &Probe) {
+    probe
+        .fake
+        .set_refresh(|_| Err(ExecError::upstream(500, "upstream failure")));
+}
+
+/// The executor answers every later refresh with the credentials it was given.
+fn executor_idles(probe: &Probe) {
+    probe.fake.set_refresh(|before| Ok(before.clone()));
+}
+
+/// Sets or removes the `runtime_only` policy without a store save.
+fn set_runtime_only(rig: &Rig, on: bool) {
+    rig.manager
+        .edit_unsaved("codex.json", |auth| {
+            if on {
+                auth.attributes.insert("runtime_only".into(), "true".into());
+            } else {
+                auth.attributes.remove("runtime_only");
+            }
+            Ok::<bool, ()>(true)
+        })
+        .unwrap()
+        .unwrap();
+}
+
+/// Number of refresh operations, pending or the live intent, that are
+/// unwritten and claim the SIWC partition.
+fn unwritten_siwc_claims(auth: &Auth) -> usize {
+    let intent = auth.codex_persist_intent.refresh_patch();
+    auth.codex_pending_refresh
+        .iter()
+        .chain(intent)
+        .filter(|patch| !patch.is_written() && patch.requested().siwc)
+        .count()
+}
+
+/// The outer partition's refresh token, as live holds it.
+fn live_refresh(rig: &Rig) -> Value {
+    rig.live().metadata["refresh_token"].clone()
+}
+
+/// Refresh #1 of B-2 and B-17: every commit fails, the window closes at once
+/// and the ordinary save fails too, so the executor's rotation A -> B stays in
+/// memory only: live B, pending and marked, with disk A.
+async fn leave_unwritten_rotation(rig: &Rig, probe: &Arc<Probe>) {
+    rotate_to(probe, "b");
+    set_window(rig, Duration::from_millis(1));
+    rig.store
+        .fail_lease_commit
+        .store(u32::MAX, Ordering::SeqCst);
+    rig.store.fail_refresh.store(true, Ordering::SeqCst);
+    let _ = rig.manager.force_refresh("codex.json").await;
+    assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+    assert_eq!(live_refresh(rig), "b-refresh", "live holds the rotation");
+    assert_eq!(rig.live().codex_pending_refresh.len(), 1, "B is owed");
+    assert!(outer_marked(rig), "B is marked");
+    *lock(&rig.manager.shared.lease_retry_window) = None;
+    rig.store.fail_lease_commit.store(0, Ordering::SeqCst);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_discarded_rotation_is_sent_and_committed_through_its_baselines() {
+    // B-2 (F2). Mutation guarded: the pass sends or commits from disk (A)
+    // instead of from the protected live B, or clears the mark late. Checked
+    // by reading: the send reads `auth` after the overlay, so a pass without
+    // `overlay_undurable` would present A, which `sent_refresh(1)` rejects.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false);
+        rig.manager.register_executor(probe.clone());
+        leave_unwritten_rotation(&rig, &probe).await;
+        // A saved update with `runtime_only` discards the pending work and
+        // marks B; then the policy is removed.
+        rig.manager
+            .run_persistence(|m| {
+                m.edit("codex.json", |auth| {
+                    auth.attributes.insert("runtime_only".into(), "true".into());
+                    Ok::<bool, ()>(true)
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        set_runtime_only(&rig, false);
+        assert!(rig.live().codex_pending_refresh.is_empty(), "discarded");
+        assert!(outer_marked(&rig), "the discarded B is marked");
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        // Refresh #2 sends B and commits B -> C against disk A.
+        rotate_to(&probe, "c");
+        let at_save = Arc::new(Mutex::new(None));
+        let (seen, manager, dir) = (
+            at_save.clone(),
+            rig.manager.clone(),
+            rig.dir.path().to_path_buf(),
+        );
+        *lock(&rig.store.before_save_hook) = Some(Arc::new(move |_: &Auth| {
+            let marked = manager.lock().auths["codex.json"].undurable.outer;
+            let file: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("codex.json")).unwrap()).unwrap();
+            lock(&seen).get_or_insert((marked, file["refresh_token"].clone()));
+        }));
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        *lock(&rig.store.before_save_hook) = None;
+        assert_eq!(probe.sent(), 2);
+        assert_eq!(probe.sent_refresh(1), "b-refresh", "B was sent, never A");
+        let (marked, disk) = lock(&at_save).clone().expect("the ordinary save ran");
+        assert!(!marked, "the mark was cleared before any ordinary repair");
+        assert_eq!(disk, "c-refresh", "the commit applied to disk A");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        // A peer writes D over C: refresh #3 adopts it.
+        peer_writes_outer(&rig.path(), "d");
+        executor_idles(&probe);
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent(), 3);
+        assert_eq!(
+            probe.sent_refresh(2),
+            "d-refresh",
+            "D is the executor's input"
+        );
+        let adopted = lock(&probe.options)[2].adopted.expect("D was adopted");
+        assert!(adopted.outer && !adopted.siwc && !adopted.was_due);
+        assert_eq!(live_refresh(&rig), "d-refresh");
+        assert_eq!(rig.disk()["refresh_token"], "d-refresh");
+        assert!(!outer_marked(&rig));
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_pending_commit_clears_its_mark_before_the_send_and_a_peer_write_is_adopted() {
+    // B-17 (H1). Mutation guarded: step 5 commits the pending A -> B but
+    // leaves the mark, so the overlay keeps B over a peer's C. Checked by
+    // reading: with the mark kept, `overlay_undurable` would keep B live and
+    // refresh #3 would send B (`sent_refresh(2)` rejects that).
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false);
+        rig.manager.register_executor(probe.clone());
+        leave_unwritten_rotation(&rig, &probe).await;
+        executor_fails(&probe);
+        let at_entry = Arc::new(Mutex::new(None));
+        let (seen, manager, path) = (at_entry.clone(), rig.manager.clone(), rig.path());
+        probe.set_at_entry(move |_| {
+            let marked = manager.lock().auths["codex.json"].undurable.outer;
+            let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            *lock(&seen) = Some((marked, file["refresh_token"].clone()));
+        });
+        rig.manager.force_refresh("codex.json").await.unwrap_err();
+        let (marked, disk) = lock(&at_entry).clone().expect("the executor was entered");
+        assert!(!marked, "the pending commit cleared the mark");
+        assert_eq!(disk, "b-refresh", "the pending commit landed B");
+        assert_eq!(probe.sent_refresh(1), "b-refresh");
+        // A peer writes C; refresh #3 adopts it and never presents B.
+        peer_writes_outer(&rig.path(), "c");
+        executor_idles(&probe);
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent(), 3);
+        assert_eq!(probe.sent_refresh(2), "c-refresh", "C, never B");
+        assert!(lock(&probe.options)[2].adopted.is_some_and(|a| a.outer));
+        assert_eq!(live_refresh(&rig), "c-refresh");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        assert_eq!(
+            (0..probe.sent())
+                .filter(|n| probe.sent_refresh(*n) == "b-refresh")
+                .count(),
+            1,
+            "B was presented once, by the pass that committed it"
+        );
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_pending_commit_against_a_rebound_store_is_refused_before_the_send() {
+    // B-3 (F3a). Mutation guarded: step 5 commits the pending write without
+    // admission, so it lands B in a file the record no longer names. Checked
+    // by reading: `admit_leased_locked` at step 5 is the only gate, and the
+    // assertions on P and the executor fail without it.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        rig.manager.register_unsaved(pending_b()).unwrap();
+        let other = tempfile::tempdir_in(rig.dir.path().parent().unwrap()).unwrap();
+        let (files, target) = (rig.store.files.clone(), other.path().to_path_buf());
+        on_lease_held(&rig, move || files.set_base_dir(&target));
+        let error = rig.manager.force_refresh("codex.json").await.unwrap_err();
+        crate::auth::credential_lock::set_test_hook(&rig.path(), None);
+        assert!(
+            error
+                .to_string()
+                .contains("registration changed before refresh"),
+            "{error}"
+        );
+        assert_eq!(probe.sent(), 0, "entered never fires");
+        assert_eq!(rig.store.lease_commit_attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        assert!(!other.path().join("codex.json").exists(), "nothing in Q");
+        assert_eq!(rig.live().codex_pending_refresh.len(), 1, "still owed");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_pending_commit_against_the_same_directory_lands_before_the_send() {
+    // B-3, same-directory variant (N1 (v5)). Mutation guarded: admission
+    // compares the spelling of the directory instead of the file, so a rebind
+    // to the directory already bound is refused. Checked by reading.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        rig.manager.register_unsaved(pending_b()).unwrap();
+        let at_entry = Arc::new(Mutex::new(None));
+        let (seen, path) = (at_entry.clone(), rig.path());
+        probe.set_at_entry(move |_| {
+            let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            *lock(&seen) = Some(file["refresh_token"].clone());
+        });
+        let (files, same) = (rig.store.files.clone(), rig.dir.path().to_path_buf());
+        on_lease_held(&rig, move || files.set_base_dir(&same));
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        crate::auth::credential_lock::set_test_hook(&rig.path(), None);
+        assert_eq!(
+            lock(&at_entry).clone(),
+            Some(json!("b-refresh")),
+            "B landed"
+        );
+        assert_eq!(probe.sent(), 1);
+        assert_eq!(probe.sent_refresh(0), "b-refresh");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_contender_waits_out_the_commit_retries() {
+    // B-5 (F4a). Mutation guarded: the lease is dropped between attempts, so a
+    // contender gets the lock mid-retry. Checked by reading: the token is a
+    // local of `commit_rotation_with_retry` that only `run_leased` moves.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("b");
+        rig.manager.register_executor(probe.clone());
+        rig.store.fail_lease_commit.store(2, Ordering::SeqCst);
+        let retrying = Arc::new(Notify::new());
+        let (wake, store) = (retrying.clone(), rig.store.clone());
+        *lock(&rig.store.before_lease_commit_hook) = Some(Arc::new(move |_: &Auth| {
+            if store.lease_commit_attempts.load(Ordering::SeqCst) >= 2 {
+                wake.notify_one();
+            }
+        }));
+        let pass = spawn_refresh(&rig);
+        retrying.notified().await;
+        let contender = crate::auth::credential_lock::acquire_with_timeout(
+            rig.path(),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(
+            contender.err().map(|e| e.kind()),
+            Some(io::ErrorKind::TimedOut),
+            "the lease was kept between attempts"
+        );
+        pass.await.unwrap().unwrap();
+        assert_eq!(rig.store.lease_commit_attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(probe.sent(), 1, "the executor was entered once");
+        assert_eq!(rig.disk()["refresh_token"], "b-refresh");
+        let live = rig.live();
+        assert!(live.codex_pending_refresh.is_empty(), "no pending");
+        assert!(
+            live.codex_persist_intent
+                .refresh_patch()
+                .is_none_or(CredentialRefreshPatch::is_written),
+            "the op is written"
+        );
+        assert!(!outer_marked(&rig));
+        contend_for_lock(rig.path()).await.expect("released");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+async fn exhausted_commit_releases_before_the_ordinary_save(fail_save: bool) {
+    // B-6 (F4b, M1). Mutation guarded: the lease is released after the
+    // ordinary save, or before the rotation is published. Checked by reading:
+    // the contender's acquisition and the pending op both precede the unpark.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("b");
+        rig.manager.register_executor(probe.clone());
+        set_window(&rig, Duration::from_secs(60));
+        rig.store
+            .fail_lease_commit
+            .store(u32::MAX, Ordering::SeqCst);
+        rig.store.fail_refresh.store(fail_save, Ordering::SeqCst);
+        let (parked, unpark) = (Arc::new(Notify::new()), std::sync::mpsc::channel::<()>());
+        let (reached, gate) = (parked.clone(), Mutex::new(unpark.1));
+        *lock(&rig.store.before_save_hook) = Some(Arc::new(move |_: &Auth| {
+            reached.notify_one();
+            let _ = lock(&gate).recv_timeout(Duration::from_secs(20));
+        }));
+        let pass = spawn_refresh(&rig);
+        parked.notified().await;
+        // The ordinary save is parked; the lease is already gone.
+        crate::auth::credential_lock::acquire_with_timeout(rig.path(), Duration::from_secs(5))
+            .await
+            .expect("a contender takes the lock after the exhausted commit");
+        assert_eq!(rig.store.lease_commit_attempts.load(Ordering::SeqCst), 6);
+        let live = rig.live();
+        assert_eq!(live.metadata["refresh_token"], "b-refresh");
+        assert!(
+            live.codex_pending_refresh.iter().any(|p| !p.is_written()),
+            "an unwritten pending op"
+        );
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+        unpark.0.send(()).unwrap();
+        let _ = pass.await.unwrap();
+        *lock(&rig.store.before_save_hook) = None;
+        if fail_save {
+            assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+            assert_eq!(rig.live().codex_pending_refresh.len(), 1, "B stays pending");
+        } else {
+            assert_eq!(rig.disk()["refresh_token"], "b-refresh");
+        }
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_exhausted_commit_releases_the_lease_before_the_ordinary_save_writes() {
+    exhausted_commit_releases_before_the_ordinary_save(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_exhausted_commit_releases_the_lease_before_the_ordinary_save_fails() {
+    exhausted_commit_releases_before_the_ordinary_save(true).await;
+}
+
+/// The fixture rotated on both partitions, outer A -> B and SIWC S1 -> S2,
+/// with the operation that did it.
+fn dual_rotation() -> (Auth, CredentialRefreshPatch) {
+    let before = fixture();
+    let mut after = before.clone();
+    after
+        .metadata
+        .insert("access_token".into(), json!("b-access"));
+    after
+        .metadata
+        .insert("refresh_token".into(), json!("b-refresh"));
+    let siwc = after
+        .metadata
+        .get_mut("siwc")
+        .and_then(Value::as_object_mut)
+        .unwrap();
+    siwc.insert("access_token".into(), json!("s2-access"));
+    siwc.insert("refresh_token".into(), json!("s2-refresh"));
+    let patch = CredentialRefreshPatch::new(&before.metadata, &after.metadata, true, true);
+    (after, patch)
+}
+
+/// A peer process that rotated the SIWC partition on disk.
+fn peer_writes_siwc(path: &std::path::Path, name: &str) {
+    let mut file: Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let siwc = file.get_mut("siwc").and_then(Value::as_object_mut).unwrap();
+    siwc.insert("access_token".into(), json!(format!("{name}-access")));
+    siwc.insert("refresh_token".into(), json!(format!("{name}-refresh")));
+    std::fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
+}
+
+/// B-12 and B-13: an operation owed on both partitions, while a peer has put
+/// an unrelated SIWC identity on disk. `as_intent` holds the operation as the
+/// live intent instead of a pending entry.
+async fn partial_completion_adopts_the_peer_partition(as_intent: bool) {
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("c");
+        rig.manager.register_executor(probe.clone());
+        let (mut live, patch) = dual_rotation();
+        if as_intent {
+            live.codex_persist_intent = CodexPersistIntent::Refresh(patch);
+        } else {
+            live.codex_pending_refresh.push(patch);
+        }
+        rig.manager.register_unsaved(live).unwrap();
+        peer_writes_siwc(&rig.path(), "s9");
+        let at_entry = Arc::new(Mutex::new(None));
+        let (seen, manager, path) = (at_entry.clone(), rig.manager.clone(), rig.path());
+        probe.set_at_entry(move |_| {
+            let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let live = manager.get("codex.json").unwrap();
+            let owed = live
+                .codex_pending_refresh
+                .iter()
+                .chain(live.codex_persist_intent.refresh_patch())
+                .filter(|patch| !patch.is_written())
+                .count();
+            *lock(&seen) = Some((
+                file["refresh_token"].clone(),
+                file["siwc"]["refresh_token"].clone(),
+                owed,
+            ));
+        });
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        let (outer, siwc, owed) = lock(&at_entry).clone().expect("the executor was entered");
+        assert_eq!(outer, "b-refresh", "the outer partition landed");
+        assert_eq!(siwc, "s9-refresh", "the peer's SIWC identity is untouched");
+        assert_eq!(owed, 1, "the operation is not marked written");
+        assert_eq!(probe.sent(), 1);
+        let sent = &lock(&probe.seen)[0];
+        assert_eq!(sent.metadata["refresh_token"], "b-refresh");
+        assert_eq!(sent.metadata["siwc"]["refresh_token"], "s9-refresh");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh");
+        assert_eq!(rig.disk()["siwc"]["refresh_token"], "s9-refresh");
+        let live = rig.live();
+        assert_eq!(live.metadata["siwc"]["refresh_token"], "s9-refresh");
+        assert_eq!(
+            unwritten_siwc_claims(&live),
+            0,
+            "no unwritten operation claims the SIWC partition"
+        );
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_pending_op_completes_per_partition_when_a_peer_rotated_the_other() {
+    // B-12. Mutation guarded: the pending commit marks the whole op written
+    // although SIWC reported `Some(false)`, so S2 would be forgotten or S9
+    // overwritten. Checked by reading: `apply_pending_outcomes_locked` marks an
+    // op written only when every requested partition applied; the `owed == 1`
+    // assertion fails otherwise.
+    partial_completion_adopts_the_peer_partition(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_live_intent_completes_per_partition_when_a_peer_rotated_the_other() {
+    // B-13. Same mutation as B-12, with the operation held as the live intent.
+    partial_completion_adopts_the_peer_partition(true).await;
+}
+
+/// A rig whose disk and live hold B, with the executor set to rotate to C and
+/// to wait at the send.
+async fn rig_at_b() -> (Rig, Arc<Probe>) {
+    let rig = rig();
+    let probe = Probe::new("codex", false).rotating("b");
+    rig.manager.register_executor(probe.clone());
+    rig.manager.force_refresh("codex.json").await.unwrap();
+    assert_eq!(rig.disk()["refresh_token"], "b-refresh");
+    assert_eq!(live_refresh(&rig), "b-refresh");
+    assert!(!outer_marked(&rig));
+    // The unparked send left its entry signal stored; a wait would return at
+    // once, before the next pass starts.
+    let _ = tokio::time::timeout(Duration::ZERO, probe.entered.notified()).await;
+    rotate_to(&probe, "c");
+    probe.hold.store(true, Ordering::SeqCst);
+    (rig, probe)
+}
+
+/// Gives live the intent a token command would leave: a Refresh operation not
+/// in any store. An edit under `runtime_only` clears the intent, so a test
+/// that needs one at publication sets it in the entry.
+fn set_stale_intent(rig: &Rig) {
+    let mut state = rig.manager.lock();
+    let live = Arc::make_mut(&mut state.auths.get_mut("codex.json").unwrap().auth);
+    let mut after = live.metadata.clone();
+    after.insert("access_token".into(), json!("x-access"));
+    after.insert("refresh_token".into(), json!("x-refresh"));
+    live.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+        &live.metadata,
+        &after,
+        true,
+        false,
+    ));
+}
+
+/// What the store was asked to save so far: bound saves, writes, guarded saves.
+fn save_counts(rig: &Rig) -> (u32, usize, usize) {
+    (
+        rig.store.save_bound_calls.load(Ordering::SeqCst),
+        lock(&rig.store.writes).len(),
+        lock(&rig.store.guarded).len(),
+    )
+}
+
+/// The assertions of B-15 step 2 and B-20: the refused rotation C stays live
+/// under a marker, is merged and never reaches the store.
+fn assert_refused_rotation_retained(rig: &Rig, started: chrono::DateTime<chrono::Utc>) {
+    let live = rig.live();
+    assert_eq!(live.metadata["refresh_token"], "c-refresh", "C is live");
+    assert!(outer_marked(rig), "C is marked");
+    assert!(outer_cause_is_different(rig));
+    assert!(!unresolved_set(rig));
+    let baselines = rig.manager.lock().auths["codex.json"]
+        .undurable_baselines
+        .outer
+        .clone();
+    for want in ["b-refresh", "c-refresh"] {
+        assert!(
+            baselines
+                .iter()
+                .any(|b| b.get("refresh_token") == Some(&json!(want))),
+            "the baselines name {want}"
+        );
+    }
+    assert!(
+        matches!(live.codex_persist_intent, CodexPersistIntent::Configuration),
+        "the live intent is Configuration"
+    );
+    assert!(live.codex_pending_refresh.is_empty(), "no pending");
+    assert!(
+        live.last_refreshed_at.is_some_and(|at| at >= started),
+        "last_refreshed_at is the response's"
+    );
+    assert_eq!(rig.disk()["refresh_token"], "b-refresh", "disk stays B");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_policy_refused_rotation_stays_live_and_protected_and_is_never_written() {
+    // B-15 (N2, H2). Mutations guarded: (1) the refused branch persists C,
+    // which `save_counts` and the disk assertion catch; (2) it drops C, which
+    // the live and sent assertions catch; (3) it keeps the stale Refresh
+    // intent, which the Configuration assertion catches (the intent is set by
+    // `set_stale_intent`). Checked by reading `publish_rotation_locked`.
+    bounded(async {
+        let (rig, probe) = rig_at_b().await;
+        let (saves, attempts) = (
+            save_counts(&rig),
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst),
+        );
+        let started = chrono::Utc::now();
+        let pass = spawn_refresh(&rig);
+        probe.wait_entered().await;
+        set_runtime_only(&rig, true);
+        set_stale_intent(&rig);
+        assert!(
+            !matches!(
+                rig.live().codex_persist_intent,
+                CodexPersistIntent::Configuration
+            ),
+            "live carries a non-default intent at publication"
+        );
+        probe.release();
+        pass.await.unwrap().unwrap();
+        assert_eq!(
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst),
+            attempts,
+            "no commit was attempted"
+        );
+        assert_eq!(
+            save_counts(&rig),
+            saves,
+            "no save or save_bound by the tail"
+        );
+        assert_refused_rotation_retained(&rig, started);
+        // The policy is lifted: the next refresh keeps C, sends it and lands D.
+        set_runtime_only(&rig, false);
+        rotate_to(&probe, "d");
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent(), 3);
+        assert_eq!(probe.sent_refresh(2), "c-refresh", "C was kept and sent");
+        assert_eq!(rig.disk()["refresh_token"], "d-refresh");
+        assert_eq!(live_refresh(&rig), "d-refresh");
+        assert!(!outer_marked(&rig), "the marker cleared in the publication");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_commit_refusal_is_carried_when_the_policy_is_lifted_before_publication() {
+    // B-15 variant (decision 12). The commit's admission gives `PolicyRefused`;
+    // the policy is lifted before the publication's own admission, which would
+    // then say `Admitted`. Mutation guarded: publication trusts its own
+    // admission and persists C. Checked by changing production locally: with
+    // the `Outcome::PolicyRefused` conversion removed, this test fails on the
+    // disk and save assertions.
+    bounded(async {
+        let (rig, probe) = rig_at_b().await;
+        let (saves, attempts) = (
+            save_counts(&rig),
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst),
+        );
+        let started = chrono::Utc::now();
+        let pass = spawn_refresh(&rig);
+        probe.wait_entered().await;
+        set_runtime_only(&rig, true);
+        // The commit's check is the first after the send; the policy is lifted
+        // at the publication's, which is the second.
+        let (calls, manager) = (Arc::new(AtomicU32::new(0)), rig.manager.clone());
+        let counted = calls.clone();
+        *lock(&rig.manager.shared.origin_check_hook) = Some(Arc::new(move |_| {
+            if counted.fetch_add(1, Ordering::SeqCst) == 1 {
+                manager
+                    .edit_unsaved("codex.json", |auth| {
+                        auth.attributes.remove("runtime_only");
+                        Ok::<bool, ()>(true)
+                    })
+                    .unwrap()
+                    .unwrap();
+            }
+        }));
+        probe.release();
+        pass.await.unwrap().unwrap();
+        *lock(&rig.manager.shared.origin_check_hook) = None;
+        assert!(
+            !rig.live().attributes.contains_key("runtime_only"),
+            "the policy was lifted before publication"
+        );
+        assert_eq!(
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst),
+            attempts
+        );
+        assert_eq!(
+            save_counts(&rig),
+            saves,
+            "no save or save_bound by the tail"
+        );
+        assert_refused_rotation_retained(&rig, started);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_rotation_is_not_written_by_a_save_after_the_policy_is_lifted() {
+    // B-20 (H2). The policy is lifted after the lease is released and before
+    // the ordinary save. Mutation guarded: the tail rebuilds a Refresh patch
+    // from the refused response (the Refresh arm's synthesis, or the merge's),
+    // so the save writes C. Checked by reading: both synthesis paths are
+    // skipped only for the `PolicyRefused` disposition and `Refused` merge.
+    bounded(async {
+        let (rig, probe) = rig_at_b().await;
+        let (saves, attempts) = (
+            save_counts(&rig),
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst),
+        );
+        let started = chrono::Utc::now();
+        let pass = spawn_refresh(&rig);
+        probe.wait_entered().await;
+        set_runtime_only(&rig, true);
+        set_stale_intent(&rig);
+        let manager = rig.manager.clone();
+        *lock(&rig.manager.shared.lease_tail_hook) = Some(Arc::new(move |_: &Auth| {
+            manager
+                .edit_unsaved("codex.json", |auth| {
+                    auth.attributes.remove("runtime_only");
+                    Ok::<bool, ()>(true)
+                })
+                .unwrap()
+                .unwrap();
+        }));
+        probe.release();
+        pass.await.unwrap().unwrap();
+        *lock(&rig.manager.shared.lease_tail_hook) = None;
+        assert!(!rig.live().attributes.contains_key("runtime_only"));
+        assert_eq!(
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst),
+            attempts
+        );
+        assert_eq!(
+            save_counts(&rig),
+            saves,
+            "no save or save_bound by the tail"
+        );
+        assert_refused_rotation_retained(&rig, started);
+    })
+    .await;
+}
+
+// ---- B-4: a rebind of the store during the leased pass ----
+
+/// Where the store is rebound during the pass: (i) while the executor holds the
+/// send, (ii) after the lease is released and before the ordinary save, (iii)
+/// after the save's admission, and at the store's own call.
+#[derive(Clone, Copy, Debug)]
+enum RebindAt {
+    Send,
+    Tail,
+    Admitted,
+    BeforeSave,
+}
+
+/// Arranges for `act` to run once at `at`. The count says how often it ran.
+fn arm_at(
+    rig: &Rig,
+    probe: &Probe,
+    at: RebindAt,
+    act: impl Fn() + Send + Sync + 'static,
+) -> Arc<AtomicU32> {
+    let ran = Arc::new(AtomicU32::new(0));
+    let counted = ran.clone();
+    let once = move || {
+        if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+            act();
+        }
+    };
+    match at {
+        RebindAt::Send => probe.set_at_entry(move |_| once()),
+        RebindAt::Tail => {
+            *lock(&rig.manager.shared.lease_tail_hook) = Some(Arc::new(move |_: &Auth| once()));
+        }
+        RebindAt::Admitted => {
+            *lock(&rig.manager.shared.persist_admitted_hook) =
+                Some(Arc::new(move |_: &Auth| once()));
+        }
+        RebindAt::BeforeSave => {
+            *lock(&rig.store.before_save_hook) = Some(Arc::new(move |_: &Auth| once()));
+        }
+    }
+    ran
+}
+
+/// Removes every hook `arm_at` may have set.
+fn disarm(rig: &Rig) {
+    *lock(&rig.manager.shared.lease_tail_hook) = None;
+    *lock(&rig.manager.shared.persist_admitted_hook) = None;
+    *lock(&rig.store.before_save_hook) = None;
+}
+
+/// The shapes of Q, the file the store names after the rebind.
+#[derive(Clone, Copy, Debug)]
+enum Shape {
+    Missing,
+    SameAsA,
+    Unrelated,
+}
+
+/// A Codex file that shares nothing with A.
+fn unrelated_codex_file(a: &[u8]) -> Vec<u8> {
+    let mut file: Map<String, Value> = serde_json::from_slice(a).unwrap();
+    file.insert("access_token".into(), json!("q-access"));
+    file.insert("refresh_token".into(), json!("q-refresh"));
+    let siwc = file.get_mut("siwc").and_then(Value::as_object_mut).unwrap();
+    siwc.insert("access_token".into(), json!("q-siwc-access"));
+    siwc.insert("refresh_token".into(), json!("q-siwc-refresh"));
+    serde_json::to_vec(&file).unwrap()
+}
+
+/// B-4 for one rebind point and one shape of Q.
+async fn rebind_to_another_file(at: RebindAt, shape: Shape) {
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("b");
+        rig.manager.register_executor(probe.clone());
+        let q = tempfile::tempdir_in(rig.dir.path().parent().unwrap()).unwrap();
+        let q_file = q.path().join("codex.json");
+        let a = std::fs::read(rig.path()).unwrap();
+        match shape {
+            Shape::Missing => {}
+            Shape::SameAsA => std::fs::write(&q_file, &a).unwrap(),
+            Shape::Unrelated => std::fs::write(&q_file, unrelated_codex_file(&a)).unwrap(),
+        }
+        let q_before = std::fs::read(&q_file).ok();
+        let (files, target) = (rig.store.files.clone(), q.path().to_path_buf());
+        let ran = arm_at(&rig, &probe, at, move || files.set_base_dir(&target));
+        // What the publication left, seen after the release and before the
+        // ordinary save. A rebind during the send is the only one it sees.
+        let at_tail = Arc::new(AtomicBool::new(false));
+        if !matches!(at, RebindAt::Tail) {
+            let (seen, manager) = (at_tail.clone(), rig.manager.clone());
+            *lock(&rig.manager.shared.lease_tail_hook) = Some(Arc::new(move |_: &Auth| {
+                seen.store(
+                    manager.lock().auths["codex.json"].undurable.outer,
+                    Ordering::SeqCst,
+                );
+            }));
+        }
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        disarm(&rig);
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "{at:?}: the rebind ran");
+        if matches!(at, RebindAt::Send) {
+            assert!(
+                at_tail.load(Ordering::SeqCst),
+                "{at:?}: the publication marked B"
+            );
+        }
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "b-refresh",
+            "{at:?}: P holds B"
+        );
+        assert_eq!(
+            std::fs::read(&q_file).ok(),
+            q_before,
+            "{at:?}: Q is unchanged"
+        );
+        assert_eq!(live_refresh(&rig), "b-refresh", "{at:?}: live is B");
+        assert!(outer_marked(&rig), "{at:?}: B is marked");
+        assert!(
+            outer_cause_is_different(&rig),
+            "{at:?}: the mark says Different"
+        );
+        assert!(!unresolved_set(&rig), "{at:?}: nothing is unresolved");
+        assert_eq!(probe.sent(), 1);
+
+        rotate_to(&probe, "c");
+        match shape {
+            Shape::Missing => {
+                rig.manager.force_refresh("codex.json").await.unwrap_err();
+                assert_eq!(probe.sent(), 1, "{at:?}: nothing was sent");
+                assert!(!q_file.exists(), "{at:?}: Q is still missing");
+                rig.manager
+                    .run_persistence(|manager| {
+                        manager.edit("codex.json", |auth| {
+                            auth.metadata.insert("note".into(), json!("edited"));
+                            Ok::<_, ()>(true)
+                        })
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(q_file.exists(), "{at:?}: a saved edit created Q");
+                rig.manager.force_refresh("codex.json").await.unwrap();
+                assert_eq!(probe.sent_refresh(1), "b-refresh", "{at:?}: B is sent");
+                let landed: Value =
+                    serde_json::from_slice(&std::fs::read(&q_file).unwrap()).unwrap();
+                assert_eq!(
+                    landed["refresh_token"], "c-refresh",
+                    "{at:?}: C landed in Q"
+                );
+                assert!(!outer_marked(&rig), "{at:?}: the mark cleared");
+            }
+            Shape::SameAsA => {
+                rig.manager.force_refresh("codex.json").await.unwrap();
+                assert_eq!(
+                    probe.sent_refresh(1),
+                    "b-refresh",
+                    "{at:?}: B, never A, is sent"
+                );
+                let landed: Value =
+                    serde_json::from_slice(&std::fs::read(&q_file).unwrap()).unwrap();
+                assert_eq!(
+                    landed["refresh_token"], "c-refresh",
+                    "{at:?}: C landed in Q"
+                );
+                assert!(!outer_marked(&rig), "{at:?}: the mark cleared");
+            }
+            Shape::Unrelated => {
+                rig.manager.force_refresh("codex.json").await.unwrap();
+                assert_eq!(probe.sent_refresh(1), "b-refresh", "{at:?}: B is sent");
+                // The follow-up's commit may re-serialize Q's keys in another
+                // order, so its content is compared, not its bytes.
+                let parse = |bytes: &[u8]| serde_json::from_slice::<Value>(bytes).unwrap();
+                assert_eq!(
+                    parse(&std::fs::read(&q_file).unwrap()),
+                    parse(q_before.as_deref().unwrap()),
+                    "{at:?}: Q holds what it held"
+                );
+                assert_eq!(live_refresh(&rig), "c-refresh", "{at:?}: live holds C");
+                assert!(outer_marked(&rig), "{at:?}: C stays marked");
+            }
+        }
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "b-refresh",
+            "{at:?}: P still holds B"
+        );
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+macro_rules! rebind_cases {
+    ($($name:ident: $at:expr, $shape:expr;)*) => {
+        $(
+            #[tokio::test(flavor = "current_thread")]
+            async fn $name() {
+                // B-4 (F3b, M5). Mutation guarded: a rebind publishes as an
+                // ordinary Admitted pass (no mark), or its follow-up sends A
+                // or writes into a file the record did not name. Checked by
+                // reading: the mark, Q and sent-token assertions fail then.
+                rebind_to_another_file($at, $shape).await
+            }
+        )*
+    };
+}
+
+rebind_cases! {
+    a_rebind_during_the_send_to_a_missing_file_marks_b: RebindAt::Send, Shape::Missing;
+    a_rebind_during_the_send_to_a_copy_of_a_marks_b: RebindAt::Send, Shape::SameAsA;
+    a_rebind_during_the_send_to_an_unrelated_file_marks_b: RebindAt::Send, Shape::Unrelated;
+    a_rebind_after_the_release_to_a_missing_file_marks_b: RebindAt::Tail, Shape::Missing;
+    a_rebind_after_the_release_to_a_copy_of_a_marks_b: RebindAt::Tail, Shape::SameAsA;
+    a_rebind_after_the_release_to_an_unrelated_file_marks_b: RebindAt::Tail, Shape::Unrelated;
+    a_rebind_after_the_save_admission_to_a_missing_file_marks_b: RebindAt::Admitted, Shape::Missing;
+    a_rebind_after_the_save_admission_to_a_copy_of_a_marks_b: RebindAt::Admitted, Shape::SameAsA;
+    a_rebind_after_the_save_admission_to_an_unrelated_file_marks_b: RebindAt::Admitted, Shape::Unrelated;
+    a_rebind_in_the_store_call_to_a_missing_file_marks_b: RebindAt::BeforeSave, Shape::Missing;
+    a_rebind_in_the_store_call_to_a_copy_of_a_marks_b: RebindAt::BeforeSave, Shape::SameAsA;
+    a_rebind_in_the_store_call_to_an_unrelated_file_marks_b: RebindAt::BeforeSave, Shape::Unrelated;
+}
+
+/// The forms of a rebind that leaves the credential on P.
+#[derive(Clone, Copy, Debug)]
+enum Form {
+    /// The record names P by its absolute path; the store moves elsewhere.
+    AbsolutePath,
+    /// The store is bound to the directory it already has.
+    SameDirectory,
+    /// The store is bound to a lexically different name for P's directory.
+    Alias,
+}
+
+/// A second name for `dir`: a symlink on unix, a case change on Windows.
+#[cfg(unix)]
+fn alias_of(dir: &std::path::Path, parent: &std::path::Path) -> std::path::PathBuf {
+    let alias = parent.join("alias");
+    std::os::unix::fs::symlink(dir, &alias).unwrap();
+    alias
+}
+
+#[cfg(windows)]
+fn alias_of(dir: &std::path::Path, _parent: &std::path::Path) -> std::path::PathBuf {
+    let name = dir.file_name().unwrap().to_string_lossy().to_uppercase();
+    dir.with_file_name(name)
+}
+
+/// B-4's same-file variants for one rebind point and one form.
+#[cfg(any(unix, windows))]
+async fn rebind_to_the_same_file(at: RebindAt, form: Form) {
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("b");
+        rig.manager.register_executor(probe.clone());
+        let elsewhere = tempfile::tempdir_in(rig.dir.path().parent().unwrap()).unwrap();
+        let target = match form {
+            Form::AbsolutePath => {
+                let absolute = rig.path().to_string_lossy().into_owned();
+                rig.manager
+                    .edit_unsaved("codex.json", |auth| {
+                        auth.attributes
+                            .insert(crate::auth::classification::ATTRIBUTE_PATH.into(), absolute);
+                        Ok::<bool, ()>(true)
+                    })
+                    .unwrap()
+                    .unwrap();
+                elsewhere.path().to_path_buf()
+            }
+            Form::SameDirectory => rig.dir.path().to_path_buf(),
+            Form::Alias => {
+                let alias = alias_of(rig.dir.path(), elsewhere.path());
+                assert_ne!(alias, rig.dir.path(), "the alias is spelled differently");
+                assert!(
+                    same_file::Handle::from_path(&alias).unwrap()
+                        == same_file::Handle::from_path(rig.dir.path()).unwrap(),
+                    "the alias is the same directory"
+                );
+                alias
+            }
+        };
+        let files = rig.store.files.clone();
+        let ran = arm_at(&rig, &probe, at, move || files.set_base_dir(&target));
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        disarm(&rig);
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "{at:?} {form:?}: the rebind ran"
+        );
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "b-refresh",
+            "{at:?} {form:?}: P holds B"
+        );
+        assert_eq!(live_refresh(&rig), "b-refresh");
+        assert!(!outer_marked(&rig), "{at:?} {form:?}: nothing is marked");
+        assert!(
+            !unresolved_set(&rig),
+            "{at:?} {form:?}: nothing is unresolved"
+        );
+
+        // A peer takes P's lock through its original spelling and writes C.
+        let held =
+            crate::auth::credential_lock::acquire_with_timeout(rig.path(), Duration::from_secs(5))
+                .await
+                .unwrap();
+        peer_writes_outer(&rig.path(), "c");
+        drop(held);
+        rotate_to(&probe, "d");
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent(), 2);
+        assert_eq!(
+            probe.sent_refresh(1),
+            "c-refresh",
+            "{at:?} {form:?}: C is sent, never B"
+        );
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "d-refresh",
+            "{at:?} {form:?}: D landed"
+        );
+        assert!(!outer_marked(&rig));
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[cfg(any(unix, windows))]
+macro_rules! same_file_cases {
+    ($($name:ident: $at:expr, $form:expr;)*) => {
+        $(
+            #[tokio::test(flavor = "current_thread")]
+            async fn $name() {
+                // B-4 same-file variants (N1 (v5)). Mutation guarded: the
+                // origin comparison is lexical, so a rebind that leaves the
+                // credential on P is treated as a move: B is marked and the
+                // follow-up sends B over the peer's C. Checked by reading:
+                // the no-mark and sent-token assertions fail then.
+                rebind_to_the_same_file($at, $form).await
+            }
+        )*
+    };
+}
+
+#[cfg(any(unix, windows))]
+same_file_cases! {
+    a_rebind_during_the_send_to_the_absolute_path_leaves_b_unmarked: RebindAt::Send, Form::AbsolutePath;
+    a_rebind_during_the_send_to_the_same_directory_leaves_b_unmarked: RebindAt::Send, Form::SameDirectory;
+    a_rebind_during_the_send_to_an_alias_leaves_b_unmarked: RebindAt::Send, Form::Alias;
+    a_rebind_after_the_release_to_the_absolute_path_leaves_b_unmarked: RebindAt::Tail, Form::AbsolutePath;
+    a_rebind_after_the_release_to_the_same_directory_leaves_b_unmarked: RebindAt::Tail, Form::SameDirectory;
+    a_rebind_after_the_release_to_an_alias_leaves_b_unmarked: RebindAt::Tail, Form::Alias;
+    a_rebind_after_the_save_admission_to_the_absolute_path_leaves_b_unmarked: RebindAt::Admitted, Form::AbsolutePath;
+    a_rebind_after_the_save_admission_to_the_same_directory_leaves_b_unmarked: RebindAt::Admitted, Form::SameDirectory;
+    a_rebind_after_the_save_admission_to_an_alias_leaves_b_unmarked: RebindAt::Admitted, Form::Alias;
+}
+
+// ---- B6a coverage check: subjects of the tests B5 moved to `lease_unsupported` ----
+//
+// Each test below covers a subject for which no leased test among B-1 to B-39
+// did. The table in the report maps every moved test to its covering test.
+
+/// A name that lives as long as the process, for `rotate_to`.
+fn leaked(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_saved_edit_after_a_failed_leased_save_persists_the_rotation_and_the_settings() {
+    // Subject: a failed refresh save, then an edit (failed_refresh_save_then_
+    // edit..., consecutive_failed_refreshes_then_edit..., sparse_refresh_
+    // failure_settings_edit_and_retry..., skipped_pending_save...). Mutation
+    // guarded: the edit's save forgets the owed rotation and writes the
+    // settings over disk A, or refuses to write at all. Checked by reading:
+    // the disk assertions fail in both cases.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("b");
+        rig.manager.register_executor(probe.clone());
+        leave_unwritten_rotation(&rig, &probe).await;
+        rig.manager
+            .run_persistence(|manager| {
+                manager.edit("codex.json", |auth| {
+                    auth.metadata.insert("note".into(), json!("edited"));
+                    Ok::<_, ()>(true)
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let disk = rig.disk();
+        assert_eq!(
+            disk["refresh_token"], "b-refresh",
+            "the rotation reached disk"
+        );
+        assert_eq!(disk["note"], "edited", "the settings reached disk");
+        assert!(
+            rig.live().codex_pending_refresh.is_empty(),
+            "nothing is owed"
+        );
+        assert!(!outer_marked(&rig), "the mark cleared with the write");
+        executor_idles(&probe);
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent_refresh(1), "b-refresh", "the next pass sends B");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn seventeen_leased_refreshes_each_send_the_last_rotation_and_replay_none() {
+    // Subject: no operation is replayed (delayed_refresh_snapshot_remains_
+    // written_after_seventeen_refreshes, saved_refresh_intent_does_not_replay...,
+    // queued_refresh_snapshot_does_not_replay_consumed_patch). Mutation
+    // guarded: a committed operation stays pending or live-intended, so a
+    // later pass commits it again over a newer rotation. Checked by reading:
+    // the sent-token chain and the empty pending list fail then.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("r0");
+        rig.manager.register_executor(probe.clone());
+        let mut previous = json!("outer-refresh-old");
+        for n in 0..17 {
+            let name = leaked(format!("r{n}"));
+            rotate_to(&probe, name);
+            rig.manager.force_refresh("codex.json").await.unwrap();
+            assert_eq!(
+                probe.sent_refresh(n),
+                previous,
+                "pass {n} sends the last rotation"
+            );
+            previous = json!(format!("{name}-refresh"));
+            assert_eq!(rig.disk()["refresh_token"], previous, "pass {n} is on disk");
+            let live = rig.live();
+            assert!(
+                live.codex_pending_refresh.is_empty(),
+                "pass {n}: nothing pending"
+            );
+            assert!(
+                matches!(live.codex_persist_intent, CodexPersistIntent::Configuration),
+                "pass {n}: no live intent"
+            );
+            assert!(!outer_marked(&rig), "pass {n}: no mark");
+        }
+        assert_eq!(rig.store.lease_commit_attempts.load(Ordering::SeqCst), 17);
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_leased_outer_refresh_keeps_the_inactive_partitions_failure_and_backoff() {
+    // Subject: per-partition failure and backoff (outer_only_refresh_preserves_
+    // unattempted_siwc_failure, pending_retry_preserves_inactive_partition_
+    // failure_and_backoff, configuration_completion_preserves_newer_partition_
+    // failure, pending_siwc_success_does_not_clear_newer_siwc_failure, outer_
+    // only_refresh_after_expired_siwc_backoff...). Mutation guarded: a leased
+    // outer-only publication clears the SIWC failure or moves its backoff.
+    // Checked by reading: both assertions fail then.
+    bounded(async {
+        let rig = rig();
+        rig.manager
+            .edit_unsaved("codex.json", |auth| {
+                auth.metadata.insert("use_siwc".into(), json!(false));
+                Ok::<_, ()>(true)
+            })
+            .unwrap()
+            .unwrap();
+        rig.manager.register_executor(rotation_executor(true));
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        let live = rig.live();
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-rotated");
+        assert_eq!(
+            live.codex_refresh_failure.as_ref().unwrap().partition,
+            crate::auth::CodexCredentialPartition::Siwc,
+            "the SIWC failure is recorded"
+        );
+        let backoff = live.next_refresh_after;
+        assert!(backoff.is_some(), "the SIWC partition waits out a backoff");
+        let probe = Probe::new("codex", false);
+        probe.fake.set_refresh(|before| {
+            let mut after = before.clone();
+            after
+                .metadata
+                .insert("access_token".into(), json!("n-access"));
+            after
+                .metadata
+                .insert("refresh_token".into(), json!("n-refresh"));
+            after.codex_refresh_failure = None;
+            after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+                &before.metadata,
+                &after.metadata,
+                true,
+                false,
+            ));
+            Ok(after)
+        });
+        rig.manager.register_executor(probe.clone());
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        let live = rig.live();
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "n-refresh",
+            "the outer rotation landed"
+        );
+        assert_eq!(
+            live.codex_refresh_failure.as_ref().map(|f| f.partition),
+            Some(crate::auth::CodexCredentialPartition::Siwc),
+            "the SIWC failure survives an outer-only pass"
+        );
+        assert_eq!(live.next_refresh_after, backoff, "the backoff is unchanged");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn forty_refused_leased_rotations_are_repaired_through_the_first_disk_identity() {
+    // Subject: a long chain of discarded rotations (forty_runtime_only_
+    // rotations_repair_first_disk_identity, forty_failed_saves_repair_first_
+    // disk_identity, later_partition_rotation_repairs_discarded_chain,
+    // discarded_chain_keeps_landed_intermediate_baselines). Mutation guarded:
+    // the baseline list drops its oldest entry (disk A) past a bound, so the
+    // final commit finds no baseline matching disk and is not written.
+    // Checked by changing the production bound is not possible without
+    // production edits; checked by reading `undurable_baselines` pushes.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("n0");
+        rig.manager.register_executor(probe.clone());
+        let manager = rig.manager.clone();
+        probe.set_at_entry(move |_| {
+            manager
+                .edit_unsaved("codex.json", |auth| {
+                    auth.attributes.insert("runtime_only".into(), "true".into());
+                    Ok::<bool, ()>(true)
+                })
+                .unwrap()
+                .unwrap();
+        });
+        for n in 0..40 {
+            rotate_to(&probe, leaked(format!("n{n}")));
+            set_runtime_only(&rig, false);
+            rig.manager.force_refresh("codex.json").await.unwrap();
+            assert_eq!(
+                live_refresh(&rig),
+                json!(format!("n{n}-refresh")),
+                "pass {n}"
+            );
+            assert!(
+                outer_marked(&rig),
+                "pass {n}: the refused rotation is marked"
+            );
+            assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old", "pass {n}");
+        }
+        assert_eq!(rig.store.lease_commit_attempts.load(Ordering::SeqCst), 0);
+        *lock(&probe.at_entry) = None;
+        set_runtime_only(&rig, false);
+        rotate_to(&probe, "final");
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(
+            probe.sent_refresh(40),
+            "n39-refresh",
+            "the live rotation is sent"
+        );
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "final-refresh",
+            "the commit found disk A in the chain"
+        );
+        assert!(!outer_marked(&rig), "the mark cleared");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_policy_toggle_between_commit_and_publication_does_not_unwrite_the_commit() {
+    // Subject: an admitted write finishes after a discard ABA (admitted_
+    // refresh_may_finish_after_discard_aba, captured_refresh_is_revoked_after_
+    // discard_aba, admitted_refresh_failure_does_not_requeue...). Mutation
+    // guarded: publication refuses or re-queues a rotation the lease already
+    // committed because `runtime_only` went on and off in between. Checked by
+    // reading: the disk, mark and pending assertions fail then.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("b");
+        rig.manager.register_executor(probe.clone());
+        let (calls, manager) = (Arc::new(AtomicU32::new(0)), rig.manager.clone());
+        let counted = calls.clone();
+        *lock(&rig.manager.shared.origin_check_hook) = Some(Arc::new(move |_| {
+            // The commit's check is the first; the toggle follows it, before
+            // the publication's own.
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                for on in [true, false] {
+                    manager
+                        .edit_unsaved("codex.json", |auth| {
+                            if on {
+                                auth.attributes.insert("runtime_only".into(), "true".into());
+                            } else {
+                                auth.attributes.remove("runtime_only");
+                            }
+                            Ok::<bool, ()>(true)
+                        })
+                        .unwrap()
+                        .unwrap();
+                }
+            }
+        }));
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        *lock(&rig.manager.shared.origin_check_hook) = None;
+        assert!(calls.load(Ordering::SeqCst) >= 2, "both checks ran");
+        assert_eq!(rig.disk()["refresh_token"], "b-refresh", "B is on disk");
+        assert_eq!(live_refresh(&rig), "b-refresh");
+        assert!(!outer_marked(&rig), "nothing is marked");
+        assert!(
+            rig.live().codex_pending_refresh.is_empty(),
+            "nothing is owed"
+        );
+    })
+    .await;
+}
