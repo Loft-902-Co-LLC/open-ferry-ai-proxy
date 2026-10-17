@@ -1094,14 +1094,26 @@ async fn a_401_adopts_nothing_while_a_refresh_without_a_job_is_in_flight() {
 // before it takes the persist lock. The gate quiesces, and an outcome is
 // recorded without an operation: it publishes a newer generation, and its
 // save is refused. The refused save must not make the refresh's look older:
-// the file ends with the refresh's token.
+// the file ends with the refresh's token. The leased commit already put the
+// token in the file, so the held save is told apart by a field only it can
+// write: a note set on the record as the lease is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_save_does_not_hide_an_admitted_one() {
     let env = Env::new();
+    let noting = env.manager.clone();
+    *lock(&env.manager.shared.lease_tail_hook) = Some(Arc::new(move |_: &Auth| {
+        let mut auth = noting.get(ID).expect("credential").as_ref().clone();
+        auth.metadata.insert("note".into(), json!("tail"));
+        noting.update_unsaved(auth).expect("the note is set");
+    }));
     let hold = hold_save(&env.manager, |auth| access_token(auth) == "access-1");
     let refresh = env.refresh();
     hold.wait_entered().await;
     assert_eq!(env.token(), "access-1");
+    assert!(
+        env.on_disk().get("note").is_none(),
+        "only the held save can write the note"
+    );
     let published = env.versions().1;
     let closing = env.close();
     until(|| env.gate.state() != GateState::Open).await;
@@ -1118,6 +1130,7 @@ async fn a_refused_save_does_not_hide_an_admitted_one() {
     closing.await.expect("task").expect("closes");
     assert_eq!(env.on_disk()["refresh_token"], "refresh-1");
     assert_eq!(env.on_disk()["access_token"], "access-1");
+    assert_eq!(env.on_disk()["note"], "tail", "the held save landed");
 }
 
 // Not upstream's: C2-O2. A save of a newer generation that fails does not
