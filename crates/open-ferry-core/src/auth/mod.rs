@@ -590,6 +590,95 @@ pub trait AuthStore: Send + Sync + 'static {
     fn codex_origin(&self, _auth: &Auth) -> io::Result<Option<CodexOrigin>> {
         Ok(None)
     }
+
+    /// Not upstream's. Saves `auth` only if the path it resolves to is
+    /// `origin`'s file, proven under that path's credential lock. `Ok(None)`
+    /// when the proof is not `Same`: nothing was written, and `refused` was
+    /// called once with the resolved path's origin and the proof (`Different`
+    /// or `Unproven`) while the store held its write permit and that
+    /// credential lock, before the save mutex. `refused` may take the
+    /// manager's state lock. It must do no I/O, and the only store method it
+    /// may call is `codex_origin`. A store with no file identity saves and
+    /// never calls `refused`.
+    fn save_bound(
+        &self,
+        auth: &Auth,
+        _origin: &CodexOrigin,
+        _refused: &mut dyn FnMut(&CodexOrigin, OriginProof),
+    ) -> io::Result<Option<String>> {
+        self.save(auth).map(Some)
+    }
+
+    /// Not upstream's. The unleased save. Calls `guard` once, while the store
+    /// holds its write permit and the destination's credential lock and
+    /// before the save mutex, with the destination's origin (`None` for a
+    /// store or record with no file identity). `Err(reason)` from `guard`:
+    /// nothing is written, `Ok(Deferred(reason))`. `Ok(withheld)`: every
+    /// withheld partition is written exactly as the destination file holds
+    /// it, and a missing destination, or one lacking a withheld partition
+    /// `auth` holds, gives `Deferred(MissingFile | MissingPartition)` with
+    /// nothing created or written. `guard` has `save_bound`'s `refused`
+    /// contract. The default cannot constrain fields, so it refuses a
+    /// non-empty withheld set.
+    fn save_guarded(
+        &self,
+        auth: &Auth,
+        guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
+    ) -> io::Result<GuardedSave> {
+        match guard(None) {
+            Err(reason) => Ok(GuardedSave::Deferred(reason)),
+            Ok(withheld) if withheld.any() => Ok(GuardedSave::Deferred(SaveDeferral::Unsupported)),
+            Ok(_) => self.save(auth).map(GuardedSave::Written),
+        }
+    }
+}
+
+/// The partitions an unleased save must leave exactly as the destination file
+/// holds them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WithheldPartitions {
+    /// The top-level `OUTER_KEYS`.
+    pub outer: bool,
+    /// The nested `siwc` object.
+    pub siwc: bool,
+}
+
+impl WithheldPartitions {
+    /// Whether any partition is withheld.
+    pub fn any(self) -> bool {
+        self.outer || self.siwc
+    }
+}
+
+/// Why `save_guarded` wrote nothing. Carries no token, path or account data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveDeferral {
+    /// Store: a partition is withheld and the destination does not exist.
+    MissingFile,
+    /// Store: the destination lacks a withheld partition `auth` holds.
+    MissingPartition,
+    /// Store: a withheld set the store cannot honour (the default body).
+    Unsupported,
+    /// Guard: the unresolved state now names a partition not withheld.
+    StateChanged,
+    /// Guard: an operation was written, or live's tokens moved.
+    Stale,
+    /// Guard: live no longer resolves to the destination.
+    OriginMoved,
+    /// Guard: the entry is gone or has a new epoch.
+    RegistrationChanged,
+    /// Guard: a refresh pass on this id holds its refresh mutex.
+    RefreshInFlight,
+}
+
+/// The result of [`AuthStore::save_guarded`].
+#[derive(Debug)]
+pub enum GuardedSave {
+    /// Saved; the file's path, or an empty string for a disabled credential
+    /// whose file is gone.
+    Written(String),
+    /// Nothing was written.
+    Deferred(SaveDeferral),
 }
 
 fn unsupported() -> io::Error {

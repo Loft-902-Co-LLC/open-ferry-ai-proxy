@@ -267,7 +267,11 @@ async fn login_dispatches_completed_commands_only_after_success() {
             json!({"type":"codex", "access_token":"A", "refresh_token":"A-refresh", "siwc":{"access_token":"S","refresh_token":"S-refresh"}}),
         ),
     );
+    // A login no longer writes SIWC, so seed it with a raw write.
     dir.store.save_new(&original).unwrap();
+    let mut seeded = dir.read_json("command.json");
+    seeded["siwc"] = original.metadata["siwc"].clone();
+    dir.write("command.json", &seeded.to_string());
     api.manager.register_unsaved(original.clone()).unwrap();
     let sync = std::sync::Arc::new(CommandSync {
         manager: api.manager.clone(),
@@ -401,4 +405,78 @@ async fn ambiguous_login_destination_dispatches_plain_sync() {
         1,
         "ambiguous destination dispatches plain sync"
     );
+}
+
+// The compose rule: a management login never writes SIWC, so a registered
+// credential's SIWC object is not carried into a new file.
+#[tokio::test]
+async fn login_without_a_file_drops_the_registered_siwc_binding() {
+    let auth_dir = AuthDir::new();
+    let api = Api::over(&auth_dir);
+    let file_name = "codex-siwc@example.com.json";
+    let registered = record(
+        "codex",
+        file_name,
+        map(json!({
+            "type": "codex", "access_token": "old", "refresh_token": "old-refresh",
+            "use_siwc": true, "prefix": "team",
+            "siwc": {"access_token": "S-B", "refresh_token": "S-B-refresh"}
+        })),
+    );
+    api.manager.register_unsaved(registered).unwrap();
+
+    let fresh = record(
+        "codex",
+        file_name,
+        map(json!({"type": "codex", "access_token": "new", "refresh_token": "new-refresh"})),
+    );
+    save_token_record(&api.state, fresh).await.unwrap();
+    let saved = auth_dir.read_json(file_name);
+    assert_eq!(saved["access_token"], "new");
+    assert_eq!(saved["refresh_token"], "new-refresh");
+    assert_eq!(saved["prefix"], "team");
+    let saved = saved.as_object().unwrap();
+    assert!(!saved.contains_key("siwc"));
+    assert!(!saved.contains_key("use_siwc"));
+}
+
+#[tokio::test]
+async fn login_over_a_file_keeps_the_files_siwc_exactly() {
+    let auth_dir = AuthDir::new();
+    let api = Api::over(&auth_dir);
+    let file_name = "codex-siwc@example.com.json";
+    let registered = record(
+        "codex",
+        file_name,
+        map(json!({
+            "type": "codex", "access_token": "old", "refresh_token": "old-refresh",
+            "use_siwc": true,
+            "siwc": {"access_token": "S-B", "refresh_token": "S-B-refresh"}
+        })),
+    );
+    api.manager.register_unsaved(registered).unwrap();
+    // A peer committed SIWC C to the file.
+    auth_dir.write(
+        file_name,
+        &json!({
+            "type": "codex", "access_token": "old", "refresh_token": "old-refresh",
+            "use_siwc": true,
+            "siwc": {"access_token": "S-C", "refresh_token": "S-C-refresh"}
+        })
+        .to_string(),
+    );
+
+    let fresh = record(
+        "codex",
+        file_name,
+        map(json!({"type": "codex", "access_token": "new", "refresh_token": "new-refresh"})),
+    );
+    save_token_record(&api.state, fresh).await.unwrap();
+    let saved = auth_dir.read_json(file_name);
+    assert_eq!(saved["refresh_token"], "new-refresh");
+    assert_eq!(
+        saved["siwc"],
+        json!({"access_token": "S-C", "refresh_token": "S-C-refresh"})
+    );
+    assert_eq!(saved["use_siwc"], true);
 }

@@ -527,13 +527,74 @@ pub(crate) fn is_credential_key(key: &str) -> bool {
     matches!(key, "siwc" | "use_siwc") || OUTER_KEYS.contains(&key)
 }
 
+/// Makes each withheld partition of `merged` exactly `disk`'s: for outer, every
+/// `OUTER_KEYS` key takes disk's value, and a key disk lacks is removed; for
+/// SIWC, the `siwc` object is disk's, and removed when disk has none. No other
+/// key is touched (`use_siwc` stays the merge's). Pure; no I/O.
+pub(crate) fn constrain_withheld(
+    merged: &mut Map<String, Value>,
+    disk: &Map<String, Value>,
+    withheld: super::WithheldPartitions,
+) {
+    if withheld.outer {
+        for key in OUTER_KEYS {
+            match disk.get(*key) {
+                Some(value) => {
+                    merged.insert((*key).into(), value.clone());
+                }
+                None => {
+                    merged.shift_remove(*key);
+                }
+            }
+        }
+    }
+    if withheld.siwc {
+        match disk.get("siwc") {
+            Some(siwc) => {
+                merged.insert("siwc".into(), siwc.clone());
+            }
+            None => {
+                merged.shift_remove("siwc");
+            }
+        }
+    }
+}
+
+/// Whether `map` (top level, or the nested `siwc` object for SIWC) holds the
+/// partition: some `IDENTITY_KEYS` key is a non-empty string.
+pub(crate) fn holds_partition(
+    map: &Map<String, Value>,
+    partition: super::CodexCredentialPartition,
+) -> bool {
+    let nested_map;
+    let map = match partition {
+        super::CodexCredentialPartition::Outer => map,
+        super::CodexCredentialPartition::Siwc => {
+            nested_map = nested(map);
+            &nested_map
+        }
+    };
+    IDENTITY_KEYS.iter().any(|key| {
+        map.get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    })
+}
+
 pub(crate) fn merge_persist(
     disk: Option<&Map<String, Value>>,
     incoming: &Map<String, Value>,
     intent: &CodexPersistIntent,
 ) -> (Map<String, Value>, PatchApplied) {
     let Some(disk) = disk else {
-        return (incoming.clone(), PatchApplied::default());
+        let mut merged = incoming.clone();
+        // A sign-in never writes SIWC: the destination decides, and with no
+        // file it holds none.
+        if matches!(intent, CodexPersistIntent::OuterLogin) {
+            merged.shift_remove("siwc");
+            merged.shift_remove("use_siwc");
+        }
+        return (merged, PatchApplied::default());
     };
     let mut merged = match intent {
         CodexPersistIntent::Configuration => {
@@ -574,7 +635,7 @@ pub(crate) fn merge_persist(
             let mut merged = disk.clone();
             for (key, value) in incoming {
                 if key != "siwc"
-                    && (key != "use_siwc" || !disk.contains_key(key))
+                    && key != "use_siwc"
                     && (OUTER_KEYS.contains(&key.as_str())
                         || (!value.is_null()
                             && (!value.as_str().is_some_and(|s| s.trim().is_empty())
