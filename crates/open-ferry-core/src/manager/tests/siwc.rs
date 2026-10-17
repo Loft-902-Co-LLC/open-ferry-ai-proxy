@@ -229,7 +229,7 @@ fn merge_refreshed_metadata_preserves_siwc_and_concurrent_bind() {
     assert_eq!(merged.metadata["siwc"]["access_token"], "new-token");
 }
 
-struct ControlledExecutor {
+pub(super) struct ControlledExecutor {
     fake: Arc<FakeExecutor>,
     entered: Notify,
     release: Semaphore,
@@ -366,6 +366,20 @@ fn disk_manager() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
         Some(store.clone()),
     );
     create_with_siwc(&store, &dir, &fixture());
+    manager.register(fixture()).unwrap();
+    (dir, store, manager)
+}
+
+/// [`disk_manager`] with the manager over a store that gives no lease: the
+/// unleased refresh path these tests were written for. The returned store is
+/// the same files, for the peer's own writes.
+fn disk_manager_unleased() -> (tempfile::TempDir, Arc<FileStore>, Manager) {
+    let (dir, store, _leased) = disk_manager();
+    let manager = Manager::new(
+        Settings::default(),
+        Arc::new(FakeModels::default()),
+        Some(super::siwc_persistence::observe(store.clone(), true)),
+    );
     manager.register(fixture()).unwrap();
     (dir, store, manager)
 }
@@ -536,7 +550,9 @@ async fn caller_cancelled_refresh_still_persists() {
 
 #[tokio::test]
 async fn manager_outer_refresh_preserves_concurrent_siwc_bind() {
-    let (_dir, store, manager) = disk_manager();
+    // The peer writes through the files while the pass would hold the lease;
+    // this test pins the unleased path.
+    let (_dir, store, manager) = disk_manager_unleased();
     let executor = ControlledExecutor::new(true, false, None, true);
     manager.register_executor(executor.clone());
     let worker = manager.clone();
@@ -559,7 +575,9 @@ async fn manager_outer_refresh_preserves_concurrent_siwc_bind() {
 
 #[tokio::test]
 async fn partial_success_superseded_on_disk_does_not_expose_rotated_token() {
-    let (_dir, store, manager) = disk_manager();
+    // The peer writes through the files while the pass would hold the lease;
+    // this test pins the unleased path.
+    let (_dir, store, manager) = disk_manager_unleased();
     let executor = ControlledExecutor::new(true, false, Some(true), true);
     manager.register_executor(executor.clone());
     let worker = manager.clone();
@@ -585,7 +603,9 @@ async fn partial_success_superseded_on_disk_does_not_expose_rotated_token() {
 
 #[tokio::test]
 async fn manager_adopts_newer_disk_partition_and_keeps_epoch_protection() {
-    let (_dir, store, manager) = disk_manager();
+    // The peer writes through the files while the pass would hold the lease;
+    // this test pins the unleased path.
+    let (_dir, store, manager) = disk_manager_unleased();
     let executor = ControlledExecutor::new(true, true, None, true);
     manager.register_executor(executor.clone());
     let worker = manager.clone();

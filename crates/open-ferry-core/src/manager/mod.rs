@@ -484,6 +484,14 @@ pub(crate) struct Shared {
     /// about to take the fence, and waits for the second before it does.
     #[cfg(test)]
     send_fence_pause: Mutex<Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>>,
+    /// Test seam: called with the published snapshot after the lease is
+    /// released and before the ordinary save.
+    #[cfg(test)]
+    lease_tail_hook: Mutex<Option<PersistHook>>,
+    /// Test seam: called with the saved snapshot after an unleased save has
+    /// written and released check (vi)'s hold on the refresh mutex.
+    #[cfg(test)]
+    unleased_saved_hook: Mutex<Option<PersistHook>>,
 }
 
 /// What a test runs after each proof of a leased origin check.
@@ -649,6 +657,10 @@ impl Manager {
             lease_retry_window: Mutex::new(None),
             #[cfg(test)]
             send_fence_pause: Mutex::new(None),
+            #[cfg(test)]
+            lease_tail_hook: Mutex::new(None),
+            #[cfg(test)]
+            unleased_saved_hook: Mutex::new(None),
         });
         let owner = Some(Arc::new(Owner(Arc::downgrade(&shared))));
         Self {

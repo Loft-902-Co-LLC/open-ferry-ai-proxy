@@ -2,14 +2,17 @@
 use super::support::*;
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::credential_lock::credential_lock_path;
-use crate::auth::{Auth, AuthStore, FileStore};
+use crate::auth::{
+    Auth, AuthStore, CodexLease, CodexLeaseToken, CodexOrigin, CodexPersisted, FileStore,
+    GuardedSave, OriginProof, SaveDeferral, WithheldPartitions,
+};
 use crate::gate::{ActiveGate, GateState};
 use crate::manager::{CallResult, Manager, Settings, lock};
 use futures_util::FutureExt;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::fs::OpenOptions;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -29,28 +32,65 @@ fn fixture() -> Auth {
 
 type SameRecordHook = Arc<dyn Fn(&Auth, &Auth) + Send + Sync>;
 type SaveHook = Arc<dyn Fn(&Auth) + Send + Sync>;
+/// Called with the map `codex_lease_read` is about to return; may edit it.
+type LeaseReadHook = Arc<dyn Fn(&mut Map<String, Value>) + Send + Sync>;
 
-struct ObservedStore {
-    files: Arc<FileStore>,
-    error_once: Mutex<Option<String>>,
-    fail_refresh: AtomicBool,
-    skip_refresh_read: AtomicBool,
-    fail_after_save: AtomicBool,
-    writes: Mutex<Vec<u64>>,
-    saved: Notify,
-    same_record_hook: Mutex<Option<SameRecordHook>>,
-    same_record_error: AtomicBool,
-    save_hook: Mutex<Option<SaveHook>>,
-    before_save_hook: Mutex<Option<SaveHook>>,
-    read_hook: Mutex<Option<SaveHook>>,
+pub(super) struct ObservedStore {
+    pub(super) files: Arc<FileStore>,
+    pub(super) error_once: Mutex<Option<String>>,
+    pub(super) fail_refresh: AtomicBool,
+    pub(super) skip_refresh_read: AtomicBool,
+    pub(super) fail_after_save: AtomicBool,
+    pub(super) writes: Mutex<Vec<u64>>,
+    pub(super) saved: Notify,
+    pub(super) same_record_hook: Mutex<Option<SameRecordHook>>,
+    pub(super) same_record_error: AtomicBool,
+    pub(super) save_hook: Mutex<Option<SaveHook>>,
+    pub(super) before_save_hook: Mutex<Option<SaveHook>>,
+    pub(super) read_hook: Mutex<Option<SaveHook>>,
+    /// While set, `codex_origin` gives `Ok(None)`: a record with no resolved
+    /// identity. The lease methods and `save_bound` still forward.
+    pub(super) opaque_origin: AtomicBool,
+    /// While non-zero, `codex_lease_commit` fails before it forwards;
+    /// `u32::MAX` never counts down.
+    pub(super) fail_lease_commit: AtomicU32,
+    /// Every `codex_lease_commit` call, failed or not.
+    pub(super) lease_commit_attempts: AtomicU32,
+    /// Every `codex_refresh_lease` call.
+    pub(super) lease_calls: AtomicU32,
+    /// Every `save_bound` call.
+    pub(super) save_bound_calls: AtomicU32,
+    /// Fires at the start of every `codex_lease_commit`.
+    pub(super) before_lease_commit_hook: Mutex<Option<SaveHook>>,
+    /// Fires on the map `codex_lease_read` is about to return.
+    pub(super) lease_read_hook: Mutex<Option<LeaseReadHook>>,
+    /// While non-zero, `codex_lease_commit` forwards and then returns an
+    /// injected error in place of the result (a write that landed unseen).
+    pub(super) fail_after_lease_commit: AtomicU32,
+    /// While non-zero, `codex_lease_read` fails without forwarding.
+    pub(super) fail_lease_read: AtomicU32,
+    /// Each `save_guarded` result with the record's generation; `None` is a
+    /// write.
+    pub(super) guarded: Mutex<Vec<(u64, Option<SaveDeferral>)>>,
+    /// While set, `codex_refresh_lease` gives `Unsupported` without forwarding.
+    pub(super) lease_unsupported: AtomicBool,
 }
 
-impl AuthStore for ObservedStore {
-    fn list(&self) -> io::Result<Vec<Auth>> {
-        self.files.list()
+/// Counts a fault counter down; `u32::MAX` stays armed. True when it was armed.
+fn take_fault(counter: &AtomicU32) -> bool {
+    match counter.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
+        0 | u32::MAX => None,
+        n => Some(n - 1),
+    }) {
+        Ok(_) => true,
+        Err(n) => n == u32::MAX,
     }
+}
 
-    fn save(&self, auth: &Auth) -> io::Result<String> {
+impl ObservedStore {
+    /// What every save method does first: the hook, `error_once`, then
+    /// `fail_refresh` for a `Refresh` intent.
+    fn save_preamble(&self, auth: &Auth) -> io::Result<()> {
         let hook = lock(&self.before_save_hook).clone();
         if let Some(hook) = hook {
             hook(auth);
@@ -63,17 +103,121 @@ impl AuthStore for ObservedStore {
         {
             return Err(io::Error::other("injected refresh save failure"));
         }
-        let path = self.files.save(auth)?;
-        if self.fail_after_save.swap(false, Ordering::SeqCst) {
-            return Err(io::Error::other("injected error after landed write"));
-        }
+        Ok(())
+    }
+
+    /// What every save method does after a write.
+    fn after_write(&self, auth: &Auth) {
         let hook = lock(&self.save_hook).clone();
         if let Some(hook) = hook {
             hook(auth);
         }
         lock(&self.writes).push(auth.generation);
         self.saved.notify_waiters();
+    }
+}
+
+impl AuthStore for ObservedStore {
+    fn list(&self) -> io::Result<Vec<Auth>> {
+        self.files.list()
+    }
+
+    fn save(&self, auth: &Auth) -> io::Result<String> {
+        self.save_preamble(auth)?;
+        let path = self.files.save(auth)?;
+        if self.fail_after_save.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("injected error after landed write"));
+        }
+        self.after_write(auth);
         Ok(path)
+    }
+
+    fn codex_refresh_lease(&self, auth: &Auth) -> io::Result<CodexLease> {
+        self.lease_calls.fetch_add(1, Ordering::SeqCst);
+        if self.lease_unsupported.load(Ordering::SeqCst) {
+            return Ok(CodexLease::Unsupported);
+        }
+        self.files.codex_refresh_lease(auth)
+    }
+
+    fn codex_lease_read(&self, token: &CodexLeaseToken) -> io::Result<Option<Map<String, Value>>> {
+        if take_fault(&self.fail_lease_read) {
+            return Err(io::Error::other("injected lease read failure"));
+        }
+        let mut map = self.files.codex_lease_read(token)?;
+        let hook = lock(&self.lease_read_hook).clone();
+        if let (Some(hook), Some(map)) = (hook, map.as_mut()) {
+            hook(map);
+        }
+        Ok(map)
+    }
+
+    fn codex_lease_commit(
+        &self,
+        token: &CodexLeaseToken,
+        auth: &Auth,
+        patch: &crate::auth::codex_refresh::CredentialRefreshPatch,
+    ) -> io::Result<CodexPersisted> {
+        self.lease_commit_attempts.fetch_add(1, Ordering::SeqCst);
+        let hook = lock(&self.before_lease_commit_hook).clone();
+        if let Some(hook) = hook {
+            hook(auth);
+        }
+        if take_fault(&self.fail_lease_commit) {
+            return Err(io::Error::other("injected lease commit failure"));
+        }
+        let result = self.files.codex_lease_commit(token, auth, patch)?;
+        if take_fault(&self.fail_after_lease_commit) {
+            return Err(io::Error::other("injected error after landed lease commit"));
+        }
+        Ok(result)
+    }
+
+    fn codex_origin(&self, auth: &Auth) -> io::Result<Option<CodexOrigin>> {
+        if self.opaque_origin.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        self.files.codex_origin(auth)
+    }
+
+    fn save_bound(
+        &self,
+        auth: &Auth,
+        origin: &CodexOrigin,
+        refused: &mut dyn FnMut(&CodexOrigin, OriginProof),
+    ) -> io::Result<Option<String>> {
+        self.save_bound_calls.fetch_add(1, Ordering::SeqCst);
+        self.save_preamble(auth)?;
+        let written = self.files.save_bound(auth, origin, refused)?;
+        if written.is_some() {
+            if self.fail_after_save.swap(false, Ordering::SeqCst) {
+                return Err(io::Error::other("injected error after landed write"));
+            }
+            self.after_write(auth);
+        }
+        Ok(written)
+    }
+
+    fn save_guarded(
+        &self,
+        auth: &Auth,
+        guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
+    ) -> io::Result<GuardedSave> {
+        self.save_preamble(auth)?;
+        let result = self.files.save_guarded(auth, guard)?;
+        match &result {
+            GuardedSave::Written(_) => {
+                lock(&self.guarded).push((auth.generation, None));
+                if self.fail_after_save.swap(false, Ordering::SeqCst) {
+                    return Err(io::Error::other("injected error after landed write"));
+                }
+                self.after_write(auth);
+            }
+            GuardedSave::Deferred(reason) => {
+                lock(&self.guarded).push((auth.generation, Some(*reason)));
+            }
+        }
+        Ok(result)
     }
 
     fn delete(&self, id: &str) -> io::Result<()> {
@@ -135,6 +279,36 @@ impl ObservedStore {
     }
 }
 
+/// An [`ObservedStore`] over a given `FileStore`, with no fault armed.
+/// `lease_unsupported` makes it answer `Unsupported` to every lease.
+pub(super) fn observe(files: Arc<FileStore>, lease_unsupported: bool) -> Arc<ObservedStore> {
+    Arc::new(ObservedStore {
+        files,
+        error_once: Mutex::new(None),
+        fail_refresh: AtomicBool::new(false),
+        skip_refresh_read: AtomicBool::new(false),
+        fail_after_save: AtomicBool::new(false),
+        writes: Mutex::new(Vec::new()),
+        saved: Notify::new(),
+        same_record_hook: Mutex::new(None),
+        same_record_error: AtomicBool::new(false),
+        save_hook: Mutex::new(None),
+        before_save_hook: Mutex::new(None),
+        read_hook: Mutex::new(None),
+        opaque_origin: AtomicBool::new(false),
+        fail_lease_commit: AtomicU32::new(0),
+        lease_commit_attempts: AtomicU32::new(0),
+        lease_calls: AtomicU32::new(0),
+        save_bound_calls: AtomicU32::new(0),
+        before_lease_commit_hook: Mutex::new(None),
+        lease_read_hook: Mutex::new(None),
+        fail_after_lease_commit: AtomicU32::new(0),
+        fail_lease_read: AtomicU32::new(0),
+        guarded: Mutex::new(Vec::new()),
+        lease_unsupported: AtomicBool::new(lease_unsupported),
+    })
+}
+
 fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate) {
     let root = std::env::var_os("OFP_TEST_SCRATCH")
         .map(std::path::PathBuf::from)
@@ -155,20 +329,7 @@ fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate
         seeded.insert(key.into(), fixture().metadata[key].clone());
     }
     std::fs::write(&path, serde_json::to_vec(&seeded).unwrap()).unwrap();
-    let store = Arc::new(ObservedStore {
-        files,
-        error_once: Mutex::new(None),
-        fail_refresh: AtomicBool::new(false),
-        skip_refresh_read: AtomicBool::new(false),
-        fail_after_save: AtomicBool::new(false),
-        writes: Mutex::new(Vec::new()),
-        saved: Notify::new(),
-        same_record_hook: Mutex::new(None),
-        same_record_error: AtomicBool::new(false),
-        save_hook: Mutex::new(None),
-        before_save_hook: Mutex::new(None),
-        read_hook: Mutex::new(None),
-    });
+    let store = observe(files, false);
     let manager = Manager::new(
         Settings::default(),
         Arc::new(FakeModels::default()),
@@ -297,6 +458,8 @@ impl Drop for SaveHold {
 #[tokio::test]
 async fn failed_refresh_save_then_edit_persists_both_rotations_and_settings() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(|before| {
         let mut after = before.clone();
@@ -350,6 +513,8 @@ async fn failed_refresh_save_then_edit_persists_both_rotations_and_settings() {
 #[tokio::test(flavor = "current_thread")]
 async fn configuration_snapshot_carries_published_rotation_before_refresh_save_fails() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(|before| {
         let mut after = before.clone();
@@ -468,6 +633,8 @@ async fn configuration_snapshot_carries_published_rotation_before_refresh_save_f
 #[tokio::test]
 async fn explicit_outer_token_edit_keeps_pending_siwc_rotation() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(|before| {
         let mut after = before.clone();
@@ -553,6 +720,8 @@ async fn consecutive_failed_refreshes_then_edit_persist_latest_rotations() {
     // that must retain the earlier outer rotation.
     for second_outer in [true, false] {
         let (dir, store, manager, _gate) = disk_manager();
+        // The fault or hook is on the unleased refresh save, so the store gives no lease.
+        store.lease_unsupported.store(true, Ordering::SeqCst);
         for (round, outer) in [(1, true), (2, second_outer)] {
             let executor = FakeExecutor::new("codex");
             executor.set_refresh(move |before| {
@@ -899,6 +1068,8 @@ fn result_save_without_a_runtime_runs_inline() {
 #[tokio::test]
 async fn sparse_refresh_failure_settings_edit_and_retry_keeps_pending() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let mut before = fixture();
     before
         .metadata
@@ -968,6 +1139,8 @@ async fn sparse_refresh_failure_settings_edit_and_retry_keeps_pending() {
 #[tokio::test]
 async fn sparse_second_refresh_saves_pending_refresh_token_rotation() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let executor = FakeExecutor::new("codex");
     executor.set_refresh(|before| {
         let mut after = before.clone();
@@ -1177,6 +1350,8 @@ async fn reconciliation_publishes_authoritative_disk_omissions() {
     for partition in ["outer", "siwc-key", "siwc-object"] {
         for independent in [false, true] {
             let (_dir, store, manager, _gate) = disk_manager();
+            // The fault or hook is on the unleased refresh save, so the store gives no lease.
+            store.lease_unsupported.store(true, Ordering::SeqCst);
             let mut before = fixture();
             before.metadata.insert("id_token".into(), json!("outer-id"));
             before.metadata["siwc"]["id_token"] = json!("siwc-id");
@@ -1343,6 +1518,8 @@ async fn refresh_with_result_during_save(store: &ObservedStore, manager: &Manage
 #[tokio::test(flavor = "current_thread")]
 async fn saved_refresh_intent_does_not_replay_after_concurrent_result() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     refresh_with_result_during_save(&store, &manager).await;
     assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
     let mut outside = disk(&dir);
@@ -1364,6 +1541,8 @@ async fn saved_refresh_intent_does_not_replay_after_concurrent_result() {
 #[tokio::test(flavor = "current_thread")]
 async fn failed_refresh_intent_retries_pending_then_does_not_replay() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -1398,6 +1577,8 @@ async fn failed_refresh_intent_retries_pending_then_does_not_replay() {
 #[tokio::test(flavor = "current_thread")]
 async fn reconciliation_without_siwc_does_not_create_empty_partition() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let mut before = fixture();
     before.metadata.remove("siwc");
     before.metadata.remove("use_siwc");
@@ -1433,6 +1614,8 @@ async fn reconciliation_without_siwc_does_not_create_empty_partition() {
 #[tokio::test]
 async fn pending_explicit_null_survives_live_removal_and_sparse_refresh() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let mut before = fixture();
     before.metadata.insert("id_token".into(), json!("I0"));
     store.files.save_new(&before).unwrap();
@@ -1537,6 +1720,8 @@ fn rotation_executor(partial_failure: bool) -> Arc<FakeExecutor> {
 #[tokio::test(flavor = "current_thread")]
 async fn skipped_pending_save_keeps_rotation_and_unsaved_edit() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(rotation_executor(false));
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -1593,6 +1778,8 @@ async fn failed_inactive_refresh(store: &ObservedStore, manager: &Manager) {
 #[tokio::test(flavor = "current_thread")]
 async fn pending_retry_preserves_inactive_partition_failure_and_backoff() {
     let (_dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     failed_inactive_refresh(&store, &manager).await;
     let backoff = manager.get("codex.json").unwrap().next_refresh_after;
     manager.mark_result(&success(&manager));
@@ -1610,6 +1797,8 @@ async fn pending_retry_preserves_inactive_partition_failure_and_backoff() {
 #[tokio::test(flavor = "current_thread")]
 async fn configuration_completion_preserves_newer_partition_failure() {
     let (_dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -1662,6 +1851,8 @@ async fn configuration_completion_preserves_newer_partition_failure() {
 #[tokio::test(flavor = "current_thread")]
 async fn outer_only_refresh_preserves_unattempted_siwc_failure() {
     let (_dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     failed_inactive_refresh(&store, &manager).await;
     let backoff = manager.get("codex.json").unwrap().next_refresh_after;
     let executor = expiry_executor();
@@ -1702,6 +1893,8 @@ fn outside_expiry(dir: &tempfile::TempDir) {
 #[tokio::test(flavor = "current_thread")]
 async fn queued_refresh_snapshot_does_not_replay_consumed_patch() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -1778,6 +1971,8 @@ async fn queued_pending_snapshot_does_not_replay_consumed_patch() {
 #[tokio::test(flavor = "current_thread")]
 async fn pending_reconciliation_without_siwc_does_not_create_empty_partition() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let mut before = fixture();
     before.metadata.remove("siwc");
     before.metadata.remove("use_siwc");
@@ -1850,6 +2045,8 @@ fn siwc_rotation_executor() -> Arc<FakeExecutor> {
 #[tokio::test(flavor = "current_thread")]
 async fn pending_siwc_success_does_not_clear_newer_siwc_failure() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(siwc_rotation_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -1894,35 +2091,24 @@ async fn consumed_pending_outer_is_not_embedded_in_later_siwc_refresh() {
     manager.force_refresh("codex.json").await.unwrap();
     let mut counter = (*manager.get("codex.json").unwrap()).clone();
     counter.success = 1;
-    // The SIWC refresh takes its base, which carries the pending outer patch,
-    // and is held inside the executor, before it publishes.
+    // The counter save writes and consumes the outer patch. Check (vi) holds
+    // the refresh mutex through that write, and the save is held after it.
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
     let entered = Arc::new(Notify::new());
     let notify = entered.clone();
-    let executor = FakeExecutor::new("codex");
-    executor.set_refresh(move |before| {
-        notify.notify_one();
-        lock(&release_rx)
-            .recv_timeout(Duration::from_secs(60))
-            .expect("refresh released");
-        let mut after = before.clone();
-        after.metadata["siwc"]["access_token"] = json!("siwc-new");
-        after.metadata["siwc"]["refresh_token"] = json!("siwc-refresh-new");
-        after.codex_refresh_failure = None;
-        after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
-            &before.metadata,
-            &after.metadata,
-            false,
-            true,
-        ));
-        Ok(after)
-    });
-    manager.register_executor(executor);
-    let refreshing = manager.clone();
-    let refresh_task = tokio::spawn(async move { refreshing.force_refresh("codex.json").await });
-    entered.notified().await;
-    // The counter save writes and consumes the outer patch while the refresh waits.
+    *lock(&store.save_hook) = Some(Arc::new(move |auth| {
+        if auth.success == 1 {
+            notify.notify_one();
+            lock(&release_rx)
+                .recv_timeout(Duration::from_secs(60))
+                .expect("counter save released");
+        }
+    }));
+    let hold = SaveHold {
+        release: Some(release_tx),
+        entered,
+    };
     let saving = manager.clone();
     let counter_task = tokio::task::spawn_blocking(move || {
         saving.persist(
@@ -1933,13 +2119,20 @@ async fn consumed_pending_outer_is_not_embedded_in_later_siwc_refresh() {
             crate::manager::lifecycle::Save::Yes,
         )
     });
+    hold.wait_entered().await;
+    // The SIWC refresh starts now and waits on the refresh mutex.
+    manager.register_executor(siwc_rotation_executor());
+    let refreshing = manager.clone();
+    let refresh_task = tokio::spawn(async move { refreshing.force_refresh("codex.json").await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!refresh_task.is_finished());
+    assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
+    outside_expiry(&dir);
+    drop(hold);
     assert!(matches!(
         counter_task.await.unwrap().unwrap(),
         super::super::Persisted::Written { .. }
     ));
-    assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
-    outside_expiry(&dir);
-    release_tx.send(()).unwrap();
     refresh_task.await.unwrap().unwrap();
     assert_eq!(disk(&dir)["expired"], "2099-03-01T00:00:00Z");
     assert_eq!(disk(&dir)["siwc"]["refresh_token"], "siwc-refresh-new");
@@ -1948,6 +2141,8 @@ async fn consumed_pending_outer_is_not_embedded_in_later_siwc_refresh() {
 #[tokio::test(flavor = "current_thread")]
 async fn stale_counter_save_parked_across_siwc_refresh_is_deferred() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -1973,11 +2168,12 @@ async fn stale_counter_save_parked_across_siwc_refresh_is_deferred() {
     let refresh_task = tokio::spawn(async move { refreshing.force_refresh("codex.json").await });
     refresh_hold.wait_entered().await;
     drop(counter_hold);
-    // The guard defers the stale save, so its pending outer patch is written
-    // by the refresh instead.
+    // Check (vi) refuses the counter save while the pass is in flight. The
+    // pass's tail writes the pending outer patch, and step 14 replays the
+    // counter once the pass ends.
     assert!(matches!(
         counter_task.await.unwrap().unwrap(),
-        super::super::Persisted::Deferred(crate::auth::SaveDeferral::Stale)
+        super::super::Persisted::Deferred(crate::auth::SaveDeferral::RefreshInFlight)
     ));
     assert_eq!(disk(&dir)["expired"], "2099-01-01T00:00:00Z");
     outside_expiry(&dir);
@@ -1990,6 +2186,8 @@ async fn stale_counter_save_parked_across_siwc_refresh_is_deferred() {
 #[tokio::test(flavor = "current_thread")]
 async fn delayed_refresh_snapshot_remains_written_after_seventeen_refreshes() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     let captured = Arc::new(Mutex::new(None));
     let capture = captured.clone();
     *lock(&store.save_hook) = Some(Arc::new(move |auth| {
@@ -2124,6 +2322,8 @@ fn clones_racing_to_save_write_one_refresh_and_one_configuration() {
 #[tokio::test]
 async fn outer_only_refresh_after_expired_siwc_backoff_keeps_later_time() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     failed_inactive_refresh(&store, &manager).await;
     let now = manager.now();
     let expired = now - chrono::TimeDelta::seconds(1);
@@ -2291,6 +2491,8 @@ fn later_expiry_executor() -> Arc<FakeExecutor> {
 #[tokio::test(flavor = "current_thread")]
 async fn older_pending_snapshot_does_not_reconcile_over_newer_expiry_rotation() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -2318,6 +2520,8 @@ async fn older_pending_snapshot_does_not_reconcile_over_newer_expiry_rotation() 
 #[tokio::test(flavor = "current_thread")]
 async fn written_edit_snapshot_keeps_rotation_attached_after_its_save() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -2380,6 +2584,8 @@ async fn written_edit_snapshot_keeps_rotation_attached_after_its_save() {
 #[tokio::test(flavor = "current_thread")]
 async fn stale_generation_refresh_folds_into_pending_for_later_save() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(true, "skipped"));
     let held = hold_matching_save(&manager, |auth| {
         matches!(auth.codex_persist_intent, CodexPersistIntent::Refresh(_))
@@ -2426,6 +2632,8 @@ async fn stale_generation_refresh_folds_into_pending_for_later_save() {
 #[tokio::test]
 async fn load_discards_pending_work_and_requires_quiescent_initialization() {
     let (_dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(true, "before-load"));
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -2450,6 +2658,8 @@ async fn load_discards_pending_work_and_requires_quiescent_initialization() {
 #[tokio::test]
 async fn superseding_dual_rotation_keeps_outer_chain_after_explicit_siwc_edit() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(true, "chain-b"));
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -2508,6 +2718,8 @@ async fn superseding_dual_rotation_keeps_outer_chain_after_explicit_siwc_edit() 
 #[tokio::test(flavor = "current_thread")]
 async fn edit_completion_does_not_reconcile_over_refresh_waiting_on_save_lock() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -2515,7 +2727,9 @@ async fn edit_completion_does_not_reconcile_over_refresh_waiting_on_save_lock() 
     let edit_rx = Mutex::new(edit_rx);
     let edit_entered = Arc::new(Notify::new());
     let notify = edit_entered.clone();
-    *lock(&store.save_hook) = Some(Arc::new(move |auth| {
+    // The edit is held where its write is done and check (vi)'s hold is
+    // released, still inside the save mutex the refresh will wait on.
+    *lock(&manager.shared.unleased_saved_hook) = Some(Arc::new(move |auth| {
         if matches!(auth.codex_persist_intent, CodexPersistIntent::Configuration)
             && auth.metadata.get("note") == Some(&json!("holding-save-lock"))
         {
@@ -2593,7 +2807,7 @@ async fn edit_completion_does_not_reconcile_over_refresh_waiting_on_save_lock() 
     refresh.await.unwrap();
     // Read-back waits for the save mutex too: release Q before joining E.
     edit.await.unwrap();
-    *lock(&store.save_hook) = None;
+    *lock(&manager.shared.unleased_saved_hook) = None;
     *lock(&store.before_save_hook) = None;
     manager.mark_result(&success(&manager));
     wait_pending_saves(&manager).await;
@@ -2793,6 +3007,8 @@ async fn same_record_adoption_rebases_recorded_baselines_and_prunes_new_logins()
 #[tokio::test]
 async fn siwc_bind_adoption_keeps_unwritten_outer_rotation() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     // Production file-synthesized live records and bind results share origins.
     let loaded = store.files.read_back(&fixture()).unwrap().unwrap();
     manager.update_unsaved(loaded).unwrap();
@@ -2828,6 +3044,10 @@ async fn read_back_serializes_written_coverage_for_detached_saves() {
 
 async fn read_back_serializes_written_coverage(detached: bool) {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(expiry_executor());
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -3087,7 +3307,9 @@ async fn failed_eligible_save_does_not_requeue_after_runtime_only_edit() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn same_record_adoption_rebases_live_unwritten_refresh_intent() {
-    let (dir, _store, manager, _gate) = disk_manager();
+    let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(true, "published"));
     let held = hold_matching_save(&manager, |auth| {
         matches!(auth.codex_persist_intent, CodexPersistIntent::Refresh(_))
@@ -3119,6 +3341,8 @@ async fn same_record_adoption_rebases_live_unwritten_refresh_intent() {
 #[tokio::test]
 async fn pathless_bind_adoption_uses_resolved_origin() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     assert!(
         manager
             .get("codex.json")
@@ -3150,6 +3374,8 @@ async fn pathless_bind_adoption_uses_resolved_origin() {
 #[tokio::test(flavor = "current_thread")]
 async fn captured_refresh_is_revoked_after_discard_aba() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(true, "revoked"));
     let held = hold_matching_save(&manager, |auth| {
         matches!(auth.codex_persist_intent, CodexPersistIntent::Refresh(_))
@@ -3200,6 +3426,8 @@ async fn captured_refresh_is_revoked_after_discard_aba() {
 #[tokio::test(flavor = "current_thread")]
 async fn admitted_refresh_failure_does_not_requeue_after_discard_aba() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(true, "failed-admitted"));
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -3258,6 +3486,8 @@ async fn admitted_refresh_failure_does_not_requeue_after_discard_aba() {
 #[tokio::test(flavor = "current_thread")]
 async fn admitted_refresh_may_finish_after_discard_aba() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(true, "admitted"));
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -3848,6 +4078,8 @@ fn unsupported_gemini_and_opaque_store_preserve_replacement_compatibility() {
 #[tokio::test(flavor = "current_thread")]
 async fn rejection_adoption_does_not_fall_back_to_consumed_disk_tokens() {
     let (_dir, store, manager, gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(false, "rotated"));
     store.fail_refresh.store(true, Ordering::SeqCst);
     manager.force_refresh("codex.json").await.unwrap();
@@ -4580,6 +4812,8 @@ async fn later_partition_rotation_repairs_discarded_chain() {
     for outer in [true, false] {
         for foreign in [false, true] {
             let (dir, store, manager, _gate) = disk_manager();
+            // The fault or hook is on the unleased refresh save, so the store gives no lease.
+            store.lease_unsupported.store(true, Ordering::SeqCst);
             for label in ["discard-first", "discard-second"] {
                 manager.register_executor(partition_rotation_executor(outer, label));
                 store.fail_refresh.store(true, Ordering::SeqCst);
@@ -4728,6 +4962,8 @@ async fn discarded_chain_keeps_landed_intermediate_baselines() {
         for foreign in [false, true] {
             for middle_count in [1, 3] {
                 let (_dir, store, manager, _gate) = disk_manager();
+                // The fault or hook is on the unleased refresh save, so the store gives no lease.
+                store.lease_unsupported.store(true, Ordering::SeqCst);
                 manager.register_executor(partition_rotation_executor(outer, "landed-b"));
                 let (release_tx, release_rx) = mpsc::channel();
                 let release_rx = Mutex::new(release_rx);
@@ -4937,6 +5173,8 @@ fn recorded_baselines_preserve_provider_baseline_and_agreement() {
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_only_empty_supported_replace_discards_and_preserves_record() {
     let (dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     for (outer, label) in [(true, "empty-outer"), (false, "empty-siwc")] {
         manager.register_executor(partition_rotation_executor(outer, label));
         store.fail_refresh.store(true, Ordering::SeqCst);
@@ -5097,6 +5335,8 @@ fn hold_admitted_chain_save(manager: &Manager) -> SaveHold {
 async fn repair_long_discard_chain(failed_saves: bool, admitted_middle: bool) {
     for outer in [true, false] {
         let (_dir, store, manager, _gate) = disk_manager();
+        // The fault or hook is on the unleased refresh save, so the store gives no lease.
+        store.lease_unsupported.store(true, Ordering::SeqCst);
         if !failed_saves {
             manager
                 .edit_unsaved("codex.json", |auth| {
@@ -5651,6 +5891,8 @@ async fn empty_supported_replace_keeps_held_refresh_operation() {
     for outer in [true, false] {
         for failed_save in [false, true] {
             let (_dir, store, manager, _gate) = disk_manager();
+            // The fault or hook is on the unleased refresh save, so the store gives no lease.
+            store.lease_unsupported.store(true, Ordering::SeqCst);
             manager.register_executor(partition_rotation_executor(outer, "held-empty"));
             let held = hold_matching_save(&manager, |auth| {
                 matches!(auth.codex_persist_intent, CodexPersistIntent::Refresh(_))
@@ -5787,6 +6029,8 @@ async fn late_admitted_sparse_identity_output_repairs_disk() {
 #[tokio::test(flavor = "current_thread")]
 async fn empty_supported_replace_preserves_actual_refresh_failure_backoff() {
     let (_dir, store, manager, _gate) = disk_manager();
+    // The fault or hook is on the unleased refresh save, so the store gives no lease.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
     failed_inactive_refresh(&store, &manager).await;
     let before = manager.get("codex.json").unwrap();
     let failures = manager.lock().auths["codex.json"].refresh_failures;
@@ -5842,9 +6086,11 @@ async fn empty_supported_replace_preserves_nonzero_refresh_failure_count() {
     );
 }
 
-async fn live_record_save_after_empty_replace(failed_save: bool, reset_quota: bool) {
+async fn live_record_save_after_empty_replace(saving_replace: bool, reset_quota: bool) {
     for outer in [true, false] {
         let (dir, store, manager, _gate) = disk_manager();
+        // The fault or hook is on the unleased refresh save, so the store gives no lease.
+        store.lease_unsupported.store(true, Ordering::SeqCst);
         rotate_partition(&manager, &store, outer, "self-older", true);
         let older = manager.get("codex.json").unwrap().codex_pending_refresh[0].clone();
         assert!(!older.is_written(), "older rotation starts unwritten");
@@ -5863,8 +6109,8 @@ async fn live_record_save_after_empty_replace(failed_save: bool, reset_quota: bo
         let newer = newer.clone();
         let mut replacement = (*before).clone();
         replacement.metadata.clear();
-        if failed_save {
-            *lock(&store.error_once) = Some("injected unchanged Replace save failure".into());
+        if saving_replace {
+            // Check (vi) refuses the Replace's save while the pass is in flight.
             manager.update(replacement).unwrap();
         } else {
             manager.update_unsaved(replacement).unwrap();
@@ -5885,13 +6131,25 @@ async fn live_record_save_after_empty_replace(failed_save: bool, reset_quota: bo
             manager.mark_result(&success(&manager));
         }
         let generation = manager.get("codex.json").unwrap().generation;
-        store.wait_saved(generation).await;
+        // The save is refused while the pass is in flight: wait until it is
+        // owed, then the file still holds the partition's original tokens.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !manager.lock().auths.get("codex.json").is_some_and(|entry| {
+                entry
+                    .owed_save
+                    .is_some_and(|owed| owed.version >= generation)
+            }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the refused live-record save is owed");
         let saved = disk(&dir);
         let partition = if outer { &saved } else { &saved["siwc"] };
         assert!(
-            partition["access_token"] == json!("self-newer-access")
-                && partition["refresh_token"] == json!("self-newer-refresh"),
-            "live-record save composes older and held rotations over the original disk identity"
+            partition["access_token"] != json!("self-newer-access")
+                && partition["refresh_token"] != json!("self-newer-refresh"),
+            "the live-record save has not written while the pass is in flight"
         );
         drop(held);
         refresh.await.unwrap();
@@ -5913,7 +6171,7 @@ async fn live_record_save_after_empty_replace(failed_save: bool, reset_quota: bo
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn live_record_save_preserves_chain_after_empty_replace_error() {
+async fn live_record_save_preserves_chain_after_refused_empty_replace() {
     live_record_save_after_empty_replace(true, false).await;
 }
 
@@ -5923,7 +6181,7 @@ async fn live_record_save_preserves_chain_after_empty_replace_skip() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn reset_quota_preserves_chain_after_empty_replace_error() {
+async fn reset_quota_preserves_chain_after_refused_empty_replace() {
     live_record_save_after_empty_replace(true, true).await;
 }
 
