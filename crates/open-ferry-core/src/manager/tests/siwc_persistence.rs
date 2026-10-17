@@ -9811,15 +9811,17 @@ async fn a_policy_toggle_between_commit_and_publication_does_not_unwrite_the_com
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_held_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_leased_refresh() {
-    // Subject: a queued or delayed snapshot that carries an operation does not
-    // replay consumed work (queued_refresh_snapshot_does_not_replay_consumed_
-    // patch, delayed_refresh_snapshot_remains_written..., written_edit_
-    // snapshot...). An edit's save, carrying the owed rotation A -> B, is held
-    // in the store; a newer leased refresh sends B and commits C while the
-    // save is held; the held save then completes. Mutation guarded: the held
-    // save writes its snapshot's B over C, or leaves the consumed operation
-    // owed so a later pass commits it again.
+async fn a_deferred_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_leased_refresh() {
+    // Subject: the DEFERRED snapshot case. The edit's save is held in the
+    // store's preamble, which runs after the edit took the per-id save lock, so
+    // the newer pass's ordinary save queues behind it while the pass holds the
+    // refresh lock. Released, the edit's guard therefore refuses with
+    // `RefreshInFlight` before any patch is applied, and the change is owed
+    // and flushed by the pass. This does not reach the replay layers (the
+    // delayed case does, see the next test); it pins that the consumed
+    // operation is written when the edit is released and that the deferral
+    // loses nothing. Mutations guarded: the pass never marks the held
+    // snapshot's operation written, or the deferred save is never flushed.
     bounded(async {
         let rig = rig();
         let probe = Probe::new("codex", false).rotating("b");
@@ -9831,8 +9833,13 @@ async fn a_held_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_leas
             Mutex::new(held.1),
             Arc::new(AtomicBool::new(false)),
         );
-        *lock(&rig.store.before_save_hook) = Some(Arc::new(move |_: &Auth| {
+        // The held snapshot's operation (it shares the written flag with the
+        // live one) and generation, captured as the store sees them.
+        let seen: HeldSnapshot = Arc::new(Mutex::new(None));
+        let record = seen.clone();
+        *lock(&rig.store.before_save_hook) = Some(Arc::new(move |auth: &Auth| {
             if !first.swap(true, Ordering::SeqCst) {
+                *lock(&record) = Some((auth.generation, auth.codex_pending_refresh.clone()));
                 reached.notify_one();
                 let _ = lock(&gate).recv_timeout(Duration::from_secs(20));
             }
@@ -9849,6 +9856,9 @@ async fn a_held_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_leas
                 .await
         });
         parked.notified().await;
+        let (generation, ops) = lock(&seen).clone().expect("the hook saw the snapshot");
+        assert_eq!(ops.len(), 1, "the held snapshot carries the one owed op");
+        assert!(!ops[0].is_written(), "the held snapshot's op is unwritten");
         // The newer leased refresh sends B and commits C while the edit's
         // save is still held; its own ordinary save waits behind the edit.
         rotate_to(&probe, "c");
@@ -9866,15 +9876,44 @@ async fn a_held_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_leas
             "c-refresh",
             "C landed while the edit was held"
         );
+        // The held snapshot shares its operation's written flag with live's
+        // (live still lists the op until the tail's save prunes it, so the
+        // flag is the witness): the pass's commit marked it.
+        assert!(
+            ops[0].is_written(),
+            "the held snapshot's op is written by the pass's commit"
+        );
+        assert_eq!(unwritten_ops(&rig.live()), 0, "live holds no unwritten op");
         held.0.send(()).unwrap();
-        edit.await.unwrap().unwrap().unwrap();
+        let edited = edit
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .expect("the edit found the record");
+        assert_eq!(edited.metadata["note"], "edited", "the edit's outcome");
         pass.await.unwrap().unwrap();
         *lock(&rig.store.before_save_hook) = None;
+        let edit_saves: Vec<_> = lock(&rig.store.guarded)
+            .iter()
+            .filter(|(at, _)| *at == generation)
+            .map(|(_, deferral)| *deferral)
+            .collect();
+        assert_eq!(
+            edit_saves,
+            vec![Some(SaveDeferral::RefreshInFlight)],
+            "the edit's one guarded save was deferred behind the pass"
+        );
+        assert!(
+            rig.manager.lock().auths["codex.json"].owed_save.is_none(),
+            "the deferred save was flushed"
+        );
         assert_eq!(
             rig.disk()["refresh_token"],
             "c-refresh",
             "B was not replayed"
         );
+        assert_eq!(rig.disk()["note"], "edited", "the edit reached disk");
         assert_eq!(live_refresh(&rig), "c-refresh");
         assert!(
             rig.live().codex_pending_refresh.is_empty(),
@@ -9887,4 +9926,119 @@ async fn a_held_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_leas
         assert_eq!(probe.reused(), 0, "a spent token was presented again");
     })
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_delayed_snapshot_with_an_owed_rotation_is_not_replayed_over_a_newer_leased_refresh() {
+    // Subject: the DELAYED snapshot case (queued_refresh_snapshot_does_not_
+    // replay_consumed_patch, delayed_refresh_snapshot_remains_written_after_
+    // seventeen_refreshes, written_edit_snapshot_keeps_rotation_attached_after_
+    // its_save). The edit is held at the top of `persist_inner`, after its
+    // snapshot exists and before the persist locks, the save lock and the
+    // guard. The newer leased refresh then runs to its end: it sends B, commits
+    // and publishes C and saves. Released, the edit carries a stale snapshot
+    // (op A -> B, token B) older than the pass's write, so `persist_inner`
+    // skips it on generation order before the store's guard runs (no guarded
+    // entry is recorded); the written flag and the baseline guard stay behind
+    // that. Mutations guarded: the pass never marks the held operation written,
+    // or the stale snapshot writes B over C or leaves the operation owed.
+    // Single-layer mutations of generation order, the written filter, the
+    // baseline guard or the overlay each survive this test; only the combined
+    // removal of the written filter and the baseline guard breaks it, and then
+    // at the pass's own landing, not at the edit.
+    bounded(async {
+        let rig = rig();
+        let probe = Probe::new("codex", false).rotating("b");
+        rig.manager.register_executor(probe.clone());
+        leave_unwritten_rotation(&rig, &probe).await;
+        let (entered, held) = (Arc::new(Notify::new()), mpsc::channel::<()>());
+        let (reached, gate, armed) = (entered.clone(), Mutex::new(held.1), AtomicBool::new(true));
+        let seen: HeldSnapshot = Arc::new(Mutex::new(None));
+        let record = seen.clone();
+        *lock(&rig.manager.shared.persist_hook) = Some(Arc::new(move |auth: &Auth| {
+            if auth.metadata.get("note") == Some(&json!("edited"))
+                && armed.swap(false, Ordering::SeqCst)
+            {
+                *lock(&record) = Some((auth.generation, auth.codex_pending_refresh.clone()));
+                reached.notify_one();
+                lock(&gate)
+                    .recv_timeout(Duration::from_secs(20))
+                    .expect("the edit is released");
+            }
+        }));
+        let manager = rig.manager.clone();
+        let edit = tokio::spawn(async move {
+            manager
+                .run_persistence(|m| {
+                    m.edit("codex.json", |auth| {
+                        auth.metadata.insert("note".into(), json!("edited"));
+                        Ok::<_, ()>(true)
+                    })
+                })
+                .await
+        });
+        entered.notified().await;
+        let (generation, ops) = lock(&seen).clone().expect("the hook saw the snapshot");
+        assert_eq!(ops.len(), 1, "the held snapshot carries the one owed op");
+        assert!(!ops[0].is_written(), "the held snapshot's op is unwritten");
+        // The newer leased refresh runs to its end while the edit is held: it
+        // commits the owed A -> B, sends B and lands C.
+        rotate_to(&probe, "c");
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent_refresh(1), "b-refresh", "B was sent");
+        assert_eq!(rig.disk()["refresh_token"], "c-refresh", "C landed");
+        assert!(ops[0].is_written(), "the pass marked the held op written");
+        held.0.send(()).unwrap();
+        let edited = edit
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .expect("the edit found the record");
+        assert_eq!(edited.metadata["note"], "edited", "the edit's outcome");
+        *lock(&rig.manager.shared.persist_hook) = None;
+        // Recorded, not pinned: how the stale snapshot's own save ended.
+        let edit_saves: Vec<_> = lock(&rig.store.guarded)
+            .iter()
+            .filter(|(at, _)| *at == generation)
+            .map(|(_, deferral)| *deferral)
+            .collect();
+        assert!(
+            edit_saves.len() <= 1,
+            "the edit reached the guard at most once: {edit_saves:?}"
+        );
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "c-refresh",
+            "B was not replayed"
+        );
+        assert_eq!(live_refresh(&rig), "c-refresh");
+        assert_eq!(
+            unwritten_ops(&rig.live()),
+            0,
+            "no unwritten operation remains"
+        );
+        assert!(!outer_marked(&rig));
+        assert!(
+            rig.manager.lock().auths["codex.json"].owed_save.is_none(),
+            "nothing is owed to the file"
+        );
+        executor_idles(&probe);
+        rig.manager.force_refresh("codex.json").await.unwrap();
+        assert_eq!(probe.sent_refresh(2), "c-refresh", "the next pass sends C");
+        assert_eq!(probe.reused(), 0, "a spent token was presented again");
+    })
+    .await;
+}
+
+/// A held snapshot's generation and pending operations, as a hook saw them.
+type HeldSnapshot = Arc<Mutex<Option<(u64, Vec<CredentialRefreshPatch>)>>>;
+
+/// Number of refresh operations, pending or the live intent, still unwritten.
+fn unwritten_ops(auth: &Auth) -> usize {
+    auth.codex_pending_refresh
+        .iter()
+        .chain(auth.codex_persist_intent.refresh_patch())
+        .filter(|patch| !patch.is_written())
+        .count()
 }
