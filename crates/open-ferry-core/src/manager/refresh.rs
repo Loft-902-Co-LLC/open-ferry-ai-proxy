@@ -3917,7 +3917,7 @@ pub(super) mod partial_failure_seam {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use chrono::{TimeDelta, Utc};
 
@@ -3928,7 +3928,8 @@ mod tests {
     use super::super::{Entry, Manager, MarkCause, Settings, State, UndurablePartitions};
     use super::{
         Deferral, LeasePrep, ReadBackSettlement, SendFence, add, bounded_retry_delay,
-        deferral_backoff, has_unauthorized_auth_failure, settle_refused_availability,
+        deferral_backoff, has_unauthorized_auth_failure, may_start_retry,
+        settle_refused_availability,
     };
     use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
     use crate::auth::{
@@ -3958,6 +3959,24 @@ mod tests {
                 add(now, secs(expected)),
                 "expiry {expiry:?} max {max} floor {floor}"
             );
+        }
+    }
+
+    /// B-22: a retry may start with no deadline, or before it; at the
+    /// deadline or after it, it may not.
+    #[test]
+    fn a_retry_may_start_only_before_the_deadline() {
+        // Headroom so the subtraction below cannot underflow.
+        let now = Instant::now() + Duration::from_secs(1);
+        let ms = Duration::from_millis(1);
+        let rows = [
+            (None, true),
+            (Some(now + ms), true),
+            (Some(now), false),
+            (Some(now - ms), false),
+        ];
+        for (index, (deadline, expected)) in rows.into_iter().enumerate() {
+            assert_eq!(may_start_retry(deadline, now), expected, "row {index}");
         }
     }
 
