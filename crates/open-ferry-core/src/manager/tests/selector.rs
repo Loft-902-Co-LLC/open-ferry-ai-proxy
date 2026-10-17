@@ -164,6 +164,9 @@ impl Pool {
                 discard_epoch: 0,
                 undurable: Default::default(),
                 undurable_baselines: Default::default(),
+                unresolved_origin: None,
+                undurable_causes: Default::default(),
+                landing_unconfirmed: Default::default(),
             },
         );
     }

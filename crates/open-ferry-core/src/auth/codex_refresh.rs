@@ -90,6 +90,27 @@ impl CodexPersistIntent {
             _ => self == other,
         }
     }
+
+    /// The Refresh patch, if this intent is one.
+    pub(crate) fn refresh_patch(&self) -> Option<&CredentialRefreshPatch> {
+        match self {
+            Self::Refresh(patch) => Some(patch),
+            _ => None,
+        }
+    }
+}
+
+/// Which Codex partitions an outcome names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CodexPartitions {
+    pub(crate) outer: bool,
+    pub(crate) siwc: bool,
+}
+
+impl CodexPartitions {
+    pub(crate) fn any(self) -> bool {
+        self.outer || self.siwc
+    }
 }
 
 impl fmt::Debug for CodexPersistIntent {
@@ -147,6 +168,19 @@ fn nested(map: &Map<String, Value>) -> Map<String, Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default()
+}
+
+/// Per partition: the token identity on `disk` differs from `live`. Identity
+/// inequality only: predecessor protection comes from the pending and undurable
+/// overlays that build the disk the caller passes.
+pub(crate) fn disk_rotated_partitions(
+    live: &Map<String, Value>,
+    disk: &Map<String, Value>,
+) -> CodexPartitions {
+    CodexPartitions {
+        outer: !same_version(live, disk),
+        siwc: !same_version(&nested(live), &nested(disk)),
+    }
 }
 
 impl PartitionPatch {
@@ -344,6 +378,27 @@ impl CredentialRefreshPatch {
         match partition {
             super::CodexCredentialPartition::Outer => self.outer.is_some(),
             super::CodexCredentialPartition::Siwc => self.siwc.is_some(),
+        }
+    }
+
+    /// The partitions this operation rotated.
+    pub(crate) fn requested(&self) -> CodexPartitions {
+        CodexPartitions {
+            outer: self.outer.is_some(),
+            siwc: self.siwc.is_some(),
+        }
+    }
+
+    /// Per requested partition: `disk` shows this patch's result. This is the
+    /// per-partition form of `matches_after`: outer on the top level, SIWC on
+    /// the nested object. A partition not requested is false.
+    pub(crate) fn landed_in(&self, disk: &Map<String, Value>) -> CodexPartitions {
+        CodexPartitions {
+            outer: self.outer.as_ref().is_some_and(|p| p.matches_after(disk)),
+            siwc: self
+                .siwc
+                .as_ref()
+                .is_some_and(|p| p.matches_after(&nested(disk))),
         }
     }
 
