@@ -20,6 +20,30 @@ use super::{CodexExecutor, REFRESH_ATTEMPTS, REFRESH_LEAD};
 use crate::codex::siwc::SiwcAuth;
 use crate::codex::token::SiwcTokenData;
 
+/// Which partitions to send a refresh for, as `(outer, siwc)`. Each input pair
+/// is `(refreshable, due)`, computed on the record the executor was given.
+pub(super) fn refresh_decision(
+    options: RefreshOptions,
+    (has_outer, outer_due): (bool, bool),
+    (has_siwc, siwc_due): (bool, bool),
+) -> (bool, bool) {
+    // `was_due` is the manager's reading of the record before it adopted
+    // anything; without adoption it is the due state of this record.
+    let due_before = options
+        .adopted
+        .map_or(outer_due || siwc_due, |adopted| adopted.was_due);
+    // An explicit call with neither partition due can follow a 401 for an
+    // unexpired token. Refresh every refreshable partition in that case,
+    // except one the manager adopted from another process.
+    let explicit_unscheduled = !options.force && !due_before;
+    let adopted_outer = options.adopted.is_some_and(|a| a.outer);
+    let adopted_siwc = options.adopted.is_some_and(|a| a.siwc);
+    (
+        has_outer && (options.force || outer_due || (explicit_unscheduled && !adopted_outer)),
+        has_siwc && (options.force || siwc_due || (explicit_unscheduled && !adopted_siwc)),
+    )
+}
+
 impl CodexExecutor {
     pub(super) async fn refresh_inner(
         &self,
@@ -40,11 +64,9 @@ impl CodexExecutor {
                 .outer_refresh_due_at(now, Some(REFRESH_LEAD))
                 .is_some_and(|due| due <= now);
         let siwc_due = has_siwc && auth.siwc_refresh_due_at(now).is_some_and(|due| due <= now);
-        // An explicit call with neither partition due can follow a 401 for an
-        // unexpired token. Refresh every refreshable partition in that case.
-        let explicit_unscheduled = !options.force && !outer_due && !siwc_due;
-        let need_outer = has_outer && (options.force || explicit_unscheduled || outer_due);
-        let need_siwc = has_siwc && (options.force || explicit_unscheduled || siwc_due);
+        let (need_outer, need_siwc) =
+            refresh_decision(options, (has_outer, outer_due), (has_siwc, siwc_due));
+        let adopted_any = options.adopted.is_some_and(|a| a.outer || a.siwc);
         let mut refreshed = (*auth).clone();
         let mut outer_rotated = false;
         let mut siwc_rotated = false;
@@ -100,6 +122,11 @@ impl CodexExecutor {
         if !outer_rotated && !siwc_rotated {
             if let Some(failure) = failure {
                 return Err(failure.error);
+            }
+            // The manager adopted a partition another process already rotated
+            // and published, so there is nothing left to send or persist.
+            if adopted_any {
+                return Ok(refreshed);
             }
             if auth.auth_kind() == Some(AuthKind::ApiKey) {
                 return Ok(refreshed);
