@@ -2201,6 +2201,19 @@ fn gemini_and_responses_tool_schemas_share_one_request_budget() {
 fn gemini_copy_budget_release_benchmark() {
     let case = std::env::var("SCHEMA_BENCH_CASE").expect("select benchmark case");
     let schema = match case.as_str() {
+        "conditional_unions30" => {
+            let properties = |prefix| -> Map<String, Value> {
+                (0..4000)
+                    .map(|i| (format!("{prefix}{i}"), json!({"type":"string"})))
+                    .collect()
+            };
+            let mut schema = json!({"type":"object",
+                "then":{"properties":properties("p")},"else":{"properties":properties("q")}});
+            for _ in 0..30 {
+                schema = json!({"anyOf":[schema,{"type":"string"}]});
+            }
+            schema
+        }
         "depth16" => nested_required_union(16, json!({"type":"string"})),
         "depth62" => nested_required_union(62, json!({"type":"string"})),
         "prefix1" | "prefix100" | "prefix300" => {
@@ -2234,6 +2247,13 @@ fn gemini_copy_budget_release_benchmark() {
     let start = std::time::Instant::now();
     let cleaned = clean_schema(&schema);
     let elapsed = start.elapsed();
+    if case == "conditional_unions30" {
+        let mut leaf = &cleaned;
+        for _ in 0..30 {
+            leaf = &leaf["anyOf"][0];
+        }
+        assert_eq!(leaf["properties"].as_object().unwrap().len(), 8000);
+    }
     println!(
         "BENCH {case} input={input_bytes} output={} elapsed_ms={:.3}",
         cleaned.to_string().len(),
@@ -2445,4 +2465,107 @@ fn gemini_copy_write_cost_counts_only_new_containers_and_padding() {
         first.bytes,
         actual.to_string().len() - original.to_string().len()
     );
+}
+
+// Not upstream's: preflight must parse the same complete escaped path as sjson writes.
+// Expected outputs confirmed with v8.0.32 and Go 1.26.4.
+#[test]
+fn gemini_conditionals_with_trailing_backslash_keys_match_go() {
+    for (input, expected) in [
+        (
+            r#"{"a\\":{"then":{}},"a.then":{"properties":{"x":{"type":"string"}}}}"#,
+            r#"{"properties":{"a\\":{"then":{}},"a.properties":{"x":{"type":"string"}}},"type":"object"}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"p\\":{"type":"object","then":{"type":"object"}},"p.then":{"type":"object","properties":{"q":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"p\\":{"type":"object","then":{"type":"object"}},"p.properties":{"q":{"type":"string"}}}}"#,
+        ),
+        (
+            r#"{"a":{"properties":{"x":{"type":"number"}}},"a\\":{"then":{}},"a.then":{"properties":{"x":{"type":"string"},"y":{"type":"boolean"}}}}"#,
+            r#"{"properties":{"a":{"properties":{"x":{"type":"number"}},"type":"object"},"a\\":{"then":{}},"a.properties":{"x":{"type":"string"},"y":{"type":"boolean"}}},"type":"object"}"#,
+        ),
+    ] {
+        let input: Value = serde_json::from_str(input).unwrap();
+        let expected: Value = serde_json::from_str(expected).unwrap();
+        assert_eq!(clean_schema(&input), expected);
+        let mut merged = input.clone();
+        let mut budget = SchemaCopyBudget::unlimited();
+        merge_conditionals(&mut merged, &mut budget);
+        assert_eq!(
+            usize::MAX - budget.remaining,
+            merged.to_string().len() - input.to_string().len(),
+            "the complete path must charge its newly created container"
+        );
+    }
+}
+
+// Not upstream's: pin the actual limits independently of fixtures derived from them.
+#[test]
+fn gemini_copy_budget_constants_are_pinned() {
+    assert_eq!(SCHEMA_COPY_BYTES_PER_REQUEST, 8 * 1024 * 1024);
+    assert_eq!(SCHEMA_COPY_NODES_PER_REQUEST, 65_536);
+    assert_eq!(SCHEMA_COPY_PATH_WORK_PER_REQUEST, 4_194_304);
+}
+
+// Not upstream's: duplicated required names fit at the cost of one property write,
+// plus the original branch's larger required array; one byte less rejects the whole union.
+#[test]
+fn gemini_duplicate_required_names_charge_one_property_at_boundary() {
+    let props = json!({"a":{"type":"string","description":"x".repeat(1024)}});
+    let single = json!({"required":["a"]});
+    let duplicate = json!({"required":["a","a"]});
+    let BranchCopyCost::Cost(single_cost) =
+        required_only_branch_cost(&single, Some(&props), "anyOf.0", &mut HashMap::new())
+    else {
+        panic!("single branch must fit")
+    };
+    let old = copy_cost(&single).unwrap().at("anyOf.0".len());
+    let new = copy_cost(&duplicate).unwrap().at("anyOf.0".len());
+    let expected = CopyCost {
+        bytes: single_cost.bytes + new.bytes - old.bytes,
+        nodes: single_cost.nodes + new.nodes - old.nodes,
+        path_work: single_cost.path_work + new.path_work - old.path_work,
+    };
+    let schema = json!({"type":"object","properties":props,
+        "anyOf":[duplicate,{"type":"string"}]});
+    let mut fitting = schema.clone();
+    let mut budget = SchemaCopyBudget {
+        remaining: expected.bytes,
+        nodes: expected.nodes,
+        path_work: expected.path_work,
+    };
+    flatten_any_of_one_of(&mut fitting, &mut budget);
+    assert_eq!(fitting["anyOf"][0]["properties"]["a"], props["a"]);
+    assert_eq!(fitting["anyOf"][0]["required"], json!(["a", "a"]));
+    assert_eq!(
+        (budget.remaining, budget.nodes, budget.path_work),
+        (0, 0, 0)
+    );
+    let mut rejected = schema;
+    let mut budget = SchemaCopyBudget {
+        remaining: expected.bytes - 1,
+        ..SchemaCopyBudget::unlimited()
+    };
+    flatten_any_of_one_of(&mut rejected, &mut budget);
+    assert!(rejected.get("anyOf").is_none());
+    assert_eq!(budget.remaining, expected.bytes - 1);
+}
+
+// Not upstream's: repeated -1 names append twice rather than overwrite once.
+#[test]
+fn gemini_duplicate_append_names_still_charge_both_copies() {
+    let props = json!({"-1":{"type":"string"}});
+    let item = json!({"required":["-1","-1"]});
+    let BranchCopyCost::Cost(cost) =
+        required_only_branch_cost(&item, Some(&props), "anyOf.0", &mut HashMap::new())
+    else {
+        panic!("append branch must fit")
+    };
+    let branch = materialize_required_only_branch(&item, &props);
+    assert_eq!(
+        branch["properties"],
+        json!([{"type":"string"},{"type":"string"}])
+    );
+    assert!(cost.bytes >= branch.to_string().len());
+    assert!(cost.nodes >= copy_cost(&branch).unwrap().nodes);
 }
