@@ -16,6 +16,11 @@
 //!   upstream does. A [`TransportFault::Lifecycle`] fault counts as a
 //!   WebSocket close (a lifecycle failure even with a status) and as an EOF
 //!   (a transient one).
+//! - Upstream's `isConfiguredTLSHandshakeTimeoutError` (the typed deadline
+//!   of its configured TLS handshake bound) has no source here, as there is
+//!   no such bound. A [`TransportFault::Transient`] fault, which only an
+//!   executor sets, plays its part: it makes the error a transient transport
+//!   failure even when its kind is a deadline, and never a lifecycle one.
 //! - A closed HTTP/2 connection is known by hyper's texts as well as Go's
 //!   (see [`is_http2_closed_connection_message`]).
 //! - The manager's own errors carry their cause as a summary, so the
@@ -226,6 +231,10 @@ pub(crate) fn is_connection_lifecycle_error(err: ErrView<'_>) -> bool {
     if err.status() != 0 {
         return false;
     }
+    // An executor's own transport deadline, not the caller's.
+    if err.transport() == Some(TransportFault::Transient) {
+        return false;
+    }
     if err.is_context_error() {
         return true;
     }
@@ -236,6 +245,9 @@ pub(crate) fn is_connection_lifecycle_error(err: ErrView<'_>) -> bool {
 pub(crate) fn is_connection_lifecycle_result_error(err: &AuthError) -> bool {
     if err.code == CODE_CONNECTION_LIFECYCLE {
         return true;
+    }
+    if err.code == CODE_TRANSIENT_TRANSPORT {
+        return false;
     }
     if err.http_status != 0 {
         return false;
@@ -285,6 +297,9 @@ pub(crate) fn is_transient_transport_error(err: ErrView<'_>) -> bool {
     if err.status() != 0 {
         return false;
     }
+    if err.transport() == Some(TransportFault::Transient) {
+        return true;
+    }
     if err.is_context_error() {
         return false;
     }
@@ -300,6 +315,13 @@ pub(crate) fn is_transient_transport_result_error(err: &AuthError) -> bool {
         return true;
     }
     if err.http_status != 0 {
+        return false;
+    }
+    // Once an error is reduced to a recorded message, its type is gone. The
+    // transient code set by `result_error_from_error` is what vouches for a
+    // handshake timeout; the same words in a bare message might come from an
+    // external transport or the caller's own deadline.
+    if go_lower(&err.message).contains("tls handshake timeout") {
         return false;
     }
     is_transient_transport_message(&err.message)

@@ -187,6 +187,107 @@ async fn manager_should_retry_after_error_retries_pre_http_transport_failure() {
     }
 }
 
+/// Upstream's TestConfiguredTLSHandshakeTimeoutIsRetryable: an executor's own
+/// handshake deadline is a transient pre-HTTP failure even though it is a
+/// deadline, while the caller's deadline or cancellation, or the same words
+/// in a bare message, are not.
+///
+/// Deviation: upstream's typed `ConfiguredTLSHandshakeTimeoutError` becomes a
+/// [`TransportFault::Transient`] fault on a deadline error; the cases that
+/// join it with the caller's own cancellation or deadline can't be built, as
+/// an error has one kind.
+#[tokio::test(start_paused = true)]
+async fn configured_tls_handshake_timeout_is_retryable() {
+    use crate::exec::ErrorKind;
+    use crate::manager::classify::{
+        CODE_TRANSIENT_TRANSPORT, is_connection_lifecycle_result_error,
+        is_transient_transport_error, is_transient_transport_result_error,
+    };
+
+    let h = Harness::new(Settings {
+        request_retry: 1,
+        ..Settings::default()
+    });
+    h.executor(&FakeExecutor::new("codex"));
+    let model = "gpt-handshake-retry";
+    h.add(auth("handshake-retry", "codex"), &[model]);
+
+    let url = "Post \"https://api.anthropic.com/v1/messages\"";
+    let cases = [
+        (
+            "configured handshake timeout",
+            ExecError::new(
+                ErrorKind::DeadlineExceeded,
+                format!("{url}: tls handshake timeout: context deadline exceeded"),
+            )
+            .with_transport(TransportFault::Transient),
+            true,
+        ),
+        (
+            "caller deadline stays non retryable",
+            ExecError::new(
+                ErrorKind::DeadlineExceeded,
+                format!("{url}: context deadline exceeded"),
+            ),
+            false,
+        ),
+        (
+            "plaintext timeout phrase is not trusted",
+            ExecError::new(
+                ErrorKind::DeadlineExceeded,
+                format!(
+                    "{url}: external transport tls handshake timeout: context deadline exceeded"
+                ),
+            ),
+            false,
+        ),
+        (
+            "caller cancellation stays non retryable",
+            ExecError::new(ErrorKind::Canceled, format!("{url}: context canceled")),
+            false,
+        ),
+    ];
+    for (name, err, want) in cases {
+        let view = ErrView::Exec(&err);
+        assert_eq!(is_transient_transport_error(view), want, "{name}");
+        assert_eq!(should_retry(&h, &err, 0, model).is_some(), want, "{name}");
+        let result = result_error_from_error(view);
+        if want {
+            assert_eq!(result.code, CODE_TRANSIENT_TRANSPORT, "{name}");
+            assert!(is_transient_transport_result_error(&result), "{name}");
+            assert!(!is_connection_lifecycle_result_error(&result), "{name}");
+        } else {
+            assert_ne!(result.code, CODE_TRANSIENT_TRANSPORT, "{name}");
+            assert!(!is_transient_transport_result_error(&result), "{name}");
+        }
+    }
+}
+
+/// Not upstream's: a recorded message with the handshake-timeout words and no
+/// transient code isn't promoted to a transient failure (the
+/// `isTransientTransportResultError` guard), while the same words with the
+/// code are, and other transient texts still are.
+#[test]
+fn recorded_handshake_timeout_text_needs_the_transient_code() {
+    use crate::manager::classify::{CODE_TRANSIENT_TRANSPORT, is_transient_transport_result_error};
+
+    let bare = AuthError {
+        message: "Post \"https://api.anthropic.com/v1/messages\": tls handshake timeout".into(),
+        ..AuthError::default()
+    };
+    assert!(!is_transient_transport_result_error(&bare));
+    let coded = AuthError {
+        code: CODE_TRANSIENT_TRANSPORT.into(),
+        ..bare.clone()
+    };
+    assert!(is_transient_transport_result_error(&coded));
+    let reset = AuthError {
+        message: "connection reset".into(),
+        ..AuthError::default()
+    };
+    assert!(is_transient_transport_result_error(&reset));
+}
+
 #[tokio::test(start_paused = true)]
 async fn manager_mark_result_pre_http_transport_failure_does_not_cooldown() {
     let model = "gpt-6-astra";
