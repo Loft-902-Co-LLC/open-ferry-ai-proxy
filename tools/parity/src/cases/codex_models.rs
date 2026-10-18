@@ -28,6 +28,7 @@ fn case(name: &str, registrations: Value, client_version: &str) -> Case {
         "optimize_multi_agent_v2": false,
         "providers": true,
         "apply_patch": null,
+        "tool_search": null,
     }))
 }
 
@@ -151,6 +152,30 @@ pub fn lists() -> Vec<Case> {
             json!([{"id": "gemini-2.5-pro"}, {"id": "gemini-2.5-flash-image"}])
         ),
     ]);
+    // Every template claims search; a Claude route keeps the claim only
+    // when the callback says yes for the model.
+    let search = json!([
+        registration(
+            "claude",
+            json!([
+                {"id": "claude-search-yes"}, {"id": "claude-search-no"}, {"id": "gpt-5.5"},
+                {"id": "claude-mixed"}, {"id": "claude-static", "metadata_model_id": "claude-sonnet-4-6"},
+            ])
+        ),
+        registration(
+            "codex",
+            json!([{"id": "claude-mixed"}, {"id": "gpt-6-astra"}])
+        ),
+        registration("openai-compatibility", json!([{"id": "custom-search"}])),
+    ]);
+    let search_yes = json!([
+        "claude-search-yes",
+        "gpt-5.5",
+        "claude-mixed",
+        "claude-static",
+        "gpt-6-astra",
+        "custom-search",
+    ]);
     let escapes = json!([registration(
         "openai-compatibility",
         json!([
@@ -211,5 +236,30 @@ pub fn lists() -> Vec<Case> {
         case("mixed-providers", mixed, "0.153.4"),
         case("static-lookup", static_lookup, "0.144.0"),
         case("escapes", escapes, ""),
+        case("tool-search-unset", search.clone(), "0.153.4"),
+        with(
+            case("tool-search-none", search.clone(), "0.153.4"),
+            "tool_search",
+            json!([]),
+        ),
+        with(
+            case("tool-search-claude", search.clone(), "0.153.4"),
+            "tool_search",
+            search_yes.clone(),
+        ),
+        with(
+            with(
+                case("tool-search-without-providers", search.clone(), "0.153.4"),
+                "tool_search",
+                search_yes.clone(),
+            ),
+            "providers",
+            false.into(),
+        ),
+        with(
+            case("tool-search-old-client", search, "0.137.0"),
+            "tool_search",
+            search_yes,
+        ),
     ]
 }

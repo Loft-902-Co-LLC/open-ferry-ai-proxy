@@ -822,12 +822,23 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
             translator.read(case, bytes),
         ),
     };
-    let omitted = go_value
+    let mut omitted = go_value
         .as_mut()
         .map(|go| translator.drop_deliberate_omissions(case, go))
         .unwrap_or_default();
+    // Our output as compared: what we add on purpose and upstream doesn't
+    // have is taken out of it (the failure files keep the whole output).
+    let mut filtered = None;
+    if translator == Translator::ConfigDiff
+        && let Ok(rust) = &rust_output
+    {
+        let mut rust = rust.clone();
+        omitted.extend(config_diff::drop_unlogged(&mut rust));
+        filtered = Some(Ok(rust));
+    }
+    let compared: &Result<Value, String> = filtered.as_ref().unwrap_or(&rust_output);
 
-    let outcome = match (&go_value, &rust_output) {
+    let outcome = match (&go_value, compared) {
         (Some(go), Ok(rust)) => {
             let mut comparison = compare::compare_numbers(
                 go,

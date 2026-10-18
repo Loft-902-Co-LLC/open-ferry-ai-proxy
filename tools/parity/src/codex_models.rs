@@ -5,7 +5,8 @@
 use std::fmt::Write as _;
 
 use open_ferry_core::codex_models::{
-    ApplyPatchCapability, ProvidersForModel, build_response, marshal_compact,
+    ApplyPatchCapability, ProvidersForModel, ToolSearchCapability, build_response_with_tool_search,
+    marshal_compact,
 };
 use open_ferry_core::models::{ModelInfo, ThinkingSupport};
 use open_ferry_core::registry::ModelRegistry;
@@ -38,13 +39,20 @@ pub fn list(options: &Value) -> Value {
         .as_array()
         .map(|ids| ids.iter().map(text).collect());
     let apply_patch = |model: &str| supported.as_ref().is_some_and(|ids| ids.contains(&model));
-    let response = build_response(
+    let native: Option<Vec<&str>> = options["tool_search"]
+        .as_array()
+        .map(|ids| ids.iter().map(text).collect());
+    let tool_search = |model: &str| native.as_ref().is_some_and(|ids| ids.contains(&model));
+    let response = build_response_with_tool_search(
         &registry,
         &models,
         (options["providers"] == true).then_some(&providers as ProvidersForModel<'_>),
         supported
             .is_some()
             .then_some(&apply_patch as ApplyPatchCapability<'_>),
+        native
+            .is_some()
+            .then_some(&tool_search as ToolSearchCapability<'_>),
         options["optimize_multi_agent_v2"] == true,
         text(&options["client_version"]),
     );
@@ -139,4 +147,48 @@ fn model_info(model: &Value) -> ModelInfo {
 
 fn text(value: &Value) -> &str {
     value.as_str().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list;
+    use crate::cases::codex_models::lists;
+
+    /// The models of a hand-written case whose entry takes search.
+    fn searching(name: &str) -> Vec<String> {
+        let case = lists().into_iter().find(|case| case.name == name).unwrap();
+        let body = &list(&case.options)["body"]["models"];
+        let mut slugs: Vec<String> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|model| model["supports_search_tool"] == true)
+            .map(|model| model["slug"].as_str().unwrap().to_owned())
+            .collect();
+        slugs.sort();
+        slugs
+    }
+
+    /// Not upstream's: a model served only by Claude keeps search when the
+    /// callback says yes for it; one a Codex route also serves, or a custom
+    /// provider alone, does not, and a Codex-only template always does.
+    #[test]
+    fn claude_models_take_search_only_by_the_callback() {
+        let astra = ["gpt-6-astra"];
+        assert_eq!(searching("tool-search-unset"), astra);
+        assert_eq!(searching("tool-search-none"), astra);
+        let claude = [
+            "claude-search-yes",
+            "claude-static",
+            "gpt-5.5",
+            "gpt-6-astra",
+        ];
+        assert_eq!(searching("tool-search-claude"), claude);
+        assert_eq!(searching("tool-search-old-client"), claude);
+        // Without the provider lookup only a template's own claim is left.
+        assert_eq!(
+            searching("tool-search-without-providers"),
+            ["gpt-5.5", "gpt-6-astra"]
+        );
+    }
 }
