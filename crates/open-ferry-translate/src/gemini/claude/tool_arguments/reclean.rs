@@ -6,8 +6,22 @@
 //! Only the decision to declare and require a placeholder is exported. Description
 //! hints carry no constraint used by that decision; their presence is retained
 //! where they can change a property map. No Antigravity request cleaner is exposed.
-//! Trees or reference expansions deeper than 64 levels are conservatively ignored
-//! to bound expansion; arguments are preserved when the projection cannot finish.
+//! The 64-level depth limit bounds recursion; a separate 100,000-node copy budget
+//! bounds reference fan-out during inlining. Either limit preserves arguments when
+//! the projection cannot finish. Upstream has neither expansion bound.
+//!
+//! Deliberate projection deviations from upstream's raw-path quirks:
+//! - Scalar `required` beside `allOf` is retained here; upstream's array-only
+//!   `getStrings` ignores it. The underscore decision can be false here, true in Go.
+//! - Scalar `required` in `anyOf`/`oneOf` required-only branches likewise differs
+//!   from upstream's array-only materialization (false here, true in Go).
+//! - Required property names containing `|` or a backslash use literal lookup here;
+//!   upstream's incompletely escaped gjson paths can discard their required entry.
+//!   For a closed object this can preserve an underscore that upstream deletes.
+//! - A property literally named `type` holding `["null"]`, with `required` naming
+//!   `nullable`, can require underscore here while Go's type-array path walk does not.
+//!
+//! The scalar-required and literal-type shapes never come from our Gemini cleaner.
 
 use super::{analyze, array, gjson_array, local_ref, str_of};
 use serde_json::{Map, Value, json};
@@ -207,20 +221,45 @@ fn repair_list(values: &[Value], depth: usize) -> Option<Value> {
             .collect::<Option<Vec<_>>>()?,
     ))
 }
+// Cycle fallbacks copy siblings without resolving their references; count those
+// copies too, rather than hiding an arbitrarily large subtree in Value::clone.
+fn copy_bounded(value: &Value, depth: usize, remaining: &mut usize) -> Option<Value> {
+    if depth > 64 {
+        return None;
+    }
+    *remaining = remaining.checked_sub(1)?;
+    Some(match value {
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|v| copy_bounded(v, depth + 1, remaining))
+                .collect::<Option<_>>()?,
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(k, v)| Some((k.clone(), copy_bounded(v, depth + 1, remaining)?)))
+                .collect::<Option<_>>()?,
+        ),
+        _ => value.clone(),
+    })
+}
 fn inline(
     value: &Value,
     root: &Value,
     active: &mut BTreeSet<String>,
     depth: usize,
+    remaining: &mut usize,
 ) -> Option<Value> {
     if depth > 64 {
         return None;
     }
+    *remaining = remaining.checked_sub(1)?;
     if let Some(values) = value.as_array() {
         return Some(Value::Array(
             values
                 .iter()
-                .map(|v| inline(v, root, active, depth + 1))
+                .map(|v| inline(v, root, active, depth + 1, remaining))
                 .collect::<Option<Vec<_>>>()?,
         ));
     }
@@ -236,20 +275,18 @@ fn inline(
             if let Some(target) = target.as_object() {
                 for key in ["type", "nullable", "description"] {
                     if let Some(value) = target.get(key) {
-                        out.insert(key.to_owned(), value.clone());
+                        out.insert(key.to_owned(), copy_bounded(value, depth + 1, remaining)?);
                     }
                 }
             }
-            out.extend(
-                map.iter()
-                    .filter(|(k, _)| k.as_str() != "$ref")
-                    .map(|(k, v)| (k.clone(), v.clone())),
-            );
+            for (key, value) in map.iter().filter(|(k, _)| k.as_str() != "$ref") {
+                out.insert(key.clone(), copy_bounded(value, depth + 1, remaining)?);
+            }
             out.insert("description".into(), json!("reference hint"));
             return Some(Value::Object(out));
         }
-        if let Some(target) = inline(target, root, active, depth + 1)?.as_object() {
-            out.extend(target.clone());
+        if let Value::Object(target) = inline(target, root, active, depth + 1, remaining)? {
+            out.extend(target);
             resolved = true;
         }
         active.remove(reference);
@@ -261,7 +298,10 @@ fn inline(
             }
             continue;
         }
-        out.insert(key.clone(), inline(value, root, active, depth + 1)?);
+        out.insert(
+            key.clone(),
+            inline(value, root, active, depth + 1, remaining)?,
+        );
     }
     Some(Value::Object(out))
 }
@@ -569,7 +609,8 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
         return false;
     };
     let wrapped = json!({"schema":schema});
-    let Some(mut projected) = inline(&wrapped, &wrapped, &mut BTreeSet::new(), 0) else {
+    let Some(mut projected) = inline(&wrapped, &wrapped, &mut BTreeSet::new(), 0, &mut 100_000)
+    else {
         return false;
     };
     walk(&mut projected, false, hint_presence);

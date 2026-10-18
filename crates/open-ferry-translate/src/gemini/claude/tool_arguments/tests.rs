@@ -1031,3 +1031,100 @@ fn reclean_expansion_bound_preserves_arguments() {
     }
     assert!(!reclean::requires(&schema, "_"));
 }
+
+// Not upstream's: compact-text deduplication keeps first-seen identity and key order.
+#[test]
+fn cached_schema_text_keeps_first_seen_order() {
+    let first = json!({"type":"object","properties":{}});
+    let duplicate = first.clone();
+    let reordered: Value = serde_json::from_str(r#"{"properties":{},"type":"object"}"#).unwrap();
+    let mut schemas = Schemas::default();
+    for schema in [&first, &duplicate, &reordered, &first] {
+        unique(&mut schemas, schema);
+    }
+    assert_eq!(schemas.serialized.len(), 2);
+    assert_eq!(schemas.len(), 2);
+    assert!(std::ptr::eq(schemas[0], &first));
+    assert!(std::ptr::eq(schemas[1], &reordered));
+}
+
+// Not upstream's: a shallow two-ref chain must exhaust the node budget, not
+// allocate its exponentially expanded tree. No wall-clock assertion is needed.
+#[test]
+fn reclean_node_budget_preserves_arguments() {
+    let mut defs = serde_json::Map::new();
+    defs.insert(
+        "d16".into(),
+        json!({"type":"object","properties":{"leaf":{"type":"string"}}}),
+    );
+    for i in (0..16).rev() {
+        let reference = format!("#/schema/$defs/d{}", i + 1);
+        defs.insert(
+            format!("d{i}"),
+            json!({"type":"object","properties":{"a":{"$ref":reference},"b":{"$ref":reference}}}),
+        );
+    }
+    let schema =
+        json!({"type":"object","properties":{"p":{"$ref":"#/schema/$defs/d0"}},"$defs":defs});
+    assert!(!reclean::requires(&schema, "_"));
+    let original = json!({"tools":[{"name":"T","input_schema":{"type":"object","properties":{"p":{"type":"string"}},"additionalProperties":false}}]});
+    let sent =
+        json!({"tools":[{"functionDeclarations":[{"name":"T","parametersJsonSchema":schema}]}]});
+    let args = json!({"p":"x","_":true});
+    assert_eq!(clean_arguments(&args, "T", &original, &sent), args);
+}
+
+// Not upstream's: literal results from SanitizedFunctionNameMap in upstream
+// v8.0.32, run with Go 1.26.4 and GOTOOLCHAIN=local in a copied review harness.
+#[test]
+fn sent_name_hash_suffixes_match_go() {
+    let long = "a".repeat(80);
+    let other_long = format!("{long}b");
+    let request =
+        json!({"tools":[{"name":long},{"name":other_long},{"name":"a b"},{"name":"a_b"}]});
+    for (name, expected) in [
+        (
+            long.as_str(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_50fe35dfe06a",
+        ),
+        (
+            other_long.as_str(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_9d18499d2077",
+        ),
+        ("a b", "a_b_eebd4769fc73"),
+        ("a_b", "a_b_3fab944de3f4"),
+    ] {
+        assert_eq!(sent_tool_name(&request, name).as_deref(), Some(expected));
+    }
+}
+
+// Not upstream's: manual whole-clean-call release timings for the review fixture.
+// Run with cargo test -p open-ferry-translate --release schema_dedup_release_timings
+// -- --ignored --nocapture. Request construction and assertion are outside timing.
+#[test]
+#[ignore = "manual release benchmark; no timing assertion"]
+fn schema_dedup_release_timings() {
+    for n in [1_000, 3_000, 6_000] {
+        let branches: Vec<_> = (0..n).map(|i| json!({"type":"object","properties":{"p":{"type":"string","description":format!("d{i}")}},"additionalProperties":false})).collect();
+        let schema = json!({"type":"object","anyOf":branches});
+        let bytes = schema.to_string().len();
+        let original = json!({"tools":[{"name":"T","input_schema":schema}]});
+        let sent = json!({"tools":[{"functionDeclarations":[{"name":"T","parametersJsonSchema":{"type":"object","properties":{"p":{"type":"string"},"_":{"type":"boolean"}},"required":["_"]}}]}]});
+        let args = json!({"p":"x","_":true});
+        for run in 1..=3 {
+            let start = std::time::Instant::now();
+            let result = std::hint::black_box(clean_arguments(
+                std::hint::black_box(&args),
+                "T",
+                std::hint::black_box(&original),
+                std::hint::black_box(&sent),
+            ));
+            let elapsed = start.elapsed();
+            assert_eq!(result, json!({"p":"x"}));
+            println!(
+                "N={n} bytes={bytes} run={run} elapsed_ms={:.3}",
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
