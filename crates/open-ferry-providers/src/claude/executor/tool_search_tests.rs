@@ -502,3 +502,58 @@ payload:
         "caller description"
     );
 }
+
+// Ported from TestClaudeExecutor_NativeToolSearchPayloadRuleIsFinal, with the
+// tool index moved for the constant deferred anchor that precedes the
+// discovered tools (97ba1e89). The rule runs after native tool search shapes
+// the tools, so it still has the last word over `defer_loading`.
+#[tokio::test]
+async fn native_tool_search_payload_rule_is_final() {
+    let sent = |rules: &str| {
+        let config = Config::parse(format!(
+            "claude:
+  tool-search: true
+{rules}"
+        ))
+        .unwrap();
+        async move {
+            let mock = Mock::start(Reply::sse(&search_sse())).await;
+            let mut request = request(search_payload());
+            request.model = "claude-sonnet-4-5".into();
+            let mut options = options(Format::OPENAI_RESPONSE);
+            options.original_request = request.payload.clone();
+            mock.executor()
+                .with_config(Arc::new(config))
+                .execute(api_key_auth(), request, options)
+                .await
+                .unwrap();
+            mock.last().json()
+        }
+    };
+    let plain = sent("").await;
+    let tools = plain["tools"].as_array().unwrap();
+    let anchor = tools
+        .iter()
+        .position(|tool| tool["name"] == "tool_search_deferred_anchor")
+        .expect("the anchor is declared with native tool search");
+    let discovered = anchor + 1;
+    assert_eq!(tools[discovered]["defer_loading"], true, "{tools:?}");
+    let name = tools[discovered]["name"].clone();
+    let body = sent(&format!(
+        "payload:
+  override:
+    - models:
+        - name: '*'
+          protocol: claude
+      params:
+        tools.{discovered}.defer_loading: false
+"
+    ))
+    .await;
+    assert_eq!(body["tools"][discovered]["name"], name);
+    assert_eq!(
+        body["tools"][discovered]["defer_loading"], false,
+        "payload rule did not win over native tool search: {}",
+        body["tools"][discovered]
+    );
+}
