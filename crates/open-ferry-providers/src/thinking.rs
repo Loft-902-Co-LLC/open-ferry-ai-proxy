@@ -1091,11 +1091,37 @@ mod tests {
     // TestStripConfigurationUpdatesExported. Invalid JSON cannot enter a Value.
     #[test]
     fn collapse_and_strip_configuration_update_boundaries() {
+        let body = json!({"input": []});
+        let mut collapsed = body.clone();
+        collapse_configuration_updates(&mut collapsed, false);
+        assert_eq!(collapsed, body);
+        strip_configuration_updates(&mut collapsed);
+        assert_eq!(collapsed, body);
+        let mut body = json!({"input":[
+            {"type":"configuration_update","reasoning":{"effort":"low"}},
+            {"type":"configuration_update","reasoning":{"effort":"high"}}
+        ]});
+        collapse_configuration_updates(&mut body, false);
+        assert_eq!(body, json!({"input":[],"reasoning":{"effort":"high"}}));
+        let mut body = json!({"reasoning":{"effort":"medium"},"input":[
+            {"type":"configuration_update","reasoning":{"effort":"high"}},
+            {"role":"user","content":"hi"}
+        ]});
+        strip_configuration_updates(&mut body);
+        assert_eq!(
+            body,
+            json!({"reasoning":{"effort":"medium"},"input":[{"role":"user","content":"hi"}]})
+        );
+    }
+
+    // Not upstream's: parsed bodies without an input array or update items
+    // must remain unchanged under both configuration-update helpers.
+    #[test]
+    fn configuration_update_helpers_preserve_bodies_without_updates() {
         for body in [
-            serde_json::json!({"input": []}),
-            serde_json::json!({"reasoning":{"effort":"medium"}}),
-            serde_json::json!({"input":{"type":"configuration_update","reasoning":{"effort":"high"}}}),
-            serde_json::json!({"input":[{"role":"user","content":"hi"}]}),
+            json!({"reasoning":{"effort":"medium"}}),
+            json!({"input":{"type":"configuration_update","reasoning":{"effort":"high"}}}),
+            json!({"input":[{"role":"user","content":"hi"}]}),
         ] {
             let mut collapsed = body.clone();
             collapse_configuration_updates(&mut collapsed, false);
@@ -1103,24 +1129,6 @@ mod tests {
             strip_configuration_updates(&mut collapsed);
             assert_eq!(collapsed, body);
         }
-        let mut body = serde_json::json!({"input":[
-            {"type":"configuration_update","reasoning":{"effort":"low"}},
-            {"type":"configuration_update","reasoning":{"effort":"high"}}
-        ]});
-        collapse_configuration_updates(&mut body, false);
-        assert_eq!(
-            body,
-            serde_json::json!({"input":[],"reasoning":{"effort":"high"}})
-        );
-        let mut body = serde_json::json!({"reasoning":{"effort":"medium"},"input":[
-            {"type":"configuration_update","reasoning":{"effort":"high"}},
-            {"role":"user","content":"hi"}
-        ]});
-        strip_configuration_updates(&mut body);
-        assert_eq!(
-            body,
-            serde_json::json!({"reasoning":{"effort":"medium"},"input":[{"role":"user","content":"hi"}]})
-        );
     }
 
     #[test]

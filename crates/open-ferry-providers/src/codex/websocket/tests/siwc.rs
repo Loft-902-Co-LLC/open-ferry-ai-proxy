@@ -1,6 +1,8 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth_test.go
-// and codex_executor_siwc_configuration_update_test.go
-// (TestCodexWebsocketsExecutorUseSIWCExecuteAndStream) (v8.0.32, MIT).
+// (TestCodexWebsocketsExecutorUseSIWCExecuteAndStream) and
+// codex_executor_siwc_configuration_update_test.go
+// (TestCodexWebsocketsExecuteUseSIWCStripsConfigurationUpdates,
+// TestCodexWebsocketsPrepareStreamUseSIWCKeepsSuffixEffort) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

@@ -1017,12 +1017,7 @@ impl CodexExecutor {
             delete(&mut body, field);
         }
         if auth.use_siwc() {
-            crate::codex::siwc_request::apply_body(
-                &mut body,
-                false,
-                false,
-                crate::thinking::has_thinking_suffix(&main),
-            );
+            crate::codex::siwc_request::apply_body(&mut body, false, false, false);
         } else {
             normalize_instructions(&mut body, false);
         }

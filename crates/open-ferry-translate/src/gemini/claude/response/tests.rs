@@ -534,16 +534,26 @@ fn stream_edge_cases() {
 #[test]
 fn non_stream_edge_cases() {
     let request = json!({"tools": [{"name": "a b"}, {"name": "Read"}]});
+    let output = non_stream(
+        &request,
+        concat!(
+            r#"{"candidates":[{"content":{"parts":[{"text":"a","thought":true},{"thoughtSignature":"s"},{"text":"b"},"#,
+            r#"{"functionCall":{"name":"a_b","args":"{}"}},{"functionCall":{"name":"read","args":{"k":[1]}}},"#,
+            r#"{"text":"c","thought_signature":"t"}]},"finishReason":"MAX_TOKENS"}]}"#
+        ),
+    );
+    let calls: Vec<_> = output["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["type"] == "tool_use")
+        .collect();
+    assert_eq!(calls.len(), 2);
+    let first_id = calls[0]["id"].as_str().unwrap();
+    let second_id = calls[1]["id"].as_str().unwrap();
+    assert_ne!(first_id, second_id);
     assert_eq!(
-        mask_tool_ids(&non_stream(
-            &request,
-            concat!(
-                r#"{"candidates":[{"content":{"parts":[{"text":"a","thought":true},{"thoughtSignature":"s"},{"text":"b"},"#,
-                r#"{"functionCall":{"name":"a_b","args":"{}"}},{"functionCall":{"name":"read","args":{"k":[1]}}},"#,
-                r#"{"text":"c","thought_signature":"t"}]},"finishReason":"MAX_TOKENS"}]}"#
-            )
-        )
-        .to_string()),
+        mask_tool_ids(&output.to_string()),
         concat!(
             r#"{"id":"","type":"message","role":"assistant","model":"","content":[{"type":"thinking","thinking":"a","signature":"s"},"#,
             r#"{"type":"text","text":"b"},{"type":"tool_use","id":"a_b-N","name":"a b","input":{}},"#,
