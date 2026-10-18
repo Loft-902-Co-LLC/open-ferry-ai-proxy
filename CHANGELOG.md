@@ -6,12 +6,13 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 ## [Unreleased]
 
-Nothing has been released yet. This is what is in place today, ported from CLIProxyAPI v8.0.20.
+Nothing has been released yet. This is what is in place today, ported from CLIProxyAPI v8.0.27.
 
 ### Added
 
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
+- **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, its calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing login is a 401; the usual token is never sent in its place. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
 - **The client APIs**, over HTTP and WebSocket, sending each part of a streamed answer as soon as it's ready, as CLIProxyAPI does:
   - OpenAI Chat Completions, legacy Completions and Responses;
   - Claude Messages;
@@ -53,6 +54,18 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 
 ### Changed
 
+- **Ported from CLIProxyAPI v8.0.27**, up from v8.0.20. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8020-to-v8027-left-out). It brings:
+  - **Sign in with ChatGPT for Codex credentials**: a Codex credential can hold a second login, with ChatGPT, and then calls the OpenAI API with it. It is under Added.
+  - **Codex clients' `tool_search` on Claude**: a Responses call from a Codex client to a Claude model can use Anthropic's native tool search, which keeps the prompt cache prefix stable as the client finds tools. It is off by default. Turn it on with `upstream.claude.tool-search` (`claude.tool-search` in the legacy layout); a Claude key with a base URL other than Anthropic's also needs `native-tool-search: true`. Where it is on, the model list tells Codex clients which Claude models take it. A credential that can't take it gets the plain translation, as before.
+  - **`response.interrupt` on the Responses WebSocket**: a client can interrupt a response that is running, over Codex's connection or in a turn run over HTTP. Codex and xAI WebSocket sessions now survive a config reload, and are closed only for a credential that is removed.
+  - **`routing.session-affinity-rebind-on`**: with `quota`, a session keeps its credential through a transient failure, such as a timeout or a 5xx, which fails over for that call only, and moves on a quota, sign-in or model error. The default, `any`, is as before.
+  - **`max-request-body-bytes`**: a request body that says it is longer than the limit gets a 413 before anything reads it, and the Responses WebSocket's messages are held to it too. Unset, zero or negative keeps 64 MiB, where CLIProxyAPI turns the limit off.
+  - **`streaming.send-keepalive-before-ft`**: with it on and `streaming.keepalive-seconds` above zero, a stream sends its heartbeats before the first token.
+  - **Vertex AI native Interactions**: a Vertex AI key or service account file with `interactions: true` sends an Interactions client's calls to Vertex AI's own Interactions API, at the global location, in place of `generateContent`.
+  - **Responses compaction on Claude**: a compaction call for a Claude model has Claude write the summary, and returns it sealed, in the same format CLIProxyAPI uses.
+  - **The Codex model catalog** no longer needs a `gpt-5.5` entry: without one, the first entry is the template for models that have none of their own.
+  - **Usage records** say which client key provider let the call in (`access_provider`, `config-inline` for a key from the config) and whether the key is native (`is_native_key`). The usage ledger keeps both.
+  - **Smaller fixes**: Claude's rate-limit parsing ignores overage billing resets, drops invalid and null `cache_control` entries and respects the registry's completion limit for a Responses call's default `max_tokens`; a Claude stream sends its message delta with the trailing usage; tool call IDs that Claude can't take are normalized and restored, and Codex Chat Completions shortens over-length ones; Gemini's schemas lose the dependent keywords it doesn't support, and a function response with media gets a trailing user turn; Meta keeps foreign encrypted reasoning in Responses requests; Codex image requests keep the resolved upstream model; a canceled stream keeps the cooldown its upstream error set, and `credential_quota` counts as a quota cooldown in a model's availability; an xAI WebSocket resets its terminal error when it is configured again; an OpenAI-compatible stream's time to first token is measured on its first token frame; and the v8 config API normalizes collection styles and unquotes mapping keys.
 - **Ported from CLIProxyAPI v8.0.20**, up from v8.0.15. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8015-to-v8020-left-out). Besides the speech endpoints, it brings:
   - **`server.github-token`** (or `github-token` in the legacy layout), a token for requests to GitHub's API: the management API's latest-version check sends it ahead of `GITHUB_TOKEN`. The management API never shows it.
   - **Compact error bodies**: an upstream error body that is already JSON is compacted to one line, so a stream's `data:` line carries it whole.

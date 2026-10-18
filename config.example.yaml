@@ -40,9 +40,10 @@ server:
   # Server port
   port: 8317
 
-  # Maximum allowed size (in bytes) for incoming HTTP request bodies.
+  # Maximum allowed size (in bytes) for incoming HTTP request bodies, before and after
+  # decoding, and for each Responses WebSocket message.
   # Requests exceeding this limit are rejected with HTTP 413 Payload Too Large.
-  # Default is 0 (disabled / no limit); values <= 0 disable the limit.
+  # Default is 0; values <= 0 keep open-ferry's default of 64 MiB (CLIProxyAPI has no limit then).
   max-request-body-bytes: 0
 
   # Token for requests to GitHub's API: the management API's check for the latest release.
