@@ -393,7 +393,7 @@ pub(crate) fn assert_old_key_redacted(turn: &str, chunks: &[String]) {
 
 thread_local! {
     /// Where this thread's logs go while a test captures them.
-    static CAPTURED: RefCell<Option<Arc<Mutex<String>>>> = const { RefCell::new(None) };
+    static CAPTURED: RefCell<Option<Arc<Mutex<CapturedLogs>>>> = const { RefCell::new(None) };
 }
 
 /// What a test logs on its thread, one event a line: the message, then
@@ -401,7 +401,13 @@ thread_local! {
 /// tests capture them). Shared by every test of the crate that reads its
 /// logs, as a test binary has one global subscriber.
 #[derive(Clone, Default)]
-pub(crate) struct Logs(Arc<Mutex<String>>);
+pub(crate) struct Logs(Arc<Mutex<CapturedLogs>>);
+
+#[derive(Default)]
+struct CapturedLogs {
+    text: String,
+    levels: Vec<tracing::Level>,
+}
 
 impl Logs {
     /// Captures what this thread logs until the guard is dropped. A
@@ -425,6 +431,16 @@ impl Logs {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .text
+            .clone()
+    }
+
+    /// The level of every captured entry, in the same order as `text`.
+    pub(crate) fn levels(&self) -> Vec<tracing::Level> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .levels
             .clone()
     }
 }
@@ -465,8 +481,9 @@ impl tracing::Subscriber for Capture {
         let mut line = String::new();
         event.record(&mut Fields(&mut line));
         let mut text = text.lock().unwrap_or_else(PoisonError::into_inner);
-        text.push_str(&line);
-        text.push('\n');
+        text.text.push_str(&line);
+        text.text.push('\n');
+        text.levels.push(*event.metadata().level());
     }
 
     fn enter(&self, _: &tracing::span::Id) {}

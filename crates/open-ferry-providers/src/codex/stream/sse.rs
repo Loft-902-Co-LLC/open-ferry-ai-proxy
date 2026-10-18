@@ -241,19 +241,25 @@ mod tests {
 
     use super::*;
 
-    async fn scan_logged(input: &str, limit: usize) -> (Vec<String>, String) {
+    async fn scan_logged(input: &str, limit: usize) -> (Vec<String>, String, Vec<tracing::Level>) {
         let (logs, _capture) = crate::secret_echo::Logs::capture();
         let lines = scan(input, limit).await;
-        (lines, logs.text())
+        (lines, logs.text(), logs.levels())
     }
 
-    fn assert_warnings(logs: &str, count: usize) {
+    fn assert_warnings(logs: &str, levels: &[tracing::Level], count: usize) {
         let warnings: Vec<_> = logs
             .lines()
             .filter(|line| {
                 line.contains("codex executor: upstream SSE event data is not valid JSON")
             })
             .collect();
+        assert_eq!(logs.lines().count(), count, "unexpected entries: {logs}");
+        assert_eq!(levels.len(), count, "unexpected levels: {levels:?}");
+        assert!(
+            levels.iter().all(|level| *level == tracing::Level::WARN),
+            "{levels:?}: {logs}"
+        );
         assert_eq!(warnings.len(), count, "{logs}");
         for warning in warnings {
             assert!(
@@ -417,9 +423,9 @@ mod tests {
             ),
         ];
         for (name, input, want, warnings) in cases {
-            let (lines, logs) = scan_logged(input, 1 << 20).await;
+            let (lines, logs, levels) = scan_logged(input, 1 << 20).await;
             assert_eq!(lines, *want, "{name}");
-            assert_warnings(&logs, *warnings);
+            assert_warnings(&logs, &levels, *warnings);
         }
     }
     // Ported from TestCodexSSEScannerBoundsAnEventToTheLineLimit.
@@ -429,8 +435,8 @@ mod tests {
         let b = format!("data: {}", "y".repeat(40));
         let c = format!("data: {}\"}}", "z".repeat(40));
         let input = format!("{a}\n{b}\n{c}\n\ndata: {{\"b\":2}}\n\n");
-        let (lines, logs) = scan_logged(&input, 64).await;
-        assert_warnings(&logs, 1);
+        let (lines, logs, levels) = scan_logged(&input, 64).await;
+        assert_warnings(&logs, &levels, 1);
         assert!(!logs.contains(&"x".repeat(40)), "payload leaked: {logs}");
         assert_eq!(
             lines,
@@ -515,8 +521,8 @@ mod tests {
             ("37,5".into(), "false,false".into(), 38)
         );
         let input = std::str::from_utf8(held).unwrap().to_owned() + "\n\n";
-        let (_, logs) = scan_logged(&input, 1 << 20).await;
-        assert_warnings(&logs, 1);
+        let (_, logs, levels) = scan_logged(&input, 1 << 20).await;
+        assert_warnings(&logs, &levels, 1);
         assert!(
             logs.contains("data_lines=2 ") && logs.contains("data_bytes=43 "),
             "{logs}"
@@ -530,8 +536,8 @@ mod tests {
     // as upstream's assemble does before calling diagnose.
     #[tokio::test]
     async fn diagnostic_trims_single_line_data() {
-        let (_, logs) = scan_logged("data:   {\"a\":", 1 << 20).await;
-        assert_warnings(&logs, 1);
+        let (_, logs, levels) = scan_logged("data:   {\"a\":", 1 << 20).await;
+        assert_warnings(&logs, &levels, 1);
         assert!(logs.contains("data_bytes=5 "), "{logs}");
         assert!(logs.contains("json_error_offset=5"), "{logs}");
     }
