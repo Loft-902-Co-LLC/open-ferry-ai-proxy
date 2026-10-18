@@ -599,10 +599,17 @@ pub(crate) fn apply_result(
     model_key: &str,
     now: Timestamp,
     dispatched: u64,
+    rests: LiveRests,
 ) -> StaleSuccess {
     let was_terminal_unauthorized = has_unauthorized_auth_failure(auth);
-    let (model, credential) =
-        stale_success(auth, result, model_key, now, was_terminal_unauthorized);
+    let stale = stale_success(
+        auth,
+        result,
+        model_key,
+        now,
+        was_terminal_unauthorized,
+        rests,
+    );
     apply_outcome(
         settings,
         auth,
@@ -611,6 +618,7 @@ pub(crate) fn apply_result(
         now,
         was_terminal_unauthorized,
         dispatched,
+        stale,
     );
     if was_terminal_unauthorized {
         auth.unavailable = true;
@@ -621,15 +629,32 @@ pub(crate) fn apply_result(
     if !result.skip_quota_observation {
         observe_quota(auth, result, model_key, now);
     }
-    StaleSuccess { model, credential }
+    stale
 }
 
-/// Which cooldown a success left be because the call predated it (see
-/// [`apply_result`]); neither when the success was taken as recovery.
+/// Which cooldown a success left be because it proved nothing about
+/// recovery (see [`apply_result`]); all false when it was taken as recovery.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct StaleSuccess {
+    /// An active credential-wide quota stayed: a success is no recovery
+    /// from it.
+    pub(crate) quota: bool,
+    /// The model's cooldown stayed: the call predated it.
     pub(crate) model: bool,
+    /// The credential's own cooldown stayed: the call predated it.
     pub(crate) credential: bool,
+}
+
+/// Which scopes of a result still have a provider reset that holds, by the
+/// quota-check rests. The cap shortens a long cooldown's timestamps to the
+/// check's time, so the cooldown can look over while the provider's quota
+/// is not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LiveRests {
+    /// The credential's rest.
+    pub(crate) credential: bool,
+    /// The result's model's rest.
+    pub(crate) model: bool,
 }
 
 /// Takes the quota snapshot of the response behind `result` into the
@@ -650,36 +675,52 @@ fn observe_quota(auth: &mut Auth, result: &CallResult, model_key: &str, now: Tim
     }
 }
 
-/// Whether a success predates the live cooldown it would clear, for the
-/// model (first) or for the credential (second): it was dispatched at or
-/// before that cooldown was recorded, so it proves nothing about recovery.
+/// Whether a success proves nothing about recovery from a live cooldown
+/// (see [`StaleSuccess`]), given which of the scopes' provider resets still
+/// hold (`rests`, from the quota-check rests: the cap rewrites a long
+/// cooldown's timestamps, so they may have run out while the reset hasn't).
 fn stale_success(
     auth: &Auth,
     result: &CallResult,
     model_key: &str,
     now: Timestamp,
     was_terminal_unauthorized: bool,
-) -> (bool, bool) {
-    if !result.success {
-        return (false, false);
+    rests: LiveRests,
+) -> StaleSuccess {
+    if !result.success || was_terminal_unauthorized {
+        return StaleSuccess::default();
     }
     let predates = |recorded: u64| result.execution_seq > 0 && result.execution_seq <= recorded;
+    // A success is no recovery from an active credential quota, whatever
+    // call it came from. Past the cap's check time the quota is held by its
+    // rest alone, and then only a call that predates it is no recovery (the
+    // check's own success is).
+    let recorded = auth
+        .model_states
+        .values()
+        .map(|state| state.cooldown_recorded_seq)
+        .fold(auth.cooldown_recorded_seq, u64::max);
+    let quota = (auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now))
+        || (rests.credential && recorded > 0 && predates(recorded));
     let model = !model_key.is_empty()
-        && !was_terminal_unauthorized
         && existing_model_state(auth, model_key).is_some_and(|existing| {
-            is_model_state_active_cooldown(existing, now)
+            (is_model_state_active_cooldown(existing, now) || rests.model)
                 && existing.cooldown_recorded_seq > 0
                 && predates(existing.cooldown_recorded_seq)
         });
     let credential = model_key.is_empty()
-        && !was_terminal_unauthorized
         && is_auth_active_cooldown(auth, now)
         && auth.cooldown_recorded_seq > 0
         && predates(auth.cooldown_recorded_seq);
-    (model, credential)
+    StaleSuccess {
+        quota,
+        model,
+        credential,
+    }
 }
 
 /// The body of [`apply_result`].
+#[allow(clippy::too_many_arguments)]
 fn apply_outcome(
     settings: &Settings,
     auth: &mut Auth,
@@ -688,13 +729,12 @@ fn apply_outcome(
     now: Timestamp,
     was_terminal_unauthorized: bool,
     dispatched: u64,
+    stale: StaleSuccess,
 ) {
     if result.success {
         // A success from a call dispatched before a still-live cooldown was
         // recorded predates the failure and proves nothing about recovery,
         // so it causes no state change at all.
-        let (retain_model_cooldown, retain_auth_cooldown) =
-            stale_success(auth, result, model_key, now, was_terminal_unauthorized);
         if was_terminal_unauthorized {
             if !model_key.is_empty()
                 && let Some(key) = ensure_model_state(auth, model_key)
@@ -702,10 +742,9 @@ fn apply_outcome(
             {
                 reset_model_state(state, now);
             }
-        } else if auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now)
-        {
+        } else if stale.quota {
             // An active credential-scoped cooldown stays.
-        } else if retain_model_cooldown || retain_auth_cooldown {
+        } else if stale.model || stale.credential {
             // So does one recorded after this call was dispatched.
         } else if !model_key.is_empty() {
             if let Some(key) = ensure_model_state(auth, model_key)
