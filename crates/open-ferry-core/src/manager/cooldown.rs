@@ -694,14 +694,13 @@ fn stale_success(
     // A success is no recovery from an active credential quota, whatever
     // call it came from. Past the cap's check time the quota is held by its
     // rest alone, and then only a call that predates it is no recovery (the
-    // check's own success is).
-    let recorded = auth
-        .model_states
-        .values()
-        .map(|state| state.cooldown_recorded_seq)
-        .fold(auth.cooldown_recorded_seq, u64::max);
+    // check's own success is). The credential's own watermark orders that,
+    // which a credential-wide 429 stamps (upstream's `conductor_cooldown.go`
+    // does the same); another model's failure doesn't move it.
     let quota = (auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now))
-        || (rests.credential && recorded > 0 && predates(recorded));
+        || (rests.credential
+            && auth.cooldown_recorded_seq > 0
+            && predates(auth.cooldown_recorded_seq));
     let model = !model_key.is_empty()
         && existing_model_state(auth, model_key).is_some_and(|existing| {
             (is_model_state_active_cooldown(existing, now) || rests.model)
