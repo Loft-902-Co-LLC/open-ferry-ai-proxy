@@ -86,18 +86,18 @@ static CONFIG_CLAUDE_CONFIG: Type = Type {
 static CONFIG_CLAUDE_HEADER_DEFAULTS: Type = Type {
     name: "config.ClaudeHeaderDefaults",
     fields: &[
+        ("user-agent", Field::Leaf),
+        ("package-version", Field::Leaf),
+        ("runtime-version", Field::Leaf),
+        ("os", Field::Leaf),
+        ("arch", Field::Leaf),
+        ("timeout", Field::Leaf),
+        ("timezone", Field::Leaf),
+        ("stabilize-device-profile", Field::Leaf),
         ("anthropic-beta-strip", Field::Leaf),
         ("anthropic-beta-append", Field::Leaf),
         ("inject-diagnostics", Field::Leaf),
         ("client-request-id", Field::Leaf),
-        ("arch", Field::Leaf),
-        ("os", Field::Leaf),
-        ("package-version", Field::Leaf),
-        ("runtime-version", Field::Leaf),
-        ("stabilize-device-profile", Field::Leaf),
-        ("timeout", Field::Leaf),
-        ("timezone", Field::Leaf),
-        ("user-agent", Field::Leaf),
     ],
 };
 

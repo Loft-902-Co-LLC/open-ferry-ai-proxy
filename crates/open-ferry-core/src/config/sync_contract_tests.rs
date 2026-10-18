@@ -397,3 +397,218 @@ fn v32_carried_settings_have_redacted_diff_lines() {
     assert!(!lines.contains("private-beta-name"));
     assert!(!format!("{new:?}").contains("private-beta-name"));
 }
+
+// Not upstream's: compare one block without unrelated inserted defaults or root order.
+fn claude_header_block(text: &str) -> &str {
+    let mut start = None;
+    let mut indent = 0;
+    let mut offset = 0;
+    let mut end = 0;
+    for line in text.split_inclusive('\n') {
+        let spaces = line.len() - line.trim_start_matches(' ').len();
+        if let Some(start) = start {
+            if !line.trim().is_empty() {
+                if spaces <= indent {
+                    return &text[start..end];
+                }
+                end = offset + line.len();
+            }
+        } else if matches!(line.trim(), "header-defaults:" | "claude-header-defaults:") {
+            start = Some(offset);
+            indent = spaces;
+            end = offset + line.len();
+        }
+        offset += line.len();
+    }
+    &text[start.expect("header-defaults block")..end]
+}
+
+// Not upstream's: the v8 path table must follow ClaudeHeaderDefaults' field order.
+#[test]
+fn claude_header_saves_keep_upstream_field_order_byte_for_byte() {
+    let fields = "user-agent: x\nstabilize-device-profile: true\nanthropic-beta-strip:\n    - a\nanthropic-beta-append:\n    - b\ninject-diagnostics: false\nclient-request-id: \"off\"\n";
+    let v8 = format!(
+        "config-version: 8\nupstream:\n    claude:\n        header-defaults:\n{}",
+        fields
+            .lines()
+            .map(|line| format!("            {line}\n"))
+            .collect::<String>()
+    );
+    let cfg = Config::parse(v8.as_bytes()).unwrap();
+    for migrate in [false, true] {
+        let out = save::render_preserving_comments(v8.as_bytes(), &cfg, migrate).unwrap();
+        assert_eq!(
+            claude_header_block(std::str::from_utf8(&out).unwrap()).as_bytes(),
+            claude_header_block(&v8).as_bytes()
+        );
+    }
+    let legacy = format!(
+        "claude-header-defaults:\n{}",
+        fields
+            .lines()
+            .map(|line| format!("    {line}\n"))
+            .collect::<String>()
+    );
+    let cfg = Config::parse(legacy.as_bytes()).unwrap();
+    let out = save::render_preserving_comments(legacy.as_bytes(), &cfg, true).unwrap();
+    assert_eq!(
+        claude_header_block(std::str::from_utf8(&out).unwrap()).as_bytes(),
+        claude_header_block(&v8).as_bytes()
+    );
+}
+
+// Not upstream's: a nil non-omitempty pointer clears an existing scalar, but
+// missing-key pruning must not add null to a file without the setting.
+#[test]
+fn clearing_session_date_pin_replaces_existing_values_with_null() {
+    for raw in [
+        "claude:\n  session-date-pin-days: 0\n",
+        "config-version: 8\nupstream:\n  claude:\n    session-date-pin-days: 0\n",
+        "port: 8317\n",
+        "config-version: 8\nserver:\n  port: 8317\n",
+    ] {
+        for migrate in [false, true] {
+            let mut cfg = Config::parse(raw.as_bytes()).unwrap();
+            cfg.claude.session_date_pin_days = None;
+            let out = save::render_preserving_comments(raw.as_bytes(), &cfg, migrate).unwrap();
+            let text = String::from_utf8_lossy(&out);
+            if raw.contains("session-date-pin-days") {
+                assert!(text.contains("session-date-pin-days: null"), "{text}");
+            } else {
+                assert!(!text.contains("session-date-pin-days"), "{text}");
+            }
+            assert_eq!(
+                Config::parse(&out).unwrap().claude.session_date_pin_days,
+                Some(7)
+            );
+        }
+    }
+}
+
+// Not upstream's: pin the shared merge's shallow replacement of a null struct.
+#[test]
+fn null_claude_section_saves_the_whole_generated_mapping() {
+    let raw = "claude: null\n";
+    for migrate in [false, true] {
+        let cfg = Config::parse(raw.as_bytes()).unwrap();
+        let out = save::render_preserving_comments(raw.as_bytes(), &cfg, migrate).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        for field in [
+            "model-level-cooling: false",
+            "tool-search: false",
+            "session-date-pin-days: 7",
+        ] {
+            assert!(text.contains(field), "{text}");
+        }
+    }
+}
+
+// Not upstream's: typed overrides must coexist with preserved fingerprint fields,
+// comments and unknown siblings; v8 migration retains unknown fields as comments.
+#[test]
+fn claude_header_comments_and_unknown_siblings_survive_two_saves() {
+    let fields = "# fingerprint baseline\n# package-version: measured\nuser-agent: x # keep baseline\n# measured profile\nstabilize-device-profile: true\n# operator overrides\nanthropic-beta-strip:\n  - a\nanthropic-beta-append:\n  - b\ninject-diagnostics: false\nclient-request-id: \"off\"\nunknown-sibling: retained-value # keep unknown\n";
+    for (prefix, indent) in [
+        ("claude-header-defaults:\n", "  "),
+        (
+            "config-version: 8\nupstream:\n  claude:\n    header-defaults:\n",
+            "      ",
+        ),
+    ] {
+        let raw = format!(
+            "{prefix}{}",
+            fields
+                .lines()
+                .map(|line| format!("{indent}{line}\n"))
+                .collect::<String>()
+        );
+        for migrate in [false, true] {
+            let cfg = Config::parse(raw.as_bytes()).unwrap();
+            let first = save::render_preserving_comments(raw.as_bytes(), &cfg, migrate).unwrap();
+            let cfg = Config::parse(&first).unwrap();
+            let second = save::render_preserving_comments(&first, &cfg, migrate).unwrap();
+            let first = std::str::from_utf8(&first).unwrap();
+            let text = std::str::from_utf8(&second).unwrap();
+            assert_eq!(
+                claude_header_block(first).as_bytes(),
+                claude_header_block(text).as_bytes()
+            );
+            let unknown_line = |text: &str| {
+                text.lines()
+                    .find(|line| line.contains("unknown-sibling:"))
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec()
+            };
+            assert_eq!(unknown_line(first), unknown_line(text));
+            for preserved in [
+                "# fingerprint baseline",
+                "# package-version: measured",
+                "user-agent: x # keep baseline",
+                "# measured profile",
+                "# operator overrides",
+                "unknown-sibling: retained-value # keep unknown",
+            ] {
+                assert!(text.contains(preserved), "missing {preserved}: {text}");
+            }
+            assert_eq!(cfg.claude_header_defaults.inject_diagnostics, Some(false));
+        }
+    }
+}
+
+// Not upstream's: pin yaml.v3-compatible decoding for both carried integer fields.
+#[test]
+fn carried_integer_edge_inputs_follow_the_shared_decoder() {
+    for v8 in [false, true] {
+        for pin in [false, true] {
+            let key = if pin {
+                "session-date-pin-days"
+            } else {
+                "tls-handshake-timeout-seconds"
+            };
+            let yaml = |value: &str| match (v8, pin) {
+                (false, false) => format!("{key}: {value}\n"),
+                (false, true) => format!("claude:\n  {key}: {value}\n"),
+                (true, false) => format!("config-version: 8\nrequests:\n  {key}: {value}\n"),
+                (true, true) => {
+                    format!("config-version: 8\nupstream:\n  claude:\n    {key}: {value}\n")
+                }
+            };
+            for (raw, want) in [
+                ("-5", -5),
+                ("null", if pin { 7 } else { 0 }),
+                ("1.5", 1),
+                ("0x10", 16),
+            ] {
+                let raw = yaml(raw);
+                let cfg = Config::parse(raw.as_bytes()).unwrap();
+                let got = if pin {
+                    cfg.claude.session_date_pin_days.unwrap()
+                } else {
+                    cfg.tls_handshake_timeout_seconds
+                };
+                assert_eq!(got, want, "{raw}");
+                for migrate in [false, true] {
+                    let out =
+                        save::render_preserving_comments(raw.as_bytes(), &cfg, migrate).unwrap();
+                    let text = String::from_utf8_lossy(&out);
+                    assert!(text.contains(&format!("{key}: {want}")), "{text}");
+                    let loaded = Config::parse(&out).unwrap();
+                    assert_eq!(
+                        if pin {
+                            loaded.claude.session_date_pin_days.unwrap()
+                        } else {
+                            loaded.tls_handshake_timeout_seconds
+                        },
+                        want
+                    );
+                }
+            }
+            for raw in ["'12'", "invalid", "9223372036854775808"] {
+                let raw = yaml(raw);
+                let error = Config::parse(raw.as_bytes()).unwrap_err().to_string();
+                assert!(error.contains("into int"), "{error}");
+            }
+        }
+    }
+}

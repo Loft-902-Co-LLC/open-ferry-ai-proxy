@@ -391,9 +391,12 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                     Value::Bool(cfg.claude.model_level_cooling),
                 )
                 .put("tool-search", Value::Bool(cfg.claude.tool_search))
-                .pointer(
+                .put(
                     "session-date-pin-days",
-                    cfg.claude.session_date_pin_days.map(Value::Int),
+                    cfg.claude
+                        .session_date_pin_days
+                        .map(Value::Int)
+                        .unwrap_or(Value::Null),
                 )
                 .done(),
         )

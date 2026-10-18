@@ -356,22 +356,6 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
         "upstream.claude.session-date-pin-days",
     ),
     (
-        "claude-header-defaults.anthropic-beta-strip",
-        "upstream.claude.header-defaults.anthropic-beta-strip",
-    ),
-    (
-        "claude-header-defaults.anthropic-beta-append",
-        "upstream.claude.header-defaults.anthropic-beta-append",
-    ),
-    (
-        "claude-header-defaults.inject-diagnostics",
-        "upstream.claude.header-defaults.inject-diagnostics",
-    ),
-    (
-        "claude-header-defaults.client-request-id",
-        "upstream.claude.header-defaults.client-request-id",
-    ),
-    (
         "claude-header-defaults.user-agent",
         "upstream.claude.header-defaults.user-agent",
     ),
@@ -402,6 +386,22 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     (
         "claude-header-defaults.stabilize-device-profile",
         "upstream.claude.header-defaults.stabilize-device-profile",
+    ),
+    (
+        "claude-header-defaults.anthropic-beta-strip",
+        "upstream.claude.header-defaults.anthropic-beta-strip",
+    ),
+    (
+        "claude-header-defaults.anthropic-beta-append",
+        "upstream.claude.header-defaults.anthropic-beta-append",
+    ),
+    (
+        "claude-header-defaults.inject-diagnostics",
+        "upstream.claude.header-defaults.inject-diagnostics",
+    ),
+    (
+        "claude-header-defaults.client-request-id",
+        "upstream.claude.header-defaults.client-request-id",
     ),
     (
         "disable-claude-cloak-mode",
