@@ -229,7 +229,16 @@ async fn edit_with_body(
         if let Err(response) = config_write::writer(state) {
             return response;
         }
-        if let Err(response) = check_if_match(state, &if_match).await {
+        // Under the write lock, as upstream holds its handler mutex while it
+        // reads and compares: a write of this API that is half done is
+        // waited for, not hashed. The lock is released before the body is
+        // read, so a slow upload holds nothing; the writer checks again
+        // under the file's lock.
+        let checked = {
+            let _guard = state.config_write_lock().lock().await;
+            check_if_match(state, &if_match).await
+        };
+        if let Err(response) = checked {
             return response;
         }
     }
