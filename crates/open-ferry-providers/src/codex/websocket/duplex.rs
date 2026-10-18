@@ -11,8 +11,8 @@
 //! its `response.create` is sent. Codex's events reach the client as they
 //! come, a response's end included, while the client's next frames go to
 //! Codex on the same connection:
-//! - a `response.steer` goes as the client sent it, but for the config's
-//!   payload rules, while a response runs, so Codex can steer it; Codex's
+//! - a `response.steer` strips SIWC configuration updates, then goes as
+//!   the client sent it, but for the config's payload rules, while a response runs, so Codex can steer it; Codex's
 //!   `response.steer.*` answers reach the client byte for byte;
 //! - a `response.create` or `response.append` is prepared as the first
 //!   request was and sent once no steering waits on Codex and no automatic
@@ -501,6 +501,9 @@ impl Duplex {
             model: self.request.model.clone(),
             payload: Bytes::copy_from_slice(text.as_bytes()),
         };
+        if self.auth.use_siwc() {
+            crate::thinking::strip_configuration_updates(&mut body);
+        }
         let source = |_: Value| original.clone();
         let target = payload::Target {
             executor: "codex-websockets",

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/thinking/apply.go, validate.go, suffix.go,
-// configuration_update.go, and
+// configuration_update.go, configuration_update_test.go, and
 // internal/runtime/executor/helps/model_capabilities.go and thinking.go
 // (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
@@ -38,6 +38,8 @@
 //!   `extractCodexConfig` reads what gjson finds in it. A Claude model bound
 //!   to a request would also need `stripInferredClaudeSummaryActivation`,
 //!   which isn't ported.
+//! - Configuration-update helpers take parsed JSON values; malformed JSON
+//!   cannot enter them, so the upstream invalid-JSON boundary cases do not apply.
 //! - The Kimi and Antigravity targets aren't ported.
 //! - A plugin's request normalizer (`normalizedUpdatesChanged`) isn't
 //!   ported, so the client's Responses request is always read for its
@@ -568,6 +570,13 @@ pub(crate) fn parse_suffix(model: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// `HasThinkingSuffix`: whether the suffix defines a thinking configuration.
+pub(crate) fn has_thinking_suffix(model: &str) -> bool {
+    parse_suffix(model)
+        .1
+        .is_some_and(|raw| suffix_config(raw).is_set())
+}
+
 /// `parseSuffixToConfig`: `none`, `auto` or `-1`, a level name, or a
 /// non-negative budget. Anything else says nothing.
 pub(crate) fn suffix_config(raw: &str) -> Config {
@@ -776,6 +785,20 @@ fn configuration_update_config(body: &Value) -> Config {
         .map(json::lower_trim)
         .rfind(|effort| !effort.is_empty());
     effort.map_or_else(Config::unset, effort_config)
+}
+
+/// `CollapseConfigurationUpdates`: remove unsupported update items, promoting the
+/// last usable effort unless an explicit model suffix already resolved it.
+/// SIWC accepts the resulting loss of prompt-cache reuse.
+pub(crate) fn collapse_configuration_updates(body: &mut Value, keep_top_level_effort: bool) {
+    let config = configuration_update_config(body);
+    strip_configuration_updates(body);
+    if !keep_top_level_effort
+        && config.is_set()
+        && let Some(effort) = crate::codex::thinking::compatible_effort(&config)
+    {
+        json::set(body, "reasoning.effort", Value::String(effort));
+    }
 }
 
 /// `stripConfigurationUpdates`: removes the `configuration_update` input
@@ -1046,6 +1069,59 @@ fn level_index(level: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Ported from TestHasThinkingSuffix.
+    #[test]
+    fn has_thinking_suffix_cases() {
+        for (model, want) in [
+            ("model", false),
+            ("model()", false),
+            ("model(invalid)", false),
+            ("model(high)", true),
+            ("model(xhigh)", true),
+            ("model(none)", true),
+            ("model(auto)", true),
+            ("model(16384)", true),
+        ] {
+            assert_eq!(has_thinking_suffix(model), want, "{model}");
+        }
+    }
+
+    // Ported from TestCollapseConfigurationUpdatesBoundaries and
+    // TestStripConfigurationUpdatesExported. Invalid JSON cannot enter a Value.
+    #[test]
+    fn collapse_and_strip_configuration_update_boundaries() {
+        for body in [
+            serde_json::json!({"input": []}),
+            serde_json::json!({"reasoning":{"effort":"medium"}}),
+            serde_json::json!({"input":{"type":"configuration_update","reasoning":{"effort":"high"}}}),
+            serde_json::json!({"input":[{"role":"user","content":"hi"}]}),
+        ] {
+            let mut collapsed = body.clone();
+            collapse_configuration_updates(&mut collapsed, false);
+            assert_eq!(collapsed, body);
+            strip_configuration_updates(&mut collapsed);
+            assert_eq!(collapsed, body);
+        }
+        let mut body = serde_json::json!({"input":[
+            {"type":"configuration_update","reasoning":{"effort":"low"}},
+            {"type":"configuration_update","reasoning":{"effort":"high"}}
+        ]});
+        collapse_configuration_updates(&mut body, false);
+        assert_eq!(
+            body,
+            serde_json::json!({"input":[],"reasoning":{"effort":"high"}})
+        );
+        let mut body = serde_json::json!({"reasoning":{"effort":"medium"},"input":[
+            {"type":"configuration_update","reasoning":{"effort":"high"}},
+            {"role":"user","content":"hi"}
+        ]});
+        strip_configuration_updates(&mut body);
+        assert_eq!(
+            body,
+            serde_json::json!({"reasoning":{"effort":"medium"},"input":[{"role":"user","content":"hi"}]})
+        );
+    }
 
     #[test]
     fn parses_suffixes() {

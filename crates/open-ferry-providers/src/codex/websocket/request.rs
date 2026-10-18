@@ -185,6 +185,7 @@ pub(super) fn prepare(
         crate::codex::siwc_request::apply_websocket_body(
             &mut body,
             crate::codex::siwc_request::explicit_instructions(&payload),
+            crate::thinking::has_thinking_suffix(&request.model),
         );
     }
     // The rules see the body as it is sent.

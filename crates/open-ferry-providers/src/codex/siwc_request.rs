@@ -39,7 +39,12 @@ pub(crate) fn explicit_instructions(payload: &Value) -> bool {
 
 /// SIWC stripping, before payload finalization. `compact` removes stream
 /// and store; ordinary Responses calls always ask for SSE without storage.
-pub(crate) fn apply_body(body: &mut Value, explicit: bool, compact: bool) {
+pub(crate) fn apply_body(
+    body: &mut Value,
+    explicit: bool,
+    compact: bool,
+    keep_top_level_effort: bool,
+) {
     if compact {
         delete(body, "stream");
         delete(body, "store");
@@ -47,6 +52,7 @@ pub(crate) fn apply_body(body: &mut Value, explicit: bool, compact: bool) {
         set(body, "stream", Value::Bool(true));
         set(body, "store", Value::Bool(false));
     }
+    crate::thinking::collapse_configuration_updates(body, keep_top_level_effort);
     for field in [
         "prompt_cache_retention",
         "prompt_cache_options",
@@ -66,8 +72,8 @@ pub(crate) fn apply_body(body: &mut Value, explicit: bool, compact: bool) {
 }
 
 /// WebSocket Responses omit streaming and background flags, before payload rules.
-pub(crate) fn apply_websocket_body(body: &mut Value, explicit: bool) {
-    apply_body(body, explicit, false);
+pub(crate) fn apply_websocket_body(body: &mut Value, explicit: bool, keep_top_level_effort: bool) {
+    apply_body(body, explicit, false, keep_top_level_effort);
     delete(body, "stream");
     delete(body, "background");
 }
