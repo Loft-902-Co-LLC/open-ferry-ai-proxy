@@ -928,4 +928,70 @@ mod tests {
         assert!(merged.status_message.is_empty());
         assert!(merged.last_error.is_none());
     }
+
+    /// Ported from upstream's `MergeRefreshedAuth` rule for the independent
+    /// layers (the model-states loop in `metadata_merge.go`, which its Devin
+    /// refresh tests reach): a refresh derives from the snapshot it started
+    /// from, so a layer, a mark and a watermark the live credential gained
+    /// meanwhile stay.
+    #[test]
+    fn a_refresh_keeps_the_live_shadow_the_mark_and_the_watermark() {
+        use crate::auth::ModelState;
+
+        let own = ModelState {
+            status: Status::Error,
+            unavailable: true,
+            next_retry_after: Some(secs(3600)),
+            ..ModelState::default()
+        };
+        let mut base = Auth::default();
+        base.model_states.insert(
+            "m".into(),
+            ModelState {
+                status: Status::Active,
+                ..ModelState::default()
+            },
+        );
+        let updated = base.clone();
+        for refresh_changed_the_model in [false, true] {
+            let mut current = base.clone();
+            current.model_states.insert(
+                "m".into(),
+                ModelState {
+                    status: Status::Error,
+                    unavailable: true,
+                    next_retry_after: Some(secs(7200)),
+                    cooldown_recorded_seq: 7,
+                    credential_quota_shadow: Some(Box::new(own.clone())),
+                    credential_quota_propagated: true,
+                    ..ModelState::default()
+                },
+            );
+            let mut updated = updated.clone();
+            if refresh_changed_the_model && let Some(state) = updated.model_states.get_mut("m") {
+                state.status_message = "refreshed".into();
+            }
+
+            let merged = merge_refreshed_auth(&base, &current, &updated, now());
+
+            let state = &merged.model_states["m"];
+            assert_eq!(
+                state.cooldown_recorded_seq, 7,
+                "{refresh_changed_the_model}"
+            );
+            assert!(
+                state.credential_quota_propagated,
+                "{refresh_changed_the_model}"
+            );
+            assert_eq!(
+                state
+                    .credential_quota_shadow
+                    .as_deref()
+                    .map(|s| s.next_retry_after),
+                Some(Some(secs(3600))),
+                "{refresh_changed_the_model}"
+            );
+            assert_eq!(state.next_retry_after, Some(secs(7200)));
+        }
+    }
 }
