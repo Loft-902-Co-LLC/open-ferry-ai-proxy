@@ -206,6 +206,7 @@ pub struct GeminiToOpenAIResponsesStream {
     /// The status a message item gets when it is finished: `incomplete` for
     /// one the final event finishes after `MAX_TOKENS`.
     message_status: &'static str,
+    tool_search_status: &'static str,
     msg_opened: bool,
     msg_closed: bool,
     msg_index: i64,
@@ -285,6 +286,7 @@ struct ReasoningItem {
 
 /// What upstream keeps about one tool call in its `Func*` maps.
 struct Call {
+    tool_search: bool,
     call_id: String,
     name: String,
     namespace: String,
@@ -510,6 +512,7 @@ impl GeminiToOpenAIResponsesStream {
             finish_reason: String::new(),
             usage: Usage::default(),
             message_status: COMPLETED,
+            tool_search_status: COMPLETED,
             msg_opened: false,
             msg_closed: false,
             msg_index: 0,
@@ -598,6 +601,13 @@ impl GeminiToOpenAIResponsesStream {
         if let Some(metadata) = extract_grounding_metadata(root) {
             self.ground(metadata, &mut out);
         }
+        let reason = str_of(at(root, "candidates.0.finishReason"));
+        self.tool_search_status = terminal_state(if reason.is_empty() {
+            &self.finish_reason
+        } else {
+            &reason
+        })
+        .1;
         if let Some(Value::Array(parts)) = at(root, "candidates.0.content.parts") {
             for (index, part) in parts.iter().enumerate() {
                 let args = RawArgs {
@@ -1590,7 +1600,7 @@ impl GeminiToOpenAIResponsesStream {
 
         let index = self.next_index;
         self.next_index += 1;
-        let mut call_id = if identity.apply_patch {
+        let mut call_id = if identity.apply_patch || identity.tool_search {
             upstream_id
         } else {
             String::new()
@@ -1600,7 +1610,32 @@ impl GeminiToOpenAIResponsesStream {
         }
         let args_json = raw_args.map_or_else(|| "{}".to_owned(), Cow::into_owned);
 
-        if identity.custom {
+        if identity.tool_search {
+            for (event, status) in [
+                ("response.output_item.added", "in_progress"),
+                ("response.output_item.done", self.tool_search_status),
+            ] {
+                let seq = self.next_seq();
+                push_event(
+                    out,
+                    event,
+                    &json!({"type":event,"sequence_number":seq,"output_index":index,
+                    "item":super::tool_search::call_item(&call_id, status, &args_json)}),
+                );
+            }
+            self.calls.insert(
+                index,
+                Call {
+                    tool_search: true,
+                    call_id,
+                    name: identity.name,
+                    namespace: identity.namespace,
+                    custom: false,
+                    args: args_json,
+                    input: String::new(),
+                },
+            );
+        } else if identity.custom {
             let item_id = format!("ctc_{call_id}");
             let mut input = unwrap_responses_custom_tool_input(&args_json);
             let mut patch = None;
@@ -1678,6 +1713,7 @@ impl GeminiToOpenAIResponsesStream {
             self.calls.insert(
                 index,
                 Call {
+                    tool_search: false,
                     call_id,
                     name: identity.name,
                     namespace: identity.namespace,
@@ -1742,6 +1778,7 @@ impl GeminiToOpenAIResponsesStream {
             self.calls.insert(
                 index,
                 Call {
+                    tool_search: false,
                     call_id,
                     name: identity.name,
                     namespace: identity.namespace,
@@ -1838,7 +1875,9 @@ impl GeminiToOpenAIResponsesStream {
                 .get(&index)
                 .filter(|call| !call.call_id.is_empty())
             {
-                let mut item = if call.custom {
+                let mut item = if call.tool_search {
+                    super::tool_search::call_item(&call.call_id, status, &call.args)
+                } else if call.custom {
                     json!({
                         "id": format!("ctc_{}", call.call_id),
                         "type": "custom_tool_call",
@@ -1857,7 +1896,9 @@ impl GeminiToOpenAIResponsesStream {
                         "name": "",
                     })
                 };
-                set_tool_call_identity(&mut item, &call.name, &call.namespace);
+                if !call.tool_search {
+                    set_tool_call_identity(&mut item, &call.name, &call.namespace);
+                }
                 outputs.push(item);
             }
         }
@@ -2211,12 +2252,22 @@ fn non_stream(
                 continue;
             }
 
-            let args = raw_args.map(Cow::into_owned).unwrap_or_default();
+            let args = raw_args.map(Cow::into_owned).unwrap_or_else(|| {
+                if identity.tool_search {
+                    "{}".into()
+                } else {
+                    String::new()
+                }
+            });
             let mut call_id = new_call_id();
-            if identity.apply_patch && !call_evidence.upstream_id.is_empty() {
+            if (identity.apply_patch || identity.tool_search)
+                && !call_evidence.upstream_id.is_empty()
+            {
                 call_id = call_evidence.upstream_id.clone();
             }
-            let mut item = if identity.custom {
+            let mut item = if identity.tool_search {
+                super::tool_search::call_item(&call_id, status, &args)
+            } else if identity.custom {
                 let mut input = unwrap_responses_custom_tool_input(&args);
                 if identity.apply_patch {
                     let mut patch = CallState::default();
@@ -2247,7 +2298,9 @@ fn non_stream(
                     "name": "",
                 })
             };
-            set_tool_call_identity(&mut item, &identity.name, &identity.namespace);
+            if !identity.tool_search {
+                set_tool_call_identity(&mut item, &identity.name, &identity.namespace);
+            }
             g.order.push(Output::Function(g.functions.len()));
             g.functions.push((item, signature));
             continue;

@@ -988,6 +988,7 @@ fn identities_make_custom_tool_calls() {
             namespace: "functions".to_owned(),
             custom: true,
             apply_patch: false,
+            tool_search: false,
         },
     )]);
     let step = json!({"type": "function_call", "id": "call_1", "name": "functions__exec", "arguments": {"input": "ls"}});

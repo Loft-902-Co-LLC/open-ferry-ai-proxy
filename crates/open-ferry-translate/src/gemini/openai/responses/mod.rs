@@ -4,6 +4,7 @@ mod replay_cache;
 mod request;
 mod response;
 mod signature_carrier;
+mod tool_search;
 mod trailing_signature;
 mod web_search;
 

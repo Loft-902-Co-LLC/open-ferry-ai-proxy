@@ -168,7 +168,8 @@ pub fn convert_openai_responses_request_to_gemini(
 
     match root.get("input") {
         Some(Value::Array(input)) => {
-            let restored = restore_text_signatures(model, input);
+            let normalized = super::tool_search::normalize_items(input, &declarations.forward);
+            let restored = restore_text_signatures(model, &normalized);
             let (items, has_carrier) = signature_carrier::normalize(&restored);
             if has_carrier {
                 native = true;
