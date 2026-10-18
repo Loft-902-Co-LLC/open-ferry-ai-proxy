@@ -1673,6 +1673,133 @@ async fn a_401_holds_the_refresh_lock_only_inside_the_save_mutex() {
     );
 }
 
+/// Edits the credential while its refresh lock is held, as a pass holds it:
+/// check (vi) refuses the save, and the change is owed.
+fn owe_a_note(manager: &Manager) {
+    let refresh_lock = lock(&manager.shared.refresh_locks)
+        .entry(ID.to_owned())
+        .or_default()
+        .clone();
+    let pass = refresh_lock.try_lock_owned().expect("no pass runs");
+    manager
+        .edit(ID, |auth| {
+            auth.metadata.insert("note".into(), json!("kept"));
+            Ok::<_, String>(true)
+        })
+        .expect("the edit is published");
+    drop(pass);
+    let owed = lock(&manager.shared.state).auths[ID].owed_save.is_some();
+    assert!(owed, "the save is owed");
+}
+
+/// Writes the owed save as `operation`, and checks it kept both the change
+/// and the newer disk tokens (L27); the next 401 then adopts them.
+async fn flush_and_adopt(
+    env: &Env,
+    operation: crate::gate::Operation,
+    closing: tokio::task::JoinHandle<Result<(), crate::gate::CloseError>>,
+) {
+    let (manager, epoch) = (
+        env.manager.clone(),
+        env.manager.get(ID).expect("credential").registration_epoch,
+    );
+    operation
+        .run_blocking(move || manager.flush_owed_save(ID, epoch))
+        .await
+        .expect("the flush runs");
+    drop(operation);
+    let owed = lock(&env.manager.shared.state).auths[ID]
+        .owed_save
+        .is_some();
+    assert!(!owed, "the flush wrote it");
+    assert_eq!(env.on_disk()["note"], "kept");
+    assert_eq!(env.on_disk()["access_token"], "access-9");
+    closing.await.expect("task").expect("closes");
+    assert_next_401_adopts_disk_tokens(env).await;
+}
+
+// Not upstream's: a save refused behind a pass is owed, and memory holds a
+// change the file lacks until a flush writes it. D3 adopts nothing
+// meanwhile, as the file's record would drop the change, and refuses before
+// it goes to take the save mutex.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_401_adopts_nothing_while_a_save_is_owed() {
+    let env = Env::new();
+    let manager = env.manager.clone();
+    tokio::task::spawn_blocking(move || owe_a_note(&manager))
+        .await
+        .expect("task");
+    assert!(env.on_disk().get("note").is_none(), "the save was refused");
+    let looks = Arc::new(AtomicUsize::new(0));
+    {
+        let looks = Arc::clone(&looks);
+        *lock(&env.manager.shared.adopt_unheld_hook) = Some(Arc::new(move || {
+            looks.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+
+    let operation = env.gate.begin_operation().expect("operation");
+    let closing = env.close();
+    until(|| env.gate.state() != GateState::Open).await;
+    rotate_on_disk(&env);
+    let failed = env.manager.get(ID).expect("credential");
+    let answered = env
+        .manager
+        .try_refresh_after_unauthorized(&failed, &ExecError::upstream(401, "401"), false)
+        .await;
+    assert!(answered.is_none(), "nothing is adopted");
+    assert_eq!(
+        looks.load(Ordering::SeqCst),
+        0,
+        "the save mutex was waited for"
+    );
+    assert_eq!(env.token(), "access-0");
+    let live = env.manager.get(ID).expect("credential");
+    assert_eq!(live.metadata["note"], "kept", "memory keeps the change");
+    flush_and_adopt(&env, operation, closing).await;
+}
+
+// Not upstream's: as above, but the save is refused and owed after D3's
+// first look, as it goes to take the save mutex. D3 looks again before it
+// reads, and adopts nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_401_adopts_nothing_when_a_save_is_owed_after_its_first_look() {
+    let env = Env::new();
+    let operation = env.gate.begin_operation().expect("operation");
+    {
+        let (manager, operation) = (env.manager.clone(), operation.clone());
+        let armed = AtomicBool::new(true);
+        *lock(&env.manager.shared.adopt_unheld_hook) = Some(Arc::new(move || {
+            if armed.swap(false, Ordering::SeqCst) {
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let manager = manager.clone();
+                drop(operation.run_blocking(move || {
+                    owe_a_note(&manager);
+                    done_tx.send(()).expect("the test is listening");
+                }));
+                done_rx.recv().expect("the edit runs");
+            }
+        }));
+    }
+    let closing = env.close();
+    until(|| env.gate.state() != GateState::Open).await;
+    rotate_on_disk(&env);
+
+    let failed = env.manager.get(ID).expect("credential");
+    let answered = env
+        .manager
+        .try_refresh_after_unauthorized(&failed, &ExecError::upstream(401, "401"), false)
+        .await;
+    // Drops the hook's operation, which the close waits for.
+    *lock(&env.manager.shared.adopt_unheld_hook) = None;
+    assert!(answered.is_none(), "nothing is adopted");
+    assert_eq!(env.token(), "access-0");
+    let live = env.manager.get(ID).expect("credential");
+    assert_eq!(live.metadata["note"], "kept", "memory keeps the change");
+    assert!(env.on_disk().get("note").is_none(), "the save was refused");
+    flush_and_adopt(&env, operation, closing).await;
+}
+
 // Not upstream's: C4-1. A request holds a snapshot of the credential. The
 // credential is then removed and registered again at another path (an
 // `auth-dir` change does this), still with the old token, and the file at

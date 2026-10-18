@@ -1041,7 +1041,8 @@ impl Manager {
     /// applies the disk copy as one step under the state lock, and only when
     /// nothing of the credential is in flight: no refresh holds its refresh
     /// lock (a forced or request-path refresh, which has no job), no refresh
-    /// job runs, no published snapshot of it waits to be saved, none was
+    /// job runs, no published snapshot of it waits to be saved, no save of it
+    /// is owed (a refused save left a change the file lacks), none was
     /// published (so none can have been saved) between the read and the swap
     /// (its save-publication sequence is as it was before the read), and its
     /// registration is the one that was read. A credential whose token moved
@@ -1077,6 +1078,10 @@ impl Manager {
                 .get(&failed.id)
                 .is_some_and(|job| job.running)
                 || state.pending_saves.contains_key(&failed.id)
+                || state
+                    .auths
+                    .get(&failed.id)
+                    .is_some_and(|entry| entry.owed_save.is_some())
             {
                 return None;
             }
@@ -1114,6 +1119,11 @@ impl Manager {
                 }
                 if entry.auth.registration_epoch != failed.registration_epoch {
                     // Removed and registered again since the request's snapshot.
+                    return None;
+                }
+                if entry.owed_save.is_some() {
+                    // The file lacks a change of this process's; its record
+                    // would drop it.
                     return None;
                 }
                 (
