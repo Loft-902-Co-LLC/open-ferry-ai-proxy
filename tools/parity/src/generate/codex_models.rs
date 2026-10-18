@@ -171,19 +171,38 @@ impl Generator {
                 "models": models,
             }));
         }
+        let all_ids = ids.clone();
         let apply_patch = if self.rng.chance(30) {
             Value::Null
         } else {
             ids.retain(|_| self.rng.chance(60));
             json!(ids)
         };
-        json!({
+        let mut options = json!({
             "registrations": registrations,
             "client_version": self.rng.pick(VERSIONS),
             "optimize_multi_agent_v2": self.rng.chance(50),
             "providers": self.rng.chance(85),
             "apply_patch": apply_patch,
-        })
+        });
+        // Drawn last, so the options above stay what they were.
+        options["tool_search"] = self.codex_tool_search(all_ids);
+        options
+    }
+
+    /// The models whose credentials all support native tool search: none
+    /// given, all false, all true, or a mix by model.
+    fn codex_tool_search(&mut self, ids: Vec<String>) -> Value {
+        match self.rng.below(4) {
+            0 => Value::Null,
+            1 => json!([]),
+            2 => json!(ids),
+            _ => json!(
+                ids.into_iter()
+                    .filter(|_| self.rng.chance(50))
+                    .collect::<Vec<_>>()
+            ),
+        }
     }
 
     fn codex_model_id(&mut self) -> String {

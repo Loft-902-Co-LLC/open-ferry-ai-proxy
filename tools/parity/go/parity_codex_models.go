@@ -7,7 +7,8 @@
 //
 //	{"registrations": [{"client": "...", "provider": "...", "models": [model, ...]}, ...],
 //	 "client_version": "...", "optimize_multi_agent_v2": bool,
-//	 "providers": bool, "apply_patch": null or ["public model ID", ...]}
+//	 "providers": bool, "apply_patch": null or ["public model ID", ...],
+//	 "tool_search": null or ["public model ID", ...]}
 //
 // Each model is an object with the fields of codexModelsModel; the ones
 // registry.ModelInfo keeps out of JSON (metadata_model_id, the explicit_*
@@ -20,7 +21,9 @@
 // is given, as open-ferry doesn't port cpa_capabilities. Which models take
 // apply_patch, as the HTTP handler decides it, is checked by open-ferry's
 // own tests: open-ferry decides it by provider name rather than by asking
-// executors.
+// executors. "tool_search" lists the model IDs whose credentials all support
+// Anthropic native tool search, or is null for no callback (which keeps
+// Claude routes from advertising search).
 //
 // The output is {"body": ..., "bytes": n, "sha256": "..."}: the length and
 // SHA-256 of MarshalCompact's output, and the output itself with every
@@ -55,6 +58,7 @@ type codexModelsOptions struct {
 	OptimizeMultiAgentV2 bool      `json:"optimize_multi_agent_v2"`
 	Providers            bool      `json:"providers"`
 	ApplyPatch           *[]string `json:"apply_patch"`
+	ToolSearch           *[]string `json:"tool_search"`
 }
 
 type codexModelsModel struct {
@@ -133,7 +137,15 @@ func codexModelsList(in input) []byte {
 		}
 		applyPatch = func(model string) bool { return supported[model] }
 	}
-	response := codexmodels.BuildResponseForClientWithToolCapabilities(models, providers, nil, applyPatch, options.OptimizeMultiAgentV2, options.ClientVersion)
+	var toolSearch codexmodels.ToolSearchCapabilityForModelFunc
+	if options.ToolSearch != nil {
+		native := make(map[string]bool, len(*options.ToolSearch))
+		for _, id := range *options.ToolSearch {
+			native[id] = true
+		}
+		toolSearch = func(model string) bool { return native[model] }
+	}
+	response := codexmodels.BuildResponseForClientWithToolCapabilities(models, providers, nil, applyPatch, toolSearch, options.OptimizeMultiAgentV2, options.ClientVersion)
 	body, err := codexmodels.MarshalCompact(response)
 	if err != nil {
 		panic(err)

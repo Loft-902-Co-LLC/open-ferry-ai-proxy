@@ -2494,9 +2494,13 @@ fn is_generated_tool_id(text: &str) -> bool {
 /// [`Translator::embedded_json`]): a value read as text that isn't a string,
 /// such as a tool output that answers no call and is neither a string nor a
 /// list. The suite's own requests have none (see `Generator::raw_text`);
-/// other suites' requests the registry sends this way do.
-const GEMINI_RESPONSES_REQUEST_JSON: &[JsonAt] =
-    &[("$.contents[*].parts[*].text", JsonForm::Whole)];
+/// other suites' requests the registry sends this way do. The system
+/// instruction's text is read the same way (`str_of` on the `instructions`
+/// and on a system or developer message's text parts), so it is in the list.
+const GEMINI_RESPONSES_REQUEST_JSON: &[JsonAt] = &[
+    ("$.contents[*].parts[*].text", JsonForm::Whole),
+    ("$.systemInstruction.parts[*].text", JsonForm::Whole),
+];
 
 /// The same for the Gemini → Responses stream translator.
 const GEMINI_RESPONSES_STREAM_JSON: &[JsonAt] = &[];
@@ -2608,6 +2612,8 @@ fn mask_made_up_call_ids(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -2850,6 +2856,31 @@ mod tests {
         assert_eq!(differences.len(), 1);
         assert_eq!(differences[0].path, "$.messages[1].content[0].tool_use_id");
         assert_eq!(differences[0].rust, r#""toolu_(generated-2)""#);
+    }
+
+    /// `instructions` that aren't a string: upstream copies the request's JSON
+    /// text into the system instruction, escapes and spacing included, where
+    /// we write the JSON compactly.
+    #[test]
+    fn responses_instructions_that_are_json_are_equivalent() {
+        let request = r#"{"model":"gemini-2.5-pro","instructions":{ "a": "\ufeff" },"input":"hi"}"#;
+        let case = Case::new("instructions", "gemini-2.5-pro", request);
+        let rust = Translator::GeminiResponsesRequest.run_rust(&case).unwrap();
+        assert_eq!(
+            rust["systemInstruction"]["parts"][0]["text"],
+            "{\"a\":\"\u{feff}\"}"
+        );
+        let mut go = rust.clone();
+        go["systemInstruction"]["parts"][0]["text"] = r#"{ "a": "\ufeff" }"#.into();
+        let embedded = Translator::GeminiResponsesRequest.embedded_json(&case);
+        let numbers = Translator::GeminiResponsesRequest.numbers();
+        let cmp = compare::compare_numbers(&go, &rust, embedded, numbers);
+        assert!(cmp.differences.is_empty(), "{:?}", cmp.differences);
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::EmbeddedJson]));
+        // Text that is not the same JSON still differs.
+        go["systemInstruction"]["parts"][0]["text"] = r#"{ "a": "\ufeff2" }"#.into();
+        let cmp = compare::compare_numbers(&go, &rust, embedded, numbers);
+        assert_eq!(cmp.differences.len(), 1);
     }
 
     #[test]
