@@ -1791,11 +1791,11 @@ impl Translator {
             }
             Self::GeminiClaudeNonStream => {
                 let mut value: Value = exact::from_str(&text).ok()?;
-                let mut n = 0;
+                let mut seen = Vec::new();
                 if let Some(Value::Array(blocks)) = value.get_mut("content") {
                     blocks
                         .iter_mut()
-                        .for_each(|block| mask_tool_use_counter(block, &mut n));
+                        .for_each(|block| mask_tool_use_counter(block, &mut seen));
                 }
                 return Some(value);
             }
@@ -2113,32 +2113,40 @@ pub(crate) fn sse_frames_ended_by(text: &str, end: &str) -> Value {
 /// Masks the tool call IDs in a Gemini to Claude stream's content blocks
 /// (see [`mask_tool_use_counter`]).
 fn mask_tool_use_counters(frames: &mut Value) {
-    let mut n = 0;
+    let mut seen = Vec::new();
     for frame in frames.as_array_mut().into_iter().flatten() {
         if let Some(block) = frame.pointer_mut("/data/content_block") {
-            mask_tool_use_counter(block, &mut n);
+            mask_tool_use_counter(block, &mut seen);
         }
     }
 }
 
 /// Replaces the count at the end of the ID the Gemini to Claude translators
 /// make up for a `tool_use` block, `<name>-<count>`, with `(generated-<n>)`
-/// for the `n`th call, counting in `n`. The count is process-wide, upstream's
-/// and ours alike, streaming or not, so it depends on the cases run before.
-fn mask_tool_use_counter(block: &mut Value, n: &mut usize) {
+/// for the `n`th distinct ID in `seen`, so an ID given twice still reads the
+/// same twice. The count is process-wide, upstream's and ours alike,
+/// streaming or not, so it depends on the cases run before.
+fn mask_tool_use_counter(block: &mut Value, seen: &mut Vec<String>) {
     if block["type"] != "tool_use" {
         return;
     }
     let Some(Value::String(id)) = block.get_mut("id") else {
         return;
     };
-    if let Some((name, count)) = id.rsplit_once('-')
-        && !count.is_empty()
-        && count.bytes().all(|b| b.is_ascii_digit())
-    {
-        *n += 1;
-        *id = format!("{name}-(generated-{n})");
+    let Some((name, count)) = id.rsplit_once('-') else {
+        return;
+    };
+    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return;
     }
+    let n = match seen.iter().position(|other| other == id) {
+        Some(index) => index + 1,
+        None => {
+            seen.push(id.clone());
+            seen.len()
+        }
+    };
+    *id = format!("{name}-(generated-{n})");
 }
 
 /// Replaces the clock time and count in the IDs the Gemini to Chat
@@ -2779,6 +2787,38 @@ mod tests {
                 { "type": "tool_use", "id": "toolu_01ABC", "name": "Read" }
             ])
         );
+
+        // An ID given twice reads the same twice, so it differs from two IDs.
+        let ids = |first: &str, second: &str| {
+            let response = json!({ "content": [
+                { "type": "tool_use", "id": first },
+                { "type": "tool_use", "id": second }
+            ] });
+            Translator::GeminiClaudeNonStream
+                .read(&case, response.to_string().as_bytes())
+                .unwrap()["content"]
+                .clone()
+        };
+        assert_eq!(ids("Bash-100", "Bash-100")[1]["id"], "Bash-(generated-1)");
+        assert_ne!(ids("Bash-100", "Bash-100"), ids("Bash-9", "Bash-10"));
+        let frames = |first: &str, second: &str| {
+            let text: String = [first, second]
+                .iter()
+                .map(|id| {
+                    let start = json!({ "type": "content_block_start", "content_block": { "type": "tool_use", "id": id } });
+                    format!("event: content_block_start
+data: {start}
+
+
+")
+                })
+                .collect();
+            Translator::GeminiClaudeStream
+                .read(&case, text.as_bytes())
+                .unwrap()
+        };
+        assert_eq!(frames("Bash-9", "Bash-10"), frames("Bash-100", "Bash-101"));
+        assert_ne!(frames("Bash-100", "Bash-100"), frames("Bash-9", "Bash-10"));
     }
 
     #[test]
