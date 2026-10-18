@@ -2365,9 +2365,7 @@ impl Manager {
                 let mut state = self.lock();
                 if let Some(entry) = state.auths.get_mut(&auth.id)
                     && entry.auth.registration_epoch == epoch
-                    && entry
-                        .owed_save
-                        .is_some_and(|owed| generation >= owed.version)
+                    && covers_owed(entry.owed_save, generation)
                 {
                     entry.owed_save = None;
                 }
@@ -3451,6 +3449,12 @@ fn has_unwritten_refresh_work(auth: &Auth) -> bool {
             crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) if !patch.is_written())
 }
 
+// Whether a written Configuration save of `generation` covers the owed change:
+// only a save of the owed generation, or a later one, does.
+fn covers_owed(owed: Option<super::OwedSave>, generation: u64) -> bool {
+    owed.is_some_and(|owed| generation >= owed.version)
+}
+
 // Pending memory is bounded by refreshes between successful saves. No cap may
 // silently discard an unwritten rotation; written flags are pruned on edits/save.
 pub(crate) fn pending_for_edit(
@@ -3715,5 +3719,18 @@ mod tests {
         release_saved_intent(&mut live, &saved, true);
         assert!(live.codex_refresh_failure.is_none());
         assert!(live.codex_pending_refresh.is_empty());
+    }
+
+    #[test]
+    fn only_a_save_of_the_owed_generation_or_later_covers_it() {
+        // B-37 (d): a Configuration save older than the refused one leaves it owed.
+        let owed = Some(super::super::OwedSave {
+            reason: SaveDeferral::RefreshInFlight,
+            version: 5,
+        });
+        assert!(!covers_owed(owed, 4));
+        assert!(covers_owed(owed, 5));
+        assert!(covers_owed(owed, 6));
+        assert!(!covers_owed(None, 5));
     }
 }
