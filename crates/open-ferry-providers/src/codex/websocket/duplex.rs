@@ -11,11 +11,11 @@
 //! its `response.create` is sent. Codex's events reach the client as they
 //! come, a response's end included, while the client's next frames go to
 //! Codex on the same connection:
-//! - for a SIWC credential, the proxy removes a steer's
-//!   `configuration_update` items without promoting their effort, then
-//!   applies the payload rules. It sends the steer while a response runs,
-//!   so Codex can steer it; Codex's `response.steer.*` answers reach the
-//!   client byte for byte;
+//! - a `response.steer` goes as the client sent it, but for the config's
+//!   payload rules, while a response runs, so Codex can steer it; for a
+//!   SIWC credential its `configuration_update` items are removed first,
+//!   without promoting their effort. Codex's `response.steer.*` answers
+//!   reach the client byte for byte;
 //! - a `response.create` or `response.append` is prepared as the first
 //!   request was and sent once no steering waits on Codex and no automatic
 //!   successor runs; until then up to [`MAX_QUEUED_CREATES`] wait in turn;
@@ -495,9 +495,10 @@ impl Duplex {
         }
     }
 
-    /// For SIWC, the proxy removes the steer's configuration updates without
-    /// promoting their effort, then applies payload rules, never a create's
-    /// defaults.
+    /// A steering message: as the client sent it, but for the payload
+    /// rules, never with a create's defaults. For a SIWC credential its
+    /// `configuration_update` items are removed first, without promoting
+    /// their effort, and the rules see what is left.
     fn on_steer(&mut self, text: &str, mut body: Value) {
         let original = body.clone();
         let steer_request = Request {
