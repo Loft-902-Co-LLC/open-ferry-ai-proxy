@@ -38,7 +38,7 @@ use crate::common::gemini::{
 use crate::gemini_schema::get;
 use crate::json::{bool_of, int_of, path, str_of};
 
-/// Numbers the `tool_use` blocks of every stream in the process, as
+/// Numbers the `tool_use` blocks of every response in the process, as
 /// upstream's package-wide counter does.
 static TOOL_USE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -508,7 +508,6 @@ pub fn convert_gemini_response_to_claude_non_stream_with_translated(
     }
 
     let mut blocks = Blocks::default();
-    let mut tool_count = 0;
     if let Some(Value::Array(parts)) = get(response, "candidates.0.content.parts") {
         for part in parts {
             let signature = str_of(
@@ -549,7 +548,7 @@ pub fn convert_gemini_response_to_claude_non_stream_with_translated(
                     &str_of(call.get("name")),
                 );
                 let client_name = client_name(original_request, &upstream_name);
-                tool_count += 1;
+                let tool_id = TOOL_USE_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
                 let input = match call.get("args") {
                     Some(args @ Value::Object(_)) => {
                         clean_arguments(args, &client_name, original_request, translated_request)
@@ -558,7 +557,7 @@ pub fn convert_gemini_response_to_claude_non_stream_with_translated(
                 };
                 blocks.blocks.push(json!({
                     "type": "tool_use",
-                    "id": sanitize_tool_id(&format!("{upstream_name}-{tool_count}")),
+                    "id": sanitize_tool_id(&format!("{upstream_name}-{tool_id}")),
                     "name": client_name,
                     "input": input,
                 }));
