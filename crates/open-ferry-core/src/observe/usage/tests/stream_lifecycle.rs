@@ -410,3 +410,18 @@ fn websocket_ttft_keeps_the_first_send() {
     let record = harness.record();
     assert_eq!(int_at(&record, "/ttft_ms"), 230);
 }
+
+// Not upstream's: taps read physical chunks, so split Codex terminal events
+// must supply the same usage as the executor's assembled event.
+#[test]
+fn codex_split_terminal_event_keeps_usage() {
+    let record = stream_record(
+        "codex",
+        "gpt-5.4",
+        &[
+            "data: {\"type\":\"response.completed\",\n: keep-alive\ndata: \"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"total_tokens\":6}}}\n\n",
+        ],
+    );
+    assert_eq!(int_at(&record, "/tokens/input_tokens"), 5);
+    assert_eq!(int_at(&record, "/tokens/output_tokens"), 1);
+}

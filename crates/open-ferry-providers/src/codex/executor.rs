@@ -32,8 +32,8 @@
 //!   upstream builds a client per request, with a uTLS fingerprint for
 //!   ChatGPT. The request headers are in [`super::request`].
 //! - A non-streaming call reads the stream a line at a time, up to 50 MiB a
-//!   line, where upstream reads the whole body first; the outcome is the
-//!   same. Error bodies are read up to 4 MiB and compact bodies up to
+//!   physical line or assembled event, where upstream reads the whole
+//!   body first and bounds an event by that body's length. Error bodies are read up to 4 MiB and compact bodies up to
 //!   50 MiB.
 //! - A dropped call or stream stops at once; upstream checks its context.
 //! - A secret the request sent is redacted from every answer that quotes it,
@@ -96,7 +96,7 @@ use super::request::{
     Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, endpoint, original_request,
     prepare_body, refuse_control_characters, response_format,
 };
-use super::stream::{self, Bootstrap, Clock, LineReader, MAX_LINE, StreamSetup, is_grok_client};
+use super::stream::{self, Bootstrap, Clock, MAX_LINE, SseReader, StreamSetup, is_grok_client};
 use super::terminal::{
     APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
     has_meaningful_output_delta, incomplete_stream_error, is_terminal_empty_incomplete,
@@ -435,7 +435,7 @@ impl CodexExecutor {
         }
         let response_headers = response.headers().clone();
 
-        let mut reader = LineReader::new(response);
+        let mut reader = SseReader::new(response);
         let mut items = OutputItems::default();
         let mut saw_output_delta = false;
         while let Some(line) = reader.next_line().await {
