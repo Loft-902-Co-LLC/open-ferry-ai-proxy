@@ -12,9 +12,11 @@
 //! so an empty user turn goes before a first model turn and, for a request
 //! that generates content, after a last one, unless that last turn answers
 //! a function call without nested media. Vertex AI also rejects the call
-//! IDs of an OpenAI Responses client's function calls and results.
+//! IDs of an OpenAI Responses client's function calls and results. Vertex drops
+//! trailing thought-only turns before adding either boundary in streams; other
+//! generating calls add the leading user turn first, as upstream does.
 //!
-//! Deviations from upstream: none.
+//! Contents are edited as JSON arrays in place rather than rebuilt as raw JSON.
 
 use serde_json::{Value, json};
 
@@ -74,8 +76,12 @@ fn thought_only_model_turn(content: &Value) -> bool {
         "model" | "assistant"
     ) && content
         .get("parts")
-        .and_then(Value::as_array)
+        .filter(|parts| !parts.is_null())
         .is_some_and(|parts| {
+            let parts = parts
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_else(|| std::slice::from_ref(parts));
             !parts.is_empty()
                 && parts.iter().all(|part| {
                     json::bool_of(part.get("thought"))
