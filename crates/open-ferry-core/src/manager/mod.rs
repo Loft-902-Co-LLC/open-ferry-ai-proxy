@@ -190,6 +190,10 @@ pub(crate) struct Entry {
     pub(crate) landing_unconfirmed: UndurablePartitions,
     /// A refused save whose change is still owed. Memory only.
     pub(crate) owed_save: Option<OwedSave>,
+    /// The newest generation a Configuration save has written for this
+    /// registration. A refusal at or below it owes nothing, as that save
+    /// covered it. Memory only.
+    pub(crate) written_configuration: u64,
     /// Partitions whose unsettled read-back mark has already been warned about.
     /// Memory only; cleared wherever the partition's `ReadBack` cause ends, so a
     /// later cause warns again.

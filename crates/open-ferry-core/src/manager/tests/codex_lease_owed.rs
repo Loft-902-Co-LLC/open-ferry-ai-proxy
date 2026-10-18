@@ -16,8 +16,9 @@ use super::support::FakeExecutor;
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::{Auth, CodexOrigin, SaveDeferral};
 use crate::exec::ExecError;
+use crate::manager::lifecycle::Save;
 use crate::manager::{
-    EditError, HeldPartitions, Manager, ManagerError, MarkCause, RefreshHold, lock,
+    EditError, HeldPartitions, Manager, ManagerError, MarkCause, Persisted, RefreshHold, lock,
 };
 use serde_json::{Map, Value, json};
 use std::path::Path;
@@ -989,6 +990,65 @@ async fn an_owed_use_siwc_change_survives_adopting_a_peer_rotation() {
         );
         assert_eq!(rig.disk()["use_siwc"], false, "the flush wrote it");
         assert_eq!(owed(&rig.manager), None);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_refusal_of_a_generation_already_written_owes_nothing() {
+    // A flush reads the flag, then waits for the save lock while a pass's
+    // tail writes the same generation and clears it. Refused by check (vi)
+    // while the pass still holds the refresh lock, the flush must not owe it
+    // again: the pass may already have looked for the flag, and nothing else
+    // would flush it. The test holds the refresh lock in the pass's place.
+    // Mutation: recording every refusal (the flag stays set after the change
+    // is on disk).
+    bounded(async {
+        let rig = rig();
+        let refresh_lock = lock(&rig.manager.shared.refresh_locks)
+            .entry(ID.to_owned())
+            .or_default()
+            .clone();
+        let pass = refresh_lock.clone().try_lock_owned().unwrap();
+        set_note(&rig.manager, "owed").unwrap();
+        let stale = rig.live();
+        assert_eq!(
+            owed(&rig.manager),
+            Some((SaveDeferral::RefreshInFlight, stale.generation)),
+            "the edit is owed behind the pass"
+        );
+        drop(pass);
+        rig.manager.flush_owed_save(ID, stale.registration_epoch);
+        assert_eq!(disk_note(&rig), "owed");
+        assert_eq!(owed(&rig.manager), None);
+        assert_eq!(
+            rig.live().generation,
+            stale.generation,
+            "the flush wrote the edit's generation"
+        );
+        // A pass starts, and the flush that read the flag reaches check (vi).
+        let _pass = refresh_lock.try_lock_owned().unwrap();
+        let discard_epoch = rig.manager.lock().auths[ID].discard_epoch;
+        let refused = rig
+            .manager
+            .persist(
+                &stale,
+                stale.registration_epoch,
+                stale.generation,
+                discard_epoch,
+                Save::Yes,
+            )
+            .unwrap();
+        assert_eq!(
+            refused,
+            Persisted::Deferred(SaveDeferral::RefreshInFlight),
+            "check (vi) refused the late flush"
+        );
+        assert_eq!(
+            owed(&rig.manager),
+            None,
+            "a refusal of a written generation owes nothing"
+        );
     })
     .await;
 }
