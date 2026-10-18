@@ -529,6 +529,13 @@ fn claude_header_comments_and_unknown_siblings_survive_two_saves() {
             let second = save::render_preserving_comments(&first, &cfg, migrate).unwrap();
             let first = std::str::from_utf8(&first).unwrap();
             let text = std::str::from_utf8(&second).unwrap();
+            // A legacy save without migration moves comment lines to column 0,
+            // which ends the block, so compare the whole file there. A second
+            // v8 save can still move root keys behind the sections the first
+            // save inserted, so the other legs compare the block.
+            if !migrate && prefix.starts_with("claude-header-defaults") {
+                assert_eq!(first, text);
+            }
             assert_eq!(
                 claude_header_block(first).as_bytes(),
                 claude_header_block(text).as_bytes()
