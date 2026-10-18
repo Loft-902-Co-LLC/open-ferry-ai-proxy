@@ -682,3 +682,34 @@ fn v8_edits_accept_v32_carried_settings() {
     assert_eq!(cfg.claude_header_defaults.inject_diagnostics, Some(false));
     assert_eq!(cfg.claude_header_defaults.client_request_id, "off");
 }
+
+/// Not upstream's: `edit_v8_if` checks its condition on the SHA-256 of the
+/// bytes it reads under the write lock, and a refusal writes nothing.
+#[test]
+fn edit_v8_if_checks_the_file_it_reads() {
+    let dir = TempDir::new();
+    let raw = "port: 8317\nrequest-retry: 3\n";
+    let file = dir.write("config.yaml", raw);
+    let hash = save::sha256_hex(raw.as_bytes());
+    let put = edit(V8Method::Put, "server/port", "8318");
+
+    let stale: &V8Precondition = &|hash| hash == "stale";
+    let refused = edit_v8_if(&file, &put, Some(stale));
+    assert_eq!(
+        refused,
+        Err(V8EditError::PreconditionFailed {
+            current_sha256: hash.clone()
+        })
+    );
+    assert_eq!(fs::read_to_string(&file).expect("read"), raw);
+
+    let current_hash = hash.clone();
+    let current: &V8Precondition = &move |hash| hash == current_hash;
+    let (config, wrote) = edit_v8_if(&file, &put, Some(current)).expect("edit");
+    assert_eq!(config.port, 8318);
+    assert_eq!(
+        wrote,
+        save::sha256_hex(fs::read_to_string(&file).expect("read").as_bytes())
+    );
+    assert_ne!(wrote, hash);
+}
