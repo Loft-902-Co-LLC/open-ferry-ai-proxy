@@ -1,9 +1,9 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_stream.go,
-// helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens) and
+// helps/codex_sse_scanner.go, helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens) and
 // internal/client/grokbuild/keepalive.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Codex's SSE stream, read a line at a time and translated to the
+//! Codex's SSE stream, with split JSON data fields assembled and translated to the
 //! client's format.
 //!
 //! Each `data:` event is checked first: a terminal failure (`error`,
@@ -30,7 +30,9 @@
 //!   also reads the user agent from the request's Gin context
 //!   (`IsGrokClientContext`), which has the same headers: the Codex
 //!   executor is handed them as the call's options.
-//! - A rewritten terminal event is written by `serde_json`.
+//! - A rewritten terminal event is written by `serde_json`. Invalid JSON
+//!   has no event type here, so an invalid split terminal event remains
+//!   invalid and ends with the existing incomplete-stream error.
 //! - Dropping the stream, or the call while lines are held back, stops
 //!   reading, where upstream watches its context.
 //! - Usage reporting and request logging are left to the call's taps,
@@ -42,6 +44,9 @@
 //!   one, and what a model echoes back in its output, which upstream passes
 //!   on as it is, reach the client without it. The call's taps see each line
 //!   as Codex sent it.
+
+mod sse;
+pub(crate) use sse::SseReader;
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -304,7 +309,7 @@ const CLOSED_BEFORE_FIRST_PAYLOAD: &str = "upstream stream closed before first p
 
 /// The state of one translated stream.
 struct State {
-    reader: LineReader,
+    reader: SseReader,
     setup: StreamSetup,
     claude: claude_tokens::State,
     items: OutputItems,
@@ -350,7 +355,7 @@ impl State {
         let claude =
             claude_tokens::State::new(&setup.source_format, &Format::CODEX, &setup.response_format);
         Self {
-            reader: LineReader::new(response),
+            reader: SseReader::new(response),
             setup,
             claude,
             items: OutputItems::default(),
@@ -415,13 +420,26 @@ impl State {
         let mut held_any = false;
         let mut frames = 0;
         let mut bytes = 0;
-        while let Some(line) = self.reader.next_line().await {
+        while let Some(line) = self
+            .reader
+            .next_budgeted(|lines, size| {
+                timed_out()
+                    || frames + lines >= MAX_BOOTSTRAP_FRAMES
+                    || bytes + size >= MAX_BOOTSTRAP_BYTES
+            })
+            .await
+        {
+            if self.reader.held_lines > 0 && line.as_ref().is_ok_and(Vec::is_empty) {
+                self.send(held);
+                return Ok(());
+            }
             let line = line.map_err(|error| {
                 tracing::debug!("codex: stream read failed: {error}");
                 self.reader.report(&error);
                 ExecError::new(ErrorKind::Upstream, error.to_string())
             })?;
-            let line_len = line.len();
+            let line_len = self.reader.raw_bytes;
+            let raw_lines = self.reader.raw_lines;
             let gives_chunk = self.upstream_gives_chunk(&line);
             let frame = match self.process(line).await {
                 Ok(frame) => frame,
@@ -449,10 +467,10 @@ impl State {
                 let frame_bytes = line_len + frame.chunks.iter().map(Vec::len).sum::<usize>();
                 let timed_out = timed_out();
                 if !timed_out
-                    && frames < MAX_BOOTSTRAP_FRAMES
-                    && bytes + frame_bytes <= MAX_BOOTSTRAP_BYTES
+                    && frames + self.reader.held_lines + raw_lines <= MAX_BOOTSTRAP_FRAMES
+                    && bytes + self.reader.held_bytes + frame_bytes <= MAX_BOOTSTRAP_BYTES
                 {
-                    frames += 1;
+                    frames += raw_lines;
                     bytes += frame_bytes;
                     held_any |= !frame.chunks.is_empty() || gives_chunk;
                     held.extend(frame.chunks);

@@ -2563,3 +2563,126 @@ async fn the_taps_see_the_answer_as_it_came() {
         assert!(raw.seen().contains(ECHOED_TOKEN), "{name}: {}", raw.seen());
     }
 }
+
+// Ported from TestCodexExecuteStreamTreatsAnEventSplitAcrossDataLinesAsOneEvent,
+// TestCodexExecuteNonStreamReadsAnEventSplitAcrossDataLines,
+// TestCodexExecuteStreamAssemblesSplitEventsWithAndWithoutBootstrapBuffering,
+// TestCodexExecuteStreamMinimalReproFromIssue6575 and
+// TestCodexExecuteStreamPassesADoneSentinelAfterTheCompletedEvent.
+#[tokio::test]
+async fn split_sse_events_match_whole_events() {
+    let completed = r#"{"type":"response.completed","response":{"id":"resp_split","object":"response","model":"gpt-5.4","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}"#;
+    let cut = completed.find("\"output\":").unwrap();
+    let created = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\"}}\n\n";
+    for buffered in [false, true] {
+        for output in [
+            "",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        ] {
+            let mut expected = None;
+            for split in [false, true] {
+                let terminal = if split {
+                    format!("{}\r\ndata: {}", &completed[..cut], &completed[cut..])
+                } else {
+                    completed.to_owned()
+                };
+                let body = format!("{created}{output}data: {terminal}\r\n\r\ndata: [DONE]\n\n");
+                let mock = Mock::start(Reply::sse(&body)).await;
+                let exec = executor().with_config(Arc::new({
+                    let mut config = Config::default();
+                    config.codex.stream_bootstrap_buffering = buffered;
+                    config
+                }));
+                let response = exec
+                    .execute_stream(
+                        api_key_auth(&mock.url),
+                        request("gpt-5.4", r#"{"model":"gpt-5.4","input":"hello"}"#),
+                        stream_options("openai-response"),
+                    )
+                    .await
+                    .unwrap();
+                let (text, error) = collect(response).await;
+                assert!(error.is_none(), "{error:?}");
+                let terminal = sse_events(&text)
+                    .into_iter()
+                    .find(|v| v["type"] == "response.completed")
+                    .unwrap();
+                assert_eq!(terminal["response"]["id"], "resp_split");
+                if let Some(expected) = &expected {
+                    assert_eq!(&text, expected);
+                } else {
+                    expected = Some(text);
+                }
+                let response = exec
+                    .execute(
+                        api_key_auth(&mock.url),
+                        request("gpt-5.4", r#"{"model":"gpt-5.4","input":"hello"}"#),
+                        options("openai-response"),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(payload_json(&response)["id"], "resp_split");
+            }
+        }
+    }
+}
+
+// Ported from TestCodexExecuteStreamSplitHandshakeExceedingLineBudgetReleasesBootstrapWithoutFailover
+// TestCodexExecuteStreamMixedFramingCommentInsideSplitEventCountsBudget
+// and TestCodexExecuteStreamEventExceedsByteBudgetWhileAssemblingReleasesStream.
+#[tokio::test]
+async fn split_handshake_exhausts_bootstrap_budgets() {
+    for fragment in [
+        "data: \n".repeat(50),
+        ": comment\n".repeat(50),
+        format!(
+            "data: {}\n",
+            " ".repeat(crate::codex::terminal::MAX_BOOTSTRAP_BYTES)
+        ),
+    ] {
+        let body = format!(
+            "data: {{\"type\":\"response.in_progress\",\"response\":{{\"output\":[\n{fragment}data: ]}}}}\n\ndata: {{\"type\":\"error\",\"error\":{{\"code\":\"server_overloaded\",\"message\":\"overloaded\"}}}}\n\n"
+        );
+        let mock = Mock::start(Reply::sse(&body)).await;
+        let response = executor()
+            .with_config(Arc::new({
+                let mut config = Config::default();
+                config.codex.stream_bootstrap_buffering = true;
+                config
+            }))
+            .execute_stream(
+                api_key_auth(&mock.url),
+                request("gpt-5.4", r#"{"model":"gpt-5.4","input":"hello"}"#),
+                stream_options("openai-response"),
+            )
+            .await
+            .expect("budget releases stream before overload probing");
+        let (_, error) = collect(response).await;
+        assert!(error.is_some());
+    }
+}
+
+// Ported from TestCodexExecuteStreamKeepsAnInvalidSplitEventInvalid.
+// Not upstream's: serde cannot read the terminal type out of invalid JSON,
+// so this malformed stream also ends with the existing incomplete-stream error.
+#[tokio::test]
+async fn invalid_split_event_stays_invalid() {
+    let body = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"comp\ndata: leted\",\"output\":[]}}\n\n";
+    let mock = Mock::start(Reply::sse(body)).await;
+    let response = executor()
+        .execute_stream(
+            api_key_auth(&mock.url),
+            request("gpt-5.4", r#"{"model":"gpt-5.4","input":"hello"}"#),
+            stream_options("openai-response"),
+        )
+        .await
+        .unwrap();
+    let (text, error) = collect(response).await;
+    assert!(text.contains("comp\ndata: leted"), "{text}");
+    assert!(
+        !sse_events(&text)
+            .iter()
+            .any(|v| v["type"] == "response.completed")
+    );
+    assert!(error.is_some());
+}

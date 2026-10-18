@@ -7,7 +7,7 @@
 // StreamUsageBuffer.PublishFailure), the usage reporting of
 // internal/runtime/executor/claude_executor_execute.go,
 // claude_executor_stream.go, codex_executor_execute.go,
-// codex_executor_stream.go, codex_executor_terminal.go
+// helps/codex_sse_scanner.go, codex_executor_stream.go, codex_executor_terminal.go
 // (observeCodexTokenEvent), codex_executor_request.go
 // (publishCodexImageToolUsage, codexImageGenerationToolModel),
 // codex_websockets_executor.go,
@@ -136,9 +136,13 @@
 //! - Meta's calls are read as Codex's, an Execute as the Codex Execute and a
 //!   Stream as the Codex stream, and recorded as `MetaExecutor`'s. The tap
 //!   keeps the counts of the first terminal event of either (a stream's
-//!   `response.done` too, as for Codex), where upstream's Meta executor
+//!   `response.completed` or `response.incomplete`), where upstream's Meta executor
 //!   takes the latest `response.completed` or `response.incomplete` of a
 //!   stream and the one its translation found in an Execute's.
+//!   A Meta stream canceled before either terminal event is a 499; after
+//!   one is read it is successful. The observer sees upstream reads, so a
+//!   terminal event read while the dropped stream drains ready chunks can
+//!   count even if its translated chunk never reached the client.
 //! - A failure whose error keeps the answer's usage
 //!   ([`ExecError::keeps_usage`], set by the Meta and xAI executors when an
 //!   answer's `apply_patch` call can't be carried over) keeps the counts
@@ -713,6 +717,8 @@ struct Call {
     /// Chat Completions SSE data, joined until the frame ends.
     chat_frame: Vec<u8>,
     chat_frame_overflow: bool,
+    codex_frame: Vec<u8>,
+    codex_nesting: (i64, bool, bool),
     error_response: bool,
     /// Image streams keep upstream's first-byte timing.
     image_stream: bool,
@@ -760,6 +766,8 @@ impl Call {
             lines: Lines::default(),
             chat_frame: Vec::new(),
             chat_frame_overflow: false,
+            codex_frame: Vec::new(),
+            codex_nesting: (0, false, false),
             error_response: false,
             image_stream: false,
             body: Vec::new(),
@@ -934,6 +942,8 @@ impl Call {
                     }
                 }
             }
+            Mode::CodexExecute if self.provider == "codex" => self.codex_line(line, now),
+            Mode::CodexStream if self.provider == "codex" => self.codex_line(line, now),
             Mode::CodexExecute => {
                 if let Some(rest) = line.strip_prefix(b"data:") {
                     self.codex_execute_payload(json::trim_space(rest));
@@ -950,6 +960,84 @@ impl Call {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Read Codex's split data fields as the executor's SSE scanner does.
+    fn codex_line(&mut self, line: &[u8], now: Instant) {
+        let Some(rest) = line.strip_prefix(b"data:") else {
+            if line.is_empty() {
+                self.flush_codex_frame(now);
+            }
+            return;
+        };
+        let data = rest.strip_prefix(b" ").unwrap_or(rest);
+        if self.codex_frame.is_empty() {
+            let trimmed = json::trim_space(data);
+            if go::json_valid(trimmed)
+                || trimmed == b"[DONE]"
+                || !matches!(trimmed.first(), Some(b'{' | b'['))
+            {
+                self.codex_payload(trimmed, now);
+                return;
+            }
+        } else {
+            self.codex_frame.push(b'\n');
+            if self.codex_nesting.2 {
+                self.codex_nesting.2 = false;
+            }
+        }
+        if self.codex_frame.len() + data.len() > LINE_BOUND {
+            self.flush_codex_frame(now);
+            self.codex_payload(data, now);
+            return;
+        }
+        self.codex_frame.extend_from_slice(data);
+        let (depth, string, escaped) = &mut self.codex_nesting;
+        let mut closed = false;
+        for &b in data {
+            if *string {
+                if *escaped {
+                    *escaped = false;
+                } else if b == b'\\' {
+                    *escaped = true;
+                } else if b == b'"' {
+                    *string = false;
+                }
+            } else {
+                match b {
+                    b'"' => *string = true,
+                    b'{' | b'[' => *depth += 1,
+                    b'}' | b']' => {
+                        *depth -= 1;
+                        if *depth <= 0 {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if closed {
+            self.flush_codex_frame(now);
+        }
+    }
+
+    fn flush_codex_frame(&mut self, now: Instant) {
+        let data = std::mem::take(&mut self.codex_frame);
+        self.codex_nesting = (0, false, false);
+        // Invalid joins must not become a terminal event via gjson's partial reads.
+        if go::json_valid(&data) {
+            self.codex_payload(&data, now);
+        }
+    }
+
+    fn codex_payload(&mut self, data: &[u8], now: Instant) {
+        if self.mode == Mode::CodexExecute {
+            self.codex_execute_payload(data);
+        } else {
+            self.codex_stream_payload(data, now);
         }
     }
 
