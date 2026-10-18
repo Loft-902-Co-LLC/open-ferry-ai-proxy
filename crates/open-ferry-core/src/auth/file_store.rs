@@ -39,6 +39,9 @@
 //! 0600 in directories created with mode 0700 (on Unix). A runtime save of a
 //! disabled credential whose file is gone does nothing, so a deleted file
 //! stays deleted; a login uses [`FileStore::save_new_auth`] to create one.
+//! A Codex login over a file that isn't a JSON object (or is over 8 MiB)
+//! first keeps a copy of it beside it, with `.invalid-<time>` added to its
+//! name, and over one it can't read fails and leaves it.
 //!
 //! [`FileStore::write_file`] and [`FileStore::remove_file`] write the bytes
 //! of one file in the auth directory as they are, and remove one, by name,
@@ -1310,15 +1313,9 @@ impl FileStore {
                 write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
                     .map_err(|err| wrap(err, "auth filestore: write file failed"))?;
             }
-            Err(err)
-                if err.kind() == io::ErrorKind::FileTooLarge
-                    || (codex
-                        && (creation_intent
-                            || matches!(
-                                auth.codex_persist_intent,
-                                super::codex_refresh::CodexPersistIntent::OuterLogin
-                            ))) =>
-            {
+            // A file over the cap is replaced: an explicit Codex save has
+            // already kept a copy of it.
+            Err(err) if err.kind() == io::ErrorKind::FileTooLarge => {
                 write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
                     .map_err(|err| wrap(err, "auth filestore: write existing failed"))?;
             }
@@ -1342,23 +1339,40 @@ impl FileStore {
         Ok(SaveWith::Written(path_str))
     }
 
+    /// The Codex credential file as disk holds it, or `None` when there is
+    /// none to merge. A file that can't be read is an error.
+    ///
+    /// An `explicit` read (a Codex sign-in) differs from a runtime one in
+    /// what it does with a file that holds nothing usable. A missing or
+    /// empty file is `None`. A file that isn't a JSON object, or is over
+    /// [`MAX_AUTH_FILE_SIZE`], is also `None`, after a copy of it is kept
+    /// beside it ([`keep_invalid_copy`]). A file that can't be read is
+    /// refused, with an error that names no path, and left as it is: it may
+    /// be fine, held by another process. A runtime read refuses all of them.
     fn codex_disk(&self, path: &Path, explicit: bool) -> io::Result<Option<Map<String, Value>>> {
-        let result = read_capped(path).and_then(|bytes| {
-            unmarshal_object(&bytes)
-                .map_err(|_| invalid("invalid JSON"))?
-                .ok_or_else(|| invalid("invalid JSON"))
-        });
-        match result {
-            Ok(map) => Ok(Some(map)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound || explicit => Ok(None),
-            Err(error) => Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "auth filestore: cannot read existing credential {}",
-                    path.display()
-                ),
-            )),
+        let bytes = match read_capped(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::FileTooLarge && explicit => None,
+            Err(error) if explicit => return Err(refuse_unreadable(error.kind())),
+            Err(error) => return Err(runtime_unreadable(path, error.kind())),
+        };
+        if let Some(bytes) = &bytes
+            && let Ok(Some(map)) = unmarshal_object(bytes)
+        {
+            return Ok(Some(map));
         }
+        if !explicit {
+            return Err(runtime_unreadable(path, io::ErrorKind::InvalidInput));
+        }
+        // Nothing to keep in an empty file.
+        if bytes.as_deref().is_none_or(|bytes| !bytes.is_empty()) {
+            keep_invalid_copy(path, bytes.as_deref())?;
+            tracing::warn!(
+                "the existing Codex credential file was not valid; a copy was kept beside it with the .invalid-<time> suffix"
+            );
+        }
+        Ok(None)
     }
 
     /// The path a save writes `auth` to: its `path` attribute, else its
@@ -1950,6 +1964,73 @@ fn label_for(metadata: &serde_json::Map<String, Value>) -> String {
         })
         .unwrap_or_default()
         .to_owned()
+}
+
+fn runtime_unreadable(path: &Path, kind: io::ErrorKind) -> io::Error {
+    io::Error::new(
+        kind,
+        format!(
+            "auth filestore: cannot read existing credential {}",
+            path.display()
+        ),
+    )
+}
+
+/// The error for a credential file a sign-in can't read. The text names no
+/// path or file name.
+fn refuse_unreadable(kind: io::ErrorKind) -> io::Error {
+    io::Error::new(
+        kind,
+        "auth filestore: cannot read the existing credential file, so the sign-in did not replace it",
+    )
+}
+
+/// Keeps a copy of the credential file at `path` beside it, named after it
+/// with `.invalid-<UTC time>` added (`-2`, `-3` and so on when that name is
+/// taken), before a sign-in replaces it. The name ends in neither `.json`
+/// nor `.lock`, so nothing loads it as a credential. `bytes` is what was
+/// read; `None` copies a file over [`MAX_AUTH_FILE_SIZE`] from disk. The copy
+/// is created new, mode 0600 on Unix, and synced. If it can't be made, none
+/// is left and the error is [`refuse_unreadable`]'s.
+fn keep_invalid_copy(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
+    let refuse = |error: io::Error| refuse_unreadable(error.kind());
+    let Some(name) = path.file_name() else {
+        return Err(refuse_unreadable(io::ErrorKind::InvalidInput));
+    };
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    for attempt in 1..=1000u32 {
+        let mut copy_name = name.to_owned();
+        copy_name.push(format!(".invalid-{stamp}"));
+        if attempt > 1 {
+            copy_name.push(format!("-{attempt}"));
+        }
+        let copy = path.with_file_name(copy_name);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&copy) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(refuse(error)),
+        };
+        let written = match bytes {
+            Some(bytes) => file.write_all(bytes),
+            None => fs::File::open(path)
+                .and_then(|mut source| io::copy(&mut source, &mut file).map(|_| ())),
+        }
+        .and_then(|()| file.sync_all());
+        if let Err(error) = written {
+            drop(file);
+            let _ = fs::remove_file(&copy);
+            return Err(refuse(error));
+        }
+        return Ok(());
+    }
+    Err(refuse_unreadable(io::ErrorKind::AlreadyExists))
 }
 
 /// Reads a file of at most [`MAX_AUTH_FILE_SIZE`] bytes.
@@ -5202,5 +5283,194 @@ mod tests {
         assert_eq!(on_disk["refresh_token"], "refresh-N");
         assert!(on_disk.get("siwc").is_none());
         assert!(on_disk.get("use_siwc").is_none());
+    }
+
+    // A Codex sign-in over a credential file that holds nothing usable.
+
+    /// The names beside `dir`'s `f.json` that keep an invalid copy of it.
+    fn invalid_copies(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.contains(".invalid-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Whether `name` is `f.json.invalid-<YYYYMMDDTHHMMSSZ>` with `-n` or not.
+    fn is_copy_name(name: &str) -> bool {
+        let Some(rest) = name.strip_prefix("f.json.invalid-") else {
+            return false;
+        };
+        let (stamp, extra) = rest.split_once('-').unwrap_or((rest, "2"));
+        stamp.len() == 16
+            && stamp.ends_with('Z')
+            && stamp.as_bytes()[8] == b'T'
+            && stamp[..8].bytes().all(|b| b.is_ascii_digit())
+            && extra.bytes().all(|b| b.is_ascii_digit())
+    }
+
+    fn sign_in(store: &FileStore, token: &str) -> io::Result<String> {
+        store.save_new_auth(&mut lease_record("f.json", token))
+    }
+
+    #[test]
+    fn a_sign_in_keeps_a_copy_of_a_file_that_is_not_a_json_object() {
+        let over = vec![b'x'; MAX_AUTH_FILE_SIZE as usize + 1];
+        let cases: [(&str, &[u8]); 5] = [
+            ("invalid JSON", b"{not json"),
+            ("null", b"null"),
+            ("array", b"[]"),
+            (
+                "blanks", b"  
+",
+            ),
+            ("over the cap", &over),
+        ];
+        for (what, old) in cases {
+            let d = mutation_scratch();
+            let dp = clean_dir(&d);
+            let store = FileStore::new(dp.as_path());
+            fs::write(dp.join("f.json"), old).unwrap();
+            sign_in(&store, "new-token").unwrap();
+
+            let on_disk = read_json(&dp.join("f.json"));
+            assert_eq!(on_disk["access_token"], "new-token", "{what}");
+            assert!(on_disk.get("siwc").is_none(), "{what}");
+            assert!(on_disk.get("use_siwc").is_none(), "{what}");
+            let copies = invalid_copies(&dp);
+            assert_eq!(copies.len(), 1, "{what}: {copies:?}");
+            assert!(is_copy_name(&copies[0]), "{what}: {}", copies[0]);
+            assert!(fs::read(dp.join(&copies[0])).unwrap() == old, "{what}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(dp.join(&copies[0]))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600, "{what}");
+            }
+            // The store and its listing never load the copy as a credential.
+            let listed = store.list().unwrap();
+            assert_eq!(listed.len(), 1, "{what}");
+            assert_eq!(listed[0].file_name, "f.json", "{what}");
+        }
+    }
+
+    #[test]
+    fn a_second_sign_in_in_the_same_second_keeps_a_distinct_copy() {
+        for _ in 0..5 {
+            let d = mutation_scratch();
+            let dp = clean_dir(&d);
+            let store = FileStore::new(dp.as_path());
+            for old in ["first bad", "second bad"] {
+                fs::write(dp.join("f.json"), old).unwrap();
+                sign_in(&store, "new-token").unwrap();
+            }
+            let copies = invalid_copies(&dp);
+            assert_eq!(copies.len(), 2, "{copies:?}");
+            assert!(copies.iter().all(|name| is_copy_name(name)), "{copies:?}");
+            let stamp =
+                |name: &String| name[..name.len().min("f.json.invalid-".len() + 16)].to_owned();
+            if stamp(&copies[0]) == stamp(&copies[1]) {
+                assert!(
+                    copies.iter().any(|name| name.ends_with("Z-2")),
+                    "{copies:?}"
+                );
+                let second = copies.iter().find(|name| name.ends_with("Z-2")).unwrap();
+                assert_eq!(fs::read(dp.join(second)).unwrap(), b"second bad");
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn a_sign_in_replaces_an_empty_file_without_a_copy() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        fs::write(dp.join("f.json"), b"").unwrap();
+        sign_in(&store, "new-token").unwrap();
+        assert_eq!(read_json(&dp.join("f.json"))["access_token"], "new-token");
+        assert!(invalid_copies(&dp).is_empty());
+    }
+
+    /// Holds the file at `path` so that it can't be read, as long as the
+    /// returned value lives. `None` where this platform can't.
+    fn unreadable(path: &Path) -> Option<Box<dyn std::any::Any>> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(path)
+                .unwrap();
+            Some(Box::new(held))
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // A directory can't be read as a file, root or not.
+            fs::remove_file(path).unwrap();
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            Some(Box::new(()))
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = path;
+            None
+        }
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_sign_in_refuses_a_file_it_cannot_read_and_says_nothing_of_the_path() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        let old = br#"{"type":"codex","access_token":"old"}"#;
+        fs::write(dp.join("f.json"), old).unwrap();
+        let held = unreadable(&dp.join("f.json")).unwrap();
+
+        let error = sign_in(&store, "new-token").unwrap_err();
+        let text = format!("{error} {error:?}");
+        assert!(
+            text.contains("cannot read the existing credential file"),
+            "{text}"
+        );
+        for secret in ["f.json", dp.to_str().unwrap(), "new-token"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert!(invalid_copies(&dp).is_empty());
+        drop(held);
+        #[cfg(windows)]
+        assert_eq!(fs::read(dp.join("f.json")).unwrap(), old);
+        #[cfg(unix)]
+        assert!(dp.join("f.json").is_dir());
+    }
+
+    #[test]
+    fn a_runtime_codex_save_still_refuses_an_invalid_file() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        for old in [&b"{not json"[..], b"null", b"[]", b""] {
+            fs::write(dp.join("f.json"), old).unwrap();
+            let error = store
+                .save(&lease_record("f.json", "new-token"))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot read existing credential")
+            );
+            assert_eq!(fs::read(dp.join("f.json")).unwrap(), old);
+            assert!(invalid_copies(&dp).is_empty());
+        }
     }
 }
