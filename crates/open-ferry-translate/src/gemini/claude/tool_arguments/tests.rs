@@ -3,8 +3,7 @@
 
 use super::*;
 
-// Ported from TestCleanClaudeToolArguments. Antigravity executor-only
-// post-translation injection is excluded because that executor isn't ported.
+// Ported from TestCleanClaudeToolArguments, including the closed-object re-clean.
 #[test]
 fn clean_claude_tool_arguments() {
     let parse = |raw: &str| serde_json::from_str::<Value>(raw).unwrap();
@@ -757,4 +756,278 @@ fn local_references_follow_go_array_indices() {
             json!({})
         );
     }
+}
+
+// Ported from TestCleanClaudeToolArguments/closed object still strips executor underscore.
+#[test]
+fn closed_object_strips_recleaned_executor_underscore() {
+    let original = json!({"tools":[{"name":"StrictOptions","input_schema":{"type":"object","properties":{"flag":{"type":"string"}},"additionalProperties":false}}]});
+    let sent = json!({"tools":[{"functionDeclarations":[{"name":"StrictOptions","parametersJsonSchema":{"type":"object","properties":{"flag":{"type":"string"}}}}]}]});
+    assert_eq!(
+        clean_arguments(
+            &json!({"flag":"x","_":true}),
+            "StrictOptions",
+            &original,
+            &sent
+        ),
+        json!({"flag":"x"})
+    );
+}
+
+// Not upstream's: Go 1.26.4 outputs from the upstream wrapped cleaner cover
+// normalization, refs, unions, required filtering and existing placeholders.
+#[test]
+fn reclean_projection_matches_upstream_edges() {
+    let cases: Value = serde_json::from_str(r####"[
+  ["type/required [\"object\", null]",{"type":"object","properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [\"object\", []]",{"type":"object","properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [\"object\", [\"flag\"]]",{"type":"object","properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [\"object\", [\"missing\"]]",{"type":"object","properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [\"object\", \"flag\"]",{"type":"object","properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [\"object\", true]",{"type":"object","properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [\"object\", [\"_\"]]",{"type":"object","properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [\"OBJECT\", null]",{"type":"OBJECT","properties":{"flag":{"type":"string"}}},false,false],
+  ["type/required [\"OBJECT\", []]",{"type":"OBJECT","properties":{"flag":{"type":"string"}},"required":[]},false,false],
+  ["type/required [\"OBJECT\", [\"flag\"]]",{"type":"OBJECT","properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [\"OBJECT\", [\"missing\"]]",{"type":"OBJECT","properties":{"flag":{"type":"string"}},"required":["missing"]},false,false],
+  ["type/required [\"OBJECT\", \"flag\"]",{"type":"OBJECT","properties":{"flag":{"type":"string"}},"required":"flag"},false,false],
+  ["type/required [\"OBJECT\", true]",{"type":"OBJECT","properties":{"flag":{"type":"string"}},"required":true},false,false],
+  ["type/required [\"OBJECT\", [\"_\"]]",{"type":"OBJECT","properties":{"flag":{"type":"string"}},"required":["_"]},false,false],
+  ["type/required [\"string\", null]",{"type":"string","properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [\"string\", []]",{"type":"string","properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [\"string\", [\"flag\"]]",{"type":"string","properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [\"string\", [\"missing\"]]",{"type":"string","properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [\"string\", \"flag\"]",{"type":"string","properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [\"string\", true]",{"type":"string","properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [\"string\", [\"_\"]]",{"type":"string","properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [\"array\", null]",{"type":"array","properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [\"array\", []]",{"type":"array","properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [\"array\", [\"flag\"]]",{"type":"array","properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [\"array\", [\"missing\"]]",{"type":"array","properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [\"array\", \"flag\"]",{"type":"array","properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [\"array\", true]",{"type":"array","properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [\"array\", [\"_\"]]",{"type":"array","properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [null, null]",{"type":null,"properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [null, []]",{"type":null,"properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [null, [\"flag\"]]",{"type":null,"properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [null, [\"missing\"]]",{"type":null,"properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [null, \"flag\"]",{"type":null,"properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [null, true]",{"type":null,"properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [null, [\"_\"]]",{"type":null,"properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [[], null]",{"type":[],"properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [[], []]",{"type":[],"properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [[], [\"flag\"]]",{"type":[],"properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [[], [\"missing\"]]",{"type":[],"properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [[], \"flag\"]",{"type":[],"properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [[], true]",{"type":[],"properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [[], [\"_\"]]",{"type":[],"properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [[\"object\", \"null\"], null]",{"type":["object","null"],"properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [[\"object\", \"null\"], []]",{"type":["object","null"],"properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [[\"object\", \"null\"], [\"flag\"]]",{"type":["object","null"],"properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [[\"object\", \"null\"], [\"missing\"]]",{"type":["object","null"],"properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [[\"object\", \"null\"], \"flag\"]",{"type":["object","null"],"properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [[\"object\", \"null\"], true]",{"type":["object","null"],"properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [[\"object\", \"null\"], [\"_\"]]",{"type":["object","null"],"properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [[\"array\", \"object\"], null]",{"type":["array","object"],"properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [[\"array\", \"object\"], []]",{"type":["array","object"],"properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [[\"array\", \"object\"], [\"flag\"]]",{"type":["array","object"],"properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [[\"array\", \"object\"], [\"missing\"]]",{"type":["array","object"],"properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [[\"array\", \"object\"], \"flag\"]",{"type":["array","object"],"properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [[\"array\", \"object\"], true]",{"type":["array","object"],"properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [[\"array\", \"object\"], [\"_\"]]",{"type":["array","object"],"properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [[\"null\"], null]",{"type":["null"],"properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [[\"null\"], []]",{"type":["null"],"properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [[\"null\"], [\"flag\"]]",{"type":["null"],"properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [[\"null\"], [\"missing\"]]",{"type":["null"],"properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [[\"null\"], \"flag\"]",{"type":["null"],"properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [[\"null\"], true]",{"type":["null"],"properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [[\"null\"], [\"_\"]]",{"type":["null"],"properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["type/required [{\"x\": {}}, null]",{"type":{"x":{}},"properties":{"flag":{"type":"string"}}},true,false],
+  ["type/required [{\"x\": {}}, []]",{"type":{"x":{}},"properties":{"flag":{"type":"string"}},"required":[]},true,false],
+  ["type/required [{\"x\": {}}, [\"flag\"]]",{"type":{"x":{}},"properties":{"flag":{"type":"string"}},"required":["flag"]},false,false],
+  ["type/required [{\"x\": {}}, [\"missing\"]]",{"type":{"x":{}},"properties":{"flag":{"type":"string"}},"required":["missing"]},true,false],
+  ["type/required [{\"x\": {}}, \"flag\"]",{"type":{"x":{}},"properties":{"flag":{"type":"string"}},"required":"flag"},true,false],
+  ["type/required [{\"x\": {}}, true]",{"type":{"x":{}},"properties":{"flag":{"type":"string"}},"required":true},true,false],
+  ["type/required [{\"x\": {}}, [\"_\"]]",{"type":{"x":{}},"properties":{"flag":{"type":"string"}},"required":["_"]},true,false],
+  ["properties {}",{"type":"object","properties":{}},false,true],
+  ["properties {\"_\": {}}",{"type":"object","properties":{"_":{}}},true,false],
+  ["properties {\"_\": null}",{"type":"object","properties":{"_":null}},true,false],
+  ["properties {\"_\": false}",{"type":"object","properties":{"_":false}},true,false],
+  ["properties {\"_\": true}",{"type":"object","properties":{"_":true}},true,false],
+  ["properties {\"flag\": {\"required\": true}}",{"type":"object","properties":{"flag":{"required":true}}},false,false],
+  ["properties {\"flag\": {\"required\": false}}",{"type":"object","properties":{"flag":{"required":false}}},true,false],
+  ["properties {\"enum\": {}}",{"type":"object","properties":{"enum":{}}},false,true],
+  ["properties {\"enum\": [\"x\"]}",{"type":"object","properties":{"enum":["x"]}},true,false],
+  ["properties {\"$ref\": {}}",{"type":"object","properties":{"$ref":{}}},true,false],
+  ["properties null",{"type":"object","properties":null},false,false],
+  ["properties []",{"type":"object","properties":[]},false,false],
+  ["properties true",{"type":"object","properties":true},false,false],
+  ["anyOf [{}, []]",{"anyOf":[]},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, []]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[]},false,false],
+  ["anyOf [{}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}]]",{"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}}]},true,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}}]},true,false],
+  ["anyOf [{}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"null\"}]]",{"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"null"}]},true,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"null"}]},true,false],
+  ["anyOf [{}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"object\", \"properties\": {\"other\": {}}}]]",{"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"object","properties":{"other":{}}}]},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"object\", \"properties\": {\"other\": {}}}]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"object","properties":{"other":{}}}]},false,false],
+  ["anyOf [{}, [\"bad\"]]",{"anyOf":["bad"]},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [\"bad\"]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":["bad"]},true,false],
+  ["anyOf [{}, [true]]",{"anyOf":[true]},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [true]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[true]},true,false],
+  ["anyOf [{}, [{\"required\": [\"flag\"]}]]",{"anyOf":[{"required":["flag"]}]},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"required\": [\"flag\"]}]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"required":["flag"]}]},true,false],
+  ["anyOf [{}, [{\"type\": \"null\"}]]",{"anyOf":[{"type":"null"}]},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"type":"null"}]},true,false],
+  ["anyOf [{}, \"bad\"]",{"anyOf":"bad"},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":"bad"},false,false],
+  ["anyOf [{}, {\"properties\": {\"reason\": {}}}]",{"anyOf":{"properties":{"reason":{}}}},true,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"properties\": {\"reason\": {}}}]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":{"properties":{"reason":{}}}},true,false],
+  ["oneOf [{}, []]",{"oneOf":[]},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, []]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[]},false,false],
+  ["oneOf [{}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}]]",{"oneOf":[{"type":"object","properties":{"flag":{"type":"string"}}}]},true,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[{"type":"object","properties":{"flag":{"type":"string"}}}]},true,false],
+  ["oneOf [{}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"null\"}]]",{"oneOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"null"}]},true,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"null"}]},true,false],
+  ["oneOf [{}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"object\", \"properties\": {\"other\": {}}}]]",{"oneOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"object","properties":{"other":{}}}]},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"type\": \"object\", \"properties\": {\"other\": {}}}]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[{"type":"object","properties":{"flag":{"type":"string"}}},{"type":"object","properties":{"other":{}}}]},false,false],
+  ["oneOf [{}, [\"bad\"]]",{"oneOf":["bad"]},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [\"bad\"]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":["bad"]},true,false],
+  ["oneOf [{}, [true]]",{"oneOf":[true]},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [true]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[true]},true,false],
+  ["oneOf [{}, [{\"required\": [\"flag\"]}]]",{"oneOf":[{"required":["flag"]}]},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"required\": [\"flag\"]}]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[{"required":["flag"]}]},true,false],
+  ["oneOf [{}, [{\"type\": \"null\"}]]",{"oneOf":[{"type":"null"}]},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[{"type":"null"}]},true,false],
+  ["oneOf [{}, \"bad\"]",{"oneOf":"bad"},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":"bad"},false,false],
+  ["oneOf [{}, {\"properties\": {\"reason\": {}}}]",{"oneOf":{"properties":{"reason":{}}}},true,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"properties\": {\"reason\": {}}}]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":{"properties":{"reason":{}}}},true,false],
+  ["structural {\"allOf\": [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}]}",{"allOf":[{"type":"object","properties":{"flag":{"type":"string"}}}]},true,false],
+  ["structural {\"type\": \"object\", \"allOf\": [{\"properties\": {\"flag\": {}}}]}",{"type":"object","allOf":[{"properties":{"flag":{}}}]},true,false],
+  ["structural {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"allOf\": [{\"required\": [\"flag\"]}]}",{"type":"object","properties":{"flag":{"type":"string"}},"allOf":[{"required":["flag"]}]},false,false],
+  ["structural {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"allOf\": [{\"required\": [\"missing\"]}]}",{"type":"object","properties":{"flag":{"type":"string"}},"allOf":[{"required":["missing"]}]},true,false],
+  ["structural {\"then\": {\"properties\": {\"flag\": {}}}}",{"then":{"properties":{"flag":{}}}},true,false],
+  ["structural {\"else\": {\"properties\": {\"_\": {}}}}",{"else":{"properties":{"_":{}}}},true,false],
+  ["structural {\"flag\": {\"type\": \"string\"}}",{"flag":{"type":"string"}},true,false],
+  ["structural {\"flag\": {\"type\": \"string\", \"required\": true}}",{"flag":{"type":"string","required":true}},false,false],
+  ["structural {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"$ref\": \"#/$defs/x\", \"$defs\": {\"x\": {\"required\": [\"flag\"]}}}",{"type":"object","properties":{"flag":{"type":"string"}},"$ref":"#/$defs/x","$defs":{"x":{"required":["flag"]}}},true,false],
+  ["structural {\"$ref\": \"#/schema/$defs/x\", \"$defs\": {\"x\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}}}",{"$ref":"#/schema/$defs/x","$defs":{"x":{"type":"object","properties":{"flag":{"type":"string"}}}}},true,false],
+  ["structural {\"$ref\": \"#/schema/$defs/x\", \"$defs\": {\"x\": {\"$ref\": \"#/schema/$defs/x\", \"type\": \"object\", \"properties\": {\"flag\": {}}}}}",{"$ref":"#/schema/$defs/x","$defs":{"x":{"$ref":"#/schema/$defs/x","type":"object","properties":{"flag":{}}}}},true,false],
+  ["structural {\"properties\": {\"$ref\": \"#/schema/$defs/x\"}, \"$defs\": {\"x\": {}}}",{"properties":{"$ref":"#/schema/$defs/x"},"$defs":{"x":{}}},false,true],
+  ["structural {\"type\": [\"array\", \"object\"], \"properties\": {\"flag\": {}}, \"items\": {}}",{"type":["array","object"],"properties":{"flag":{}},"items":{}},true,false],
+  ["structural {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}], \"oneOf\": [{\"type\": \"object\", \"properties\": {\"_\": {}}}]}",{"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}}],"oneOf":[{"type":"object","properties":{"_":{}}}]},true,false],
+  ["structural {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"anyOf\": [{\"required\": [\"flag\"]}]}",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"required":["flag"]}]},true,false]
+]"####).unwrap();
+    for case in cases.as_array().unwrap() {
+        for (key, index) in [("_", 2), ("reason", 3)] {
+            assert_eq!(
+                reclean::requires(&case[1], key),
+                case[index].as_bool().unwrap(),
+                "{}: {key}",
+                case[0]
+            );
+        }
+    }
+}
+
+// Not upstream's: isolate unusable refs on the two analyzer paths.
+#[test]
+fn unusable_refs_preserve_siblings_only_in_multi_branch_unions() {
+    for reference in ["http://x", "#/$defs/missing", "#/self"] {
+        let mut schema = json!({"$ref":reference,"properties":{"reason":{}},"required":"reason","additionalProperties":false,"allOf":[{"properties":{"flag":{}}}]});
+        // Use an explicit visited set to isolate the already-visited case.
+        let mut visited = BTreeSet::new();
+        if reference == "#/self" {
+            visited.insert(reference.to_owned());
+        }
+        let info = analyze_depth(&schema, &schema, 0, &mut visited.clone());
+        assert!(info.complex);
+        assert!(!info.properties.contains_key("reason"));
+        schema["anyOf"] = json!([{"type":"object"},{"type":"string"}]);
+        let info = analyze_depth(&schema, &schema, 0, &mut visited);
+        assert!(info.properties.contains_key("reason"));
+        assert!(info.properties.contains_key("flag"));
+        assert!(info.required.contains("reason"));
+        assert!(info.forbids);
+    }
+}
+
+// Not upstream's: malformed unions remain complex but cannot enable translated cleaning.
+#[test]
+fn scalar_union_does_not_enable_translated_placeholder_cleaning() {
+    let schema = json!({"type":"object","anyOf":true});
+    assert!(analyze(&schema, &schema).complex);
+    let original = json!({"tools":[{"name":"T","input_schema":schema}]});
+    let sent = json!({"tools":[{"functionDeclarations":[{"name":"T","parametersJsonSchema":{"type":"object","properties":{"reason":{}},"required":["reason"]}}]}]});
+    let args = json!({"reason":"keep"});
+    assert_eq!(clean_arguments(&args, "T", &original, &sent), args);
+}
+
+// Not upstream's: deep declarations in opaque branches must protect client fields.
+#[test]
+fn deep_declarations_protect_unanalyzed_union_fields() {
+    let schema = json!({"anyOf":[{"type":"object","additionalProperties":false},{"type":"object","additionalProperties":false,"unknown":true,"properties":{"reason":{}}}]});
+    assert!(!analyze(&schema, &schema).properties.contains_key("reason"));
+    assert!(declares_deep(
+        &schema,
+        &schema,
+        "reason",
+        0,
+        &mut BTreeSet::new()
+    ));
+    let original = json!({"tools":[{"name":"T","input_schema":schema}]});
+    let sent = json!({"tools":[{"functionDeclarations":[{"name":"T","parametersJsonSchema":{"type":"object","properties":{"reason":{}},"required":["reason"]}}]}]});
+    let args = json!({"reason":"keep"});
+    assert_eq!(clean_arguments(&args, "T", &original, &sent), args);
+}
+
+// Not upstream's: parsed schemas still retain property ordering for ambiguity checks.
+#[test]
+fn duplicate_schema_order_remains_ambiguous() {
+    let original: Value = serde_json::from_str(r#"{"tools":[{"name":"T","input_schema":{"type":"object","properties":{}}},{"name":"T","input_schema":{"properties":{},"type":"object"}}]}"#).unwrap();
+    assert!(original_schema(&original, "T").is_none());
+}
+
+// Not upstream's: collector precedence, recursion and raw names use the shared sanitizer.
+#[test]
+fn sent_names_use_raw_recursive_function_names() {
+    let request = json!({"tools":[{"name":"ignored","function":{"name":" raw "}},{"tools":[{"functionDeclarations":[{"name":"a b"}],"function_declarations":[{"name":"a_b"}]}]}]});
+    let mut names = Vec::new();
+    for tool in request["tools"].as_array().unwrap() {
+        collect_function_names(tool, &mut names);
+    }
+    assert_eq!(names, vec![" raw ", "a b", "a_b"]);
+    let refs: Vec<_> = names.iter().map(String::as_str).collect();
+    let expected = crate::responses_tools::sanitize_tool_names(&refs);
+    for name in names {
+        assert_eq!(
+            sent_tool_name(&request, &name),
+            expected.get(&name).cloned()
+        );
+    }
+    assert!(sent_tool_name(&request, "raw").is_none());
+}
+
+// Not upstream's: no-schema fallback precedes argument type checking, except with translated schemas.
+#[test]
+fn no_schema_nonobjects_follow_translated_lookup_order() {
+    let original = json!({"tools":[{"name":"T"}]});
+    let sent = json!({"tools":[{"functionDeclarations":[{"name":"T","parametersJsonSchema":{"type":"object"}}]}]});
+    for args in [json!(null), json!(7), json!([1]), json!("text")] {
+        assert_eq!(
+            clean_arguments(&args, "T", &original, &Value::Null),
+            json!({})
+        );
+        assert_eq!(clean_arguments(&args, "T", &original, &sent), args);
+    }
+}
+
+// Not upstream's: an unbounded projection must conservatively retain arguments.
+#[test]
+fn reclean_expansion_bound_preserves_arguments() {
+    let mut schema = json!({"type":"object","properties":{"flag":{}}});
+    for _ in 0..70 {
+        schema = json!({"allOf":[schema]});
+    }
+    assert!(!reclean::requires(&schema, "_"));
 }

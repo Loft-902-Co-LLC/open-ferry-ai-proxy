@@ -1,0 +1,589 @@
+// Ported from CLIProxyAPI internal/util/gemini_schema.go (v8.0.32, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! Structural projection of the wrapped re-clean used by the argument cleaner.
+//!
+//! Only the decision to declare and require a placeholder is exported. Description
+//! hints carry no constraint used by that decision; their presence is retained
+//! where they can change a property map. No Antigravity request cleaner is exposed.
+//! Trees or reference expansions deeper than 64 levels are conservatively ignored
+//! to bound expansion; arguments are preserved when the projection cannot finish.
+
+use super::{analyze, array, gjson_array, local_ref, str_of};
+use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
+
+const NAME_MAPS: [&str; 5] = [
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "$defs",
+    "definitions",
+];
+const REPAIR_CONTAINERS: &str = "properties patternProperties additionalProperties items prefixItems $defs definitions dependentSchemas dependentRequired dependencies if then else not contains propertyNames unevaluatedProperties unevaluatedItems contentSchema additionalItems default const example examples discriminator xml externalDocs enumDescriptions enumTitles";
+const REMOVED: &str = "minLength maxLength exclusiveMinimum exclusiveMaximum pattern minItems maxItems uniqueItems contains format default examples minimum maximum multipleOf $schema $defs definitions const $ref $id id additionalProperties $anchor $vocabulary $dynamicRef $dynamicAnchor propertyNames patternProperties dependentRequired dependentSchemas dependencies if then else $comment enumDescriptions enumTitles prefill deprecated encrypted discriminator additionalItems unevaluatedProperties unevaluatedItems contentSchema not";
+
+fn string_required(schema: &Value) -> Vec<String> {
+    array(schema, "required")
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+fn promote(schema: &mut Value, names: Vec<String>) {
+    if names.is_empty() {
+        return;
+    }
+    let mut required = string_required(schema);
+    required.extend(names);
+    let mut seen = BTreeSet::new();
+    required.retain(|name| !name.is_empty() && seen.insert(name.clone()));
+    schema["required"] = json!(required);
+}
+fn non_object_type(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(kind)) => !kind.is_empty() && !kind.eq_ignore_ascii_case("object"),
+        Some(Value::Array(kinds)) => {
+            !kinds.is_empty()
+                && !kinds
+                    .iter()
+                    .any(|v| v.as_str().is_some_and(|v| v.eq_ignore_ascii_case("object")))
+        }
+        _ => false,
+    }
+}
+fn repair_properties(
+    props: &Map<String, Value>,
+    depth: usize,
+) -> Option<(Map<String, Value>, Vec<String>)> {
+    let mut out = Map::new();
+    let mut promoted = Vec::new();
+    for (name, schema) in props {
+        let mut schema = if schema == &Value::Bool(true) {
+            json!({})
+        } else {
+            schema.clone()
+        };
+        if let Some(map) = schema.as_object_mut() {
+            if let Some(Value::Bool(required)) = map.get("required") {
+                if *required {
+                    promoted.push(name.clone());
+                }
+                map.shift_remove("required");
+            }
+            schema = repair(&schema, depth + 1)?;
+        }
+        out.insert(name.clone(), schema);
+    }
+    promoted.sort();
+    Some((out, promoted))
+}
+fn repair(schema: &Value, depth: usize) -> Option<Value> {
+    if depth > 64 {
+        return None;
+    }
+    let Some(map) = schema.as_object() else {
+        return Some(schema.clone());
+    };
+    let mut node = Value::Object(map.clone());
+    if !non_object_type(node.get("type")) {
+        let bare: Map<_, _> = map
+            .iter()
+            .filter(|(key, value)| {
+                value.is_object()
+                    && !key.starts_with("x-")
+                    && !REPAIR_CONTAINERS
+                        .split_whitespace()
+                        .any(|k| k == key.as_str())
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !bare.is_empty() {
+            let (bare, promoted) = repair_properties(&bare, depth)?;
+            for key in bare.keys() {
+                node.as_object_mut()?.shift_remove(key);
+            }
+            if let Some(props) = node.get_mut("properties").and_then(Value::as_object_mut) {
+                props.extend(bare);
+            } else {
+                node["properties"] = Value::Object(bare);
+                if node.get("type").is_none() {
+                    node["type"] = json!("object");
+                }
+            }
+            promote(&mut node, promoted);
+        }
+    }
+    if let Some(props) = node.get("properties").and_then(Value::as_object) {
+        let (props, promoted) = repair_properties(props, depth)?;
+        node["properties"] = Value::Object(props);
+        if node.get("type").is_none() {
+            node["type"] = json!("object");
+        }
+        promote(&mut node, promoted);
+    }
+    let is_array = node
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.eq_ignore_ascii_case("array"))
+        || array(&node, "type")
+            .any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("array")));
+    if is_array && node.get("items").is_none() {
+        node["items"] = json!({"type":"string"});
+    } else if node.get("items").is_some()
+        && (node.get("type").is_none_or(Value::is_null) || node.get("type") == Some(&json!("")))
+    {
+        node["type"] = json!("array");
+    }
+    for key in [
+        "items",
+        "additionalProperties",
+        "if",
+        "then",
+        "else",
+        "not",
+        "contains",
+        "propertyNames",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "contentSchema",
+        "additionalItems",
+    ] {
+        if let Some(value) = node.get(key).cloned() {
+            if value.is_object() {
+                node[key] = repair(&value, depth + 1)?;
+            } else if value == Value::Bool(true) && key != "additionalProperties" {
+                node[key] = json!({});
+            } else if let Some(values) = value.as_array().filter(|_| key == "items") {
+                node[key] = repair_list(values, depth)?;
+            }
+        }
+    }
+    for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+        if let Some(values) = node.get(key).and_then(Value::as_array) {
+            node[key] = repair_list(values, depth)?;
+        }
+    }
+    for key in [
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "dependencies",
+    ] {
+        if let Some(values) = node.get(key).and_then(Value::as_object) {
+            let out = if key == "patternProperties" {
+                repair_properties(values, depth)?.0
+            } else {
+                values
+                    .iter()
+                    .map(|(k, v)| {
+                        Some((
+                            k.clone(),
+                            if v == &Value::Bool(true) {
+                                json!({})
+                            } else {
+                                repair(v, depth + 1)?
+                            },
+                        ))
+                    })
+                    .collect::<Option<Map<_, _>>>()?
+            };
+            node[key] = Value::Object(out);
+        }
+    }
+    Some(node)
+}
+fn repair_list(values: &[Value], depth: usize) -> Option<Value> {
+    Some(Value::Array(
+        values
+            .iter()
+            .map(|value| {
+                if value == &Value::Bool(true) {
+                    Some(json!({}))
+                } else {
+                    repair(value, depth + 1)
+                }
+            })
+            .collect::<Option<Vec<_>>>()?,
+    ))
+}
+fn inline(
+    value: &Value,
+    root: &Value,
+    active: &mut BTreeSet<String>,
+    depth: usize,
+) -> Option<Value> {
+    if depth > 64 {
+        return None;
+    }
+    if let Some(values) = value.as_array() {
+        return Some(Value::Array(
+            values
+                .iter()
+                .map(|v| inline(v, root, active, depth + 1))
+                .collect::<Option<Vec<_>>>()?,
+        ));
+    }
+    let Some(map) = value.as_object() else {
+        return Some(value.clone());
+    };
+    let mut out = Map::new();
+    let mut resolved = false;
+    if let Some(reference) = map.get("$ref").and_then(Value::as_str)
+        && let Some(target) = local_ref(root, reference)
+    {
+        if !active.insert(reference.to_owned()) {
+            if let Some(target) = target.as_object() {
+                for key in ["type", "nullable", "description"] {
+                    if let Some(value) = target.get(key) {
+                        out.insert(key.to_owned(), value.clone());
+                    }
+                }
+            }
+            out.extend(
+                map.iter()
+                    .filter(|(k, _)| k.as_str() != "$ref")
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
+            out.insert("description".into(), json!("reference hint"));
+            return Some(Value::Object(out));
+        }
+        if let Some(target) = inline(target, root, active, depth + 1)?.as_object() {
+            out.extend(target.clone());
+            resolved = true;
+        }
+        active.remove(reference);
+    }
+    for (key, value) in map {
+        if key == "$ref" {
+            if !resolved {
+                out.insert("description".into(), json!("reference hint"));
+            }
+            continue;
+        }
+        out.insert(key.clone(), inline(value, root, active, depth + 1)?);
+    }
+    Some(Value::Object(out))
+}
+// The name-map flag follows upstream's trailing keyword parity, protecting names
+// such as properties.properties while visiting all the same JSON containers.
+fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
+    if let Some(map) = value.as_object_mut() {
+        for (key, child) in map {
+            walk(child, NAME_MAPS.contains(&key.as_str()) && !name_map, phase);
+        }
+    } else if let Some(values) = value.as_array_mut() {
+        for child in values {
+            walk(child, false, phase);
+        }
+    }
+    phase(value, name_map);
+}
+fn hint_presence(value: &mut Value, _: bool) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    let enumeration = map
+        .get("enum")
+        .cloned()
+        .or_else(|| map.get("const").map(|v| json!([v])));
+    if enumeration
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty() && a.len() <= 10)
+    {
+        map.insert("description".into(), json!("enum hint"));
+    }
+    map.shift_remove("enum");
+}
+fn merge_missing(destination: &mut Value, incoming: &Value) {
+    if let (Some(destination), Some(incoming)) = (destination.as_object_mut(), incoming.as_object())
+    {
+        for (key, value) in incoming {
+            if let Some(existing) = destination.get_mut(key) {
+                merge_missing(existing, value);
+            } else {
+                destination.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+fn conditionals(node: &mut Value, name_map: bool) {
+    if name_map || !node.is_object() {
+        return;
+    }
+    for key in ["then", "else"] {
+        if let Some(props) = node
+            .get(key)
+            .and_then(|v| v.get("properties"))
+            .and_then(Value::as_object)
+            .cloned()
+        {
+            for (key, value) in props {
+                if node.get("properties").is_none() {
+                    node["properties"] = json!({});
+                }
+                if let Some(props) = node.get_mut("properties").and_then(Value::as_object_mut) {
+                    props.entry(key).or_insert(value);
+                }
+            }
+        }
+    }
+}
+fn all_of(node: &mut Value, _: bool) {
+    let Some(branches) = node.get("allOf").and_then(Value::as_array).cloned() else {
+        return;
+    };
+    for branch in branches {
+        if let Some(map) = branch.as_object() {
+            for (key, incoming) in map {
+                if key == "required" {
+                    if let Some(required) = incoming.as_array() {
+                        let mut names: Vec<String> = gjson_array(node.get("required"))
+                            .map(|v| str_of(Some(v)).into_owned())
+                            .collect();
+                        for name in required {
+                            let name = str_of(Some(name)).into_owned();
+                            if !names.contains(&name) {
+                                names.push(name);
+                            }
+                        }
+                        node["required"] = json!(names);
+                    }
+                } else if !["if", "then", "else", "allOf"].contains(&key.as_str()) {
+                    if let Some(existing) = node.get_mut(key) {
+                        merge_missing(existing, incoming);
+                    } else {
+                        node[key] = incoming.clone();
+                    }
+                }
+            }
+        }
+    }
+    node.as_object_mut().unwrap().shift_remove("allOf");
+}
+fn null_only(branch: &Value) -> bool {
+    branch.get("properties").is_none()
+        && branch.get("items").is_none()
+        && (branch.get("type") == Some(&json!("null"))
+            || branch
+                .get("type")
+                .and_then(Value::as_array)
+                .is_some_and(|v| !v.is_empty() && v.iter().all(|v| v == "null")))
+}
+fn unions(node: &mut Value, name_map: bool) {
+    if name_map || !node.is_object() {
+        return;
+    }
+    for key in ["oneOf", "anyOf"] {
+        let Some(branches) = node
+            .get(key)
+            .and_then(Value::as_array)
+            .filter(|a| !a.is_empty())
+            .cloned()
+        else {
+            continue;
+        };
+        if key == "oneOf" && node.get("anyOf").is_some_and(Value::is_array) {
+            node.as_object_mut().unwrap().shift_remove(key);
+            continue;
+        }
+        let mut non_null = Vec::new();
+        let mut has_null = false;
+        for branch in branches {
+            if null_only(&branch) {
+                has_null = true;
+                continue;
+            }
+            let mut branch = if branch == Value::Bool(true) {
+                json!({})
+            } else {
+                branch
+            };
+            if !branch.is_object() {
+                continue;
+            }
+            if branch.get("required").is_some()
+                && [
+                    "type",
+                    "properties",
+                    "items",
+                    "enum",
+                    "anyOf",
+                    "oneOf",
+                    "allOf",
+                ]
+                .iter()
+                .all(|k| branch.get(*k).is_none())
+            {
+                let names: Vec<_> = gjson_array(branch.get("required"))
+                    .map(|v| str_of(Some(v)).into_owned())
+                    .collect();
+                let Some(props) = node
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .filter(|p| !names.is_empty() && names.iter().all(|n| p.contains_key(n)))
+                else {
+                    continue;
+                };
+                let selected: Map<_, _> = names
+                    .iter()
+                    .map(|n| (n.clone(), props[n].clone()))
+                    .collect();
+                branch["type"] = json!("object");
+                branch["properties"] = Value::Object(selected);
+            }
+            non_null.push(branch);
+        }
+        if non_null.len() >= 2 {
+            node["anyOf"] = Value::Array(non_null);
+            if key == "oneOf" {
+                node.as_object_mut().unwrap().shift_remove("oneOf");
+            }
+            continue;
+        }
+        if node.get("properties").is_some_and(Value::is_object) {
+            for branch in non_null {
+                if let Some(props) = branch.get("properties").and_then(Value::as_object) {
+                    for (name, value) in props {
+                        let target = node["properties"].as_object_mut().unwrap();
+                        if let Some(existing) = target.get_mut(name) {
+                            merge_missing(existing, value);
+                        } else {
+                            target.insert(name.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            if str_of(node.get("type")).is_empty() {
+                node["type"] = json!("object");
+            }
+            node.as_object_mut().unwrap().shift_remove(key);
+        } else if let Some(branch) = non_null.into_iter().next() {
+            *node = branch;
+        } else if has_null {
+            *node = json!({"type":"null"});
+        } else {
+            node.as_object_mut().unwrap().shift_remove(key);
+        }
+    }
+}
+fn type_arrays(node: &mut Value, _: bool) {
+    let Some(kinds) = node
+        .get("type")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+    else {
+        return;
+    };
+    let non_null: Vec<_> = kinds
+        .iter()
+        .map(|v| str_of(Some(v)).into_owned())
+        .filter(|s| !s.is_empty() && s != "null")
+        .collect();
+    let kind = if node.get("items").is_some() && non_null.iter().any(|s| s == "array") {
+        "array"
+    } else if node.get("properties").is_some() && non_null.iter().any(|s| s == "object") {
+        "object"
+    } else {
+        non_null.first().map(String::as_str).unwrap_or("string")
+    };
+    let kind = kind.to_owned();
+    if kind != "array" {
+        node.as_object_mut().unwrap().shift_remove("items");
+    }
+    node["type"] = json!(kind);
+}
+fn objects(node: &mut Value, name_map: bool) {
+    if !name_map
+        && node.get("properties").is_some_and(Value::is_object)
+        && !str_of(node.get("type")).eq_ignore_ascii_case("object")
+    {
+        node["type"] = json!("object");
+    }
+}
+fn cleanup(node: &mut Value, name_map: bool) {
+    if !name_map && let Some(map) = node.as_object_mut() {
+        map.retain(|key, _| {
+            !key.starts_with("x-") && !REMOVED.split_whitespace().any(|k| k == key)
+        });
+    }
+}
+fn required(node: &mut Value, _: bool) {
+    let Some(names) = node.get("required").and_then(Value::as_array) else {
+        return;
+    };
+    let filtered: Vec<_> = names
+        .iter()
+        .map(|v| str_of(Some(v)).into_owned())
+        .filter(|name| {
+            node.get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|p| p.contains_key(name))
+        })
+        .collect();
+    if filtered.len() == names.len() && node.get("properties").is_some_and(Value::is_object) {
+        return;
+    }
+    if filtered.is_empty() {
+        node.as_object_mut().unwrap().shift_remove("required");
+    } else {
+        node["required"] = json!(filtered);
+    }
+}
+fn placeholders(node: &mut Value, _: bool) {
+    if node.get("type") != Some(&json!("object"))
+        || node.get("anyOf").is_some_and(Value::is_array)
+        || node.get("oneOf").is_some_and(Value::is_array)
+    {
+        return;
+    }
+    match node.get("properties") {
+        None => {
+            node["properties"] = json!({"reason":{"type":"string"}});
+            node["required"] = json!(["reason"]);
+        }
+        Some(Value::Object(props)) if props.is_empty() => {
+            node["properties"] = json!({"reason":{"type":"string"}});
+            node["required"] = json!(["reason"]);
+        }
+        Some(Value::Object(_))
+            if !node
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty()) =>
+        {
+            node["properties"]
+                .as_object_mut()
+                .unwrap()
+                .entry("_")
+                .or_insert(json!({"type":"boolean"}));
+            node["required"] = json!(["_"]);
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
+    let Some(schema) = repair(schema, 0) else {
+        return false;
+    };
+    let wrapped = json!({"schema":schema});
+    let Some(mut projected) = inline(&wrapped, &wrapped, &mut BTreeSet::new(), 0) else {
+        return false;
+    };
+    walk(&mut projected, false, hint_presence);
+    walk(&mut projected, false, conditionals);
+    walk(&mut projected, false, all_of);
+    walk(&mut projected, false, unions);
+    walk(&mut projected, false, type_arrays);
+    walk(&mut projected, false, cleanup);
+    walk(&mut projected, false, required);
+    walk(&mut projected, false, objects);
+    walk(&mut projected, false, placeholders);
+    let Some(schema) = projected.get("schema") else {
+        return false;
+    };
+    analyze(schema, schema).properties.contains_key(placeholder)
+        && gjson_array(schema.get("required")).any(|v| str_of(Some(v)) == placeholder)
+}
