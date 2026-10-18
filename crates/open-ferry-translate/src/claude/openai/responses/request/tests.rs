@@ -2724,3 +2724,79 @@ fn exported_wrappers_keep_a_json_body() {
     assert!(plain.is_object() && compat.is_object());
     assert!(err_plain.is_some() && err_compat.is_some());
 }
+
+// TestConvertOpenAIResponsesRequestToClaude_IncompleteToolOutputIsError
+#[test]
+fn incomplete_tool_output_is_error() {
+    let request = |outputs: Value| {
+        let mut input = vec![
+            json!({"type":"message","role":"user","content":"Weather in Atlantis?"}),
+            json!({"type":"function_call","call_id":"call_err1","name":"get_weather","arguments":"{\"city\":\"Atlantis\"}"}),
+        ];
+        input.extend(outputs.as_array().unwrap().iter().cloned());
+        input.push(json!({"type":"message","role":"user","content":"Did it fail?"}));
+        json!({
+            "model": "gpt-4o",
+            "tools": [{"type":"function","name":"get_weather","description":"Get weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
+            "input": input,
+            "max_output_tokens": 128,
+            "stream": false
+        })
+    };
+    let result_of = |body: &Value| {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == "call_err1")
+            .unwrap_or_else(|| panic!("expected tool_result for call_err1: {body}"))
+            .clone()
+    };
+
+    let body = convert(
+        "claude-opus-5-5",
+        &request(
+            json!([{"type":"function_call_output","call_id":"call_err1","status":"incomplete","output":"City not found"}]),
+        ),
+    );
+    let result = result_of(&body);
+    assert_eq!(result["content"], "City not found", "{body}");
+    assert_eq!(result["is_error"], true, "{body}");
+
+    // Not upstream's: the other statuses, and none, stay plain results; case
+    // and spaces in the status don't matter, as upstream's EqualFold and
+    // TrimSpace; custom tool outputs are covered; and the last of a call's
+    // repeated outputs decides, as it does for the content.
+    for (output_type, status, want) in [
+        ("function_call_output", Some("completed"), false),
+        ("function_call_output", None, false),
+        ("function_call_output", Some(" Incomplete "), true),
+        ("custom_tool_call_output", Some("incomplete"), true),
+    ] {
+        let mut output = json!({"type":output_type,"call_id":"call_err1","output":"ok"});
+        if let Some(status) = status {
+            output["status"] = status.into();
+        }
+        let result = result_of(&convert("claude-opus-5-5", &request(json!([output]))));
+        assert_eq!(
+            result
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            want,
+            "{output_type} {status:?}: {result}"
+        );
+    }
+    let result = result_of(&convert(
+        "claude-opus-5-5",
+        &request(json!([
+            {"type":"function_call_output","call_id":"call_err1","status":"completed","output":"first"},
+            {"type":"function_call_output","call_id":"call_err1","status":"incomplete","output":"last"}])),
+    ));
+    assert_eq!(
+        (&result["content"], &result["is_error"]),
+        (&json!("last"), &json!(true))
+    );
+}
