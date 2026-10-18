@@ -25,6 +25,9 @@
 //!   whose `Policy::Client` leaves a secret shorter than eight bytes alone,
 //!   as for every client error.
 //! - Dropping the stream stops reading, where upstream watches its context.
+//! - After a translated Claude error, the stream ends once Gemini's trailing
+//!   usage arrives, rather than waiting for EOF. This keeps the terminal error
+//!   ready for the manager even when the client leaves and upstream stays open.
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which see each chunk as it is read (see the crate's `observe_send`
 //!   module).
@@ -77,6 +80,7 @@ struct State {
     claude: claude_tokens::State,
     pending: VecDeque<Result<Bytes, ExecError>>,
     finished: bool,
+    translated_error: Option<String>,
 }
 
 /// Translates the provider's stream in `response` to the client's format.
@@ -92,6 +96,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         claude,
         pending: VecDeque::new(),
         finished: false,
+        translated_error: None,
     };
     futures_util::stream::unfold(state, |mut state| async move {
         loop {
@@ -125,6 +130,17 @@ impl State {
                 self.send(&payload).await;
             }
             Lines::Raw => self.send(&line).await,
+        }
+        if self.translated_error.is_some()
+            && json_payload(&line)
+                .and_then(|payload| serde_json::from_slice::<serde_json::Value>(payload).ok())
+                .is_some_and(|chunk| chunk.get("usageMetadata").is_some())
+        {
+            self.finished = true;
+            let error = self.translated_error.take().unwrap();
+            self.pending.push_back(Err(
+                ExecError::from(StatusError::new(502, error)).with_usage_kept()
+            ));
         }
         if self.setup.translator.tool_input_error().is_some() {
             self.fail();
@@ -164,6 +180,16 @@ impl State {
 
     fn queue(&mut self, chunks: Vec<Vec<u8>>) {
         for chunk in chunks {
+            if self.translated_error.is_none() && self.setup.response_format == Format::CLAUDE {
+                // Retain the first translated error while reading trailing usage.
+                self.translated_error = chunk.split(|b| *b == b'\n').find_map(|line| {
+                    let payload = line.strip_prefix(b"data:")?;
+                    super::translated_claude_error(&self.setup.response_format, payload)
+                });
+                if let Some(error) = &self.translated_error {
+                    self.reader.report(error);
+                }
+            }
             if !chunk.is_empty() {
                 self.pending.push_back(Ok(Bytes::from(chunk)));
             }
@@ -189,6 +215,12 @@ impl State {
         if tool_input_failed {
             return self.fail();
         }
+        if let Some(error) = self.translated_error.take() {
+            self.pending.push_back(Err(
+                ExecError::from(StatusError::new(502, error)).with_usage_kept()
+            ));
+            return;
+        }
         if let Some(error) = error {
             tracing::debug!("{}: stream read failed: {error}", self.setup.name);
             self.reader.report(&error);
@@ -197,6 +229,12 @@ impl State {
             return;
         }
         self.send(b"[DONE]").await;
+        if let Some(error) = self.translated_error.take() {
+            self.pending.push_back(Err(
+                ExecError::from(StatusError::new(502, error)).with_usage_kept()
+            ));
+            return;
+        }
         if self.setup.translator.tool_input_error().is_some() {
             self.fail();
         }

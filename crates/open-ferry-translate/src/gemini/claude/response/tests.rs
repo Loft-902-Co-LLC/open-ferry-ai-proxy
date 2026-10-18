@@ -645,12 +645,10 @@ fn partless_malformed_function_call_closes_message() {
         "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 10, "totalTokenCount": 60}
     }"#;
     let output = stream(&hi_request(), &[chunk, "[DONE]"]).concat();
-    assert!(output.contains(r#""type":"message_stop""#), "{output}");
-    assert_eq!(
-        message_delta(&output)["delta"]["stop_reason"],
-        "refusal",
-        "{output}"
-    );
+    assert_eq!(output.matches("event: error\n").count(), 1);
+    assert!(!output.contains("event: message_delta"));
+    assert!(!output.contains("event: message_stop"));
+    assert!(output.contains("MALFORMED_FUNCTION_CALL"));
 }
 
 // TestConvertGeminiResponseToClaudeStream_PartlessStopClosesMessageWithEndTurn
@@ -684,7 +682,7 @@ fn partless_stop_closes_message_with_end_turn() {
 fn non_stream_safety_and_malformed_function_call_refusal() {
     for (finish_reason, want) in [
         ("SAFETY", "refusal"),
-        ("MALFORMED_FUNCTION_CALL", "refusal"),
+        ("IMAGE_SAFETY", "refusal"),
         ("RECITATION", "refusal"),
         ("PROHIBITED_CONTENT", "refusal"),
         ("SPII", "refusal"),
@@ -1130,4 +1128,50 @@ fn parameterless_continuation_emits_one_empty_object() {
         r#"{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"reason":"more"}}}]},"finishReason":"STOP"}]}"#,
     ]).concat();
     assert_eq!(input_deltas(&output), "{}");
+}
+
+// Ported from TestConvertGeminiResponseToClaudeStream_MalformedFunctionCallAfterThinkingEmitsError
+// and TestConvertGeminiResponseToClaudeStream_MalformedFunctionCallWithoutUsageAndDuplicateTerminalChunk.
+#[test]
+fn malformed_call_closes_thinking_and_suppresses_late_chunks() {
+    let mut translator = GeminiToClaudeStream::new(&hi_request());
+    let mut output = translator.translate(
+        br#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"planning tool call"}]}}]}"#,
+    );
+    output.push_str(
+        &translator.translate(br#"{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL"}]}"#),
+    );
+    assert!(
+        output.find("event: content_block_stop").unwrap() < output.find("event: error").unwrap()
+    );
+    assert!(translator.translate(br#"{"candidates":[{"content":{"parts":[{"text":"late text"}]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":50}}"#).is_empty());
+    assert!(translator.translate(b"[DONE]").is_empty());
+    assert!(!output.contains("event: message_delta"));
+    assert!(!output.contains("event: message_stop"));
+    assert_eq!(output.matches("event: error").count(), 1);
+}
+
+// Ported from TestConvertGeminiResponseToClaudeNonStream_MalformedFunctionCallReturnsAPIError
+// and TestConvertGeminiResponseToClaude_MalformedFunctionCallWithToolUsePreservesToolUse.
+#[test]
+fn malformed_call_is_api_error_unless_a_tool_call_was_returned() {
+    for tool_call in [false, true] {
+        let parts = if tool_call {
+            json!([{"functionCall":{"name":"Bash","args":{"command":"ls"}}}])
+        } else {
+            json!([])
+        };
+        let response = json!({"candidates":[{"content":{"parts":parts},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":37}});
+        let output = convert_gemini_response_to_claude_non_stream(&hi_request(), &response);
+        if tool_call {
+            assert_eq!(output["stop_reason"], "tool_use");
+        } else {
+            assert_eq!(output, malformed_error());
+        }
+        let output = stream(&hi_request(), &[&response.to_string(), "[DONE]"]).concat();
+        assert_eq!(output.contains("event: error"), !tool_call);
+        if tool_call {
+            assert!(output.contains(r#""stop_reason":"tool_use""#));
+        }
+    }
 }
