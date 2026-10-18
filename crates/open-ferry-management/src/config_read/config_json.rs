@@ -21,7 +21,7 @@
 //!   isn't a string, a time in a zone a day or more from UTC, or an
 //!   infinite or NaN float) is written as `null`; upstream's whole answer
 //!   fails.
-//! - open-ferry's `claude-cli` list follows `claude-api-key`, left out when
+//! - open-ferry's `claude-cli` list follows `claude-header-defaults`, left out when
 //!   it is empty.
 //! - open-ferry's `routing.quota` follows `session-affinity-rebind-on`,
 //!   left out when nothing in it is set.

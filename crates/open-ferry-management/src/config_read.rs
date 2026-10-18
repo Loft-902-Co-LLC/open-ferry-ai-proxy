@@ -56,7 +56,8 @@
 //!   `credential-in-flight`, the other
 //!   providers' sections (`antigravity`, `antigravity-signature-*`, `devin`),
 //!   `codex.live-media-relay`, and the client impersonation settings
-//!   (`claude-code`, `claude-header-defaults`, `disable-claude-cloak-mode`,
+//!   (`claude-code`, the fingerprint fields of `claude-header-defaults`,
+//!   `disable-claude-cloak-mode`,
 //!   `codex-header-defaults.user-agent`, `codex.disable-codex-cloaking`, and
 //!   each Claude key's `cloak`, `fingerprint-profile` and
 //!   `experimental-cch-signing`). A list the file gives as `[]` is written
