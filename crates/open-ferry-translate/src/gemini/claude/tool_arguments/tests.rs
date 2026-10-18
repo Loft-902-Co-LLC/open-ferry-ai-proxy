@@ -1022,6 +1022,27 @@ fn no_schema_nonobjects_follow_translated_lookup_order() {
     }
 }
 
+// Not upstream's: a tool with no name matches no call, even one whose name
+// has the same canonical form, so the call isn't taken as parameterless and
+// its arguments are kept.
+#[test]
+fn nameless_tools_match_no_call() {
+    let sent = json!({"tools":[{"functionDeclarations":[{"name":" ","parametersJsonSchema":{"type":"object"}}]}]});
+    for original in [
+        json!({"tools":[{"name":"","input_schema":{"type":"object"}}]}),
+        json!({"tools":[{"name":" "}]}),
+        json!({"tools":[1]}),
+    ] {
+        for name in ["_", "____"] {
+            assert!(!parameterless(&original, name));
+            for args in [json!({"city":"Paris"}), json!(true), json!("a string")] {
+                assert_eq!(clean_arguments(&args, name, &original, &Value::Null), args);
+                assert_eq!(clean_arguments(&args, name, &original, &sent), args);
+            }
+        }
+    }
+}
+
 // Not upstream's: an unbounded projection must conservatively retain arguments.
 #[test]
 fn reclean_expansion_bound_preserves_arguments() {

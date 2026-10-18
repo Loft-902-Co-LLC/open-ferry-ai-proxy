@@ -57,7 +57,7 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
         let names: BTreeSet<_> = tools
             .iter()
             .map(tool_name)
-            .filter(|n| canonical_tool_name(n) == canonical_tool_name(name))
+            .filter(|n| !n.is_empty() && canonical_tool_name(n) == canonical_tool_name(name))
             .collect();
         if names.len() != 1 {
             return None;
@@ -371,6 +371,9 @@ fn translated_schemas<'a>(sent: &'a Value, original: &Value, name: &str) -> Vec<
         for group in tools.as_array().into_iter().flatten() {
             for decl in array(group, "functionDeclarations") {
                 let declared = str_of(decl.get("name")).trim().to_owned();
+                if declared.is_empty() {
+                    continue;
+                }
                 let Some(schema) = decl
                     .get("parametersJsonSchema")
                     .or_else(|| decl.get("parameters"))
