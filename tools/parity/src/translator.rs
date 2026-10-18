@@ -1659,7 +1659,9 @@ impl Translator {
     /// kept as text if it isn't JSON. A Gemini response's `createTime` from a
     /// Claude stream is masked when it is the current time (see
     /// [`mask_create_time_now`]), and the function calls in a chunk from a
-    /// Chat Completions stream are sorted (see [`sort_function_calls`]). In
+    /// Chat Completions stream are sorted (see [`sort_function_calls`]). The
+    /// counts in the tool call IDs made up for a Claude client from a Gemini
+    /// stream or response are masked (see [`mask_tool_use_counter`]). In
     /// a Chat Completions request from a Gemini one, each call ID we derive
     /// from compact JSON where upstream derives another from the client's
     /// text becomes upstream's (see [`derived_call_ids`]).
@@ -1784,10 +1786,19 @@ impl Translator {
             {
                 return Some(NO_OUTPUT.into());
             }
-            Self::ResponsesNonStream
-            | Self::CodexGeminiNonStream
-            | Self::OpenAIGeminiNonStream
-            | Self::GeminiClaudeNonStream => return exact::from_str(&text).ok(),
+            Self::ResponsesNonStream | Self::CodexGeminiNonStream | Self::OpenAIGeminiNonStream => {
+                return exact::from_str(&text).ok();
+            }
+            Self::GeminiClaudeNonStream => {
+                let mut value: Value = exact::from_str(&text).ok()?;
+                let mut n = 0;
+                if let Some(Value::Array(blocks)) = value.get_mut("content") {
+                    blocks
+                        .iter_mut()
+                        .for_each(|block| mask_tool_use_counter(block, &mut n));
+                }
+                return Some(value);
+            }
             Self::ClaudeGeminiNonStream => {
                 let mut value: Value = exact::from_str(&text).ok()?;
                 mask_create_time_now(&mut value);
@@ -2099,29 +2110,34 @@ pub(crate) fn sse_frames_ended_by(text: &str, end: &str) -> Value {
     Value::Array(frames)
 }
 
-/// Replaces the count at the end of the IDs the Gemini to Claude stream
-/// translator makes up for tool calls, `<name>-<count>`, with
-/// `(generated-<n>)` for the `n`th call. The count is process-wide, upstream's
-/// and ours alike, so it depends on the cases run before.
+/// Masks the tool call IDs in a Gemini to Claude stream's content blocks
+/// (see [`mask_tool_use_counter`]).
 fn mask_tool_use_counters(frames: &mut Value) {
     let mut n = 0;
     for frame in frames.as_array_mut().into_iter().flatten() {
-        let Some(block) = frame.pointer_mut("/data/content_block") else {
-            continue;
-        };
-        if block["type"] != "tool_use" {
-            continue;
+        if let Some(block) = frame.pointer_mut("/data/content_block") {
+            mask_tool_use_counter(block, &mut n);
         }
-        let Some(Value::String(id)) = block.get_mut("id") else {
-            continue;
-        };
-        if let Some((name, count)) = id.rsplit_once('-')
-            && !count.is_empty()
-            && count.bytes().all(|b| b.is_ascii_digit())
-        {
-            n += 1;
-            *id = format!("{name}-(generated-{n})");
-        }
+    }
+}
+
+/// Replaces the count at the end of the ID the Gemini to Claude translators
+/// make up for a `tool_use` block, `<name>-<count>`, with `(generated-<n>)`
+/// for the `n`th call, counting in `n`. The count is process-wide, upstream's
+/// and ours alike, streaming or not, so it depends on the cases run before.
+fn mask_tool_use_counter(block: &mut Value, n: &mut usize) {
+    if block["type"] != "tool_use" {
+        return;
+    }
+    let Some(Value::String(id)) = block.get_mut("id") else {
+        return;
+    };
+    if let Some((name, count)) = id.rsplit_once('-')
+        && !count.is_empty()
+        && count.bytes().all(|b| b.is_ascii_digit())
+    {
+        *n += 1;
+        *id = format!("{name}-(generated-{n})");
     }
 }
 
@@ -2740,6 +2756,29 @@ mod tests {
             .read(&sent, br#"{"id":"resp_ab_1"}"#)
             .unwrap();
         assert_eq!(response["id"], "resp_ab_1");
+    }
+
+    #[test]
+    fn gemini_to_claude_tool_use_counters_are_masked() {
+        let case = Case::response("counters", "{}", Vec::new());
+        let response = json!({ "content": [
+            { "type": "tool_use", "id": "Bash-6108", "name": "Bash" },
+            { "type": "text", "text": "a-1" },
+            { "type": "tool_use", "id": "a.b-c-6109", "name": "a.b-c" },
+            { "type": "tool_use", "id": "toolu_01ABC", "name": "Read" }
+        ] });
+        let read = Translator::GeminiClaudeNonStream
+            .read(&case, response.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(
+            read["content"],
+            json!([
+                { "type": "tool_use", "id": "Bash-(generated-1)", "name": "Bash" },
+                { "type": "text", "text": "a-1" },
+                { "type": "tool_use", "id": "a.b-c-(generated-2)", "name": "a.b-c" },
+                { "type": "tool_use", "id": "toolu_01ABC", "name": "Read" }
+            ])
+        );
     }
 
     #[test]
