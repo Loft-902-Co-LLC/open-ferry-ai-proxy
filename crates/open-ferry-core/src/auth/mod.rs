@@ -152,6 +152,12 @@ pub struct ModelState {
     pub quota: QuotaState,
     /// When this state last changed.
     pub updated_at: Option<Timestamp>,
+    /// The execution sequence watermark taken when the current model
+    /// cooldown was recorded: a success from an execution stamped at or
+    /// below it started before the cooldown and must not clear it
+    /// (upstream's `cooldownRecordedSeq`). Runtime only, never saved: zero
+    /// after a restart, so a restored cooldown is clearable by any success.
+    pub cooldown_recorded_seq: u64,
 }
 
 /// One credential and its runtime state (upstream's `Auth`).
@@ -249,6 +255,10 @@ pub struct Auth {
     /// Executors clear this marker on complete success and replace it on
     /// partial failure; due helpers mark the failed partition for retry.
     pub codex_refresh_failure: Option<CodexRefreshFailure>,
+    /// The execution sequence watermark taken when the current auth-level
+    /// cooldown was recorded; see [`ModelState::cooldown_recorded_seq`]
+    /// (upstream's `cooldownRecordedSeq`). Runtime only.
+    pub cooldown_recorded_seq: u64,
 }
 
 /// A transient partition failure accompanying successful Codex rotations.

@@ -117,6 +117,7 @@ pub use settings::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak};
 
 use chrono::Utc;
@@ -453,6 +454,10 @@ pub(crate) struct Shared {
     /// one thread.
     load_gate: Arc<ReloadBarrier>,
     refresh_loop: Mutex<Option<RefreshLoopHandle>>,
+    /// Stamps upstream dispatches with a monotonic sequence, so a success
+    /// from a call dispatched before a cooldown was recorded can't clear
+    /// that cooldown (upstream's `executionSeq`).
+    execution_seq: AtomicU64,
     /// What failed calls are told to, once set.
     error_events: OnceLock<Arc<dyn ErrorEvents>>,
     /// The cooldown state store.
@@ -649,6 +654,7 @@ impl Manager {
             error_events: OnceLock::new(),
             cooldown_store: cooldown_store::CooldownStore::default(),
             gate: RwLock::new(ActiveGate::open()),
+            execution_seq: AtomicU64::new(0),
             #[cfg(test)]
             persist_hook: Mutex::new(None),
             #[cfg(test)]
@@ -696,6 +702,20 @@ impl Manager {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Stamps a new upstream dispatch with the next execution sequence
+    /// (upstream's `nextExecutionSeq`). The stamp travels on the call's
+    /// [`CallResult::execution_seq`].
+    pub(crate) fn next_execution_seq(&self) -> u64 {
+        self.shared.execution_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The latest execution sequence issued (upstream's
+    /// `currentExecutionSeq`): the watermark a cooldown records, which
+    /// marks every dispatch up to now as older than it.
+    pub(crate) fn current_execution_seq(&self) -> u64 {
+        self.shared.execution_seq.load(Ordering::SeqCst)
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {

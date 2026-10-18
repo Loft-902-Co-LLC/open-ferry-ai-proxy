@@ -410,6 +410,7 @@ fn failure_result(
         response_headers: err.headers.clone(),
         credential_version: auth.credential_version,
         registration_epoch: auth.registration_epoch,
+        execution_seq: attempt.execution_seq,
         ..CallResult::default()
     }
 }
@@ -435,6 +436,9 @@ struct Attempt<'a> {
     result_model: String,
     /// The call's session, while session affinity is on.
     session: Option<&'a Arc<Session>>,
+    /// The sequence stamp of the latest upstream dispatch of this attempt,
+    /// or 0 before the first.
+    execution_seq: u64,
 }
 
 impl Attempt<'_> {
@@ -951,7 +955,7 @@ impl Manager {
             let mut auth_err: Option<ExecError> = None;
             let mut did_refresh = false;
             for upstream_model in &models {
-                let attempt = Attempt {
+                let mut attempt = Attempt {
                     provider: &provider,
                     route_model: &route_model,
                     result_model: self.state_model_for_execution(
@@ -961,6 +965,7 @@ impl Manager {
                         pooled,
                     ),
                     session: session.as_ref(),
+                    execution_seq: 0,
                 };
                 let mut exec_req = req.clone();
                 exec_req.model = if restore_execution_model {
@@ -969,6 +974,7 @@ impl Manager {
                     upstream_model.clone()
                 };
                 let exec_opts = opts.clone();
+                attempt.execution_seq = self.next_execution_seq();
                 let mut outcome = Self::call_unary(
                     kind,
                     &*executor,
@@ -985,6 +991,7 @@ impl Manager {
                     {
                         auth = refreshed;
                         did_refresh = true;
+                        attempt.execution_seq = self.next_execution_seq();
                         outcome = Self::call_unary(
                             kind,
                             &*executor,
@@ -1013,6 +1020,7 @@ impl Manager {
                                 skip_quota_observation: kind == CallKind::CountTokens,
                                 credential_version: auth.credential_version,
                                 registration_epoch: auth.registration_epoch,
+                                execution_seq: attempt.execution_seq,
                                 ..CallResult::default()
                             },
                             session,
@@ -1222,7 +1230,7 @@ impl Manager {
         let mut did_refresh = false;
         for (idx, model) in prepared.models.iter().enumerate() {
             let is_last_model = idx + 1 >= prepared.models.len();
-            let attempt = Attempt {
+            let mut attempt = Attempt {
                 provider: &prepared.provider,
                 route_model,
                 result_model: self.state_model_for_execution(
@@ -1232,6 +1240,7 @@ impl Manager {
                     prepared.pooled,
                 ),
                 session,
+                execution_seq: 0,
             };
             let mut exec_req = req.clone();
             exec_req.model = if execution_model.is_empty() {
@@ -1240,6 +1249,7 @@ impl Manager {
                 execution_model.to_owned()
             };
             let exec_opts = opts.clone();
+            attempt.execution_seq = self.next_execution_seq();
             let mut outcome = Self::call_stream(
                 &**executor,
                 auth.clone(),
@@ -1256,6 +1266,7 @@ impl Manager {
                     auth = refreshed;
                     publish_selected(&exec_opts, &auth);
                     did_refresh = true;
+                    attempt.execution_seq = self.next_execution_seq();
                     outcome = Self::call_stream(
                         &**executor,
                         auth.clone(),
@@ -1304,6 +1315,7 @@ impl Manager {
                     auth = refreshed;
                     publish_selected(&exec_opts, &auth);
                     did_refresh = true;
+                    attempt.execution_seq = self.next_execution_seq();
                     match Self::call_stream(
                         &**executor,
                         auth.clone(),
@@ -1372,6 +1384,7 @@ impl Manager {
                             response_headers: headers.clone(),
                             credential_version: auth.credential_version,
                             registration_epoch: auth.registration_epoch,
+                            execution_seq: attempt.execution_seq,
                             ..CallResult::default()
                         },
                         session,
@@ -1446,6 +1459,7 @@ impl Manager {
             result_model: attempt.result_model.clone(),
             headers: headers.clone(),
             session: attempt.session.cloned(),
+            execution_seq: attempt.execution_seq,
             rewriter,
             failed: false,
             tx,
@@ -1502,6 +1516,7 @@ impl Manager {
                             response_headers: forwarder.headers.clone(),
                             credential_version: forwarder.auth.credential_version,
                             registration_epoch: forwarder.auth.registration_epoch,
+                            execution_seq: forwarder.execution_seq,
                             ..CallResult::default()
                         },
                         forwarder.session.as_deref(),
@@ -1533,6 +1548,8 @@ struct Forwarder {
     /// The stream's response headers, for the quota snapshot.
     headers: HeaderMap,
     session: Option<Arc<Session>>,
+    /// The sequence stamp of the dispatch that opened the stream.
+    execution_seq: u64,
     rewriter: Option<StreamRewriter>,
     failed: bool,
     tx: mpsc::Sender<Result<Bytes, ExecError>>,
@@ -1555,6 +1572,7 @@ impl Forwarder {
                         route_model: &self.route_model,
                         result_model: self.result_model.clone(),
                         session: self.session.as_ref(),
+                        execution_seq: self.execution_seq,
                     };
                     let mut result = failure_result(&attempt, &self.auth, &err, action, true);
                     result.response_headers = stream_failure_headers(&self.headers, &err);
@@ -1764,6 +1782,7 @@ mod tests {
             route_model: "model",
             result_model: "model".to_owned(),
             session: None,
+            execution_seq: 0,
         };
         let polls = Arc::new(AtomicUsize::new(0));
         let count = polls.clone();
