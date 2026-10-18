@@ -20,6 +20,7 @@
 
 use serde_json::{Map, Value};
 
+use super::quota_signals::merge_quota_observation;
 use super::text::{equal_fold, go_lower};
 use crate::auth::{Auth, Status, Timestamp};
 
@@ -477,6 +478,25 @@ pub(crate) fn merge_refreshed_auth_with(
             merged.unavailable = false;
             merged.status_message.clear();
             merged.last_error = None;
+        }
+    }
+
+    // The refreshed snapshot of the quota replaces an older one; the
+    // cooldown fields stay with the live credential, so a failure that came
+    // meanwhile isn't lost.
+    merged.quota = merge_quota_observation(std::mem::take(&mut merged.quota), &updated.quota);
+
+    // A model's own layer under a credential-wide quota cooldown, and the
+    // mark of the wrap, follow the live credential's: a refresh derives
+    // from the snapshot it started from and never moves them.
+    for (model, merged_state) in &mut merged.model_states {
+        if let Some(current_state) = current.model_states.get(model) {
+            if let Some(shadow) = &current_state.credential_quota_shadow
+                && merged_state.credential_quota_shadow.is_none()
+            {
+                merged_state.credential_quota_shadow = Some(Box::new(shadow.clone_shallow()));
+            }
+            merged_state.credential_quota_propagated |= current_state.credential_quota_propagated;
         }
     }
 

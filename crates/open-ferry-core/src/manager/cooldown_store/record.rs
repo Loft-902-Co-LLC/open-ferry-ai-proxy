@@ -40,6 +40,8 @@
 //! is, and a value of the wrong type fails the whole file.
 //!
 //! Deviations from upstream:
+//! - The independent state's status reads by name, an unknown one as
+//!   `Unknown`.
 //! - Times are written in UTC; upstream writes the offset of the time it
 //!   was given, often the local one.
 //! - A record with a time Go can't write (a year before 0 or after 9999)
@@ -58,7 +60,7 @@ use serde_json::{Map, Value};
 
 use open_ferry_translate::go::{equal_fold, json_string};
 
-use crate::auth::{AuthError, QuotaState, Timestamp, parse_go_rfc3339};
+use crate::auth::{AuthError, ModelState, QuotaState, Status, Timestamp, parse_go_rfc3339};
 use crate::manager::credential::is_zero;
 
 /// One saved cooldown: a credential's, or one of its models' (upstream's
@@ -78,6 +80,14 @@ pub(crate) struct Record {
     pub(crate) quota: QuotaState,
     pub(crate) last_error: Option<AuthError>,
     pub(crate) updated_at: Option<Timestamp>,
+    /// A model's own cooldown beneath the credential-wide quota cooldown
+    /// that its outer fields show, so that a restart doesn't lose which is
+    /// which (`independent_state`).
+    pub(crate) independent_state: Option<ModelState>,
+    /// Whether the credential-wide quota cooldown wraps this model's state,
+    /// for one with no cooldown of its own beneath it
+    /// (`credential_quota_propagated`).
+    pub(crate) credential_quota_propagated: bool,
     /// open-ferry's capped quota rest under this cooldown, if any
     /// (`open_ferry_quota_check`; see `quota_check`).
     pub(crate) quota_check: Option<QuotaCheckRecord>,
@@ -102,10 +112,14 @@ pub(crate) fn nonzero(time: Option<Timestamp>) -> Option<Timestamp> {
 
 /// Whether Go can write every time in `record` (years 0 to 9999).
 pub(crate) fn writable(record: &Record) -> bool {
+    let own = record.independent_state.as_ref();
     [
         record.next_retry_after,
         record.updated_at,
         record.quota.next_recover_at,
+        own.and_then(|state| state.next_retry_after),
+        own.and_then(|state| state.updated_at),
+        own.and_then(|state| state.quota.next_recover_at),
         record.quota_check.map(|check| check.check_at),
         record.quota_check.map(|check| check.reset_at),
     ]
@@ -173,9 +187,32 @@ fn record_node(record: &Record) -> Node {
         fields.push(("last_error", error_node(err)));
     }
     fields.push(("updated_at", time(record.updated_at)));
+    if let Some(state) = &record.independent_state {
+        fields.push(("independent_state", model_state_node(state)));
+    }
+    if record.credential_quota_propagated {
+        fields.push(("credential_quota_propagated", Node::Raw("true".to_owned())));
+    }
     if let Some(check) = &record.quota_check {
         fields.push(("open_ferry_quota_check", quota_check_node(check)));
     }
+    Node::Object(fields)
+}
+
+/// A model's own cooldown (upstream's `ModelState` as `json.Marshal` writes
+/// it). Like a record's quota, its quota keeps no snapshot.
+fn model_state_node(state: &ModelState) -> Node {
+    let mut fields = vec![("status", string(state.status.as_str()))];
+    if !state.status_message.is_empty() {
+        fields.push(("status_message", string(&state.status_message)));
+    }
+    fields.push(("unavailable", Node::Raw(state.unavailable.to_string())));
+    fields.push(("next_retry_after", time(state.next_retry_after)));
+    if let Some(err) = &state.last_error {
+        fields.push(("last_error", error_node(err)));
+    }
+    fields.push(("quota", quota_node(&state.quota)));
+    fields.push(("updated_at", time(state.updated_at)));
     Node::Object(fields)
 }
 
@@ -338,6 +375,8 @@ fn decode_record(value: &Value) -> Result<Record, String> {
         "quota",
         "last_error",
         "updated_at",
+        "independent_state",
+        "credential_quota_propagated",
         "open_ferry_quota_check",
     ];
     let mut record = Record::default();
@@ -368,11 +407,73 @@ fn decode_record(value: &Value) -> Result<Record, String> {
                 }
                 other => return Err(mismatch(other, key)),
             },
+            Some("independent_state") => match value {
+                Value::Null => record.independent_state = None,
+                Value::Object(map) => {
+                    let state = record
+                        .independent_state
+                        .get_or_insert_with(ModelState::default);
+                    decode_model_state(state, map)?;
+                }
+                other => return Err(mismatch(other, key)),
+            },
+            Some("credential_quota_propagated") => {
+                set_bool(&mut record.credential_quota_propagated, value, key)?;
+            }
             Some("open_ferry_quota_check") => record.quota_check = decode_quota_check(value),
             _ => {}
         }
     }
     Ok(record)
+}
+
+/// A model's own cooldown (upstream's `ModelState`). A status it has no
+/// name for reads as unknown.
+fn decode_model_state(state: &mut ModelState, map: &Map<String, Value>) -> Result<(), String> {
+    const FIELDS: &[&str] = &[
+        "status",
+        "status_message",
+        "unavailable",
+        "next_retry_after",
+        "last_error",
+        "quota",
+        "updated_at",
+    ];
+    for (key, value) in map {
+        match field(key, FIELDS) {
+            Some("status") => {
+                if let Some(name) = text(value, key)? {
+                    state.status = match name.as_str() {
+                        "active" => Status::Active,
+                        "pending" => Status::Pending,
+                        "refreshing" => Status::Refreshing,
+                        "error" => Status::Error,
+                        "disabled" => Status::Disabled,
+                        _ => Status::Unknown,
+                    };
+                }
+            }
+            Some("status_message") => set_text(&mut state.status_message, value, key)?,
+            Some("unavailable") => set_bool(&mut state.unavailable, value, key)?,
+            Some("next_retry_after") => set_time(&mut state.next_retry_after, value, key)?,
+            Some("updated_at") => set_time(&mut state.updated_at, value, key)?,
+            Some("quota") => match value {
+                Value::Null => {}
+                Value::Object(map) => decode_quota(&mut state.quota, map)?,
+                other => return Err(mismatch(other, key)),
+            },
+            Some("last_error") => match value {
+                Value::Null => state.last_error = None,
+                Value::Object(map) => {
+                    let err = state.last_error.get_or_insert_with(AuthError::default);
+                    decode_error(err, map)?;
+                }
+                other => return Err(mismatch(other, key)),
+            },
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// open-ferry's capped quota rest, or `None` for anything but an object
