@@ -961,9 +961,14 @@ mod tests {
         for key in ["maximum", "exclusiveMinimum", "exclusiveMaximum"] {
             assert!(props["scientific_bounds"].get(key).is_none());
         }
-        assert_eq!(props["high_precision_fraction"]["maximum"].to_string(),
-            "18446744073709552000.00000000000000000000000000000000000000000000000000000000000000000000000000000001");
-        assert_eq!(props["extreme_exponents"]["minimum"].to_string(), "1.1e-9223372036854775808");
+        assert_eq!(
+            props["high_precision_fraction"]["maximum"].to_string(),
+            "18446744073709552000.00000000000000000000000000000000000000000000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            props["extreme_exponents"]["minimum"].to_string(),
+            "1.1e-9223372036854775808"
+        );
         assert!(props["extreme_exponents"].get("maximum").is_none());
         assert_eq!(
             props["user_data"]["default"]["maximum"].to_string(),

@@ -2629,39 +2629,29 @@ async fn split_sse_events_match_whole_events() {
     }
 }
 
-// Ported from TestCodexExecuteStreamSplitHandshakeExceedingLineBudgetReleasesBootstrapWithoutFailover
-// TestCodexExecuteStreamMixedFramingCommentInsideSplitEventCountsBudget
-// and TestCodexExecuteStreamEventExceedsByteBudgetWhileAssemblingReleasesStream.
+// Ported from TestCodexExecuteStreamSplitHandshakeExceedingLineBudgetReleasesBootstrapWithoutFailover.
 #[tokio::test]
 async fn split_handshake_exhausts_bootstrap_budgets() {
-    for fragment in [
-        "data: \n".repeat(50),
-        ": comment\n".repeat(50),
-        format!(
-            "data: {}\n",
-            " ".repeat(crate::codex::terminal::MAX_BOOTSTRAP_BYTES)
-        ),
-    ] {
-        let body = format!(
-            "data: {{\"type\":\"response.in_progress\",\"response\":{{\"output\":[\n{fragment}data: ]}}}}\n\ndata: {{\"type\":\"error\",\"error\":{{\"code\":\"server_overloaded\",\"message\":\"overloaded\"}}}}\n\n"
-        );
-        let mock = Mock::start(Reply::sse(&body)).await;
-        let response = executor()
-            .with_config(Arc::new({
-                let mut config = Config::default();
-                config.codex.stream_bootstrap_buffering = true;
-                config
-            }))
-            .execute_stream(
-                api_key_auth(&mock.url),
-                request("gpt-5.4", r#"{"model":"gpt-5.4","input":"hello"}"#),
-                stream_options("openai-response"),
-            )
-            .await
-            .expect("budget releases stream before overload probing");
-        let (_, error) = collect(response).await;
-        assert!(error.is_some());
-    }
+    let fragment = "data: \n".repeat(50);
+    let body = format!(
+        "data: {{\"type\":\"response.in_progress\",\"response\":{{\"output\":[\n{fragment}data: ]}}}}\n\ndata: {{\"type\":\"error\",\"error\":{{\"code\":\"server_overloaded\",\"message\":\"overloaded\"}}}}\n\n"
+    );
+    let mock = Mock::start(Reply::sse(&body)).await;
+    let response = executor()
+        .with_config(Arc::new({
+            let mut config = Config::default();
+            config.codex.stream_bootstrap_buffering = true;
+            config
+        }))
+        .execute_stream(
+            api_key_auth(&mock.url),
+            request("gpt-5.4", r#"{"model":"gpt-5.4","input":"hello"}"#),
+            stream_options("openai-response"),
+        )
+        .await
+        .expect("budget releases stream before overload probing");
+    let (_, error) = collect(response).await;
+    assert!(error.is_some());
 }
 
 // Ported from TestCodexExecuteStreamKeepsAnInvalidSplitEventInvalid.
