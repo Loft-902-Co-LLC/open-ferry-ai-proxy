@@ -72,6 +72,7 @@ mod cooldown_state;
 mod cooldown_state_store;
 mod cooldown_view;
 mod credential_policy;
+mod credential_quota_independent_state;
 mod download;
 mod force_refresh;
 mod forced_provider;

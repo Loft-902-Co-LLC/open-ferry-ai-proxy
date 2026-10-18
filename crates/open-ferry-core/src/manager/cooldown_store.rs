@@ -33,6 +33,10 @@
 //! what is left.
 //!
 //! Deviations from upstream:
+//! - A model's own cooldown beneath a credential quota is saved and
+//!   restored as the record's independent state; a name for a status that
+//!   isn't known reads as `Unknown`, and the saved layer keeps no quota
+//!   snapshot, only the cooldown fields.
 //! - Only the file store is ported: no store a token store backend
 //!   provides, no Postgres, no Home.
 //! - Saves are debounced on a background thread; upstream saves on the
@@ -103,8 +107,9 @@ use std::time::{Duration, Instant};
 
 use super::classify::has_unauthorized_auth_failure;
 use super::cooldown::{
-    cooldown_disabled_for_auth, cooldown_reason, ensure_model_state, merge_model_state,
-    reset_model_state, update_aggregated_availability,
+    cooldown_disabled_for_auth, cooldown_reason, ensure_model_state, is_credential_quota_active,
+    is_model_state_active_cooldown, merge_model_state, reset_model_state,
+    update_aggregated_availability,
 };
 use super::credential::is_zero;
 use super::quota_signals::{apply_cooldown_fields, cooldown_fields_of, merge_quota_observation};
@@ -730,6 +735,14 @@ fn scrub_record(secrets: &Secrets, record: &mut Record) {
         hide(&mut error.code);
         hide(&mut error.message);
     }
+    if let Some(own) = &mut record.independent_state {
+        hide(&mut own.status_message);
+        hide(&mut own.quota.reason);
+        if let Some(error) = &mut own.last_error {
+            hide(&mut error.code);
+            hide(&mut error.message);
+        }
+    }
 }
 
 /// `auth`'s records as the manager holds them, before they are scrubbed.
@@ -755,6 +768,8 @@ fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut V
             quota: cooldown_fields(&auth.quota),
             last_error: auth.last_error.clone(),
             updated_at: record::nonzero(auth.updated_at),
+            independent_state: None,
+            credential_quota_propagated: false,
             quota_check: None,
         });
     }
@@ -778,6 +793,17 @@ fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut V
             quota: cooldown_fields(&state.quota),
             last_error: state.last_error.clone(),
             updated_at: record::nonzero(state.updated_at),
+            // The model's own cooldown beneath a credential-wide quota one,
+            // and the mark of the wrap, so a restart keeps which is which.
+            independent_state: state
+                .credential_quota_shadow
+                .as_deref()
+                .map(|own| ModelState {
+                    quota: cooldown_fields(&own.quota),
+                    cooldown_recorded_seq: 0,
+                    ..own.clone_shallow()
+                }),
+            credential_quota_propagated: state.credential_quota_propagated,
             quota_check: None,
         });
     }
@@ -997,23 +1023,92 @@ fn restore_record(
         auth.last_error = record.last_error.clone();
         return Some(auth.id.clone());
     }
+    let wrap_live = is_credential_quota_active(&auth.quota, now);
+    let wrap_next = auth.quota.next_recover_at;
+    let wrap_backoff = auth.quota.backoff_level;
     if let Some(key) = ensure_model_state(auth, model)
         && let Some(state) = auth.model_states.get_mut(&key)
     {
-        merge_model_state(
-            state,
-            &ModelState {
-                status: Status::Error,
-                status_message: reason.to_owned(),
-                unavailable: true,
-                next_retry_after: Some(next_retry_after),
-                last_error: record.last_error.clone(),
-                quota,
-                updated_at: Some(updated_at),
-                // A restored cooldown is clearable by any success.
-                cooldown_recorded_seq: 0,
-            },
-        );
+        // The candidates for the own layer of a wrapped record: the live
+        // shadow or, when the live state isn't wrapped, the live state
+        // itself, so that a load that comes late never erases a newer block
+        // of the model's own, recorded after the file was written.
+        let mut live_shadow = state
+            .credential_quota_shadow
+            .as_deref()
+            .map(ModelState::clone_shallow);
+        if live_shadow.is_none()
+            && !state.credential_quota_propagated
+            && state.quota.reason != "credential_quota"
+            && is_model_state_active_cooldown(state, now)
+        {
+            live_shadow = Some(state.clone_shallow());
+        }
+        let was_live_wrapped = state.credential_quota_propagated
+            || state.quota.reason == "credential_quota"
+            || wrap_live;
+        let restored = ModelState {
+            status: Status::Error,
+            status_message: reason.to_owned(),
+            unavailable: true,
+            next_retry_after: Some(next_retry_after),
+            last_error: record.last_error.clone(),
+            quota,
+            updated_at: Some(updated_at),
+            // A restored cooldown is clearable by any success.
+            cooldown_recorded_seq: 0,
+            ..ModelState::default()
+        };
+        merge_model_state(state, &restored);
+        // A wrapped record is one whose own layer was saved, whose wrap was
+        // marked, or whose outer reason is the credential-wide quota.
+        let wrapped_record = record.independent_state.is_some()
+            || record.credential_quota_propagated
+            || restored.quota.reason.trim() == "credential_quota";
+        if !wrapped_record && was_live_wrapped {
+            // An unwrapped record under a live wrap becomes the model's own
+            // layer, the newest of it and the live ones, and the outer
+            // fields keep showing the credential-wide cooldown.
+            let live_newer = live_shadow
+                .as_ref()
+                .is_some_and(|live| live.updated_at > Some(updated_at));
+            state.credential_quota_shadow = if state.credential_quota_shadow.is_none()
+                || (live_shadow.is_some() && !live_newer)
+            {
+                Some(Box::new(restored.clone_shallow()))
+            } else if live_newer {
+                live_shadow.map(Box::new)
+            } else {
+                state.credential_quota_shadow.take()
+            };
+            state.credential_quota_propagated = true;
+            apply_cooldown_fields(
+                &mut state.quota,
+                QuotaState {
+                    exceeded: true,
+                    reason: "credential_quota".into(),
+                    next_recover_at: wrap_next,
+                    backoff_level: wrap_backoff,
+                    ..QuotaState::default()
+                },
+            );
+            if state.next_retry_after < wrap_next {
+                state.next_retry_after = wrap_next;
+            }
+            state.unavailable = true;
+            state.status = Status::Error;
+        } else if wrapped_record {
+            state.credential_quota_propagated = true;
+            if let Some(own) = &record.independent_state
+                && live_shadow
+                    .as_ref()
+                    .is_none_or(|live| live.updated_at <= own.updated_at)
+            {
+                state.credential_quota_shadow = Some(Box::new(own.clone_shallow()));
+            } else if let Some(live) = live_shadow {
+                state.credential_quota_shadow = Some(Box::new(live));
+            }
+        }
     }
     auth.generation = auth.generation.saturating_add(1);
     auth.updated_at = Some(updated_at);

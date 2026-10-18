@@ -1461,6 +1461,8 @@ fn auth_json_matches_go() {
             },
             updated_at: Some(at("2026-01-01T12:00:00Z")),
             cooldown_recorded_seq: 0,
+            credential_quota_shadow: None,
+            credential_quota_propagated: false,
         },
     );
     let bare = Auth {

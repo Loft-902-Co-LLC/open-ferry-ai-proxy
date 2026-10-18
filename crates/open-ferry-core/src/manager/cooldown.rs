@@ -15,6 +15,12 @@
 //! OpenAI-compatible provider or per credential.
 //!
 //! Deviations from upstream:
+//! - A model's own cooldown beneath a credential-wide quota cooldown is
+//!   kept (upstream's Devin quota change, b946d54e). Upstream's Devin-only
+//!   `isDevinQuotaExhaustionMessage` checks are treated as false, so only a
+//!   `credential_scope` failure wraps the sibling models; the revalidation
+//!   scheduling and quota restoration that only Devin triggers aren't
+//!   ported.
 //! - Model states are walked in key order, where Go's map order is random.
 //! - The backoff level saturates where Go's shift would overflow.
 //! - Result policies and hooks aren't ported.
@@ -315,6 +321,8 @@ pub(crate) fn merge_model_state(target: &mut ModelState, source: &ModelState) {
         cooldown_recorded_seq: target
             .cooldown_recorded_seq
             .max(source.cooldown_recorded_seq),
+        credential_quota_shadow: None,
+        credential_quota_propagated: false,
     };
     // The newer snapshot wins whole, the preferred state's on a tie.
     merged.quota = merge_quota_observation(merged.quota, &fallback.quota);
@@ -333,6 +341,25 @@ pub(crate) fn merge_model_state(target: &mut ModelState, source: &ModelState) {
     } else if merged.unavailable || merged.quota.exceeded {
         merged.status = Status::Error;
     }
+    // The own layer and the wrap's mark come from either side (the newer
+    // wins) while the merged state is wrapped. The reporting model carries
+    // the outer reason "quota", so a wrap is told by the mark and the shadow
+    // as well as by the propagated reason.
+    if merged.quota.reason == "credential_quota"
+        || merged.quota.reason == "quota"
+        || target.credential_quota_propagated
+        || source.credential_quota_propagated
+        || target.credential_quota_shadow.is_some()
+        || source.credential_quota_shadow.is_some()
+    {
+        let shadow = preferred
+            .credential_quota_shadow
+            .as_ref()
+            .or(fallback.credential_quota_shadow.as_ref());
+        merged.credential_quota_shadow = shadow.map(|shadow| Box::new(shadow.clone_shallow()));
+        merged.credential_quota_propagated =
+            target.credential_quota_propagated || source.credential_quota_propagated;
+    }
     *target = merged;
 }
 
@@ -345,7 +372,24 @@ pub(crate) fn reset_model_state(state: &mut ModelState, now: Timestamp) {
     state.last_error = None;
     apply_cooldown_fields(&mut state.quota, QuotaState::default());
     state.cooldown_recorded_seq = 0;
+    state.credential_quota_shadow = None;
+    state.credential_quota_propagated = false;
     state.updated_at = Some(now);
+}
+
+/// Takes a model state out from under a credential-wide quota cooldown that
+/// has run out: its own layer comes back if it is still live, and a clean
+/// state otherwise, and the mark of the wrap goes either way so that a later
+/// wrap snapshots fresh state (upstream's inline normalization in
+/// `MarkResult`).
+fn unwrap_expired_quota(state: &mut ModelState, now: Timestamp) {
+    match state.credential_quota_shadow.take() {
+        Some(shadow) if is_model_state_active_cooldown(&shadow, now) => {
+            // The shadow's own watermark comes with it.
+            *state = shadow.clone_shallow();
+        }
+        _ => reset_model_state(state, now),
+    }
 }
 
 /// Whether a state still holds a model out (upstream's
@@ -515,10 +559,14 @@ pub(crate) fn clear_cooldown_state_for_auth(auth: &mut Auth, now: Timestamp) -> 
             || !is_zero(state.next_retry_after)
             || state.quota.exceeded
             || !is_zero(state.quota.next_recover_at)
+            || state.credential_quota_shadow.is_some()
+            || state.credential_quota_propagated
         {
             state.unavailable = false;
             state.next_retry_after = None;
             apply_cooldown_fields(&mut state.quota, QuotaState::default());
+            state.credential_quota_shadow = None;
+            state.credential_quota_propagated = false;
             state.updated_at = Some(now);
             changed = true;
         }
@@ -677,6 +725,29 @@ fn apply_outcome(
     let Some(mut state) = auth.model_states.remove(&key) else {
         return;
     };
+    // A credential-wide quota cooldown still in force, as this call finds it.
+    let wrap_live =
+        auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now);
+    // A wrap that has run out is taken off before this result applies, so
+    // that its own layer comes back and a later wrap snapshots fresh state.
+    if (state.credential_quota_propagated || state.quota.reason == "credential_quota")
+        && !is_credential_quota_active(&auth.quota, now)
+    {
+        unwrap_expired_quota(&mut state, now);
+    }
+    // While the credential-wide cooldown wraps the model, a failure of its
+    // own is applied to its own layer, so that its deadline and backoff
+    // never inherit the credential's, and the outer fields are composed from
+    // both layers below. A credential-wide failure refreshes the outer layer
+    // and is never the model's own.
+    let saved_outer = state.clone_shallow();
+    let own_layer_pending = !result.credential_scope && wrap_live;
+    if own_layer_pending {
+        state = match state.credential_quota_shadow.take() {
+            Some(shadow) => shadow.clone_shallow(),
+            None => ModelState::default(),
+        };
+    }
     state.unavailable = true;
     state.status = Status::Error;
     state.updated_at = Some(now);
@@ -774,8 +845,48 @@ fn apply_outcome(
                         ..QuotaState::default()
                     },
                 );
+                // A failure of the model's own re-derives its own layer below,
+                // so a stale one goes. A credential-wide report keeps the
+                // layer it finds, and only refreshes the outer one.
+                if !result.credential_scope {
+                    state.credential_quota_shadow = None;
+                } else if !state.credential_quota_propagated
+                    && saved_outer.quota.reason != "credential_quota"
+                {
+                    // The reporting model's first wrap keeps the block of its
+                    // own that is still live, an ordinary 429 of the model
+                    // included. An outer `credential_quota` instead proves
+                    // an earlier wrap, which is never the model's own.
+                    state.credential_quota_shadow = after(prev_retry_after, now).then(|| {
+                        let mut own = saved_outer.clone_shallow();
+                        own.next_retry_after = prev_retry_after;
+                        own.unavailable = true;
+                        own.status = Status::Error;
+                        Box::new(own)
+                    });
+                }
                 if result.credential_scope && !disable_cooling {
                     for other in auth.model_states.values_mut() {
+                        // A wrap that has run out comes off first, so that a
+                        // stale mark can't keep a fresh block from being kept.
+                        if (other.credential_quota_propagated
+                            || other.quota.reason == "credential_quota")
+                            && !is_credential_quota_active(&auth.quota, now)
+                        {
+                            unwrap_expired_quota(other, now);
+                        }
+                        // The first wrap keeps the sibling's live block of its
+                        // own beneath the credential's; a healthy or already
+                        // wrapped sibling has none. The mark stops a later
+                        // wrap from taking its own earlier layer for one.
+                        let already_wrapped = other.credential_quota_propagated
+                            || other.quota.reason == "credential_quota";
+                        if !already_wrapped {
+                            other.credential_quota_shadow =
+                                is_model_state_active_cooldown(other, now)
+                                    .then(|| Box::new(other.clone_shallow()));
+                        }
+                        other.credential_quota_propagated = true;
                         other.unavailable = true;
                         other.status = Status::Error;
                         let mut other_quota_next = credential_next;
@@ -811,6 +922,10 @@ fn apply_outcome(
                         auth.quota.next_recover_at = auth_next;
                         auth.quota.backoff_level = level;
                         auth.next_retry_after = auth_next;
+                        // The reporting model is wrapped too, so a later
+                        // credential-wide report from another model can't
+                        // keep its state as a block of its own.
+                        state.credential_quota_propagated = true;
                     }
                 }
             }
@@ -848,6 +963,42 @@ fn apply_outcome(
     // one reached the credential and every sibling state above, so they take
     // it too; a sibling's later, longer model cooldown re-stamps only its own.
     state.cooldown_recorded_seq = dispatched;
+    if own_layer_pending {
+        // The outer fields are composed from the wrap, which was saved, and
+        // from the model's own layer, which has just been updated in place.
+        let own = state.clone_shallow();
+        let mut outer = saved_outer;
+        outer.credential_quota_shadow =
+            is_model_state_active_cooldown(&own, now).then(|| Box::new(own));
+        outer.cooldown_recorded_seq = dispatched;
+        // Wrapped by definition: marked, so that a later credential-wide
+        // report can't take it for an unwrapped state.
+        outer.credential_quota_propagated = true;
+        outer.unavailable = true;
+        outer.status = Status::Error;
+        outer.updated_at = Some(now);
+        outer.last_error.clone_from(&state.last_error);
+        outer.status_message.clone_from(&state.status_message);
+        if state.next_retry_after > outer.next_retry_after {
+            outer.next_retry_after = state.next_retry_after;
+        }
+        if auth.quota.next_recover_at > outer.next_retry_after {
+            outer.next_retry_after = auth.quota.next_recover_at;
+        }
+        if !(outer.quota.exceeded && outer.quota.reason == "credential_quota") {
+            apply_cooldown_fields(
+                &mut outer.quota,
+                QuotaState {
+                    exceeded: true,
+                    reason: "credential_quota".into(),
+                    next_recover_at: auth.quota.next_recover_at,
+                    backoff_level: auth.quota.backoff_level,
+                    ..QuotaState::default()
+                },
+            );
+        }
+        state = outer;
+    }
     if result.credential_scope && !disable_cooling && status == 429 {
         auth.cooldown_recorded_seq = dispatched;
         for other in auth.model_states.values_mut() {

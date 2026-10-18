@@ -84,6 +84,7 @@ use super::credential::{
 };
 use super::merge::{ResponseCredentials, merge_refreshed_auth_with, normalize_credential_metadata};
 use super::models::Resolver;
+use super::quota_signals::merge_quota_observation;
 use super::refresh::clear_unauthorized_model_states;
 use super::select::{executor_key_from_auth, lookup_executor};
 use super::text::{canonical_model_key, equal_fold, go_lower};
@@ -1521,7 +1522,13 @@ impl Manager {
             if is_credential_quota_active(&existing_auth.quota, now) {
                 auth.unavailable = existing_auth.unavailable;
                 auth.next_retry_after = existing_auth.next_retry_after;
+                // The cooldown stays; the newest snapshot of the quota,
+                // from either, is kept.
+                let observation =
+                    merge_quota_observation(std::mem::take(&mut auth.quota), &existing_auth.quota);
                 auth.quota = existing_auth.quota.clone();
+                auth.quota.observed_at = observation.observed_at;
+                auth.quota.signals = observation.signals;
                 if auth.status == Status::Active {
                     auth.status = existing_auth.status;
                 }

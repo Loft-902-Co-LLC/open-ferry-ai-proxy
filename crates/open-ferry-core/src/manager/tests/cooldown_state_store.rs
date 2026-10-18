@@ -280,6 +280,8 @@ fn file_cooldown_state_store_save_load_and_clean_stale() {
             ..AuthError::default()
         }),
         updated_at: Some(at(0, 0, 0)),
+        independent_state: None,
+        credential_quota_propagated: false,
         quota_check: None,
     };
 
@@ -1536,6 +1538,8 @@ async fn every_free_text_field_of_a_saved_record_is_scrubbed() {
             quota,
             updated_at: Some(h.now()),
             cooldown_recorded_seq: 0,
+            credential_quota_shadow: None,
+            credential_quota_propagated: false,
         },
     );
     h.manager.register_unsaved(first).expect("register");

@@ -158,6 +158,30 @@ pub struct ModelState {
     /// (upstream's `cooldownRecordedSeq`). Runtime only, never saved: zero
     /// after a restart, so a restored cooldown is clearable by any success.
     pub cooldown_recorded_seq: u64,
+    /// This model's own cooldown while the outer fields present the
+    /// credential-wide quota cooldown over it, so what the model's own
+    /// failures justify isn't lost under the credential's (upstream's
+    /// `credentialQuotaShadow`). `None` when no live block of its own lies
+    /// beneath an outer `credential_quota`. A shadow never holds a shadow.
+    /// Saved in the cooldown record's `independent_state`.
+    pub credential_quota_shadow: Option<Box<ModelState>>,
+    /// Whether the credential-wide quota cooldown has wrapped this state,
+    /// which tells "no block of its own" from "not wrapped yet" (upstream's
+    /// `credentialQuotaPropagated`). Saved in the cooldown record's
+    /// `credential_quota_propagated`.
+    pub credential_quota_propagated: bool,
+}
+
+impl ModelState {
+    /// A copy without the shadow (upstream's `cloneShallow`): a shadow never
+    /// nests.
+    #[must_use]
+    pub fn clone_shallow(&self) -> ModelState {
+        ModelState {
+            credential_quota_shadow: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// One credential and its runtime state (upstream's `Auth`).
