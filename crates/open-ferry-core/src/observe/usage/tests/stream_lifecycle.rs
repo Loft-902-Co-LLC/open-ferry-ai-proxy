@@ -278,7 +278,7 @@ fn a_canceled_claude_stream_is_a_failure_that_keeps_its_usage() {
 }
 
 /// Upstream's `TestGeminiVertexStream_ClientDisconnectAfterTerminalEventIsNotFailed`
-/// (v8.0.20), for the tap: a Vertex AI stream whose client goes away after
+/// (v8.0.27), for the tap: a Vertex AI stream whose client goes away after
 /// the chunk with the finish reason is complete, with its counts. The API
 /// key and service account rows are one here, as the tap reads both alike.
 #[test]

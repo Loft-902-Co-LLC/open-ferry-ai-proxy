@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6416_test.go (v8.0.20, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6416_test.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A call's outcome counts only for the tokens or API key it ran with:

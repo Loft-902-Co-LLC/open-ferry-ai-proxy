@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/auth/filestore.go (jsonEqual) (v8.0.20, MIT).
+// Ported from CLIProxyAPI sdk/auth/filestore.go (jsonEqual) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Credential JSON as upstream reads, writes and compares it: Go's

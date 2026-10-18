@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_request_test.go
-// (v8.0.20, MIT), and interactions_openai_responses_user_turn_test.go
-// (v8.0.20, MIT).
+// (v8.0.27, MIT), and interactions_openai_responses_user_turn_test.go
+// (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // 24 of the 30 tests are ported whole, and two in part. Dropped, because an
@@ -1078,7 +1078,7 @@ fn embedded_json_keeps_numbers_as_written() {
     assert_eq!(out["input"][1]["result"].to_string(), spelled, "{out}");
 }
 
-// The v8.0.20 tests of interactions_openai_responses_user_turn_test.go.
+// The v8.0.27 tests of interactions_openai_responses_user_turn_test.go.
 
 const TURN_HELLO: &str =
     r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}"#;

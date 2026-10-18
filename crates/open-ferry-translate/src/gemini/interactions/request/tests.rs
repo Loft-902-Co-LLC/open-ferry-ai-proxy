@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/gemini/interactions/interactions_gemini_common_test.go
-// and interactions_gemini_file_data_test.go (v8.0.20, MIT), and
+// and interactions_gemini_file_data_test.go (v8.0.27, MIT), and
 // interactions_gemini_user_turn_test.go, interactions_gemini_uri_test.go and
-// interactions_gemini_instruction_test.go (v8.0.20, MIT).
+// interactions_gemini_instruction_test.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The request translators' tests: upstream's request tests are here, and
@@ -843,7 +843,7 @@ fn quoted_data_is_cut_at_escapes_gjson_does_not_read() {
     }
 }
 
-// The v8.0.20 tests: interactions_gemini_user_turn_test.go,
+// The v8.0.27 tests: interactions_gemini_user_turn_test.go,
 // interactions_gemini_uri_test.go and interactions_gemini_instruction_test.go.
 
 /// `interactionsGeminiHistory`.

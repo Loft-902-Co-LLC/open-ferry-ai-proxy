@@ -3,7 +3,7 @@
 // speechRoutingModel, speechModelBase, buildXAISpeechPayload,
 // mapXAISpeechVoice, speechOutputFormat, speechCodecFormat,
 // speechContentType, speechContentTypeNeedsDefault,
-// speechResponseContentType) (v8.0.20, MIT).
+// speechResponseContentType) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The speech endpoints, `POST /v1/audio/speech` (OpenAI's) and `POST

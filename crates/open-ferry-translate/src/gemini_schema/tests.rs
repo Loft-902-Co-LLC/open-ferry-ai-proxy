@@ -1,4 +1,4 @@
-//! Ports internal/util/gemini_schema_test.go (v8.0.20).
+//! Ports internal/util/gemini_schema_test.go (v8.0.27).
 //!
 //! Upstream runs most of these tests against several of its cleaners. Only
 //! `CleanJSONSchemaForGeminiJSONSchema` is ported, so they run against it. A
@@ -1503,7 +1503,7 @@ fn deleting_object_keys_together_matches_one_at_a_time() {
     assert_eq!(together(&paths), one_at_a_time(&paths), "extensions");
 }
 
-// TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394 (v8.0.20),
+// TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394 (v8.0.27),
 // for this cleaner only.
 #[test]
 fn enforces_object_type_for_properties() {

@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/registry/codex_client_models_test.go
-//! (v8.0.20, MIT).
+//! (v8.0.27, MIT).
 //!
 //! Changed: `TestEmbeddedCodexClientModelsCatalogIsValid` checks the built-in
 //! catalog and its default template; the snapshot and revision checks are

@@ -2,7 +2,7 @@
 // (TestApplyPatchTranslationError, TestApplyPatchFinalizeOptionalCanonicalState,
 // TestApplyPatchTokenUsageHelperRetainsFailureState,
 // TestApplyPatchInteractionsOnlyValidSourceDoneClosesTransport,
-// TestApplyPatchCanceledEOFStillRecordsFailure) (v8.0.20, MIT).
+// TestApplyPatchCanceledEOFStillRecordsFailure) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Upstream's `helps` stream helpers, through what holds their state here:

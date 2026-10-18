@@ -4,7 +4,7 @@
 // geminiInteractionsPayloadConfigSource, geminiInteractionsPayloadConfigInput,
 // geminiInteractionsSameByteSlice, applyGeminiInteractionsRevisionHeader,
 // applyGeminiInteractionsRequestHeaders), with the translation errors
-// (v8.0.20, MIT).
+// (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body and headers of a native Interactions call, and its answer.

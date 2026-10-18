@@ -4,7 +4,7 @@
 // TestCodexExecutorDirectOpenAIImageGenerationStreamsImagesEndpoint,
 // TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForJSON,
 // TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForMultipart
-// and TestCodexExecutorDirectOpenAIImage25Models) (v8.0.20, MIT).
+// and TestCodexExecutorDirectOpenAIImage25Models) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OpenAI Images endpoints served through Codex, end to end against a

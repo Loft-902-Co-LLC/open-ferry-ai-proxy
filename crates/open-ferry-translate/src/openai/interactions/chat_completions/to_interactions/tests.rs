@@ -520,7 +520,7 @@ fn request_arguments_keep_their_numbers() {
     );
 }
 
-// The v8.0.20 tests of openai_interactions_user_turn_test.go.
+// The v8.0.27 tests of openai_interactions_user_turn_test.go.
 
 const USER_TURN_FILE_ID: &str = r#"{"type":"file","file":{"file_id":"file-absent"}}"#;
 const USER_TURN_EMPTY_AUDIO: &str = r#"{"type":"input_audio","input_audio":{"format":"wav"}}"#;

@@ -369,7 +369,7 @@ Against CLIProxyAPI v8.0.20 (commit `0f96f568e4db`), built with go1.26.4, with `
 To rerun it and update the summary above, use Go 1.26 ([UPSTREAM.md](UPSTREAM.md#checking-parity) says how to get it) and a CLIProxyAPI checkout at the pinned tag beside this one:
 
 ```sh
-git clone --branch v8.0.20 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
+git clone --branch v8.0.27 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI --go go1.26.4 --random 1000 --seed 13 --summary README.md
 ```
 

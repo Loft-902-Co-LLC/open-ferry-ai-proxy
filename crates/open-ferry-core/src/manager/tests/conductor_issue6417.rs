@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6417_test.go (v8.0.20, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6417_test.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A refresh that started before the credential's tokens were replaced

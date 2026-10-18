@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/pkce.go and oauth_server.go,
-// which internal/auth/claude repeats (v8.0.20, MIT), and parse_oauth_callback
+// which internal/auth/claude repeats, and parse_oauth_callback
 // from internal/misc/oauth.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // Query and URL parsing also ported from Go's net/url/url.go (ParseQuery,

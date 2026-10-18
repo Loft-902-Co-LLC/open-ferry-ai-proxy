@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions/interactions_codex_test.go
-// and noop_optimization_test.go (v8.0.20, MIT), and interactions_codex_uri_test.go
-// (v8.0.20, MIT).
+// and noop_optimization_test.go (v8.0.27, MIT), and interactions_codex_uri_test.go
+// (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All ten tests of interactions_codex_test.go are ported whole, and all of

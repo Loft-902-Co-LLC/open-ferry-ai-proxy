@@ -1,12 +1,12 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (legacyConfig) and
 // the structs it holds in internal/config, internal/pluginstore and
-// internal/registry (v8.0.20, MIT): their YAML field names, as yaml.v3
+// internal/registry (v8.0.27, MIT): their YAML field names, as yaml.v3
 // reads them with reflection.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The field names of upstream's `legacyConfig` and the structs it holds,
 //! for [`super::validate`]'s strict decode (`KnownFields`). The tables were
-//! generated from v8.0.15's types and checked against v8.0.20's; a field is
+//! generated from v8.0.15's types and checked against v8.0.27's; a field is
 //! listed by its YAML key, with the struct it decodes into when that
 //! struct's own fields are checked.
 
