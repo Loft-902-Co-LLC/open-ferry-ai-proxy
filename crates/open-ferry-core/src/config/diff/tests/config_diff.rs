@@ -15,7 +15,7 @@
 // TestBuildConfigChangeDetails_RemoteManagementSecretUpdated,
 // TestBuildConfigChangeDetails_RemoteManagementBaseURL,
 // TestBuildConfigChangeDetails_CountBranches, TestTrimStrings)
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The change details of the settings open-ferry types.

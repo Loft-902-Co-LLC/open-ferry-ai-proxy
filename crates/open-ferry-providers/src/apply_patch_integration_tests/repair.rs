@@ -4,7 +4,7 @@
 // TestApplyPatchRepairXAIWebsocketPersistentFailureRetry,
 // TestApplyPatchRepairResponsesSourceTerminalNonStream,
 // TestApplyPatchRepairXAIWebsocketCompactionUsage,
-// TestApplyPatchRepairOrdinaryEmptyHTTPPassthrough) (v8.0.27, MIT).
+// TestApplyPatchRepairOrdinaryEmptyHTTPPassthrough) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `apply_patch_repair_test.go`: a Responses source whose call to

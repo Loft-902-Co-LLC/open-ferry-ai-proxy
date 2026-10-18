@@ -7,7 +7,7 @@
 // TestApplyPatchBridgeLiveWebsocketPreview,
 // TestApplyPatchBridgeOrdinaryFunctionStreamControl,
 // TestApplyPatchBridgeInvalidStreamArguments, applyPatchTestPreviewChunks,
-// newApplyPatchCompatTestExecutor, applyPatchTestChatReply) (v8.0.27, MIT).
+// newApplyPatchCompatTestExecutor, applyPatchTestChatReply) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The bridge end to end: a client's custom `apply_patch` tool declared to

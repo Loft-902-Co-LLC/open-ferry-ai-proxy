@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/interactions/init.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/interactions/init.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Gemini and Interactions translators' registrations: Interactions

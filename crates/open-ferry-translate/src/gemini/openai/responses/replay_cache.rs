@@ -6,7 +6,7 @@
 // normalizeAntigravityFunctionCallPartReplayItem,
 // evictOldestAntigravityReasoningReplayEntries,
 // purgeExpiredAntigravityReasoningReplayCache), with the cleanup interval from
-// internal/cache/signature_cache.go (CacheCleanupInterval) (v8.0.27, MIT).
+// internal/cache/signature_cache.go (CacheCleanupInterval) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The in-process reasoning replay cache: items a response wants back on the

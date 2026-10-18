@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/apply_patch_test.go
 // (TestInteractionsApplyPatchDeclarationAndHistory,
-// TestInteractionsApplyPatchWinningDeclarationAndNegativeCompatibility) (v8.0.27, MIT).
+// TestInteractionsApplyPatchWinningDeclarationAndNegativeCompatibility) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The client's `apply_patch` custom tool as the request translator

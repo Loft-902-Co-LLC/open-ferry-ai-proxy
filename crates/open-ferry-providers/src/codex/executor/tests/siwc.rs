@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth_test.go
-// and codex_executor_compact_test.go (v8.0.27, MIT).
+// and codex_executor_compact_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use open_ferry_core::auth::codex_refresh::CodexPersistIntent;

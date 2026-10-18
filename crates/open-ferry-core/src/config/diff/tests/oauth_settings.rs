@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/watcher/diff/oauth_settings_test.go
 // (TestDiffOAuthSettingsChanges, TestDiffOAuthSettingsChanges_Reordering)
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `oauth-settings` change lines.

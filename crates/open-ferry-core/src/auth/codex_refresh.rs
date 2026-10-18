@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/refresh_patch.go and
-// sdk/cliproxy/auth/codex_persist.go (v8.0.27, MIT).
+// sdk/cliproxy/auth/codex_persist.go (v8.0.32, MIT).
 //! Independent, version-checked Codex token partitions and save intents.
 
 use std::fmt;

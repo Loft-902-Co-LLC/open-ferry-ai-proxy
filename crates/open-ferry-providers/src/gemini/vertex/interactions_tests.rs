@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/runtime/executor/gemini_vertex_executor_interactions_test.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/gemini_vertex_executor_interactions_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Native Interactions and the default bridge against loopback fakes.

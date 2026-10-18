@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/openai_auth.go and errors.go,
-// sdk/auth/codex.go and sdk/auth/codex_device.go (v8.0.27, MIT).
+// sdk/auth/codex.go and sdk/auth/codex_device.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex's OAuth: the browser login with PKCE, the device-code login, the

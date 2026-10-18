@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (ExpirationTime,
 // AccessTokenExpirationTime, HasValidAccessToken and their helpers) and
-// authAccessToken in sdk/cliproxy/auth/conductor_refresh.go (v8.0.27, MIT).
+// authAccessToken in sdk/cliproxy/auth/conductor_refresh.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! When a credential's tokens expire, read from its metadata.
@@ -532,7 +532,7 @@ mod tests {
     }
 
     // Upstream's ExpirationTime and AccessTokenExpirationTime with a
-    // RejectedAccessToken (v8.0.27).
+    // RejectedAccessToken (v8.0.32).
     #[test]
     fn rejected_access_token_has_expired() {
         let future = Utc::now() + TimeDelta::hours(1);

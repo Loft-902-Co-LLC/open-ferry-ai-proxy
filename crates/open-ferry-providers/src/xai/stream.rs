@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor_stream.go
 // (ExecuteStream's reading goroutine) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI's SSE stream, read a line at a time and translated to the client's
@@ -147,7 +147,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
 }
 
 /// The error a bridge or translation failure ends the stream with. It keeps
-/// the usage the stream read (v8.0.27's `StopApplyPatchStreamWithUsage`).
+/// the usage the stream read (v8.0.32's `StopApplyPatchStreamWithUsage`).
 fn apply_patch_failure() -> ExecError {
     ExecError::from(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE)).with_usage_kept()
 }

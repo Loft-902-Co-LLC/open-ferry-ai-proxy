@@ -14,7 +14,7 @@ Both legacy and v8 YAML layouts are accepted. The v8 management API edits the v8
 
 The compatibility-only `signin-with-chatgpt-identifier` has no runtime effect and warns once per load when set, without logging its value.
 
-These other switches' configuration contract is available for the v8.0.27 sync. Runtime behavior is wired by the corresponding provider and server changes.
+These other switches' configuration contract is available for the v8.0.32 sync. Runtime behavior is wired by the corresponding provider and server changes.
 
 The v8.0.32 contract also carries these settings for compatibility. open-ferry ignores them because it does not impersonate clients or cloak Claude requests.
 

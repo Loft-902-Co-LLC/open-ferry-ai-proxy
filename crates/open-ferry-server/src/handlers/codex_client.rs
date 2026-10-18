@@ -1,6 +1,6 @@
 // Ported from prepareCodexMultiAgentV2Tools and prepareCodexOrphanDelegation
 // in CLIProxyAPI sdk/api/handlers/openai/openai_responses_handlers.go
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Codex client's Responses request, readied before it is routed.

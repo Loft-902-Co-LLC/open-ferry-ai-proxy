@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI (v8.0.27, MIT): internal/translator/common/claude_system.go,
+// Ported from CLIProxyAPI (v8.0.32, MIT): internal/translator/common/claude_system.go,
 // internal/translator/common/claude_messages.go, internal/util/claude_attribution.go
 // and internal/util/claude_tool_id.go, and code repeated in
 // internal/translator/claude/openai/chat-completions/claude_openai_request.go and

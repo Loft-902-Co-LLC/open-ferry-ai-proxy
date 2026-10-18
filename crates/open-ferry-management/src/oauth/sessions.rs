@@ -4,7 +4,7 @@
 // GetOAuthSessionDetails, guardOAuthSessionPendingForSave,
 // oauthSessionErrorWithCause, ValidateOAuthState, NormalizeOAuthProvider,
 // NormalizeOAuthCallbackProvider, NormalizePluginOAuthCallbackProvider,
-// WriteOAuthCallbackFileForPendingSession) (v8.0.27, MIT).
+// WriteOAuthCallbackFileForPendingSession) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OAuth login sessions, each under the `state` its login sent to the

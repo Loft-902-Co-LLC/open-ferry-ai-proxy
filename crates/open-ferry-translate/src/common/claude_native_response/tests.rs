@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/claude_native_sse_test.go
-// and claude_native_response_test.go (v8.0.27, MIT).
+// and claude_native_response_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};

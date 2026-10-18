@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/api/handlers/gemini/interactions_handlers_test.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI sdk/api/handlers/gemini/interactions_handlers_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use crate::stream::tests::pre_first_token::check_protocol;

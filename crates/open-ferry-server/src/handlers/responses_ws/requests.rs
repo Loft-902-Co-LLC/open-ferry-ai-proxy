@@ -7,7 +7,7 @@
 // normalizeResponsesWebsocketPassthroughRequest in CLIProxyAPI
 // sdk/api/handlers/openai/openai_responses_websocket_requests.go, and
 // inputContainsFullTranscript and inputWithoutCompactionItems in
-// sdk/api/handlers/openai/openai_responses_websocket_prewarm.go (v8.0.27,
+// sdk/api/handlers/openai/openai_responses_websocket_prewarm.go (v8.0.32,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

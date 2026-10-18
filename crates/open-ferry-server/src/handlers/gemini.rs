@@ -2,7 +2,7 @@
 // handleStreamGenerateContent, handleCountTokens, handleGenerateContent and
 // forwardGeminiStream in CLIProxyAPI sdk/api/handlers/gemini/gemini_handlers.go,
 // and the "gemini" case of convertModelToMap in
-// internal/registry/model_registry.go (v8.0.27, MIT).
+// internal/registry/model_registry.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Gemini API: `GET /v1beta/models`, `GET /v1beta/models/<name>` and
