@@ -1,7 +1,7 @@
 // Ported from shouldHandleResponsesWebsocketPrewarmLocally,
 // normalizeResponsesWebsocketPrewarmFollowup and
 // syntheticResponsesWebsocketPrewarmPayloads in CLIProxyAPI
-// sdk/api/handlers/openai/openai_responses_websocket_prewarm.go (v8.0.20,
+// sdk/api/handlers/openai/openai_responses_websocket_prewarm.go (v8.0.27,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

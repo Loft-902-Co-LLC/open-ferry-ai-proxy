@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
 // (XAIWebsocketsExecutor, XAIAutoExecutor, xaiWebsocketsEnabled,
-// buildXAIResponsesWebsocketURL, CloseExecutionSession) (v8.0.20, MIT).
+// buildXAIResponsesWebsocketURL, CloseExecutionSession) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket upstream for xAI: streaming calls over a

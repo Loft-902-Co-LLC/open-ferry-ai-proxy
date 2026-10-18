@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_response_test.go
-// (v8.0.20, MIT).
+// (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // All 44 tests are ported, with the response-side test of
@@ -8,7 +8,7 @@
 // is in the request's tests, since it hashes requests as well.
 // responses_perf_test.go holds only benchmarks and is not ported. Tests of
 // our own, marked as such, check finalizing a stream that had no lines, and
-// the translator side of v8.0.20's issue6381_responses_eof_test.go, whose
+// the translator side of v8.0.27's issue6381_responses_eof_test.go, whose
 // tests drive the executor.
 //
 // Table-driven tests run their cases in a loop rather than as subtests.
@@ -2120,7 +2120,7 @@ fn stream_echo_keeps_negative_zero() {
     }
 }
 
-/// Not upstream's: the translator side of v8.0.20's
+/// Not upstream's: the translator side of v8.0.27's
 /// `TestOpenAICompatExecutorResponsesEOFAfterFinishReasonCompletesStream`.
 /// Once a finish reason closed the message, a stream that ends without
 /// `[DONE]` can be finished by sending `[DONE]`, and late usage still counts.
@@ -2162,7 +2162,7 @@ fn eof_without_a_closing_finish_reason_cannot_finish_the_stream() {
     assert!(feed.0.can_finalize_response_stream());
 }
 
-/// Not upstream's: the translator side of v8.0.20's
+/// Not upstream's: the translator side of v8.0.27's
 /// `TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonCompletesStream`.
 /// An `apply_patch` call that a finish reason closed doesn't fail the stream
 /// at its end; one still open does.

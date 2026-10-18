@@ -21,7 +21,7 @@
 // accessTokenForFingerprint), sdk/cliproxy/auth/conductor_execution.go
 // (requestedModelAliasFromOptions, generateFromOptions),
 // and sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
-// GenerateFromContext, GenerateEnabled) (v8.0.20, MIT).
+// GenerateFromContext, GenerateEnabled) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The usage reporter: the [`Tap`] that turns each executor call of a
@@ -1209,7 +1209,7 @@ impl Call {
             (_, Outcome::Canceled) if !self.answered => {
                 Some(failure(Detail::default(), Failure::canceled()))
             }
-            // The answer came and counts, though the call failed (v8.0.20's
+            // The answer came and counts, though the call failed (v8.0.27's
             // `PublishFailure` with the usage observed).
             (_, Outcome::Failed) if error.keeps_usage => {
                 let detail = self.kept_usage();

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_responses_signature.go
-// (v8.0.20, MIT), with its compat replay of an unknown-format
+// (v8.0.27, MIT), with its compat replay of an unknown-format
 // encrypted_content.
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -305,7 +305,7 @@ pub(crate) mod tests {
         assert!(get(&body, "input.0.encrypted_content").is_none(), "{body}");
     }
 
-    // v8.0.20's
+    // v8.0.27's
     // TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesUnknownFormatEncryptedContent.
     #[test]
     fn compat_preserves_unknown_format_encrypted_content() {

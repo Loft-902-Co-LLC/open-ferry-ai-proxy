@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/clienterror/client_error.go (IsRequestFault,
-// IsItemNotPersisted, IsClaudeThreadNotFound and the body checks) (v8.0.20,
+// IsItemNotPersisted, IsClaudeThreadNotFound and the body checks) (v8.0.27,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -193,7 +193,7 @@ mod tests {
             404,
             r#"{"error":{"type":"not_found_error","message":"Not Found"}}"#
         ));
-        // v8.0.20's "Claude missing thread state plain text".
+        // v8.0.27's "Claude missing thread state plain text".
         assert!(is_request_fault(
             404,
             "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."

@@ -112,7 +112,7 @@ fn a_plain_reply_is_counted_as_its_completed_event() {
     assert_eq!(record.get("failed").and_then(|v| v.as_bool()), Some(false));
 }
 
-// v8.0.20's `upstreamUsage.PublishFailure`: an error that keeps the answer's
+// v8.0.27's `upstreamUsage.PublishFailure`: an error that keeps the answer's
 // usage makes a failure with its counts; any other error, one without.
 #[test]
 fn a_failure_keeps_the_counts_only_when_its_error_does() {

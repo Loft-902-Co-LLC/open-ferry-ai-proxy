@@ -6,7 +6,7 @@
 // IsModelSubstituted, isDatedModelAlias, isModelDateSuffix,
 // isModelNumericVersionSuffix, isModelDigits) and
 // stream_response_model_observer.go (StreamResponseModelObserver)
-// (v8.0.20, MIT).
+// (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model an upstream says it served, read from its answer, and whether

@@ -30,7 +30,7 @@ Options:
   --note <text>              what the machine is, for the report: its VM size
                              and region, say (required)
   --ref <ref>                open-ferry's branch, tag or commit (default: main)
-  --tag <tag>                CLIProxyAPI's tag (default: v8.0.20)
+  --tag <tag>                CLIProxyAPI's tag (default: v8.0.27)
   --dir <dir>                where everything goes (default: ~/ofp-bench)
   --repo <url>               open-ferry's repository (default: its GitHub one)
   --cliproxyapi-repo <url>   CLIProxyAPI's repository (default: its GitHub one)
@@ -47,7 +47,7 @@ EOF
 
 note=""
 ref="main"
-tag="v8.0.20"
+tag="v8.0.27"
 dir="$HOME/ofp-bench"
 repo="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy.git"
 cliproxyapi_repo="https://github.com/router-for-me/CLIProxyAPI.git"
