@@ -2859,9 +2859,18 @@ impl Manager {
             let auth = Arc::make_mut(&mut entry.auth);
             count_result(auth, result, now);
             // open-ferry's cap on long quota rests (see `quota_check`).
+            let rests = state.quota_checks.live_rests(&auth.id, &model_key, now);
             state.quota_checks.before_result(auth);
             let dispatched = self.current_execution_seq();
-            let stale = apply_result(&state.settings, auth, result, &model_key, now, dispatched);
+            let stale = apply_result(
+                &state.settings,
+                auth,
+                result,
+                &model_key,
+                now,
+                dispatched,
+                rests,
+            );
             let cap = state.settings.quota_check_after;
             state
                 .quota_checks

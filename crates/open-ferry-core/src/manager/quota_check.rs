@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use super::cooldown::{CallResult, StaleSuccess, add};
+use super::cooldown::{CallResult, LiveRests, StaleSuccess, add};
 use super::cooldown_store::QuotaCheckRecord;
 use super::text::canonical_model_key;
 use super::{Entry, Manager, Settings, Shared, State, lock};
@@ -329,6 +329,21 @@ impl QuotaChecks {
         }
     }
 
+    /// Which of the credential's and `model_key`'s provider resets still
+    /// hold at `now`, for a result about to be applied.
+    pub(crate) fn live_rests(&self, id: &str, model_key: &str, now: Timestamp) -> LiveRests {
+        let live = |scope: &str| {
+            self.rests
+                .get(&Self::key(id, scope))
+                .is_some_and(|rest| now < rest.reset_at)
+        };
+        let key = canonical_model_key(model_key);
+        LiveRests {
+            credential: live(CREDENTIAL),
+            model: !key.is_empty() && live(&key),
+        }
+    }
+
     /// Takes the leases of `auth`'s checks in flight off, before an outcome
     /// is applied to it.
     pub(crate) fn before_result(&mut self, auth: &mut Auth) {
@@ -365,10 +380,11 @@ impl QuotaChecks {
             // A success that predates the cooldown it didn't clear isn't
             // recovery, so the rest of that cooldown (its reset, backoff
             // and check claim) stays too.
-            if !stale.credential {
+            let kept = stale.quota || stale.credential;
+            if !kept {
                 self.rests.remove(&Self::key(&auth.id, CREDENTIAL));
             }
-            if !stale.model && !stale.credential {
+            if !kept && !stale.model {
                 self.rests.remove(&Self::key(&auth.id, &scope));
             }
         } else if result

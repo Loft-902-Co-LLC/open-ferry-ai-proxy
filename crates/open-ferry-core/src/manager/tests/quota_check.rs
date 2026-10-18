@@ -344,6 +344,148 @@ async fn a_stale_success_keeps_the_rest() {
     );
 }
 
+/// A result of a call dispatched as `execution_seq`: a success, or a quota
+/// answer resetting after `retry_after` (credential-wide when flagged).
+fn outcome(
+    success: bool,
+    execution_seq: u64,
+    retry_after: Option<Duration>,
+    credential_scope: bool,
+) -> crate::manager::CallResult {
+    use crate::auth::AuthError;
+    crate::manager::CallResult {
+        auth_id: "a".into(),
+        provider: "claude".into(),
+        model: MODEL.into(),
+        success,
+        execution_seq,
+        retry_after,
+        credential_scope,
+        error: (!success).then(|| AuthError {
+            code: "quota_exhausted".into(),
+            message: "QUOTA_EXHAUSTED".into(),
+            retryable: true,
+            http_status: 429,
+        }),
+        ..crate::manager::CallResult::default()
+    }
+}
+
+// Not upstream's: a model success is no recovery from an active
+// credential-wide quota (upstream keeps it), so it leaves the credential's
+// rest, its reset and its doubling be, as it leaves the cooldown.
+#[tokio::test(start_paused = true)]
+async fn a_model_success_keeps_the_credential_rest() {
+    let rig = Rig::new(HOUR, &[MODEL]);
+    let first = rig.h.manager.next_execution_seq();
+    let second = rig.h.manager.next_execution_seq();
+    let reset = rig.at(72 * HOUR);
+    rig.h
+        .manager
+        .mark_result(&outcome(false, second, Some(72 * HOUR), true));
+    let rests = rig.checks();
+    assert_eq!(rests.len(), 1, "{rests:?}");
+    assert_eq!(rests[0].wait, HOUR);
+    assert_eq!(rests[0].provider_reset_at, reset);
+
+    // The first call, dispatched before the answer, succeeds.
+    rig.h
+        .manager
+        .mark_result(&outcome(true, first, None, false));
+    assert_eq!(rig.checks(), rests, "the rest after a model success");
+
+    // One call checks at the cap's end, and its quota answer doubles.
+    rig.h.clock.advance(HOUR);
+    rig.answer(Answer::Quota(reset, true));
+    rig.executor.set_delay(Duration::from_secs(10));
+    let calls: Vec<_> = (0..6)
+        .map(|_| {
+            let manager = rig.h.manager.clone();
+            tokio::spawn(async move { call(&manager, MODEL).await })
+        })
+        .collect();
+    for task in calls {
+        assert!(!task.await.expect("join"));
+    }
+    assert_eq!(rig.reached(), 1, "one check, not every waiting call");
+    let rests = rig.checks();
+    assert_eq!(rests.len(), 1, "{rests:?}");
+    assert_eq!(rests[0].wait, 2 * HOUR);
+}
+
+// Not upstream's: the cap shortens a model cooldown to the check's time, so
+// a success from a call dispatched before the quota answer that arrives
+// after that time still meets a live provider reset; it isn't recovery and
+// keeps the rest.
+#[tokio::test(start_paused = true)]
+async fn a_stale_success_after_the_check_is_due_keeps_the_rest() {
+    let rig = Rig::new(MINUTE, &[MODEL]);
+    let first = rig.h.manager.next_execution_seq();
+    let second = rig.h.manager.next_execution_seq();
+    let reset = rig.at(72 * HOUR);
+    rig.h
+        .manager
+        .mark_result(&outcome(false, second, Some(72 * HOUR), false));
+    let rests = [check(MODEL, rig.at(MINUTE), reset, MINUTE)];
+    assert_eq!(rig.checks(), rests);
+
+    rig.h.clock.advance(MINUTE);
+    rig.h
+        .manager
+        .mark_result(&outcome(true, first, None, false));
+    assert_eq!(rig.checks(), rests, "the rest after a stale success");
+    assert!(
+        rig.h.get("a").model_states[MODEL].unavailable,
+        "the model is still resting"
+    );
+
+    // The next call is the check, and one check only.
+    rig.answer(Answer::Ok);
+    assert!(rig.call(MODEL).await, "the check");
+    assert_eq!(rig.reached(), 1);
+    assert_eq!(rig.checks(), []);
+}
+
+// Not upstream's: the same stale success while the check is in flight keeps
+// the check's claim and lease, so the other calls still find the credential
+// resting; the check's own success, dispatched after the answer, ends it.
+#[tokio::test(start_paused = true)]
+async fn a_stale_success_while_a_check_is_leased_keeps_its_claim() {
+    let rig = Rig::new(MINUTE, &[MODEL]);
+    let first = rig.h.manager.next_execution_seq();
+    let second = rig.h.manager.next_execution_seq();
+    let reset = rig.at(72 * HOUR);
+    rig.h
+        .manager
+        .mark_result(&outcome(false, second, Some(72 * HOUR), false));
+    rig.h.clock.advance(MINUTE);
+
+    // The check C goes out and stays in flight.
+    rig.answer(Answer::Ok);
+    rig.executor.set_delay(Duration::from_secs(10));
+    let manager = rig.h.manager.clone();
+    let checking = tokio::spawn(async move { call(&manager, MODEL).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(rig.reached(), 1);
+    assert!(rig.checks()[0].checking);
+
+    // A succeeds meanwhile: no recovery, and C is still the check.
+    rig.h
+        .manager
+        .mark_result(&outcome(true, first, None, false));
+    let rests = rig.checks();
+    assert_eq!(rests.len(), 1, "{rests:?}");
+    assert!(rests[0].checking, "the lease stays: {rests:?}");
+    assert_eq!(rests[0].provider_reset_at, reset);
+    assert!(!rig.call(MODEL).await, "the other calls still rest");
+    assert_eq!(rig.reached(), 1);
+
+    // C's own success, dispatched after the answer, is recovery.
+    assert!(checking.await.expect("join"));
+    assert_eq!(rig.checks(), []);
+    assert!(rig.call(MODEL).await);
+}
+
 // Not upstream's: a check answered with another failure lets the next call
 // check, once that failure's own cooldown is over.
 #[tokio::test(start_paused = true)]
