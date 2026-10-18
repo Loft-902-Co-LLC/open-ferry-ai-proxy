@@ -989,7 +989,7 @@ impl Call {
         }
         if self.codex_frame.len() + data.len() > LINE_BOUND {
             self.flush_codex_frame(now);
-            self.codex_payload(data, now);
+            self.codex_payload(json::trim_space(data), now);
             return;
         }
         self.codex_frame.extend_from_slice(data);

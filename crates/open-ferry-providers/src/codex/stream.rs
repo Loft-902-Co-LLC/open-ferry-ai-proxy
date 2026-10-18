@@ -420,16 +420,28 @@ impl State {
         let mut held_any = false;
         let mut frames = 0;
         let mut bytes = 0;
+        let mut exhausted = "";
         while let Some(line) = self
             .reader
             .next_budgeted(|lines, size| {
-                timed_out()
-                    || frames + lines >= MAX_BOOTSTRAP_FRAMES
-                    || bytes + size >= MAX_BOOTSTRAP_BYTES
+                exhausted = if timed_out() {
+                    "time budget"
+                } else if frames + lines >= MAX_BOOTSTRAP_FRAMES {
+                    "frame budget"
+                } else if bytes + size >= MAX_BOOTSTRAP_BYTES {
+                    "byte budget"
+                } else {
+                    return false;
+                };
+                true
             })
             .await
         {
             if self.reader.held_lines > 0 && line.as_ref().is_ok_and(Vec::is_empty) {
+                let elapsed = (bootstrap.now)().saturating_duration_since(start);
+                tracing::debug!(
+                    "codex executor: bootstrap {exhausted} exhausted after {frames} lines / {bytes} bytes / {elapsed:?}, releasing stream without overload probing"
+                );
                 self.send(held);
                 return Ok(());
             }
@@ -466,9 +478,11 @@ impl State {
             if frame.handshake && !frame.terminal {
                 let frame_bytes = line_len + frame.chunks.iter().map(Vec::len).sum::<usize>();
                 let timed_out = timed_out();
+                let total_frames = frames + self.reader.held_lines + raw_lines;
+                let total_bytes = bytes + self.reader.held_bytes + frame_bytes;
                 if !timed_out
-                    && frames + self.reader.held_lines + raw_lines <= MAX_BOOTSTRAP_FRAMES
-                    && bytes + self.reader.held_bytes + frame_bytes <= MAX_BOOTSTRAP_BYTES
+                    && total_frames <= MAX_BOOTSTRAP_FRAMES
+                    && total_bytes <= MAX_BOOTSTRAP_BYTES
                 {
                     frames += raw_lines;
                     bytes += frame_bytes;
@@ -478,10 +492,10 @@ impl State {
                 }
                 let exhausted = if timed_out {
                     "time budget"
-                } else if frames < MAX_BOOTSTRAP_FRAMES {
-                    "byte budget"
-                } else {
+                } else if total_frames > MAX_BOOTSTRAP_FRAMES {
                     "frame budget"
+                } else {
+                    "byte budget"
                 };
                 tracing::debug!(
                     "codex executor: bootstrap {exhausted} exhausted after {frames} lines / {bytes} bytes, releasing stream without overload probing"
