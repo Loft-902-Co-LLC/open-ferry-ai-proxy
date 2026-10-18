@@ -884,6 +884,52 @@ async fn b37_a_a_failed_flush_keeps_the_flag_and_the_next_one_clears_it() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn an_owed_use_siwc_change_survives_adopting_a_peer_rotation() {
+    // An operator turns SIWC off at a pass's tail and every save of the
+    // change fails, so it stays owed. A peer then rotates outer, and the next
+    // pass adopts that rotation from a file that still has SIWC on: the owed
+    // change keeps live's switch, and the pass's flush writes it.
+    // Mutation: adoption taking `use_siwc` from the file while a change is
+    // owed (live would turn SIWC back on, and the flush would write that and
+    // clear the flag).
+    bounded(async {
+        let rig = rig();
+        let failing = fail_configuration_saves(&rig);
+        let (manager, flag) = (rig.manager.clone(), failing.clone());
+        let probe = pass_with_tail(&rig, move || {
+            let mut changed = (*manager.get(ID).unwrap()).clone();
+            changed.metadata.insert("use_siwc".into(), json!(false));
+            manager.update(changed).unwrap();
+            flag.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(
+            owed(&rig.manager).is_some(),
+            "the failed flush keeps the flag"
+        );
+        assert_eq!(rig.disk()["use_siwc"], true, "nothing wrote the change");
+        // A peer rotates outer; the next pass adopts it, and its flush writes.
+        failing.store(false, Ordering::SeqCst);
+        peer_write(&rig.path(), true, "p");
+        rig.manager.force_refresh(ID).await.unwrap();
+        assert_eq!(probe.sent(), 2);
+        assert_eq!(
+            probe.sent_refresh(1),
+            "p-refresh",
+            "the pass adopted the peer's rotation"
+        );
+        assert_eq!(
+            rig.live().metadata["use_siwc"],
+            false,
+            "live keeps the owed switch"
+        );
+        assert_eq!(rig.disk()["use_siwc"], false, "the flush wrote it");
+        assert_eq!(owed(&rig.manager), None);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn b37_b_a_skipped_flush_keeps_the_flag() {
     // B-37 (b): the record is disabled and its file is gone, so the save is
     // Skipped; Skipped writes nothing and keeps the flag.
