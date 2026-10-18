@@ -2240,3 +2240,209 @@ fn gemini_copy_budget_release_benchmark() {
         elapsed.as_secs_f64() * 1000.0
     );
 }
+
+// Not upstream's: both structural caps must bind at the actual constants, not a broad depth range.
+#[test]
+fn gemini_copy_budget_node_and_path_caps_have_exact_boundaries() {
+    let schema = |property| {
+        json!({"type":"object","properties":{"a":property},
+        "anyOf":[{"required":["a"]},{"type":"string"}]})
+    };
+    let mut baseline = SchemaCopyBudget::unlimited();
+    clean_json_schema_for_gemini_json_schema(&schema(json!({"default":[]})), &mut baseline);
+    let node_overhead = usize::MAX - baseline.nodes;
+    let zeros = SCHEMA_COPY_NODES_PER_REQUEST - node_overhead;
+    let mut budget = SchemaCopyBudget::default();
+    let fits = clean_json_schema_for_gemini_json_schema(
+        &schema(json!({"default":vec![0;zeros]})),
+        &mut budget,
+    );
+    assert!(fits.get("anyOf").is_some());
+    assert_eq!(budget.nodes, 0);
+    let mut budget = SchemaCopyBudget::default();
+    let over = clean_json_schema_for_gemini_json_schema(
+        &schema(json!({"default":vec![0;zeros + 1]})),
+        &mut budget,
+    );
+    assert!(over.get("anyOf").is_none());
+    assert_eq!(budget.nodes, SCHEMA_COPY_NODES_PER_REQUEST);
+
+    let mut baseline = SchemaCopyBudget::unlimited();
+    clean_json_schema_for_gemini_json_schema(&schema(json!({"default":{"":0}})), &mut baseline);
+    let path_overhead = usize::MAX - baseline.path_work;
+    let key_len = SCHEMA_COPY_PATH_WORK_PER_REQUEST - path_overhead;
+    let mut budget = SchemaCopyBudget::default();
+    let fits = clean_json_schema_for_gemini_json_schema(
+        &schema(json!({"default":{"z".repeat(key_len):0}})),
+        &mut budget,
+    );
+    assert!(fits.get("anyOf").is_some());
+    assert_eq!(budget.path_work, 0);
+    let mut budget = SchemaCopyBudget::default();
+    let over = clean_json_schema_for_gemini_json_schema(
+        &schema(json!({"default":{"z".repeat(key_len + 1):0}})),
+        &mut budget,
+    );
+    assert!(over.get("anyOf").is_none());
+    assert_eq!(budget.path_work, SCHEMA_COPY_PATH_WORK_PER_REQUEST);
+}
+
+fn realistic_union_schema(fields: usize) -> Value {
+    let properties: Map<String, Value> = (0..fields)
+        .map(|i| (format!("field_{i}"), realistic_argument()))
+        .collect();
+    let branches: Vec<_> = properties
+        .keys()
+        .map(|name| json!({"required":[name]}))
+        .collect();
+    json!({"type":"object","properties":properties,"anyOf":branches})
+}
+
+fn realistic_argument() -> Value {
+    json!({"type":"object","description":"Argument","properties":{"value":{
+        "type":"string","description":"Value","default":"","enum":["a","b"]}},"required":["value"]})
+}
+
+// Not upstream's: existing allOf/union indices must never be counted as newly padded arrays.
+#[test]
+fn gemini_copy_budget_preserves_realistic_actions_fields_and_tools() {
+    let mut actions = Vec::new();
+    for i in 0..40 {
+        let args: Map<String, Value> = (0..10)
+            .map(|j| (format!("arg_{j}"), realistic_argument()))
+            .collect();
+        actions.push(
+            json!({"if":{"properties":{"action":{"const":format!("action_{i}")}}},
+            "then":{"properties":{format!("action_{i}"):{"type":"object","properties":args}}}}),
+        );
+    }
+    for (name, schemas) in [
+        ("40_actions", vec![json!({"type":"object","allOf":actions})]),
+        ("127_fields", vec![realistic_union_schema(127)]),
+        ("20_tools_30_fields", vec![realistic_union_schema(30); 20]),
+    ] {
+        let mut unlimited = SchemaCopyBudget::unlimited();
+        let expected: Vec<_> = schemas
+            .iter()
+            .map(|schema| clean_json_schema_for_gemini_json_schema(schema, &mut unlimited))
+            .collect();
+        let mut budget = SchemaCopyBudget::default();
+        let actual: Vec<_> = schemas
+            .iter()
+            .map(|schema| clean_json_schema_for_gemini_json_schema(schema, &mut budget))
+            .collect();
+        assert_eq!(actual, expected, "{name}");
+        let mut old = SchemaCopyBudget {
+            nodes: 8192,
+            path_work: 1 << 20,
+            ..SchemaCopyBudget::default()
+        };
+        let at_old_caps: Vec<_> = schemas
+            .iter()
+            .map(|schema| clean_json_schema_for_gemini_json_schema(schema, &mut old))
+            .collect();
+        println!(
+            "REALISTIC {name}: nodes={} path_work={} old_caps_match={} old_matching_tools={}/{}",
+            SCHEMA_COPY_NODES_PER_REQUEST - budget.nodes,
+            SCHEMA_COPY_PATH_WORK_PER_REQUEST - budget.path_work,
+            at_old_caps == expected,
+            at_old_caps
+                .iter()
+                .zip(&expected)
+                .filter(|(a, b)| a == b)
+                .count(),
+            schemas.len()
+        );
+        if name == "20_tools_30_fields" {
+            let tools: Vec<_> = schemas
+                .iter()
+                .enumerate()
+                .map(|(i, schema)| json!({"name":format!("tool_{i}"),"input_schema":schema}))
+                .collect();
+            let translated = crate::gemini::claude::convert_claude_request_to_gemini(
+                "gemini-test",
+                &json!({"tools":tools}),
+                false,
+                &crate::models::ModelCatalog::default(),
+            )
+            .0;
+            let schemas: Vec<_> = translated["tools"][0]["functionDeclarations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["parametersJsonSchema"].clone())
+                .collect();
+            assert_eq!(schemas, expected);
+        }
+    }
+}
+
+// Not upstream's: a conditional's existing properties must consume no copy allowance.
+#[test]
+fn gemini_copy_budget_only_charges_missing_conditional_keys() {
+    let mut schema = json!({"type":"object","properties":{"present":{"type":"string"}},
+        "then":{"properties":{"present":{"description":"x".repeat(100_000)}}}});
+    let mut budget = SchemaCopyBudget {
+        remaining: 0,
+        nodes: 0,
+        path_work: 0,
+    };
+    merge_conditionals(&mut schema, &mut budget);
+    assert_eq!(schema["properties"]["present"], json!({"type":"string"}));
+    assert_eq!(budget.remaining, 0);
+    assert_eq!(budget.nodes, 0);
+    assert_eq!(budget.path_work, 0);
+}
+
+// Not upstream's: charging existing ancestors or a full numeric index would reject ordinary writes.
+#[test]
+fn gemini_copy_write_cost_counts_only_new_containers_and_padding() {
+    let original = json!({"allOf":vec![json!({"properties":{}});40]});
+    let property = json!({"type":"string"});
+    let mut target = CopyTarget::Existing(&original);
+    let cost = target.write(
+        &keys("allOf.39.properties.a"),
+        &property,
+        copy_cost(&property).unwrap(),
+        "",
+    );
+    assert_eq!(cost.nodes, 2); // Only the copied property, no existing ancestors.
+    let original = json!({"properties":vec![Value::Null;1001]});
+    let mut target = CopyTarget::Existing(&original);
+    let cost = target.write(
+        &keys("properties.1002"),
+        &property,
+        copy_cost(&property).unwrap(),
+        "",
+    );
+    assert_eq!(cost.nodes, 3); // One new null pad and the two property nodes.
+    let next = target.write(
+        &keys("properties.1003"),
+        &property,
+        copy_cost(&property).unwrap(),
+        "",
+    );
+    assert_eq!(next.nodes, 2); // Appending needs no more padding.
+    let original = json!({});
+    let mut target = CopyTarget::Existing(&original);
+    let first = target.write(
+        &keys("properties.-1"),
+        &property,
+        copy_cost(&property).unwrap(),
+        "",
+    );
+    let next = target.write(
+        &keys("properties.-1"),
+        &property,
+        copy_cost(&property).unwrap(),
+        "",
+    );
+    assert_eq!(first.nodes, 3); // A new array and its property.
+    assert_eq!(next.nodes, 2); // A second append, not an object-key replacement.
+    let mut actual = original.clone();
+    set(&mut actual, "properties.-1", property.clone());
+    assert_eq!(
+        first.bytes,
+        actual.to_string().len() - original.to_string().len()
+    );
+}
