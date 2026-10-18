@@ -9,7 +9,8 @@
 //! alternating user and assistant turns:
 //! - messages become text, image and document blocks;
 //! - function and custom tool calls become `tool_use` blocks;
-//! - their outputs become `tool_result` blocks;
+//! - their outputs become `tool_result` blocks, with `is_error` set when the
+//!   output's status is `incomplete`;
 //! - reasoning items with a Claude signature become thinking blocks;
 //! - web searches become Claude's server tool pair.
 //!
@@ -578,11 +579,8 @@ fn convert_input(
                 if !raw_id.is_empty() && !answered.insert(raw_id.clone()) {
                     continue;
                 }
-                let output = last_outputs
-                    .get(&raw_id)
-                    .copied()
-                    .unwrap_or(item)
-                    .get("output");
+                let output_item = last_outputs.get(&raw_id).copied().unwrap_or(item);
+                let output = output_item.get("output");
                 // An output with no call before it, such as the task a
                 // delegated thread starts with, has no tool_use to answer.
                 // Claude rejects such a tool_result, so it goes as user
@@ -591,14 +589,18 @@ fn convert_input(
                     turns.push("user", standalone_output_blocks(output));
                     continue;
                 }
-                turns.push(
-                    "user",
-                    vec![object([
-                        ("type", "tool_result".into()),
-                        ("tool_use_id", sanitize_tool_id(&raw_id).into()),
-                        ("content", tool_result_content(output)),
-                    ])],
-                );
+                let mut result = object([
+                    ("type", "tool_result".into()),
+                    ("tool_use_id", sanitize_tool_id(&raw_id).into()),
+                    ("content", tool_result_content(output)),
+                ]);
+                // Responses reports an unfinished tool output as status
+                // "incomplete"; Claude's only in-band equivalent is is_error
+                // on tool_result, so the signal is carried over, not dropped.
+                if go::equal_fold(str_of(output_item.get("status")).trim(), "incomplete") {
+                    result["is_error"] = true.into();
+                }
+                turns.push("user", vec![result]);
             }
             "tool_search_call" if tool_search => {
                 let raw_id = str_of(item.get("call_id")).trim().to_owned();
