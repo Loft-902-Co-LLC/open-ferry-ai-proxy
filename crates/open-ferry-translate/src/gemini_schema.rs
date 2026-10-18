@@ -60,14 +60,17 @@
 //!   level of such values nested in one another escapes the text of the level
 //!   below once more, doubling it, so a 600-byte schema can come out as 16 MB.
 //! - Copying conditional properties and materializing required-only union
-//!   branches share an 8 MiB budget across all tool schemas in a request,
-//!   spent in tool order. Charges include serialized strings, keys and
-//!   numeric-name null padding. Below the budget, output matches upstream.
-//!   A conditional branch that does not fit, and the remaining shallower
-//!   conditional branches, add nothing to their parents. If materializing
-//!   any branch would exceed the budget, the entire union keyword is dropped,
-//!   leaving its parent schema, rather than retaining a stricter partial union.
-//!   Upstream copies without bound, multiplying nested properties at each level.
+//!   branches share limits of 8 MiB of bytes, 8,192 nodes and 1 MiB of path
+//!   work across all tool schemas in one translation call, spent in tool order.
+//!   Each copied node is charged its destination path length plus its relative
+//!   path length within the copied value; strings, keys and numeric-name null
+//!   padding are charged too. Each retry translates with fresh limits. Below
+//!   all limits, output matches upstream. A conditional branch that does not
+//!   fit, and all later branches at the same or shallower depths, add nothing
+//!   to their parents. If the combined cost of all required-only branches in
+//!   a union does not fit, its entire keyword is dropped, leaving the parent
+//!   schema rather than retaining a stricter partial union. Upstream copies
+//!   without bound, multiplying nested properties at each level.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -90,17 +93,102 @@ const MAX_JSON_TEXT: usize = 1024;
 /// The maximum extra schema bytes copied across one request's tools.
 pub(crate) const SCHEMA_COPY_BYTES_PER_REQUEST: usize = 8 * 1024 * 1024;
 
-/// One request's allowance, shared by both copy passes and every tool schema.
+/// Limits for the nodes allocated and the paths traversed by later passes.
+const SCHEMA_COPY_NODES_PER_REQUEST: usize = 8192;
+const SCHEMA_COPY_PATH_WORK_PER_REQUEST: usize = 1 << 20;
+
+/// One translation call's allowance, shared by both copy passes and every tool.
+#[derive(Clone, Copy)]
 pub(crate) struct SchemaCopyBudget {
     remaining: usize,
+    nodes: usize,
+    path_work: usize,
 }
 
 impl Default for SchemaCopyBudget {
     fn default() -> Self {
         Self {
             remaining: SCHEMA_COPY_BYTES_PER_REQUEST,
+            nodes: SCHEMA_COPY_NODES_PER_REQUEST,
+            path_work: SCHEMA_COPY_PATH_WORK_PER_REQUEST,
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CopyCost {
+    bytes: usize,
+    nodes: usize,
+    path_work: usize,
+}
+
+impl CopyCost {
+    fn add(self, other: Self) -> Self {
+        Self {
+            bytes: self.bytes.saturating_add(other.bytes),
+            nodes: self.nodes.saturating_add(other.nodes),
+            path_work: self.path_work.saturating_add(other.path_work),
+        }
+    }
+
+    fn at(self, destination_len: usize) -> Self {
+        Self {
+            path_work: self
+                .path_work
+                .saturating_add(self.nodes.saturating_mul(destination_len)),
+            ..self
+        }
+    }
+}
+
+impl SchemaCopyBudget {
+    fn spend(&mut self, cost: CopyCost) -> Option<()> {
+        let remaining = self.remaining.checked_sub(cost.bytes)?;
+        let nodes = self.nodes.checked_sub(cost.nodes)?;
+        let path_work = self.path_work.checked_sub(cost.path_work)?;
+        *self = Self {
+            remaining,
+            nodes,
+            path_work,
+        };
+        Some(())
+    }
+}
+
+/// Analyze a value once, before cloning it. Relative path work is cached
+/// separately so a union can reuse the result at each branch's destination.
+fn copy_cost(value: &Value) -> Option<CopyCost> {
+    let mut cost = CopyCost::default();
+    let mut stack = vec![(value, 0usize)];
+    while let Some((value, path_len)) = stack.pop() {
+        cost.nodes += 1;
+        cost.path_work = cost.path_work.saturating_add(path_len);
+        if cost.nodes > SCHEMA_COPY_NODES_PER_REQUEST
+            || cost.path_work > SCHEMA_COPY_PATH_WORK_PER_REQUEST
+        {
+            return None;
+        }
+        match value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    stack.push((value, path_len.saturating_add(1 + escape_key(key).len())));
+                }
+            }
+            Value::Array(items) => {
+                for (index, value) in items.iter().enumerate() {
+                    let digits = if index == 0 {
+                        1
+                    } else {
+                        index.ilog10() as usize + 1
+                    };
+                    stack.push((value, path_len.saturating_add(1 + digits)));
+                }
+            }
+            _ => {}
+        }
+    }
+    cost.bytes = copy_bytes(value, SCHEMA_COPY_BYTES_PER_REQUEST)?;
+    Some(cost)
 }
 
 /// Counts serialized bytes without allocating the serialized value. Stop
@@ -129,13 +217,20 @@ fn copy_bytes(value: &Value, limit: usize) -> Option<usize> {
 
 /// Conservatively charges path keys, containers, and every possible null pad
 /// before a set. This also covers sjson's numeric-name array construction.
-fn copy_path_bytes(path: &str) -> usize {
-    keys(path).iter().fold(0usize, |cost, key| {
+fn copy_path_cost(path: &str) -> CopyCost {
+    keys(path).iter().fold(CopyCost::default(), |cost, key| {
         let padding = build_index(key)
             .filter(|&index| index <= MAX_PADDED_INDEX)
-            .map_or(0, |index| (index + 1) * 5);
-        cost.saturating_add(key.len().saturating_mul(6).saturating_add(4))
-            .saturating_add(padding)
+            .map_or(0, |index| index + 1);
+        cost.add(CopyCost {
+            bytes: key
+                .len()
+                .saturating_mul(6)
+                .saturating_add(4)
+                .saturating_add(padding * 5),
+            nodes: padding + 1,
+            path_work: (padding + 1).saturating_mul(path.len()),
+        })
     })
 }
 
@@ -810,28 +905,6 @@ fn merge_conditionals(doc: &mut Value, budget: &mut SchemaCopyBudget) {
         };
         // A branch keeps what it gives its parent, so an enclosing branch
         // copies both.
-        let Some(size) = copy_bytes(found, budget.remaining) else {
-            break;
-        };
-        let padding =
-            found
-                .as_object()
-                .expect("matched an object")
-                .keys()
-                .fold(0usize, |cost, key| {
-                    cost.saturating_add(copy_path_bytes(&format!("properties.{}", escape_key(key))))
-                });
-        let Some(remaining) = budget
-            .remaining
-            .checked_sub(size)
-            .and_then(|left| left.checked_sub(padding))
-        else {
-            break;
-        };
-        budget.remaining = remaining;
-        let Value::Object(properties) = found.clone() else {
-            unreachable!("matched an object");
-        };
         let parent = if path.ends_with(".then") {
             trim_suffix(&path, ".then")
         } else if path.ends_with(".else") {
@@ -840,6 +913,19 @@ fn merge_conditionals(doc: &mut Value, budget: &mut SchemaCopyBudget) {
             String::new()
         } else {
             continue;
+        };
+        let destination = join_path(&parent, "properties");
+        let Some(mut cost) = copy_cost(found).map(|cost| cost.at(destination.len())) else {
+            break;
+        };
+        for key in found.as_object().expect("matched an object").keys() {
+            cost = cost.add(copy_path_cost(&join_path(&destination, &escape_key(key))));
+        }
+        if budget.spend(cost).is_none() {
+            break;
+        }
+        let Value::Object(properties) = found.clone() else {
+            unreachable!("matched an object");
         };
         for (key, value) in properties {
             let destination = join_path(&parent, &format!("properties.{}", escape_key(&key)));
@@ -976,7 +1062,7 @@ fn is_required_only_union_branch(item: &Value) -> bool {
 
 enum BranchCopyCost {
     Unavailable,
-    Bytes(usize),
+    Cost(CopyCost),
     OverBudget,
 }
 
@@ -985,7 +1071,8 @@ enum BranchCopyCost {
 fn required_only_branch_cost(
     item: &Value,
     parent_props: Option<&Value>,
-    limit: usize,
+    destination: &str,
+    property_costs: &mut HashMap<String, Option<CopyCost>>,
 ) -> BranchCopyCost {
     let Some(parent_props) = parent_props.filter(|props| props.is_object()) else {
         return BranchCopyCost::Unavailable;
@@ -1002,27 +1089,28 @@ fn required_only_branch_cost(
     {
         return BranchCopyCost::Unavailable;
     }
-    let Some(mut remaining) = copy_bytes(item, limit).and_then(|size| limit.checked_sub(size + 32))
-    else {
+    let Some(mut cost) = copy_cost(item).map(|cost| cost.at(destination.len())) else {
         return BranchCopyCost::OverBudget;
     };
+    cost = cost.add(CopyCost {
+        bytes: 32,
+        nodes: 2,
+        path_work: 2 * (destination.len() + 11),
+    });
     for name in required {
         let name = str_of(Some(name));
-        let property = get(parent_props, &escape_key(&name)).expect("checked required name");
-        let Some(left) = copy_bytes(property, remaining)
-            .and_then(|size| remaining.checked_sub(size))
-            .and_then(|left| {
-                left.checked_sub(copy_path_bytes(&format!(
-                    "properties.{}",
-                    escape_key(&name)
-                )))
-            })
-        else {
+        let property_cost = property_costs.entry(name.to_string()).or_insert_with(|| {
+            copy_cost(get(parent_props, &escape_key(&name)).expect("checked required name"))
+        });
+        let Some(property_cost) = *property_cost else {
             return BranchCopyCost::OverBudget;
         };
-        remaining = left;
+        let path = join_path(destination, &format!("properties.{}", escape_key(&name)));
+        cost = cost
+            .add(property_cost.at(path.len()))
+            .add(copy_path_cost(&path));
     }
-    BranchCopyCost::Bytes(limit - remaining)
+    BranchCopyCost::Cost(cost)
 }
 
 /// Gives a preflighted required-only branch its parent's required properties.
@@ -1098,17 +1186,28 @@ fn flatten_any_of_one_of(doc: &mut Value, budget: &mut SchemaCopyBudget) {
             .is_some_and(bool_of);
         // Reserve the complete union before making any branch copies. A
         // partial union could remove valid alternatives and become stricter.
-        let mut remaining = budget.remaining;
+        let mut reserved = *budget;
+        let mut property_costs = HashMap::new();
         let mut costs = Vec::with_capacity(items.len());
         let mut over_budget = false;
-        for item in &items {
+        for (index, item) in items.iter().enumerate() {
             let cost = if is_required_only_union_branch(item) {
-                required_only_branch_cost(item, parent_props, remaining)
+                required_only_branch_cost(
+                    item,
+                    parent_props,
+                    &format!("{path}.{index}"),
+                    &mut property_costs,
+                )
             } else {
                 BranchCopyCost::Unavailable
             };
             match cost {
-                BranchCopyCost::Bytes(bytes) => remaining -= bytes,
+                BranchCopyCost::Cost(cost) => {
+                    if reserved.spend(cost).is_none() {
+                        over_budget = true;
+                        break;
+                    }
+                }
                 BranchCopyCost::OverBudget => {
                     over_budget = true;
                     break;
@@ -1121,7 +1220,7 @@ fn flatten_any_of_one_of(doc: &mut Value, budget: &mut SchemaCopyBudget) {
             delete(doc, &path);
             continue;
         }
-        budget.remaining = remaining;
+        *budget = reserved;
         let mut non_null = Vec::new();
         let mut has_null = false;
         let mut filtered = false;
@@ -1134,7 +1233,7 @@ fn flatten_any_of_one_of(doc: &mut Value, budget: &mut SchemaCopyBudget) {
             } else if is_null_only_branch(item) {
                 has_null = true;
             } else if is_required_only_union_branch(item) {
-                if matches!(cost, BranchCopyCost::Bytes(_)) {
+                if matches!(cost, BranchCopyCost::Cost(_)) {
                     non_null.push(materialize_required_only_branch(
                         item,
                         parent_props.expect("preflighted parent properties"),
