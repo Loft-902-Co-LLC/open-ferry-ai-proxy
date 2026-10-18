@@ -284,6 +284,66 @@ async fn one_check_at_a_time() {
     }
 }
 
+// Not upstream's: a success from a call dispatched before the quota answer
+// leaves the cooldown be (upstream's issue 6643), so it leaves the rest
+// beside it too: one check at the cap, and the next quota answer doubles.
+#[tokio::test(start_paused = true)]
+async fn a_stale_success_keeps_the_rest() {
+    use crate::auth::AuthError;
+    use crate::manager::CallResult;
+
+    let rig = Rig::new(HOUR, &[MODEL]);
+    let result = |success: bool, execution_seq: u64, retry_after: Option<Duration>| CallResult {
+        auth_id: "a".into(),
+        provider: "claude".into(),
+        model: MODEL.into(),
+        success,
+        execution_seq,
+        retry_after,
+        error: (!success).then(|| AuthError {
+            code: "quota_exhausted".into(),
+            message: "QUOTA_EXHAUSTED".into(),
+            retryable: true,
+            http_status: 429,
+        }),
+        ..CallResult::default()
+    };
+    // Two calls are dispatched; the second gets the quota answer first.
+    let first = rig.h.manager.next_execution_seq();
+    let second = rig.h.manager.next_execution_seq();
+    let reset = rig.at(72 * HOUR);
+    rig.h
+        .manager
+        .mark_result(&result(false, second, Some(72 * HOUR)));
+    let rest = [check(MODEL, rig.at(HOUR), reset, HOUR)];
+    assert_eq!(rig.checks(), rest);
+
+    // The first call succeeds: the cooldown stays, and so does its rest.
+    rig.h.manager.mark_result(&result(true, first, None));
+    assert_eq!(rig.checks(), rest, "the rest after a stale success");
+    assert!(rig.retry_at(MODEL).is_some());
+
+    // At the cap's end one call checks, as it would without the success.
+    rig.h.clock.advance(HOUR);
+    rig.answer(Answer::Quota(reset, false));
+    rig.executor.set_delay(Duration::from_secs(10));
+    let calls: Vec<_> = (0..6)
+        .map(|_| {
+            let manager = rig.h.manager.clone();
+            tokio::spawn(async move { call(&manager, MODEL).await })
+        })
+        .collect();
+    for task in calls {
+        assert!(!task.await.expect("join"));
+    }
+    assert_eq!(rig.reached(), 1, "one check, not every waiting call");
+    // And its quota answer doubles the wait.
+    assert_eq!(
+        rig.checks(),
+        [check(MODEL, rig.at(2 * HOUR), reset, 2 * HOUR)]
+    );
+}
+
 // Not upstream's: a check answered with another failure lets the next call
 // check, once that failure's own cooldown is over.
 #[tokio::test(start_paused = true)]

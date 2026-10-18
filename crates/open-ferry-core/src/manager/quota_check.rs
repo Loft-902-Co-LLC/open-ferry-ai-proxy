@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use super::cooldown::{CallResult, add};
+use super::cooldown::{CallResult, StaleSuccess, add};
 use super::cooldown_store::QuotaCheckRecord;
 use super::text::canonical_model_key;
 use super::{Entry, Manager, Settings, Shared, State, lock};
@@ -353,6 +353,7 @@ impl QuotaChecks {
         result: &CallResult,
         model_key: &str,
         now: Timestamp,
+        stale: StaleSuccess,
     ) {
         if cap.is_zero() {
             self.forget(&auth.id);
@@ -361,8 +362,15 @@ impl QuotaChecks {
         self.forget_ended(&auth.id, now);
         let scope = scope_of(result, model_key);
         if result.success {
-            self.rests.remove(&Self::key(&auth.id, CREDENTIAL));
-            self.rests.remove(&Self::key(&auth.id, &scope));
+            // A success that predates the cooldown it didn't clear isn't
+            // recovery, so the rest of that cooldown (its reset, backoff
+            // and check claim) stays too.
+            if !stale.credential {
+                self.rests.remove(&Self::key(&auth.id, CREDENTIAL));
+            }
+            if !stale.model && !stale.credential {
+                self.rests.remove(&Self::key(&auth.id, &scope));
+            }
         } else if result
             .error
             .as_ref()

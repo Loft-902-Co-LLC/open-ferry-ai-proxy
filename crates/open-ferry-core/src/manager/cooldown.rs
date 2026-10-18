@@ -599,8 +599,10 @@ pub(crate) fn apply_result(
     model_key: &str,
     now: Timestamp,
     dispatched: u64,
-) {
+) -> StaleSuccess {
     let was_terminal_unauthorized = has_unauthorized_auth_failure(auth);
+    let (model, credential) =
+        stale_success(auth, result, model_key, now, was_terminal_unauthorized);
     apply_outcome(
         settings,
         auth,
@@ -619,6 +621,15 @@ pub(crate) fn apply_result(
     if !result.skip_quota_observation {
         observe_quota(auth, result, model_key, now);
     }
+    StaleSuccess { model, credential }
+}
+
+/// Which cooldown a success left be because the call predated it (see
+/// [`apply_result`]); neither when the success was taken as recovery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StaleSuccess {
+    pub(crate) model: bool,
+    pub(crate) credential: bool,
 }
 
 /// Takes the quota snapshot of the response behind `result` into the
@@ -639,6 +650,35 @@ fn observe_quota(auth: &mut Auth, result: &CallResult, model_key: &str, now: Tim
     }
 }
 
+/// Whether a success predates the live cooldown it would clear, for the
+/// model (first) or for the credential (second): it was dispatched at or
+/// before that cooldown was recorded, so it proves nothing about recovery.
+fn stale_success(
+    auth: &Auth,
+    result: &CallResult,
+    model_key: &str,
+    now: Timestamp,
+    was_terminal_unauthorized: bool,
+) -> (bool, bool) {
+    if !result.success {
+        return (false, false);
+    }
+    let predates = |recorded: u64| result.execution_seq > 0 && result.execution_seq <= recorded;
+    let model = !model_key.is_empty()
+        && !was_terminal_unauthorized
+        && existing_model_state(auth, model_key).is_some_and(|existing| {
+            is_model_state_active_cooldown(existing, now)
+                && existing.cooldown_recorded_seq > 0
+                && predates(existing.cooldown_recorded_seq)
+        });
+    let credential = model_key.is_empty()
+        && !was_terminal_unauthorized
+        && is_auth_active_cooldown(auth, now)
+        && auth.cooldown_recorded_seq > 0
+        && predates(auth.cooldown_recorded_seq);
+    (model, credential)
+}
+
 /// The body of [`apply_result`].
 fn apply_outcome(
     settings: &Settings,
@@ -653,19 +693,8 @@ fn apply_outcome(
         // A success from a call dispatched before a still-live cooldown was
         // recorded predates the failure and proves nothing about recovery,
         // so it causes no state change at all.
-        let predates = |recorded: u64| result.execution_seq > 0 && result.execution_seq <= recorded;
-        let retain_model_cooldown = !model_key.is_empty()
-            && !was_terminal_unauthorized
-            && existing_model_state(auth, model_key).is_some_and(|existing| {
-                is_model_state_active_cooldown(existing, now)
-                    && existing.cooldown_recorded_seq > 0
-                    && predates(existing.cooldown_recorded_seq)
-            });
-        let retain_auth_cooldown = model_key.is_empty()
-            && !was_terminal_unauthorized
-            && is_auth_active_cooldown(auth, now)
-            && auth.cooldown_recorded_seq > 0
-            && predates(auth.cooldown_recorded_seq);
+        let (retain_model_cooldown, retain_auth_cooldown) =
+            stale_success(auth, result, model_key, now, was_terminal_unauthorized);
         if was_terminal_unauthorized {
             if !model_key.is_empty()
                 && let Some(key) = ensure_model_state(auth, model_key)
