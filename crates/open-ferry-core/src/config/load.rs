@@ -2681,3 +2681,23 @@ mod tests {
         assert_eq!(config.models.catalog, "");
     }
 }
+
+#[cfg(test)]
+mod vertex_resource_prefix_tests {
+    use super::*;
+
+    // Not upstream's: both config layouts must retain full publisher prefixes.
+    #[test]
+    fn vertex_publisher_prefix_survives_both_config_layouts() {
+        let prefix = "https://aiplatform.googleapis.com/v1beta1/projects/P/locations/L/publishers/google/models";
+        for yaml in [
+            format!("vertex-api-key:\n  - api-key: test-key\n    base-url: ' {prefix} '"),
+            format!(
+                "config-version: 8\napi-keys:\n  vertex:\n    - keys: [{{api-key: test-key}}]\n      base-url: ' {prefix} '"
+            ),
+        ] {
+            let config = load_bytes(yaml.as_bytes()).unwrap();
+            assert_eq!(config.vertex_api_key[0].base_url, prefix);
+        }
+    }
+}

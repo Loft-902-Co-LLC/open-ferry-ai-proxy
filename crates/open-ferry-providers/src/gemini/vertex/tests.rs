@@ -1100,3 +1100,57 @@ fn trailing_reasoning_cleanup_precedes_payload_rules() {
         assert_eq!(body["contents"], configured);
     }
 }
+
+// Ported from TestVertexAPIKeyModelsURL, including generate, stream and count.
+#[test]
+fn api_key_models_url_preserves_publisher_and_version_prefixes() {
+    for (base, prefix) in [
+        (
+            "",
+            "https://aiplatform.googleapis.com/v1/publishers/google/models",
+        ),
+        (
+            "https://zenmux.ai",
+            "https://zenmux.ai/v1/publishers/google/models",
+        ),
+        (
+            "https://zenmux.ai/",
+            "https://zenmux.ai/v1/publishers/google/models",
+        ),
+        (
+            "https://zenmux.ai/v1",
+            "https://zenmux.ai/v1/publishers/google/models",
+        ),
+        (
+            "https://api.zenmux.ai/v1/publishers/google/models",
+            "https://api.zenmux.ai/v1/publishers/google/models",
+        ),
+        (
+            "https://aiplatform.googleapis.com/v1/projects/P/locations/us-central1/publishers/google/models",
+            "https://aiplatform.googleapis.com/v1/projects/P/locations/us-central1/publishers/google/models",
+        ),
+        (
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/P/locations/us-central1/publishers/google/models",
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/P/locations/us-central1/publishers/google/models",
+        ),
+        (
+            "https://aiplatform.googleapis.com/v1beta1/projects/P/locations/L/publishers/google/models",
+            "https://aiplatform.googleapis.com/v1beta1/projects/P/locations/L/publishers/google/models",
+        ),
+        (
+            "  https://zenmux.ai  ",
+            "https://zenmux.ai/v1/publishers/google/models",
+        ),
+        (
+            "https://zenmux.ai/v1beta1/",
+            "https://zenmux.ai/v1beta1/publishers/google/models",
+        ),
+    ] {
+        for action in ["generateContent", "streamGenerateContent", "countTokens"] {
+            assert_eq!(
+                api_key_models_url(base, "gemini-4-argon", action),
+                format!("{prefix}/gemini-4-argon:{action}")
+            );
+        }
+    }
+}

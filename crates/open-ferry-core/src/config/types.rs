@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/config/config.go, sdk_config.go,
-// config_types.go and config_defaults.go, and the strategy names of
+// config_types.go, config_defaults.go and vertex_compat.go, and the strategy names of
 // sdk/cliproxy/service_config.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -1124,7 +1124,10 @@ pub struct VertexCompatKey {
     pub weight: Option<i64>,
     /// Namespaces this key's models.
     pub prefix: String,
-    /// The endpoint, before `/v1/publishers/...`; empty means Vertex AI.
+    /// The endpoint; empty means Vertex AI. A `/publishers/` segment makes
+    /// this the full resource prefix (including any project and location).
+    /// Otherwise the executor appends `/publishers/google/models`, inserting
+    /// `/v1` only when no version suffix such as `/v1beta1` is present.
     pub base_url: String,
     /// A proxy for this key, overriding the global one.
     pub proxy_url: String,
