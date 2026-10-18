@@ -3054,7 +3054,9 @@ impl Manager {
             }
             metadata.insert("siwc".to_owned(), Value::Object(nested));
         }
-        if no_pending_save {
+        // A change check (vi) deferred is owed, not in flight, and its flush
+        // writes live's switch: the file's must not replace it first.
+        if no_pending_save && entry.owed_save.is_none() {
             match disk_effective.get("use_siwc") {
                 Some(value) => {
                     metadata.insert("use_siwc".to_owned(), value.clone());
