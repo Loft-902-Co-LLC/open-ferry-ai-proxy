@@ -12,6 +12,7 @@ use super::siwc_persistence::{
     LeaseReadHook, Probe, REFRESH_SOURCE, Rig, bounded, code_only, expiry_executor, fixture,
     fn_bodies, mutated, observed, partition, pending_b, rig, token_count,
 };
+use super::support::FakeExecutor;
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::{Auth, CodexOrigin, SaveDeferral};
 use crate::exec::ExecError;
@@ -607,6 +608,69 @@ async fn an_exhausted_commit_that_kept_the_tokens_is_not_confirmed_by_identity()
             "2099-02-01T00:00:00Z",
             "the tail's save wrote the expiry"
         );
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_exhausted_commit_is_judged_against_the_locked_files_values_too() {
+    // As above, but the rotation kept the tokens and the expiry and set
+    // `last_refresh`, and the locked file already has that `last_refresh`
+    // with another expiry. The commit would write live's expiry over the
+    // file's, so the file the confirming read returns is not the result.
+    // Mutation: the confirming read checking only the values the rotation
+    // changed from live (outer would count as written, and the tail's
+    // Configuration save would keep the file's expiry).
+    bounded(async {
+        let rig = rig();
+        let executor = FakeExecutor::new("codex");
+        executor.set_refresh(|before| {
+            let mut after = before.clone();
+            after
+                .metadata
+                .insert("last_refresh".into(), json!("2026-10-17T12:00:00Z"));
+            after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+                &before.metadata,
+                &after.metadata,
+                true,
+                false,
+            ));
+            Ok(after)
+        });
+        rig.manager.register_executor(executor);
+        edit_file(&rig.path(), |file| {
+            file.insert("last_refresh".into(), json!("2026-10-17T12:00:00Z"));
+            file.insert("expired".into(), json!("2099-03-01T00:00:00Z"));
+        });
+        quick_commit_retries(&rig);
+        rig.store
+            .fail_lease_commit
+            .store(u32::MAX, Ordering::SeqCst);
+        let at_tail_view = Arc::new(Mutex::new(None));
+        let (seen, manager) = (at_tail_view.clone(), rig.manager.clone());
+        at_tail(&rig, move |_| *lock(&seen) = Some(view(&manager)));
+        rig.manager.force_refresh(ID).await.unwrap();
+        *lock(&rig.manager.shared.lease_tail_hook) = None;
+        assert!(
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst) >= 1,
+            "the commit ran"
+        );
+        assert_eq!(
+            lock(&at_tail_view).take().expect("the tail hook ran"),
+            View {
+                outer: (true, "different"),
+                siwc: (false, "none"),
+                pending: vec![false],
+                intent_written: Some(false),
+            }
+        );
+        assert_eq!(
+            rig.disk()["expired"],
+            "2099-01-01T00:00:00Z",
+            "the tail's save wrote live's expiry"
+        );
+        assert_eq!(rig.disk()["last_refresh"], "2026-10-17T12:00:00Z");
         assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
     })
     .await;

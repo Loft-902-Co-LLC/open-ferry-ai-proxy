@@ -1661,4 +1661,31 @@ fn partition_helpers_report_requested_rotated_and_landed() {
         .metadata
         .insert("last_refresh".into(), json!("2026-10-14T12:00:00Z"));
     assert_eq!(both.landed_in(&other_value.metadata), all);
+
+    // The locked file counts too: `apply` writes a value the operation kept
+    // where that file differs. This file already has the new `last_refresh`
+    // but another expiry, so it does not show the result until the write.
+    let mut kept_before = before.clone();
+    kept_before
+        .metadata
+        .insert("expired".into(), json!("2099-01-01T00:00:00Z"));
+    let mut kept_after = kept_before.clone();
+    kept_after
+        .metadata
+        .insert("last_refresh".into(), json!("2026-10-13T12:00:00Z"));
+    let mut locked = kept_after.clone();
+    locked
+        .metadata
+        .insert("expired".into(), json!("2099-02-01T00:00:00Z"));
+    let kept_on_disk = CredentialRefreshPatch::with_disk_baseline(
+        &kept_before.metadata,
+        Some(&locked.metadata),
+        &kept_after.metadata,
+        true,
+        false,
+    );
+    assert!(!kept_on_disk.landed_in(&locked.metadata).any());
+    let (committed, _) = kept_on_disk.apply(&locked.metadata);
+    assert_eq!(committed["expired"], "2099-01-01T00:00:00Z");
+    assert_eq!(kept_on_disk.landed_in(&committed), outer);
 }
