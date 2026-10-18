@@ -861,7 +861,7 @@ mod tests {
     // Ported from TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds.
     #[test]
     fn strips_out_of_range_int64_bounds() {
-        let input: Value = serde_json::from_str(r#"{
+        let input: Value = open_ferry_translate::json::exact::from_slice(br#"{
 		"model": "gpt-6-luna",
 		"tools": [{
 			"type": "function",
@@ -957,12 +957,13 @@ mod tests {
         }
         assert_eq!(props["float_bounds"]["minimum"].to_string(), "-0.5");
         assert_eq!(props["float_bounds"]["maximum"].to_string(), "3.14");
-        assert_eq!(props["scientific_bounds"]["minimum"].to_string(), "1e+5");
+        assert_eq!(props["scientific_bounds"]["minimum"].to_string(), "1e5");
         for key in ["maximum", "exclusiveMinimum", "exclusiveMaximum"] {
             assert!(props["scientific_bounds"].get(key).is_none());
         }
-        assert!(props["high_precision_fraction"].get("maximum").is_some());
-        assert!(props["extreme_exponents"].get("minimum").is_some());
+        assert_eq!(props["high_precision_fraction"]["maximum"].to_string(),
+            "18446744073709552000.00000000000000000000000000000000000000000000000000000000000000000000000000000001");
+        assert_eq!(props["extreme_exponents"]["minimum"].to_string(), "1.1e-9223372036854775808");
         assert!(props["extreme_exponents"].get("maximum").is_none());
         assert_eq!(
             props["user_data"]["default"]["maximum"].to_string(),
