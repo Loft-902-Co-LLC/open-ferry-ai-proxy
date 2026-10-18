@@ -1313,8 +1313,9 @@ impl FileStore {
                 write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
                     .map_err(|err| wrap(err, "auth filestore: write file failed"))?;
             }
-            // A file over the cap is replaced: an explicit Codex save has
-            // already kept a copy of it.
+            // A file over the cap is replaced. A Codex sign-in has kept a copy
+            // of it, and a runtime Codex save has already refused it in
+            // `codex_disk`; a save of any other kind replaces it as before.
             Err(err) if err.kind() == io::ErrorKind::FileTooLarge => {
                 write_atomic(&path, raw.as_bytes(), self.file_guard.is_none())
                     .map_err(|err| wrap(err, "auth filestore: write existing failed"))?;
@@ -1349,6 +1350,10 @@ impl FileStore {
     /// beside it ([`keep_invalid_copy`]). A file that can't be read is
     /// refused, with an error that names no path, and left as it is: it may
     /// be fine, held by another process. A runtime read refuses all of them.
+    ///
+    /// The copy covers what this read saw: a writer that ignores the
+    /// credential lock and rewrites the file mid-save isn't covered, as for
+    /// every save.
     fn codex_disk(&self, path: &Path, explicit: bool) -> io::Result<Option<Map<String, Value>>> {
         let bytes = match read_capped(path) {
             Ok(bytes) => Some(bytes),
@@ -1985,19 +1990,57 @@ fn refuse_unreadable(kind: io::ErrorKind) -> io::Error {
     )
 }
 
+/// The error for a credential file a sign-in could read but not copy. The
+/// text names no path or file name.
+fn refuse_uncopyable(kind: io::ErrorKind) -> io::Error {
+    io::Error::new(
+        kind,
+        "auth filestore: cannot keep a copy of the existing credential file, so the sign-in did not replace it",
+    )
+}
+
+/// The error for a credential file that is not a regular file (a device, a
+/// FIFO, a directory behind a link), which a sign-in won't copy. The text
+/// names no path or file name.
+fn refuse_not_regular() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "auth filestore: the existing credential file is not a regular file, so the sign-in did not replace it",
+    )
+}
+
 /// Keeps a copy of the credential file at `path` beside it, named after it
 /// with `.invalid-<UTC time>` added (`-2`, `-3` and so on when that name is
 /// taken), before a sign-in replaces it. The name ends in neither `.json`
 /// nor `.lock`, so nothing loads it as a credential. `bytes` is what was
-/// read; `None` copies a file over [`MAX_AUTH_FILE_SIZE`] from disk. The copy
-/// is created new, mode 0600 on Unix, and synced. If it can't be made, none
-/// is left and the error is [`refuse_unreadable`]'s.
+/// read; `None` copies a file over [`MAX_AUTH_FILE_SIZE`] from disk, which
+/// must be a regular file and is copied for no more than the length it had
+/// when opened. The copy is created new, mode 0600 on Unix, and synced. If
+/// it can't be made, the sign-in is refused with [`refuse_uncopyable`]'s
+/// error (or [`refuse_not_regular`]'s, before any copy is created), and a
+/// partial copy is removed on a best-effort basis: a failure to remove it
+/// is ignored.
 fn keep_invalid_copy(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
-    let refuse = |error: io::Error| refuse_unreadable(error.kind());
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    keep_invalid_copy_stamped(path, bytes, &stamp)
+}
+
+/// [`keep_invalid_copy`] with the time part of the name given.
+fn keep_invalid_copy_stamped(path: &Path, bytes: Option<&[u8]>, stamp: &str) -> io::Result<()> {
+    let refuse = |error: io::Error| refuse_uncopyable(error.kind());
     let Some(name) = path.file_name() else {
-        return Err(refuse_unreadable(io::ErrorKind::InvalidInput));
+        return Err(refuse_uncopyable(io::ErrorKind::InvalidInput));
     };
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    // Open the source once, and judge the handle, before any copy exists.
+    let mut source = None;
+    if bytes.is_none() {
+        let file = fs::File::open(path).map_err(refuse)?;
+        let metadata = file.metadata().map_err(refuse)?;
+        if !metadata.is_file() {
+            return Err(refuse_not_regular());
+        }
+        source = Some((file, metadata.len()));
+    }
     for attempt in 1..=1000u32 {
         let mut copy_name = name.to_owned();
         copy_name.push(format!(".invalid-{stamp}"));
@@ -2017,10 +2060,27 @@ fn keep_invalid_copy(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(refuse(error)),
         };
-        let written = match bytes {
-            Some(bytes) => file.write_all(bytes),
-            None => fs::File::open(path)
-                .and_then(|mut source| io::copy(&mut source, &mut file).map(|_| ())),
+        let written = match (bytes, source.as_mut()) {
+            (Some(bytes), _) => file.write_all(bytes),
+            (None, Some((source, len))) => {
+                // One byte past the length it had, to notice a file that grew;
+                // fewer than that length is a short copy.
+                let len = *len;
+                io::copy(&mut source.take(len + 1), &mut file).and_then(|copied| {
+                    match copied.cmp(&len) {
+                        std::cmp::Ordering::Equal => Ok(()),
+                        std::cmp::Ordering::Greater => Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "the file grew while it was copied",
+                        )),
+                        std::cmp::Ordering::Less => Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "the file shrank while it was copied",
+                        )),
+                    }
+                })
+            }
+            (None, None) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
         }
         .and_then(|()| file.sync_all());
         if let Err(error) = written {
@@ -2030,7 +2090,7 @@ fn keep_invalid_copy(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
         }
         return Ok(());
     }
-    Err(refuse_unreadable(io::ErrorKind::AlreadyExists))
+    Err(refuse_uncopyable(io::ErrorKind::AlreadyExists))
 }
 
 /// Reads a file of at most [`MAX_AUTH_FILE_SIZE`] bytes.
@@ -5360,30 +5420,89 @@ mod tests {
     }
 
     #[test]
-    fn a_second_sign_in_in_the_same_second_keeps_a_distinct_copy() {
-        for _ in 0..5 {
-            let d = mutation_scratch();
-            let dp = clean_dir(&d);
-            let store = FileStore::new(dp.as_path());
-            for old in ["first bad", "second bad"] {
-                fs::write(dp.join("f.json"), old).unwrap();
-                sign_in(&store, "new-token").unwrap();
-            }
-            let copies = invalid_copies(&dp);
-            assert_eq!(copies.len(), 2, "{copies:?}");
-            assert!(copies.iter().all(|name| is_copy_name(name)), "{copies:?}");
-            let stamp =
-                |name: &String| name[..name.len().min("f.json.invalid-".len() + 16)].to_owned();
-            if stamp(&copies[0]) == stamp(&copies[1]) {
-                assert!(
-                    copies.iter().any(|name| name.ends_with("Z-2")),
-                    "{copies:?}"
-                );
-                let second = copies.iter().find(|name| name.ends_with("Z-2")).unwrap();
-                assert_eq!(fs::read(dp.join(second)).unwrap(), b"second bad");
-                return;
-            }
+    fn copies_made_with_the_same_stamp_get_distinct_names() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let path = dp.join("f.json");
+        let stamp = "20260101T000000Z";
+        for old in ["first", "second", "third"] {
+            keep_invalid_copy_stamped(&path, Some(old.as_bytes()), stamp).unwrap();
         }
+        let expected = [
+            ("f.json.invalid-20260101T000000Z", "first"),
+            ("f.json.invalid-20260101T000000Z-2", "second"),
+            ("f.json.invalid-20260101T000000Z-3", "third"),
+        ];
+        let names: Vec<&str> = expected.iter().map(|(name, _)| *name).collect();
+        assert_eq!(invalid_copies(&dp), names);
+        for (name, old) in expected {
+            assert_eq!(fs::read(dp.join(name)).unwrap(), old.as_bytes(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_second_sign_in_keeps_its_own_copy_beside_the_first() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        for old in ["first bad", "second bad"] {
+            fs::write(dp.join("f.json"), old).unwrap();
+            sign_in(&store, "new-token").unwrap();
+        }
+        let copies = invalid_copies(&dp);
+        assert_eq!(copies.len(), 2, "{copies:?}");
+        assert!(copies.iter().all(|name| is_copy_name(name)), "{copies:?}");
+        let mut kept: Vec<Vec<u8>> = copies
+            .iter()
+            .map(|name| fs::read(dp.join(name)).unwrap())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, [b"first bad".to_vec(), b"second bad".to_vec()]);
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_made_says_so_and_names_no_path() {
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        // The directory is missing, so creating the copy fails with NotFound.
+        let path = dp.join("missing-dir").join("secret-name.json");
+        let error =
+            keep_invalid_copy_stamped(&path, Some(b"{not json"), "20260101T000000Z").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let text = format!("{error} {error:?}");
+        assert!(
+            text.contains("cannot keep a copy of the existing credential file"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("cannot read the existing credential file"),
+            "{text}"
+        );
+        for secret in ["secret-name", "missing-dir", dp.to_str().unwrap()] {
+            assert!(!text.contains(secret), "{text}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sign_in_refuses_to_copy_a_file_that_is_not_a_regular_file() {
+        use std::os::unix::fs::symlink;
+        let d = mutation_scratch();
+        let dp = clean_dir(&d);
+        let store = FileStore::new(dp.as_path());
+        symlink("/dev/zero", dp.join("f.json")).unwrap();
+
+        let error = sign_in(&store, "new-token").unwrap_err();
+        let text = format!("{error} {error:?}");
+        assert!(text.contains("is not a regular file"), "{text}");
+        for secret in ["f.json", dp.to_str().unwrap(), "new-token"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert!(invalid_copies(&dp).is_empty());
+        assert_eq!(
+            fs::read_link(dp.join("f.json")).unwrap(),
+            Path::new("/dev/zero")
+        );
     }
 
     #[test]
