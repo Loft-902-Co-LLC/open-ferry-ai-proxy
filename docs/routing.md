@@ -111,7 +111,7 @@ Each credential that `GET /v0/management/auth-files` lists (`GET /v8/management/
 
 ## CLIProxyAPI and these settings
 
-Both settings are open-ferry's own, and CLIProxyAPI (v8.0.15 to v8.0.27) handles a config that uses them as follows:
+Both settings are open-ferry's own, and CLIProxyAPI (v8.0.15 to v8.0.32) handles a config that uses them as follows:
 
 - **It loads the file.** Its loader ignores fields it doesn't know, so `routing.quota` is ignored, and it runs a `strategy` it doesn't know as `round-robin` (`normalizedRoutingRuntimeState` and `newRoutingSelector` in `sdk/cliproxy/service_config.go`).
 - **Its management API refuses `quota`**: `PUT /v0/management/routing/strategy` answers 400 `invalid strategy`, and a v8 config write that sets `routing.quota` answers 400 `invalid_config` (`ValidateV8Config` decodes strictly).

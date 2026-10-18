@@ -25,7 +25,7 @@ What v1 still needs:
 ## v1: a complete proxy for one person or a small team
 
 Already in place:
-- **Parity with CLIProxyAPI v8.0.27 for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; what we do differently is listed in UPSTREAM.md.
+- **Parity with CLIProxyAPI v8.0.32 for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; what we do differently is listed in UPSTREAM.md.
 - CLIProxyAPI's config and auth directory, read as they are.
 - The OpenAI, Claude and Gemini client APIs, over HTTP and WebSocket.
 - The credential manager.
