@@ -2,7 +2,8 @@
 // (GeminiVertexExecutor: Execute, ExecuteStream, CountTokens, Refresh and
 // their service-account and API-key variants, isImagenModel,
 // getVertexAction, convertImagenToGeminiResponse, convertToImagenRequest,
-// vertexCreds, vertexAPICreds, vertexBaseURL) (v8.0.27, MIT).
+// vertexCreds, vertexAPICreds, vertexBaseURL, vertexAPIKeyModelsURL,
+// vertexAPIVersionSuffix) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`VertexExecutor`]: calls Gemini models on Vertex AI.
@@ -166,9 +167,14 @@ impl VertexExecutor {
         set_string_if_different(&mut body, "model", base);
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
-        turns::ensure_leading_user(&mut body, "contents");
-        turns::drop_trailing_thought_only(&mut body, "contents");
-        turns::ensure_trailing_user(&mut body, "contents");
+        if stream {
+            turns::drop_trailing_thought_only(&mut body, "contents");
+            turns::ensure_boundary_user(&mut body, "contents");
+        } else {
+            turns::ensure_leading_user(&mut body, "contents");
+            turns::drop_trailing_thought_only(&mut body, "contents");
+            turns::ensure_trailing_user(&mut body, "contents");
+        }
         json::delete(&mut body, "session_id");
         self.apply_payload_rules(request, options, stream, None, &mut body);
         Ok(body)

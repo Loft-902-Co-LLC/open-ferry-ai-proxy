@@ -255,3 +255,12 @@ fn drops_only_trailing_thought_model_turns_and_keeps_one_turn() {
         assert_eq!(body, original);
     }
 }
+
+// Not upstream's: gjson Array wraps object-valued parts as one part.
+#[test]
+fn trailing_thought_accepts_object_parts() {
+    let user = json!({"role":"user","parts":[{"text":"hi"}]});
+    let mut body = json!({"contents":[user,{"role":"model","parts":{"thought":true}}]});
+    drop_trailing_thought_only(&mut body, "contents");
+    assert_eq!(body["contents"], json!([user]));
+}

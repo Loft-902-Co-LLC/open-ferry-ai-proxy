@@ -1039,10 +1039,9 @@ async fn answers_hide_the_key_and_token() {
     }
 }
 
-// Ported from TestGeminiVertexDropsTrailingReasoningTurn. The common preparation
-// path is tested directly: both auth modes send precisely this prepared body.
-#[test]
-fn drops_trailing_reasoning_turn() {
+// Ported from TestGeminiVertexDropsTrailingReasoningTurn, over HTTP with both auth modes.
+#[tokio::test]
+async fn drops_trailing_reasoning_turn() {
     let user =
         json!({"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}]});
     let reasoning = json!({"type":"reasoning","id":"rs_test_1","summary":[{"type":"summary_text","text":"I should say hi briefly."}]});
@@ -1071,11 +1070,39 @@ fn drops_trailing_reasoning_turn() {
         ),
     ] {
         for streaming in [false, true] {
-            let request = request("gemini-4-argon", &json!({"input":input}).to_string());
-            let body = executor()
-                .prepare(&request, &options(&Format::OPENAI_RESPONSE), streaming)
-                .unwrap();
-            assert_eq!(body["contents"], want);
+            let mock = Mock::start(if streaming {
+                Reply::sse(OK_STREAM)
+            } else {
+                Reply::json(OK_ANSWER)
+            })
+            .await;
+            let tokens = token_endpoint().await;
+            for (executor, auth) in [
+                (executor(), auth(&mock)),
+                (
+                    executor().with_service_account_base_url(mock.url.clone()),
+                    Arc::new(service_account_auth(
+                        &format!("{}/token", tokens.url),
+                        "global",
+                    )),
+                ),
+            ] {
+                let request = request("gemini-4-argon", &json!({"input":input}).to_string());
+                if streaming {
+                    let response = executor
+                        .execute_stream(auth, request, stream_options(&Format::OPENAI_RESPONSE))
+                        .await
+                        .unwrap();
+                    let (_, error) = collect(response).await;
+                    assert!(error.is_none(), "{error:?}");
+                } else {
+                    executor
+                        .execute(auth, request, options(&Format::OPENAI_RESPONSE))
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(mock.last().json()["contents"], want);
+            }
         }
     }
 }
@@ -1150,6 +1177,58 @@ fn api_key_models_url_preserves_publisher_and_version_prefixes() {
             assert_eq!(
                 api_key_models_url(base, "gemini-4-argon", action),
                 format!("{prefix}/gemini-4-argon:{action}")
+            );
+        }
+    }
+}
+
+// Not upstream's: the stream and non-stream boundary order differs for a lone thought.
+#[tokio::test]
+async fn lone_thought_has_path_specific_boundaries() {
+    let thought = json!({"role":"model","parts":[{"thought":true,"text":"t"}]});
+    let user = json!({"role":"user","parts":[{"text":""}]});
+    for streaming in [false, true] {
+        let mock = Mock::start(if streaming {
+            Reply::sse(OK_STREAM)
+        } else {
+            Reply::json(OK_ANSWER)
+        })
+        .await;
+        let tokens = token_endpoint().await;
+        for (executor, auth) in [
+            (executor(), auth(&mock)),
+            (
+                executor().with_service_account_base_url(mock.url.clone()),
+                Arc::new(service_account_auth(
+                    &format!("{}/token", tokens.url),
+                    "global",
+                )),
+            ),
+        ] {
+            let request = request(
+                "gemini-2.5-flash",
+                &json!({"contents":[thought]}).to_string(),
+            );
+            if streaming {
+                let response = executor
+                    .execute_stream(auth, request, stream_options(&Format::GEMINI))
+                    .await
+                    .unwrap();
+                let (_, error) = collect(response).await;
+                assert!(error.is_none(), "{error:?}");
+            } else {
+                executor
+                    .execute(auth, request, options(&Format::GEMINI))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                mock.last().json()["contents"],
+                if streaming {
+                    json!([user, thought, user])
+                } else {
+                    json!([user])
+                }
             );
         }
     }
