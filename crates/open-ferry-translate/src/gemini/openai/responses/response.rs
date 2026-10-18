@@ -2252,13 +2252,7 @@ fn non_stream(
                 continue;
             }
 
-            let args = raw_args.map(Cow::into_owned).unwrap_or_else(|| {
-                if identity.tool_search {
-                    "{}".into()
-                } else {
-                    String::new()
-                }
-            });
+            let args = raw_args.map(Cow::into_owned).unwrap_or_default();
             let mut call_id = new_call_id();
             if (identity.apply_patch || identity.tool_search)
                 && !call_evidence.upstream_id.is_empty()

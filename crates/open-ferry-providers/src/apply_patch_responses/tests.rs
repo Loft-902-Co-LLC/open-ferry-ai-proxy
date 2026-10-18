@@ -1089,3 +1089,31 @@ fn an_initialized_stream_fails_a_requested_patch_without_a_chunk() {
     assert!(other.finish().is_empty());
     assert!(other.tool_input_error().is_none());
 }
+
+// Not upstream's: ApplyPatchRequested uses the search-aware Gemini identities.
+#[test]
+fn requested_filters_hidden_deferred_patch_tools() {
+    let original = json(
+        r#"{"tools":[{"type":"tool_search","execution":"client"},{"type":"custom","name":"apply_patch","defer_loading":true}]}"#,
+    );
+    assert!(!requested(&original));
+    assert!(!requested(&serde_json::json!({"request":original})));
+}
+
+// Not upstream's: a patch discovered only through client search still requests the patch contract.
+#[test]
+fn requested_finds_patch_tools_in_client_search_outputs() {
+    let original = json(
+        r#"{"input":[{"type":"tool_search_output","execution":"client","tools":[{"type":"custom","name":"apply_patch","defer_loading":true}]}]}"#,
+    );
+    assert!(requested(&original));
+    assert!(requested(&serde_json::json!({"request":original})));
+    let server = json(
+        r#"{"input":[{"type":"tool_search_output","execution":"server","tools":[{"type":"custom","name":"apply_patch"}]}]}"#,
+    );
+    assert!(!requested(&server));
+    let shadowed = json(
+        r#"{"tools":[{"type":"function","name":"apply_patch"}],"input":[{"type":"tool_search_output","tools":[{"type":"custom","name":"apply_patch"}]}]}"#,
+    );
+    assert!(!requested(&shadowed));
+}

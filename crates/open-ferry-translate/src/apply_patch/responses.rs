@@ -1,4 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/apply_patch_responses.go
+// and internal/runtime/executor/helps/apply_patch.go (ApplyPatchRequested)
 // (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -50,7 +51,17 @@ use crate::json::lenient::{self, Found};
 use crate::json::{delete_path, go_value, int_of, path, raw, set_path, str_of};
 use crate::responses_tools::{
     ToolDescriptor, collect_tool_descriptors, collect_tool_winners, qualify_namespace_tool_name,
+    responses_tool_reverse_identity_map,
 };
+
+/// `ApplyPatchRequested`: whether a winning, currently available tool is
+/// the custom patch tool. Uses Gemini's search-aware identities, as upstream
+/// does, so hidden deferred tools and discovered tools follow the same rules.
+pub fn requested(original: &Value) -> bool {
+    responses_tool_reverse_identity_map(original)
+        .values()
+        .any(|identity| identity.apply_patch)
+}
 
 /// Why the bridge failed a stream, or rejected a request. The client sees
 /// only the `response.failed` event; this is for the executor.

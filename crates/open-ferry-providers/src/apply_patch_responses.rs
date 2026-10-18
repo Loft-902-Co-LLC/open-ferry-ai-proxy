@@ -124,15 +124,7 @@ fn held_size(buffers: &[Vec<u8>]) -> usize {
 /// for Gemini (`ResponsesToolReverseIdentityMap`), a request wrapped in a
 /// `request` that holds a model, input or tools is read from inside it.
 pub(crate) fn requested(original: &Value) -> bool {
-    let mut root = original;
-    if let Some(request) = original.get("request")
-        && ["model", "input", "tools"]
-            .iter()
-            .any(|key| request.get(*key).is_some())
-    {
-        root = request;
-    }
-    Bridge::new(root).active()
+    responses::requested(original)
 }
 
 /// `InitializeApplyPatchStream`: readies `translator`, which translates a
