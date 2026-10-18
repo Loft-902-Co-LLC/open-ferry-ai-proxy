@@ -395,3 +395,118 @@ async fn in_flight_successes_keep_fresh_quota_cooldown() {
         "the exhausted credential is selectable again during its quota cooldown"
     );
 }
+
+/// One count-tokens or stream call is held in flight while a unary call is
+/// answered with a quota 429; the held one succeeds only afterwards.
+struct HeldExecutor {
+    quota_recorded: Notify,
+}
+
+impl ProviderExecutor for HeldExecutor {
+    fn id(&self) -> &str {
+        PROVIDER
+    }
+
+    fn execute(
+        &self,
+        _auth: Arc<Auth>,
+        _request: Request,
+        _options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        Box::pin(async {
+            Err(ExecError::upstream(
+                429,
+                "QUOTA_EXHAUSTED: Resets in 140h36m",
+            ))
+        })
+    }
+
+    fn count_tokens(
+        &self,
+        _auth: Arc<Auth>,
+        _request: Request,
+        _options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        Box::pin(async move {
+            self.quota_recorded.notified().await;
+            Ok(Response {
+                payload: "ok".into(),
+                headers: http::HeaderMap::new(),
+            })
+        })
+    }
+
+    fn execute_stream(
+        &self,
+        _auth: Arc<Auth>,
+        _request: Request,
+        _options: Options,
+    ) -> BoxFuture<'_, Result<crate::exec::StreamResponse, ExecError>> {
+        Box::pin(async move {
+            self.quota_recorded.notified().await;
+            Ok(crate::exec::StreamResponse {
+                headers: http::HeaderMap::new(),
+                chunks: Box::pin(futures_util::stream::iter([Ok(bytes::Bytes::from("ok"))])),
+            })
+        })
+    }
+
+    fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
+        Box::pin(async move { Ok((*auth).clone()) })
+    }
+}
+
+/// Not upstream's, which has no test of the other two call paths: a count
+/// tokens call or a stream dispatched before a quota 429 leaves the cooldown
+/// be when it succeeds, as a unary call does.
+#[tokio::test(start_paused = true)]
+async fn stale_successes_on_streams_and_count_tokens_keep_the_cooldown() {
+    use futures_util::StreamExt;
+
+    for stream in [false, true] {
+        let id = "issue6643-held-auth";
+        let h = Harness::new(Settings::default());
+        h.add(auth(id, PROVIDER), &[MODEL]);
+        let executor = Arc::new(HeldExecutor {
+            quota_recorded: Notify::new(),
+        });
+        h.manager.register_executor(executor.clone());
+
+        let manager = h.manager.clone();
+        let held = tokio::spawn(async move {
+            let provs = providers(&[PROVIDER]);
+            if stream {
+                let mut opts = options();
+                opts.stream = true;
+                let mut response = manager.execute_stream(&provs, request(MODEL), opts).await?;
+                while let Some(chunk) = response.chunks.next().await {
+                    chunk?;
+                }
+                Ok(())
+            } else {
+                manager
+                    .count_tokens(&provs, request(MODEL), options())
+                    .await
+                    .map(|_| ())
+            }
+        });
+        settle().await;
+        h.manager
+            .execute(&providers(&[PROVIDER]), request(MODEL), options())
+            .await
+            .expect_err("the quota answer");
+        assert!(model_state(&h, id, MODEL).quota.exceeded);
+        executor.quota_recorded.notify_waiters();
+        held.await
+            .expect("join")
+            .unwrap_or_else(|e: ExecError| panic!("stream={stream}: {e}"));
+
+        let state = model_state(&h, id, MODEL);
+        assert!(
+            state.unavailable
+                && state.quota.exceeded
+                && state.next_retry_after.is_some_and(|t| t > h.now()),
+            "stream={stream}: stale success cleared the cooldown: {state:?}"
+        );
+    }
+}

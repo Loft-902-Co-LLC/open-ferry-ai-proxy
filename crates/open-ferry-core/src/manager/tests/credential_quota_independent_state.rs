@@ -20,7 +20,7 @@ use chrono::TimeDelta;
 
 use super::cooldown_state_store::{RecordingStore, temp_dir};
 use super::support::*;
-use crate::auth::{AuthError, ModelState, Status};
+use crate::auth::{AuthError, ModelState, QuotaState, Status, Timestamp};
 use crate::manager::cooldown_store::{
     FileStore, Record, StateStore, flush, install_store, restore_now, set_debounce,
 };
@@ -287,4 +287,180 @@ async fn a_success_after_the_quota_drops_the_independent_layer() {
     let state = model_state(&h, id, OWN);
     assert!(state.credential_quota_shadow.is_none(), "{state:?}");
     assert!(!state.credential_quota_propagated, "{state:?}");
+}
+
+fn hours(h: i64) -> TimeDelta {
+    TimeDelta::hours(h)
+}
+
+/// A credential quota block on a model that has lasted until `until`.
+fn wrapped_state(until: Timestamp, now: Timestamp) -> ModelState {
+    ModelState {
+        status: Status::Error,
+        unavailable: true,
+        next_retry_after: Some(until),
+        quota: QuotaState {
+            exceeded: true,
+            reason: "credential_quota".into(),
+            next_recover_at: Some(until),
+            ..QuotaState::default()
+        },
+        updated_at: Some(now),
+        ..ModelState::default()
+    }
+}
+
+/// A saved cooldown of `OWN` as the store gives it back.
+fn saved(until: Timestamp, written: Timestamp, reason: &str) -> Record {
+    Record {
+        provider: PROVIDER.into(),
+        auth_id: "restore".into(),
+        model: OWN.into(),
+        status: "cooling".into(),
+        next_retry_after: Some(until),
+        reason: reason.into(),
+        quota: QuotaState {
+            exceeded: true,
+            reason: reason.into(),
+            next_recover_at: Some(until),
+            ..QuotaState::default()
+        },
+        updated_at: Some(written),
+        ..Record::default()
+    }
+}
+
+fn restore(h: &Harness, records: Vec<Record>) {
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, RecordingStore::with_load(records));
+    restore_now(&h.manager);
+}
+
+/// Ported from upstream's TestDevinRestoreDoesNotClobberNewerShadow, on
+/// `claude`: a stale record's own layer doesn't replace a newer live one.
+#[tokio::test(start_paused = true)]
+async fn restore_does_not_clobber_a_newer_shadow() {
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let mut live = auth("restore", PROVIDER);
+    live.status = Status::Active;
+    let newer = ModelState {
+        status: Status::Error,
+        unavailable: true,
+        next_retry_after: Some(now + hours(12)),
+        updated_at: Some(now),
+        ..ModelState::default()
+    };
+    live.model_states.insert(
+        OWN.into(),
+        ModelState {
+            credential_quota_shadow: Some(Box::new(newer)),
+            credential_quota_propagated: true,
+            ..wrapped_state(now + hours(72), now)
+        },
+    );
+    h.manager.register_unsaved(live).expect("register");
+
+    let older = ModelState {
+        status: Status::Error,
+        unavailable: true,
+        next_retry_after: Some(now + hours(1)),
+        updated_at: Some(now - hours(2)),
+        ..ModelState::default()
+    };
+    restore(
+        &h,
+        vec![Record {
+            independent_state: Some(older),
+            ..saved(now + hours(72), now - hours(2), "credential_quota")
+        }],
+    );
+
+    let state = model_state(&h, "restore", OWN);
+    let shadow = state.credential_quota_shadow.as_deref();
+    assert!(
+        shadow.is_some_and(|s| s.next_retry_after.is_some_and(|t| t > now + hours(6))),
+        "newer live shadow clobbered by the stale record: {state:?}"
+    );
+}
+
+/// Ported from upstream's TestDevinRestorePreservesLiveUnwrappedIndependent,
+/// on `claude`: a stale wrapped record applied over a live cooldown of the
+/// model's own keeps that cooldown as the layer beneath.
+#[tokio::test(start_paused = true)]
+async fn restore_keeps_a_live_unwrapped_cooldown_as_the_shadow() {
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let mut live = auth("restore", PROVIDER);
+    live.status = Status::Active;
+    let own = ModelState {
+        status: Status::Error,
+        unavailable: true,
+        next_retry_after: Some(now + hours(12)),
+        last_error: Some(error(404, "missing")),
+        updated_at: Some(now),
+        ..ModelState::default()
+    };
+    live.unavailable = true;
+    live.next_retry_after = own.next_retry_after;
+    live.model_states.insert(OWN.into(), own);
+    h.manager.register_unsaved(live).expect("register");
+
+    restore(
+        &h,
+        vec![Record {
+            credential_quota_propagated: true,
+            ..saved(now + hours(72), now - hours(2), "credential_quota")
+        }],
+    );
+
+    let state = model_state(&h, "restore", OWN);
+    let shadow = state
+        .credential_quota_shadow
+        .as_deref()
+        .unwrap_or_else(|| panic!("the live cooldown must be kept as the shadow: {state:?}"));
+    let deadline = shadow.next_retry_after.expect("shadow deadline");
+    assert!(
+        deadline > now + hours(6) && deadline < now + hours(24),
+        "captured shadow deadline = {deadline}, want the ~12h block"
+    );
+}
+
+/// Ported from upstream's TestDevinRestoreIndependentRecordUnderLiveWrapPreserved
+/// (its restore assertions; the refresh that follows is Devin's): a record
+/// of a model's own cooldown that arrives late, under a live credential
+/// quota, is kept as the model's layer.
+#[tokio::test(start_paused = true)]
+async fn restore_keeps_an_independent_record_under_a_live_wrap() {
+    let h = harness_with("restore");
+    h.manager
+        .mark_result(&credential_quota("restore", OTHER, 72 * 60));
+    let now = h.now();
+    assert!(
+        h.get("restore")
+            .model_states
+            .get(OWN)
+            .is_none_or(|s| s.credential_quota_shadow.is_none())
+    );
+
+    restore(
+        &h,
+        vec![Record {
+            last_error: Some(error(429, "model rate limit")),
+            ..saved(now + hours(12), now - TimeDelta::minutes(1), "quota")
+        }],
+    );
+
+    let state = model_state(&h, "restore", OWN);
+    let shadow = state
+        .credential_quota_shadow
+        .as_deref()
+        .unwrap_or_else(|| panic!("the record must be kept beneath the wrap: {state:?}"));
+    assert!(
+        shadow
+            .next_retry_after
+            .is_some_and(|t| t > now + hours(6) && t < now + hours(24)),
+        "{shadow:?}"
+    );
+    assert!(state.credential_quota_propagated, "{state:?}");
 }
