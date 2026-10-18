@@ -22,7 +22,7 @@ When we move the pin, we update this table, bring every ported file's header to 
 | 091ff27f | All | Antigravity's capability hints in auth metadata, with the credential manager's save policy for them and the git, object and Postgres stores' handling of them. Neither Antigravity nor those stores are ported |
 | cad1b503 | All | Devin's input token estimates for Claude streams. Devin isn't ported |
 | 18b6cc8a | The Devin getters | Devin isn't ported. The Meta getters are already in place (`registry/definitions.rs`) |
-| e9c8769a | Devin's executor part | Devin isn't ported. The Claude part and the shared tool call ID helpers (`helps/tool_call_ids.go`) are ported |
+| e9c8769a | Devin's executor part, and the helpers in `helps/tool_call_ids.go` that encode, decode and restore Devin's tool call IDs | Devin isn't ported. Claude's normalization of tool call IDs (`NormalizeClaudeToolCallIDs`) is ported |
 | 4a8ecf5c | All | Home's skipping of local filtering for a dispatched credential. Home isn't ported, and the local path is unchanged |
 | 6331b38b | Home's dispatch of `response.interrupt` | Home isn't ported. The Responses WebSocket handling and the Codex executor's part are ported |
 | a68ad134, 11f04c20, 03a3cfec | Home's catalog routing for tool search (`homeProvidersForModel`, `homeToolSearchCapabilityForModel`, `homeModelNativeCapabilities`) | Home isn't ported. The local catalog check, the executor, the switch and the server parts are ported |
