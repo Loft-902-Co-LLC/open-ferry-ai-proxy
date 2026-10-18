@@ -863,6 +863,47 @@ payload:
     assert_eq!(mock.last().json()["max_tokens"], 256);
 }
 
+// Not upstream's: upstream's executor tests for the binding drive each of its
+// three paths; this sends one request through ours. The binding is injected
+// before the payload rules, so an override rule still has the last word, and
+// the beta follows whatever the body ends up carrying.
+#[tokio::test]
+async fn signed_thinking_history_gets_a_drop_block_binding_and_its_beta() {
+    let payload = json!({
+        "model": "claude-opus-5-5",
+        "max_tokens": 256,
+        "thinking": {"type": "adaptive"},
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "redacted_thinking", "data": "ZGF0YQ=="},
+                {"type": "text", "text": "a"}]},
+            {"role": "user", "content": "more"}]
+    });
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    mock.executor()
+        .execute(
+            api_key_auth(),
+            Request {
+                model: "claude-opus-5-5".into(),
+                payload: Bytes::from(payload.to_string()),
+            },
+            options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let sent = mock.last();
+    assert_eq!(
+        sent.json()["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+        "drop_block"
+    );
+    assert!(
+        sent.header("anthropic-beta")
+            .unwrap_or_default()
+            .contains("thinking-binding-controls-2026-08-01")
+    );
+}
+
 #[tokio::test]
 async fn openai_call_reads_claudes_stream() {
     let mock = Mock::start(Reply::sse(SSE)).await;

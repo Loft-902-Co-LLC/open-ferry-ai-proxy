@@ -1037,8 +1037,8 @@ fn tool_result_text_parts(block: &Value) -> Vec<Value> {
 }
 
 /// `claudeModelRejectsAssistantPrefill`: whether the model rejects a
-/// conversation ending with an assistant turn: Fable, Opus 5 and later, and
-/// Sonnet 4.6 and later. The family is read after any provider namespace
+/// conversation ending with an assistant turn: Fable, Opus 5 and later,
+/// Sonnet 4.6 and later, and Haiku 5 and later. The family is read after any provider namespace
 /// and `claude-` prefix, and the versions after it, with `.` read as `-`.
 fn rejects_assistant_prefill(model_name: &str) -> bool {
     let normalized = go::to_lower(model_name.trim());
@@ -1051,7 +1051,7 @@ fn rejects_assistant_prefill(model_name: &str) -> bool {
     if family == "fable" {
         return true;
     }
-    if family != "opus" && family != "sonnet" {
+    if !matches!(family, "opus" | "sonnet" | "haiku") {
         return false;
     }
     let version = |position: usize| {

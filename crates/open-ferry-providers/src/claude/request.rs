@@ -42,6 +42,9 @@ pub(crate) const OAUTH_BETA: &str = "oauth-2025-04-20";
 pub(crate) const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
 pub(crate) const TOKEN_COUNTING_BETA: &str = "token-counting-2024-11-01";
 pub(crate) const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
+/// Anthropic rejects a body with `thinking.block_binding` unless this beta
+/// travels with it.
+pub(crate) const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 pub(crate) const EXTENDED_CACHE_TTL_BETA: &str = "extended-cache-ttl-2025-04-11";
 pub(crate) const ADVISOR_TOOL_BETA: &str = "advisor-tool-2026-03-01";
 
@@ -627,10 +630,166 @@ pub(crate) fn payload_has_1h_ttl(body: &Value) -> bool {
         || message_contents(body).any(any)
 }
 
+/// `claudeCanonicalModel`: lower case, trimmed, without a routing prefix.
+fn canonical_model(model: &str) -> String {
+    let model = json::lower_trim(model);
+    model.rsplit('/').next().unwrap_or_default().to_owned()
+}
+
+/// `isClaudeOpus55Model`, `isClaudeSonnet55Model`, `isClaudeHaiku55Model` and
+/// `isClaudeFable51OnlyModel` together (`isClaudePreservedThinkingModel`): the
+/// models whose signed thinking blocks Anthropic binds to the creation-time
+/// prefix (system, tools and every earlier message). Mythos 5.1 shares the
+/// fable family elsewhere but does not run the prefix check.
+fn is_preserved_thinking_model(model: &str) -> bool {
+    let model = canonical_model(model);
+    let versioned = |base: &str| {
+        model == base
+            || model
+                .strip_prefix(base)
+                .is_some_and(|rest| rest.starts_with('-') || rest.starts_with('['))
+    };
+    let opus = model == "claude-opus-5-5" || model.starts_with("claude-opus-5-5[");
+    let sonnet = versioned("claude-sonnet-5-5");
+    let haiku = versioned("claude-haiku-5-5") || versioned("claude-haiku-5.5");
+    let fable = ["fable-5-1", "fable-5.1"].iter().any(|target| {
+        model.match_indices(target).any(|(at, _)| {
+            !model[at + target.len()..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_digit())
+        })
+    });
+    opus || sonnet || haiku || fable
+}
+
+/// `claudeThinkingTypeAcceptsBlockBinding`: Haiku 5.5 and Sonnet 5.5 take
+/// `block_binding` only with adaptive thinking (disabled and between_tools
+/// answer 400); the other models also take manual `enabled` thinking.
+fn thinking_type_accepts_block_binding(model: &str, thinking_type: &str) -> bool {
+    match json::lower_trim(thinking_type).as_str() {
+        "adaptive" => true,
+        "enabled" => {
+            let model = canonical_model(model);
+            !(model.starts_with("claude-haiku-5-5")
+                || model.starts_with("claude-haiku-5.5")
+                || model.starts_with("claude-sonnet-5-5"))
+        }
+        _ => false,
+    }
+}
+
+/// `claudeBodyHasSignedThinkingBlock`: whether an assistant message replays a
+/// signed `thinking` block or a `redacted_thinking` block with data, the
+/// history Anthropic subjects to prefix binding validation.
+fn has_signed_thinking_block(body: &Value) -> bool {
+    message_contents(body)
+        .flatten()
+        .any(|block| match json::str_at(block, "type").trim() {
+            "thinking" => !json::str_at(block, "signature").trim().is_empty(),
+            "redacted_thinking" => !json::str_at(block, "data").trim().is_empty(),
+            _ => false,
+        })
+}
+
+/// `applyClaudePreservedThinkingBinding`: when a request replays signed
+/// thinking on a preserved-thinking model, default
+/// `thinking.block_binding.prefix_mismatch_behavior` to `drop_block`, so a
+/// prefix mismatch (a reconnect resending history, a changed tools list,
+/// rebuilt server-tool blocks) drops the bound blocks rather than failing the
+/// request with a 400. A behavior the caller set wins, and an explicit
+/// `thinking.type` is required so a bare `block_binding` object is never
+/// made up on a request without thinking. Runs before the payload rules,
+/// which stay the last word and may override or filter the value.
+pub(crate) fn apply_preserved_thinking_binding(body: &mut Value) {
+    let model = json::str_at(body, "model");
+    if !is_preserved_thinking_model(&model)
+        || !thinking_type_accepts_block_binding(&model, &json::str_at(body, "thinking.type"))
+        || json::get(body, "thinking.block_binding.prefix_mismatch_behavior").is_some()
+        || !has_signed_thinking_block(body)
+    {
+        return;
+    }
+    json::set(
+        body,
+        "thinking.block_binding.prefix_mismatch_behavior",
+        json!("drop_block"),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use open_ferry_core::models::ModelInfo;
+
+    fn signed_history(model: &str, thinking: Value) -> Value {
+        json!({"model": model, "thinking": thinking, "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t", "signature": "sig"},
+                {"type": "text", "text": "a"}]},
+            {"role": "user", "content": "more"}]})
+    }
+
+    // Not upstream's: upstream's tests drive the executor; these check the
+    // binding rules (model, thinking type, signed history, caller's value) directly.
+    #[test]
+    fn preserved_thinking_binding_defaults_to_drop_block() {
+        let behavior =
+            |body: &Value| json::str_at(body, "thinking.block_binding.prefix_mismatch_behavior");
+        for (model, thinking) in [
+            (
+                "claude-opus-5-5",
+                json!({"type": "enabled", "budget_tokens": 1024}),
+            ),
+            ("claude-opus-5-5", json!({"type": "adaptive"})),
+            (
+                "anthropic/claude-sonnet-5-5-20260801",
+                json!({"type": "adaptive"}),
+            ),
+            ("claude-haiku-5.5", json!({"type": "adaptive"})),
+            (
+                "claude-fable-5-1",
+                json!({"type": "enabled", "budget_tokens": 1024}),
+            ),
+        ] {
+            let mut body = signed_history(model, thinking);
+            apply_preserved_thinking_binding(&mut body);
+            assert_eq!(behavior(&body), "drop_block", "{model}");
+        }
+        for (model, thinking) in [
+            (
+                "claude-sonnet-5-5",
+                json!({"type": "enabled", "budget_tokens": 1024}),
+            ),
+            ("claude-haiku-5-5", json!({"type": "disabled"})),
+            ("claude-opus-5-5", json!({"type": "disabled"})),
+            ("claude-opus-5", json!({"type": "adaptive"})),
+            ("claude-fable-5-10", json!({"type": "adaptive"})),
+        ] {
+            let mut body = signed_history(model, thinking);
+            apply_preserved_thinking_binding(&mut body);
+            assert!(body["thinking"].get("block_binding").is_none(), "{model}");
+        }
+        let mut unsigned = signed_history("claude-opus-5-5", json!({"type": "adaptive"}));
+        unsigned["messages"][1]["content"][0]["signature"] = json!(" ");
+        apply_preserved_thinking_binding(&mut unsigned);
+        assert!(unsigned["thinking"].get("block_binding").is_none());
+        let mut redacted = signed_history("claude-opus-5-5", json!({"type": "adaptive"}));
+        redacted["messages"][1]["content"][0] = json!({"type": "redacted_thinking", "data": "d"});
+        apply_preserved_thinking_binding(&mut redacted);
+        assert_eq!(behavior(&redacted), "drop_block");
+        let mut chosen = signed_history(
+            "claude-opus-5-5",
+            json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}),
+        );
+        apply_preserved_thinking_binding(&mut chosen);
+        assert_eq!(behavior(&chosen), "error");
+        let mut no_thinking = signed_history("claude-opus-5-5", json!(null));
+        no_thinking.as_object_mut().unwrap().remove("thinking");
+        apply_preserved_thinking_binding(&mut no_thinking);
+        assert!(no_thinking.get("thinking").is_none());
+    }
 
     #[test]
     fn invalid_cache_controls_do_not_count_normalize_or_suppress_injection() {
