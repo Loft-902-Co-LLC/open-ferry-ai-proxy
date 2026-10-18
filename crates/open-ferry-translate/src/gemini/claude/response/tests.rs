@@ -549,9 +549,12 @@ fn non_stream_edge_cases() {
         .filter(|block| block["type"] == "tool_use")
         .collect();
     assert_eq!(calls.len(), 2);
-    let first_id = calls[0]["id"].as_str().unwrap();
-    let second_id = calls[1]["id"].as_str().unwrap();
-    assert_ne!(first_id, second_id);
+    // The names differ, so compare the numbers the counter gave them.
+    let number = |call: &Value| -> u64 {
+        let id = call["id"].as_str().unwrap();
+        id.rsplit_once('-').unwrap().1.parse().unwrap()
+    };
+    assert!(number(calls[1]) > number(calls[0]), "{calls:?}");
     assert_eq!(
         mask_tool_ids(&output.to_string()),
         concat!(
