@@ -179,6 +179,7 @@ impl InteractionsToOpenAIResponsesStream {
         step: Option<&Value>,
         initial: bool,
     ) -> Events {
+        let fallback_id = self.fallback_item_id(index);
         let call = self.calls.entry(index).or_default();
         if let Some(kind) = get(step, "type")
             && str_of(Some(kind)) != "function_call"
@@ -245,7 +246,7 @@ impl InteractionsToOpenAIResponsesStream {
         } else {
             call.argument_fragments.clear();
             if !call.item_id_seen && !call.added {
-                call.id = first_non_empty([&call.call_id, &format!("item_{index}")]).to_owned();
+                call.id = first_non_empty([&call.call_id, &fallback_id]).to_owned();
             }
             if !call.call_id_seen && !call.added {
                 call.call_id.clone_from(&call.id);
@@ -335,16 +336,17 @@ impl InteractionsToOpenAIResponsesStream {
             .collect();
         let mut events = Vec::new();
         for index in indexes {
+            let fallback_id = self.fallback_item_id(index);
             let Some(call) = self.calls.get_mut(&index) else {
                 continue;
             };
             if call.patch.is_none() {
                 // Interactions already maps an absent call_id to id (and an
-                // absent id to call_id/item_<index>). Freeze that
+                // absent id to call_id or a per-response fallback). Freeze that
                 // compatibility mapping only at the response terminal, after
                 // all supplied snapshot IDs were reconciled.
                 if !call.item_id_seen {
-                    call.id = first_non_empty([&call.call_id, &format!("item_{index}")]).to_owned();
+                    call.id = first_non_empty([&call.call_id, &fallback_id]).to_owned();
                 }
                 if !call.call_id_seen {
                     call.call_id.clone_from(&call.id);

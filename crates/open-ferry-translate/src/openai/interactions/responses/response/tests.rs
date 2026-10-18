@@ -1629,3 +1629,68 @@ fn numbers_keep_their_text() {
         stream.translate(br#"data: {"type":"response.created","response":{"id":-0,"model":"m"}}"#);
     assert!(out.contains(r#"{"interaction":{"id":"-0","#), "{out}");
 }
+
+// Ported from TestInteractionsResponsesGeneratedItemIDsDoNotCollideAcrossResponses.
+#[test]
+fn generated_item_ids_do_not_collide_across_responses() {
+    let mut seen = std::collections::HashSet::new();
+    for (step, delta, delta_event, patch) in [
+        (
+            json!({"type":"thought"}),
+            json!({"type":"thought_summary","text":"thinking"}),
+            "response.reasoning_summary_text.delta",
+            false,
+        ),
+        (
+            json!({"type":"model_output"}),
+            json!({"type":"text","text":"ready"}),
+            "response.output_text.delta",
+            false,
+        ),
+        (
+            json!({"type":"function_call","name":"exec_command","arguments":{}}),
+            json!({"type":"arguments_delta","arguments":"{\"cmd\":\"pwd\"}"}),
+            "response.function_call_arguments.delta",
+            false,
+        ),
+        (
+            json!({"type":"function_call","name":"functions__apply_patch"}),
+            json!({"type":"arguments_delta","arguments":"{\"input\":\"pq\"}"}),
+            "response.custom_tool_call_input.delta",
+            true,
+        ),
+    ] {
+        for response in 0..2 {
+            let mut stream = if patch {
+                patch_stream()
+            } else {
+                InteractionsToOpenAIResponsesStream::new(MODEL, &Value::Null, &Value::Null)
+            };
+            let mut output = String::new();
+            for raw in [
+                json!({"event_type":"interaction.created","interaction":{"id":format!("interaction_{response}")}}),
+                json!({"event_type":"step.start","index":0,"step":step}),
+                json!({"event_type":"step.delta","index":0,"delta":delta}),
+                json!({"event_type":"step.stop","index":0}),
+                json!({"event_type":"interaction.completed","interaction":{"status":"completed"}}),
+            ] {
+                output.push_str(&stream.translate(&go_json(raw)));
+            }
+            let events = events(&output);
+            let added = find(&events, "response.output_item.added");
+            let id = added["item"]["id"].as_str().unwrap();
+            assert!(!id.is_empty() && seen.insert(id.to_owned()), "{output}");
+            for (event, path) in [
+                (delta_event, "/item_id"),
+                ("response.output_item.done", "/item/id"),
+                ("response.completed", "/response/output/0/id"),
+            ] {
+                assert_eq!(
+                    find(&events, event).pointer(path).and_then(Value::as_str),
+                    Some(id),
+                    "{output}"
+                );
+            }
+        }
+    }
+}

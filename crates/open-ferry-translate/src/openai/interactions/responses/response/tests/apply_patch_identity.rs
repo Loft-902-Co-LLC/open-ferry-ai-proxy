@@ -219,7 +219,12 @@ fn terminal_identity_fallback() {
             let name = format!("{first}-{terminal}");
             let mut stream = patch_stream();
             let mut step = json!({"type": "function_call", "name": "functions__apply_patch"});
-            let id = if first == "call" { "call_2" } else { "item_2" };
+            let fallback = stream.fallback_item_id(2);
+            let id = match first {
+                "call" => "call_2",
+                "item" => "item_2",
+                _ => &fallback,
+            };
             if first == "item" {
                 step["id"] = json!(id);
             }

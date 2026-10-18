@@ -149,6 +149,7 @@ pub struct InteractionsToOpenAIResponsesStream {
     pub(super) patch_bridge: bool,
     pub(super) error: Option<ToolInputError>,
     pub(super) id: String,
+    pub(super) item_id_prefix: String,
     pub(super) environment_id: String,
     pub(super) calls: BTreeMap<i64, Call>,
     pub(super) item_ids: BTreeMap<i64, String>,
@@ -172,6 +173,10 @@ pub struct InteractionsToOpenAIResponsesStream {
 }
 
 impl InteractionsToOpenAIResponsesStream {
+    pub(super) fn fallback_item_id(&self, index: i64) -> String {
+        format!("item_{}_{index}", self.item_id_prefix)
+    }
+
     /// A stream for a response from `model`, to the client's
     /// `original_request`, sent upstream as `request`. `Null` stands for
     /// either being absent.
@@ -186,6 +191,7 @@ impl InteractionsToOpenAIResponsesStream {
             patch_bridge,
             error: None,
             id: String::new(),
+            item_id_prefix: uuid::Uuid::new_v4().to_string(),
             environment_id: String::new(),
             calls: BTreeMap::new(),
             item_ids: BTreeMap::new(),
@@ -386,7 +392,7 @@ impl InteractionsToOpenAIResponsesStream {
             return self.update_function_call(index, step, true);
         }
         let (id, call_id) = (text(step, "id"), text(step, "call_id"));
-        let item_id = first_non_empty([&id, &call_id, &format!("item_{index}")]).to_owned();
+        let item_id = first_non_empty([&id, &call_id, &self.fallback_item_id(index)]).to_owned();
         if step_type == "function_call" {
             return self.update_function_call(index, step, true);
         }
