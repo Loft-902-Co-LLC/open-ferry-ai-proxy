@@ -3,9 +3,10 @@
 
 //! Restores Claude tool names and removes schema-normalization placeholders.
 //!
-//! Antigravity's post-translation schema sanitization is not simulated: Gemini
-//! does not run that pass. Arguments are represented as JSON values, as in the
-//! rest of this translator, so their text is serialized compactly. Cleaning
+//! Closed objects use the upstream re-clean decision on every route, without
+//! running an Antigravity request cleaner. Arguments use compact JSON values.
+//! Schema equality retains key order but cannot distinguish whitespace or string
+//! escape spellings discarded when requests are parsed. Cleaning
 //! stops after 128 argument levels to bound recursive walks of recursive schemas;
 //! deeper data is preserved.
 
@@ -14,6 +15,8 @@ use crate::common::tool_names::canonical_tool_name;
 use crate::json::{path, str_of};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod reclean;
 
 fn tool_name(tool: &Value) -> String {
     let name = str_of(tool.get("name"));
@@ -75,7 +78,10 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
         })
         .collect();
     let first = *schemas.first()?;
-    schemas.iter().all(|s| *s == first).then_some(first)
+    schemas
+        .iter()
+        .all(|s| s.map(Value::to_string) == first.map(Value::to_string))
+        .then_some(first)
 }
 
 #[derive(Default, Clone)]
@@ -131,7 +137,12 @@ impl<'a> Info<'a> {
     }
 }
 fn unique<'a>(values: &mut Vec<&'a Value>, value: &'a Value) {
-    if !values.contains(&value) {
+    let serialized = value.to_string();
+    if !values
+        .iter()
+        .map(|existing| existing.to_string())
+        .any(|existing| existing == serialized)
+    {
         values.push(value);
     }
 }
@@ -142,6 +153,19 @@ fn array<'a>(schema: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
         .into_iter()
         .flatten()
 }
+// gjson's Array returns one element for a non-null scalar or object.
+fn gjson_array(value: Option<&Value>) -> impl Iterator<Item = &Value> {
+    value
+        .filter(|value| !value.is_null())
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_else(|| std::slice::from_ref(value))
+        })
+}
+
 fn branches(schema: &Value) -> Option<Vec<&Value>> {
     let mut out = Vec::new();
     for key in ["anyOf", "oneOf"] {
@@ -199,12 +223,14 @@ fn analyze_depth<'a>(
         return info;
     }
     let has_union = schema.get("anyOf").is_some() || schema.get("oneOf").is_some();
+    let mut multi_branch_union = false;
     if has_union {
         let Some(branches) = branches(schema).filter(|b| !b.is_empty()) else {
             info.complex = true;
             return info;
         };
         let multiple = branches.len() > 1;
+        multi_branch_union = multiple;
         for branch in branches {
             let branch_info = analyze_depth(branch, root, depth + 1, visited);
             if multiple {
@@ -216,16 +242,17 @@ fn analyze_depth<'a>(
     }
     if let Some(reference) = schema.get("$ref") {
         let reference = str_of(Some(reference)).into_owned();
-        if !reference.starts_with("#/") || !visited.insert(reference.clone()) {
+        let target = (!visited.contains(&reference))
+            .then(|| local_ref(root, &reference))
+            .flatten();
+        if let Some(target) = target {
+            visited.insert(reference.clone());
+            info.merge(analyze_depth(target, root, depth + 1, visited));
+            visited.remove(&reference);
+        } else if !multi_branch_union {
             info.complex = true;
             return info;
         }
-        if let Some(target) = local_ref(root, &reference) {
-            info.merge(analyze_depth(target, root, depth + 1, visited));
-        } else {
-            info.complex = true;
-        }
-        visited.remove(&reference);
     }
     if let Some(all) = schema.get("allOf") {
         if let Some(all) = all.as_array() {
@@ -256,7 +283,7 @@ fn analyze_depth<'a>(
         }
     }
     info.required
-        .extend(array(schema, "required").map(|v| str_of(Some(v)).into_owned()));
+        .extend(gjson_array(schema.get("required")).map(|v| str_of(Some(v)).into_owned()));
     info
 }
 
@@ -268,42 +295,47 @@ pub(super) fn parameterless(request: &Value, name: &str) -> bool {
     }
 }
 
-// Derive upstream's request-wide disambiguated name when matching a sent schema.
-fn sent_tool_name(original: &Value, target: &str) -> Option<String> {
-    use sha2::{Digest as _, Sha256};
-    let names: BTreeSet<_> = original
-        .get("tools")?
-        .as_array()?
-        .iter()
-        .map(tool_name)
-        .filter(|name| !name.is_empty())
-        .collect();
-    let mut counts = BTreeMap::<String, usize>::new();
-    for name in &names {
-        *counts
-            .entry(sanitize_gemini_function_name(name))
-            .or_default() += 1;
+// `functionNamesFromRequest`: collect raw names, preferring function.name.
+fn collect_function_names(tool: &Value, names: &mut Vec<String>) {
+    if let Some(tools) = tool.get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            collect_function_names(tool, names);
+        }
+        return;
     }
-    let mut used = BTreeSet::new();
-    for name in names {
-        let base = sanitize_gemini_function_name(&name);
-        let mut mapped = base.clone();
-        if counts[&base] > 1 || used.contains(&base) {
-            for attempt in 0u64.. {
-                let digest = Sha256::digest(format!("{name}\0{attempt}").as_bytes());
-                let suffix: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
-                mapped = format!("{}_{}", &base[..base.len().min(51)], suffix);
-                if !used.contains(&mapped) {
-                    break;
+    let mut has_declarations = false;
+    for key in ["functionDeclarations", "function_declarations"] {
+        if let Some(declarations) = tool.get(key).and_then(Value::as_array) {
+            has_declarations = true;
+            for declaration in declarations {
+                let name = str_of(declaration.get("name"));
+                if !name.is_empty() {
+                    names.push(name.into_owned());
                 }
             }
         }
-        if name == target {
-            return Some(mapped);
-        }
-        used.insert(mapped);
     }
-    None
+    if has_declarations {
+        return;
+    }
+    let function_name = str_of(path(tool, "function.name"));
+    let name = if function_name.is_empty() {
+        str_of(tool.get("name"))
+    } else {
+        function_name
+    };
+    if !name.is_empty() {
+        names.push(name.into_owned());
+    }
+}
+
+fn sent_tool_name(original: &Value, target: &str) -> Option<String> {
+    let mut names = Vec::new();
+    for tool in original.get("tools")?.as_array()? {
+        collect_function_names(tool, &mut names);
+    }
+    let names: Vec<_> = names.iter().map(String::as_str).collect();
+    crate::responses_tools::sanitize_tool_names(&names).remove(target)
 }
 
 fn translated_schemas<'a>(sent: &'a Value, original: &Value, name: &str) -> Vec<&'a Value> {
@@ -407,7 +439,7 @@ fn candidate_accepts(infos: &[Info<'_>], key: Option<&str>, current: &Value) -> 
 fn injected(schema: &Value, key: &str, top: bool) -> bool {
     let info = analyze(schema, schema);
     if let Some(properties) = info.properties.get(key) {
-        if array(schema, "required").any(|v| v == key) {
+        if gjson_array(schema.get("required")).any(|v| v == key) {
             return true;
         }
         if key == "reason"
@@ -430,8 +462,45 @@ fn injected(schema: &Value, key: &str, top: bool) -> bool {
     ["anyOf", "oneOf"].iter().any(|k| {
         array(schema, k).any(|branch| {
             analyze(branch, branch).properties.contains_key(key)
-                && array(branch, "required").any(|v| v == key)
+                && gjson_array(branch.get("required")).any(|v| v == key)
         })
+    })
+}
+
+// `claudeOriginalDeclaresPropertyDeep`: a branch that could not be analyzed
+// may still declare this field; never delete that client's argument.
+fn declares_deep(
+    schema: &Value,
+    root: &Value,
+    key: &str,
+    depth: usize,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    if depth > 16 || !schema.is_object() {
+        return false;
+    }
+    if let Some(reference) = schema.get("$ref") {
+        let reference = str_of(Some(reference)).into_owned();
+        if visited.insert(reference.clone()) {
+            let declared = local_ref(root, &reference)
+                .is_some_and(|target| declares_deep(target, root, key, depth + 1, visited));
+            visited.remove(&reference);
+            if declared {
+                return true;
+            }
+        }
+    }
+    if schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|props| props.contains_key(key))
+        || gjson_array(schema.get("required")).any(|required| str_of(Some(required)) == key)
+    {
+        return true;
+    }
+    ["allOf", "anyOf", "oneOf"].iter().any(|keyword| {
+        gjson_array(schema.get(*keyword))
+            .any(|branch| declares_deep(branch, root, key, depth + 1, visited))
     })
 }
 
@@ -499,9 +568,10 @@ fn clean_value(
             return;
         }
     } else if info.complex
-        && !originals
-            .iter()
-            .any(|s| s.get("anyOf").is_some() || s.get("oneOf").is_some())
+        && !originals.iter().any(|s| {
+            s.get("anyOf").is_some_and(Value::is_array)
+                || s.get("oneOf").is_some_and(Value::is_array)
+        })
     {
         return;
     }
@@ -533,15 +603,25 @@ fn clean_value(
     }
     let dynamic = info.dynamic() || infos.iter().any(Info::dynamic);
     for key in ["reason", "_"] {
-        if info.properties.contains_key(key)
+        if value.get(key).is_none()
+            || info.properties.contains_key(key)
             || info.required.contains(key)
             || dynamic
             || info.parent_accepts(key, value)
             || candidate_accepts(&infos, None, value)
+            || (!translated.is_empty()
+                && originals
+                    .iter()
+                    .any(|schema| declares_deep(schema, root, key, 0, &mut BTreeSet::new())))
         {
             continue;
         }
-        if translated.is_empty() || translated.iter().any(|schema| injected(schema, key, top)) {
+        if translated.is_empty()
+            || translated.iter().any(|schema| {
+                injected(schema, key, top)
+                    || (top && info.forbids && reclean::requires(schema, key))
+            })
+        {
             value.as_object_mut().unwrap().shift_remove(key);
         }
     }
@@ -557,7 +637,8 @@ fn clean_value(
 }
 
 pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: &Value) -> Value {
-    if !args.is_object() {
+    let translated = translated_schemas(sent, original, name);
+    if !args.is_object() && !translated.is_empty() {
         return args.clone();
     }
     let Some(schema) = original_schema(original, name) else {
@@ -566,15 +647,11 @@ pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: 
     let Some(schema) = schema else {
         return json!({});
     };
+    if !args.is_object() {
+        return args.clone();
+    }
     let mut args = args.clone();
-    clean_value(
-        &mut args,
-        &[schema],
-        &translated_schemas(sent, original, name),
-        schema,
-        true,
-        0,
-    );
+    clean_value(&mut args, &[schema], &translated, schema, true, 0);
     args
 }
 

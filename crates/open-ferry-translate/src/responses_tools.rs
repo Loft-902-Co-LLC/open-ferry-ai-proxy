@@ -464,7 +464,7 @@ pub(crate) fn map_client_search_name(forward: &HashMap<String, String>) -> Strin
 
 /// `sanitizeResponsesToolNames`: a Gemini name for each tool name. Names
 /// that sanitize alike, or to a name already taken, get a hash suffix.
-fn sanitize_tool_names(names: &[&str]) -> HashMap<String, String> {
+pub(crate) fn sanitize_tool_names(names: &[&str]) -> HashMap<String, String> {
     let mut seen = HashSet::with_capacity(names.len());
     let mut unique = Vec::new();
     let mut base_counts = HashMap::<String, usize>::new();
