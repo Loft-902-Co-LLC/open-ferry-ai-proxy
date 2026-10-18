@@ -8,8 +8,11 @@
 //!   their original JSON text.
 //! - A discovery summary's error value is serialized compactly; upstream
 //!   keeps its original JSON text.
-//! - Summary statuses use serde_json escaping rather than sjson's HTML
-//!   escapes. The decoded status is the same.
+//! - Summary statuses are written with serde_json's escaping. Upstream's
+//!   sjson writes a plain ASCII status as it is, and escapes `<`, `>`, `&`,
+//!   U+2028 and U+2029 only in a status that also holds a control
+//!   character, a non-ASCII character, a quote or a backslash; serde_json
+//!   never escapes those. The decoded status is the same.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
