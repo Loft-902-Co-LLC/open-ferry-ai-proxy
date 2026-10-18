@@ -1944,6 +1944,8 @@ dependencies = [
  "futures-util",
  "http",
  "httparse",
+ "hyper",
+ "hyper-util",
  "open-ferry-core",
  "open-ferry-translate",
  "percent-encoding",
