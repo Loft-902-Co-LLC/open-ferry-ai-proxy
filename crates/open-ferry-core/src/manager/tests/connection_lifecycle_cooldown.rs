@@ -94,6 +94,17 @@ async fn manager_mark_result_connection_lifecycle_does_not_cooldown() {
             "wrapped unexpected EOF",
             message("read tcp 127.0.0.1:1->127.0.0.1:2: unexpected EOF"),
         ),
+        // Ported from TestManager_MarkResult_ConnectionLifecycleDoesNotCooldown's
+        // HTTP/2 cases, with hyper's texts added.
+        (
+            "http2 force closed",
+            message("http2: client connection force closed via ClientConn.Close"),
+        ),
+        ("http2 conn closed", message("http2: client conn is closed")),
+        (
+            "hyper connection closed",
+            message("operation was canceled: connection closed"),
+        ),
         (
             "typed canceled",
             result_error_from_error(ErrView::Exec(&ExecError::canceled())),
@@ -167,6 +178,30 @@ async fn manager_mark_result_http_status_with_lifecycle_text_still_cooldowns() {
         ("401 unexpected EOF", 401, "unexpected EOF", true),
         ("429 context canceled", 429, "context canceled", true),
         ("500 unexpected EOF", 500, "unexpected EOF", false),
+        (
+            "401 http2 force closed",
+            401,
+            "http2: client connection force closed via ClientConn.Close",
+            true,
+        ),
+        (
+            "429 http2 conn closed",
+            429,
+            "http2: client conn is closed",
+            true,
+        ),
+        (
+            "500 http2 force closed",
+            500,
+            "http2: client connection force closed via ClientConn.Close",
+            false,
+        ),
+        (
+            "500 http2 conn closed",
+            500,
+            "http2: client conn is closed",
+            false,
+        ),
         (
             "500 websocket 1006 text",
             500,
@@ -274,6 +309,19 @@ fn result_error_from_error_connection_lifecycle_does_not_become_request_scoped()
         ),
         ExecError::upstream(0, "context deadline exceeded"),
         ExecError::upstream(0, "unexpected EOF"),
+        // Ported from TestResultErrorFromError_ConnectionLifecycleDoesNotBecomeRequestScoped's
+        // HTTP/2 cases; the last two are hyper's texts.
+        ExecError::upstream(
+            0,
+            "http2: client connection force closed via ClientConn.Close",
+        ),
+        ExecError::upstream(0, "http2: client conn is closed"),
+        ExecError::upstream(
+            0,
+            "Post \"https://example.com\": http2: client conn is closed",
+        ),
+        ExecError::upstream(0, "operation was canceled: connection closed"),
+        ExecError::upstream(0, "connection closed before message completed"),
     ];
     for err in &cases {
         let view = ErrView::Exec(err);
@@ -312,6 +360,17 @@ fn is_connection_lifecycle_error_status_bearing_errors_stay_coolable() {
             502,
             "websocket: close 1006 (abnormal closure): unexpected EOF",
         ),
+        // Ported from TestIsConnectionLifecycleError_StatusBearingErrorsStayCoolable.
+        ExecError::upstream(
+            401,
+            "http2: client connection force closed via ClientConn.Close",
+        ),
+        ExecError::upstream(429, "http2: client conn is closed"),
+        ExecError::upstream(
+            500,
+            "http2: client connection force closed via ClientConn.Close",
+        ),
+        ExecError::upstream(500, "http2: client conn is closed"),
     ];
     for err in &cases {
         let view = ErrView::Exec(err);

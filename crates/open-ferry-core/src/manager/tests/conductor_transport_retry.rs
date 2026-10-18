@@ -133,6 +133,29 @@ async fn manager_should_retry_after_error_retries_pre_http_transport_failure() {
             ExecError::upstream(401, "unauthorized"),
             false,
         ),
+        // Ported from TestManager_ShouldRetryAfterError_RetriesPreHTTPTransportFailure's
+        // HTTP/2 cases; the last is hyper's text for the same drop.
+        (
+            "http2 force closed",
+            ExecError::upstream(
+                0,
+                "http2: client connection force closed via ClientConn.Close",
+            ),
+            true,
+        ),
+        (
+            "http2 conn closed",
+            ExecError::upstream(
+                0,
+                "Post \"https://example.com\": http2: client conn is closed",
+            ),
+            true,
+        ),
+        (
+            "hyper connection closed",
+            ExecError::upstream(0, "operation was canceled: connection closed"),
+            true,
+        ),
         ("canceled", ExecError::canceled(), false),
         (
             "certificate",
