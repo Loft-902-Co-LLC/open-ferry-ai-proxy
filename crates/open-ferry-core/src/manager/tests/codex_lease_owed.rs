@@ -2235,8 +2235,9 @@ async fn stale_a_save_whose_base_live_moved_past_is_refused_with_no_pass_in_flig
     // peer N and installs N in live. `edit_unsaved` stands in for live moving
     // past the save's base; this pins the guard's version check. With no pass
     // in flight the guard answers `Stale` and the refused save writes
-    // nothing (the owed flush that follows is a separate write). No reload is queued and nothing is owed when the
-    // hook runs, so the held save mutex is not waited for.
+    // nothing (the owed flush that follows is a separate write). No reload
+    // is queued and nothing is owed when the hook runs, so the held save
+    // mutex is not waited for.
     // Mutation: the guard's version check removed (the save would write the
     // note and a stale base).
     bounded(async {
