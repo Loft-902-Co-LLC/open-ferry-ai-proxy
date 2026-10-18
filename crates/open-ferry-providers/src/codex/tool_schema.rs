@@ -6,13 +6,16 @@
 //! Tool schemas Codex would refuse, made acceptable
 //! (`NormalizeCodexToolSchemas`).
 //!
-//! Two changes, to `function` and `custom` tools, also inside `namespace`
+//! Changes to `function` and `custom` tools, also inside `namespace`
 //! tools:
 //! - a `pattern` (or a `patternProperties` key) with a `\p{..}`, `\P{..}` or
 //!   `\0` escape is removed, as Codex's validator rejects them; the client
 //!   still checks its own input;
 //! - a property's `oneOf` or `anyOf` of eight or more `const` branches
 //!   becomes an `enum`, or is dropped when an `enum` already says the same.
+//!
+//! Integer-valued numeric bounds outside int64 are removed; fractional
+//! bounds and exact int64 endpoints are preserved without float rounding.
 //!
 //! Integer types are left alone, as Codex validates its own tools' schemas
 //! strictly.
@@ -147,6 +150,16 @@ fn strip_incompatible_patterns(value: &mut Value) -> bool {
                 schema.shift_remove("pattern");
                 changed = true;
             }
+            for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+                if schema
+                    .get(key)
+                    .and_then(Value::as_number)
+                    .is_some_and(|number| numeric_bound_out_of_int64(&number.to_string()))
+                {
+                    schema.shift_remove(key);
+                    changed = true;
+                }
+            }
             if let Some(Value::Object(pattern_properties)) = schema.get_mut("patternProperties") {
                 pattern_properties.retain(|key, subschema| {
                     if has_unsupported_escape(key) {
@@ -186,6 +199,48 @@ fn strip_incompatible_patterns(value: &mut Value) -> bool {
         _ => {}
     }
     changed
+}
+
+/// Exact decimal handling, as upstream's json.Number and ParseInt do.
+fn numeric_bound_out_of_int64(raw: &str) -> bool {
+    if !raw.contains(['.', 'e', 'E']) {
+        return raw.parse::<i64>().is_err();
+    }
+    let (negative, magnitude) = raw.strip_prefix('-').map_or((false, raw), |s| (true, s));
+    let (mantissa, exp) = magnitude.split_once(['e', 'E']).unwrap_or((magnitude, "0"));
+    let exp = match exp.parse::<i64>() {
+        Ok(exp) => exp,
+        Err(_) => return !exp.starts_with('-') && mantissa.bytes().any(|b| b != b'0' && b != b'.'),
+    };
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{integer}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return false;
+    }
+    // i128 keeps extreme i64 exponents from overflowing arithmetic.
+    let exp = i128::from(exp);
+    if exp < -(raw.len() as i128) {
+        return false;
+    }
+    if exp > raw.len() as i128 + 20 {
+        return true;
+    }
+    let trimmed = significant.trim_end_matches('0');
+    let effective = exp - fraction.len() as i128 + (significant.len() - trimmed.len()) as i128;
+    if effective < 0 {
+        return false;
+    }
+    if effective > 19 || trimmed.len() as i128 + effective > 19 {
+        return true;
+    }
+    let sign = if negative { "-" } else { "" };
+    format!(
+        "{sign}{trimmed}{}",
+        "0".repeat(usize::try_from(effective).unwrap_or(0))
+    )
+    .parse::<i64>()
+    .is_err()
 }
 
 /// Sorts every object's keys, as Go writes a map.
@@ -802,5 +857,123 @@ mod tests {
             number_key("9007199254740993"),
             number_key("9007199254740992")
         );
+    }
+    // Ported from TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds.
+    #[test]
+    fn strips_out_of_range_int64_bounds() {
+        let input: Value = serde_json::from_str(r#"{
+		"model": "gpt-6-luna",
+		"tools": [{
+			"type": "function",
+			"name": "emulate_process",
+			"description": "Emulate a process.",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"options": {
+						"type": "object",
+						"properties": {
+							"seed": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 18446744073709552000
+							},
+							"over_max_int64": {
+								"type": "integer",
+								"minimum": -9223372036854775809,
+								"maximum": 9223372036854775808,
+								"exclusiveMinimum": -9223372036854775809,
+								"exclusiveMaximum": 9223372036854775808
+							},
+							"exact_int64_limits": {
+								"type": "integer",
+								"minimum": -9223372036854775808,
+								"maximum": 9223372036854775807,
+								"exclusiveMinimum": -9223372036854775808,
+								"exclusiveMaximum": 9223372036854775807
+							},
+							"float_bounds": {
+								"type": "number",
+								"minimum": -0.5,
+								"maximum": 3.14,
+								"exclusiveMinimum": 0.25,
+								"exclusiveMaximum": 99.95
+							},
+							"scientific_bounds": {
+								"type": "number",
+								"minimum": 1e5,
+								"maximum": 1e100,
+								"exclusiveMinimum": -1.8446744073709552e+19,
+								"exclusiveMaximum": 18446744073709552000.0
+							},
+							"high_precision_fraction": {
+								"type": "number",
+								"maximum": 18446744073709552000.00000000000000000000000000000000000000000000000000000000000000000000000000000001
+							},
+							"extreme_exponents": {
+								"type": "number",
+								"minimum": 1.1e-9223372036854775808,
+								"maximum": 10e9223372036854775807
+							},
+							"user_data": {
+								"type": "object",
+								"default": {
+									"maximum": 18446744073709552000
+								},
+								"enum": [
+									{"maximum": 18446744073709552000}
+								]
+							},
+							"maximum": {
+								"type": "integer",
+								"minimum": 0
+							}
+						}
+					}
+				},
+				"$defs": {
+					"uint64_id": {
+						"type": "integer",
+						"maximum": 18446744073709551615
+					}
+				}
+			}
+		}]
+	}"#).unwrap();
+        let out = normalized(input);
+        let params = &out["tools"][0]["parameters"];
+        let props = &params["properties"]["options"]["properties"];
+        assert!(props["seed"].get("maximum").is_none());
+        assert_eq!(props["seed"]["minimum"], 0);
+        assert_eq!(props["seed"]["type"], "integer");
+        for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+            assert!(props["over_max_int64"].get(key).is_none());
+            let expected = if key.ends_with("Minimum") || key == "minimum" {
+                "-9223372036854775808"
+            } else {
+                "9223372036854775807"
+            };
+            assert_eq!(props["exact_int64_limits"][key].to_string(), expected);
+        }
+        assert_eq!(props["float_bounds"]["minimum"].to_string(), "-0.5");
+        assert_eq!(props["float_bounds"]["maximum"].to_string(), "3.14");
+        assert_eq!(props["scientific_bounds"]["minimum"].to_string(), "1e+5");
+        for key in ["maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+            assert!(props["scientific_bounds"].get(key).is_none());
+        }
+        assert!(props["high_precision_fraction"].get("maximum").is_some());
+        assert!(props["extreme_exponents"].get("minimum").is_some());
+        assert!(props["extreme_exponents"].get("maximum").is_none());
+        assert_eq!(
+            props["user_data"]["default"]["maximum"].to_string(),
+            "18446744073709552000"
+        );
+        assert_eq!(
+            props["user_data"]["enum"][0]["maximum"].to_string(),
+            "18446744073709552000"
+        );
+        assert_eq!(props["maximum"]["type"], "integer");
+        assert!(params["$defs"]["uint64_id"].get("maximum").is_none());
+        assert_eq!(normalized(out.clone()), out);
     }
 }

@@ -1331,7 +1331,9 @@ async fn sends_the_clients_numbers_as_written() {
         "{body}"
     );
 
-    let payload = r#"{"input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"n":{"type":"number","minimum":-0,"maximum":1E20}}}}]}"#;
+    // Not upstream's: keep this numeric-spelling fixture inside int64;
+    // out-of-range schema bounds are now deliberately removed.
+    let payload = r#"{"input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"n":{"type":"number","minimum":-0,"maximum":1E5}}}}]}"#;
     executor()
         .execute(
             api_key_auth(&mock.url),
@@ -1343,7 +1345,7 @@ async fn sends_the_clients_numbers_as_written() {
     assert!(
         mock.last()
             .body
-            .contains(r#""properties":{"n":{"type":"number","minimum":-0,"maximum":1E20}}"#),
+            .contains(r#""properties":{"n":{"type":"number","minimum":-0,"maximum":1E5}}"#),
         "{}",
         mock.last().body
     );
