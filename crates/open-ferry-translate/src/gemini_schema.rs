@@ -12,8 +12,8 @@
 //! removes what Gemini rejects:
 //! - `$ref` becomes a description hint, and `const` becomes `enum`
 //! - enum values become strings
-//! - `allOf` is merged into its parent, and `anyOf` and `oneOf` are merged or
-//!   flattened to one branch
+//! - `allOf` is merged into its parent; multi-branch `anyOf` and `oneOf`
+//!   unions are kept, while single branches are merged or unwrapped
 //! - a type array is flattened to one type
 //! - conditionals, metadata keywords and `x-` extensions are dropped
 //!
@@ -888,79 +888,176 @@ fn merge_missing_schema_at_path(doc: &mut Value, destination: &str, incoming: &V
     }
 }
 
-/// Resolves each `anyOf` and `oneOf`. Where the parent has `properties`, the
-/// branches' properties fill what it lacks, a null branch makes it nullable,
-/// and it becomes an object if it had no type. Otherwise the parent is
-/// replaced by its best branch (see
-/// [`select_best`]), with the parent's description and an `Accepts: ...` hint
-/// naming the branches' types.
-fn flatten_any_of_one_of(doc: &mut Value) {
-    for key in ["anyOf", "oneOf"] {
-        let mut paths = find_paths(doc, key);
-        sort_by_depth(&mut paths);
-        for path in paths {
-            let Some(Value::Array(items)) = get(doc, &path).cloned() else {
-                continue;
-            };
-            if items.is_empty() {
-                continue;
-            }
-            let parent_path = trim_suffix(&path, &format!(".{key}"));
-            let parent = if parent_path.is_empty() {
-                Some(&*doc)
-            } else {
-                get(doc, &parent_path)
-            };
+/// Reports whether a branch only adds required names to its parent's schema.
+fn is_required_only_union_branch(item: &Value) -> bool {
+    item.is_object()
+        && child(item, "required").is_some()
+        && [
+            "type",
+            "properties",
+            "items",
+            "enum",
+            "anyOf",
+            "oneOf",
+            "allOf",
+        ]
+        .iter()
+        .all(|key| child(item, key).is_none())
+}
 
-            if let Some(parent) =
-                parent.filter(|parent| child(parent, "properties").is_some_and(Value::is_object))
-            {
-                // Read before the merges, as upstream reads it.
-                let untyped = str_of(child(parent, "type")).is_empty();
-                let mut has_null = false;
-                for item in &items {
-                    if str_of(child(item, "type")) == "null" {
-                        has_null = true;
-                    }
-                    if let Some(Value::Object(properties)) = child(item, "properties") {
-                        for (name, property) in properties {
-                            let destination = join_path(
-                                &parent_path,
-                                &format!("properties.{}", escape_key(name)),
-                            );
-                            merge_missing_schema_at_path(doc, &destination, property);
-                        }
-                    }
-                }
-                if has_null {
-                    set(doc, &join_path(&parent_path, "nullable"), Value::Bool(true));
-                }
-                if untyped {
-                    set(doc, &join_path(&parent_path, "type"), Value::from("object"));
-                }
-                delete(doc, &path);
-                continue;
-            }
+/// Gives a required-only branch the properties it requires from its parent.
+fn materialize_required_only_branch(item: &Value, parent_props: Option<&Value>) -> Option<Value> {
+    let parent_props = parent_props.filter(|props| props.is_object())?;
+    let required = child(item, "required")?.as_array()?;
+    if required.is_empty() {
+        return None;
+    }
+    let mut branch = item.clone();
+    for name in required {
+        let name = str_of(Some(name));
+        let property = get(parent_props, &escape_key(&name))?.clone();
+        set(
+            &mut branch,
+            &format!("properties.{}", escape_key(&name)),
+            property,
+        );
+    }
+    set(&mut branch, "type", Value::from("object"));
+    Some(branch)
+}
 
-            let parent_description =
-                bounded_text(get(doc, &description_path(&parent_path))).into_owned();
-            let (best, types) = select_best(&items);
-            let mut selected = items[best].clone();
-            let has_null = items
-                .iter()
-                .any(|item| str_of(child(item, "type")) == "null");
-            if has_null && str_of(child(&items[best], "type")) != "null" {
-                set(&mut selected, "nullable", Value::Bool(true));
-            }
-            if !parent_description.is_empty() {
-                merge_description(&mut selected, &parent_description);
-            }
-            if types.len() > 1 {
-                let hint = format!("Accepts: {}", types.join(" | "));
-                append_hint(&mut selected, "", &hint);
-            }
-            set_raw_at(doc, &parent_path, selected);
+fn is_null_only_branch(item: &Value) -> bool {
+    if child(item, "properties").is_some() || child(item, "items").is_some() {
+        return false;
+    }
+    match child(item, "type") {
+        Some(Value::String(kind)) => kind == "null",
+        Some(Value::Array(kinds)) => {
+            !kinds.is_empty() && kinds.iter().all(|kind| str_of(Some(kind)) == "null")
         }
+        _ => false,
+    }
+}
+
+/// Keeps multi-branch unions, filtering null and invalid branches and
+/// materializing required-only branches from parent properties. A single
+/// branch is merged or unwrapped with the parent's description and type hints.
+fn flatten_any_of_one_of(doc: &mut Value) {
+    let mut paths_by_field = find_paths_by_fields(doc, &["oneOf", "anyOf"]);
+    let mut paths = Vec::new();
+    for key in ["oneOf", "anyOf"] {
+        paths.extend(paths_by_field.remove(key).unwrap_or_default());
+    }
+    sort_by_depth(&mut paths);
+    for path in paths {
+        let key = if path == "oneOf" || path.ends_with(".oneOf") {
+            "oneOf"
+        } else {
+            "anyOf"
+        };
+        let Some(Value::Array(items)) = get(doc, &path).cloned() else {
+            continue;
+        };
+        if items.is_empty() {
+            continue;
+        }
+        let parent_path = trim_suffix(&path, &format!(".{key}"));
+        if is_property_definition(&parent_path) {
+            continue;
+        }
+        let parent = if parent_path.is_empty() {
+            Some(&*doc)
+        } else {
+            get(doc, &parent_path)
+        };
+        let parent_props = parent.and_then(|parent| child(parent, "properties"));
+        let untyped = str_of(parent.and_then(|parent| child(parent, "type"))).is_empty();
+        let has_parent_props = parent_props.is_some_and(Value::is_object);
+        let mut non_null = Vec::new();
+        let mut has_null = false;
+        let mut filtered = false;
+        for item in &items {
+            if item == &Value::Bool(true) {
+                non_null.push(Value::Object(Map::new()));
+                filtered = true;
+            } else if !item.is_object() {
+                filtered = true;
+            } else if is_null_only_branch(item) {
+                has_null = true;
+            } else if is_required_only_union_branch(item) {
+                if let Some(branch) = materialize_required_only_branch(item, parent_props) {
+                    non_null.push(branch);
+                }
+                filtered = true;
+            } else {
+                non_null.push(item.clone());
+            }
+        }
+        if non_null.len() >= 2 {
+            if has_null || filtered {
+                set(doc, &path, Value::Array(non_null));
+            }
+            if has_null {
+                set(doc, &join_path(&parent_path, "nullable"), Value::Bool(true));
+                append_hint(doc, &parent_path, "(nullable)");
+            }
+            continue;
+        }
+        if has_parent_props {
+            for item in &non_null {
+                if let Some(Value::Object(properties)) = child(item, "properties") {
+                    for (name, property) in properties {
+                        let destination =
+                            join_path(&parent_path, &format!("properties.{}", escape_key(name)));
+                        merge_missing_schema_at_path(doc, &destination, property);
+                    }
+                }
+            }
+            if has_null {
+                set(doc, &join_path(&parent_path, "nullable"), Value::Bool(true));
+            }
+            if untyped {
+                set(doc, &join_path(&parent_path, "type"), Value::from("object"));
+            }
+            delete(doc, &path);
+            continue;
+        }
+        let parent_description =
+            bounded_text(get(doc, &description_path(&parent_path))).into_owned();
+        if non_null.is_empty() {
+            if has_null {
+                let mut selected = object([("type", Value::from("null"))]);
+                if !parent_description.is_empty() {
+                    merge_description(&mut selected, &parent_description);
+                }
+                set_raw_at(doc, &parent_path, selected);
+            } else {
+                delete(doc, &path);
+            }
+            continue;
+        }
+        let mut candidates = if filtered { non_null.clone() } else { items };
+        if filtered && has_null {
+            candidates.push(object([("type", Value::from("null"))]));
+        }
+        let (_, types) = select_best(&candidates);
+        let mut selected = non_null.remove(0);
+        if has_null {
+            set(&mut selected, "nullable", Value::Bool(true));
+        }
+        if !parent_description.is_empty() {
+            merge_description(&mut selected, &parent_description);
+        }
+        if types.len() > 1 {
+            append_hint(
+                &mut selected,
+                "",
+                &format!("Accepts: {}", types.join(" | ")),
+            );
+        } else if has_null {
+            append_hint(&mut selected, "", "(nullable)");
+        }
+        set_raw_at(doc, &parent_path, selected);
     }
 }
 
