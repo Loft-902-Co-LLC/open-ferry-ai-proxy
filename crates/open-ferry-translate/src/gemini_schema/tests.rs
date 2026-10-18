@@ -1157,7 +1157,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","properties":{"v":{"description":"d","anyOf":[{"type":"string"},{"type":"null"},{"type":"object","properties":{"a":{"type":"string"}}}]}}}"#,
-            r#"{"type":"object","properties":{"v":{"type":"object","properties":{"a":{"type":"string"}},"description":"d (Accepts: string | null | object)"}}}"#,
+            r#"{"type":"object","properties":{"v":{"description":"d ((nullable))","anyOf":[{"type":"string"},{"type":"object","properties":{"a":{"type":"string"}}}]}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"v":{"type":["string","null","integer"]}},"required":["v","w"]}"#,
@@ -1250,11 +1250,11 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"anyOf":[{"type":"string"},{"type":"integer"}],"description":"root"}"#,
-            r#"{"type":"string","description":"root (Accepts: string | integer)"}"#,
+            r#"{"anyOf":[{"type":"string"},{"type":"integer"}],"description":"root"}"#,
         ),
         (
             r#"{"type":"object","properties":{"v":{"anyOf":["x",{"type":"null"}]}}}"#,
-            r#"{"type":"object","properties":{"v":{}}}"#,
+            r#"{"type":"object","properties":{"v":{"type":"null"}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"e":{"enum":[{"b":1,"a":2},[1,2],null,1.50,true]}}}"#,
@@ -1278,7 +1278,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","properties":{"o":{"oneOf":[{"type":"array"},{"items":{"type":"string"}},{"description":"d"}]}}}"#,
-            r#"{"properties":{"o":{"items":{"type":"string"},"type":"array","description":"Accepts: array | array"}},"type":"object"}"#,
+            r#"{"properties":{"o":{"oneOf":[{"items":{"type":"string"},"type":"array"},{"items":{"type":"string"},"type":"array"},{"description":"d"}]}},"type":"object"}"#,
         ),
         (
             r#"{"type":"object","properties":{"n":{"type":"object","properties":{"a":{"type":"string"}},"anyOf":[{"type":"null"}]}}}"#,
@@ -1625,5 +1625,100 @@ fn object_type_for_properties_in_detail() {
     ];
     for (input, expected) in cases {
         assert_eq!(clean(input).to_string(), expected, "{input}");
+    }
+}
+
+// Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662.
+#[test]
+fn preserves_multi_branch_any_of_one_of_issue3662() {
+    let branches = json!([
+        {"type":"string"},
+        {"type":"object","properties":{"image":{"type":"string"}},"required":["image"]},
+        {"type":"object","properties":{"audio":{"type":"string"}},"required":["audio"]}
+    ]);
+    for key in ["anyOf", "oneOf"] {
+        let mut schema = json!({"type":"object","properties":{"item":{}},"required":["item"]});
+        schema["properties"]["item"][key] = branches.clone();
+        let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+        assert_eq!(cleaned, schema);
+        assert_eq!(clean_json_schema_for_gemini_json_schema(&cleaned), cleaned);
+    }
+}
+
+// Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662/NullableMultiBranchUnionStripsNullBranchAndSetsNullable.
+#[test]
+fn nullable_multi_branch_union_strips_null_issue3662() {
+    let schema = json!({"type":"object","properties":{"item":{"anyOf":[
+        {"type":"string"},
+        {"type":"object","properties":{"image":{"type":"string"}},"required":["image"]},
+        {"type":"object","properties":{"audio":{"type":"string"}},"required":["audio"]},
+        {"type":"null"}
+    ]}},"required":["item"]});
+    let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+    let item = &cleaned["properties"]["item"];
+    assert_eq!(item["anyOf"].as_array().unwrap().len(), 3);
+    assert!(item.get("nullable").is_none());
+    assert!(item["description"].as_str().unwrap().contains("(nullable)"));
+}
+
+// Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662/PreservesUnionAndBranchRequiredWhenParentHasProperties.
+#[test]
+fn preserves_union_and_branch_required_with_parent_properties_issue3662() {
+    let schema = json!({"type":"object","properties":{},"anyOf":[
+        {"type":"object","properties":{"image":{"type":"string"}},"required":["image"]},
+        {"type":"object","properties":{"audio":{"type":"string"}},"required":["audio"]}
+    ]});
+    assert_eq!(clean_json_schema_for_gemini_json_schema(&schema), schema);
+}
+
+// Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662/BooleanUnionBranchesAndSiblingAnyOfOneOf.
+#[test]
+fn sibling_unions_and_null_only_unions_issue3662() {
+    let schema = json!({"type":"object","properties":{"value":{
+        "anyOf":[{"type":"string"},{"type":"integer"}],
+        "oneOf":[{"type":"string"},{"type":"boolean"}]
+    }}});
+    assert_eq!(clean_json_schema_for_gemini_json_schema(&schema), schema);
+    for union in [
+        json!({"anyOf":[{"type":"null"}]}),
+        json!({"oneOf":[{"type":"null"},{"type":"null"}]}),
+        json!({"anyOf":[false,{"type":"null"}],"description":"Null only"}),
+    ] {
+        let cleaned = clean_json_schema_for_gemini_json_schema(
+            &json!({"type":"object","properties":{"value":union}}),
+        );
+        assert_eq!(cleaned["properties"]["value"]["type"], "null");
+    }
+}
+
+// Not upstream's: exercise shared branch filtering and materialization on the ported JSON Schema carrier.
+#[test]
+fn materializes_required_only_and_filters_boolean_union_branches() {
+    let schema = json!({"type":"object","properties":{"image":{"type":"string"},"audio":{"type":"string"}},
+        "anyOf":[{"required":["image"]},{"required":["audio"]}]});
+    let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+    for (index, name) in ["image", "audio"].iter().enumerate() {
+        assert_eq!(cleaned["anyOf"][index]["type"], "object");
+        assert_eq!(
+            cleaned["anyOf"][index]["properties"][name],
+            json!({"type":"string"})
+        );
+        assert_eq!(cleaned["anyOf"][index]["required"], json!([name]));
+    }
+    for (branches, expected) in [
+        (json!([false,{"type":"string"}]), json!({"type":"string"})),
+        (
+            json!([false,{"type":"string"},{"type":"integer"}]),
+            json!({"anyOf":[{"type":"string"},{"type":"integer"}]}),
+        ),
+        (
+            json!([true,{"type":"string"},{"type":"integer"}]),
+            json!({"anyOf":[{},{"type":"string"},{"type":"integer"}]}),
+        ),
+    ] {
+        let cleaned = clean_json_schema_for_gemini_json_schema(
+            &json!({"type":"object","properties":{"value":{"anyOf":branches}}}),
+        );
+        assert_eq!(cleaned["properties"]["value"], expected);
     }
 }
