@@ -944,7 +944,7 @@ mod tests {
         let params = &out["tools"][0]["parameters"];
         let props = &params["properties"]["options"]["properties"];
         assert!(props["seed"].get("maximum").is_none());
-        assert_eq!(props["seed"]["minimum"], 0);
+        assert_eq!(props["seed"]["minimum"].to_string(), "0");
         assert_eq!(props["seed"]["type"], "integer");
         for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
             assert!(props["over_max_int64"].get(key).is_none());

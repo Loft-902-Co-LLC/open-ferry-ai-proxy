@@ -24,6 +24,11 @@
 //!   observer counts cancellation after `response.completed` or
 //!   `response.incomplete` as success, and before either as a 499. Transport
 //!   read failures still fail, even after a terminal event.
+//! - Without observed usage or service-tier detail, a clean EOF without a
+//!   terminal event or after a terminal event lacking both publishes success
+//!   with zero detail here. So does cancellation after such a terminal event.
+//!   Upstream publishes nothing in these cases: its stream usage buffer was
+//!   never populated and it has no ensure-published fallback.
 //! - Each line has the secrets the request sent redacted before it is read,
 //!   if they are of eight bytes or more, as every client error is (see
 //!   `Policy::Client` in the crate's `redact` module); a model can echo one

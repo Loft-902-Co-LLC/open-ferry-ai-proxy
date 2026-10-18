@@ -466,8 +466,9 @@ impl State {
                             let error = bootstrap_overload_error(body.as_bytes());
                             return Err(error.redacted(&self.setup.secrets).into());
                         }
+                        let elapsed = (bootstrap.now)().saturating_duration_since(start);
                         tracing::debug!(
-                            "codex executor: bootstrap overload rejection after {frames} lines, time budget exhausted; delivering in-stream"
+                            "codex executor: bootstrap overload rejection after {frames} lines / {elapsed:?}, time budget exhausted; delivering in-stream"
                         );
                     }
                     self.send(held);
@@ -497,8 +498,9 @@ impl State {
                 } else {
                     "byte budget"
                 };
+                let elapsed = (bootstrap.now)().saturating_duration_since(start);
                 tracing::debug!(
-                    "codex executor: bootstrap {exhausted} exhausted after {frames} lines / {bytes} bytes, releasing stream without overload probing"
+                    "codex executor: bootstrap {exhausted} exhausted after {frames} lines / {bytes} bytes / {elapsed:?}, releasing stream without overload probing"
                 );
             }
             self.send(held);

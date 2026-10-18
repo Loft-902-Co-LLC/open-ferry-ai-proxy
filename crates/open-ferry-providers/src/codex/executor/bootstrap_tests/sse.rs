@@ -107,7 +107,8 @@ async fn event_exceeds_time_budget_while_assembling() {
     assert_eq!(event["response"]["items"][0]["key_at_boundary"], 123);
     assert_eq!(event["response"]["items"][1]["key_after_boundary"], 456);
     assert!(
-        logs.text().contains("bootstrap time budget exhausted"),
+        logs.text()
+            .contains("bootstrap time budget exhausted after 3 lines /"),
         "{}",
         logs.text()
     );
@@ -158,6 +159,7 @@ async fn split_completed_after_output_and_clock_advance() {
 // Ported from TestCodexExecuteStreamMixedFramingCommentInsideSplitEventCountsBudget.
 #[tokio::test]
 async fn mixed_framing_comments_count_toward_budget() {
+    let (logs, _capture) = crate::secret_echo::Logs::capture();
     let prefix = format!(
         "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}: keepalive-1\n: keepalive-2\n",
         "data: \n".repeat(46)
@@ -166,6 +168,14 @@ async fn mixed_framing_comments_count_toward_budget() {
     let response = release_before_tail(&buffering(true), prefix, tail).await;
     let (_, error) = drain(response).await;
     assert!(error.is_some(), "the stream must release before the error");
+    // Not upstream's: the second comment takes buffered + held + raw above
+    // 48, while buffered alone is only one. Pin the frame-budget label.
+    assert!(
+        logs.text()
+            .contains("bootstrap frame budget exhausted after 1 lines /"),
+        "{}",
+        logs.text()
+    );
 }
 
 // Ported from TestCodexExecuteStreamEventExceedsByteBudgetWhileAssemblingReleasesStream.
