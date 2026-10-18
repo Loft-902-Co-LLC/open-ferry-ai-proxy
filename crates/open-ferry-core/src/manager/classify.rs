@@ -16,6 +16,8 @@
 //!   upstream does. A [`TransportFault::Lifecycle`] fault counts as a
 //!   WebSocket close (a lifecycle failure even with a status) and as an EOF
 //!   (a transient one).
+//! - A closed HTTP/2 connection is known by hyper's texts as well as Go's
+//!   (see [`is_http2_closed_connection_message`]).
 //! - The manager's own errors carry their cause as a summary, so the
 //!   classifiers don't look through to it.
 
@@ -257,6 +259,23 @@ pub(crate) fn is_connection_lifecycle_message(message: &str) -> bool {
         || lower.contains("websocket: close 1001")
         || lower.contains("websocket: close 1006")
         || lower.contains("unexpected eof")
+        || is_http2_closed_connection_message(&lower)
+}
+
+/// Whether a lowercased message says the HTTP/2 client connection was closed
+/// under the call (upstream's `isHTTP2ClosedConnectionMessage`).
+///
+/// Upstream matches Go's `x/net/http2` texts: `http2: client connection force
+/// closed via ClientConn.Close` and `http2: client conn is closed`. Our HTTP
+/// client is hyper, which reports a call that met a dropped connection as a
+/// canceled operation: `operation was canceled: connection closed`. That is
+/// matched too, and hyper's `connection closed before message completed`,
+/// the same call cut off after it was sent.
+fn is_http2_closed_connection_message(lower: &str) -> bool {
+    lower.contains("http2: client connection force closed via clientconn.close")
+        || lower.contains("http2: client conn is closed")
+        || (lower.contains("operation was canceled") && lower.contains("connection closed"))
+        || lower.contains("connection closed before message completed")
 }
 
 /// Whether the connection failed before any answer, so another round may
@@ -312,6 +331,7 @@ pub(crate) fn is_transient_transport_message(message: &str) -> bool {
     ]
     .iter()
     .any(|pattern| lower.contains(pattern))
+        || is_http2_closed_connection_message(&lower)
 }
 
 /// Upstream's `isUnauthorizedError`.
