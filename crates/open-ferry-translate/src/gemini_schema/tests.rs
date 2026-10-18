@@ -1691,36 +1691,160 @@ fn sibling_unions_and_null_only_unions_issue3662() {
     }
 }
 
-// Not upstream's: exercise shared branch filtering and materialization on the ported JSON Schema carrier.
+// Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662/PreservesUnionAndBranchRequiredWhenParentHasProperties.
+// Upstream's mixed and pure required-only cases use the Antigravity entry point;
+// the Gemini JSON Schema cleaner produces the same expected schemas.
 #[test]
-fn materializes_required_only_and_filters_boolean_union_branches() {
-    let schema = json!({"type":"object","properties":{"image":{"type":"string"},"audio":{"type":"string"}},
-        "anyOf":[{"required":["image"]},{"required":["audio"]}]});
-    let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
-    for (index, name) in ["image", "audio"].iter().enumerate() {
-        assert_eq!(cleaned["anyOf"][index]["type"], "object");
-        assert_eq!(
-            cleaned["anyOf"][index]["properties"][name],
-            json!({"type":"string"})
-        );
-        assert_eq!(cleaned["anyOf"][index]["required"], json!([name]));
-    }
-    for (branches, expected) in [
-        (json!([false,{"type":"string"}]), json!({"type":"string"})),
+fn preserves_union_and_branch_required_mixed_and_pure_required_only_issue3662() {
+    assert_eq!(
+        clean(
+            r##"{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" },
+				"text": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				},
+				{
+					"required": ["text"]
+				}
+			]
+		}"##
+        ),
+        serde_json::from_str::<Value>(
+            r##"{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" },
+				"text": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				},
+				{
+					"type": "object",
+					"properties": { "text": { "type": "string" } },
+					"required": ["text"]
+				}
+			]
+		}"##
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        clean(
+            r##"{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" }
+			},
+			"anyOf": [
+				{ "required": ["image"] },
+				{ "required": ["audio"] }
+			]
+		}"##
+        ),
+        serde_json::from_str::<Value>(
+            r##"{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				}
+			]
+		}"##
+        )
+        .unwrap()
+    );
+}
+
+// Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662/BooleanUnionBranchesAndSiblingAnyOfOneOf.
+// Upstream normalizes oneOf on Antigravity; this carrier preserves standard oneOf.
+#[test]
+fn boolean_union_branches_issue3662() {
+    for (union, expected) in [
         (
-            json!([false,{"type":"string"},{"type":"integer"}]),
-            json!({"anyOf":[{"type":"string"},{"type":"integer"}]}),
+            json!({"anyOf":[false,{"type":"string"}]}),
+            json!({"type":"string"}),
         ),
         (
-            json!([true,{"type":"string"},{"type":"integer"}]),
+            json!({"oneOf":[false,{"type":"string"},{"type":"integer"}]}),
+            json!({"oneOf":[{"type":"string"},{"type":"integer"}]}),
+        ),
+        (
+            json!({"anyOf":[true,{"type":"string"},{"type":"integer"}]}),
             json!({"anyOf":[{},{"type":"string"},{"type":"integer"}]}),
         ),
     ] {
         let cleaned = clean_json_schema_for_gemini_json_schema(
-            &json!({"type":"object","properties":{"value":{"anyOf":branches}}}),
+            &json!({"type":"object","properties":{"value":union}}),
         );
         assert_eq!(cleaned["properties"]["value"], expected);
     }
+}
+
+// Not upstream's: required-only branch copies multiply with nested parent properties.
+#[test]
+fn nested_required_only_unions_copy_within_a_budget() {
+    let nested = |depth| {
+        (0..depth).fold(json!({"type":"string"}), |child, _| {
+            json!({"type":"object","properties":{"a":child},
+            "anyOf":[{"required":["a"]},{"required":["a"]}]})
+        })
+    };
+    let schema = nested(14);
+    let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+    assert!(
+        value_count(&cleaned, usize::MAX)
+            <= value_count(&schema, usize::MAX) * 2 + UNION_COPY_ALLOWANCE
+    );
+    assert!(cleaned.to_string().len() < 1 << 20);
+}
+
+// Not upstream's: below the copy budget, the full nested output matches upstream.
+#[test]
+fn shallow_required_only_unions_match_upstream() {
+    let mut schema = json!({"type":"string"});
+    let mut expected = schema.clone();
+    for _ in 0..3 {
+        schema = json!({"type":"object","properties":{"a":schema},
+            "anyOf":[{"required":["a"]},{"required":["a"]}]});
+        let branch = json!({"type":"object","properties":{"a":expected},"required":["a"]});
+        expected = json!({"type":"object","properties":{"a":expected},"anyOf":[branch,branch]});
+    }
+    assert_eq!(clean_json_schema_for_gemini_json_schema(&schema), expected);
 }
 
 // Ported from TestCleanJSONSchema_RemovesDiscriminatorKeyword_Issue6639.
