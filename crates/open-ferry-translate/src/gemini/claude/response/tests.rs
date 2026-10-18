@@ -1171,6 +1171,26 @@ fn malformed_call_closes_thinking_and_suppresses_late_chunks() {
     assert_eq!(output.matches("event: error").count(), 1);
 }
 
+// Not upstream's: a malformed call reported after the message has ended
+// leaves the block its parts open, with no error, as upstream does.
+#[test]
+fn malformed_call_after_the_message_ended_leaves_the_block_open() {
+    let mut translator = GeminiToClaudeStream::new(&hi_request());
+    let ended = translator.translate(br#"{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}"#)
+        + &translator.translate(b"[DONE]");
+    assert!(ended.contains("event: message_stop"));
+    let late = translator.translate(br#"{"candidates":[{"content":{"parts":[{"text":"late","thought":true}]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":1}}"#);
+    assert!(late.contains("event: content_block_start"));
+    assert!(late.contains("event: content_block_delta"));
+    assert!(!late.contains("event: content_block_stop"));
+    assert!(!late.contains("event: error"));
+    assert!(
+        translator
+            .translate(br#"{"candidates":[{"content":{"parts":[{"text":"later"}]}}]}"#)
+            .is_empty()
+    );
+}
+
 // Ported from TestConvertGeminiResponseToClaudeNonStream_MalformedFunctionCallReturnsAPIError
 // and TestConvertGeminiResponseToClaude_MalformedFunctionCallWithToolUsePreservesToolUse.
 #[test]

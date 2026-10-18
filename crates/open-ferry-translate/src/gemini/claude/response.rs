@@ -193,7 +193,9 @@ impl GeminiToClaudeStream {
             self.cached_tokens = cached;
         }
 
-        if self.malformed() {
+        // Once the message has ended, a malformed call leaves the open block
+        // as it is, as upstream does.
+        if self.malformed() && !self.has_final_events {
             self.finish_malformed(&mut out);
             return out;
         }
