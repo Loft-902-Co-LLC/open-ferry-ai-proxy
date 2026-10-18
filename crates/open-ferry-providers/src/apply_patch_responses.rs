@@ -120,9 +120,11 @@ fn held_size(buffers: &[Vec<u8>]) -> usize {
 }
 
 /// `ApplyPatchRequested`: whether a custom `apply_patch` tool wins its name
-/// in the client's `original` request. As upstream reads the request's tools
-/// for Gemini (`ResponsesToolReverseIdentityMap`), a request wrapped in a
-/// `request` that holds a model, input or tools is read from inside it.
+/// in the client's `original` request and is available now. As upstream
+/// reads the request's tools for Gemini (`ResponsesToolReverseIdentityMap`),
+/// a deferred tool the client hasn't found yet doesn't count, a tool its own
+/// tool search found does, and a request wrapped in a `request` that holds a
+/// model, input or tools is read from inside it.
 pub(crate) fn requested(original: &Value) -> bool {
     responses::requested(original)
 }
