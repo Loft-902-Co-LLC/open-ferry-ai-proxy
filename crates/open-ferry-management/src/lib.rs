@@ -54,6 +54,7 @@ mod access;
 mod api_call;
 mod auth_files;
 mod bind;
+mod config_etag;
 mod config_file_write;
 mod config_keys;
 mod config_lists;
