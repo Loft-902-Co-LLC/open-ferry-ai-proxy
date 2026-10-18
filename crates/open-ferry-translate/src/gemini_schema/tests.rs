@@ -1722,3 +1722,83 @@ fn materializes_required_only_and_filters_boolean_union_branches() {
         assert_eq!(cleaned["properties"]["value"], expected);
     }
 }
+
+// Ported from TestCleanJSONSchema_RemovesDiscriminatorKeyword_Issue6639.
+#[test]
+fn removes_discriminator_keyword_issue6639() {
+    let cleaned = clean(
+        r##"{
+		"type": "object",
+		"properties": {
+			"target": {
+				"anyOf": [
+					{"type": "object", "properties": {"kind": {"const": "a"}, "url": {"type": "string"}}},
+					{"type": "object", "properties": {"kind": {"const": "b"}, "path": {"type": "string"}}}
+				],
+				"discriminator": {"propertyName": "kind"}
+			},
+			"deliverables": {
+				"type": "array",
+				"items": {
+					"anyOf": [
+						{"type": "object", "properties": {"kind": {"const": "file"}, "path": {"type": "string"}}},
+						{"type": "object", "properties": {"kind": {"const": "link"}, "url": {"type": "string"}}}
+					],
+					"discriminator": {"propertyName": "kind"}
+				}
+			},
+			"polymorphicObject": {
+				"type": "object",
+				"properties": {
+					"kind": {"type": "string"}
+				},
+				"oneOf": [
+					{"properties": {"a": {"type": "string"}}},
+					{"properties": {"b": {"type": "number"}}}
+				],
+				"discriminator": {
+					"propertyName": "kind",
+					"mapping": {"a": "#/definitions/A", "b": "#/definitions/B"}
+				}
+			},
+			"discriminator": {
+				"type": "string",
+				"description": "Legitimate property named discriminator"
+			},
+			"nestedDiscriminatorProp": {
+				"type": "object",
+				"properties": {
+					"discriminator": {
+						"type": "object",
+						"properties": {
+							"kind": {"type": "string"}
+						},
+						"discriminator": {"propertyName": "kind"}
+					}
+				}
+			}
+		},
+		"discriminator": {"propertyName": "target"}
+	}"##,
+    );
+    for path in [
+        "discriminator",
+        "properties.target.discriminator",
+        "properties.deliverables.items.discriminator",
+        "properties.polymorphicObject.discriminator",
+        "properties.nestedDiscriminatorProp.properties.discriminator.discriminator",
+    ] {
+        assert!(!exists(&cleaned, path), "{path}: {cleaned}");
+    }
+    for path in [
+        "properties.target.anyOf",
+        "properties.deliverables.items.anyOf",
+    ] {
+        assert_eq!(get(&cleaned, path).unwrap().as_array().unwrap().len(), 2);
+    }
+    assert!(exists(&cleaned, "properties.discriminator"));
+    assert!(exists(
+        &cleaned,
+        "properties.nestedDiscriminatorProp.properties.discriminator.properties.kind"
+    ));
+}
