@@ -225,13 +225,16 @@ fn convert(
 
     let mut included = HashSet::new();
     let mut claude_tools = Vec::new();
+    let native_tool_search = tools.client_search_wins();
+    // The deferred anchor goes between declared and discovered tools, so each
+    // discovery only appends to tools[].
+    let mut anchor_index = None;
     for descriptor in tools.winning() {
         let Some(mut tool) = convert_tool(descriptor, &tools.claude_name(&descriptor.name)) else {
             continue;
         };
-        if tools.client_search_wins()
-            && descriptor.source_priority == tool_search::DISCOVERED_PRIORITY
-        {
+        if native_tool_search && descriptor.source_priority == tool_search::DISCOVERED_PRIORITY {
+            anchor_index.get_or_insert(claude_tools.len());
             if let Some(fields) = tool.as_object_mut() {
                 fields.remove("cache_control");
             }
@@ -243,6 +246,9 @@ fn convert(
             included.insert(name);
         }
         claude_tools.push(tool);
+    }
+    if native_tool_search && let Some(anchor) = tool_search::deferred_anchor_tool(&claude_tools) {
+        claude_tools.insert(anchor_index.unwrap_or(claude_tools.len()), anchor);
     }
     if !claude_tools.is_empty() {
         out.insert("tools".into(), claude_tools.into());

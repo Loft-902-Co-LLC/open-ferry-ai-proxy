@@ -5,6 +5,7 @@
 use serde_json::{Value, json};
 
 use super::test_support::sse_events;
+use super::tool_search::DEFERRED_ANCHOR_NAME;
 use super::*;
 use crate::models::ModelCatalog;
 
@@ -150,7 +151,12 @@ fn tool_search_declares_query_and_hides_deferred_tools_until_discovery() {
     let mut request = session();
     request["input"] = json!([{"role":"user","content":"hi"}]);
     let body = translate(&request, true);
-    assert_eq!(names(&body), ["exec_command", "tool_search"]);
+    // Upstream's TestConvertOpenAIResponsesRequestToClaude_ToolSearchOmitsDeferredTools:
+    // the deferred anchor is the only deferred tool declared.
+    assert_eq!(
+        names(&body),
+        ["exec_command", "tool_search", DEFERRED_ANCHOR_NAME]
+    );
     let search = &body["tools"][1];
     assert_eq!(
         search["input_schema"]["properties"]["query"]["type"],
@@ -190,10 +196,11 @@ fn search_history_loads_native_references_and_preserves_discovery_order() {
     let body = translate(&request, true);
     let names = names(&body);
     assert_eq!(
-        &names[..4],
+        &names[..5],
         [
             "exec_command",
             "tool_search",
+            DEFERRED_ANCHOR_NAME,
             "mcp__codex_apps__calendar_create_event",
             "lookup_order"
         ]
@@ -265,7 +272,8 @@ fn search_name_winner_controls_both_deferred_filtering_and_response_type() {
     let deferred = json!({"type":"function","name":"later","defer_loading":true});
     for (tools, want_type, count) in [
         (json!([function, search, deferred]), "function_call", 2),
-        (json!([search, function, deferred]), "tool_search_call", 1),
+        // The second case also carries the deferred anchor.
+        (json!([search, function, deferred]), "tool_search_call", 2),
     ] {
         let request = json!({"input":"hi","tools":tools});
         assert_eq!(names(&translate(&request, true)).len(), count);
@@ -410,4 +418,109 @@ fn explicit_switch_pins_compatibility_request_and_both_response_paths() {
             .unwrap();
         assert_eq!(first.1["item"]["type"], expected_type);
     }
+}
+
+// Upstream's TestConvertOpenAIResponsesRequestToClaude_DeferredAnchorKeepsToolsPrefixStable:
+// going from no deferred tool to one misses Anthropic's prompt cache, so the
+// anchor is declared from the first request on and discoveries only append.
+#[test]
+fn deferred_anchor_keeps_the_tools_prefix_stable_across_a_discovery() {
+    let mut first = session();
+    first["input"] = json!([{"role":"user","content":"hi"}]);
+    let turn1 = translate(&first, true);
+    let turn2 = translate(&session(), true);
+
+    assert_eq!(
+        names(&turn1),
+        ["exec_command", "tool_search", DEFERRED_ANCHOR_NAME]
+    );
+    let anchor = &turn1["tools"][2];
+    assert_eq!(anchor["defer_loading"], true);
+    assert!(anchor.get("cache_control").is_none());
+    assert!(anchor["input_schema"].is_object());
+    let (tools1, tools2) = (
+        turn1["tools"].as_array().unwrap(),
+        turn2["tools"].as_array().unwrap(),
+    );
+    assert!(tools2.len() > tools1.len());
+    assert_eq!(&tools2[..tools1.len()], tools1.as_slice());
+    assert!(
+        !blocks(&turn2)
+            .iter()
+            .any(|b| b["content"].to_string().contains(DEFERRED_ANCHOR_NAME)),
+        "the anchor must never be referenced"
+    );
+}
+
+// Upstream's TestConvertOpenAIResponsesRequestToClaude_DeferredAnchorYieldsToClientToolName:
+// a client tool whose final Claude name is the anchor's, declared, normalized
+// or discovered, keeps its declaration and no second tool takes the name.
+#[test]
+fn deferred_anchor_yields_to_a_client_tool_of_the_same_name() {
+    let search = json!({"type":"tool_search","execution":"client"});
+    let declared = |name: &str| json!({"type":"function","name":name,"description":"Client tool.","parameters":{"type":"object","properties":{}}});
+    let discovered = json!({"type":"tool_search_output","call_id":"call_search_1","status":"completed","execution":"client","tools":[
+        {"type":"function","name":DEFERRED_ANCHOR_NAME,"description":"Client tool.","defer_loading":true,"parameters":{"type":"object","properties":{}}}]});
+    for (case, request) in [
+        (
+            "exact declared name",
+            json!({"input":"hi","tools":[search, declared(DEFERRED_ANCHOR_NAME)]}),
+        ),
+        (
+            "normalized name",
+            json!({"input":"hi","tools":[search, declared("tool.search.deferred.anchor")]}),
+        ),
+        (
+            "discovered tool",
+            json!({"input":[{"role":"user","content":"hi"},
+                {"type":"tool_search_call","call_id":"call_search_1","status":"completed","execution":"client","arguments":{"query":"x"}},
+                discovered],"tools":[search]}),
+        ),
+    ] {
+        let body = translate(&request, true);
+        let matches: Vec<_> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| tool["name"] == DEFERRED_ANCHOR_NAME)
+            .collect();
+        assert!(
+            matches.len() == 1 && matches[0]["description"] == "Client tool.",
+            "{case}: {}",
+            body["tools"]
+        );
+    }
+}
+
+// Upstream's TestConvertOpenAIResponsesRequestToClaude_NoDeferredAnchorWithoutNativeToolSearch:
+// without native tool search nothing is deferred, so no anchor is declared.
+#[test]
+fn no_deferred_anchor_without_native_tool_search() {
+    let function = json!({"type":"function","name":"tool_search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}});
+    let search = json!({"type":"tool_search","execution":"client"});
+    let deferred = json!({"type":"function","name":"later","defer_loading":true});
+    for (case, tools) in [
+        ("no tool_search", json!([deferred])),
+        (
+            "user function wins name",
+            json!([function, search, deferred]),
+        ),
+    ] {
+        let body = translate(&json!({"input":"hi","tools":tools}), true);
+        assert!(
+            !body["tools"].to_string().contains(DEFERRED_ANCHOR_NAME),
+            "{case}"
+        );
+    }
+    let request = session();
+    assert!(
+        translate(&request, true)["tools"]
+            .to_string()
+            .contains(DEFERRED_ANCHOR_NAME)
+    );
+    assert!(
+        !translate(&request, false)["tools"]
+            .to_string()
+            .contains(DEFERRED_ANCHOR_NAME)
+    );
 }
