@@ -6,7 +6,7 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 ## [Unreleased]
 
-Nothing has been released yet. This is what is in place today, ported from CLIProxyAPI v8.0.27.
+Nothing has been released yet. This is what is in place today, ported from CLIProxyAPI v8.0.32.
 
 ### Added
 
@@ -54,6 +54,17 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 
 ### Changed
 
+- **Ported from CLIProxyAPI v8.0.32**, up from v8.0.27. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8027-to-v8032-left-out). It brings:
+  - **Closed HTTP/2 connections are retried as transient drops**: a call that meets a connection the peer closed fails over to another try and no longer counts against the credential. A recorded `tls handshake timeout` message alone no longer counts as a transient failure.
+  - **A model's own cooldown stays beneath a credential-wide quota cooldown**: when the credential's quota runs out, the model's cooldown is kept and comes back when the credential's ends. It is saved with `save-cooldown-status`. A success from a call dispatched before a cooldown no longer clears it.
+  - **`If-Match` on v8 config writes**: reads of the v8 config routes answer an `ETag`, and a write that sends `If-Match` is refused with a 412 `precondition_failed` when the file has changed since. A write without it works as before.
+  - **Vertex AI and Gemini fixes**: a Vertex AI key's base URL can carry the full `/publishers/` prefix; a Vertex AI request no longer ends on a thought-only model turn; a Gemini call that finishes with a malformed function call gives a Claude client a retryable error; a Gemini Responses call can use a client's tool search.
+  - **Gemini tool arguments are cleaned against the Claude tool schemas the client sent**, so the placeholder that schema normalization adds to a closed object no longer reaches the client's tool.
+  - **Gemini schemas keep their unions**: a tool schema's multi-branch `anyOf` or `oneOf` stays a union, and the `discriminator` keyword Gemini rejects is dropped.
+  - **Claude**: on Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1, signed thinking replayed from earlier turns is sent with `thinking.block_binding.prefix_mismatch_behavior` set to `drop_block`, with the beta it needs; an assistant prefill to Haiku 5 or later is refused; a Chat Completions call to Claude gets the model's registered `max_tokens`; a Responses tool output marked incomplete reaches Claude as a `tool_result` error; Claude's tool search keeps the first deferred tool's cache anchor.
+  - **Stream and usage fixes**: a Codex event split across `data:` lines is put together before it is translated; Codex tool schemas lose integer bounds outside the 64-bit range; xAI calls lose the web search options its Responses API rejects; a Meta client that leaves after the last event is a normal end; fallback item IDs in Interactions streams are unique.
+  - **New config keys, carried and reported as ignored**: `requests.tls-handshake-timeout-seconds`, `upstream.claude.session-date-pin-days` and the four `claude-header-defaults` fields (`anthropic-beta-strip`, `anthropic-beta-append`, `inject-diagnostics`, `client-request-id`) load and save in both layouts, and `open-ferry migrate` reports them. They belong to client impersonation, which open-ferry doesn't do.
+  - **The model catalog** is v8.0.32's, with Claude Haiku 5.5, Gemini 3.8 and Gemini 4 Argon, and Meta's Muse Wonder models.
 - **Ported from CLIProxyAPI v8.0.27**, up from v8.0.20. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8020-to-v8027-left-out). It brings:
   - **Sign in with ChatGPT for Codex credentials**: a Codex credential can hold a second login, with ChatGPT, and then calls the OpenAI API with it. It is under Added.
   - **Codex clients' `tool_search` on Claude**: a Responses call from a Codex client to a Claude model can use Anthropic's native tool search, which keeps the prompt cache prefix stable as the client finds tools. It is off by default. Turn it on with `upstream.claude.tool-search` (`claude.tool-search` in the legacy layout); a Claude key with a base URL other than Anthropic's also needs `native-tool-search: true`. Where it is on, the model list tells Codex clients which Claude models take it. A credential that can't take it gets the plain translation, as before.
