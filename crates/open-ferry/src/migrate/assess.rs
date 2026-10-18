@@ -389,11 +389,12 @@ pub(crate) fn ignored_settings(data: &[u8]) -> Option<Vec<String>> {
     let mut found = Vec::new();
     // Client impersonation.
     let mut cloaking = Vec::new();
+    if value(&["upstream", "claude", "session-date-pin-days"])
+        .is_some_and(|value| is_set(&value) && value != AnyValue::Int(7))
+    {
+        cloaking.push("upstream.claude.session-date-pin-days".to_owned());
+    }
     for (path, shown) in [
-        (
-            &["upstream", "claude", "session-date-pin-days"][..],
-            "upstream.claude.session-date-pin-days",
-        ),
         (
             &["requests", "tls-handshake-timeout-seconds"][..],
             "requests.tls-handshake-timeout-seconds (uTLS)",
@@ -1121,6 +1122,34 @@ mod tests {
         );
         assert_eq!(credential_type(br#"{"email":"x"}"#), None);
         assert_eq!(credential_type(b"not json"), None);
+    }
+
+    // Not upstream's: defaults and disabled overrides should not produce migration warnings.
+    #[test]
+    fn default_date_pin_and_lone_false_diagnostics_are_not_reported() {
+        for v8 in [false, true] {
+            for days in ["null", "0", "7", "14", "-5"] {
+                let yaml = if v8 {
+                    format!(
+                        "config-version: 8\nupstream:\n  claude:\n    session-date-pin-days: {days}\n    header-defaults: {{inject-diagnostics: false}}\n"
+                    )
+                } else {
+                    format!(
+                        "claude: {{session-date-pin-days: {days}}}\nclaude-header-defaults: {{inject-diagnostics: false}}\n"
+                    )
+                };
+                let ignored = ignored_settings(yaml.as_bytes()).unwrap().join("; ");
+                assert_eq!(
+                    ignored.contains("session-date-pin-days"),
+                    matches!(days, "14" | "-5"),
+                    "{yaml}: {ignored}"
+                );
+                assert!(!ignored.contains("header-defaults"), "{ignored}");
+                if matches!(days, "null" | "0" | "7") {
+                    assert!(ignored.is_empty(), "{ignored}");
+                }
+            }
+        }
     }
 
     // Not upstream's: our migration report identifies carried impersonation keys.
