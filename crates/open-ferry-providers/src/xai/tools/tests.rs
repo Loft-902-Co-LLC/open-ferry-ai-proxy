@@ -895,3 +895,36 @@ fn client_declared_tool_keys() {
     .collect();
     assert_eq!(collect_client_declared_tool_keys(&body), want);
 }
+
+// Ported from TestXAIExecutorPrepareStripsUnsupportedWebSearchOptions.
+#[test]
+fn strips_unsupported_web_search_options() {
+    let out = normalize(
+        r#"{"tools":[
+        {"type":"web_search","external_web_access":true,"search_context_size":"high","search_content_types":["text","image"],"user_location":{"type":"approximate","country":"NL"},"filters":{"allowed_domains":["github.com"]}},
+        {"type":"namespace","name":"research","description":"Research tools.","tools":[{"type":"web_search","search_context_size":"low"}]}
+    ]}"#,
+    );
+    let mut count = 0;
+    fn check(tool: &Value, count: &mut usize) {
+        if tool["type"] == "namespace" {
+            for child in tool["tools"].as_array().unwrap() {
+                check(child, count);
+            }
+        } else if tool["type"] == "web_search" {
+            *count += 1;
+            for field in ["external_web_access", "search_context_size"] {
+                assert!(tool.get(field).is_none());
+            }
+            if *count == 1 {
+                assert_eq!(tool["search_content_types"][1], "image");
+                assert_eq!(tool["user_location"]["country"], "NL");
+                assert_eq!(tool["filters"]["allowed_domains"][0], "github.com");
+            }
+        }
+    }
+    for tool in out["tools"].as_array().unwrap() {
+        check(tool, &mut count);
+    }
+    assert!(count > 0, "{out}");
+}
