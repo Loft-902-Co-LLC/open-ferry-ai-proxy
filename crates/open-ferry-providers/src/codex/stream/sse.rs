@@ -181,8 +181,7 @@ impl SseReader {
                 } else {
                     &self.joined
                 };
-                let (lengths, valid_lines, offset) =
-                    diagnostic(&self.held, self.held_lines, data);
+                let (lengths, valid_lines, offset) = diagnostic(&self.held, self.held_lines, data);
                 tracing::warn!(
                     data_lines = self.held_lines,
                     data_bytes = data.len(),
@@ -237,7 +236,36 @@ fn diagnostic(held: &[u8], count: usize, joined: &[u8]) -> (String, String, i64)
 
 #[cfg(test)]
 mod tests {
+    //! Dropped: TestCodexSSEScannerReadsLineByLineWhileAssemblyIsOff needs
+    //! SetAssembly, which has no upstream executor callers and isn't ported.
+
     use super::*;
+
+    async fn scan_logged(input: &str, limit: usize) -> (Vec<String>, String) {
+        let (logs, _capture) = crate::secret_echo::Logs::capture();
+        let lines = scan(input, limit).await;
+        (lines, logs.text())
+    }
+
+    fn assert_warnings(logs: &str, count: usize) {
+        let warnings: Vec<_> = logs
+            .lines()
+            .filter(|line| {
+                line.contains("codex executor: upstream SSE event data is not valid JSON")
+            })
+            .collect();
+        assert_eq!(warnings.len(), count, "{logs}");
+        for warning in warnings {
+            assert!(
+                !warning.contains("SECRET_MARKER"),
+                "payload leaked: {warning}"
+            );
+            assert!(
+                warning.contains("data_lines=") && warning.contains("json_error_offset="),
+                "{warning}"
+            );
+        }
+    }
     async fn scan(input: &str, limit: usize) -> Vec<String> {
         let mut reader = SseReader::new(reqwest::Response::from(http::Response::new(
             input.to_owned(),
@@ -252,7 +280,7 @@ mod tests {
     // Ported from TestCodexSSEScannerAssemblesEventData.
     #[tokio::test]
     async fn assembles_event_data() {
-        let cases: &[(&str, &str, &[&str])] = &[
+        let cases: &[(&str, &str, &[&str], usize)] = &[
             (
                 "one-line events pass through as read",
                 "event: response.created\ndata: {\"type\":\"response.created\"}\n\n: keep-alive\n\ndata: {\"type\":\"x\",\"v\":\"a b\"}\n\n",
@@ -265,11 +293,13 @@ mod tests {
                     "data: {\"type\":\"x\",\"v\":\"a b\"}",
                     "",
                 ],
+                0,
             ),
             (
                 "CRLF line endings",
                 "event: a\r\ndata: {\"type\":\"a\"}\r\n\r\n",
                 &["event: a", "data: {\"type\":\"a\"}", ""],
+                0,
             ),
             (
                 "data lines of one event are joined and compacted",
@@ -279,11 +309,13 @@ mod tests {
                     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"output\":[]}}",
                     "",
                 ],
+                0,
             ),
             (
                 "joined CRLF event",
                 "data: {\"a\":\r\ndata: [1,\r\ndata: 2]}\r\n\r\n",
                 &["data: {\"a\":[1,2]}", ""],
+                0,
             ),
             (
                 "comment and field lines inside an event come before its data",
@@ -296,31 +328,37 @@ mod tests {
                     "data: {\"a\":1}",
                     "",
                 ],
+                0,
             ),
             (
                 "unterminated one-line event at end of stream",
                 "data: {\"type\":\"response.completed\"}",
                 &["data: {\"type\":\"response.completed\"}"],
+                0,
             ),
             (
                 "unterminated multi-line event at end of stream",
                 "data: {\"type\":\ndata: \"response.completed\"}\n",
                 &["data: {\"type\":\"response.completed\"}"],
+                0,
             ),
             (
                 "complete events without blank separators stay separate",
                 "data: {\"a\":1}\ndata: {\"b\":2}\n",
                 &["data: {\"a\":1}", "data: {\"b\":2}"],
+                0,
             ),
             (
                 "split event followed by an event without a blank separator",
                 "data: {\"a\":\ndata: 1}\ndata: {\"b\":2}\n",
                 &["data: {\"a\":1}", "data: {\"b\":2}"],
+                0,
             ),
             (
                 "an invalid fragment absorbs the following data lines up to the blank line",
                 "data: {\"a\":\"SECRET_MARKER\ndata: {\"b\":2}\n\n",
                 &["data: {\"a\":\"SECRET_MARKER\ndata: {\"b\":2}", ""],
+                1,
             ),
             (
                 "only the first invalid event in a stream is described",
@@ -333,6 +371,7 @@ mod tests {
                     "data: {\"c\":3}",
                     "",
                 ],
+                1,
             ),
             (
                 "a complete object on its own line inside an open array stays in the event",
@@ -341,18 +380,26 @@ mod tests {
                     "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"id\":\"m\",\"type\":\"message\"}]}}",
                     "",
                 ],
+                0,
             ),
             (
                 "unterminated incomplete event at end of stream is still delivered",
                 "data: {\"type\":\"response.completed\",\"t\":\"SECRET_MARKER\",",
                 &["data: {\"type\":\"response.completed\",\"t\":\"SECRET_MARKER\","],
+                1,
             ),
             (
                 "empty and non-JSON data lines take the stock path",
                 "data:\n\ndata: \n\ndata: ping\n\n",
                 &["data:", "", "data: ", "", "data: ping", ""],
+                0,
             ),
-            ("done sentinel", "data: [DONE]\n\n", &["data: [DONE]", ""]),
+            (
+                "done sentinel",
+                "data: [DONE]\n\n",
+                &["data: [DONE]", ""],
+                0,
+            ),
             (
                 "invalid one-line event passes through with one warning",
                 "data: {\"type\":\"response.completed\",\"t\":\"SECRET_MARKER\",\n\n",
@@ -360,15 +407,19 @@ mod tests {
                     "data: {\"type\":\"response.completed\",\"t\":\"SECRET_MARKER\",",
                     "",
                 ],
+                1,
             ),
             (
                 "event split inside a string stays invalid and keeps its data lines",
                 "data: {\"t\":\"SECRET_MARKER\ndata: SECRET_MARKER\"}\n\n",
                 &["data: {\"t\":\"SECRET_MARKER\ndata: SECRET_MARKER\"}", ""],
+                1,
             ),
         ];
-        for (name, input, want) in cases {
-            assert_eq!(scan(input, 1 << 20).await, *want, "{name}");
+        for (name, input, want, warnings) in cases {
+            let (lines, logs) = scan_logged(input, 1 << 20).await;
+            assert_eq!(lines, *want, "{name}");
+            assert_warnings(&logs, *warnings);
         }
     }
     // Ported from TestCodexSSEScannerBoundsAnEventToTheLineLimit.
@@ -378,8 +429,11 @@ mod tests {
         let b = format!("data: {}", "y".repeat(40));
         let c = format!("data: {}\"}}", "z".repeat(40));
         let input = format!("{a}\n{b}\n{c}\n\ndata: {{\"b\":2}}\n\n");
+        let (lines, logs) = scan_logged(&input, 64).await;
+        assert_warnings(&logs, 1);
+        assert!(!logs.contains(&"x".repeat(40)), "payload leaked: {logs}");
         assert_eq!(
-            scan(&input, 64).await,
+            lines,
             [
                 a,
                 b,
@@ -427,9 +481,8 @@ mod tests {
             );
         }
     }
-    // Ported from TestCodexExecuteStreamEventExceedsBudgetWhileAssemblingReleasesStream
-    // and TestCodexExecuteStreamEventExceedsTimeBudgetWhileAssemblingReleasesStream:
-    // a budget yield must not wait for more bytes and must preserve the fragments.
+    // Not upstream's: retain a small scanner-level regression alongside the
+    // executor-level budget and clock tests in bootstrap_tests::sse.
     #[tokio::test]
     async fn budget_yield_preserves_assembly() {
         let input = "data: {\"a\":\ndata: 1}\n\n";
@@ -453,17 +506,33 @@ mod tests {
         assert_eq!(reader.raw_bytes, 19);
     }
     // Ported from TestCodexSSEScannerDiagnosticDescribesFraming.
-    #[test]
-    fn diagnostic_describes_framing() {
+    #[tokio::test]
+    async fn diagnostic_describes_framing() {
         let held = b"data: {\"type\":\"response.completed\",\"t\":\"abc\ndata: def\"}";
         let joined = b"{\"type\":\"response.completed\",\"t\":\"abc\ndef\"}";
         assert_eq!(
             diagnostic(held, 2, joined),
             ("37,5".into(), "false,false".into(), 38)
         );
+        let input = std::str::from_utf8(held).unwrap().to_owned() + "\n\n";
+        let (_, logs) = scan_logged(&input, 1 << 20).await;
+        assert_warnings(&logs, 1);
+        assert!(
+            logs.contains("data_lines=2 ") && logs.contains("data_bytes=43 "),
+            "{logs}"
+        );
         let many = b"data: {\n".repeat(10);
         let (lengths, valid, _) = diagnostic(&many[..many.len() - 1], 10, b"{");
         assert_eq!(lengths, "1,1,1,1,1,1,1,1,+2");
         assert_eq!(valid, "false,false,false,false,false,false,false,false,+2");
+    }
+    // Not upstream's: single-line diagnostics trim all surrounding whitespace,
+    // as upstream's assemble does before calling diagnose.
+    #[tokio::test]
+    async fn diagnostic_trims_single_line_data() {
+        let (_, logs) = scan_logged("data:   {\"a\":", 1 << 20).await;
+        assert_warnings(&logs, 1);
+        assert!(logs.contains("data_bytes=5 "), "{logs}");
+        assert!(logs.contains("json_error_offset=5"), "{logs}");
     }
 }

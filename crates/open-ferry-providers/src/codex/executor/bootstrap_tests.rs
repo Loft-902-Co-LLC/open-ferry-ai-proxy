@@ -36,6 +36,7 @@ use crate::codex::terminal::{
     is_overload_bootstrap_failure,
 };
 
+mod sse;
 mod websocket;
 
 pub(super) const OVERLOAD_EVENT: &str = r#"{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}"#;
