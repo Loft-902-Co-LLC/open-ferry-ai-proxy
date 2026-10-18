@@ -37,8 +37,11 @@ pub(crate) fn explicit_instructions(payload: &Value) -> bool {
         .is_some_and(|text| !text.trim().is_empty())
 }
 
-/// SIWC stripping, before payload finalization. `compact` removes stream
-/// and store; ordinary Responses calls always ask for SSE without storage.
+/// First collapse `configuration_update` items, then strip unsupported fields.
+/// `keep_top_level_effort` preserves the effort already set by the model's
+/// thinking suffix. These rules run before payload finalization. `compact`
+/// removes stream and store; ordinary Responses calls ask for SSE without
+/// storage.
 pub(crate) fn apply_body(
     body: &mut Value,
     explicit: bool,

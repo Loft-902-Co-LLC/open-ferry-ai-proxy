@@ -1493,3 +1493,67 @@ async fn siwc_steer_strips_configuration_updates_without_promoting_effort() {
         serde_json::json!({"type":"response.steer","previous_response_id":"r1","input":[{"role":"user","content":[{"type":"input_text","text":"STEER_OK"}]}]})
     );
 }
+
+// Not upstream's: defaults must check the SIWC steer's stripped input items.
+#[tokio::test]
+async fn siwc_steer_defaults_check_stripped_input() {
+    let server = serve(|mut peer| async move {
+        if peer.recv().await.is_none() {
+            return;
+        }
+        peer.send(&response("response.created", "r1")).await;
+        if peer.recv().await.is_none() {
+            return;
+        }
+        peer.send(LIFECYCLE_ACCEPTED).await;
+        peer.send(&response("response.completed", "r1")).await;
+        peer.hold().await;
+    })
+    .await;
+    use open_ferry_core::config::{AnyValue, PayloadModelRule, PayloadRule};
+    let mut config = Config::default();
+    config.codex.response_steering = true;
+    config.payload.default.push(PayloadRule {
+        models: vec![PayloadModelRule {
+            name: MODEL.into(),
+            protocol: "codex".into(),
+            ..Default::default()
+        }],
+        params: vec![("input.0.role".into(), AnyValue::Str("developer".into()))],
+    });
+    let executor = executor_with(config);
+    let (mut client, input) = Client::new(4);
+    let mut credential = auth(&server.url);
+    credential
+        .metadata
+        .insert("use_siwc".into(), serde_json::json!(true));
+    credential.metadata.insert(
+        "siwc".into(),
+        serde_json::json!({"access_token":"siwc-mock-access"}),
+    );
+    credential.attributes.remove("api_key");
+    let chunks = within(
+        "the SIWC call to start",
+        executor.execute_stream(
+            Arc::new(credential),
+            request(MODEL, r#"{"input":[],"instructions":"Initial settings"}"#),
+            duplex_options("duplex-siwc-steer-defaults", input),
+        ),
+    )
+    .await
+    .unwrap()
+    .chunks;
+    let (_, error) = run(chunks, |event, _| match kind(event) {
+        (kind, _) if kind == "response.created" => client.send(r#"{"type":"response.steer","previous_response_id":"r1","input":[{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":"x"}]}"#),
+        (kind, _) if kind == "response.completed" => client.close(),
+        _ => {}
+    }).await;
+    assert!(error.is_none(), "{error:?}");
+    server.wait_closed(1).await;
+    let sent = messages(&server);
+    assert_eq!(sent[0]["type"], "response.create");
+    assert_eq!(
+        sent[1],
+        serde_json::json!({"type":"response.steer","previous_response_id":"r1","input":[{"role":"user","content":"x"}]})
+    );
+}

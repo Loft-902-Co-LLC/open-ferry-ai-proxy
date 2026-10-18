@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth_test.go,
-// codex_executor_compact_test.go and codex_executor_siwc_configuration_update_test.go
-// (v8.0.32, MIT).
+// codex_executor_compact_test.go and
+// codex_executor_siwc_configuration_update_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use open_ferry_core::auth::codex_refresh::CodexPersistIntent;
@@ -1199,6 +1199,20 @@ async fn siwc_http_collapses_updates_before_finalizer_and_respects_suffix() {
                 body["input"].as_array().unwrap().len(),
                 if siwc { 1 } else { 3 }
             );
+            if siwc {
+                let input = body["input"].as_array().unwrap();
+                assert!(
+                    input
+                        .iter()
+                        .all(|item| item["type"] != "configuration_update")
+                );
+                assert_eq!(input[0]["role"], "user");
+                assert_eq!(input[0]["type"], "message");
+                assert_eq!(
+                    input[0]["content"],
+                    json!([{"type":"input_text","text":"hi"}])
+                );
+            }
             assert_eq!(body["reasoning"]["summary"], "auto");
         }
     }
