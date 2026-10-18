@@ -50,6 +50,31 @@ pub(super) fn declaration(tool: &Value, name: &str) -> Value {
     json!({"name":name,"description":tool_description(tool),"input_schema":schema})
 }
 
+/// Names the constant deferred tool declared with native tool search; nothing
+/// ever references it.
+pub(super) const DEFERRED_ANCHOR_NAME: &str = "tool_search_deferred_anchor";
+
+/// `responsesDeferredAnchorTool`: Anthropic keeps the prompt cache when
+/// deferred tools are added, but not when a request goes from no deferred tool
+/// to one. This anchor is declared from the first request on, so discoveries
+/// only append after it. `None` when a converted tool already carries its name
+/// (names are normalized during conversion, so the check runs on the final
+/// tools); the request then keeps the client's tool and has no anchor.
+pub(super) fn deferred_anchor_tool(claude_tools: &[Value]) -> Option<Value> {
+    if claude_tools
+        .iter()
+        .any(|tool| str_of(tool.get("name")) == DEFERRED_ANCHOR_NAME)
+    {
+        return None;
+    }
+    Some(json!({
+        "name": DEFERRED_ANCHOR_NAME,
+        "description": "Placeholder that is never loaded; tool search returns the real tools.",
+        "input_schema": {"type": "object", "properties": {}},
+        "defer_loading": true
+    }))
+}
+
 pub(super) fn output_text(item: &Value, tools: &RequestTools) -> String {
     let names: Vec<_> = discovered_descriptors(item.get("tools"))
         .iter()
