@@ -4,7 +4,7 @@
 //
 // All tests are ported. The tests without an upstream name are new; their
 // expected output comes from upstream, with tool call numbers masked: the
-// counter is shared by every stream in the process.
+// counter is shared by every response in the process.
 
 use serde_json::{Value, json};
 
@@ -535,7 +535,7 @@ fn stream_edge_cases() {
 fn non_stream_edge_cases() {
     let request = json!({"tools": [{"name": "a b"}, {"name": "Read"}]});
     assert_eq!(
-        non_stream(
+        mask_tool_ids(&non_stream(
             &request,
             concat!(
                 r#"{"candidates":[{"content":{"parts":[{"text":"a","thought":true},{"thoughtSignature":"s"},{"text":"b"},"#,
@@ -543,11 +543,11 @@ fn non_stream_edge_cases() {
                 r#"{"text":"c","thought_signature":"t"}]},"finishReason":"MAX_TOKENS"}]}"#
             )
         )
-        .to_string(),
+        .to_string()),
         concat!(
             r#"{"id":"","type":"message","role":"assistant","model":"","content":[{"type":"thinking","thinking":"a","signature":"s"},"#,
-            r#"{"type":"text","text":"b"},{"type":"tool_use","id":"a_b-1","name":"a b","input":{}},"#,
-            r#"{"type":"tool_use","id":"read-2","name":"Read","input":{}},{"type":"thinking","thinking":"","signature":"t"},"#,
+            r#"{"type":"text","text":"b"},{"type":"tool_use","id":"a_b-N","name":"a b","input":{}},"#,
+            r#"{"type":"tool_use","id":"read-N","name":"Read","input":{}},{"type":"thinking","thinking":"","signature":"t"},"#,
             r#"{"type":"text","text":"c"}],"#,
             r#""stop_reason":"tool_use","stop_sequence":null}"#
         )
@@ -1062,11 +1062,11 @@ fn non_stream_carriers_in_detail() {
         ),
     );
     assert_eq!(
-        output.to_string(),
+        mask_tool_ids(&output.to_string()),
         concat!(
             r#"{"id":"","type":"message","role":"assistant","model":"","content":[{"type":"thinking","thinking":"","signature":"a"},"#,
             r#"{"type":"thinking","thinking":"","signature":"b"},{"type":"thinking","thinking":"x","signature":"c"},"#,
-            r#"{"type":"thinking","thinking":"","signature":"d"},{"type":"tool_use","id":"g-1","name":"g","input":{}},"#,
+            r#"{"type":"thinking","thinking":"","signature":"d"},{"type":"tool_use","id":"g-N","name":"g","input":{}},"#,
             r#"{"type":"text","text":"y"},{"type":"thinking","thinking":"","signature":"e"},{"type":"text","text":"z"}],"#,
             r#""stop_reason":"tool_use","stop_sequence":null}"#
         )
@@ -1183,4 +1183,34 @@ fn malformed_call_is_api_error_unless_a_tool_call_was_returned() {
             assert!(output.contains(r#""stop_reason":"tool_use""#));
         }
     }
+}
+
+// Ported from TestConvertGeminiResponseToClaudeNonStream_UniqueToolUseIDsAcrossTurns.
+#[test]
+fn non_stream_tool_use_ids_are_unique_across_turns_and_streams() {
+    let request =
+        json!({"model":"gemini-test","messages":[{"role":"user","content":"run command"}]});
+    let response = json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}}}],"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-test","responseId":"resp-tool"});
+    let mut translator = GeminiToClaudeStream::new(&request);
+    let stream =
+        translator.translate(response.to_string().as_bytes()) + &translator.translate(b"[DONE]");
+    let streamed = stream
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["content_block"]["type"] == "tool_use")
+        .unwrap();
+    let first = convert_gemini_response_to_claude_non_stream(&request, &response);
+    let second = convert_gemini_response_to_claude_non_stream(&request, &response);
+    let ids = [
+        streamed["content_block"]["id"].as_str().unwrap(),
+        first["content"][0]["id"].as_str().unwrap(),
+        second["content"][0]["id"].as_str().unwrap(),
+    ];
+    for id in ids {
+        assert!(id.strip_prefix("Bash-").unwrap().parse::<u64>().unwrap() > 0);
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[0], ids[2]);
+    assert_ne!(ids[1], ids[2]);
 }
