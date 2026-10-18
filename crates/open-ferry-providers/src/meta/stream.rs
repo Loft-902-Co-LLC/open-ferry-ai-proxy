@@ -20,7 +20,10 @@
 //!   what it can from it.
 //! - Usage, the served model and the response log are the call's taps' work
 //!   (see the crate's `observe_send` module), not the reporter's.
-//! - A dropped stream stops at once; upstream checks its context.
+//! - A dropped stream stops at once; upstream checks its context. The usage
+//!   observer counts cancellation after `response.completed` or
+//!   `response.incomplete` as success, and before either as a 499. Transport
+//!   read failures still fail, even after a terminal event.
 //! - Each line has the secrets the request sent redacted before it is read,
 //!   if they are of eight bytes or more, as every client error is (see
 //!   `Policy::Client` in the crate's `redact` module); a model can echo one
