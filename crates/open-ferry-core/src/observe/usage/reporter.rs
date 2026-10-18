@@ -1096,6 +1096,8 @@ impl Call {
         }
         self.response_model.observe(payload, "codex");
         if self.held.is_none()
+            && (self.provider != "meta"
+                || is_terminal(payload, &["response.completed", "response.incomplete"]))
             && is_terminal(
                 payload,
                 &["response.completed", "response.incomplete", "response.done"],
@@ -1337,6 +1339,13 @@ impl Call {
                 Some(detail) => Some(success(detail)),
                 None => self.seen_done.then(|| success(Detail::default())),
             },
+            // Meta keeps reading subscription usage after its terminal event.
+            // A client leaving before that event is still a failed call.
+            (Mode::CodexStream, Outcome::Canceled)
+                if self.provider == "meta" && self.held.is_none() =>
+            {
+                Some(failure(Detail::default(), Failure::canceled()))
+            }
             (_, Outcome::Failed) => Some(failure(Detail::default(), error)),
             (Mode::XaiStream, _) => self.buffered().map(success),
             (Mode::XaiWebsocket, _) => self.buffered().map(success),

@@ -425,3 +425,43 @@ fn codex_split_terminal_event_keeps_usage() {
     assert_eq!(int_at(&record, "/tokens/input_tokens"), 5);
     assert_eq!(int_at(&record, "/tokens/output_tokens"), 1);
 }
+
+/// Ported from TestMetaStream_ClientDisconnectAfterTerminalEventIsNotFailed
+/// and TestMetaStream_ClientDisconnectBeforeTerminalEventIsFailed.
+#[test]
+fn meta_client_disconnect_depends_on_terminal_event() {
+    for terminal in [
+        None,
+        Some("response.completed"),
+        Some("response.incomplete"),
+        Some("response.done"),
+    ] {
+        let harness = Harness::new();
+        let driver = ClientCall::new("muse-wonder-1.0").stream().tap(&harness);
+        driver.attempt(
+            AttemptKind::Stream,
+            "meta",
+            "muse-wonder-1.0",
+            &auth("meta-1", "0", "meta"),
+        );
+        driver.head(200, &[("content-type", "text/event-stream")]);
+        driver.chunk("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n");
+        if let Some(terminal) = terminal {
+            driver.chunk(&format!("data: {{\"type\":\"{terminal}\",\"response\":{{\"usage\":{{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}}}}\n\n"));
+        }
+        driver.finish(Outcome::Canceled);
+        let record = harness.record();
+        let success = matches!(terminal, Some("response.completed" | "response.incomplete"));
+        assert_eq!(
+            bool_at(&record, "/failed"),
+            !success,
+            "{terminal:?}: {record}"
+        );
+        if success {
+            assert_eq!(int_at(&record, "/tokens/input_tokens"), 10);
+            assert_eq!(int_at(&record, "/tokens/output_tokens"), 5);
+        } else {
+            assert_eq!(int_at(&record, "/fail/status_code"), 499);
+        }
+    }
+}
