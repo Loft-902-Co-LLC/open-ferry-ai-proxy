@@ -64,6 +64,11 @@
 //!   it, the shallower ones, add nothing to their parents. Upstream copies
 //!   all of them: a branch keeps what it gives its parent until the end, so
 //!   the copies double with each level of conditionals nested in a branch.
+//! - Materializing required-only union branches copies at most 65,536 more
+//!   values than the schema holds. A branch that would exceed the budget is
+//!   filtered as unmaterializable. Below the budget, output matches upstream,
+//!   which copies without bound: nested parent properties are copied into
+//!   each branch again, multiplying with each level.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -86,6 +91,10 @@ const MAX_JSON_TEXT: usize = 1024;
 /// How many more values merging conditionals may copy than the schema holds;
 /// see the module docs.
 const CONDITIONAL_COPY_ALLOWANCE: usize = 1 << 16;
+
+/// How many more values required-only union branches may copy than the schema
+/// holds; see the module docs.
+const UNION_COPY_ALLOWANCE: usize = 1 << 16;
 
 /// Keywords Gemini rejects, removed wherever they are a keyword rather than a
 /// name. Upstream's list also has `additionalProperties`, which this cleaner
@@ -907,12 +916,26 @@ fn is_required_only_union_branch(item: &Value) -> bool {
 }
 
 /// Gives a required-only branch the properties it requires from its parent.
-fn materialize_required_only_branch(item: &Value, parent_props: Option<&Value>) -> Option<Value> {
+fn materialize_required_only_branch(
+    item: &Value,
+    parent_props: Option<&Value>,
+    budget: &mut usize,
+) -> Option<Value> {
     let parent_props = parent_props.filter(|props| props.is_object())?;
     let required = child(item, "required")?.as_array()?;
     if required.is_empty() {
         return None;
     }
+    // Preflight every copy before cloning any property. A failed branch uses
+    // none of the budget, just like one with a missing required property.
+    let mut remaining = budget.checked_sub(value_count(item, *budget))?;
+    remaining = remaining.checked_sub(2)?; // The properties map and object type.
+    for name in required {
+        let name = str_of(Some(name));
+        let property = get(parent_props, &escape_key(&name))?;
+        remaining = remaining.checked_sub(value_count(property, remaining))?;
+    }
+    *budget = remaining;
     let mut branch = item.clone();
     for name in required {
         let name = str_of(Some(name));
@@ -944,6 +967,7 @@ fn is_null_only_branch(item: &Value) -> bool {
 /// materializing required-only branches from parent properties. A single
 /// branch is merged or unwrapped with the parent's description and type hints.
 fn flatten_any_of_one_of(doc: &mut Value) {
+    let mut budget = value_count(doc, usize::MAX).saturating_add(UNION_COPY_ALLOWANCE);
     let mut paths_by_field = find_paths_by_fields(doc, &["oneOf", "anyOf"]);
     let mut paths = Vec::new();
     for key in ["oneOf", "anyOf"] {
@@ -989,7 +1013,9 @@ fn flatten_any_of_one_of(doc: &mut Value) {
             } else if is_null_only_branch(item) {
                 has_null = true;
             } else if is_required_only_union_branch(item) {
-                if let Some(branch) = materialize_required_only_branch(item, parent_props) {
+                if let Some(branch) =
+                    materialize_required_only_branch(item, parent_props, &mut budget)
+                {
                     non_null.push(branch);
                 }
                 filtered = true;
@@ -1046,7 +1072,7 @@ fn flatten_any_of_one_of(doc: &mut Value) {
         if filtered && has_null {
             candidates.push(object([("type", Value::from("null"))]));
         }
-        let (_, types) = select_best(&candidates);
+        let types = union_branch_types(&candidates);
         let mut selected = non_null.remove(0);
         if nullable {
             set(&mut selected, "nullable", Value::Bool(true));
@@ -1067,37 +1093,25 @@ fn flatten_any_of_one_of(doc: &mut Value) {
     }
 }
 
-/// The index of the branch upstream keeps, and the types of all branches.
-/// An object (or a branch with `properties`) beats an array (or a branch with
-/// `items`), which beats any other non-null type; the first of the best wins.
-fn select_best(items: &[Value]) -> (usize, Vec<String>) {
-    let (mut best, mut best_score) = (0, -1);
+/// The types of all branches, inferring object or array from properties or
+/// items as upstream's `selectBest` does. Its branch selection is unused on
+/// the Gemini JSON Schema path.
+fn union_branch_types(items: &[Value]) -> Vec<String> {
     let mut types = Vec::new();
-    for (index, item) in items.iter().enumerate() {
+    for item in items {
         let mut kind = bounded_text(child(item, "type")).into_owned();
-        let score = if kind == "object" || child(item, "properties").is_some() {
-            if kind.is_empty() {
+        if kind.is_empty() {
+            if child(item, "properties").is_some() {
                 kind = "object".into();
-            }
-            3
-        } else if kind == "array" || child(item, "items").is_some() {
-            if kind.is_empty() {
+            } else if child(item, "items").is_some() {
                 kind = "array".into();
             }
-            2
-        } else if !kind.is_empty() && kind != "null" {
-            1
-        } else {
-            0
-        };
+        }
         if !kind.is_empty() {
             types.push(kind);
         }
-        if score > best_score {
-            (best, best_score) = (index, score);
-        }
     }
-    (best, types)
+    types
 }
 
 /// Flattens each type array to one type: `array` if the node has `items` and
