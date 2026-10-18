@@ -306,11 +306,11 @@ fn streams_text_thinking_and_tool_calls() {
             ),
             (
                 "content_block_delta",
-                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#,
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
             ),
             (
                 "content_block_delta",
-                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"y\":2}"}}"#,
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":""}}"#,
             ),
             (
                 "content_block_stop",
@@ -547,7 +547,7 @@ fn non_stream_edge_cases() {
         concat!(
             r#"{"id":"","type":"message","role":"assistant","model":"","content":[{"type":"thinking","thinking":"a","signature":"s"},"#,
             r#"{"type":"text","text":"b"},{"type":"tool_use","id":"a_b-1","name":"a b","input":{}},"#,
-            r#"{"type":"tool_use","id":"read-2","name":"Read","input":{"k":[1]}},{"type":"thinking","thinking":"","signature":"t"},"#,
+            r#"{"type":"tool_use","id":"read-2","name":"Read","input":{}},{"type":"thinking","thinking":"","signature":"t"},"#,
             r#"{"type":"text","text":"c"}],"#,
             r#""stop_reason":"tool_use","stop_sequence":null}"#
         )
@@ -1066,4 +1066,68 @@ fn non_stream_carriers_in_detail() {
             r#""stop_reason":"tool_use","stop_sequence":null}"#
         )
     );
+}
+
+fn input_deltas(output: &str) -> String {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter(|event| event["delta"]["type"] == "input_json_delta")
+        .map(|event| event["delta"]["partial_json"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+// Ported from TestConvertGeminiResponseToClaude_SanitizesParameterlessToolArguments,
+// TestConvertGeminiResponseToClaude_CanonicalNameCollisionKeepsExactToolArguments,
+// TestConvertGeminiResponseToClaude_AmbiguousCanonicalNameKeepsUpstreamNameAndArguments,
+// TestConvertGeminiResponseToClaude_KeepsReasonWhenTranslatedSchemaHasNoPlaceholder.
+#[test]
+fn cleans_arguments_and_preserves_exact_or_ambiguous_names() {
+    let request = json!({"tools": [
+        {"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}},
+        {"name":"Read","input_schema":{"type":"object","properties":{}}},
+        {"name":"read","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}},
+        {"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}
+    ]});
+    let sent = json!({"tools":[{"functionDeclarations":[{"name":"Bash","parametersJsonSchema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]}]});
+    for (name, args, want) in [
+        (
+            "EnterPlanMode",
+            json!({"reason":"Plan mode switch"}),
+            json!({}),
+        ),
+        ("read", json!({"path":"/tmp/a"}), json!({"path":"/tmp/a"})),
+        ("Read", json!({"reason":"x"}), json!({})),
+        ("READ", json!({"path":"/tmp/a"}), json!({"path":"/tmp/a"})),
+        (
+            "Bash",
+            json!({"command":"ls","reason":"why"}),
+            json!({"command":"ls","reason":"why"}),
+        ),
+    ] {
+        let response = json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":name,"args":args}}]},"finishReason":"STOP"}]});
+        let out = convert_gemini_response_to_claude_non_stream_with_translated(
+            &request, &sent, &response,
+        );
+        assert_eq!(out["content"][0]["name"], name);
+        assert_eq!(out["content"][0]["input"], want);
+        let mut translator = GeminiToClaudeStream::new(&request).with_translated_request(&sent);
+        let output = translator.translate(response.to_string().as_bytes());
+        assert_eq!(
+            serde_json::from_str::<Value>(&input_deltas(&output)).unwrap(),
+            want
+        );
+    }
+}
+
+// Ported from TestConvertGeminiResponseToClaude_ParameterlessToolContinuationDoesNotDuplicateEmptyObject.
+#[test]
+fn parameterless_continuation_emits_one_empty_object() {
+    let request = json!({"tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}}]});
+    let output = stream(&request, &[
+        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"switch"}}}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"reason":"more"}}}]},"finishReason":"STOP"}]}"#,
+    ]).concat();
+    assert_eq!(input_deltas(&output), "{}");
 }

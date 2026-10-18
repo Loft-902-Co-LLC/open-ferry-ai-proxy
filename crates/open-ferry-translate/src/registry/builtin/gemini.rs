@@ -49,15 +49,18 @@ pub(super) fn register(registry: &Registry) {
         }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
-                Box::new(GeminiToClaude(gemini_claude::GeminiToClaudeStream::new(
-                    context.original_request,
-                )))
+                Box::new(GeminiToClaude(
+                    gemini_claude::GeminiToClaudeStream::new(context.original_request)
+                        .with_translated_request(context.request),
+                ))
             })),
             non_stream: Some(Arc::new(|context, body| {
-                let response = gemini_claude::convert_gemini_response_to_claude_non_stream(
-                    context.original_request,
-                    &parse(body),
-                );
+                let response =
+                    gemini_claude::convert_gemini_response_to_claude_non_stream_with_translated(
+                        context.original_request,
+                        context.request,
+                        &parse(body),
+                    );
                 Some(to_vec(&response))
             })),
             token_count: Some(Arc::new(|count| {

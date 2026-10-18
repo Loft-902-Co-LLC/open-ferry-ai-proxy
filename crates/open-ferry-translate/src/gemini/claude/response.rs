@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_response.go
 // (ConvertGeminiResponseToClaude, ConvertGeminiResponseToClaudeNonStream and
-// ClaudeTokenCount) (v8.0.27, MIT).
+// ClaudeTokenCount), internal/util/translator.go (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini responses → Claude Messages responses.
@@ -30,11 +30,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 
+use super::tool_arguments::{clean_arguments, client_name, parameterless};
 use crate::common::claude::sanitize_tool_id;
 use crate::common::gemini::{
     SanitizedToolNames, restore_sanitized_tool_name, sanitized_tool_name_map,
 };
-use crate::common::tool_names::{ToolNameMap, map_tool_name, tool_name_map_from_claude_request};
 use crate::gemini_schema::get;
 use crate::json::{bool_of, int_of, path, str_of};
 
@@ -64,8 +64,12 @@ enum Block {
 /// chunk at a time. Keep one per response: it tracks which content block is
 /// open.
 pub struct GeminiToClaudeStream {
-    /// Canonical tool names → the names the client declared.
-    tool_names: Option<ToolNameMap>,
+    /// Tools from the original and translated requests, and the open call.
+    original_request: Value,
+    translated_request: Value,
+    current_tool: String,
+    current_parameterless: bool,
+    current_input_emitted: bool,
     /// Sanitized function names → the names the client declared.
     sanitized_names: Option<SanitizedToolNames>,
     has_first_response: bool,
@@ -87,7 +91,11 @@ impl GeminiToClaudeStream {
     /// tool names it declared.
     pub fn new(original_request: &Value) -> Self {
         Self {
-            tool_names: tool_name_map_from_claude_request(original_request),
+            original_request: json!({"tools": original_request.get("tools")}),
+            translated_request: Value::Null,
+            current_tool: String::new(),
+            current_parameterless: false,
+            current_input_emitted: false,
             sanitized_names: sanitized_tool_name_map(original_request),
             has_first_response: false,
             block: Block::None,
@@ -100,6 +108,15 @@ impl GeminiToClaudeStream {
             output_tokens: 0,
             cached_tokens: 0,
         }
+    }
+
+    /// Uses the tool schemas actually sent upstream when detecting placeholders.
+    pub fn with_translated_request(mut self, request: &Value) -> Self {
+        self.translated_request = json!({
+            "tools": request.get("tools"),
+            "request": {"tools": path(request, "request.tools")},
+        });
+        self
     }
 
     /// Translates one chunk of the Gemini stream: a response's JSON, or
@@ -267,7 +284,7 @@ impl GeminiToClaudeStream {
                 self.sanitized_names.as_ref(),
                 &str_of(call.get("name")),
             );
-            let client_name = map_tool_name(self.tool_names.as_ref(), &upstream_name);
+            let client_name = client_name(&self.original_request, &upstream_name);
             let args = call.get("args");
 
             // A call without a name continues the open one: Gemini can split
@@ -283,6 +300,9 @@ impl GeminiToClaudeStream {
             self.close_block(out);
             self.block = Block::None;
 
+            self.current_parameterless = parameterless(&self.original_request, &client_name);
+            self.current_tool = client_name.clone();
+            self.current_input_emitted = false;
             let n = TOOL_USE_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             self.push_block_start(
                 json!({
@@ -352,9 +372,21 @@ impl GeminiToClaudeStream {
         );
     }
 
-    fn push_input_delta(&self, args: &Value, out: &mut String) {
+    fn push_input_delta(&mut self, args: &Value, out: &mut String) {
+        let cleaned = clean_arguments(
+            args,
+            &self.current_tool,
+            &self.original_request,
+            &self.translated_request,
+        );
+        let partial = if self.current_parameterless && self.current_input_emitted {
+            String::new()
+        } else {
+            self.current_input_emitted = true;
+            cleaned.to_string()
+        };
         self.push_delta(
-            json!({"type": "input_json_delta", "partial_json": args.to_string()}),
+            json!({"type": "input_json_delta", "partial_json": partial}),
             out,
         );
     }
@@ -409,7 +441,19 @@ pub fn convert_gemini_response_to_claude_non_stream(
     original_request: &Value,
     response: &Value,
 ) -> Value {
-    let tool_names = tool_name_map_from_claude_request(original_request);
+    convert_gemini_response_to_claude_non_stream_with_translated(
+        original_request,
+        &Value::Null,
+        response,
+    )
+}
+
+/// Converts a whole response with the schemas actually sent to Gemini.
+pub fn convert_gemini_response_to_claude_non_stream_with_translated(
+    original_request: &Value,
+    translated_request: &Value,
+    response: &Value,
+) -> Value {
     let sanitized_names = sanitized_tool_name_map(original_request);
 
     let count = |path_: &str| path(response, path_).map_or(0, int_of);
@@ -474,15 +518,18 @@ pub fn convert_gemini_response_to_claude_non_stream(
                     sanitized_names.as_ref(),
                     &str_of(call.get("name")),
                 );
+                let client_name = client_name(original_request, &upstream_name);
                 tool_count += 1;
                 let input = match call.get("args") {
-                    Some(args @ Value::Object(_)) => args.clone(),
+                    Some(args @ Value::Object(_)) => {
+                        clean_arguments(args, &client_name, original_request, translated_request)
+                    }
                     _ => json!({}),
                 };
                 blocks.blocks.push(json!({
                     "type": "tool_use",
                     "id": sanitize_tool_id(&format!("{upstream_name}-{tool_count}")),
-                    "name": map_tool_name(tool_names.as_ref(), &upstream_name),
+                    "name": client_name,
                     "input": input,
                 }));
                 continue;
