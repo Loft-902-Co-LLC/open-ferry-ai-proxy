@@ -15,7 +15,9 @@ use super::siwc_persistence::{
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::{Auth, CodexOrigin, SaveDeferral};
 use crate::exec::ExecError;
-use crate::manager::{HeldPartitions, Manager, ManagerError, MarkCause, RefreshHold, lock};
+use crate::manager::{
+    EditError, HeldPartitions, Manager, ManagerError, MarkCause, RefreshHold, lock,
+};
 use serde_json::{Map, Value, json};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -631,10 +633,14 @@ async fn leased_pass_with(rig: &Rig, probe: &Arc<Probe>, act: impl Fn() + Send +
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn b36_d_a_save_refused_at_the_tail_is_owed_and_written_by_step_14() {
-    // B-36 (d): at the leased tail an update's save and its own flush are both
-    // refused for the refresh in flight; the pass saves it again at its end.
-    // Mutation: step 14 not flushing the owed save (D/f would keep the old note).
+async fn b36_d_a_save_refused_at_the_tail_is_owed_and_the_landed_tail_covers_it() {
+    // B-36 (d) with the rotation landed: an update's save and its own flush
+    // are both refused for the refresh in flight, and the pass's leased tail
+    // then writes the note itself (a landed Refresh intent is saved as
+    // Configuration) and clears the debt. Step 14 has nothing left to do here;
+    // `b36_d_step_14_writes_a_change_the_exhausted_tail_left_owed` isolates it.
+    // Mutation: the leased tail dropping the owed change (D/f would keep the
+    // old note).
     bounded(async {
         let rig = rig();
         let probe = Probe::new("codex", false).rotating("r");
@@ -668,17 +674,98 @@ async fn b36_d_a_save_refused_at_the_tail_is_owed_and_written_by_step_14() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn b36_d_step_14_writes_a_change_the_exhausted_tail_left_owed() {
+    // B-36 (d), isolating step 14: every commit attempt fails, so the leased
+    // tail stays an unwritten Refresh intent, which writes the rotation and
+    // leaves the owed note (and the flag) alone. The update's save and its own
+    // flush are refused at the tail; only the pass's step 14 then writes the
+    // note and clears the flag.
+    // Mutation: removing the flush call in `refresh_with` (step 14) alone; the
+    // other callers of `flush_owed_save` stay.
+    bounded(async {
+        let rig = rig();
+        quick_commit_retries(&rig);
+        rig.store
+            .fail_lease_commit
+            .store(u32::MAX, Ordering::SeqCst);
+        let probe = Probe::new("codex", false).rotating("r");
+        let seen = Arc::new(Mutex::new(None));
+        let (manager, store, log) = (rig.manager.clone(), rig.store.clone(), seen.clone());
+        leased_pass_with(&rig, &probe, move || {
+            set_note(&manager, "owed").unwrap();
+            let refused = lock(&store.guarded)
+                .iter()
+                .filter(|(_, d)| matches!(d, Some(SaveDeferral::RefreshInFlight)))
+                .count();
+            *lock(&log) = Some((owed(&manager), refused));
+        })
+        .await;
+        let (state, refused) = lock(&seen).take().expect("the tail ran");
+        assert!(
+            matches!(state, Some((SaveDeferral::RefreshInFlight, _))),
+            "the change is owed while the pass runs: {state:?}"
+        );
+        assert_eq!(refused, 2, "the update's save and its own flush");
+        // Observed: the exhausted pass's own Refresh-intent save is refused
+        // too (the lease is gone, so it is not the exempt tail), so the file's
+        // R and the note both come from step 14's one write.
+        assert_eq!(
+            deferrals(&rig),
+            vec![
+                Some(SaveDeferral::RefreshInFlight),
+                Some(SaveDeferral::RefreshInFlight),
+                Some(SaveDeferral::RefreshInFlight),
+                None
+            ],
+            "the update, its flush and the pass's tail refused; step 14 wrote"
+        );
+        assert!(
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst) >= 1,
+            "the commit ran and never landed"
+        );
+        assert_eq!(rig.disk()["refresh_token"], "r-refresh", "the tail wrote R");
+        assert_eq!(disk_note(&rig), "owed", "step 14 wrote the note");
+        assert_eq!(owed(&rig.manager), None, "a covering save cleared the flag");
+        assert_eq!(rig.live().metadata["note"], "owed");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn b36_b_the_no_rotation_tail_writes_directly() {
     // B-36 (b) (decision 13): the executor returns live's tokens unchanged, so
     // the tail is the unleased one and saves without being refused.
-    // Mutation: the no-rotation tail taking the leased path (its save would be refused as in flight).
+    // Step 5's commit already put B on disk, so the tail's own save is what
+    // is counted: one new guarded Written result and one new store write, and
+    // no `save_bound` call.
+    // Mutation: the tail skipping its save, or taking the leased path (its
+    // save would be refused as in flight).
     bounded(async {
         let rig = rig();
         let probe = Probe::new("codex", false);
         probe.fake.set_refresh(|before| Ok(before.clone()));
         rig.manager.register_executor(probe.clone());
         rig.manager.register_unsaved(pending_b()).unwrap();
+        let guarded_before = lock(&rig.store.guarded).len();
+        let writes_before = lock(&rig.store.writes).len();
+        let bound_before = rig.store.save_bound_calls.load(Ordering::SeqCst);
         rig.manager.force_refresh(ID).await.unwrap();
+        let guarded = lock(&rig.store.guarded)[guarded_before..].to_vec();
+        assert_eq!(
+            guarded.iter().map(|(_, d)| *d).collect::<Vec<_>>(),
+            vec![None],
+            "exactly one guarded save, and it was written: {guarded:?}"
+        );
+        assert_eq!(
+            lock(&rig.store.writes).len() - writes_before,
+            1,
+            "one store write"
+        );
+        assert_eq!(
+            rig.store.save_bound_calls.load(Ordering::SeqCst),
+            bound_before,
+            "no bound save"
+        );
         assert_eq!(probe.sent(), 1, "the executor was entered once");
         assert_eq!(refused_count(&rig), 0, "no refusal from its own tail");
         assert_eq!(owed(&rig.manager), None);
@@ -930,6 +1017,14 @@ impl Parked {
 /// a thread, and binds the store back to D. Reaching the lock is ordered by
 /// the lock's own "waiting" event, never by a sleep.
 fn park_update(rig: &Rig, copy: bool, note: &str) -> Parked {
+    park_save(rig, copy, note, false)
+}
+
+/// [`park_update`], or with `settings_only` a settings-only `edit` that
+/// installs no explicit path: it reads no file first, so it waits on E's
+/// credential lock even when E/f is missing (`update` would stop at its
+/// adoption read).
+fn park_save(rig: &Rig, copy: bool, note: &str, settings_only: bool) -> Parked {
     let other = tempfile::tempdir_in(rig.dir.path().parent().unwrap()).unwrap();
     if copy {
         std::fs::copy(rig.path(), other.path().join(ID)).unwrap();
@@ -951,9 +1046,24 @@ fn park_update(rig: &Rig, copy: bool, note: &str) -> Parked {
         })),
     );
     let manager = rig.manager.clone();
-    let mut changed = (*manager.get(ID).unwrap()).clone();
-    changed.metadata.insert("note".into(), json!(note));
-    let save = std::thread::spawn(move || manager.update(changed));
+    let note = note.to_owned();
+    let save = std::thread::spawn(move || {
+        if settings_only {
+            manager
+                .edit(ID, |auth| {
+                    auth.metadata.insert("note".into(), json!(note));
+                    Ok::<bool, ()>(true)
+                })
+                .map_err(|error| match error {
+                    EditError::Manager(error) => error,
+                    EditError::Rejected(()) => unreachable!("the edit never refuses"),
+                })
+        } else {
+            let mut changed = (*manager.get(ID).unwrap()).clone();
+            changed.metadata.insert("note".into(), json!(note));
+            manager.update(changed)
+        }
+    });
     reached
         .recv_timeout(Duration::from_secs(10))
         .expect("the save reached the held credential lock");
@@ -1026,11 +1136,10 @@ async fn b34_a_a_parked_save_released_during_the_pass_cannot_reach_the_old_direc
 
 #[tokio::test(flavor = "current_thread")]
 async fn b34_b_a_parked_save_with_no_pass_in_flight_is_refused_as_moved() {
-    // B-34 step 3, with no pass in flight (variant (i), no E/f, never reaches
-    // E's lock in this harness: the save does not wait, so it is not parked): the guard's origin
-    // check is then the one that refuses a save whose destination is not
-    // where live now resolves. E's file is untouched (or never created), and
-    // the owed change is written to the file live names.
+    // B-34 step 3, with no pass in flight and E/f present: the guard's origin
+    // check is the one that refuses a save whose destination is not where live
+    // now resolves. E's file is untouched, and the owed change is written to
+    // the file live names. The missing-E/f variant is `b34_i_*`.
     // Mutation: dropping the origin check (the save would write E).
     for copy in [true] {
         bounded(async move {
@@ -1147,6 +1256,11 @@ async fn b38_d_an_unsettled_read_back_defers_every_entry_before_the_send() {
         );
         assert_eq!(probe.sent(), 1, "still no executor call");
         assert_eq!(warned(&rig.manager), (true, false));
+        // The scheduler's entry defers the same way.
+        let error = rig.manager.refresh_at_epoch(ID, "", 0).await.unwrap_err();
+        assert_store_error(error, "refresh_at_epoch");
+        assert_eq!(probe.sent(), 1, "the scheduler entry sent nothing");
+        assert_eq!(warned(&rig.manager), (true, false), "no second warn");
         // A token command ends it, and the next pass sends N.
         token_command(&rig, true, "n");
         assert_eq!(mark(&rig.manager, true), (false, "none"));
@@ -1403,6 +1517,71 @@ async fn b38_f_the_confirmation_read_is_the_only_one_after_the_last_attempt() {
     .await;
 }
 
+/// From B-32 (a)'s `Different` mark on outer, a later pass whose commit lands
+/// (a peer put B back in the file just before it) and reports an error on
+/// every attempt, so the confirming read decides what
+/// publication clears. `read_hook` shapes the maps `codex_lease_read` returns
+/// and is given the commit attempts so far. Returns outer's mark as the tail
+/// sees it.
+async fn exhausted_pass_over_a_different_mark(
+    read_hook: impl Fn(&mut Map<String, Value>, u32) + Send + Sync + 'static,
+) -> (bool, &'static str) {
+    let rig = different_cause_state().await;
+    rig.store
+        .fail_after_lease_commit
+        .store(u32::MAX, Ordering::SeqCst);
+    let store = Arc::downgrade(&rig.store);
+    let hook: LeaseReadHook = Arc::new(move |map: &mut Map<String, Value>| {
+        if let Some(store) = store.upgrade() {
+            read_hook(map, store.lease_commit_attempts.load(Ordering::SeqCst));
+        }
+    });
+    *lock(&rig.store.lease_read_hook) = Some(hook);
+    // The peer's C is replaced by B just before the commit, so the commit's
+    // baseline (B) holds and R lands.
+    let path = rig.path();
+    at_first_commit(&rig, move || peer_write(&path, true, "b"));
+    let seen = Arc::new(Mutex::new(None));
+    let (log, manager) = (seen.clone(), rig.manager.clone());
+    at_tail(&rig, move |_| *lock(&log) = Some(mark(&manager, true)));
+    rig.manager.force_refresh(ID).await.unwrap();
+    lock(&seen).take().expect("the tail hook ran")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b38_f_the_confirming_map_clears_a_mark_the_exhausted_commit_landed_over() {
+    // B-38 (f): outer is marked `Different`; the next pass's commit lands R
+    // but errors on every attempt, so the outcome is Exhausted and the
+    // confirming read's map is all publication has. It shows R, so it
+    // verifies outer and the tail sees the mark cleared.
+    // Mutation: `Outcome::Exhausted`'s map replaced by `None` (publication
+    // would have no disk to verify against and the mark would stay).
+    bounded(async {
+        let mark = exhausted_pass_over_a_different_mark(|_, _| {}).await;
+        assert_eq!(mark, (false, "none"), "the confirming map cleared it");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b38_f_a_confirming_map_with_another_field_unequal_keeps_the_mark() {
+    // B-38 (f) control: the confirming read (after the first attempt) shows
+    // R but one more token field unequal to the pass's final metadata, so the
+    // partition is not verified and keeps its mark. Mutation: verification
+    // against the pass's own final metadata instead of the map (the mark would
+    // clear).
+    bounded(async {
+        let mark = exhausted_pass_over_a_different_mark(|map, attempts| {
+            if attempts >= 1 {
+                map.insert("expired".into(), json!("2098-01-01T00:00:00Z"));
+            }
+        })
+        .await;
+        assert_eq!(mark, (true, "different"), "the unequal field kept it");
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn b38_g_a_replace_observation_discards_an_owed_change() {
     // B-38 (g): a change is owed; a Replace observation of a rewritten file
@@ -1620,6 +1799,20 @@ async fn b39_d_no_change_at_the_pause_sends_once() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn b39_d_an_ineligible_pass_with_no_change_at_the_pause_sends_once() {
+    // B-39 (d), the ineligible route: the same pause with nothing changed
+    // sends once. Mutation: the fence refusing an ineligible pass without a
+    // cause (nothing would be sent).
+    bounded(async {
+        let (rig, probe) = ineligible_rig();
+        let (pause, pass) = paused_pass(&rig).await;
+        released(&rig, &pause, pass).await.unwrap();
+        assert_eq!(probe.sent(), 1, "the executor was entered once");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn b39_a2_an_outer_token_command_clears_the_cause_at_the_pause() {
     // B-39 (a2): from the `ReadBack` state with no lease to settle it, the
     // fence would defer `ReadBackUnsettled`; an outer token command at the
@@ -1832,8 +2025,11 @@ async fn b36_a_a_parked_save_is_written_before_the_pass_may_send() {
     // lock's "read" event) when the store is bound back and a forced pass is
     // started. The pass must not enter the executor while the save runs; once
     // the save is released it writes E/f, and only then does the pass send.
-    // Mutation: none discriminating. The wait comes from E's credential lock,
-    // so dropping the refresh-lock hold in check (vi) survives (tried).
+    // The explicit `path` is what lets the save be admitted to E/f at all;
+    // the refresh lock is therefore asserted directly, because the pass would
+    // also wait on E's credential lock.
+    // Mutation: check (vi) not keeping the refresh lock across the write
+    // (`Ok(guard) => drop(guard)`): the lock is free while the save is parked.
     bounded(async {
         let rig = rig();
         let probe = Probe::new("codex", false);
@@ -1862,6 +2058,14 @@ async fn b36_a_a_parked_save_is_written_before_the_pass_may_send() {
             .recv_timeout(Duration::from_secs(10))
             .expect("the save reached E's read");
         crate::auth::credential_lock::set_test_hook(&file, None);
+        let refresh_lock = lock(&rig.manager.shared.refresh_locks)
+            .get(ID)
+            .cloned()
+            .expect("the id has a refresh lock");
+        assert!(
+            refresh_lock.try_lock_owned().is_err(),
+            "the parked save holds the refresh lock from check (vi) to its write"
+        );
         rig.store.files.set_base_dir(rig.dir.path());
         let existed_at_send = Arc::new(Mutex::new(None));
         let (log, watched) = (existed_at_send.clone(), file.clone());
@@ -1931,20 +2135,34 @@ async fn b34_ii_a_parked_save_bound_back_to_its_directory_is_still_refused() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn b34_iii_a_parked_save_over_a_file_holding_live_is_refused_by_the_pass() {
-    // B-34 (iii): live holds B and E already holds B too. A pass runs while a
-    // save is parked on E; released at the tail, with E the store's
-    // directory, it is refused (a pass is in flight) and E keeps its bytes
-    // while P gets R. Mutation: the parked save writing live's
-    // tokens into E during a later pass.
+    // B-34 (iii): no operation is pending. An ordinary first refresh has
+    // landed B, E holds a copy of that file (live's B), and a settings-only
+    // save is parked on E. A second pass runs; released at the tail with E the
+    // store's directory, the save is refused (a pass is in flight) and E keeps
+    // its bytes while P gets R and the change. With no pending work, only
+    // check (vi) keeps the save out. Mutation: check (vi) removed (the parked
+    // save would write live's tokens into E during the pass).
     bounded(async {
         let rig = rig();
-        let probe = Probe::new("codex", false).rotating("r");
+        let probe = Probe::new("codex", false);
+        b_then_r(&probe);
         rig.manager.register_executor(probe.clone());
-        rig.manager.register_unsaved(pending_b()).unwrap();
-        let parked = Arc::new(park_update(&rig, true, "parked"));
-        // E already holds live's B, so a write there would change nothing in
-        // the tokens: only the guard keeps the save out.
-        peer_write(&parked.file(), true, "b");
+        rig.manager.force_refresh(ID).await.unwrap();
+        assert_eq!(rig.disk()["refresh_token"], "b-refresh");
+        assert!(
+            rig.live().codex_pending_refresh.is_empty(),
+            "no pending work"
+        );
+        // The record names its file by the store's directory, as a record
+        // with no explicit path does, so the save follows the store to E.
+        rig.manager
+            .edit_unsaved(ID, |auth| {
+                auth.attributes.remove("path");
+                Ok::<bool, ()>(true)
+            })
+            .unwrap();
+        lock(&rig.store.guarded).clear();
+        let parked = Arc::new(park_save(&rig, true, "parked", true));
         let before = std::fs::read(parked.file()).unwrap();
         let (release, here) = (parked.clone(), rig.dir.path().to_path_buf());
         let store = rig.store.clone();
@@ -1963,8 +2181,102 @@ async fn b34_iii_a_parked_save_over_a_file_holding_live_is_refused_by_the_pass()
         let in_e: Value = serde_json::from_slice(&before).unwrap();
         assert_eq!(in_e["refresh_token"], "b-refresh");
         assert_eq!(rig.disk()["refresh_token"], "r-refresh");
-        assert_eq!(probe.sent(), 1);
-        assert_eq!(probe.sent_refresh(0), "b-refresh");
+        assert_eq!(disk_note(&rig), "parked", "step 14 wrote the change to P");
+        assert_eq!(probe.sent(), 2);
+        assert_eq!(probe.sent_refresh(1), "b-refresh");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b34_i_a_parked_settings_save_with_no_file_in_e_is_refused_as_moved() {
+    // B-34 (i): E/f is missing and no pass is in flight. A settings-only edit
+    // with no explicit path parks on E's credential lock, which it takes
+    // before it reads the file. Released with the store back on D, the guard's
+    // origin check refuses it: E/f is never created and the owed change is
+    // written to the file live names. Mutation: dropping the origin check (the
+    // save would create E/f).
+    bounded(async {
+        let rig = rig();
+        rig.manager.register_unsaved(pending_b()).unwrap();
+        let parked = park_save(&rig, false, "parked", true);
+        assert!(!parked.file().exists(), "E/f is missing");
+        let result = parked.release();
+        assert!(result.is_ok(), "the edit itself succeeds");
+        let refused = deferrals(&rig);
+        assert!(
+            refused.contains(&Some(SaveDeferral::OriginMoved)),
+            "{refused:?}"
+        );
+        assert!(!parked.file().exists(), "no E/f was created");
+        assert_eq!(disk_note(&rig), "parked", "the owed save wrote P");
+        assert_eq!(owed(&rig.manager), None);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_a_save_whose_base_live_moved_past_is_refused_with_no_pass_in_flight() {
+    // Manager-level `Stale` (v): a settings-only save has passed its early
+    // generation check when, inside the store, a one-shot hook raw-writes
+    // peer N and installs N in live. `edit_unsaved` stands in for live moving
+    // past the save's base; this pins the guard's version check. With no pass
+    // in flight the guard answers `Stale`, nothing is written and the file
+    // keeps the peer's bytes. No reload is queued and nothing is owed when the
+    // hook runs, so the held save mutex is not waited for.
+    // Mutation: the guard's version check removed (the save would write the
+    // note and a stale base).
+    bounded(async {
+        let rig = rig();
+        assert_eq!(owed(&rig.manager), None);
+        let (manager, path) = (rig.manager.clone(), rig.path());
+        let peer_bytes = Arc::new(Mutex::new(None));
+        let (armed, kept) = (AtomicBool::new(true), peer_bytes.clone());
+        *lock(&rig.store.before_save_hook) = Some(Arc::new(move |_: &Auth| {
+            if armed.swap(false, Ordering::SeqCst) {
+                peer_write(&path, true, "n");
+                *lock(&kept) = Some(std::fs::read(&path).unwrap());
+                manager
+                    .edit_unsaved(ID, |auth| {
+                        auth.metadata
+                            .insert("access_token".into(), json!("n-access"));
+                        auth.metadata
+                            .insert("refresh_token".into(), json!("n-refresh"));
+                        Ok::<bool, ()>(true)
+                    })
+                    .unwrap();
+            }
+        }));
+        rig.manager
+            .edit(ID, |auth| {
+                auth.metadata.insert("note".into(), json!("stale"));
+                Ok::<bool, ()>(true)
+            })
+            .unwrap();
+        *lock(&rig.store.before_save_hook) = None;
+        assert_eq!(
+            deferrals(&rig).first(),
+            Some(&Some(SaveDeferral::Stale)),
+            "{:?}",
+            deferrals(&rig)
+        );
+        // The refused save wrote nothing. The owed change is then flushed
+        // once, outside the save, and that flush (not the refused save) is
+        // the only write: it carries live's N tokens and the note, so the
+        // stale base never reaches the file.
+        let guarded = lock(&rig.store.guarded).clone();
+        assert_eq!(guarded.len(), 2, "the refused save and one flush");
+        assert_eq!(guarded[1].1, None, "the flush was written");
+        assert_eq!(
+            *lock(&rig.store.writes),
+            vec![guarded[1].0],
+            "only the flush wrote"
+        );
+        assert!(lock(&peer_bytes).take().is_some(), "the hook ran");
+        assert_eq!(rig.disk()["refresh_token"], "n-refresh");
+        assert_eq!(disk_note(&rig), "stale");
+        assert_eq!(owed(&rig.manager), None);
+        assert_eq!(rig.live().metadata["refresh_token"], "n-refresh");
     })
     .await;
 }
@@ -1993,6 +2305,20 @@ async fn b36_e_a_peer_write_during_a_leased_pass_is_marked_and_not_adopted() {
         assert_eq!(rig.disk()["refresh_token"], "ob-refresh");
         assert_eq!(rig.disk()["siwc"]["refresh_token"], "p-refresh");
         assert_eq!(rig.live().metadata["siwc"]["refresh_token"], "sb-refresh");
+        // The mark's baselines are the SIWC tokens the pass started from and
+        // the ones it rotated to; the peer's tokens are not among them.
+        let state = rig.manager.lock();
+        let baselines = &state.auths[ID].undurable_baselines;
+        assert!(baselines.outer.is_empty(), "outer landed: no baseline");
+        assert_eq!(
+            baselines
+                .siwc
+                .iter()
+                .map(|baseline| baseline.get("refresh_token").cloned())
+                .collect::<Vec<_>>(),
+            vec![Some(json!("siwc-refresh-old")), Some(json!("sb-refresh"))],
+            "the pass's start and its own rotation"
+        );
     })
     .await;
 }
