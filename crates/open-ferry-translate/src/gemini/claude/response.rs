@@ -44,6 +44,13 @@ static TOOL_USE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The message ID and model a stream starts with when Gemini gives none.
 const DEFAULT_MESSAGE_ID: &str = "msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY";
+const MALFORMED_FUNCTION_CALL_MESSAGE: &str =
+    "Gemini response finished with MALFORMED_FUNCTION_CALL";
+
+fn malformed_error() -> Value {
+    json!({"type":"error","error":{"type":"api_error","message":MALFORMED_FUNCTION_CALL_MESSAGE}})
+}
+
 const DEFAULT_MODEL: &str = "claude-3-5-sonnet-20241022";
 
 /// Converts a Claude `count_tokens` result into its response body.
@@ -130,6 +137,9 @@ impl GeminiToClaudeStream {
             self.finish(&mut out);
             return out;
         }
+        if self.malformed() && self.has_final_events {
+            return out;
+        }
         let response: Value = serde_json::from_slice(json_start(chunk)).unwrap_or(Value::Null);
 
         if !self.has_first_response {
@@ -183,6 +193,10 @@ impl GeminiToClaudeStream {
             self.cached_tokens = cached;
         }
 
+        if self.malformed() {
+            self.finish_malformed(&mut out);
+            return out;
+        }
         if usage.is_some() && contains(chunk, br#""finishReason""#) && !self.has_final_events {
             self.open_empty_text_block(&mut out);
             if self.has_content {
@@ -195,7 +209,23 @@ impl GeminiToClaudeStream {
 
     /// The end of the stream: closes the message, if it was started, with an
     /// empty text block if nothing else was sent.
+    fn malformed(&self) -> bool {
+        self.finish_reason == "MALFORMED_FUNCTION_CALL" && !self.saw_tool_call
+    }
+
+    fn finish_malformed(&mut self, out: &mut String) {
+        self.stop_open_block(out);
+        if !self.has_final_events {
+            push_event(out, "error", &malformed_error());
+            self.has_final_events = true;
+        }
+    }
+
     fn finish(&mut self, out: &mut String) {
+        if self.malformed() {
+            self.finish_malformed(out);
+            return;
+        }
         self.open_empty_text_block(out);
         if !self.has_content {
             return;
@@ -548,6 +578,11 @@ pub fn convert_gemini_response_to_claude_non_stream_with_translated(
         out["content"] = Value::Array(blocks.blocks);
     }
 
+    if str_of(get(response, "candidates.0.finishReason")) == "MALFORMED_FUNCTION_CALL"
+        && !blocks.has_tool_call
+    {
+        return malformed_error();
+    }
     out["stop_reason"] = Value::from(stop_reason(
         &str_of(get(response, "candidates.0.finishReason")),
         blocks.has_tool_call,
@@ -571,13 +606,9 @@ fn stop_reason(finish_reason: &str, saw_tool_call: bool) -> &'static str {
     }
     match finish_reason {
         "MAX_TOKENS" => "max_tokens",
-        "SAFETY"
-        | "RECITATION"
-        | "PROHIBITED_CONTENT"
-        | "SPII"
-        | "BLOCKLIST"
-        | "MALFORMED_FUNCTION_CALL"
-        | "IMAGE_SAFETY" => "refusal",
+        "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "SPII" | "BLOCKLIST" | "IMAGE_SAFETY" => {
+            "refusal"
+        }
         _ => "end_turn",
     }
 }

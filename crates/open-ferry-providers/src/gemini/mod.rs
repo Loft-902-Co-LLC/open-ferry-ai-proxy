@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor.go and
 // gemini_vertex_executor.go (the parts the two executors share)
 // (v8.0.27, MIT).
+// Also ported from internal/runtime/executor/helps/apply_patch.go.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Calls to Gemini: [`GeminiExecutor`] for the Gemini API with API keys, and
@@ -65,6 +66,8 @@
 mod executor;
 mod image;
 pub mod interactions;
+#[cfg(test)]
+mod malformed_tests;
 mod sse;
 mod stream;
 #[cfg(test)]
@@ -330,6 +333,9 @@ fn translate_answer(
         .translate_non_stream(&Format::GEMINI, &format, &context, data)
         .filter(|out| !out.is_empty())
         .ok_or_else(|| StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE))?;
+    if let Some(payload) = translated_claude_error(&format, &out) {
+        return Err(ExecError::from(StatusError::new(502, payload)).with_usage_kept());
+    }
     let payload = if format == Format::OPENAI_RESPONSE {
         ensure_responses_usage_details(out)
     } else {
@@ -399,4 +405,14 @@ fn translate_count(options: &Options, headers: HeaderMap, data: Vec<u8>) -> Resp
         payload: Bytes::from(payload),
         headers,
     }
+}
+
+/// `TranslatedClaudeErrorPayload`: only Claude translation errors become 502s.
+fn translated_claude_error(format: &Format, payload: &[u8]) -> Option<String> {
+    if *format != Format::CLAUDE {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(payload).ok()?;
+    (value.get("type").and_then(Value::as_str) == Some("error"))
+        .then(|| String::from_utf8_lossy(payload).into_owned())
 }

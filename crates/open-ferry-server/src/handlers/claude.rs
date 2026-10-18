@@ -92,13 +92,13 @@ pub(crate) async fn messages(
         move |(headers, peeked), committed| match peeked {
             Peeked::Failed(error) if committed => {
                 let items = stream::iter([Err(error)]).boxed();
-                sse_response(&headers, forward(items, ClaudeWriter, None))
+                sse_response(&headers, forward(items, ClaudeWriter::default(), None))
             }
             Peeked::Failed(error) => claude_error_response(&error, passthrough),
             Peeked::Closed => sse_response(&headers, Body::empty()),
             Peeked::First(first, rest) => {
                 let items = stream::iter([Ok(first)]).chain(rest).boxed();
-                sse_response(&headers, forward(items, ClaudeWriter, keepalive))
+                sse_response(&headers, forward(items, ClaudeWriter::default(), keepalive))
             }
         },
     )
@@ -155,14 +155,26 @@ fn gunzip(body: Bytes) -> Bytes {
 
 /// Writes a Claude event stream: payloads as they are, and an `error`
 /// event at the end of one that fails.
-struct ClaudeWriter;
+#[derive(Default)]
+struct ClaudeWriter {
+    saw_error_event: bool,
+}
 
 impl StreamWriter for ClaudeWriter {
     fn write_chunk(&mut self, chunk: Bytes, out: &mut BytesMut) {
+        self.saw_error_event |= chunk
+            .windows(b"event: error\n".len())
+            .any(|w| w == b"event: error\n")
+            || chunk
+                .windows(b"event: error\r\n".len())
+                .any(|w| w == b"event: error\r\n");
         out.extend_from_slice(&chunk);
     }
 
     fn write_terminal_error(&mut self, error: &ErrorMessage, out: &mut BytesMut) {
+        if self.saw_error_event {
+            return;
+        }
         out.extend_from_slice(b"event: error\ndata: ");
         out.extend_from_slice(claude_error_json(error).as_bytes());
         out.extend_from_slice(b"\n\n");
@@ -183,5 +195,23 @@ mod tests {
         assert_eq!(&gunzip(Bytes::from_static(b"{}"))[..], b"{}");
         let broken = Bytes::from_static(&[0x1f, 0x8b, 0, 1, 2]);
         assert_eq!(gunzip(broken.clone()), broken);
+    }
+}
+
+#[cfg(test)]
+mod translated_error_tests {
+    use super::*;
+
+    // Ported from TestClaudeMessagesHandlerDeduplicatesTranslatedSSEErrorAndTerminalChunkError.
+    #[test]
+    fn suppresses_terminal_error_after_translated_error() {
+        for newline in ["\n", "\r\n"] {
+            let mut writer = ClaudeWriter::default();
+            let mut out = BytesMut::new();
+            let chunk = Bytes::from(format!("event: error{newline}data: {{}}{newline}{newline}"));
+            writer.write_chunk(chunk.clone(), &mut out);
+            writer.write_terminal_error(&ErrorMessage::new(502, "failed"), &mut out);
+            assert_eq!(&out[..], &chunk[..]);
+        }
     }
 }

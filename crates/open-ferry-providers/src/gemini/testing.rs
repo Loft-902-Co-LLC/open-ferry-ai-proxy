@@ -53,6 +53,7 @@ pub(crate) struct Reply {
     body: String,
     /// Whether the connection fails after the body.
     cut_off: bool,
+    hold_open: bool,
 }
 
 impl Reply {
@@ -62,6 +63,7 @@ impl Reply {
             content_type: "application/json",
             body: body.to_owned(),
             cut_off: false,
+            hold_open: false,
         }
     }
 
@@ -77,6 +79,12 @@ impl Reply {
             status,
             ..Self::json(body)
         }
+    }
+
+    /// Leaves the connection open after the payload, as upstream's cancellation tests do.
+    pub(crate) fn hold_open(mut self) -> Self {
+        self.hold_open = true;
+        self
     }
 
     /// The reply, with the connection failing after the body.
@@ -133,6 +141,16 @@ impl Mock {
                     }
                     part
                 });
+                let body = body.chain(futures_util::stream::unfold(
+                    reply.hold_open,
+                    |hold| async move {
+                        if hold {
+                            futures_util::future::pending().await
+                        } else {
+                            None::<(Result<Bytes, io::Error>, bool)>
+                        }
+                    },
+                ));
                 axum::response::Response::builder()
                     .status(reply.status)
                     .header("content-type", reply.content_type)
