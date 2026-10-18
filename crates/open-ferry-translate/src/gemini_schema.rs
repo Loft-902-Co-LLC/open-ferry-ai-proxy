@@ -71,7 +71,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
-use crate::json::{go_marshaled, object, str_of};
+use crate::json::{bool_of, go_marshaled, object, str_of};
 
 /// The description upstream gives a placeholder `reason` property.
 const PLACEHOLDER_REASON_DESCRIPTION: &str = "Brief explanation of why you are calling this tool";
@@ -974,6 +974,9 @@ fn flatten_any_of_one_of(doc: &mut Value) {
         let parent_props = parent.and_then(|parent| child(parent, "properties"));
         let untyped = str_of(parent.and_then(|parent| child(parent, "type"))).is_empty();
         let has_parent_props = parent_props.is_some_and(Value::is_object);
+        let parent_nullable = parent
+            .and_then(|parent| child(parent, "nullable"))
+            .is_some_and(bool_of);
         let mut non_null = Vec::new();
         let mut has_null = false;
         let mut filtered = false;
@@ -994,6 +997,8 @@ fn flatten_any_of_one_of(doc: &mut Value) {
                 non_null.push(item.clone());
             }
         }
+        // Inherit a nullable marker left by an earlier union-cleaning pass.
+        let nullable = has_null || parent_nullable;
         if non_null.len() >= 2 {
             if has_null || filtered {
                 set(doc, &path, Value::Array(non_null));
@@ -1014,7 +1019,7 @@ fn flatten_any_of_one_of(doc: &mut Value) {
                     }
                 }
             }
-            if has_null {
+            if nullable {
                 set(doc, &join_path(&parent_path, "nullable"), Value::Bool(true));
             }
             if untyped {
@@ -1043,7 +1048,7 @@ fn flatten_any_of_one_of(doc: &mut Value) {
         }
         let (_, types) = select_best(&candidates);
         let mut selected = non_null.remove(0);
-        if has_null {
+        if nullable {
             set(&mut selected, "nullable", Value::Bool(true));
         }
         if !parent_description.is_empty() {
@@ -1055,7 +1060,7 @@ fn flatten_any_of_one_of(doc: &mut Value) {
                 "",
                 &format!("Accepts: {}", types.join(" | ")),
             );
-        } else if has_null {
+        } else if nullable {
             append_hint(&mut selected, "", "(nullable)");
         }
         set_raw_at(doc, &parent_path, selected);
