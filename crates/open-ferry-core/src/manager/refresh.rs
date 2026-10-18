@@ -1049,9 +1049,13 @@ impl Manager {
     /// it is. With nothing in flight every later snapshot is built on the
     /// adopted state, so adopting never advances the persist watermark.
     ///
-    /// The refresh lock is taken first, as `refresh_owned` takes it, with
-    /// `try_lock` since this isn't async, and held through the disk read and
-    /// the swap; the state lock is taken only inside it.
+    /// The refresh lock is taken inside the save mutex, with `try_lock` since
+    /// this isn't async (so taking it after the save mutex, the other way
+    /// round from a pass, cannot deadlock), and held through the disk read
+    /// and the swap; the state lock is taken only inside it. It is released
+    /// before the save mutex. Check (vi) runs under that mutex, so no save is
+    /// refused because an adoption holds the lock: a pass flushes what it
+    /// refused once it lets go, and an adoption would not.
     fn adopt_from_store(&self, failed: &Arc<Auth>) -> Option<Arc<Auth>> {
         let store = self.shared.store.as_ref()?;
         let failed_token = access_token(failed);
@@ -1063,11 +1067,6 @@ impl Manager {
             .entry(failed.id.clone())
             .or_default()
             .clone();
-        let Ok(_refreshing) = id_lock.try_lock() else {
-            // A refresh is under way; it may publish a newer token, and
-            // adopting now would drop it.
-            return None;
-        };
         let permit = self.mutation_gate();
         // Refuse known in-flight work before waiting for its save mutex.
         // The same checks run again inside the transaction after any wait.
@@ -1082,7 +1081,20 @@ impl Manager {
                 return None;
             }
         }
-        self.with_adoption(&failed.id, &permit, |_guard| {
+        #[cfg(test)]
+        {
+            let hook = lock(&self.shared.adopt_unheld_hook).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let result = self.with_adoption(&failed.id, &permit, |_guard| {
+            // Dropped as this closure returns, before the save mutex.
+            let Ok(_refreshing) = id_lock.try_lock() else {
+                // A refresh is under way; it may publish a newer token, and
+                // adopting now would drop it.
+                return None;
+            };
             // Before it reads: nothing of the credential may be in flight, and
             // what a save of it could have changed is noted, to be seen again at
             // the swap.
@@ -1237,7 +1249,15 @@ impl Manager {
             };
             self.queue_refresh_reschedule(&failed.id);
             Some(adopted)
-        })
+        });
+        #[cfg(test)]
+        {
+            let hook = lock(&self.shared.adopt_unheld_hook).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        result
     }
 
     /// Refreshes a credential now, whether or not it is due (upstream's

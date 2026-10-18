@@ -1640,6 +1640,39 @@ async fn a_401_adopts_nothing_when_a_save_is_published_after_its_read() {
     assert_next_401_adopts_disk_tokens(&env).await;
 }
 
+// Not upstream's: check (vi) refuses a save while the credential's refresh
+// lock is held, and only a pass saves what it refused once it lets go. D3
+// holds the lock only inside the save mutex, which check (vi) runs under, so
+// no save it races is refused and left owed with nothing to write it.
+#[tokio::test(start_paused = true)]
+async fn a_401_holds_the_refresh_lock_only_inside_the_save_mutex() {
+    let env = Env::new();
+    let refresh_lock = lock(&env.manager.shared.refresh_locks)
+        .entry(ID.to_owned())
+        .or_default()
+        .clone();
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&held);
+    *lock(&env.manager.shared.adopt_unheld_hook) = Some(Arc::new(move || {
+        lock(&seen).push(refresh_lock.try_lock().is_err());
+    }));
+    env.close().await.expect("task").expect("closes");
+    rotate_on_disk(&env);
+
+    let failed = env.manager.get(ID).expect("credential");
+    let adopted = env
+        .manager
+        .try_refresh_after_unauthorized(&failed, &ExecError::upstream(401, "401"), false)
+        .await
+        .expect("the token on disk is taken");
+    assert_eq!(access_token(&adopted), "access-9");
+    assert_eq!(
+        *lock(&held),
+        [false, false],
+        "free before the save mutex is taken and after it is released"
+    );
+}
+
 // Not upstream's: C4-1. A request holds a snapshot of the credential. The
 // credential is then removed and registered again at another path (an
 // `auth-dir` change does this), still with the old token, and the file at

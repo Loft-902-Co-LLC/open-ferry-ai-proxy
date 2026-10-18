@@ -477,6 +477,10 @@ pub(crate) struct Shared {
     /// and before it takes the state lock to apply it.
     #[cfg(test)]
     adopt_hook: Mutex<Option<AdoptHook>>,
+    /// Test seam: called as adopting from the store goes to take the save
+    /// mutex, and again after it has released it.
+    #[cfg(test)]
+    adopt_unheld_hook: Mutex<Option<AdoptHook>>,
     /// Test seam: called after each origin proof of a leased origin check,
     /// with the attempt number (1-based).
     #[cfg(test)]
@@ -655,6 +659,8 @@ impl Manager {
             read_back_hook: Mutex::new(None),
             #[cfg(test)]
             adopt_hook: Mutex::new(None),
+            #[cfg(test)]
+            adopt_unheld_hook: Mutex::new(None),
             #[cfg(test)]
             origin_check_hook: Mutex::new(None),
             #[cfg(test)]
