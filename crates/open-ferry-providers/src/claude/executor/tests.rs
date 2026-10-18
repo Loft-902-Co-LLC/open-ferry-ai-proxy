@@ -863,44 +863,246 @@ payload:
     assert_eq!(mock.last().json()["max_tokens"], 256);
 }
 
-// Not upstream's: upstream's executor tests for the binding drive each of its
-// three paths; this sends one request through ours. The binding is injected
-// before the payload rules, so an override rule still has the last word, and
-// the beta follows whatever the body ends up carrying.
-#[tokio::test]
-async fn signed_thinking_history_gets_a_drop_block_binding_and_its_beta() {
-    let payload = json!({
-        "model": "claude-opus-5-5",
-        "max_tokens": 256,
-        "thinking": {"type": "adaptive"},
+// Ported from claude_executor_test.go (v8.0.32): preservedThinkingTestSignature,
+// preservedThinkingReplayPayload and runClaudeExecutorCapture. The signature
+// is a syntactically valid Claude one that survives signature sanitization.
+const PRESERVED_THINKING_SIGNATURE: &str = "CAISqwIKiAEIEBgCKkBHRlRBsNiptQUWfPoOhuQKwi5LnncZVO9bB5jqOs76D7uBtgktML0zqJtNmLHXHHcgD6lk4MQu4QBXzFd1lbC3Mg5jbGF1ZGUtZmFibGUtNTgBQgh0aGlua2luZ1okZDk3NDM5NzUtNGJiMC00OTM2LTllMjgtZDViMGQyMWJkYzQ4EgxCGh+XVFFFeySAjtAaDL/A1LltGu6MMJ+eXSIwsN0oBpDrqLv22UBfkMnTotnIbkvkOyb9xZHgigG6OZVHaI3gThm+maLKmgO5PrFLKlDFYp+YZksy/wKwszJlnLTPzAK+NUlfzagOE1ymtZTXhAYK260XyFYmg/te/C231+Fr/hoX+EJoUBnrn0gD7hqMISOT+TaFEuOXYsN517GfaxgB";
+
+fn preserved_thinking_replay_payload(model: &str) -> Value {
+    thinking_replay_payload(model, json!({"type": "adaptive"}))
+}
+
+fn thinking_replay_payload(model: &str, thinking: Value) -> Value {
+    let mut payload = json!({
+        "model": model,
         "messages": [
-            {"role": "user", "content": "hi"},
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
             {"role": "assistant", "content": [
-                {"type": "redacted_thinking", "data": "ZGF0YQ=="},
-                {"type": "text", "text": "a"}]},
-            {"role": "user", "content": "more"}]
+                {"type": "thinking", "thinking": "earlier reasoning",
+                 "signature": PRESERVED_THINKING_SIGNATURE},
+                {"type": "text", "text": "Answer"}]},
+            {"role": "user", "content": [{"type": "text", "text": "continue"}]}]
     });
-    let mock = Mock::start(Reply::json(MESSAGE)).await;
-    mock.executor()
-        .execute(
-            api_key_auth(),
-            Request {
-                model: "claude-opus-5-5".into(),
-                payload: Bytes::from(payload.to_string()),
-            },
-            options(Format::CLAUDE),
-        )
-        .await
-        .unwrap();
+    if !thinking.is_null() {
+        payload["thinking"] = thinking;
+    }
+    payload
+}
+
+/// `runClaudeExecutorCapture`: sends the payload for `model` through the
+/// executor, streaming or not, and returns the body and `anthropic-beta` the
+/// upstream saw.
+async fn capture_claude_request(
+    rules: &str,
+    stream: bool,
+    model: &str,
+    payload: Value,
+) -> (Value, String) {
+    let mock = Mock::start(if stream {
+        Reply::sse(SSE)
+    } else {
+        Reply::json(MESSAGE)
+    })
+    .await;
+    let executor = mock.executor().with_config(Arc::new(if rules.is_empty() {
+        Config::default()
+    } else {
+        Config::parse(rules).unwrap()
+    }));
+    let request = Request {
+        model: model.into(),
+        payload: Bytes::from(payload.to_string()),
+    };
+    if stream {
+        let out = executor
+            .execute_stream(api_key_auth(), request, stream_options(Format::CLAUDE))
+            .await
+            .unwrap();
+        for chunk in out.chunks.collect::<Vec<_>>().await {
+            chunk.unwrap();
+        }
+    } else {
+        executor
+            .execute(api_key_auth(), request, options(Format::CLAUDE))
+            .await
+            .unwrap();
+    }
     let sent = mock.last();
+    let betas = sent.header("anthropic-beta").unwrap_or_default().to_owned();
+    (sent.json(), betas)
+}
+
+const THINKING_BINDING_BETA_NAME: &str = "thinking-binding-controls-2026-08-01";
+
+fn drop_block_behavior(body: &Value) -> &Value {
+    &body["thinking"]["block_binding"]["prefix_mismatch_behavior"]
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlock.
+#[tokio::test]
+async fn preserved_thinking_replay_injects_drop_block() {
+    for model in [
+        "claude-haiku-5-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+    ] {
+        let (body, betas) =
+            capture_claude_request("", false, model, preserved_thinking_replay_payload(model))
+                .await;
+        assert_eq!(drop_block_behavior(&body), "drop_block", "{model}: {body}");
+        assert!(
+            betas.contains(THINKING_BINDING_BETA_NAME),
+            "{model}: {betas}"
+        );
+        assert!(
+            body.to_string().contains(PRESERVED_THINKING_SIGNATURE),
+            "{model}: replayed thinking signature must survive injection: {body}"
+        );
+    }
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlockOnStream.
+#[tokio::test]
+async fn preserved_thinking_replay_injects_drop_block_on_stream() {
+    let model = "claude-haiku-5-5";
+    let (body, betas) =
+        capture_claude_request("", true, model, preserved_thinking_replay_payload(model)).await;
+    assert_eq!(drop_block_behavior(&body), "drop_block", "{body}");
+    assert!(betas.contains(THINKING_BINDING_BETA_NAME), "{betas}");
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingInjectionSkipsNonPreservedModel.
+#[tokio::test]
+async fn preserved_thinking_injection_skips_non_preserved_model() {
+    let model = "claude-opus-5";
+    let (body, _) =
+        capture_claude_request("", false, model, preserved_thinking_replay_payload(model)).await;
+    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingInjectionRequiresSignedBlock.
+#[tokio::test]
+async fn preserved_thinking_injection_requires_signed_block() {
+    let model = "claude-haiku-5-5";
+    let payload = json!({"model": model, "thinking": {"type": "adaptive"},
+        "messages": [{"role": "user", "content": "hi"}]});
+    let (body, _) = capture_claude_request("", false, model, payload).await;
+    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingInjectionRequiresThinkingType.
+#[tokio::test]
+async fn preserved_thinking_injection_requires_thinking_type() {
+    let model = "claude-haiku-5-5";
+    let (body, _) = capture_claude_request(
+        "",
+        false,
+        model,
+        thinking_replay_payload(model, Value::Null),
+    )
+    .await;
+    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingInjectionKeepsCallerError.
+#[tokio::test]
+async fn preserved_thinking_injection_keeps_caller_error() {
+    let model = "claude-haiku-5-5";
+    let thinking = json!({"type": "adaptive",
+        "block_binding": {"prefix_mismatch_behavior": "error"}});
+    let (body, _) =
+        capture_claude_request("", false, model, thinking_replay_payload(model, thinking)).await;
+    assert_eq!(drop_block_behavior(&body), "error", "{body}");
+}
+
+// Ported from TestClaudeExecutor_PayloadOverrideWinsOverPreservedThinkingInjection.
+#[tokio::test]
+async fn payload_override_wins_over_preserved_thinking_injection() {
+    let model = "claude-haiku-5-5";
+    let rules = r"
+payload:
+  override:
+    - models:
+        - name: claude-haiku-5-5
+          protocol: claude
+      params:
+        thinking.block_binding.prefix_mismatch_behavior: error
+";
+    let (body, _) = capture_claude_request(
+        rules,
+        false,
+        model,
+        preserved_thinking_replay_payload(model),
+    )
+    .await;
     assert_eq!(
-        sent.json()["thinking"]["block_binding"]["prefix_mismatch_behavior"],
-        "drop_block"
+        drop_block_behavior(&body),
+        "error",
+        "payload override must be the final barrier: {body}"
     );
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingInjectionSkipsDisabledHaikuThinking.
+#[tokio::test]
+async fn preserved_thinking_injection_skips_disabled_haiku_thinking() {
+    let model = "claude-haiku-5-5";
+    let (body, _) = capture_claude_request(
+        "",
+        false,
+        model,
+        thinking_replay_payload(model, json!({"type": "disabled"})),
+    )
+    .await;
+    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingInjectionSkipsBetweenToolsSonnetThinking.
+#[tokio::test]
+async fn preserved_thinking_injection_skips_between_tools_sonnet_thinking() {
+    let model = "claude-sonnet-5-5";
+    let (body, _) = capture_claude_request(
+        "",
+        false,
+        model,
+        thinking_replay_payload(model, json!({"type": "between_tools"})),
+    )
+    .await;
+    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+}
+
+// Ported from TestClaudeExecutor_PreservedThinkingInjectionSkipsMythosModel.
+#[tokio::test]
+async fn preserved_thinking_injection_skips_mythos_model() {
+    let model = "claude-mythos-5-1";
+    let (body, _) =
+        capture_claude_request("", false, model, preserved_thinking_replay_payload(model)).await;
+    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+}
+
+// Ported from TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection.
+#[tokio::test]
+async fn payload_filter_removes_preserved_thinking_injection() {
+    let model = "claude-haiku-5-5";
+    let rules = r"
+payload:
+  filter:
+    - models:
+        - name: claude-haiku-5-5
+          protocol: claude
+      params:
+        - thinking.block_binding
+";
+    let (body, _) = capture_claude_request(
+        rules,
+        false,
+        model,
+        preserved_thinking_replay_payload(model),
+    )
+    .await;
     assert!(
-        sent.header("anthropic-beta")
-            .unwrap_or_default()
-            .contains("thinking-binding-controls-2026-08-01")
+        body["thinking"].get("block_binding").is_none(),
+        "payload filter must remove injected block_binding: {body}"
     );
 }
 
