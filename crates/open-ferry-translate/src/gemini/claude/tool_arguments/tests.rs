@@ -1041,6 +1041,24 @@ fn nameless_tools_match_no_call() {
             }
         }
     }
+    // A nameless declaration sent upstream isn't the call's either, so the
+    // declared tool's missing schema still empties the arguments.
+    let original = json!({"tools":[{"name":"_"}]});
+    assert_eq!(clean_arguments(&json!(7), "_", &original, &sent), json!({}));
+    let named = json!({"tools":[{"functionDeclarations":[{"name":"_","parametersJsonSchema":{"type":"object"}}]}]});
+    assert_eq!(clean_arguments(&json!(7), "_", &original, &named), json!(7));
+}
+
+// Not upstream's: a call whose canonical name is empty keeps its name, even
+// when one declared tool has the same empty canonical name.
+#[test]
+fn empty_canonical_names_are_not_restored() {
+    let request = json!({"tools":[{"name":""},{"name":"__"}]});
+    assert_eq!(client_name(&request, "_"), "_");
+    assert_eq!(client_name(&request, "__"), "__");
+    assert_eq!(client_name(&request, ""), "");
+    let request = json!({"tools":[{"name":"Read"}]});
+    assert_eq!(client_name(&request, "_read"), "Read");
 }
 
 // Not upstream's: an unbounded projection must conservatively retain arguments.

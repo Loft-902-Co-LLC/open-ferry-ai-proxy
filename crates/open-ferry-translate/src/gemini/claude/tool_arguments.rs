@@ -28,8 +28,10 @@ fn tool_name(tool: &Value) -> String {
 }
 
 pub(super) fn client_name(request: &Value, name: &str) -> String {
-    if name.is_empty() {
-        return String::new();
+    // Upstream's name map has no entry for an empty canonical name, so a
+    // name such as `_` is never restored.
+    if canonical_tool_name(name).is_empty() {
+        return name.to_owned();
     }
     let names: BTreeSet<_> = request
         .get("tools")
