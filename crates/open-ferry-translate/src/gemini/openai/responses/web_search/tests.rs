@@ -9,7 +9,7 @@
 //! Upstream's `registerTestWebSearchModel` registers a made-up model in the
 //! global registry; here a model's web search support comes only from the
 //! embedded catalog. A model registered as searching is replaced by the
-//! catalog's `gemini-3.7-flash-high` (antigravity section,
+//! catalog's `gemini-3.8-flash-high` (antigravity section,
 //! `native_capabilities.web_search: true` and `supports_web_search: true`),
 //! in the model argument and in the request's `model`. The model registered
 //! as not searching is replaced by the catalog's `gpt-oss-120b-medium`
@@ -27,8 +27,9 @@
 //!   changed, the registration is dropped and the upstream model ID kept; its request declares
 //!   no tools, so whether the model searches changes nothing.
 //! - convert_gemini_response_to_openai_responses_stream_model_alias_uses_effective_request:
-//!   changed, the registration is dropped; `gemini-3.7-flash-high`, the model upstream
-//!   registers, is in the catalog with web search. It also sends a trailing `[DONE]`, as
+//!   changed, the registration is dropped and the upstream model ID kept. The stream takes
+//!   web search from the effective request's `googleSearch`, so whether the catalog has the
+//!   model (v8.0.32's doesn't) changes nothing. It also sends a trailing `[DONE]`, as
 //!   upstream's copy of this test does since v8.0.11: the stream translator finishes only on
 //!   a chunk with usage or `[DONE]`, and this test's last chunk has no usage.
 //! - model_supports_web_search_static_veto_takes_precedence: changed. Upstream registers a
@@ -55,7 +56,7 @@ use crate::json::bool_of;
 
 /// A catalog model with web search, for upstream's models registered with
 /// `registerTestWebSearchModel(..., true)`.
-const SEARCH_MODEL: &str = "gemini-3.7-flash-high";
+const SEARCH_MODEL: &str = "gemini-3.8-flash-high";
 
 /// A catalog model without web search, for upstream's model registered with
 /// `registerTestWebSearchModel(..., false)`.
@@ -890,7 +891,7 @@ fn extract_responses_web_search_query_multiple_text_parts() {
 
 #[test]
 fn convert_gemini_response_to_openai_responses_stream_model_alias_uses_effective_request() {
-    // Upstream model is capable of web search; it is in the catalog with it.
+    // Upstream registers this model as capable of web search.
     let resolved_model = "gemini-3.7-flash-high";
 
     // Original request uses a custom unregistered client alias
