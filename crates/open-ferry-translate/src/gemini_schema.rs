@@ -62,13 +62,16 @@
 //! - Copying conditional properties and materializing required-only union
 //!   branches share limits of 8 MiB of bytes, 65,536 nodes and 4 MiB of path
 //!   work across all tool schemas in one translation call, spent in tool order.
-//!   Each copied node is charged its destination path length plus its relative
-//!   path length within the copied value. Branch clones and written properties
-//!   are charged, with keys, containers and null padding only where writes
-//!   create them; existing ancestors and array indices incur no padding charge.
-//!   Conditionals charge only missing properties that are actually written. Each retry translates with fresh limits. Below
-//!   all limits, output matches upstream. A conditional branch that does not
-//!   fit, and all later branches at the same or shallower depths, add nothing
+//!   Copied branches and written property values are charged at their
+//!   destination paths: each node pays the destination path length plus its
+//!   relative path length within the copied value. Keys, containers and null
+//!   padding are charged only where a write creates them; existing keys and
+//!   indices cost no creation overhead, and padding covers only new slots.
+//!   A conditional is charged only for properties it adds. The charge may
+//!   slightly exceed what is written, but never falls short. Each retry
+//!   translates with fresh limits. Below all limits, output matches upstream.
+//!   A conditional branch that does not fit, and all later branches at the
+//!   same or shallower depths, add nothing
 //!   to their parents. If the combined cost of all required-only branches in
 //!   a union does not fit, its entire keyword is dropped, leaving the parent
 //!   schema rather than retaining a stricter partial union. Upstream copies
@@ -1106,25 +1109,23 @@ fn merge_conditionals(doc: &mut Value, budget: &mut SchemaCopyBudget) {
         } else {
             continue;
         };
-        let parent_value = if parent.is_empty() {
-            &*doc
-        } else {
-            get(doc, &parent).expect("conditional parent")
-        };
-        let mut target = CopyTarget::Existing(parent_value);
+        // Parse the complete write path from the root: a trailing backslash
+        // can make a textual parent resolve differently on its own.
+        let mut target = CopyTarget::Existing(doc);
         let mut cost = CopyCost::default();
         let mut writes = Vec::new();
         for (key, value) in found.as_object().expect("matched an object") {
             let relative = format!("properties.{}", escape_key(key));
-            let path_keys = keys(&relative);
+            let destination = join_path(&parent, &relative);
+            let path_keys = keys(&destination);
             if target.contains(&path_keys) {
                 continue;
             }
             let Some(value_cost) = copy_cost(value) else {
                 return;
             };
-            cost = cost.add(target.write(&path_keys, value, value_cost, &parent));
-            writes.push((join_path(&parent, &relative), value));
+            cost = cost.add(target.write(&path_keys, value, value_cost, ""));
+            writes.push((destination, value));
         }
         if budget.spend(cost).is_none() {
             break;
@@ -1297,8 +1298,15 @@ fn required_only_branch_cost(
     };
     let object_type = Value::from("object");
     let mut target = CopyTarget::Existing(item);
+    let mut charged = HashSet::new();
     for name in required {
         let name = str_of(Some(name));
+        let path = format!("properties.{}", escape_key(&name));
+        let path_keys = keys(&path);
+        // Repeated overwrites add no property; an sjson -1 append still does.
+        if !charged.insert(name.clone()) && target.contains(&path_keys) {
+            continue;
+        }
         let property = get(parent_props, &escape_key(&name)).expect("checked required name");
         let property_cost = property_costs
             .entry(name.to_string())
@@ -1306,8 +1314,7 @@ fn required_only_branch_cost(
         let Some(property_cost) = *property_cost else {
             return BranchCopyCost::OverBudget;
         };
-        let path = format!("properties.{}", escape_key(&name));
-        cost = cost.add(target.write(&keys(&path), property, property_cost, destination));
+        cost = cost.add(target.write(&path_keys, property, property_cost, destination));
     }
     cost = cost.add(target.write(
         &["type".to_owned()],
@@ -1368,7 +1375,7 @@ fn flatten_any_of_one_of(doc: &mut Value, budget: &mut SchemaCopyBudget) {
         } else {
             "anyOf"
         };
-        let Some(Value::Array(items)) = get(doc, &path).cloned() else {
+        let Some(Value::Array(items)) = get(doc, &path) else {
             continue;
         };
         if items.is_empty() {
@@ -1376,6 +1383,17 @@ fn flatten_any_of_one_of(doc: &mut Value, budget: &mut SchemaCopyBudget) {
         }
         let parent_path = trim_suffix(&path, &format!(".{key}"));
         if is_property_definition(&parent_path) {
+            continue;
+        }
+        // Retained ordinary multi-branch unions need no writes or owned
+        // snapshot, even when conditionals have grown their subtrees.
+        if items.len() >= 2
+            && items.iter().all(|item| {
+                item.is_object()
+                    && !is_null_only_branch(item)
+                    && !is_required_only_union_branch(item)
+            })
+        {
             continue;
         }
         let parent = if parent_path.is_empty() {
@@ -1426,27 +1444,29 @@ fn flatten_any_of_one_of(doc: &mut Value, budget: &mut SchemaCopyBudget) {
             continue;
         }
         *budget = reserved;
+        let original_types = union_branch_types(items);
+        let items = items.clone();
         let mut non_null = Vec::new();
         let mut has_null = false;
         let mut filtered = false;
-        for (item, cost) in items.iter().zip(costs) {
-            if item == &Value::Bool(true) {
+        for (item, cost) in items.into_iter().zip(costs) {
+            if item == Value::Bool(true) {
                 non_null.push(Value::Object(Map::new()));
                 filtered = true;
             } else if !item.is_object() {
                 filtered = true;
-            } else if is_null_only_branch(item) {
+            } else if is_null_only_branch(&item) {
                 has_null = true;
-            } else if is_required_only_union_branch(item) {
+            } else if is_required_only_union_branch(&item) {
                 if matches!(cost, BranchCopyCost::Cost(_)) {
                     non_null.push(materialize_required_only_branch(
-                        item,
+                        &item,
                         parent_props.expect("preflighted parent properties"),
                     ));
                 }
                 filtered = true;
             } else {
-                non_null.push(item.clone());
+                non_null.push(item);
             }
         }
         // Inherit a nullable marker left by an earlier union-cleaning pass.
@@ -1494,11 +1514,14 @@ fn flatten_any_of_one_of(doc: &mut Value, budget: &mut SchemaCopyBudget) {
             }
             continue;
         }
-        let mut candidates = if filtered { non_null.clone() } else { items };
+        let mut types = if filtered {
+            union_branch_types(&non_null)
+        } else {
+            original_types
+        };
         if filtered && has_null {
-            candidates.push(object([("type", Value::from("null"))]));
+            types.push("null".to_owned());
         }
-        let types = union_branch_types(&candidates);
         let mut selected = non_null.remove(0);
         if nullable {
             set(&mut selected, "nullable", Value::Bool(true));

@@ -16,7 +16,7 @@
 //! maps both ways: from the client's names to Gemini's, and from Gemini's back
 //! to the tool's [`ToolIdentity`].
 //!
-//! Deviations from upstream: the reverse identity map shares the declaration
+//! Implementation note: the reverse identity map shares the declaration
 //! builder's naming plan without cleaning schemas whose results it discards.
 
 use std::collections::{HashMap, HashSet};
