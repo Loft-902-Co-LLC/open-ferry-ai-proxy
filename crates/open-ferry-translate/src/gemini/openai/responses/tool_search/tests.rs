@@ -324,3 +324,55 @@ fn tool_search_upstream_id_and_incomplete_status() {
         assert_eq!(out["output"][0]["status"], status);
     }
 }
+
+// Not upstream's: missing args have different terminal statuses in the two upstream paths.
+#[test]
+fn missing_search_arguments_follow_response_mode() {
+    let req = json!({"tools":[{"type":"tool_search","execution":"client"}]});
+    let resp = json!({"candidates":[{"content":{"role":"model","parts":[
+        {"functionCall":{"id":"s1","name":"tool_search"}}]},"finishReason":"STOP"}]});
+    let out = convert_gemini_response_to_openai_responses_non_stream(
+        &req,
+        &Value::Null,
+        resp.to_string().as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        out["output"][0],
+        json!({"id":"ts_s1","type":"tool_search_call",
+        "status":"incomplete","execution":"client","call_id":"s1","arguments":{}})
+    );
+    let events = stream(&req, &resp);
+    let expected = json!({"id":"ts_s1","type":"tool_search_call",
+        "status":"completed","execution":"client","call_id":"s1","arguments":{}});
+    assert_eq!(*done_items(&events)[0], expected);
+    let completed = events
+        .iter()
+        .find(|(e, _)| e == "response.completed")
+        .unwrap();
+    assert_eq!(completed.1["response"]["output"][0], expected);
+}
+
+// Not upstream's: gjson walks object-valued children in summaries but not declarations.
+#[test]
+fn object_namespace_children_are_summarized_but_not_declared() {
+    let req = json!({"input":[{"type":"tool_search_output","tools":[
+        {"type":"namespace","name":"ns","children":{"a":{"name":"child"}}}]}]});
+    let declarations = build_gemini_function_declarations(&req);
+    assert!(declarations.declarations.is_empty());
+    let normalized = normalize_items(req["input"].as_array().unwrap(), &declarations.forward);
+    let summary: Value = serde_json::from_str(normalized[0]["output"].as_str().unwrap()).unwrap();
+    assert_eq!(summary, json!({"status":"completed","tools":["ns__child"]}));
+}
+
+// Not upstream's: ordinary image requests must avoid a full copy during search normalization.
+#[test]
+fn ordinary_input_is_borrowed_during_search_normalization() {
+    let items = json!([{"type":"message","role":"user","content":[
+        {"type":"input_image","image_url":format!("data:image/png;base64,{}", "A".repeat(65536))}]}]);
+    let input = items.as_array().unwrap();
+    let normalized = normalize_items(input, &HashMap::new());
+    assert!(matches!(normalized, Cow::Borrowed(_)));
+    assert!(std::ptr::eq(normalized.as_ref(), input.as_slice()));
+    assert_eq!(normalized.as_ref(), input);
+}

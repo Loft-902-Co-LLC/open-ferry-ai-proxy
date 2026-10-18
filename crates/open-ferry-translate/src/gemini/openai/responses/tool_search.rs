@@ -3,9 +3,15 @@
 
 //! Client tool-search history as Gemini function calls and results.
 //!
-//! Deviations from upstream: embedded JSON is serialized compactly, as in
-//! the other request helpers.
+//! Deviations from upstream:
+//! - Search-call argument objects are serialized compactly; upstream keeps
+//!   their original JSON text.
+//! - A discovery summary's error value is serialized compactly; upstream
+//!   keeps its original JSON text.
+//! - Summary statuses use serde_json escaping rather than sjson's HTML
+//!   escapes. The decoded status is the same.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
@@ -19,11 +25,24 @@ use crate::responses_tools::{
 
 /// `normalizeOpenAIResponsesToolSearchItems`: replay search history through
 /// the request translator's existing function-call pairing.
-pub(super) fn normalize_items(items: &[Value], forward: &HashMap<String, String>) -> Vec<Value> {
-    items
-        .iter()
-        .filter_map(|item| normalize_item(item, forward))
-        .collect()
+pub(super) fn normalize_items<'a>(
+    items: &'a [Value],
+    forward: &HashMap<String, String>,
+) -> Cow<'a, [Value]> {
+    if !items.iter().any(|item| {
+        matches!(
+            &*str_of(item.get("type")),
+            "tool_search_call" | "tool_search_output"
+        )
+    }) {
+        return Cow::Borrowed(items);
+    }
+    Cow::Owned(
+        items
+            .iter()
+            .filter_map(|item| normalize_item(item, forward))
+            .collect(),
+    )
 }
 
 fn normalize_item(item: &Value, forward: &HashMap<String, String>) -> Option<Value> {
@@ -101,11 +120,16 @@ fn discovered_names(tools: Option<&Value>, forward: &HashMap<String, String>) ->
                     .get("tools")
                     .filter(|v| v.is_array())
                     .or_else(|| tool.get("children"));
-                for child in children.and_then(Value::as_array).into_iter().flatten() {
+                let mut append_child = |child: &Value| {
                     let name = name_of(child);
                     if !name.is_empty() {
                         append(qualify_namespace_tool_name(&ns, &name));
                     }
+                };
+                match children {
+                    Some(Value::Array(children)) => children.iter().for_each(&mut append_child),
+                    Some(Value::Object(children)) => children.values().for_each(&mut append_child),
+                    _ => {}
                 }
             }
             _ => {}
