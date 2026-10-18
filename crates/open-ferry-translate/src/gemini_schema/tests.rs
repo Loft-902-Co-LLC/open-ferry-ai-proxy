@@ -1802,3 +1802,33 @@ fn removes_discriminator_keyword_issue6639() {
         "properties.nestedDiscriminatorProp.properties.discriminator.properties.kind"
     ));
 }
+
+// Not upstream's: 5efe9758 tests only the Antigravity Claude entry point; this checks its shared nullable inheritance on Gemini.
+#[test]
+fn inherits_nullable_marker_when_unwrapping_single_union_branch() {
+    for marker in [json!(true), json!("true"), json!(1)] {
+        let schema = json!({"type":"object","properties":{"value":{
+            "anyOf":[{"type":"string"}],"nullable":marker
+        }}});
+        let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+        assert_eq!(
+            cleaned["properties"]["value"],
+            json!({"type":"string","description":"(nullable)"})
+        );
+        assert_eq!(clean_json_schema_for_gemini_json_schema(&cleaned), cleaned);
+    }
+    for branches in [
+        json!([{"type":"null"},{"anyOf":[{"type":"string"},{"type":"integer"}]}]),
+        json!([{"anyOf":[{"type":"string"},{"type":"integer"}]},{"type":"null"}]),
+    ] {
+        let cleaned = clean_json_schema_for_gemini_json_schema(
+            &json!({"type":"object","properties":{"value":{"anyOf":branches}}}),
+        );
+        assert_eq!(
+            cleaned["properties"]["value"]["anyOf"],
+            json!([{"type":"string"},{"type":"integer"}])
+        );
+        assert_eq!(cleaned["properties"]["value"]["description"], "(nullable)");
+        assert_eq!(clean_json_schema_for_gemini_json_schema(&cleaned), cleaned);
+    }
+}
