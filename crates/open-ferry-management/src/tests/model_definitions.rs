@@ -102,11 +102,11 @@ async fn xai_and_meta_channels_list_their_models() {
         r#""thinking":{"levels":["low","medium","high","xhigh"]}}"#,
     );
     let meta_first = concat!(
-        r#"{"id":"muse-spark-1.3","object":"model","created":1788307200,"owned_by":"meta","#,
-        r#""type":"meta","display_name":"Muse Spark 1.3","name":"muse-spark-1.3","#,
-        r#""description":"Meta Muse Spark 1.3 flagship reasoning and agentic coding model","#,
-        r#""context_length":1048576,"max_completion_tokens":65536,"#,
-        r#""supportedInputModalities":["text","image"],"supportedOutputModalities":["text"],"#,
+        r#"{"id":"muse-wonder-1.0","object":"model","created":1791763200,"owned_by":"meta","#,
+        r#""type":"meta","display_name":"Muse Wonder 1.0","name":"muse-wonder-1.0","#,
+        r#""description":"Meta's most capable model, built for complex software engineering and long-horizon agentic work.","#,
+        r#""context_length":1007997,"max_completion_tokens":128000,"#,
+        r#""supportedInputModalities":["text","image","video","audio"],"supportedOutputModalities":["text"],"#,
         r#""thinking":{"levels":["minimal","low","medium","high","xhigh","max"]}}"#,
     );
     for (names, models, first) in [
