@@ -648,6 +648,13 @@ fn partless_malformed_function_call_closes_message() {
     assert_eq!(output.matches("event: error\n").count(), 1);
     assert!(!output.contains("event: message_delta"));
     assert!(!output.contains("event: message_stop"));
+    let error: Value = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|event| event["type"] == "error")
+        .unwrap();
+    assert_eq!(error["error"]["type"], "api_error");
     assert!(output.contains("MALFORMED_FUNCTION_CALL"));
 }
 
@@ -1155,6 +1162,8 @@ fn malformed_call_closes_thinking_and_suppresses_late_chunks() {
 // and TestConvertGeminiResponseToClaude_MalformedFunctionCallWithToolUsePreservesToolUse.
 #[test]
 fn malformed_call_is_api_error_unless_a_tool_call_was_returned() {
+    let mut request = hi_request();
+    request["tools"] = json!([{"name":"Bash","input_schema":{"type":"object"}}]);
     for tool_call in [false, true] {
         let parts = if tool_call {
             json!([{"functionCall":{"name":"Bash","args":{"command":"ls"}}}])
@@ -1162,13 +1171,13 @@ fn malformed_call_is_api_error_unless_a_tool_call_was_returned() {
             json!([])
         };
         let response = json!({"candidates":[{"content":{"parts":parts},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":37}});
-        let output = convert_gemini_response_to_claude_non_stream(&hi_request(), &response);
+        let output = convert_gemini_response_to_claude_non_stream(&request, &response);
         if tool_call {
             assert_eq!(output["stop_reason"], "tool_use");
         } else {
             assert_eq!(output, malformed_error());
         }
-        let output = stream(&hi_request(), &[&response.to_string(), "[DONE]"]).concat();
+        let output = stream(&request, &[&response.to_string(), "[DONE]"]).concat();
         assert_eq!(output.contains("event: error"), !tool_call);
         if tool_call {
             assert!(output.contains(r#""stop_reason":"tool_use""#));

@@ -182,10 +182,7 @@ impl State {
         for chunk in chunks {
             if self.translated_error.is_none() && self.setup.response_format == Format::CLAUDE {
                 // Retain the first translated error while reading trailing usage.
-                self.translated_error = chunk.split(|b| *b == b'\n').find_map(|line| {
-                    let payload = line.strip_prefix(b"data:")?;
-                    super::translated_claude_error(&self.setup.response_format, payload)
-                });
+                self.translated_error = retained_error(&self.setup.response_format, &chunk);
                 if let Some(error) = &self.translated_error {
                     self.reader.report(error);
                 }
@@ -237,6 +234,36 @@ impl State {
         }
         if self.setup.translator.tool_input_error().is_some() {
             self.fail();
+        }
+    }
+}
+
+/// Retains the JSON body from any SSE line form JSONPayload accepts.
+fn retained_error(format: &Format, chunk: &[u8]) -> Option<String> {
+    chunk
+        .split(|b| *b == b'\n')
+        .find_map(|line| super::translated_claude_error(format, json_payload(line)?))
+}
+
+#[cfg(test)]
+mod retained_error_tests {
+    use super::*;
+
+    // Not upstream's: check JSONPayload forms at the error retention boundary.
+    #[test]
+    fn retains_trimmed_error_payloads() {
+        let error = r#"{"type":"error","error":{"type":"api_error","message":"malformed"}}"#;
+        for line in [
+            error.to_owned(),
+            format!("data: {error}"),
+            format!("  data: {error}\r"),
+            format!("event: error\ndata: {error}\n\n"),
+        ] {
+            assert_eq!(
+                retained_error(&Format::CLAUDE, line.as_bytes()).as_deref(),
+                Some(error)
+            );
+            assert!(retained_error(&Format::GEMINI, line.as_bytes()).is_none());
         }
     }
 }
