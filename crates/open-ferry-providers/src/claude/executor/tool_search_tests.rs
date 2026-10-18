@@ -503,6 +503,24 @@ payload:
     );
 }
 
+// Ported from nativeToolSearchResponsesPayload and nativeToolSearchCalendar: a
+// Codex Responses turn after one client tool_search discovered a namespaced MCP
+// tool.
+const NATIVE_TOOL_SEARCH_CALENDAR: &str = "mcp__codex_apps__calendar_create_event";
+
+fn native_tool_search_responses_payload() -> Value {
+    json!({"model":"claude-sonnet-4-5","input":[
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"create a calendar event"}]},
+        {"type":"tool_search_call","call_id":"call_search_1","status":"completed","execution":"client","arguments":{"query":"calendar"}},
+        {"type":"tool_search_output","call_id":"call_search_1","status":"completed","execution":"client","tools":[
+            {"type":"namespace","name":"mcp__codex_apps__","description":"Apps.","tools":[
+                {"type":"function","name":"calendar_create_event","description":"Create a calendar event.","strict":false,"defer_loading":true,"parameters":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}}]}]}
+        ],"tools":[
+        {"type":"function","name":"exec_command","description":"Run a command.","strict":false,"parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}},
+        {"type":"tool_search","execution":"client","description":"Search deferred tools.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}
+        ],"stream":false})
+}
+
 // Ported from TestClaudeExecutor_NativeToolSearchPayloadRuleIsFinal, with the
 // tool index moved for the constant deferred anchor that precedes the
 // discovered tools (97ba1e89). The rule runs after native tool search shapes
@@ -518,7 +536,7 @@ async fn native_tool_search_payload_rule_is_final() {
         .unwrap();
         async move {
             let mock = Mock::start(Reply::sse(&search_sse())).await;
-            let mut request = request(search_payload());
+            let mut request = request(native_tool_search_responses_payload());
             request.model = "claude-sonnet-4-5".into();
             let mut options = options(Format::OPENAI_RESPONSE);
             options.original_request = request.payload.clone();
@@ -538,7 +556,7 @@ async fn native_tool_search_payload_rule_is_final() {
         .expect("the anchor is declared with native tool search");
     let discovered = anchor + 1;
     assert_eq!(tools[discovered]["defer_loading"], true, "{tools:?}");
-    let name = tools[discovered]["name"].clone();
+    assert_eq!(tools[discovered]["name"], NATIVE_TOOL_SEARCH_CALENDAR);
     let body = sent(&format!(
         "payload:
   override:
@@ -550,7 +568,10 @@ async fn native_tool_search_payload_rule_is_final() {
 "
     ))
     .await;
-    assert_eq!(body["tools"][discovered]["name"], name);
+    assert_eq!(
+        body["tools"][discovered]["name"],
+        NATIVE_TOOL_SEARCH_CALENDAR
+    );
     assert_eq!(
         body["tools"][discovered]["defer_loading"], false,
         "payload rule did not win over native tool search: {}",
