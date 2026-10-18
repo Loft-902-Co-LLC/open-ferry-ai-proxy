@@ -10,7 +10,9 @@
 //! A credential with an `api_key` attribute, or an `access_token` in its
 //! metadata, calls `{base_url}/v1/publishers/google/models/{model}:{action}`
 //! with the key as `x-goog-api-key`; the base URL is the credential's
-//! `base_url` attribute or Google's global endpoint. Any other credential
+//! `base_url` attribute or Google's global endpoint. A full `/publishers/`
+//! resource prefix is used as given; an existing version suffix is retained.
+//! Any other credential
 //! must hold a service account (`project_id`, `location` and
 //! `service_account` in its metadata), and calls the endpoint of its
 //! location for its project with a bearer token from that account (see
@@ -214,14 +216,7 @@ impl VertexExecutor {
     /// The URL of `action` on `model` for `target`.
     fn url(&self, target: &Target<'_>, model: &str, action: &str) -> String {
         match target {
-            Target::ApiKey { base_url, .. } => {
-                let base_url = if base_url.is_empty() {
-                    GLOBAL_BASE_URL
-                } else {
-                    base_url
-                };
-                format!("{base_url}/{API_VERSION}/publishers/google/models/{model}:{action}")
-            }
+            Target::ApiKey { base_url, .. } => api_key_models_url(base_url, model, action),
             Target::ServiceAccount {
                 project, location, ..
             } => {
@@ -403,6 +398,32 @@ impl VertexExecutor {
         .await?;
         let (headers, data) = read_answer(response, &secrets).await?;
         Ok(translate_count(options, headers, data))
+    }
+}
+
+/// `vertexAPIKeyModelsURL`: a full publisher resource prefix is used as given;
+/// short hosts gain the Google models path, retaining an existing API version.
+fn api_key_models_url(base_url: &str, model: &str, action: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        GLOBAL_BASE_URL
+    } else {
+        base
+    };
+    if base.contains("/publishers/") {
+        return format!("{base}/{model}:{action}");
+    }
+    let version = base.rsplit('/').next().unwrap_or_default();
+    let has_version = version.starts_with('v')
+        && version.bytes().skip(1).any(|b| b.is_ascii_digit())
+        && version
+            .bytes()
+            .skip(1)
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || b == b'_' || b == b'-');
+    if has_version {
+        format!("{base}/publishers/google/models/{model}:{action}")
+    } else {
+        format!("{base}/{API_VERSION}/publishers/google/models/{model}:{action}")
     }
 }
 

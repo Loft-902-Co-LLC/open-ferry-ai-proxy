@@ -357,7 +357,8 @@ fn gemini_key_dedup_id(key: &GeminiKey) -> String {
 
 /// Upstream's `SanitizeVertexCompatKeys`: drops entries without a key and
 /// models without both a name and an alias, cleans up the rest, and keeps
-/// the first of entries alike in key and base URL.
+/// the first of entries alike in key and base URL. Full publisher resource
+/// prefixes are retained; the executor interprets the endpoint path.
 pub fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
     let mut seen = HashSet::new();
     keys.retain_mut(|key| {
