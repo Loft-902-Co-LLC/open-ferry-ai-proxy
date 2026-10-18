@@ -519,6 +519,7 @@ impl Manager {
                 undurable_causes: Default::default(),
                 landing_unconfirmed: Default::default(),
                 owed_save: None,
+                written_configuration: 0,
                 read_back_warned: Default::default(),
             },
         );
@@ -1210,6 +1211,7 @@ impl Manager {
         let mut undurable_causes = existing.undurable_causes.clone();
         let mut landing_unconfirmed = existing.landing_unconfirmed;
         let owed_save = existing.owed_save;
+        let written_configuration = existing.written_configuration;
         let mut read_back_warned = existing.read_back_warned;
         let mut unresolved_origin = existing.unresolved_origin.clone();
         if let Some(command) = context.command
@@ -1546,6 +1548,7 @@ impl Manager {
             undurable_causes,
             landing_unconfirmed,
             owed_save,
+            written_configuration,
             read_back_warned,
         };
         // An ineligible record is never leased, so its state could never resolve.
@@ -2023,6 +2026,7 @@ impl Manager {
                     undurable_causes: Default::default(),
                     landing_unconfirmed: Default::default(),
                     owed_save: None,
+                    written_configuration: 0,
                     read_back_warned: Default::default(),
                 },
             );
@@ -2383,9 +2387,11 @@ impl Manager {
                 let mut state = self.lock();
                 if let Some(entry) = state.auths.get_mut(&auth.id)
                     && entry.auth.registration_epoch == epoch
-                    && covers_owed(entry.owed_save, generation)
                 {
-                    entry.owed_save = None;
+                    entry.written_configuration = entry.written_configuration.max(generation);
+                    if covers_owed(entry.owed_save, generation) {
+                        entry.owed_save = None;
+                    }
                 }
             }
             let mut last = lock(&id_lock);
@@ -2538,6 +2544,11 @@ impl Manager {
 
     /// Notes that a save was refused and its change is still owed to the file.
     /// A registration change owes nothing: the new registration saves itself.
+    /// Nor does a generation a written Configuration save already covers:
+    /// a flush can read the flag, wait for the save lock while that save
+    /// writes and clears it, and then be refused behind a pass that has
+    /// already looked for the flag, so recording it would leave it owed
+    /// with nothing to flush it.
     fn record_owed_save(&self, id: &str, epoch: u64, generation: u64, reason: SaveDeferral) {
         if reason == SaveDeferral::RegistrationChanged {
             return;
@@ -2546,6 +2557,7 @@ impl Manager {
             let mut state = self.lock();
             if let Some(entry) = state.auths.get_mut(id)
                 && entry.auth.registration_epoch == epoch
+                && generation > entry.written_configuration
             {
                 let version = entry
                     .owed_save
