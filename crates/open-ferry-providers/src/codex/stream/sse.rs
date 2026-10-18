@@ -176,11 +176,16 @@ impl SseReader {
         } else {
             if !valid && !self.warned {
                 self.warned = true;
+                let data = if self.held_lines == 1 {
+                    trim_space(&self.joined)
+                } else {
+                    &self.joined
+                };
                 let (lengths, valid_lines, offset) =
-                    diagnostic(&self.held, self.held_lines, &self.joined);
+                    diagnostic(&self.held, self.held_lines, data);
                 tracing::warn!(
                     data_lines = self.held_lines,
-                    data_bytes = self.joined.len(),
+                    data_bytes = data.len(),
                     line_bytes = lengths,
                     lines_valid = valid_lines,
                     json_error_offset = offset,
