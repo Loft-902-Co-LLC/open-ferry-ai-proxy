@@ -220,6 +220,19 @@ impl PartitionPatch {
                     }))
     }
 
+    /// `target` shows this patch's result: its identity, and every value the
+    /// patch changed from its own baseline, which `apply` always writes. An
+    /// operation that kept its tokens and changed only, say, the expiry has
+    /// the unwritten file's identity, so identity alone cannot tell.
+    fn shows_result(&self, target: &Map<String, Value>) -> bool {
+        self.matches_after(target)
+            && self
+                .after
+                .iter()
+                .filter(|(key, value)| self.before.get(*key) != Some(*value))
+                .all(|(key, value)| target.get(key) == Some(value))
+    }
+
     fn baseline<'a>(
         &'a self,
         target: &Map<String, Value>,
@@ -389,16 +402,16 @@ impl CredentialRefreshPatch {
         }
     }
 
-    /// Per requested partition: `disk` shows this patch's result. This is the
-    /// per-partition form of `matches_after`: outer on the top level, SIWC on
-    /// the nested object. A partition not requested is false.
+    /// Per requested partition: `disk` shows this patch's result, its identity
+    /// and the values it changed. Outer is read on the top level, SIWC on the
+    /// nested object. A partition not requested is false.
     pub(crate) fn landed_in(&self, disk: &Map<String, Value>) -> CodexPartitions {
         CodexPartitions {
-            outer: self.outer.as_ref().is_some_and(|p| p.matches_after(disk)),
+            outer: self.outer.as_ref().is_some_and(|p| p.shows_result(disk)),
             siwc: self
                 .siwc
                 .as_ref()
-                .is_some_and(|p| p.matches_after(&nested(disk))),
+                .is_some_and(|p| p.shows_result(&nested(disk))),
         }
     }
 
