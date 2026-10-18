@@ -220,17 +220,14 @@ impl PartitionPatch {
                     }))
     }
 
-    /// `target` shows this patch's result: its identity, and every value the
-    /// patch changed from its own baseline, which `apply` always writes. An
-    /// operation that kept its tokens and changed only, say, the expiry has
-    /// the unwritten file's identity, so identity alone cannot tell.
+    /// `target` shows this patch's result: its identity, and nothing `apply`
+    /// would still write. An operation that kept its tokens and changed only,
+    /// say, the expiry has the unwritten file's identity, so identity alone
+    /// cannot tell. Nor can the values it changed from its own baseline:
+    /// `apply` also writes a value it kept where the locked file differs.
     fn shows_result(&self, target: &Map<String, Value>) -> bool {
-        self.matches_after(target)
-            && self
-                .after
-                .iter()
-                .filter(|(key, value)| self.before.get(*key) != Some(*value))
-                .all(|(key, value)| target.get(key) == Some(value))
+        let mut applied = target.clone();
+        self.matches_after(target) && self.apply(&mut applied) && applied == *target
     }
 
     fn baseline<'a>(
