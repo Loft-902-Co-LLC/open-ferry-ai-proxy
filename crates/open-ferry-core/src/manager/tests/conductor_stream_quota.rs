@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_stream_quota_test.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_stream_quota_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A 429 that ends a stream after its first chunk reaches the client as is,
@@ -33,7 +33,7 @@ use crate::manager::select::{PickArgs, Selection, is_auth_blocked_for_model};
 use crate::manager::{RoutingStrategy, Settings};
 
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6503_test.go
-// (v8.0.27, MIT). Cancellation drops a pending future here, rather than
+// (v8.0.32, MIT). Cancellation drops a pending future here, rather than
 // setting Go's request context while ExecuteStream returns.
 struct CanceledBootstrapExecutor {
     source: Mutex<Option<mpsc::UnboundedReceiver<Result<Bytes, ExecError>>>>,

@@ -7,7 +7,7 @@
 // normalizeCollectionNodeStyles, removeLegacyOpenAICompatAPIKeys,
 // removeRemovedIntegrationKeys, removeLegacyGenerativeLanguageKeys,
 // removeLegacyAuthBlock, isPluginConfigsPath, isPluginConfigsSubtreePath)
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Merging the settings as upstream writes them into the file's tree.

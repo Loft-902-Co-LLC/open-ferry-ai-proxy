@@ -3,7 +3,7 @@
 // PrepareCodexMultiAgentV2Tools, OptimizeCodexMultiAgentV2Request,
 // RewriteCodexMultiAgentV2Input, HasCodexMultiAgentV2NamespaceConflict,
 // RestoreCodexMultiAgentV2Response, formatCodexSpawnAgentModels,
-// replaceCodexSpawnAgentModels and their helpers) (v8.0.27, MIT).
+// replaceCodexSpawnAgentModels and their helpers) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex's multi-agent v2 requests, readied for upstreams other than the

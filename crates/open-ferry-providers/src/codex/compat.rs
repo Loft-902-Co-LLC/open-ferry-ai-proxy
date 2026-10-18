@@ -11,7 +11,7 @@
 // TranslateRequestEnvelopeWithCodexMultiAgentV2), and
 // sdk/cliproxy/auth/api_key_model_capabilities.go (CodexAPIKeyModelIsCompat)
 // with conductor_models.go (resolveAPIKeyConfig), and the translation errors
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex clients' requests, and compatibility models, around translation.
@@ -431,7 +431,7 @@ pub(crate) fn translate(
 
 /// [`translate`] for the body to send: the content part the translation
 /// refused, either translator's, when there is one, so the request is never
-/// sent (v8.0.27's `TranslateRequestReturningError`).
+/// sent (v8.0.32's `TranslateRequestReturningError`).
 pub(crate) fn translate_checked(
     kind: Kind,
     context: Context<'_>,

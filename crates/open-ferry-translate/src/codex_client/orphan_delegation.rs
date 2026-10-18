@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/client/codex/optimize-multi-agent-v2/
 // orphan_delegation.go (RewriteCodexOrphanDelegationInput,
 // isCodexCollabSpawnSubagent, matchCodexDelegationTool,
-// buildCodexOrphanUserMessage) (v8.0.27, MIT).
+// buildCodexOrphanUserMessage) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Delegation tool outputs whose call isn't in the request, as user messages

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/apply_patch_input_test.go
-// and apply_patch_events_test.go (v8.0.27, MIT).
+// and apply_patch_events_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

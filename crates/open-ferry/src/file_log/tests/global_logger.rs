@@ -3,7 +3,7 @@
 // TestLogFormatterPrintsMediaForwardingFields,
 // TestLogFormatterPrintsPluginFields,
 // TestLogFormatterOmitsGenericPathField,
-// TestLogFormatterFormatsShortRequestID) (v8.0.27, MIT).
+// TestLogFormatterFormatsShortRequestID) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The lines' format.

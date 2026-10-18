@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/claude_ratelimit.go,
 // internal/runtime/executor/claude_executor_fast_error.go and the error
 // classification in internal/runtime/executor/claude_executor_request.go
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Anthropic's rate-limit headers, and Claude's failed responses as

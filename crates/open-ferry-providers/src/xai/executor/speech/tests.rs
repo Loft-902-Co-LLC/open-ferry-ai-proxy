@@ -5,7 +5,7 @@
 // TestXAIExecutorExecuteSpeechPayloadRulesMatchOpenAIProtocol,
 // TestXAIExecutorExecuteSpeechUpstreamErrorScope,
 // TestXAIExecutorSpeechUnknownVoiceDoesNotRotateOrCoolCredentials,
-// TestXAIExecutorSpeechModelNotFoundRotatesCredentials) (v8.0.27, MIT).
+// TestXAIExecutorSpeechModelNotFoundRotatesCredentials) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Speech calls against a mock xAI server on 127.0.0.1. The mock records

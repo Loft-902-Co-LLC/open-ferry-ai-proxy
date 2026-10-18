@@ -5,7 +5,7 @@
 // TestApplyPatchFailureStopsConsumptionAndNextAttemptIsFresh,
 // TestApplyPatchXAIWebsocketFailureMatrix,
 // TestApplyPatchInteractionsSourceFailureIsSealed,
-// TestApplyPatchFailurePreservesUpstreamUsage) (v8.0.27, MIT).
+// TestApplyPatchFailurePreservesUpstreamUsage) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `apply_patch_integration_test.go`: an invalid or unfinished call to
@@ -123,7 +123,7 @@ async fn responses_invalid_terminal_usage() {
     subtests(cases).await;
 }
 
-// v8.0.27's TestApplyPatchFailurePreservesUpstreamUsage: Meta and xAI
+// v8.0.32's TestApplyPatchFailurePreservesUpstreamUsage: Meta and xAI
 // answered, so the failure's one record keeps the answer's counts, whether
 // the answer is a stream, a stream read whole, a plain reply or a
 // compaction.

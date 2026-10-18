@@ -2,7 +2,7 @@
 // sdk/api/handlers/handlers.go (BuildErrorResponseBodyWithError),
 // sdk/api/handlers/handlers_errors.go, executionErrorMessage in
 // sdk/api/handlers/handlers_execution.go and the error helpers in
-// sdk/api/handlers/claude/code_handlers.go (v8.0.27, MIT).
+// sdk/api/handlers/claude/code_handlers.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Errors as clients see them: [`ErrorMessage`], and the OpenAI and Claude
@@ -498,7 +498,7 @@ mod tests {
         assert_eq!(error_code(&body), "thread_not_found", "{body}");
     }
 
-    // v8.0.27's TestClaudeErrorMarksPlainTextMissingThreadForClientReplay.
+    // v8.0.32's TestClaudeErrorMarksPlainTextMissingThreadForClientReplay.
     // Its TestClaudeErrorMarksStructuredExecutorMissingThreadForClientReplay
     // is the case above: an error whose text is the structured body.
     #[test]

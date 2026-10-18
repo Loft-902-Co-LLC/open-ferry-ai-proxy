@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/auth/codex/token.go, filename.go and
 // openai.go, and CreateTokenStorage and UpdateTokenStorage in
-// openai_auth.go (v8.0.27, MIT).
+// openai_auth.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex tokens, and the credential file that keeps them.
@@ -27,7 +27,7 @@ use super::jwt::DEFAULT_PLAN_TYPE;
 /// The `type` of a Codex credential file.
 pub const CREDENTIAL_TYPE: &str = "codex";
 
-/// The nested `siwc` credential, from upstream `openai.go:33-72` (v8.0.27).
+/// The nested `siwc` credential, from upstream `openai.go:33-72` (v8.0.32).
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SiwcTokenData {

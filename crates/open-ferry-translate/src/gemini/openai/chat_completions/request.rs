@@ -3,7 +3,7 @@
 // geminiContentNode, openAIToolCallGeminiThoughtSignature,
 // openAIInputAudioMimeType, applyOpenAIResponseFormatToGemini and
 // geminiDemotedSystemText) and internal/util/translator.go (RenameKey)
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions request → Gemini request.

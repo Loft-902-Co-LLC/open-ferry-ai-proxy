@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_request_test.go
-// (v8.0.27, MIT), and openai_openai-responses_user_turn_test.go (v8.0.27, MIT).
+// (v8.0.32, MIT), and openai_openai-responses_user_turn_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // All 64 tests are ported, with the request-side tests of
@@ -2863,7 +2863,7 @@ fn responses_compatibility_digest() {
     );
 }
 
-// The v8.0.27 tests of openai_openai-responses_user_turn_test.go.
+// The v8.0.32 tests of openai_openai-responses_user_turn_test.go.
 
 const CHAT_TURN_HELLO: &str =
     r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}"#;

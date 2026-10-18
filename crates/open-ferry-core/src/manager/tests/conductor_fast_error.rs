@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_fast_error_test.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_fast_error_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A request-scoped error from a Fast call, local or carrying the

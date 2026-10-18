@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/thinking/apply.go, validate.go, suffix.go,
 // configuration_update.go, and
 // internal/runtime/executor/helps/model_capabilities.go and thinking.go
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request, whatever provider it goes to.

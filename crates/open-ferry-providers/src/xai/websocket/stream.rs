@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
 // (ExecuteStream, prepareResponsesWebsocketRequest, applyXAIWebsocketHeaders,
 // ensureUpstreamConn, logXAIWebsocketRequest, logXAIWebsocketWarmupCompleted,
-// logXAIWebsocketTerminalResponse) (v8.0.27, MIT).
+// logXAIWebsocketTerminalResponse) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The streaming call over the WebSocket.

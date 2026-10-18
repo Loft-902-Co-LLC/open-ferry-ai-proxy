@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_tool_search_test.go
-// and claude_openai-responses_tool_search_disabled_test.go (v8.0.27, MIT).
+// and claude_openai-responses_tool_search_disabled_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};

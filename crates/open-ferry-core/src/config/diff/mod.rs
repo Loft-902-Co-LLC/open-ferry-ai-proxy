@@ -4,7 +4,7 @@
 // appendOptionalIntChange, appendOptionalBoolChange, formatOptionalBool,
 // formatOptionalInt, equalStringMap, formatProxyURL, formatURL) and the
 // change logging of internal/watcher/config_reload.go (reloadConfig)
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a reload changed, as the lines upstream logs after

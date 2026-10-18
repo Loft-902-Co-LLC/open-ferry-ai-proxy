@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor_compaction.go
-// and helps/antigravity_compaction.go (the Claude capsule path) (v8.0.27, MIT).
+// and helps/antigravity_compaction.go (the Claude capsule path) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Responses compaction through a Claude summary, with CPA-compatible sealed

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/auth/codex/siwc_auth.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI internal/auth/codex/siwc_auth.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Sign in with ChatGPT's dynamic-client OAuth transport.
@@ -40,7 +40,7 @@ pub use super::token::SiwcTokenData;
 use crate::json;
 use crate::oauth::Pkce;
 
-/// Upstream `siwc_auth.go:21-35` protocol values (v8.0.27).
+/// Upstream `siwc_auth.go:21-35` protocol values (v8.0.32).
 pub const DYNAMIC_CLIENT_ID: &str = "dynamic_agent_client";
 /// Our fixed agent name, replacing upstream's configurable identifier.
 pub const AGENT_NAME_HINT: &str = "open-ferry";

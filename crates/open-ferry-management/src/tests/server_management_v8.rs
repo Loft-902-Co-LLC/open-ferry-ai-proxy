@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/server_management_v8_test.go
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The v8 management names.

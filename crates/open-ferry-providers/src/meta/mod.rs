@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/meta_executor.go,
 // meta_executor_execute.go and meta_executor_stream.go, and
-// internal/runtime/executor/helps/meta_tools.go (v8.0.27, MIT).
+// internal/runtime/executor/helps/meta_tools.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`MetaExecutor`], which calls Meta's API (Muse Spark models) with an API
@@ -245,7 +245,7 @@ impl MetaExecutor {
             Cow::Borrowed(_) => data,
         };
         // Meta answered: a failure to read or translate the answer keeps
-        // its usage (v8.0.27's `upstreamUsage.PublishFailure`).
+        // its usage (v8.0.32's `upstreamUsage.PublishFailure`).
         let out = translate_completed(request, &mut prepared, &secrets, &data)
             .map_err(|error| ExecError::from(error).with_usage_kept())?;
         Ok(Response {

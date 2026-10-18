@@ -3,7 +3,7 @@
 // helpers, with isExplicitPromptCacheMode and stripPromptCacheOptions),
 // helps/claude_upstream.go, helps/claude_diagnostics.go
 // (ClaudePayloadHas1hTTL) and sdk/cliproxy/auth/classification.go
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's key and base URL, and the changes a Messages body needs

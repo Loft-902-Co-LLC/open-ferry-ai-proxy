@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/misc/mime-type.go (MimeTypes) (v8.0.27, MIT).
+// Ported from CLIProxyAPI internal/misc/mime-type.go (MimeTypes) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Upstream's table of MIME types by file extension, used to label file

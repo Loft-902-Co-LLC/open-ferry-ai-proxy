@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_lifecycle.go and
-// internal/runtime/executor/codex_websockets_executor_store_test.go (v8.0.27, MIT).
+// internal/runtime/executor/codex_websockets_executor_store_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use crate::auth::Auth;

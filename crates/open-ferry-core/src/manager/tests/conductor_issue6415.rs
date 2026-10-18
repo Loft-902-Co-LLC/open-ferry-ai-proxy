@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6415_test.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6415_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An access token the provider refused with a 401, when the credential

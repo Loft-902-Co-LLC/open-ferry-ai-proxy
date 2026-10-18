@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature (v8.0.27, MIT); this file from
+// Ported from CLIProxyAPI internal/signature (v8.0.32, MIT); this file from
 // provider_compatibility.go. https://github.com/router-for-me/CLIProxyAPI
 
 //! Reasoning-signature validation and replay decisions.

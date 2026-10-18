@@ -3,7 +3,7 @@
 // model_catalogs_test.go (TestModelCatalogConfigValidation),
 // client_test.go (TestClientCodexEnableApplyPatch) and
 // client_optimize_test.go (TestClientCodexOptimizeMultiAgentV2,
-// TestClientCodexOptimizeMultiAgentV2Migration) (v8.0.27, MIT).
+// TestClientCodexOptimizeMultiAgentV2Migration) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // The routes' tests, with upstream's expected files, are in
@@ -16,7 +16,7 @@ use crate::config::testing::TempDir;
 use crate::config::v8::V8_CLIENT_PATHS;
 
 /// Ported from CLIProxyAPI internal/api/handlers/management/config_v8_test.go
-/// (v8.0.27, MIT), TestConfigV8SaveNormalizesCollectionStylesToBlockYAML.
+/// (v8.0.32, MIT), TestConfigV8SaveNormalizesCollectionStylesToBlockYAML.
 #[test]
 fn v8_saves_normalize_collection_styles_to_block_yaml() {
     let dir = TempDir::new();

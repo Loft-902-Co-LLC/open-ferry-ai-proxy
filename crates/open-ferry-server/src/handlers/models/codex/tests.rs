@@ -1,4 +1,4 @@
-//! Ports these CLIProxyAPI tests (v8.0.27, MIT):
+//! Ports these CLIProxyAPI tests (v8.0.32, MIT):
 //! - internal/api/server_test.go: `TestModelsWithClientVersionReturnsCodexCatalog`,
 //!   `TestCodexClientModelsEndpoint_FiltersMaxAndUltraForOlderClientVersion`
 //!   and `TestModelsWithClientVersionApplyPatchRequiresExecutor`;
@@ -865,7 +865,7 @@ async fn apply_patch_bridge_matrix_catalog() {
     }
 }
 
-// Ported from codex_client_models_tool_search_test.go (v8.0.27, MIT).
+// Ported from codex_client_models_tool_search_test.go (v8.0.32, MIT).
 struct SearchCatalog {
     registry: Arc<ModelRegistry>,
     supported: std::sync::atomic::AtomicBool,

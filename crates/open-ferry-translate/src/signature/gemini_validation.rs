@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/gemini_validation.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI internal/signature/gemini_validation.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini thought signatures.

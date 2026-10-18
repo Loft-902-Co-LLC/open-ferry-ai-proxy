@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/auth/codex/pkce.go and oauth_server.go,
 // which internal/auth/claude repeats, and parse_oauth_callback
-// from internal/misc/oauth.go (v8.0.27, MIT).
+// from internal/misc/oauth.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // Query and URL parsing also ported from Go's net/url/url.go (ParseQuery,
 // parseQuery, QueryUnescape, stringContainsCTLByte and the Parse helpers in
@@ -180,7 +180,7 @@ impl std::fmt::Display for CallbackParseError {
 impl std::error::Error for CallbackParseError {}
 
 /// Parses a pasted redirect, with query parameters taking precedence over
-/// fragment parameters (upstream `internal/misc/oauth.go`, v8.0.27).
+/// fragment parameters (upstream `internal/misc/oauth.go`, v8.0.32).
 /// Empty input returns `None`. This only parses; the caller checks state.
 pub fn parse_oauth_callback(input: &str) -> Result<Option<OAuthCallback>, CallbackParseError> {
     let input = input.trim();
@@ -744,7 +744,7 @@ pub(crate) mod tests {
     use super::*;
 
     // Ported from TestParseOAuthCallbackClientID (siwc_auth_test.go:95,
-    // v8.0.27), with fragment, precedence and pasted-input coverage.
+    // v8.0.32), with fragment, precedence and pasted-input coverage.
     #[test]
     fn pasted_callbacks_keep_code_state_and_issued_client_id() {
         for input in [

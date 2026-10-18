@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/auto_refresh_loop_test.go,
-// metadata_merge_test.go and conductor_refresh.go (v8.0.27, MIT).
+// metadata_merge_test.go and conductor_refresh.go (v8.0.32, MIT).
 use super::support::*;
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::{Auth, AuthKind, AuthStore, CodexRefreshFailure, FileStore, Status};

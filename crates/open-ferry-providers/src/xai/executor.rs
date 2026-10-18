@@ -2,7 +2,7 @@
 // (XAIExecutor, Identifier), xai_executor_execute.go (Execute,
 // executeCompact, executeCompactRequest, executeCompactionTriggerStream),
 // xai_executor_stream.go (ExecuteStream) and xai_executor_tokens.go
-// (CountTokens) (v8.0.27, MIT). The image calls are in the `images` module,
+// (CountTokens) (v8.0.32, MIT). The image calls are in the `images` module,
 // the video calls in the `videos` module and the speech calls in the
 // `speech` module.
 // https://github.com/router-for-me/CLIProxyAPI
@@ -568,7 +568,7 @@ impl XaiExecutor {
 }
 
 /// The error for an answer whose `apply_patch` call couldn't be carried
-/// over. xAI answered, so it keeps the answer's usage (v8.0.27's
+/// over. xAI answered, so it keeps the answer's usage (v8.0.32's
 /// `upstreamUsage.PublishFailure`).
 fn apply_patch_failure() -> ExecError {
     ExecError::from(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE)).with_usage_kept()

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/init.go
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OpenAI Responses and Interactions translators' registrations:

@@ -3,7 +3,7 @@
 // MergeAdjacentGeminiUserContents, ContainsJSONRef, SetGeminiFunctionResponseResult and
 // SetGeminiFunctionResponseRaw), internal/util/util.go (SanitizeFunctionName) and
 // internal/util/translator.go (SanitizedToolNameMap and RestoreSanitizedToolName)
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers for the `contents` of Gemini requests, shared by the translators

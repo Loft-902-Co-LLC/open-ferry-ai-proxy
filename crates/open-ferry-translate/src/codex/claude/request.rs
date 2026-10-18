@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.27, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → Codex (OpenAI Responses) request.

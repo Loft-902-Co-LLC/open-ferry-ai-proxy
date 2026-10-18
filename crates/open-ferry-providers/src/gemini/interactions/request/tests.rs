@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_interactions_translate_test.go
-// and helps/request_pair_error_test.go (v8.0.27, MIT).
+// and helps/request_pair_error_test.go (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! How the body and the payload rules' baseline are translated.
@@ -181,7 +181,7 @@ fn an_interactions_request_is_copied() {
     }
 }
 
-/// Ports v8.0.27's TestPairTranslationReportsOnlyTheWorkingError for the
+/// Ports v8.0.32's TestPairTranslationReportsOnlyTheWorkingError for the
 /// Interactions pair: only the body is sent, so only its translation's
 /// refusal counts; a refusal of the one translation that serves both does.
 #[test]

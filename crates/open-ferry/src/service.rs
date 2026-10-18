@@ -11,7 +11,7 @@
 // builder.go (runtimeAuthSyncHook), the
 // order of internal/watcher/synthesizer/config.go (Synthesize), and the
 // auth dispatch of internal/watcher's clients.go and config_reload.go
-// (v8.0.27, MIT).
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serving the proxy.
@@ -8111,7 +8111,7 @@ mod tests {
         WatchEvent::ConfigChanged(config, String::new())
     }
 
-    // Ported from sdk/cliproxy/service_codex_executor_binding_test.go (v8.0.27).
+    // Ported from sdk/cliproxy/service_codex_executor_binding_test.go (v8.0.32).
     #[tokio::test]
     async fn rebinding_codex_and_xai_keeps_their_shared_session_stores() {
         let dir = tempfile::tempdir().unwrap();
@@ -10112,7 +10112,7 @@ port: {port}
     }
 
     // Ported from server_claude_tool_search_test.go and
-    // codex_client_models_tool_search_test.go (v8.0.27, MIT).
+    // codex_client_models_tool_search_test.go (v8.0.32, MIT).
     #[tokio::test]
     async fn claude_search_reload_changes_the_catalog_and_the_sent_tools() {
         use axum::body::Bytes;
@@ -10419,7 +10419,7 @@ port: {port}
     }
 
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
-    /// sdk/cliproxy/service_executor_registration_test.go (v8.0.27, MIT)
+    /// sdk/cliproxy/service_executor_registration_test.go (v8.0.32, MIT)
     /// for the executors ported: Codex, Meta, Claude, Gemini, Gemini
     /// Interactions, Vertex AI, xAI and the baseline OpenAI-compatible one,
     /// with open-ferry's claude-cli. The plugin executor and the other
@@ -11141,7 +11141,7 @@ port: {port}
     /// The management API as the binary serves it, over TCP.
     ///
     /// Ports the management parts of CLIProxyAPI
-    /// internal/api/server_test.go (v8.0.27, MIT):
+    /// internal/api/server_test.go (v8.0.32, MIT):
     /// - `TestManagementResponseExposesPluginSupportHeaderForCORS`, without
     ///   its `X-CPA-SUPPORT-PLUGIN` check: the plugin host isn't ported and
     ///   the header isn't sent.

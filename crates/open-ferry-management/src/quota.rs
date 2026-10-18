@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/quota.go
-// (ResetQuota) and api_tools.go (authByIndex) (v8.0.27, MIT).
+// (ResetQuota) and api_tools.go (authByIndex) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v0/management/reset-quota` (also
