@@ -1833,6 +1833,11 @@ fn unsupported_prefill_models_strip_trailing_assistant() {
         "claude-opus-5.1",
         "claude-sonnet-4-6-20260217",
         " ANTHROPIC/CLAUDE-OPUS-5-THINKING ",
+        "claude-haiku-5-5",
+        "claude-haiku-5",
+        "claude-haiku-5.5",
+        "haiku-5-5",
+        "anthropic/claude-haiku-5-5",
     ] {
         let out = convert(
             model,
@@ -1860,6 +1865,8 @@ fn supported_prefill_models_preserve_assistant_prefill() {
     for model in [
         "claude-sonnet-4-5",
         "claude-haiku-4-5",
+        "claude-haiku-5foo",
+        "claude-haiku-20260217",
         "claude-3-opus-20240229",
         "claude-opus-20240229",
         "claude-sonnet-4-20260217",

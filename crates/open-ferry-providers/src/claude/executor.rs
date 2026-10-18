@@ -95,11 +95,11 @@ use super::oauth::{ClaudeAuth, Endpoints, REFRESH_LEAD};
 use super::ratelimit::{classify, fast_direct_error, plain_error, wrap_fast};
 use super::request::{
     DEFAULT_BASE_URL, FAST_MODE_BETA, MAX_CACHE_BREAKPOINTS, TOKEN_COUNTING_BETA,
-    count_cache_controls, credentials, disable_thinking_if_tool_choice_forced,
-    enforce_cache_control_limit, ensure_cache_control, ensure_model_max_tokens,
-    extract_and_remove_betas, is_anthropic_url, is_explicit_prompt_cache_mode,
-    normalize_cache_control_ttl, normalize_sampling, sanitize_for_upstream,
-    strip_prompt_cache_options, uses_bearer,
+    apply_preserved_thinking_binding, count_cache_controls, credentials,
+    disable_thinking_if_tool_choice_forced, enforce_cache_control_limit, ensure_cache_control,
+    ensure_model_max_tokens, extract_and_remove_betas, is_anthropic_url,
+    is_explicit_prompt_cache_mode, normalize_cache_control_ttl, normalize_sampling,
+    sanitize_for_upstream, strip_prompt_cache_options, uses_bearer,
 };
 use super::stream::{self, MAX_LINE, StreamSetup, apply_patch_error};
 use super::thinking;
@@ -263,6 +263,7 @@ impl ClaudeExecutor {
         if summary {
             compaction::finalize_summary(&mut body);
         }
+        apply_preserved_thinking_binding(&mut body);
         // The rules see the body as it is sent. Upstream tracks only the
         // diagnostics path, for its cloaking, which isn't ported.
         self.apply_payload_rules(
@@ -618,6 +619,7 @@ impl ClaudeExecutor {
         extra_betas.push(TOKEN_COUNTING_BETA.to_owned());
         sanitize_for_upstream(&mut body, base_model);
         strip_prompt_cache_options(&mut body);
+        apply_preserved_thinking_binding(&mut body);
         // Anthropic's count_tokens rejects these.
         for field in ["metadata", "context_management", "diagnostics"] {
             json::delete(&mut body, field);

@@ -51,7 +51,7 @@ use serde_json::Value;
 use super::client;
 use super::request::{
     ADVISOR_TOOL_BETA, AFTER_ADVISOR_BETAS, CLAUDE_CODE_BETA, EXTENDED_CACHE_TTL_BETA,
-    FAST_MODE_BETA, OAUTH_BETA, is_oauth_token, payload_has_1h_ttl,
+    FAST_MODE_BETA, OAUTH_BETA, THINKING_BINDING_BETA, is_oauth_token, payload_has_1h_ttl,
 };
 use crate::custom_headers;
 use crate::json;
@@ -162,6 +162,11 @@ fn betas(inputs: &Inputs<'_>) -> String {
     }
     for beta in inputs.extra_betas {
         append(beta);
+    }
+    // A body with `thinking.block_binding` is rejected unless the binding beta
+    // travels with it.
+    if json::get(inputs.body, "thinking.block_binding").is_some() {
+        append(THINKING_BINDING_BETA);
     }
     if !inputs.count_tokens && payload_has_1h_ttl(inputs.body) {
         betas = with_extended_cache_ttl_beta(&betas);
@@ -522,6 +527,38 @@ mod tests {
         }
         .build();
         assert_eq!(get(&headers, "anthropic-beta"), Some(ADVISOR_TOOL_BETA));
+    }
+
+    // Not upstream's: the binding beta rule is read from upstream's header code
+    // (a body with thinking.block_binding needs it), which has no test of its own.
+    #[test]
+    fn block_binding_needs_its_beta_once() {
+        let betas = |case: Case| get(&case.build(), "anthropic-beta").map(str::to_owned);
+        let bound = json!({"thinking": {"type": "adaptive", "block_binding": {}}});
+        assert_eq!(
+            betas(Case {
+                body: bound.clone(),
+                ..Case::default()
+            })
+            .as_deref(),
+            Some(THINKING_BINDING_BETA)
+        );
+        assert_eq!(
+            betas(Case {
+                body: bound,
+                client: vec![("anthropic-beta", THINKING_BINDING_BETA)],
+                ..Case::default()
+            })
+            .as_deref(),
+            Some(THINKING_BINDING_BETA)
+        );
+        assert_eq!(
+            betas(Case {
+                body: json!({"thinking": {"type": "adaptive"}}),
+                ..Case::default()
+            }),
+            None
+        );
     }
 
     // The caller-owned cases of TestApplyClaudeHeaders_FastModeBetaIsConditional.
