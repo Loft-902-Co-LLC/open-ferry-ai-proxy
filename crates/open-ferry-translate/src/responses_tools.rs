@@ -16,7 +16,8 @@
 //! maps both ways: from the client's names to Gemini's, and from Gemini's back
 //! to the tool's [`ToolIdentity`].
 //!
-//! Deviations from upstream: none.
+//! Deviations from upstream: the reverse identity map shares the declaration
+//! builder's naming plan without cleaning schemas whose results it discards.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -292,6 +293,50 @@ pub(crate) struct GeminiDeclarations {
 /// `BuildGeminiFunctionDeclarations`: the request's function and custom
 /// tools as Gemini function declarations, with the name maps.
 pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarations {
+    let (mut out, planned) = plan_gemini_tools(root);
+    let mut copy_budget = SchemaCopyBudget::default();
+    for (gemini_name, descriptor) in planned {
+        let is_apply_patch = apply_patch::is_custom_tool(descriptor.tool);
+        let mut description = tool_description(descriptor.tool);
+        let parameters = if is_apply_patch {
+            description = apply_patch::description(descriptor.tool);
+            apply_patch::parameters()
+        } else if descriptor.custom {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+            })
+        } else if descriptor.client_search {
+            tool_parameters(descriptor.tool)
+                .filter(|v| v.is_object())
+                .map_or_else(
+                    || {
+                        serde_json::json!({"type":"object","properties":{
+                    "query":{"type":"string","description":"Search query for deferred tools."},
+                    "limit":{"type":"number","description":"Maximum number of tools to return."}
+                },"required":["query"],"additionalProperties":false})
+                    },
+                    |schema| clean_json_schema_for_gemini_json_schema(schema, &mut copy_budget),
+                )
+        } else {
+            tool_parameters(descriptor.tool).map_or_else(
+                || Value::Object(Default::default()),
+                |schema| clean_json_schema_for_gemini_json_schema(schema, &mut copy_budget),
+            )
+        };
+        out.declarations.push(object([
+            ("name", Value::String(gemini_name)),
+            ("description", Value::String(description)),
+            ("parametersJsonSchema", parameters),
+        ]));
+    }
+    out
+}
+
+/// Resolve winners, names, search shims and every identity/alias once, without
+/// inspecting or cleaning tool schemas. Both request and response paths use it.
+fn plan_gemini_tools(root: &Value) -> (GeminiDeclarations, Vec<(String, ToolDescriptor<'_>)>) {
     let descriptors = collect_descriptors(root, true);
     // A user function named tool_search and the shim win independently.
     let mut winners = HashMap::new();
@@ -308,7 +353,7 @@ pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarat
         .iter()
         .enumerate()
         .filter(|(i, (name, d))| winners.get(&(name.as_str(), d.client_search)) == Some(i))
-        .map(|(_, d)| d)
+        .map(|(_, d)| d.clone())
         .collect();
     let mut out = GeminiDeclarations::default();
     let history = root
@@ -363,7 +408,7 @@ pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarat
             },
         );
     }
-    let mut copy_budget = SchemaCopyBudget::default();
+    let mut planned = Vec::new();
     for (name, descriptor) in &winning {
         let gemini_name = if descriptor.client_search {
             shim.clone()
@@ -391,42 +436,10 @@ pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarat
             out.reverse.insert(name.clone(), identity);
         }
 
-        let mut description = tool_description(descriptor.tool);
-        let parameters = if is_apply_patch {
-            description = apply_patch::description(descriptor.tool);
-            apply_patch::parameters()
-        } else if descriptor.custom {
-            serde_json::json!({
-                "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
-            })
-        } else if descriptor.client_search {
-            tool_parameters(descriptor.tool)
-                .filter(|v| v.is_object())
-                .map_or_else(
-                    || {
-                        serde_json::json!({"type":"object","properties":{
-                    "query":{"type":"string","description":"Search query for deferred tools."},
-                    "limit":{"type":"number","description":"Maximum number of tools to return."}
-                },"required":["query"],"additionalProperties":false})
-                    },
-                    |schema| clean_json_schema_for_gemini_json_schema(schema, &mut copy_budget),
-                )
-        } else {
-            tool_parameters(descriptor.tool).map_or_else(
-                || Value::Object(Default::default()),
-                |schema| clean_json_schema_for_gemini_json_schema(schema, &mut copy_budget),
-            )
-        };
-        out.declarations.push(object([
-            ("name", Value::String(gemini_name)),
-            ("description", Value::String(description)),
-            ("parametersJsonSchema", parameters),
-        ]));
+        planned.push((gemini_name, descriptor.clone()));
     }
     // Local aliases must not shadow direct names or the search shim.
-    for (name, descriptor) in winning {
+    for (name, descriptor) in &winning {
         if !descriptor.client_search
             && !descriptor.local_name.is_empty()
             && descriptor.local_name != *name
@@ -437,7 +450,7 @@ pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarat
                 .or_insert(mapped);
         }
     }
-    out
+    (out, planned)
 }
 
 /// Internal map key separating the search shim from a user function of the same name.
@@ -527,7 +540,7 @@ pub(crate) fn responses_tool_reverse_identity_map(raw: &Value) -> HashMap<String
     {
         root = request;
     }
-    build_gemini_function_declarations(root).reverse
+    plan_gemini_tools(root).0.reverse
 }
 
 /// `MapResponsesToolName`: the Gemini name for a tool name, from `forward`
@@ -862,5 +875,54 @@ mod client_search_collision_tests {
             {"type":"tool_search_call","call_id":"search_1","arguments":{}}]}));
         assert!(history.declarations.is_empty());
         assert!(history.reverse["tool_search"].tool_search);
+    }
+    // Not upstream's: reverse identities must match the builder even when schemas exceed the copy budget.
+    #[test]
+    fn reverse_map_matches_builder_without_cleaning_over_budget_schemas() {
+        let schema = json!({"type":"object","properties":{"a":{"type":"string","description":"x".repeat(12_600)}},
+            "anyOf":vec![json!({"required":["a"]});700]});
+        let root = json!({"tools":[
+            {"type":"function","name":"a.b","parameters":schema},
+            {"type":"function","name":"a-b","parameters":schema},
+            {"type":"namespace","name":"ns","tools":[{"type":"custom","name":"custom"}]},
+            {"type":"custom","name":"apply_patch"}
+        ],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"a.b"}]}]});
+        let mut requests = vec![root.clone()];
+        let mut search = root;
+        search["tools"].as_array_mut().unwrap().extend([
+            json!({"type":"tool_search","execution":"client"}),
+            json!({"type":"function","name":"tool_search","parameters":schema}),
+            json!({"type":"function","name":"a.b","defer_loading":true,"parameters":schema}),
+            json!({"type":"function","name":"a-b","defer_loading":true,"parameters":schema}),
+        ]);
+        requests.push(search);
+        requests.push(
+            json!({"input":[{"type":"tool_search_call","id":"search_call","arguments":{}}],
+            "tools":[{"type":"function","name":"a.b","defer_loading":true,"parameters":schema},
+                {"type":"function","name":"a-b","defer_loading":true,"parameters":schema}]}),
+        );
+        requests.push(json!({"tools":[
+            {"type":"tool_search","execution":"client"},
+            {"type":"function","name":"tool_search"},
+            {"type":"function","name":"a.b","defer_loading":true,"parameters":schema},
+            {"type":"function","name":"a-b","defer_loading":true,"parameters":schema}
+        ]}));
+        for root in requests {
+            let declarations = build_gemini_function_declarations(&root);
+            assert!(
+                declarations
+                    .declarations
+                    .iter()
+                    .all(|declaration| declaration["parametersJsonSchema"].get("anyOf").is_none())
+            );
+            assert_eq!(
+                responses_tool_reverse_identity_map(&root),
+                declarations.reverse
+            );
+            assert_eq!(
+                responses_tool_reverse_identity_map(&json!({"request":root})),
+                declarations.reverse
+            );
+        }
     }
 }
