@@ -962,6 +962,23 @@ async fn preserved_thinking_replay_injects_drop_block() {
     }
 }
 
+// Not upstream's: upstream's executor tests only replay a signed `thinking`
+// block. A `redacted_thinking` block with data is also signed history, so it
+// needs the binding and the beta too.
+#[tokio::test]
+async fn redacted_thinking_replay_injects_drop_block() {
+    let model = "claude-opus-5-5";
+    let mut payload = preserved_thinking_replay_payload(model);
+    payload["messages"][1]["content"][0] = json!({"type": "redacted_thinking", "data": "ZGF0YQ=="});
+    let (body, betas) = capture_claude_request("", false, model, payload).await;
+    assert_eq!(drop_block_behavior(&body), "drop_block", "{body}");
+    assert!(betas.contains(THINKING_BINDING_BETA_NAME), "{betas}");
+    assert_eq!(
+        body["messages"][1]["content"][0]["type"], "redacted_thinking",
+        "{body}"
+    );
+}
+
 // Ported from TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlockOnStream.
 #[tokio::test]
 async fn preserved_thinking_replay_injects_drop_block_on_stream() {
