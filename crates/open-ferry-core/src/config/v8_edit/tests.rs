@@ -664,3 +664,21 @@ fn signin_with_chatgpt_identifier_accepts_put_and_patch() {
         );
     }
 }
+
+// Not upstream's: all new carried settings must be accepted by the management schema.
+#[test]
+fn v8_edits_accept_v32_carried_settings() {
+    let update = edit(
+        V8Method::Patch,
+        "",
+        r#"{"requests":{"tls-handshake-timeout-seconds":12},"upstream":{"claude":{"session-date-pin-days":0,"header-defaults":{"anthropic-beta-strip":[" beta "],"anthropic-beta-append":["extra"],"inject-diagnostics":false,"client-request-id":"off"}}}}"#,
+    );
+    let out = rendered("config-version: 8\n", &update).expect("edit");
+    let cfg = Config::parse(out.as_bytes()).expect("parse");
+    assert_eq!(cfg.tls_handshake_timeout_seconds, 12);
+    assert_eq!(cfg.claude.session_date_pin_days, Some(0));
+    assert_eq!(cfg.claude_header_defaults.anthropic_beta_strip, ["beta"]);
+    assert_eq!(cfg.claude_header_defaults.anthropic_beta_append, ["extra"]);
+    assert_eq!(cfg.claude_header_defaults.inject_diagnostics, Some(false));
+    assert_eq!(cfg.claude_header_defaults.client_request_id, "off");
+}

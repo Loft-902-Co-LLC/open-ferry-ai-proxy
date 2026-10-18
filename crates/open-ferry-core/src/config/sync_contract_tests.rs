@@ -1,4 +1,5 @@
 // Ported from CLIProxyAPI internal/config/claude_code_test.go,
+// claude_header_defaults_test.go, tls_handshake_timeout_test.go,
 // internal/watcher/diff/config_diff_test.go and the configuration contracts
 // in internal/config/config_types.go, sdk_config.go and vertex_compat.go
 // (v8.0.27, MIT).
@@ -260,4 +261,139 @@ fn v8_edits_accept_every_new_key_and_list_it_in_the_schema() {
         };
         v8_edit::preview_v8(V8.as_bytes(), &edit).expect(path);
     }
+}
+
+// Ported from TestParseConfigBytes_ClaudeHeaderDefaultsOperatorOverrides.
+#[test]
+fn claude_header_operator_overrides_normalize() {
+    for prefix in [
+        "claude-header-defaults:\n",
+        "upstream:\n  claude:\n    header-defaults:\n",
+    ] {
+        let indent = if prefix.starts_with("upstream") {
+            "      "
+        } else {
+            "  "
+        };
+        let yaml = format!(
+            "{prefix}{indent}anthropic-beta-strip: [' beta-a ', '', beta-a]\n{indent}anthropic-beta-append: [beta-b, ' beta-b ', beta-c]\n{indent}inject-diagnostics: false\n{indent}client-request-id: ' PassThrough '\n"
+        );
+        let cfg = Config::parse(yaml.as_bytes()).expect("parse");
+        let hd = &cfg.claude_header_defaults;
+        assert_eq!(hd.anthropic_beta_strip, ["beta-a"]);
+        assert_eq!(hd.anthropic_beta_append, ["beta-b", "beta-c"]);
+        assert_eq!(hd.inject_diagnostics, Some(false));
+        assert_eq!(hd.client_request_id, "passthrough");
+        for migrate in [false, true] {
+            let out =
+                save::render_preserving_comments(yaml.as_bytes(), &cfg, migrate).expect("save");
+            let loaded = Config::parse(&out).expect("reload");
+            assert!(loaded.claude_header_defaults == *hd);
+        }
+    }
+    for (raw, want) in [("sometimes", ""), (" ON ", "on"), ("Off", "off")] {
+        let yaml = format!("claude-header-defaults: {{client-request-id: '{raw}'}}\n");
+        assert_eq!(
+            Config::parse(yaml.as_bytes())
+                .unwrap()
+                .claude_header_defaults
+                .client_request_id,
+            want
+        );
+    }
+}
+
+// Ported from TestParseConfigBytesClaudeSessionDatePinDays and
+// TestSaveConfigPreserveComments_SessionDatePinDaysExplicitZeroWhenAbsent /
+// TestSaveConfigPreserveComments_SessionDatePinDaysDefaultNotPersisted.
+#[test]
+fn claude_session_date_pin_defaults_and_saves() {
+    for (yaml, want) in [
+        ("port: 8317\n", 7),
+        ("claude:\n  session-date-pin-days: 14\n", 14),
+        ("upstream:\n  claude:\n    session-date-pin-days: 7\n", 7),
+        ("upstream:\n  claude:\n    session-date-pin-days: 0\n", 0),
+        ("claude:\n  session-date-pin-days: 0\n", 0),
+    ] {
+        assert_eq!(
+            Config::parse(yaml.as_bytes())
+                .unwrap()
+                .claude
+                .session_date_pin_days,
+            Some(want)
+        );
+    }
+    for migrate in [false, true] {
+        let yaml = b"port: 8317\n";
+        let mut cfg = Config::parse(yaml).unwrap();
+        let out = save::render_preserving_comments(yaml, &cfg, migrate).unwrap();
+        assert!(!String::from_utf8_lossy(&out).contains("session-date-pin-days"));
+        cfg.claude.session_date_pin_days = Some(0);
+        cfg.claude_header_defaults.inject_diagnostics = Some(false);
+        let out = save::render_preserving_comments(yaml, &cfg, migrate).unwrap();
+        assert!(String::from_utf8_lossy(&out).contains("session-date-pin-days: 0"));
+        let loaded = Config::parse(&out).unwrap();
+        assert_eq!(loaded.claude.session_date_pin_days, Some(0));
+        assert_eq!(
+            loaded.claude_header_defaults.inject_diagnostics,
+            Some(false)
+        );
+    }
+}
+
+// Ported from TestParseConfigBytesRequestsTLSHandshakeTimeout,
+// TestParseConfigBytesRequestsTLSHandshakeTimeoutLegacyLayout,
+// TestParseConfigBytesRequestsTLSHandshakeTimeoutPrecedence and
+// TestParseConfigBytesUpstreamClaudeTLSHandshakeTimeoutIgnored.
+#[test]
+fn tls_handshake_timeout_layouts_and_precedence() {
+    for (yaml, want) in [
+        ("requests:\n  tls-handshake-timeout-seconds: 12\n", 12),
+        ("tls-handshake-timeout-seconds: 7\n", 7),
+        (
+            "tls-handshake-timeout-seconds: 7\nrequests:\n  tls-handshake-timeout-seconds: 12\n",
+            12,
+        ),
+        (
+            "tls-handshake-timeout-seconds: 7\nrequests:\n  tls-handshake-timeout-seconds: 0\n",
+            0,
+        ),
+        (
+            "upstream:\n  claude:\n    tls-handshake-timeout-seconds: 99\n",
+            0,
+        ),
+        ("tls-handshake-timeout-seconds: -5\n", -5),
+        (
+            "tls-handshake-timeout-seconds: 9223372036854775807\n",
+            i64::MAX,
+        ),
+    ] {
+        let cfg = Config::parse(yaml.as_bytes()).unwrap();
+        assert_eq!(cfg.tls_handshake_timeout_seconds, want);
+        for migrate in [false, true] {
+            let out = save::render_preserving_comments(yaml.as_bytes(), &cfg, migrate).unwrap();
+            assert_eq!(
+                Config::parse(&out).unwrap().tls_handshake_timeout_seconds,
+                want
+            );
+        }
+    }
+}
+
+// Not upstream's: carried header overrides must never leak values in reload logs.
+#[test]
+fn v32_carried_settings_have_redacted_diff_lines() {
+    let old = Config::default();
+    let mut new = old.clone();
+    new.tls_handshake_timeout_seconds = 12;
+    new.claude.session_date_pin_days = Some(0);
+    new.claude_header_defaults
+        .anthropic_beta_append
+        .push("private-beta-name".into());
+    let lines = diff::build_change_details(&old, &new).join("\n");
+    assert!(lines.contains("tls-handshake-timeout-seconds: 0 -> 12"));
+    assert!(lines.contains("claude.session-date-pin-days:"));
+    assert!(lines.contains("claude-header-defaults: updated"));
+    assert!(!lines.contains("private-beta-name"));
+    assert!(!format!("{new:?}").contains("private-beta-name"));
 }

@@ -79,12 +79,17 @@ static CONFIG_CLAUDE_CONFIG: Type = Type {
     fields: &[
         ("model-level-cooling", Field::Leaf),
         ("tool-search", Field::Leaf),
+        ("session-date-pin-days", Field::Leaf),
     ],
 };
 
 static CONFIG_CLAUDE_HEADER_DEFAULTS: Type = Type {
     name: "config.ClaudeHeaderDefaults",
     fields: &[
+        ("anthropic-beta-strip", Field::Leaf),
+        ("anthropic-beta-append", Field::Leaf),
+        ("inject-diagnostics", Field::Leaf),
+        ("client-request-id", Field::Leaf),
         ("arch", Field::Leaf),
         ("os", Field::Leaf),
         ("package-version", Field::Leaf),
@@ -605,6 +610,7 @@ pub(super) static CONFIG_LEGACY_CONFIG: Type = Type {
         ("port", Field::Leaf),
         ("pprof", Field::Struct(&CONFIG_PPROF_CONFIG)),
         ("proxy-url", Field::Leaf),
+        ("tls-handshake-timeout-seconds", Field::Leaf),
         ("quota-exceeded", Field::Struct(&CONFIG_QUOTA_EXCEEDED)),
         ("redis-usage-queue-retention-seconds", Field::Leaf),
         (

@@ -179,6 +179,10 @@ pub(super) fn config(config: &Config) -> Json {
         )
         .with("proxy-url", string(&config.proxy_url))
         .with(
+            "tls-handshake-timeout-seconds",
+            Json::Int(config.tls_handshake_timeout_seconds),
+        )
+        .with(
             "disable-image-generation",
             image_generation(config.disable_image_generation),
         )
@@ -360,11 +364,43 @@ pub(super) fn config(config: &Config) -> Json {
                     Json::Bool(config.claude.model_level_cooling),
                 )
                 .with("tool-search", Json::Bool(config.claude.tool_search))
+                .with(
+                    "session-date-pin-days",
+                    config
+                        .claude
+                        .session_date_pin_days
+                        .map(Json::Int)
+                        .unwrap_or(Json::Null),
+                )
                 .done(),
         )
         .with(
             "claude-api-key",
             slice(&config.claude_api_key, |key| claude_key(key, "")),
+        )
+        .with(
+            "claude-header-defaults",
+            Fields::new()
+                .omit_empty(
+                    "anthropic-beta-strip",
+                    strings(&config.claude_header_defaults.anthropic_beta_strip),
+                )
+                .omit_empty(
+                    "anthropic-beta-append",
+                    strings(&config.claude_header_defaults.anthropic_beta_append),
+                )
+                .omit_nil(
+                    "inject-diagnostics",
+                    config
+                        .claude_header_defaults
+                        .inject_diagnostics
+                        .map(Json::Bool),
+                )
+                .omit_empty(
+                    "client-request-id",
+                    string(&config.claude_header_defaults.client_request_id),
+                )
+                .done(),
         )
         .omit_empty("claude-cli", slice(&config.claude_cli, claude_cli))
         .omit_nil("self-update", self_update(&config.self_update))
@@ -878,6 +914,28 @@ mod tests {
         assert!(config(&cfg).encode().contains(
             r#""routing":{"strategy":"round-robin","session-affinity":true,"session-affinity-ttl":"1h","session-affinity-subagents":false,"session-affinity-rebind-on":"quota"}"#
         ));
+    }
+
+    // Not upstream's: pin the carried keys' JSON names and pointer omission rules.
+    #[test]
+    fn v32_carried_config_json() {
+        let cfg = Config::parse(b"requests: {tls-handshake-timeout-seconds: 12}\nupstream:\n  claude:\n    session-date-pin-days: 0\n    header-defaults: {anthropic-beta-strip: [beta], inject-diagnostics: false, client-request-id: off}\n").unwrap();
+        let value: Value = serde_json::from_str(&config(&cfg).encode()).unwrap();
+        assert_eq!(value["tls-handshake-timeout-seconds"], 12);
+        assert_eq!(value["claude"]["session-date-pin-days"], 0);
+        assert_eq!(value["claude-header-defaults"]["inject-diagnostics"], false);
+        assert_eq!(value["claude-header-defaults"]["client-request-id"], "off");
+        assert_eq!(
+            value["claude-header-defaults"]["anthropic-beta-strip"],
+            json!(["beta"])
+        );
+        let value: Value = serde_json::from_str(&config(&Config::default()).encode()).unwrap();
+        assert!(
+            value["claude-header-defaults"]
+                .get("inject-diagnostics")
+                .is_none()
+        );
+        assert_eq!(value["claude"]["session-date-pin-days"], 7);
     }
 
     #[test]

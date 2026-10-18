@@ -117,7 +117,7 @@ fn field_hint(owner: &str, key: &str) -> &'static str {
         ("config.CodexKey", "models") => "[]config.CodexModel",
         ("config.ClaudeKey" | "config.ClaudeCLI", "models") => "[]config.ClaudeModel",
         (_, "headers") => "map[string]string",
-        (_, "excluded-models") => "[]string",
+        (_, "excluded-models" | "anthropic-beta-strip" | "anthropic-beta-append") => "[]string",
         (_, "request-scoped-errors") => "[]config.RequestScopedErrorRule",
         ("registry.ThinkingSupport", "levels") => "[]string",
         ("config.RequestScopedErrorRule", "match" | "match-regexr") => "[]string",

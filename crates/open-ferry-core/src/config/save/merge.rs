@@ -26,6 +26,9 @@
 //! upstream's `[]string` path is.
 //!
 //! Deviations from upstream:
+//! - Claude's pointer-backed `inject-diagnostics: false` is preserved when
+//!   newly inserted, including a new parent mapping, as an explicit override.
+//!   Upstream's default-pruning whitelist omits it.
 //! - Vertex's pointer-backed `interactions: false` is preserved when newly
 //!   inserted, like the other optional booleans. Upstream's default-pruning
 //!   whitelist omits it, so that save loses an explicit false.
@@ -76,7 +79,14 @@ const UNTYPED: &[&[&str]] = &[
     &["antigravity-signature-bypass-strict"],
     &["antigravity"],
     &["devin"],
-    &["claude-header-defaults"],
+    &["claude-header-defaults", "user-agent"],
+    &["claude-header-defaults", "package-version"],
+    &["claude-header-defaults", "runtime-version"],
+    &["claude-header-defaults", "os"],
+    &["claude-header-defaults", "arch"],
+    &["claude-header-defaults", "timeout"],
+    &["claude-header-defaults", "timezone"],
+    &["claude-header-defaults", "stabilize-device-profile"],
     &["disable-claude-cloak-mode"],
     &["codex", "disable-codex-cloaking"],
     &["codex", "live-media-relay"],
@@ -406,9 +416,23 @@ fn is_known_default_value(path: &[String], node: &Node) -> bool {
     }
     if matches!(
         last,
-        Some("cache-user-id" | "disable-cooling" | "interactions")
+        Some("cache-user-id" | "disable-cooling" | "interactions" | "inject-diagnostics")
     ) && node.kind == Kind::Scalar
         && node.tag == BOOL_TAG
+    {
+        return false;
+    }
+    if last == Some("session-date-pin-days")
+        && node.kind == Kind::Scalar
+        && node.tag == INT_TAG
+        && node.value == "0"
+    {
+        return false;
+    }
+    if node.kind == Kind::Mapping
+        && ["session-date-pin-days", "inject-diagnostics"]
+            .iter()
+            .any(|key| find_map_key_index(node, key).is_some())
     {
         return false;
     }
@@ -431,7 +455,9 @@ fn is_known_default_value(path: &[String], node: &Node) -> bool {
             return node.value == default;
         }
     }
-    node.tag == INT_TAG && full == "error-logs-max-files" && node.value == "10"
+    node.tag == INT_TAG
+        && ((full == "error-logs-max-files" && node.value == "10")
+            || (full == "claude.session-date-pin-days" && node.value == "7"))
 }
 
 /// `pruneKnownDefaultsInNewNode`: removes the zero and default values from

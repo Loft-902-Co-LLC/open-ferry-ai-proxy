@@ -15,3 +15,14 @@ Both legacy and v8 YAML layouts are accepted. The v8 management API edits the v8
 The compatibility-only `signin-with-chatgpt-identifier` has no runtime effect and warns once per load when set, without logging its value.
 
 These other switches' configuration contract is available for the v8.0.27 sync. Runtime behavior is wired by the corresponding provider and server changes.
+
+The v8.0.32 contract also carries these settings for compatibility. open-ferry ignores them because it does not impersonate clients or cloak Claude requests.
+
+| v8 path | Legacy path | Default and meaning |
+|---|---|---|
+| `requests.tls-handshake-timeout-seconds` | `tls-handshake-timeout-seconds` | Integer, `0`. Upstream bounds only uTLS handshakes; its standard fallback transport is unaffected. Retained but ignored here. |
+| `upstream.claude.session-date-pin-days` | `claude.session-date-pin-days` | Optional integer, defaults to `7`; explicit `0` is retained. Upstream's cloaked session date retention. Ignored here. |
+| `upstream.claude.header-defaults.anthropic-beta-strip` | `claude-header-defaults.anthropic-beta-strip` | String list, empty. Trimmed and deduplicated in order, with empty names removed. Ignored here. |
+| `upstream.claude.header-defaults.anthropic-beta-append` | `claude-header-defaults.anthropic-beta-append` | String list, empty. Same normalization as strip. Ignored here. |
+| `upstream.claude.header-defaults.inject-diagnostics` | `claude-header-defaults.inject-diagnostics` | Optional boolean, unset means `true` upstream. Explicit false is retained. Ignored here. |
+| `upstream.claude.header-defaults.client-request-id` | `claude-header-defaults.client-request-id` | String, empty means `on` upstream. Trimmed and lowercased; `on`, `off`, `passthrough` accepted, unknown modes reset to empty. Ignored here. |

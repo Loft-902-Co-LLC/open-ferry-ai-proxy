@@ -686,7 +686,7 @@ async fn config_is_written_as_upstream_writes_it() {
         concat!(
             r#"{{"models":{{"codex-catalog":"https://example.com/codex.json"}},"#,
             r#""max-request-body-bytes":0,"client":{{"codex":{{"optimize-multi-agent-v2":true,"enable-apply-patch":false}}}},"#,
-            r#""proxy-url":"socks5://127.0.0.1:1080","disable-image-generation":false,"#,
+            r#""proxy-url":"socks5://127.0.0.1:1080","tls-handshake-timeout-seconds":0,"disable-image-generation":false,"#,
             r#""force-model-prefix":true,"request-log":true,"#,
             r#""api-keys":["k1","k2"],"passthrough-headers":true,"#,
             r#""streaming":{{"keepalive-seconds":15,"bootstrap-retries":2}},"#,
@@ -708,7 +708,7 @@ async fn config_is_written_as_upstream_writes_it() {
             r#""codex":{{"stream-bootstrap-buffering":true,"#,
             r#""orphan-delegation-compatibility":false,"model-level-cooling":true,"#,
             r#""response-steering":false}},"codex-header-defaults":{{"beta-features":"x"}},"#,
-            r#""claude":{{"model-level-cooling":true,"tool-search":false}},"claude-api-key":{claude},"#,
+            r#""claude":{{"model-level-cooling":true,"tool-search":false,"session-date-pin-days":7}},"claude-api-key":{claude},"claude-header-defaults":{{}},"#,
             r#""openai-compatibility":[{{"name":"Mimo CN","#,
             r#""base-url":"https://token-plan-cn.xiaomimimo.com/v1","#,
             r#""api-key-entries":[{{"api-key":"test-key","proxy-url":"http://q.example"}}],"#,
@@ -730,7 +730,7 @@ async fn config_is_written_as_upstream_writes_it() {
 
     let empty = concat!(
         r#"{"models":{},"max-request-body-bytes":0,"client":{"codex":{"optimize-multi-agent-v2":false,"enable-apply-patch":false}},"#,
-        r#""proxy-url":"","disable-image-generation":false,"force-model-prefix":false,"#,
+        r#""proxy-url":"","tls-handshake-timeout-seconds":0,"disable-image-generation":false,"force-model-prefix":false,"#,
         r#""request-log":false,"api-keys":null,"#,
         r#""passthrough-headers":false,"streaming":{},"trusted-proxies":null,"#,
         r#""tls":{"enable":false,"cert":"","key":""},"debug":false,"commercial-mode":false,"#,
@@ -746,8 +746,8 @@ async fn config_is_written_as_upstream_writes_it() {
         r#""xai":{"inject-x-search":false},"#,
         r#""codex":{"stream-bootstrap-buffering":false,"orphan-delegation-compatibility":false,"#,
         r#""model-level-cooling":false,"response-steering":false},"#,
-        r#""codex-header-defaults":{"beta-features":""},"claude":{"model-level-cooling":false,"tool-search":false},"#,
-        r#""claude-api-key":null,"openai-compatibility":null,"vertex-api-key":null,"#,
+        r#""codex-header-defaults":{"beta-features":""},"claude":{"model-level-cooling":false,"tool-search":false,"session-date-pin-days":7},"#,
+        r#""claude-api-key":null,"claude-header-defaults":{},"openai-compatibility":null,"vertex-api-key":null,"#,
         r#""payload":{"default":null,"default-raw":null,"override":null,"override-raw":null,"#,
         r#""filter":null}}"#,
     );
@@ -788,7 +788,7 @@ xai: {inject-x-search: true}
 "#;
 
 /// Not upstream's: open-ferry's `claude-cli` list is written after the
-/// Claude keys, with its defaults left out, and kept at the top level of the
+/// Claude header defaults, with its defaults left out, and kept at the top level of the
 /// v8 read.
 #[tokio::test]
 async fn claude_cli_is_written() {
@@ -796,7 +796,7 @@ async fn claude_cli_is_written() {
     let answer = with_config(raw).get("/v0/management/config").await;
     assert_eq!(answer.status, StatusCode::OK);
     let part = concat!(
-        r#""claude-api-key":null,"claude-cli":[{"name":"max-1","#,
+        r#""claude-api-key":null,"claude-header-defaults":{},"claude-cli":[{"name":"max-1","#,
         r#""config-dir":"/srv/claude","timeout":"2m","weight":3}],"#,
         r#""openai-compatibility":null"#,
     );
@@ -856,7 +856,7 @@ async fn self_update_is_written() {
     let answer = with_config(raw).get("/v0/management/config").await;
     assert_eq!(answer.status, StatusCode::OK);
     let part = concat!(
-        r#""claude-api-key":null,"self-update":{"mode":"off","check-every":"12h"},"#,
+        r#""claude-api-key":null,"claude-header-defaults":{},"self-update":{"mode":"off","check-every":"12h"},"#,
         r#""openai-compatibility":null"#,
     );
     assert!(answer.body.contains(part), "{}", answer.body);
@@ -1416,7 +1416,7 @@ async fn config_v8_api_keys_expose_auth_index_as_the_loader_makes_them() {
     assert_unchanged(&dir, &raw);
 }
 
-/// Not upstream's: `disable-image-generation` is written after `proxy-url`
+/// Not upstream's: `disable-image-generation` follows the proxy and TLS timeout
 /// as upstream's `MarshalJSON` writes the mode, from either layout, and
 /// the v8 reads give it at `multimedia.disable-image-generation` as the
 /// file has it. Recorded from upstream's `GetConfig` and `ConfigV8`
@@ -1459,7 +1459,7 @@ async fn disable_image_generation_is_read() {
         let answer = with_config(raw).get("/v0/management/config").await;
         assert_eq!(answer.status, StatusCode::OK);
         let part = format!(
-            r#""proxy-url":"","disable-image-generation":{written},"force-model-prefix":false,"#
+            r#""proxy-url":"","tls-handshake-timeout-seconds":0,"disable-image-generation":{written},"force-model-prefix":false,"#
         );
         assert!(answer.body.contains(&part), "{raw}: {}", answer.body);
 

@@ -44,6 +44,10 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     ("max-request-body-bytes", "server.max-request-body-bytes"),
     ("proxy-url", "requests.proxy-url"),
     (
+        "tls-handshake-timeout-seconds",
+        "requests.tls-handshake-timeout-seconds",
+    ),
+    (
         "disable-image-generation",
         "multimedia.disable-image-generation",
     ),
@@ -347,6 +351,26 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
         "upstream.claude.model-level-cooling",
     ),
     ("claude.tool-search", "upstream.claude.tool-search"),
+    (
+        "claude.session-date-pin-days",
+        "upstream.claude.session-date-pin-days",
+    ),
+    (
+        "claude-header-defaults.anthropic-beta-strip",
+        "upstream.claude.header-defaults.anthropic-beta-strip",
+    ),
+    (
+        "claude-header-defaults.anthropic-beta-append",
+        "upstream.claude.header-defaults.anthropic-beta-append",
+    ),
+    (
+        "claude-header-defaults.inject-diagnostics",
+        "upstream.claude.header-defaults.inject-diagnostics",
+    ),
+    (
+        "claude-header-defaults.client-request-id",
+        "upstream.claude.header-defaults.client-request-id",
+    ),
     (
         "claude-header-defaults.user-agent",
         "upstream.claude.header-defaults.user-agent",
@@ -847,7 +871,7 @@ mod tests {
     #[test]
     fn paths_table_matches_upstream_shape() {
         // Upstream's, and open-ferry's management.separate-address.
-        assert_eq!(V8_PATHS.len(), 118 + 1);
+        assert_eq!(V8_PATHS.len(), 124 + 1);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();

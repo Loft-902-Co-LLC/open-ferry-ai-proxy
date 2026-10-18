@@ -10,6 +10,9 @@
 # providers, pprof, plugins and Home mode, are left out; see
 # UPSTREAM.md for what isn't ported. A CLIProxyAPI config that has them still loads, and
 # open-ferry ignores them.
+# The compatibility-only tls-handshake-timeout-seconds, Claude session-date-pin-days
+# and Claude header overrides (anthropic-beta-strip, anthropic-beta-append,
+# inject-diagnostics and client-request-id) are omitted too; see docs/configuration.md.
 #
 # Existing legacy configuration files and /v0/management requests remain supported.
 # When both spellings of a field are present, the v8 value wins (including false,
