@@ -55,7 +55,7 @@ use crate::common::file_data::normalize_openai_file_data;
 use crate::common::gemini::sanitize_gemini_function_name;
 use crate::common::parts::{UserTurnDrops, count_sendable_gemini_parts};
 use crate::gemini::common::attach_default_safety_settings;
-use crate::gemini_schema::clean_json_schema_for_gemini_json_schema;
+use crate::gemini_schema::{SchemaCopyBudget, clean_json_schema_for_gemini_json_schema};
 use crate::go;
 use crate::json::{delete_path, float_of, int_of, object, path, set_path, str_of};
 use crate::registry::UnsupportedPartError;
@@ -559,6 +559,7 @@ struct Tools {
 /// search, code execution and URL context tool, passed through. With
 /// `allowed`, functions not named there are left out.
 fn convert_tools(out: &mut Value, tools: Option<&Value>, allowed: Option<&AllowedTools>) -> Tools {
+    let mut copy_budget = SchemaCopyBudget::default();
     let mut converted = Tools::default();
     let Some(Value::Array(tools)) = tools else {
         return converted;
@@ -575,9 +576,14 @@ fn convert_tools(out: &mut Value, tools: Option<&Value>, allowed: Option<&Allowe
             let sanitized = sanitize_gemini_function_name(&name);
             *converted.counts.entry(sanitized.clone()).or_default() += 1;
             converted.sanitized.insert(name.clone(), sanitized.clone());
-            let Some(declaration) =
-                function_declaration(function, tool, &name, sanitized, &mut converted.has_strict)
-            else {
+            let Some(declaration) = function_declaration(
+                function,
+                tool,
+                &name,
+                sanitized,
+                &mut converted.has_strict,
+                &mut copy_budget,
+            ) else {
                 continue;
             };
             converted.declarations.push(declaration);
@@ -616,6 +622,7 @@ fn function_declaration(
     name: &str,
     sanitized: String,
     has_strict: &mut bool,
+    copy_budget: &mut SchemaCopyBudget,
 ) -> Option<Value> {
     let mut declaration = function.clone();
     if let Some(parameters) = declaration.shift_remove("parameters") {
@@ -637,7 +644,7 @@ fn function_declaration(
         declaration.insert("name".to_owned(), Value::String(sanitized));
     }
     if let Some(schema) = declaration.get_mut("parametersJsonSchema") {
-        *schema = clean_json_schema_for_gemini_json_schema(schema);
+        *schema = clean_json_schema_for_gemini_json_schema(schema, copy_budget);
     }
     if let Some(strict) = declaration.get("strict").or_else(|| tool.get("strict")) {
         *has_strict |= *strict == Value::Bool(true);

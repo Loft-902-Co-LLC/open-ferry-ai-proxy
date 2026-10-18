@@ -39,6 +39,10 @@ use serde_json::{Value, json};
 
 use super::*;
 
+fn clean_schema(schema: &Value) -> Value {
+    clean_json_schema_for_gemini_json_schema(schema, &mut SchemaCopyBudget::default())
+}
+
 #[test]
 fn removes_dependent_keywords_but_keeps_same_named_properties() {
     let keywords = ["dependentRequired", "dependentSchemas", "dependencies"];
@@ -57,7 +61,7 @@ fn removes_dependent_keywords_but_keeps_same_named_properties() {
     for keyword in keywords {
         schema[keyword] = json!({"baseline_url": ["candidate_url"]});
     }
-    let out = clean_json_schema_for_gemini_json_schema(&schema);
+    let out = clean_schema(&schema);
     for keyword in keywords {
         for node in [
             &out,
@@ -78,7 +82,7 @@ fn removes_dependent_keywords_but_keeps_same_named_properties() {
 
 fn clean(text: &str) -> Value {
     let schema: Value = serde_json::from_str(text).expect("test schema is JSON");
-    clean_json_schema_for_gemini_json_schema(&schema)
+    clean_schema(&schema)
 }
 
 /// gjson `Get(path).String()`.
@@ -1395,7 +1399,7 @@ fn json_written_into_strings_is_cut() {
         |schema| json!({"description": schema, "anyOf": [{"type": "string"}, {"type": "integer"}]}),
     ];
     for wrap in wraps {
-        let cleaned = clean_json_schema_for_gemini_json_schema(&nested(24, wrap)).to_string();
+        let cleaned = clean_schema(&nested(24, wrap)).to_string();
         assert!(
             cleaned.len() < 4 * MAX_JSON_TEXT,
             "{} bytes: {cleaned}",
@@ -1411,10 +1415,7 @@ fn json_written_into_strings_is_cut() {
 
     // Past it, the text ends at the last whole character.
     let long = json!({"type": "string", "$ref": {"ab": "é".repeat(1000)}});
-    let description = text(
-        &clean_json_schema_for_gemini_json_schema(&long),
-        "description",
-    );
+    let description = text(&clean_schema(&long), "description");
     assert_eq!(description.len(), "See: ".len() + MAX_JSON_TEXT - 1);
     assert!(
         description.starts_with(r#"See: {"ab":"éé"#),
@@ -1430,7 +1431,13 @@ fn nested_conditionals_copy_within_a_budget() {
         json!({"type": "string"}),
         |schema, _| json!({"if": {}, "then": {"properties": {"a": schema}}}),
     );
-    let cleaned = clean_json_schema_for_gemini_json_schema(&schema).to_string();
+    // A small allowance exercises exhaustion without constructing megabytes
+    // of conditional intermediates in this regression test.
+    let cleaned = clean_json_schema_for_gemini_json_schema(
+        &schema,
+        &mut SchemaCopyBudget { remaining: 1 << 16 },
+    )
+    .to_string();
     assert!(cleaned.len() < 1 << 16, "{} bytes", cleaned.len());
 
     // A few levels are all copied, and each node with properties becomes an
@@ -1440,7 +1447,7 @@ fn nested_conditionals_copy_within_a_budget() {
         |schema, _| json!({"if": {}, "then": {"properties": {"a": schema}}}),
     );
     assert_eq!(
-        clean_json_schema_for_gemini_json_schema(&schema),
+        clean_schema(&schema),
         json!({"properties": {"a": {"properties": {"a": {"properties": {"a": {"type": "string"}}, "type": "object"}}, "type": "object"}}, "type": "object"})
     );
 }
@@ -1639,9 +1646,9 @@ fn preserves_multi_branch_any_of_one_of_issue3662() {
     for key in ["anyOf", "oneOf"] {
         let mut schema = json!({"type":"object","properties":{"item":{}},"required":["item"]});
         schema["properties"]["item"][key] = branches.clone();
-        let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+        let cleaned = clean_schema(&schema);
         assert_eq!(cleaned, schema);
-        assert_eq!(clean_json_schema_for_gemini_json_schema(&cleaned), cleaned);
+        assert_eq!(clean_schema(&cleaned), cleaned);
     }
 }
 
@@ -1654,7 +1661,7 @@ fn nullable_multi_branch_union_strips_null_issue3662() {
         {"type":"object","properties":{"audio":{"type":"string"}},"required":["audio"]},
         {"type":"null"}
     ]}},"required":["item"]});
-    let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+    let cleaned = clean_schema(&schema);
     let item = &cleaned["properties"]["item"];
     assert_eq!(item["anyOf"].as_array().unwrap().len(), 3);
     assert!(item.get("nullable").is_none());
@@ -1668,7 +1675,7 @@ fn preserves_union_and_branch_required_with_parent_properties_issue3662() {
         {"type":"object","properties":{"image":{"type":"string"}},"required":["image"]},
         {"type":"object","properties":{"audio":{"type":"string"}},"required":["audio"]}
     ]});
-    assert_eq!(clean_json_schema_for_gemini_json_schema(&schema), schema);
+    assert_eq!(clean_schema(&schema), schema);
 }
 
 // Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662/BooleanUnionBranchesAndSiblingAnyOfOneOf.
@@ -1678,15 +1685,13 @@ fn sibling_unions_and_null_only_unions_issue3662() {
         "anyOf":[{"type":"string"},{"type":"integer"}],
         "oneOf":[{"type":"string"},{"type":"boolean"}]
     }}});
-    assert_eq!(clean_json_schema_for_gemini_json_schema(&schema), schema);
+    assert_eq!(clean_schema(&schema), schema);
     for union in [
         json!({"anyOf":[{"type":"null"}]}),
         json!({"oneOf":[{"type":"null"},{"type":"null"}]}),
         json!({"anyOf":[false,{"type":"null"}],"description":"Null only"}),
     ] {
-        let cleaned = clean_json_schema_for_gemini_json_schema(
-            &json!({"type":"object","properties":{"value":union}}),
-        );
+        let cleaned = clean_schema(&json!({"type":"object","properties":{"value":union}}));
         assert_eq!(cleaned["properties"]["value"]["type"], "null");
     }
 }
@@ -1792,6 +1797,7 @@ fn preserves_union_and_branch_required_mixed_and_pure_required_only_issue3662() 
 
 // Ported from TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662/BooleanUnionBranchesAndSiblingAnyOfOneOf.
 // Upstream normalizes oneOf on Antigravity; this carrier preserves standard oneOf.
+// Upstream's true case runs through the Antigravity tool cleaner.
 #[test]
 fn boolean_union_branches_issue3662() {
     for (union, expected) in [
@@ -1808,29 +1814,29 @@ fn boolean_union_branches_issue3662() {
             json!({"anyOf":[{},{"type":"string"},{"type":"integer"}]}),
         ),
     ] {
-        let cleaned = clean_json_schema_for_gemini_json_schema(
-            &json!({"type":"object","properties":{"value":union}}),
+        let cleaned = clean_schema(&json!({"type":"object","properties":{"value":union}}));
+        assert_eq!(
+            cleaned,
+            json!({"type":"object","properties":{"value":expected}})
         );
-        assert_eq!(cleaned["properties"]["value"], expected);
     }
 }
 
 // Not upstream's: required-only branch copies multiply with nested parent properties.
 #[test]
 fn nested_required_only_unions_copy_within_a_budget() {
-    let nested = |depth| {
-        (0..depth).fold(json!({"type":"string"}), |child, _| {
-            json!({"type":"object","properties":{"a":child},
-            "anyOf":[{"required":["a"]},{"required":["a"]}]})
-        })
-    };
-    let schema = nested(14);
-    let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
-    assert!(
-        value_count(&cleaned, usize::MAX)
-            <= value_count(&schema, usize::MAX) * 2 + UNION_COPY_ALLOWANCE
-    );
-    assert!(cleaned.to_string().len() < 1 << 20);
+    // With the default allowance a 10 KB leaf fits through six levels;
+    // the seventh cannot reserve both alternatives and drops its union.
+    let leaf = json!({"type":"string","description":"x".repeat(10_000)});
+    let fits = clean_schema(&nested_required_union(6, leaf.clone()));
+    assert_eq!(fits["anyOf"].as_array().unwrap().len(), 2);
+    let dropped = clean_schema(&nested_required_union(7, leaf));
+    assert!(dropped.get("anyOf").is_none());
+    assert_eq!(dropped["properties"]["a"], fits);
+    assert!(dropped.to_string().len() < SCHEMA_COPY_BYTES_PER_REQUEST);
+    let depth10 = clean_schema(&nested_required_union(10, json!({"type":"string"})));
+    assert!(depth10.get("anyOf").is_some());
+    assert!(depth10.to_string().len() < SCHEMA_COPY_BYTES_PER_REQUEST);
 }
 
 // Not upstream's: below the copy budget, the full nested output matches upstream.
@@ -1844,7 +1850,7 @@ fn shallow_required_only_unions_match_upstream() {
         let branch = json!({"type":"object","properties":{"a":expected},"required":["a"]});
         expected = json!({"type":"object","properties":{"a":expected},"anyOf":[branch,branch]});
     }
-    assert_eq!(clean_json_schema_for_gemini_json_schema(&schema), expected);
+    assert_eq!(clean_schema(&schema), expected);
 }
 
 // Ported from TestCleanJSONSchema_RemovesDiscriminatorKeyword_Issue6639.
@@ -1934,25 +1940,182 @@ fn inherits_nullable_marker_when_unwrapping_single_union_branch() {
         let schema = json!({"type":"object","properties":{"value":{
             "anyOf":[{"type":"string"}],"nullable":marker
         }}});
-        let cleaned = clean_json_schema_for_gemini_json_schema(&schema);
+        let cleaned = clean_schema(&schema);
         assert_eq!(
             cleaned["properties"]["value"],
             json!({"type":"string","description":"(nullable)"})
         );
-        assert_eq!(clean_json_schema_for_gemini_json_schema(&cleaned), cleaned);
+        assert_eq!(clean_schema(&cleaned), cleaned);
     }
     for branches in [
         json!([{"type":"null"},{"anyOf":[{"type":"string"},{"type":"integer"}]}]),
         json!([{"anyOf":[{"type":"string"},{"type":"integer"}]},{"type":"null"}]),
     ] {
-        let cleaned = clean_json_schema_for_gemini_json_schema(
-            &json!({"type":"object","properties":{"value":{"anyOf":branches}}}),
-        );
+        let cleaned =
+            clean_schema(&json!({"type":"object","properties":{"value":{"anyOf":branches}}}));
         assert_eq!(
             cleaned["properties"]["value"]["anyOf"],
             json!([{"type":"string"},{"type":"integer"}])
         );
         assert_eq!(cleaned["properties"]["value"]["description"], "(nullable)");
-        assert_eq!(clean_json_schema_for_gemini_json_schema(&cleaned), cleaned);
+        assert_eq!(clean_schema(&cleaned), cleaned);
+    }
+}
+
+// Not upstream's: one long string must consume bytes, not one value.
+#[test]
+fn gemini_copy_budget_bounds_long_leaf_and_many_branches() {
+    let leaf = json!({"type":"string","description":"x".repeat(10_000)});
+    let nested = nested_required_union(8, leaf.clone());
+    let flat = json!({"type":"object","properties":{"a":leaf},
+        "anyOf":vec![json!({"required":["a"]});13_000]});
+    for (name, schema) in [("long_leaf_depth8", nested), ("flat_13000", flat)] {
+        let cleaned = clean_schema(&schema);
+        let size = cleaned.to_string().len();
+        println!("{name}: input={} output={size}", schema.to_string().len());
+        assert!(size <= schema.to_string().len() + SCHEMA_COPY_BYTES_PER_REQUEST);
+        assert!(cleaned.get("anyOf").is_none());
+    }
+}
+
+fn nested_required_union(depth: usize, leaf: Value) -> Value {
+    (0..depth).fold(leaf, |child, _| {
+        json!({"type":"object","properties":{"a":child},
+        "anyOf":[{"required":["a"]},{"required":["a"]}]})
+    })
+}
+
+// Not upstream's: numeric names create null padding that must consume the allowance.
+#[test]
+fn gemini_copy_budget_charges_numeric_name_padding() {
+    let schema = json!({"type":"object","properties":{"1000":{"type":"string"}},
+        "anyOf":vec![json!({"required":["1000"]});200]});
+    let mut budget = SchemaCopyBudget::default();
+    let cleaned = clean_json_schema_for_gemini_json_schema(&schema, &mut budget);
+    assert!(SCHEMA_COPY_BYTES_PER_REQUEST - budget.remaining >= 200 * 1000 * 5);
+    assert_eq!(cleaned["anyOf"].as_array().unwrap().len(), 200);
+    println!(
+        "numeric_200: input={} output={} charged={}",
+        schema.to_string().len(),
+        cleaned.to_string().len(),
+        SCHEMA_COPY_BYTES_PER_REQUEST - budget.remaining
+    );
+    let mut small = SchemaCopyBudget { remaining: 10_000 };
+    let cleaned = clean_json_schema_for_gemini_json_schema(&schema, &mut small);
+    assert!(cleaned.get("anyOf").is_none());
+    assert_eq!(small.remaining, 10_000); // Whole-union rejection reserves no copies.
+}
+
+// Not upstream's: dropping only the large alternative would make the union stricter.
+#[test]
+fn gemini_copy_budget_rejects_whole_union_in_either_branch_order() {
+    for names in [["a", "b", "c"], ["b", "c", "a"]] {
+        let schema = json!({"type":"object","properties":{
+            "a":{"type":"string","description":"x".repeat(1000)},
+            "b":{"type":"string"},"c":{"type":"string"}},
+            "anyOf":names.map(|name| json!({"required":[name]}))});
+        let mut expected = schema.clone();
+        expected.as_object_mut().unwrap().shift_remove("anyOf");
+        let mut budget = SchemaCopyBudget { remaining: 500 };
+        assert_eq!(
+            clean_json_schema_for_gemini_json_schema(&schema, &mut budget),
+            expected
+        );
+        assert_eq!(budget.remaining, 500);
+    }
+}
+
+// Not upstream's: conditionals and unions must draw from the same allowance, across schemas too.
+#[test]
+fn gemini_copy_budget_is_shared_by_both_copy_passes() {
+    let conditional = json!({"type":"object","then":{"properties":{"added":{"type":"string","description":"x".repeat(600)}}}});
+    let union = json!({"type":"object","properties":{"a":{"type":"string","description":"x".repeat(600)}},
+        "anyOf":[{"required":["a"]},{"required":["a"]}]});
+    let mut budget = SchemaCopyBudget { remaining: 2000 };
+    let first = clean_json_schema_for_gemini_json_schema(&conditional, &mut budget);
+    assert!(first["properties"].get("added").is_some());
+    let later = clean_json_schema_for_gemini_json_schema(&union, &mut budget);
+    assert!(later.get("anyOf").is_none());
+    let mut separate = SchemaCopyBudget { remaining: 2000 };
+    assert!(
+        clean_json_schema_for_gemini_json_schema(&union, &mut separate)
+            .get("anyOf")
+            .is_some()
+    );
+    let mut combined = conditional;
+    combined
+        .as_object_mut()
+        .unwrap()
+        .extend(union.as_object().unwrap().clone());
+    let mut budget = SchemaCopyBudget { remaining: 2000 };
+    let cleaned = clean_json_schema_for_gemini_json_schema(&combined, &mut budget);
+    assert!(cleaned["properties"].get("added").is_some());
+    assert!(cleaned.get("anyOf").is_none());
+}
+
+// Not upstream's: all three request paths must reuse one budget in tool order.
+#[test]
+fn gemini_and_responses_tool_schemas_share_one_request_budget() {
+    // Long leaves exhaust the real 8 MiB allowance with far fewer nodes.
+    let schema =
+        nested_required_union(6, json!({"type":"string","description":"x".repeat(10_000)}));
+    let mut claude_tools = Vec::new();
+    let mut chat_tools = Vec::new();
+    let mut responses_tools = Vec::new();
+    for i in 0..20 {
+        let name = format!("tool_{i}");
+        claude_tools.push(json!({"name":name,"input_schema":schema}));
+        chat_tools.push(json!({"type":"function","function":{"name":name,"parameters":schema}}));
+        responses_tools.push(json!({"type":"function","name":name,"parameters":schema}));
+    }
+    let claude = crate::gemini::claude::convert_claude_request_to_gemini(
+        "gemini-test",
+        &json!({"tools":claude_tools}),
+        false,
+        &crate::models::ModelCatalog::default(),
+    )
+    .0;
+    let chat = crate::gemini::openai::chat_completions::convert_openai_request_to_gemini(
+        "gemini-test",
+        &json!({"tools":chat_tools}),
+        false,
+    )
+    .0;
+    let responses = crate::responses_tools::build_gemini_function_declarations(
+        &json!({"tools":responses_tools}),
+    );
+    for (name, declarations) in [
+        (
+            "claude",
+            claude["tools"][0]["functionDeclarations"]
+                .as_array()
+                .unwrap(),
+        ),
+        (
+            "chat",
+            chat["tools"][0]["functionDeclarations"].as_array().unwrap(),
+        ),
+        ("responses", &responses.declarations),
+    ] {
+        assert_eq!(declarations.len(), 20);
+        assert!(
+            declarations[0]["parametersJsonSchema"]
+                .get("anyOf")
+                .is_some()
+        );
+        assert!(
+            declarations[19]["parametersJsonSchema"]
+                .get("anyOf")
+                .is_none()
+        );
+        let size: usize = declarations
+            .iter()
+            .map(|decl| decl["parametersJsonSchema"].to_string().len())
+            .sum();
+        println!(
+            "{name}_20_tools: schema_input={} schema_output={size}",
+            schema.to_string().len() * 20
+        );
+        assert!(size <= SCHEMA_COPY_BYTES_PER_REQUEST + schema.to_string().len() * 20);
     }
 }
