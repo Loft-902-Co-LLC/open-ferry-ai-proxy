@@ -229,6 +229,10 @@ const NOW_WINDOW: Duration = Duration::from_secs(3600);
 ///   [`GENERATED_ID_PREFIXES`]) within an hour of now becomes
 ///   `<prefix>_(generated-<n>)` for the `n`th distinct one, so where the
 ///   same ID recurs still shows;
+/// - a fallback item ID the Interactions to Responses stream makes up for a
+///   step without one, `item_<UUID>_<index>` with a random UUID for each
+///   response, becomes `item_(generated-<n>)_<index>` for the `n`th
+///   distinct UUID, so an item's ID and the references to it still match;
 /// - a `created` or `updated` time within an hour of now, as RFC 3339 text
 ///   or unix seconds, becomes [`CREATED_NOW`]. Upstream writes RFC 3339
 ///   times in UTC, as we do, but they are read as instants anyway.
@@ -260,18 +264,41 @@ fn mask_volatile_at(value: &mut Value, now: Duration, seen: &mut Vec<String>) {
         Value::String(text) => {
             if let Some(prefix) = generated_id_prefix(text, now) {
                 let prefix = prefix.to_owned();
-                let n = match seen.iter().position(|id| id == text) {
-                    Some(index) => index + 1,
-                    None => {
-                        seen.push(text.clone());
-                        seen.len()
-                    }
-                };
+                let n = seen_number(seen, text);
                 *text = format!("{prefix}_(generated-{n})");
+            } else if let Some((uuid, index)) = fallback_item_id(text) {
+                let (uuid, index) = (format!("item_{uuid}"), index.to_owned());
+                let n = seen_number(seen, &uuid);
+                *text = format!("item_(generated-{n})_{index}");
             }
         }
         _ => {}
     }
+}
+
+/// The number of `id` among the IDs in `seen`, from 1, adding it if new.
+fn seen_number(seen: &mut Vec<String>, id: &str) -> usize {
+    match seen.iter().position(|seen| seen == id) {
+        Some(index) => index + 1,
+        None => {
+            seen.push(id.to_owned());
+            seen.len()
+        }
+    }
+}
+
+/// The UUID and the index of `text`, if `text` is a fallback item ID,
+/// `item_<UUID>_<index>` (upstream's `interactionsFallbackItemID`).
+fn fallback_item_id(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("item_")?;
+    let (uuid, index) = rest.split_once('_')?;
+    let is_uuid = uuid.len() == 36
+        && uuid.char_indices().all(|(at, c)| match at {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        });
+    (is_uuid && !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+        .then_some((uuid, index))
 }
 
 /// Whether `value`, RFC 3339 text or unix seconds, is within
@@ -345,6 +372,34 @@ mod tests {
         let original = value.clone();
         mask_volatile_at(&mut value, NOW, &mut Vec::new());
         assert_eq!(value, original);
+    }
+
+    #[test]
+    fn fallback_item_ids_are_numbered_by_uuid() {
+        let a = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let b = "7C9E6679-7425-40DE-944B-E07FC1F90AE7";
+        let mut value = json!([
+            { "id": format!("item_{a}_0"), "item_id": format!("item_{a}_0") },
+            { "id": format!("item_{a}_2"), "other": format!("item_{b}_0") },
+            "item_0",
+            format!("item_{a}_"),
+            format!("item_{a}_x"),
+            "item_0f8fad5b-d9cb-469f-a165-70867728950_1",
+            "item_0f8fad5bxd9cb-469f-a165-70867728950e_1",
+        ]);
+        mask_volatile_at(&mut value, NOW, &mut Vec::new());
+        assert_eq!(
+            value,
+            json!([
+                { "id": "item_(generated-1)_0", "item_id": "item_(generated-1)_0" },
+                { "id": "item_(generated-1)_2", "other": "item_(generated-2)_0" },
+                "item_0",
+                format!("item_{a}_"),
+                format!("item_{a}_x"),
+                "item_0f8fad5b-d9cb-469f-a165-70867728950_1",
+                "item_0f8fad5bxd9cb-469f-a165-70867728950e_1",
+            ])
+        );
     }
 
     #[test]
