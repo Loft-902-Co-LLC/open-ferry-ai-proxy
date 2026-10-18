@@ -1460,6 +1460,7 @@ fn auth_json_matches_go() {
                     .collect(),
             },
             updated_at: Some(at("2026-01-01T12:00:00Z")),
+            cooldown_recorded_seq: 0,
         },
     );
     let bare = Auth {

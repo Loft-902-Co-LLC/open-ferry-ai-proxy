@@ -38,6 +38,7 @@ mod conductor_force_mapping;
 mod conductor_issue6415;
 mod conductor_issue6416;
 mod conductor_issue6417;
+mod conductor_issue6643;
 mod conductor_load_persistence;
 mod conductor_oauth_alias_nofork;
 mod conductor_oauth_alias_suspension;

@@ -1010,6 +1010,8 @@ fn restore_record(
                 last_error: record.last_error.clone(),
                 quota,
                 updated_at: Some(updated_at),
+                // A restored cooldown is clearable by any success.
+                cooldown_recorded_seq: 0,
             },
         );
     }

@@ -86,6 +86,11 @@ pub struct CallResult {
     /// The [`Auth::registration_epoch`] of the credential the call ran
     /// with, or 0 when not known (upstream's `RegistrationEpoch`).
     pub registration_epoch: u64,
+    /// The manager's sequence stamp for the dispatch, or 0 when not known (a
+    /// result recorded directly): it orders the call against cooldowns
+    /// recorded meanwhile, so a success dispatched before a cooldown can't
+    /// clear it. Zero is exempt from that rule (upstream's `ExecutionSeq`).
+    pub execution_seq: u64,
 }
 
 /// Whether `result` came from tokens or an API key `current` no longer has,
@@ -303,6 +308,13 @@ pub(crate) fn merge_model_state(target: &mut ModelState, source: &ModelState) {
             ..QuotaState::default()
         },
         updated_at: target.updated_at.max(source.updated_at),
+        // The strongest watermark of either side, so merging a restored or
+        // migrated state into a live one can't reopen the stale-success race.
+        // Both are zero across a restart, where a restored cooldown stays
+        // clearable by any success.
+        cooldown_recorded_seq: target
+            .cooldown_recorded_seq
+            .max(source.cooldown_recorded_seq),
     };
     // The newer snapshot wins whole, the preferred state's on a tie.
     merged.quota = merge_quota_observation(merged.quota, &fallback.quota);
@@ -332,6 +344,7 @@ pub(crate) fn reset_model_state(state: &mut ModelState, now: Timestamp) {
     state.next_retry_after = None;
     state.last_error = None;
     apply_cooldown_fields(&mut state.quota, QuotaState::default());
+    state.cooldown_recorded_seq = 0;
     state.updated_at = Some(now);
 }
 
@@ -462,7 +475,19 @@ pub(crate) fn clear_auth_state_on_success(auth: &mut Auth, now: Timestamp) {
     apply_cooldown_fields(&mut auth.quota, QuotaState::default());
     auth.last_error = None;
     auth.next_retry_after = None;
+    auth.cooldown_recorded_seq = 0;
     auth.updated_at = Some(now);
+}
+
+/// Whether the credential carries a live cooldown of its own, recorded
+/// without a model (upstream's `isAuthActiveCooldown`).
+fn is_auth_active_cooldown(auth: &Auth, now: Timestamp) -> bool {
+    if auth.disabled || auth.status == Status::Disabled {
+        return false;
+    }
+    after(auth.next_retry_after, now)
+        || after(auth.quota.next_recover_at, now)
+        || (auth.quota.exceeded && is_zero(auth.quota.next_recover_at))
 }
 
 /// Clears every cooldown on the credential and its models (upstream's
@@ -514,12 +539,18 @@ pub(crate) fn clear_cooldown_state_for_auth(auth: &mut Auth, now: Timestamp) -> 
 /// A credential out of rotation for a rejected token stays out: a call that
 /// was already running when it was taken out only updates its model's
 /// state.
+///
+/// `dispatched` is the latest execution sequence issued
+/// ([`Manager::current_execution_seq`](super::Manager)): the watermark a
+/// cooldown recorded now takes, so a success from a call dispatched at or
+/// before it leaves that cooldown be.
 pub(crate) fn apply_result(
     settings: &Settings,
     auth: &mut Auth,
     result: &CallResult,
     model_key: &str,
     now: Timestamp,
+    dispatched: u64,
 ) {
     let was_terminal_unauthorized = has_unauthorized_auth_failure(auth);
     apply_outcome(
@@ -529,6 +560,7 @@ pub(crate) fn apply_result(
         model_key,
         now,
         was_terminal_unauthorized,
+        dispatched,
     );
     if was_terminal_unauthorized {
         auth.unavailable = true;
@@ -567,8 +599,25 @@ fn apply_outcome(
     model_key: &str,
     now: Timestamp,
     was_terminal_unauthorized: bool,
+    dispatched: u64,
 ) {
     if result.success {
+        // A success from a call dispatched before a still-live cooldown was
+        // recorded predates the failure and proves nothing about recovery,
+        // so it causes no state change at all.
+        let predates = |recorded: u64| result.execution_seq > 0 && result.execution_seq <= recorded;
+        let retain_model_cooldown = !model_key.is_empty()
+            && !was_terminal_unauthorized
+            && existing_model_state(auth, model_key).is_some_and(|existing| {
+                is_model_state_active_cooldown(existing, now)
+                    && existing.cooldown_recorded_seq > 0
+                    && predates(existing.cooldown_recorded_seq)
+            });
+        let retain_auth_cooldown = model_key.is_empty()
+            && !was_terminal_unauthorized
+            && is_auth_active_cooldown(auth, now)
+            && auth.cooldown_recorded_seq > 0
+            && predates(auth.cooldown_recorded_seq);
         if was_terminal_unauthorized {
             if !model_key.is_empty()
                 && let Some(key) = ensure_model_state(auth, model_key)
@@ -579,6 +628,8 @@ fn apply_outcome(
         } else if auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now)
         {
             // An active credential-scoped cooldown stays.
+        } else if retain_model_cooldown || retain_auth_cooldown {
+            // So does one recorded after this call was dispatched.
         } else if !model_key.is_empty() {
             if let Some(key) = ensure_model_state(auth, model_key)
                 && let Some(state) = auth.model_states.get_mut(&key)
@@ -613,6 +664,7 @@ fn apply_outcome(
             now,
             disable_cooling,
         );
+        auth.cooldown_recorded_seq = dispatched;
         return;
     }
     if should_skip_credential_cooldown(result.error.as_ref()) {
@@ -791,6 +843,16 @@ fn apply_outcome(
         && after(prev_retry_after, now)
     {
         state.next_retry_after = prev_retry_after;
+    }
+    // The dispatch watermark of the cooldown just recorded. A credential-wide
+    // one reached the credential and every sibling state above, so they take
+    // it too; a sibling's later, longer model cooldown re-stamps only its own.
+    state.cooldown_recorded_seq = dispatched;
+    if result.credential_scope && !disable_cooling && status == 429 {
+        auth.cooldown_recorded_seq = dispatched;
+        for other in auth.model_states.values_mut() {
+            other.cooldown_recorded_seq = dispatched;
+        }
     }
     auth.model_states.insert(key, state);
     auth.status = Status::Error;

@@ -2853,7 +2853,8 @@ impl Manager {
             count_result(auth, result, now);
             // open-ferry's cap on long quota rests (see `quota_check`).
             state.quota_checks.before_result(auth);
-            apply_result(&state.settings, auth, result, &model_key, now);
+            let dispatched = self.current_execution_seq();
+            apply_result(&state.settings, auth, result, &model_key, now, dispatched);
             let cap = state.settings.quota_check_after;
             state
                 .quota_checks

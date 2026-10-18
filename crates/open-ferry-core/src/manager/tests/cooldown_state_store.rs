@@ -1535,6 +1535,7 @@ async fn every_free_text_field_of_a_saved_record_is_scrubbed() {
             last_error: Some(echoing("model")),
             quota,
             updated_at: Some(h.now()),
+            cooldown_recorded_seq: 0,
         },
     );
     h.manager.register_unsaved(first).expect("register");
