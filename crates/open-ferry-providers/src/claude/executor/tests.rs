@@ -712,6 +712,157 @@ async fn openai_stream_is_translated() {
     assert!(body["messages"].is_array());
 }
 
+// TestClaudeExecutor_ChatCompletionsDefaultMaxTokensAndPayloadDefaultRule:
+// a client that sets no output limit gets the model's registered one, and a
+// `payload.default` rule for `max_tokens` sets it instead; a limit the client
+// sent is kept, for every protocol, on a call and a stream. Changed: the
+// model is the one the mock executor is addressed with (claude-opus-5-5 in
+// the payloads, whose registered limit is 128000), and the rule's protocol
+// is `claude` as upstream's.
+#[tokio::test]
+async fn default_max_tokens_is_the_registered_limit_and_a_default_rule_replaces_it() {
+    let rules = Arc::new(
+        Config::parse(
+            r"
+payload:
+  default:
+    - models:
+        - name: claude-opus-5-5
+          protocol: claude
+      params:
+        max_tokens: 16384
+",
+        )
+        .unwrap(),
+    );
+    let opus = |payload: Value| Request {
+        model: "claude-opus-5-5".into(),
+        payload: Bytes::from(payload.to_string()),
+    };
+
+    // No rule: an omitted limit is the registered 128000.
+    let mock = Mock::start(Reply::sse(SSE)).await;
+    mock.executor()
+        .execute(
+            api_key_auth(),
+            opus(json!({"model":"claude-opus-5-5","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]})),
+            options(Format::OPENAI),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mock.last().json()["max_tokens"], 128000);
+
+    let hi = json!([{"role":"user","content":"hi"}]);
+    let parts = json!([{"role":"user","parts":[{"text":"hi"}]}]);
+    for (name, format, payload, want) in [
+        (
+            "chat omitted",
+            Format::OPENAI,
+            json!({"model":"claude-opus-5-5","messages":hi}),
+            16384,
+        ),
+        (
+            "chat null",
+            Format::OPENAI,
+            json!({"model":"claude-opus-5-5","max_tokens":null,"messages":hi}),
+            16384,
+        ),
+        (
+            "chat explicit max_completion_tokens",
+            Format::OPENAI,
+            json!({"model":"claude-opus-5-5","max_completion_tokens":4096,"messages":hi}),
+            4096,
+        ),
+        (
+            "responses omitted",
+            Format::OPENAI_RESPONSE,
+            json!({"model":"claude-opus-5-5","input":"hi"}),
+            16384,
+        ),
+        (
+            "responses explicit",
+            Format::OPENAI_RESPONSE,
+            json!({"model":"claude-opus-5-5","max_output_tokens":4096,"input":"hi"}),
+            4096,
+        ),
+        (
+            "gemini omitted",
+            Format::GEMINI,
+            json!({"contents":parts}),
+            16384,
+        ),
+        (
+            "gemini explicit",
+            Format::GEMINI,
+            json!({"contents":parts,"generationConfig":{"maxOutputTokens":4096}}),
+            4096,
+        ),
+    ] {
+        for stream in [false, true] {
+            let mock = Mock::start(Reply::sse(SSE)).await;
+            let executor = mock.executor().with_config(Arc::clone(&rules));
+            if stream {
+                let response = executor
+                    .execute_stream(
+                        api_key_auth(),
+                        opus(payload.clone()),
+                        stream_options(format.clone()),
+                    )
+                    .await
+                    .unwrap();
+                collect(response).await;
+            } else {
+                executor
+                    .execute(
+                        api_key_auth(),
+                        opus(payload.clone()),
+                        options(format.clone()),
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                mock.last().json()["max_tokens"],
+                want,
+                "{name} (stream: {stream}): {}",
+                mock.last().body
+            );
+        }
+    }
+}
+
+// Not upstream's: a Claude client's own body is left to the rules as it is
+// (stripTranslatedDefaultMaxTokens returns it untouched), so a default rule
+// does not replace the limit it sent.
+#[tokio::test]
+async fn a_default_rule_keeps_a_claude_clients_max_tokens() {
+    let rules = Arc::new(
+        Config::parse(
+            r"
+payload:
+  default:
+    - models:
+        - name: claude-sonnet-4-5
+          protocol: claude
+      params:
+        max_tokens: 16384
+",
+        )
+        .unwrap(),
+    );
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    mock.executor()
+        .with_config(rules)
+        .execute(
+            api_key_auth(),
+            request(claude_payload()),
+            options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mock.last().json()["max_tokens"], 256);
+}
+
 #[tokio::test]
 async fn openai_call_reads_claudes_stream() {
     let mock = Mock::start(Reply::sse(SSE)).await;

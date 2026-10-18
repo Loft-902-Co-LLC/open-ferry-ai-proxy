@@ -32,6 +32,9 @@ const FUNCTION_NAME_LIMIT: usize = 64;
 const TOOL_CALL_ID_LETTERS: &[u8; 62] =
     b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
+const DEFAULT_MAX_TOKENS: i64 = 32000;
+const DEFAULT_FABLE_MAX_TOKENS: i64 = 64000;
+
 const JSON_OBJECT_INSTRUCTION: &str = "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.";
 const JSON_SCHEMA_INSTRUCTION: &str = "You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n";
 const JSON_SCHEMA_INSTRUCTION_END: &str = "\nDo not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.";
@@ -40,6 +43,31 @@ const JSON_SCHEMA_INSTRUCTION_END: &str = "\nDo not include any explanations, ma
 /// system prompt. It only means something to Anthropic, so other upstreams drop it.
 pub(crate) fn is_attribution_system_text(text: &str) -> bool {
     text.trim_start().starts_with(ATTRIBUTION_SYSTEM_PREFIX)
+}
+
+/// `defaultClaudeResponsesMaxTokensForModel` and
+/// `defaultClaudeChatMaxTokensForModel`: the `max_tokens` a request that
+/// sets none is given. It is the registered output limit, capped at 64000
+/// for Fable, or the historical default without a limit.
+pub(crate) fn default_max_tokens(model_name: &str, models: &ModelCatalog) -> i64 {
+    let fable = go::to_lower(model_name.trim()).contains("fable");
+    let default = if fable {
+        DEFAULT_FABLE_MAX_TOKENS
+    } else {
+        DEFAULT_MAX_TOKENS
+    };
+    match max_completion_tokens(model_name, models) {
+        Some(limit) if !fable || limit < default => limit,
+        _ => default,
+    }
+}
+
+/// The most output tokens the catalog says the model takes, if it says.
+pub(crate) fn max_completion_tokens(model_name: &str, models: &ModelCatalog) -> Option<i64> {
+    models
+        .lookup(model_name)
+        .map(|model| model.max_completion_tokens)
+        .filter(|&limit| limit > 0)
 }
 
 /// Wraps text in a `<system-reminder>` envelope, so upstreams without

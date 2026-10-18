@@ -768,7 +768,64 @@ fn max_tokens_and_max_completion_tokens() {
         ),
     ];
     for (name, request, want_limit) in cases {
-        let out = convert("claude-3-7-sonnet-20250219", &request);
+        // Upstream's model for this test moved off claude-3-7-sonnet, whose
+        // registered limit (8192) now decides an omitted field.
+        let out = convert("claude-opus-4-1-20250805", &request);
+        assert_eq!(out["max_tokens"], json!(want_limit), "{name}: {out}");
+    }
+}
+
+// TestConvertOpenAIRequestToClaude_OmittedMaxTokensUsesRegistryLimit
+#[test]
+fn omitted_max_tokens_uses_registry_limit() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let cases = [
+        ("opus 5.5 omitted", "claude-opus-5-5", json!({}), 128000),
+        (
+            "opus 5.5 null max_tokens",
+            "claude-opus-5-5",
+            json!({"max_tokens": null}),
+            128000,
+        ),
+        (
+            "opus 5.5 null max_completion_tokens",
+            "claude-opus-5-5",
+            json!({"max_completion_tokens": null}),
+            128000,
+        ),
+        (
+            "null max_tokens falls back to max_completion_tokens",
+            "claude-opus-5-5",
+            json!({"max_tokens": null, "max_completion_tokens": 4096}),
+            4096,
+        ),
+        ("sonnet 4.6 omitted", "claude-sonnet-4-6", json!({}), 64000),
+        (
+            "fable keeps the conservative 64k ceiling",
+            "claude-fable-5-1",
+            json!({}),
+            64000,
+        ),
+        (
+            "haiku 3.5 omitted",
+            "claude-3-5-haiku-20241022",
+            json!({}),
+            8192,
+        ),
+        (
+            "unregistered model falls back to 32000",
+            "claude-test",
+            json!({}),
+            32000,
+        ),
+    ];
+    for (name, model, extra, want_limit) in cases {
+        let mut request = json!({"model": model, "messages": hi});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = convert(model, &request);
         assert_eq!(out["max_tokens"], json!(want_limit), "{name}: {out}");
     }
 }
