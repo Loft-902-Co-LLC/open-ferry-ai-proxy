@@ -391,6 +391,14 @@ pub(crate) fn ignored_settings(data: &[u8]) -> Option<Vec<String>> {
     let mut cloaking = Vec::new();
     for (path, shown) in [
         (
+            &["upstream", "claude", "session-date-pin-days"][..],
+            "upstream.claude.session-date-pin-days",
+        ),
+        (
+            &["requests", "tls-handshake-timeout-seconds"][..],
+            "requests.tls-handshake-timeout-seconds (uTLS)",
+        ),
+        (
             &["upstream", "claude", "header-defaults"][..],
             "upstream.claude.header-defaults",
         ),
@@ -1113,6 +1121,20 @@ mod tests {
         );
         assert_eq!(credential_type(br#"{"email":"x"}"#), None);
         assert_eq!(credential_type(b"not json"), None);
+    }
+
+    // Not upstream's: our migration report identifies carried impersonation keys.
+    #[test]
+    fn reports_v32_carried_settings_as_ignored() {
+        let yaml = b"requests: {tls-handshake-timeout-seconds: 12}\nupstream:\n  claude:\n    session-date-pin-days: 14\n    header-defaults: {inject-diagnostics: false, client-request-id: off}\n";
+        let ignored = ignored_settings(yaml).unwrap().join("; ");
+        for key in [
+            "tls-handshake-timeout-seconds",
+            "session-date-pin-days",
+            "header-defaults",
+        ] {
+            assert!(ignored.contains(key), "{ignored}");
+        }
     }
 
     // Not upstream's: the settings open-ferry ignores, in both layouts.

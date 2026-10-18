@@ -287,6 +287,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     (
         "requests",
         &[
+            "tls-handshake-timeout-seconds",
             "nonstream-keepalive-interval",
             "passthrough-headers",
             "payload",
@@ -382,6 +383,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     (
         "upstream.claude",
         &[
+            "session-date-pin-days",
             "disable-claude-cloak-mode",
             "disable-cloaking-model-list",
             "header-defaults",
@@ -392,6 +394,10 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     (
         "upstream.claude.header-defaults",
         &[
+            "anthropic-beta-strip",
+            "anthropic-beta-append",
+            "inject-diagnostics",
+            "client-request-id",
             "arch",
             "os",
             "package-version",

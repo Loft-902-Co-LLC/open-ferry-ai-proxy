@@ -17,6 +17,9 @@
 //! - Only the sections listed in the [module docs](super) are typed. The rest
 //!   (cloaking, fingerprints, other providers, plugins and so on) are read and
 //!   ignored, so values of the wrong type inside them are not errors.
+//! - The v8.0.32 Claude header overrides, session date pin and TLS handshake
+//!   timeout are typed for their configuration contract, but never applied
+//!   to requests: client impersonation and cloaking are not implemented.
 //! - `codex-header-defaults.user-agent` and per-key `disable-codex-cloaking`
 //!   are ignored: they only exist to present another client's identity.
 //! - Maps are `BTreeMap`s, so they iterate in key order where Go's maps
@@ -56,6 +59,8 @@ pub struct Config {
     pub client: ClientConfig,
     /// An optional proxy for outbound requests.
     pub proxy_url: String,
+    /// Carried for compatibility; uTLS client impersonation is not implemented.
+    pub tls_handshake_timeout_seconds: i64,
     /// Whether the built-in `image_generation` tool is taken out of the
     /// requests sent upstream, and with `true`, whether the images endpoints
     /// are taken away.
@@ -157,6 +162,8 @@ pub struct Config {
     pub codex_header_defaults: CodexHeaderDefaults,
     /// Provider-wide Claude behavior.
     pub claude: ClaudeConfig,
+    /// Carried operator overrides; client impersonation is not implemented.
+    pub claude_header_defaults: ClaudeHeaderDefaults,
     /// Claude API keys.
     pub claude_api_key: Vec<ClaudeKey>,
     /// Claude Code installations that serve Claude models (`claude-cli`,
@@ -193,6 +200,7 @@ impl Default for Config {
             models: CatalogSources::default(),
             client: ClientConfig::default(),
             proxy_url: String::new(),
+            tls_handshake_timeout_seconds: 0,
             disable_image_generation: DisableImageGeneration::Off,
             gpt_image_2_base_model: String::new(),
             force_model_prefix: false,
@@ -235,6 +243,7 @@ impl Default for Config {
             codex: CodexConfig::default(),
             codex_header_defaults: CodexHeaderDefaults::default(),
             claude: ClaudeConfig::default(),
+            claude_header_defaults: ClaudeHeaderDefaults::default(),
             claude_api_key: Vec::new(),
             claude_cli: Vec::new(),
             openai_compatibility: Vec::new(),
@@ -340,6 +349,11 @@ impl fmt::Debug for Config {
             .field("xai", &self.xai)
             .field("codex", &self.codex)
             .field("codex_header_defaults", &self.codex_header_defaults)
+            .field(
+                "tls_handshake_timeout_seconds",
+                &self.tls_handshake_timeout_seconds,
+            )
+            .field("claude_header_defaults", &"[redacted]")
             .field("claude", &self.claude)
             .field("claude_api_key", &self.claude_api_key)
             .field("claude_cli", &self.claude_cli)
@@ -649,8 +663,27 @@ pub struct CodexHeaderDefaults {
     pub beta_features: String,
 }
 
+/// Claude header overrides carried for configuration compatibility only.
+/// Existing fingerprint fields remain untyped and are preserved by the writer.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.ClaudeHeaderDefaults",
+    rename_all = "kebab-case"
+)]
+pub struct ClaudeHeaderDefaults {
+    /// Exact beta names removed before additions.
+    pub anthropic_beta_strip: Vec<String>,
+    /// Exact beta names appended in configured order.
+    pub anthropic_beta_append: Vec<String>,
+    /// Unset means true upstream; explicit false is retained.
+    pub inject_diagnostics: Option<bool>,
+    /// Empty means on upstream; supported values are on, off and passthrough.
+    pub client_request_id: String,
+}
+
 /// Provider-wide Claude behavior.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default, rename = "config.ClaudeConfig", rename_all = "kebab-case")]
 pub struct ClaudeConfig {
     /// Scopes quota cooldowns to the requested model.
@@ -658,6 +691,18 @@ pub struct ClaudeConfig {
     /// Enables Codex client tool search on Claude Responses routes and
     /// native-search catalog advertising. Defaults to false.
     pub tool_search: bool,
+    /// Cloaked date pin retention, carried but ignored. Unset defaults to seven days.
+    pub session_date_pin_days: Option<i64>,
+}
+
+impl Default for ClaudeConfig {
+    fn default() -> Self {
+        Self {
+            model_level_cooling: false,
+            tool_search: false,
+            session_date_pin_days: Some(7),
+        }
+    }
 }
 
 /// A Codex API key and its routing settings.

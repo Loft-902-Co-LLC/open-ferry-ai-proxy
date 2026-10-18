@@ -20,7 +20,8 @@
 //!   as written.
 //! - Steps for sections this port ignores (Antigravity, Devin, cloaking,
 //!   plugins, pprof, credential concurrency and in-flight, live media
-//!   relay) are left out.
+//!   relay) are left out. The v8.0.32 Claude header override normalization
+//!   and date-pin default are carried solely for configuration compatibility.
 //! - open-ferry's own `claude-cli` list is cleaned up and checked here too
 //!   ([`sanitize_claude_cli`]): a bad entry fails the load, as a bad weight
 //!   does.
@@ -127,6 +128,27 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
         .signin_with_chatgpt_identifier
         .trim()
         .to_owned();
+    config.claude.session_date_pin_days.get_or_insert(7);
+    let headers = &mut config.claude_header_defaults;
+    for names in [
+        &mut headers.anthropic_beta_strip,
+        &mut headers.anthropic_beta_append,
+    ] {
+        let mut seen = HashSet::new();
+        *names = names
+            .iter()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+            .collect();
+    }
+    let mode = to_lower(headers.client_request_id.trim());
+    headers.client_request_id = match mode.as_str() {
+        "" | "on" | "off" | "passthrough" => mode,
+        _ => {
+            tracing::warn!("unrecognized Claude client-request-id mode; falling back to on");
+            String::new()
+        }
+    };
     sanitize_claude_keys(&mut config.claude_api_key);
     sanitize_claude_cli(&mut config.claude_cli);
     validate_claude_cli(&config.claude_cli)?;

@@ -22,6 +22,8 @@
 //! - The new body-limit, pre-first-token keepalive, affinity rebind and
 //!   Vertex Interactions settings get change lines too. Upstream reloads
 //!   those settings but does not give them individual diff lines.
+//! - The carried v8.0.32 TLS timeout, Claude date pin and header overrides
+//!   get change lines too, with header values redacted.
 //! - Only the settings open-ferry types have lines. The sections it reads
 //!   and ignores (pprof, cloaking and `claude-code`, fingerprints,
 //!   Antigravity, Devin, Codex live media relay and
@@ -56,6 +58,21 @@ mod tests;
 /// left out (upstream's `BuildConfigChangeDetails`).
 pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
     let mut changes = Changes::default();
+
+    // Carried compatibility settings still need reload change reporting.
+    changes.int(
+        "tls-handshake-timeout-seconds",
+        old.tls_handshake_timeout_seconds,
+        new.tls_handshake_timeout_seconds,
+    );
+    changes.optional_int(
+        "claude.session-date-pin-days",
+        old.claude.session_date_pin_days,
+        new.claude.session_date_pin_days,
+    );
+    if old.claude_header_defaults != new.claude_header_defaults {
+        changes.0.push("claude-header-defaults: updated".to_owned());
+    }
 
     // Simple scalars.
     changes.flag(

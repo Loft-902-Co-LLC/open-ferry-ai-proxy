@@ -147,6 +147,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
         )
         .put("proxy-url", s(&cfg.proxy_url))
         .put(
+            "tls-handshake-timeout-seconds",
+            Value::Int(cfg.tls_handshake_timeout_seconds),
+        )
+        .put(
             "disable-image-generation",
             image_generation(cfg.disable_image_generation),
         )
@@ -387,6 +391,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                     Value::Bool(cfg.claude.model_level_cooling),
                 )
                 .put("tool-search", Value::Bool(cfg.claude.tool_search))
+                .pointer(
+                    "session-date-pin-days",
+                    cfg.claude.session_date_pin_days.map(Value::Int),
+                )
                 .done(),
         )
         .put("claude-api-key", seq(&cfg.claude_api_key, claude_key))
@@ -399,7 +407,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                 .omit_empty("check-every", s(&cfg.self_update.check_every))
                 .done(),
         )
-        .put("claude-header-defaults", claude_header_defaults())
+        .put(
+            "claude-header-defaults",
+            claude_header_defaults(&cfg.claude_header_defaults),
+        )
         .put("disable-claude-cloak-mode", Value::Bool(false))
         .put(
             "openai-compatibility",
@@ -548,8 +559,8 @@ fn live_media_relay() -> Value {
         .done()
 }
 
-/// An unset `claude-header-defaults`.
-fn claude_header_defaults() -> Value {
+/// Claude header defaults: carried overrides and unset fingerprint fields.
+fn claude_header_defaults(headers: &super::super::types::ClaudeHeaderDefaults) -> Value {
     [
         "user-agent",
         "package-version",
@@ -561,6 +572,19 @@ fn claude_header_defaults() -> Value {
     ]
     .iter()
     .fold(Fields::default(), |fields, key| fields.put(key, s("")))
+    .omit_empty(
+        "anthropic-beta-strip",
+        strings(&headers.anthropic_beta_strip),
+    )
+    .omit_empty(
+        "anthropic-beta-append",
+        strings(&headers.anthropic_beta_append),
+    )
+    .pointer(
+        "inject-diagnostics",
+        headers.inject_diagnostics.map(Value::Bool),
+    )
+    .omit_empty("client-request-id", s(&headers.client_request_id))
     .done()
 }
 

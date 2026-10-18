@@ -58,10 +58,13 @@
 //! ([`ManagementAddress`]), and `self-update` ([`SelfUpdate`]), a top-level
 //! section in both layouts that sets how open-ferry updates itself.
 //!
+//! The v8.0.32 TLS handshake timeout, Claude date pin and four Claude header
+//! overrides are typed and normalized for compatibility, but ignored at runtime.
+//!
 //! Read and ignored, so they never fail a load except where upstream checks
 //! their layout or weights before decoding:
 //! - Client impersonation, which this project doesn't do:
-//!   `claude-header-defaults`, `codex-header-defaults.user-agent`,
+//!   the fingerprint fields of `claude-header-defaults`, `codex-header-defaults.user-agent`,
 //!   `claude-code`, `disable-claude-cloak-mode`, `codex.disable-codex-cloaking`,
 //!   and per-key `cloak`, `fingerprint-profile` and `disable-codex-cloaking`.
 //! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
@@ -120,13 +123,13 @@ pub use model_catalogs::{CatalogSourceError, CatalogSources, is_url_source};
 pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 pub use safe_mode::example_api_key_warning_page;
 pub use types::{
-    ClaudeCli, ClaudeCliSystemPrompt, ClaudeConfig, ClaudeKey, ClaudeModel, ClientConfig,
-    CodexClientConfig, CodexConfig, CodexHeaderDefaults, CodexKey, CodexModel, Config,
-    DEFAULT_AUTH_DIR, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel, OAuthModelAlias,
-    OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel,
-    QuotaExceeded, RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingQuota,
-    RoutingStrategy, SelfUpdate, SelfUpdateMode, StreamingConfig, ThinkingSupport, TlsConfig,
-    VertexCompatKey, VertexCompatModel, XaiConfig,
+    ClaudeCli, ClaudeCliSystemPrompt, ClaudeConfig, ClaudeHeaderDefaults, ClaudeKey, ClaudeModel,
+    ClientConfig, CodexClientConfig, CodexConfig, CodexHeaderDefaults, CodexKey, CodexModel,
+    Config, DEFAULT_AUTH_DIR, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel,
+    OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey,
+    OpenAiCompatibilityModel, QuotaExceeded, RemoteManagement, RequestScopedErrorRule,
+    RoutingConfig, RoutingQuota, RoutingStrategy, SelfUpdate, SelfUpdateMode, StreamingConfig,
+    ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, ReadGuard, WatchError, WatchEvent, next_revision};
