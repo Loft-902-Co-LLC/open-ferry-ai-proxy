@@ -27,7 +27,11 @@ impl ConfigWriter for NeverCalled {
     fn write_file(&self, _: &[u8]) -> Result<Option<String>, WriteError> {
         panic!("refused writer must not read or write");
     }
-    fn edit_v8(&self, _: &V8Edit) -> Result<(Config, Option<String>), V8EditError> {
+    fn edit_v8(
+        &self,
+        _: &V8Edit,
+        _: Option<&V8Precondition>,
+    ) -> Result<(Config, Option<String>), V8EditError> {
         panic!("refused writer must not read or write");
     }
     fn undo(&self, _: &UndoCheck) -> Result<(Config, Option<String>), UndoError> {
@@ -58,7 +62,7 @@ fn refuse_all(writer: &dyn ConfigWriter) {
         expected
     );
     assert_eq!(
-        writer.edit_v8(&edit()).unwrap_err(),
+        writer.edit_v8(&edit(), None).unwrap_err(),
         V8EditError::WriteFailed(expected.into())
     );
     assert_eq!(
@@ -86,7 +90,7 @@ async fn refused_writes_never_call_the_writer_and_log_once_without_content() {
             "{line}"
         );
     }
-    let error = writer.edit_v8(&edit()).unwrap_err();
+    let error = writer.edit_v8(&edit(), None).unwrap_err();
     let response = v8_error_response(&error);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -159,7 +163,7 @@ fn allowed_writes_and_missing_files_under_trusted_parents_work_as_before() {
     let writer = state.config_writer().unwrap();
     writer.write_file(b"port: 1233\n").unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"port: 1233\n");
-    writer.edit_v8(&edit()).unwrap();
+    writer.edit_v8(&edit(), None).unwrap();
     assert_eq!(Config::load(&path).unwrap().port, 1234);
     writer.undo(&UndoCheck::default()).unwrap();
     assert_eq!(Config::load(&path).unwrap().port, 1233);

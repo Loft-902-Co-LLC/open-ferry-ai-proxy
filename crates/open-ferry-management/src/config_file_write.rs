@@ -27,7 +27,7 @@
 //!   one that doesn't match the file as it is now answers 412
 //!   `{"error":"precondition_failed"}` with the current `ETag`, before the
 //!   body or the path is looked at, and writes nothing. A saved change
-//!   answers the new file's `ETag`.
+//!   answers the new file's `ETag`, or none when the writer keeps no hash.
 //!
 //! Each write is made under the config write lock, becomes the config the
 //! handlers read, and has the service load the file again, as
@@ -52,11 +52,12 @@
 //! - A v8 path that isn't UTF-8 answers 400 `invalid_path` to `PUT` and
 //!   `PATCH`, and 404 `not_found` to `DELETE`, before the file is read.
 //!   Upstream uses its bytes as a key.
-//! - `If-Match` is checked under the config write lock, which every write
-//!   through this API takes, on the file as it is read just before the
-//!   writer reads it. Another process that writes the file in between (as
-//!   `open-ferry config` can) isn't caught; upstream's check is under its
-//!   handler lock alone, so the same holds there.
+//! - `If-Match` is checked twice: before the body is read, on the file as it
+//!   is then, so a stale tag beats a body that is too large; and again by
+//!   the writer, on the bytes it reads under the config file's own lock
+//!   (see [`V8Precondition`](crate::V8Precondition)), which also catches a
+//!   write by another process (as `open-ferry config` makes) after the
+//!   first check. Upstream checks under its handler's mutex alone.
 //! - Those of [`crate::config_write`].
 
 use std::sync::Arc;
@@ -73,7 +74,7 @@ use open_ferry_core::config::{Config, ConfigError, ConfigErrorKind};
 use crate::Route;
 use crate::auth_files::run_blocking;
 use crate::config_etag::{if_match_lines, if_match_satisfied, precondition_failed, with_etag};
-use crate::config_write::{self, V8Edit, V8EditError, V8Method};
+use crate::config_write::{self, V8Edit, V8EditError, V8Method, V8Precondition};
 use crate::json::{self, Json};
 use crate::state::ManagementState;
 
@@ -220,11 +221,22 @@ async fn edit_with_body(
     body: Body,
     yaml: bool,
 ) -> Response {
+    let if_match = if_match_lines(headers);
+    // Upstream checks `If-Match` before it reads the body: a stale tag is a
+    // 412 even where the body is too large. A service without a writer
+    // answers its own error first.
+    if !if_match.is_empty() {
+        if let Err(response) = config_write::writer(state) {
+            return response;
+        }
+        if let Err(response) = check_if_match(state, &if_match).await {
+            return response;
+        }
+    }
     let body = match config_write::request_body(state, body).await {
         Ok(body) => body,
         Err(response) => return response,
     };
-    let if_match = if_match_lines(headers);
     let Some(path) = path else {
         return refuse(state, if_match, V8EditError::InvalidPath, false).await;
     };
@@ -244,8 +256,9 @@ async fn edit_with_body(
 /// Has the writer make `edit` under the write lock, then the service load
 /// the file (upstream's `ConfigV8` for a change). With `If-Match` lines, the
 /// file must still have the tag one of them names, else the answer is 412
-/// and nothing is written. The answer carries the `ETag` of the file
-/// written.
+/// and nothing is written; the writer checks them on the bytes it reads under
+/// the file's lock. The answer carries the `ETag` of the file written, when
+/// the writer says what it wrote.
 async fn edit(state: &ManagementState, if_match: Vec<String>, edit: V8Edit) -> Response {
     let writer = match config_write::writer(state) {
         Ok(writer) => writer,
@@ -255,10 +268,18 @@ async fn edit(state: &ManagementState, if_match: Vec<String>, edit: V8Edit) -> R
     config_write::run_task(async move {
         let sha256 = {
             let _guard = state.config_write_lock().lock().await;
-            if let Err(response) = check_if_match(&state, &if_match).await {
-                return response;
-            }
-            match run_blocking(move || writer.edit_v8(&edit)).await {
+            let condition = (!if_match.is_empty())
+                .then_some(move |hash: &str| if_match_satisfied(&if_match, hash));
+            match run_blocking(move || {
+                writer.edit_v8(
+                    &edit,
+                    condition
+                        .as_ref()
+                        .map(|condition| condition as &V8Precondition),
+                )
+            })
+            .await
+            {
                 Ok((config, sha256)) => {
                     state.set_loaded_config(Arc::new(config), sha256.clone());
                     sha256
@@ -266,17 +287,9 @@ async fn edit(state: &ManagementState, if_match: Vec<String>, edit: V8Edit) -> R
                 Err(error) => return config_write::v8_error_response(&error),
             }
         };
-        // The version actually on disk: the writer's hash of what it wrote,
-        // else the file read back. Without either, upstream sends no tag
-        // rather than guess one.
-        let sha256 = match sha256 {
-            Some(sha256) => Some(sha256),
-            None => {
-                let state = state.clone();
-                run_blocking(move || state.read_config_file().ok().map(|data| sha256_hex(&data)))
-                    .await
-            }
-        };
+        // The version the writer wrote. A writer that keeps no hash gets no
+        // tag: reading the file back here, outside the lock, could give
+        // another write's.
         config_write::reload(&state).await;
         let response = json::response(
             StatusCode::OK,

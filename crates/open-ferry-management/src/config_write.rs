@@ -77,7 +77,7 @@ use http::StatusCode;
 use open_ferry_core::config::Config;
 use open_ferry_core::config::save::SaveErrorKind;
 pub use open_ferry_core::config::save::UndoCheck;
-pub use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method};
+pub use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method, V8Precondition};
 use open_ferry_core::config::{save, v8_edit};
 use open_ferry_core::gate::{ActiveGate, Operation};
 
@@ -132,8 +132,16 @@ pub trait ConfigWriter: Send + Sync {
 
     /// Reads the file, makes `edit` to it in the v8 layout, checks the
     /// result and saves it, and returns the config the file now holds
-    /// (upstream's `ConfigV8` for `PUT`, `PATCH` and `DELETE`).
-    fn edit_v8(&self, edit: &V8Edit) -> Result<(Config, Option<String>), V8EditError>;
+    /// (upstream's `ConfigV8` for `PUT`, `PATCH` and `DELETE`). With a
+    /// `condition`, it is checked against the SHA-256 of the file as read
+    /// under the file's lock, and a refusal is
+    /// [`V8EditError::PreconditionFailed`] (not upstream's: see
+    /// [`V8Precondition`]).
+    fn edit_v8(
+        &self,
+        edit: &V8Edit,
+        condition: Option<&V8Precondition>,
+    ) -> Result<(Config, Option<String>), V8EditError>;
 
     /// Puts the backup the last write kept in place of the file, keeping
     /// the file it replaces as the new backup so the undo can itself be
@@ -314,12 +322,16 @@ impl ConfigWriter for FileConfigWriter {
             .map_err(|error| WriteError::new(error.to_string()))
     }
 
-    fn edit_v8(&self, edit: &V8Edit) -> Result<(Config, Option<String>), V8EditError> {
+    fn edit_v8(
+        &self,
+        edit: &V8Edit,
+        condition: Option<&V8Precondition>,
+    ) -> Result<(Config, Option<String>), V8EditError> {
         let _permit = self
             .gate
             .write_permit()
             .map_err(|_| V8EditError::Switching)?;
-        v8_edit::edit_v8_with_sha256(&self.path, edit)
+        v8_edit::edit_v8_if(&self.path, edit, condition)
             .map(|(config, sha256)| (config, Some(sha256)))
     }
 
@@ -367,11 +379,15 @@ impl ConfigWriter for CheckedConfigWriter {
         self.writer.write_file(data)
     }
 
-    fn edit_v8(&self, edit: &V8Edit) -> Result<(Config, Option<String>), V8EditError> {
+    fn edit_v8(
+        &self,
+        edit: &V8Edit,
+        condition: Option<&V8Precondition>,
+    ) -> Result<(Config, Option<String>), V8EditError> {
         self.state
             .authorize_config_write()
             .map_err(V8EditError::WriteFailed)?;
-        self.writer.edit_v8(edit)
+        self.writer.edit_v8(edit, condition)
     }
 
     fn undo(&self, check: &UndoCheck) -> Result<(Config, Option<String>), UndoError> {
@@ -420,6 +436,9 @@ pub(crate) fn v8_error_response(error: &V8EditError) -> Response {
             Some(("message", message)),
         ),
         E::Switching => return json::error(StatusCode::SERVICE_UNAVAILABLE, SWITCHING),
+        E::PreconditionFailed { current_sha256 } => {
+            return crate::config_etag::precondition_failed(current_sha256);
+        }
         // A refusal core adds later, until it has its own answer.
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "write_failed", None),
     };

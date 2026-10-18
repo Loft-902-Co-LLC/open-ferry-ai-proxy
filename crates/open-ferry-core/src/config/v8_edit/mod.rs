@@ -178,7 +178,21 @@ pub enum V8EditError {
     /// versions, and nothing was written: 503. Never made here; a writer
     /// that holds a gate answers it.
     Switching,
+    /// The edit's condition ([`V8Precondition`]) refused the file as the
+    /// write lock found it, and nothing was written: 412
+    /// `precondition_failed`, with the file's SHA-256 (lowercase hex) as its
+    /// tag.
+    PreconditionFailed {
+        /// The SHA-256 of the file the condition was checked against.
+        current_sha256: String,
+    },
 }
+
+/// A condition on the config file an edit is made to, given the SHA-256 of
+/// the file's bytes (lowercase hex): whether the edit may go ahead. It is
+/// checked on the bytes [`edit_v8_if`] reads under the file's write lock, so
+/// no other write can land between the check and the edit.
+pub type V8Precondition = dyn Fn(&str) -> bool + Send + Sync;
 
 impl fmt::Display for V8EditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -197,6 +211,7 @@ impl fmt::Display for V8EditError {
             Self::ReadOnlyField(field) => write!(f, "read_only_field: {field}"),
             Self::WriteFailed(message) => write!(f, "write_failed: {message}"),
             Self::Switching => f.write_str("open-ferry is switching versions"),
+            Self::PreconditionFailed { .. } => f.write_str("precondition_failed"),
         }
     }
 }
@@ -216,9 +231,29 @@ pub fn edit_v8(path: &Path, edit: &V8Edit) -> Result<Config, V8EditError> {
 /// of what it wrote, in lowercase hex. Not upstream's: the management API
 /// keeps it, to check that the file still holds it before it next saves.
 pub fn edit_v8_with_sha256(path: &Path, edit: &V8Edit) -> Result<(Config, String), V8EditError> {
+    edit_v8_if(path, edit, None)
+}
+
+/// [`edit_v8_with_sha256`], first checking `condition` (if any) against the
+/// SHA-256 of the file as read under the write lock. A condition that
+/// refuses it is [`V8EditError::PreconditionFailed`] with that hash, and
+/// nothing is written. Not upstream's: upstream checks `If-Match` under its
+/// handler's mutex alone, so a write by another process can land between
+/// its check and its edit.
+pub fn edit_v8_if(
+    path: &Path,
+    edit: &V8Edit,
+    condition: Option<&V8Precondition>,
+) -> Result<(Config, String), V8EditError> {
     let failed = |error: save::SaveError| V8EditError::WriteFailed(error.to_string());
     let lock = save::WriteLock::acquire(path).map_err(failed)?;
     let data = std::fs::read(path).map_err(|_| V8EditError::ReadFailed)?;
+    if let Some(condition) = condition {
+        let current_sha256 = save::sha256_hex(&data);
+        if !condition(&current_sha256) {
+            return Err(V8EditError::PreconditionFailed { current_sha256 });
+        }
+    }
     let (out, config) = render(&data, edit)?;
     let sha256 = save::write_file_locked(&lock, path, &out).map_err(failed)?;
     Ok((config, sha256))

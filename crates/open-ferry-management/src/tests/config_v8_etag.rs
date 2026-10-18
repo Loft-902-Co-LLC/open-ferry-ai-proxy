@@ -253,3 +253,142 @@ async fn if_match_on_a_missing_file_is_read_failed() {
     status(&answer, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(answer.body, r#"{"error":"read_failed"}"#);
 }
+
+/// A writer that changes the config file on disk, as `open-ferry config`
+/// does from another process, just before it takes the file's lock: after
+/// the handler's own checks, before the locked read.
+struct ChangesBeforeTheLock {
+    inner: crate::FileConfigWriter,
+    path: std::path::PathBuf,
+    contents: &'static str,
+}
+
+impl crate::ConfigWriter for ChangesBeforeTheLock {
+    fn save_preserving_comments(
+        &self,
+        config: &Config,
+        migrate_v8: bool,
+        expected: Option<&str>,
+    ) -> Result<Option<String>, crate::WriteError> {
+        self.inner
+            .save_preserving_comments(config, migrate_v8, expected)
+    }
+
+    fn write_file(&self, data: &[u8]) -> Result<Option<String>, crate::WriteError> {
+        self.inner.write_file(data)
+    }
+
+    fn edit_v8(
+        &self,
+        edit: &crate::V8Edit,
+        condition: Option<&crate::V8Precondition>,
+    ) -> Result<(Config, Option<String>), crate::V8EditError> {
+        std::fs::write(&self.path, self.contents).unwrap();
+        self.inner.edit_v8(edit, condition)
+    }
+
+    fn undo(&self, check: &crate::UndoCheck) -> Result<(Config, Option<String>), crate::UndoError> {
+        self.inner.undo(check)
+    }
+}
+
+// Not upstream's: the file changes after the handler's own check, as a save
+// by another process can; the writer checks `If-Match` again on the bytes it
+// reads under the file's lock, so the write is a 412 with the new file's tag
+// and changes nothing.
+#[tokio::test]
+async fn if_match_is_checked_under_the_files_lock() {
+    const OTHER: &str = "config-version: 8\nserver: {port: 8317}\naccess: {api-keys: []}\n";
+    let dir = AuthDir::new();
+    let mut api = Api::over_config_file(&dir, RAW);
+    let state = api
+        .state
+        .clone()
+        .with_config_writer(std::sync::Arc::new(ChangesBeforeTheLock {
+            inner: crate::FileConfigWriter::new(dir.config_path()),
+            path: dir.config_path(),
+            contents: OTHER,
+        }));
+    api.router = crate::router(state.clone());
+    api.state = state;
+
+    // The client's tag is the file's when the handler looks, and stale when
+    // the writer reads.
+    let answer = call(
+        &api,
+        Method::PUT,
+        "/v8/management/config.yaml",
+        RAW,
+        &file_etag(&dir),
+    )
+    .await;
+    status(&answer, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(answer.body, r#"{"error":"precondition_failed"}"#);
+    assert_eq!(file_bytes(&dir), OTHER, "the stale write changed the file");
+    assert_eq!(answer.header("etag"), Some(file_etag(&dir).as_str()));
+}
+
+// Not upstream's: two writes with the same tag, at once: the first changes
+// the file, so the second's tag is stale by the time it reads.
+#[tokio::test]
+async fn two_writes_with_one_tag_have_one_winner() {
+    let dir = AuthDir::new();
+    let api = Api::over_config_file(&dir, RAW);
+    let tag = file_etag(&dir);
+    let port = "/v8/management/config/server/port";
+    let (a, b) = tokio::join!(
+        call(&api, Method::PUT, port, "8318", &tag),
+        call(&api, Method::PUT, port, "8319", &tag),
+    );
+    let mut statuses = [a.status, b.status];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::PRECONDITION_FAILED],
+        "{a:?} {b:?}"
+    );
+    let loser = if a.status == StatusCode::OK { &b } else { &a };
+    assert_eq!(loser.header("etag"), Some(file_etag(&dir).as_str()));
+}
+
+// Not upstream's: upstream checks `If-Match` before it reads the body, so a
+// stale tag beats a body over the limit (413).
+#[tokio::test]
+async fn a_stale_tag_beats_a_body_over_the_limit() {
+    let dir = AuthDir::new();
+    let api = Api::over_config_file(&dir, RAW);
+    let big = " ".repeat((16 << 20) + 1);
+    let answer = call(
+        &api,
+        Method::PUT,
+        "/v8/management/config.yaml",
+        &big,
+        "\"stale\"",
+    )
+    .await;
+    status(&answer, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(answer.header("etag"), Some(file_etag(&dir).as_str()));
+    // With the current tag the body is read, and refused as too large.
+    let answer = call(
+        &api,
+        Method::PUT,
+        "/v8/management/config.yaml",
+        &big,
+        &file_etag(&dir),
+    )
+    .await;
+    status(&answer, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(file_bytes(&dir), RAW);
+}
+
+// Not upstream's: a writer that keeps no hash gives no ETag, rather than one
+// read back from the file outside the lock.
+#[tokio::test]
+async fn a_writer_without_a_hash_gives_no_etag() {
+    let api = Api::writing(super::keyed_config());
+    let answer = api
+        .call(Method::PUT, "/v8/management/config/server/port", "8318")
+        .await;
+    status(&answer, StatusCode::OK);
+    assert_eq!(answer.header("etag"), None);
+}

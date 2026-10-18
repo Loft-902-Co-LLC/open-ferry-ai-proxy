@@ -97,7 +97,7 @@ use tower::ServiceExt as _;
 
 use crate::{
     ConfigReload, ConfigWriter, CredentialSync, FileConfigWriter, ManagementState, ReloadFuture,
-    SyncError, SyncFuture, V8Edit, V8EditError, WriteError, router,
+    SyncError, SyncFuture, V8Edit, V8EditError, V8Precondition, WriteError, router,
 };
 
 /// The management key the tests set.
@@ -791,7 +791,11 @@ impl ConfigWriter for FakeWriter {
         self.record(Written::File(data.to_vec())).map(|()| None)
     }
 
-    fn edit_v8(&self, edit: &V8Edit) -> Result<(Config, Option<String>), V8EditError> {
+    fn edit_v8(
+        &self,
+        edit: &V8Edit,
+        _: Option<&V8Precondition>,
+    ) -> Result<(Config, Option<String>), V8EditError> {
         self.record(Written::V8(edit.clone()))
             .map_err(|error| V8EditError::WriteFailed(error.to_string()))?;
         match self.v8_result.lock().unwrap().clone() {

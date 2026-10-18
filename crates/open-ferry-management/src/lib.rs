@@ -97,7 +97,7 @@ pub use auth_files::credential_entry;
 pub use client_ip::TrustedProxies;
 pub use config_write::{
     ConfigReload, ConfigWriter, FileConfigWriter, ReloadFuture, UndoCheck, UndoError, V8Edit,
-    V8EditError, V8Method, WriteError, undo_config,
+    V8EditError, V8Method, V8Precondition, WriteError, undo_config,
 };
 pub use credential_sync::{CredentialSync, SyncError, SyncFuture};
 pub use handover::{Ban, Handover};

@@ -11347,6 +11347,87 @@ port: {port}
             assert_eq!(read().await["available"], true);
         }
 
+        // Ported from TestConfigV8ETagExposedForCORS: a cross-origin
+        // management page can read the ETag the v8 config routes return,
+        // from a read, from a 412 and from a write.
+        #[tokio::test]
+        async fn config_v8_etag_is_exposed_for_cors() {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_dir = dir.path().join("auth");
+            std::fs::create_dir(&auth_dir).unwrap();
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let file = dir.path().join("config.yaml");
+            let text = format!(
+                "host: 127.0.0.1
+port: {port}
+auth-dir: '{}'
+{KEYED}",
+                auth_dir.display()
+            );
+            std::fs::write(&file, text).unwrap();
+            let (config, config_sha256) = Config::load_with_sha256(&file).unwrap();
+            let (stop, stopped) = oneshot::channel::<()>();
+            let served = tokio::spawn(run(
+                config,
+                file.clone(),
+                auth_dir,
+                LogLevel::detached(),
+                Options {
+                    config_sha256: Some(config_sha256),
+                    ..Options::default()
+                },
+                async move {
+                    let _ = stopped.await;
+                },
+            ));
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            wait_listening(addr).await;
+            let path = "/v8/management/config/routing/strategy";
+            let origin = ("Origin", "http://127.0.0.1:5173");
+            let key = ("Authorization", "Bearer test-secret");
+
+            let exposed_etag = |answer: &Answer, status: u16| -> String {
+                assert_eq!(answer.status, status, "{}", answer.body);
+                let exposed = answer.header("access-control-expose-headers").unwrap();
+                assert!(
+                    exposed
+                        .split(',')
+                        .any(|name| name.trim().eq_ignore_ascii_case("ETag")),
+                    "Access-Control-Expose-Headers missing ETag: {exposed:?}"
+                );
+                answer
+                    .header("etag")
+                    .expect("response is missing ETag")
+                    .to_owned()
+            };
+
+            let read = fetch(addr, "GET", "/v8/management/config.yaml", &[origin, key]).await;
+            let etag = exposed_etag(&read, 200);
+            assert!(!read.body.is_empty());
+
+            // A stale precondition reports the current version, still
+            // readable cross-origin.
+            let stale = ("If-Match", "\"stale\"");
+            let answer = send(addr, "PUT", path, &[origin, key, stale], "\"fill-first\"").await;
+            assert_eq!(exposed_etag(&answer, 412), etag);
+            assert_eq!(answer.body, r#"{"error":"precondition_failed"}"#);
+
+            // A successful conditional write answers the new version.
+            let current = ("If-Match", etag.as_str());
+            let answer = send(addr, "PUT", path, &[origin, key, current], "\"fill-first\"").await;
+            let next = exposed_etag(&answer, 200);
+            assert_ne!(next, etag);
+            let read = fetch(addr, "GET", "/v8/management/config.yaml", &[origin, key]).await;
+            assert_eq!(exposed_etag(&read, 200), next);
+
+            let _ = stop.send(());
+            let _ = served.await;
+        }
+
         #[tokio::test]
         async fn management_is_served_beside_the_proxy() {
             let dir = tempfile::tempdir().unwrap();
