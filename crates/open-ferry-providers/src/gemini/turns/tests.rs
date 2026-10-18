@@ -230,3 +230,28 @@ fn trailing_function_response_accepts_object_parts() {
         }
     }
 }
+
+// Not upstream's: covers the newly shared Vertex helper's boundary cases directly.
+#[test]
+fn drops_only_trailing_thought_model_turns_and_keeps_one_turn() {
+    let thought = json!({"role":"model","parts":[{"thought":true,"text":"thinking"}]});
+    let user = json!({"role":"user","parts":[{"text":"hi"}]});
+    let mut body = json!({"contents":[user, thought, thought]});
+    drop_trailing_thought_only(&mut body, "contents");
+    assert_eq!(body["contents"], json!([user]));
+    let mut body = json!({"contents":[thought, thought]});
+    drop_trailing_thought_only(&mut body, "contents");
+    assert_eq!(body["contents"], json!([thought]));
+    for tail in [
+        json!({"role":"model","parts":[]}),
+        json!({"role":"model","parts":[{"thought":true,"functionCall":{}}]}),
+        json!({"role":"model","parts":[{"thought":true,"functionResponse":{}}]}),
+        json!({"role":"model","parts":[{"thought":true},{"text":"answer"}]}),
+        user.clone(),
+    ] {
+        let original = json!({"contents":[user, tail]});
+        let mut body = original.clone();
+        drop_trailing_thought_only(&mut body, "contents");
+        assert_eq!(body, original);
+    }
+}
