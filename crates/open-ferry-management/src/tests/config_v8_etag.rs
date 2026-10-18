@@ -328,6 +328,101 @@ async fn if_match_is_checked_under_the_files_lock() {
     assert_eq!(answer.header("etag"), Some(file_etag(&dir).as_str()));
 }
 
+/// A writer whose first write is caught half done, as an in-place write
+/// that has truncated the file and not yet written it: it truncates the file,
+/// says so, waits to be let go, and puts the file back as it was.
+struct HalfDone {
+    inner: crate::FileConfigWriter,
+    path: std::path::PathBuf,
+    contents: &'static str,
+    first: std::sync::atomic::AtomicBool,
+    truncated: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl crate::ConfigWriter for HalfDone {
+    fn save_preserving_comments(
+        &self,
+        config: &Config,
+        migrate_v8: bool,
+        expected: Option<&str>,
+    ) -> Result<Option<String>, crate::WriteError> {
+        self.inner
+            .save_preserving_comments(config, migrate_v8, expected)
+    }
+
+    fn write_file(&self, data: &[u8]) -> Result<Option<String>, crate::WriteError> {
+        self.inner.write_file(data)
+    }
+
+    fn edit_v8(
+        &self,
+        edit: &crate::V8Edit,
+        condition: Option<&crate::V8Precondition>,
+    ) -> Result<(Config, Option<String>), crate::V8EditError> {
+        if !self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return self.inner.edit_v8(edit, condition);
+        }
+        std::fs::write(&self.path, "").unwrap();
+        self.truncated.lock().unwrap().send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+        std::fs::write(&self.path, self.contents).unwrap();
+        let config = Config::load_bytes(self.contents.as_bytes()).unwrap();
+        Ok((config, Some(sha256_hex(self.contents.as_bytes()))))
+    }
+
+    fn undo(&self, check: &crate::UndoCheck) -> Result<(Config, Option<String>), crate::UndoError> {
+        self.inner.undo(check)
+    }
+}
+
+// Not upstream's: a write that leaves the file as it was, caught between
+// truncating it and writing it, doesn't make the next request's matching tag
+// stale. Upstream's handler mutex makes that request wait for the write; the
+// early check waits for the API's write lock as well, and is not given the
+// empty file.
+#[tokio::test]
+async fn a_matching_tag_waits_for_a_write_half_done() {
+    let dir = AuthDir::new();
+    let mut api = Api::over_config_file(&dir, RAW);
+    let tag = file_etag(&dir);
+    let (truncated, saw_truncated) = std::sync::mpsc::channel();
+    let (let_go, release) = std::sync::mpsc::channel();
+    let state = api
+        .state
+        .clone()
+        .with_config_writer(std::sync::Arc::new(HalfDone {
+            inner: crate::FileConfigWriter::new(dir.config_path()),
+            path: dir.config_path(),
+            contents: RAW,
+            first: std::sync::atomic::AtomicBool::new(true),
+            truncated: std::sync::Mutex::new(truncated),
+            release: std::sync::Mutex::new(release),
+        }));
+    api.router = crate::router(state.clone());
+    api.state = state;
+
+    let port = "/v8/management/config/server/port";
+    let first = call(&api, Method::PUT, port, "8317", &tag);
+    let second = async {
+        tokio::task::spawn_blocking(move || saw_truncated.recv().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(file_bytes(&dir), "", "the first write is half done");
+        let second = call(&api, Method::PUT, port, "8318", &tag);
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let_go.send(()).unwrap();
+        };
+        tokio::join!(second, release).0
+    };
+    let (first, second) = tokio::join!(first, second);
+    status(&first, StatusCode::OK);
+    assert_eq!(first.header("etag"), Some(tag.as_str()));
+    status(&second, StatusCode::OK);
+    assert!(file_bytes(&dir).contains("8318"), "{}", file_bytes(&dir));
+}
+
 // Not upstream's: two writes with the same tag, at once: the first changes
 // the file, so the second's tag is stale by the time it reads.
 #[tokio::test]
