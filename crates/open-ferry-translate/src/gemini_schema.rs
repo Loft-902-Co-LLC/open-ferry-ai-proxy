@@ -60,11 +60,13 @@
 //!   level of such values nested in one another escapes the text of the level
 //!   below once more, doubling it, so a 600-byte schema can come out as 16 MB.
 //! - Copying conditional properties and materializing required-only union
-//!   branches share limits of 8 MiB of bytes, 8,192 nodes and 1 MiB of path
+//!   branches share limits of 8 MiB of bytes, 65,536 nodes and 4 MiB of path
 //!   work across all tool schemas in one translation call, spent in tool order.
 //!   Each copied node is charged its destination path length plus its relative
-//!   path length within the copied value; strings, keys and numeric-name null
-//!   padding are charged too. Each retry translates with fresh limits. Below
+//!   path length within the copied value. Branch clones and written properties
+//!   are charged, with keys, containers and null padding only where writes
+//!   create them; existing ancestors and array indices incur no padding charge.
+//!   Conditionals charge only missing properties that are actually written. Each retry translates with fresh limits. Below
 //!   all limits, output matches upstream. A conditional branch that does not
 //!   fit, and all later branches at the same or shallower depths, add nothing
 //!   to their parents. If the combined cost of all required-only branches in
@@ -94,8 +96,8 @@ const MAX_JSON_TEXT: usize = 1024;
 pub(crate) const SCHEMA_COPY_BYTES_PER_REQUEST: usize = 8 * 1024 * 1024;
 
 /// Limits for the nodes allocated and the paths traversed by later passes.
-const SCHEMA_COPY_NODES_PER_REQUEST: usize = 8192;
-const SCHEMA_COPY_PATH_WORK_PER_REQUEST: usize = 1 << 20;
+const SCHEMA_COPY_NODES_PER_REQUEST: usize = 65_536;
+const SCHEMA_COPY_PATH_WORK_PER_REQUEST: usize = 4 * 1024 * 1024;
 
 /// One translation call's allowance, shared by both copy passes and every tool.
 #[derive(Clone, Copy)]
@@ -142,6 +144,15 @@ impl CopyCost {
 }
 
 impl SchemaCopyBudget {
+    #[cfg(test)]
+    fn unlimited() -> Self {
+        Self {
+            remaining: usize::MAX,
+            nodes: usize::MAX,
+            path_work: usize::MAX,
+        }
+    }
+
     fn spend(&mut self, cost: CopyCost) -> Option<()> {
         let remaining = self.remaining.checked_sub(cost.bytes)?;
         let nodes = self.nodes.checked_sub(cost.nodes)?;
@@ -215,23 +226,204 @@ fn copy_bytes(value: &Value, limit: usize) -> Option<usize> {
     Some(counter.used)
 }
 
-/// Conservatively charges path keys, containers, and every possible null pad
-/// before a set. This also covers sjson's numeric-name array construction.
-fn copy_path_cost(path: &str) -> CopyCost {
-    keys(path).iter().fold(CopyCost::default(), |cost, key| {
-        let padding = build_index(key)
-            .filter(|&index| index <= MAX_PADDED_INDEX)
-            .map_or(0, |index| index + 1);
-        cost.add(CopyCost {
-            bytes: key
-                .len()
-                .saturating_mul(6)
-                .saturating_add(4)
-                .saturating_add(padding * 5),
-            nodes: padding + 1,
-            path_work: (padding + 1).saturating_mul(path.len()),
-        })
-    })
+/// A shallow overlay for preflighting writes without cloning schema values.
+/// Existing nodes are borrowed; only edited containers and new null pads are
+/// represented locally. This follows `set_keys`/`built`, including numeric keys.
+enum CopyTarget<'a> {
+    Existing(&'a Value),
+    Object {
+        base: Option<&'a Map<String, Value>>,
+        changes: HashMap<String, Self>,
+    },
+    Array {
+        base: Option<&'a [Value]>,
+        changes: HashMap<usize, Self>,
+        len: usize,
+    },
+    Null,
+}
+
+impl<'a> CopyTarget<'a> {
+    fn empty_array() -> Self {
+        Self::Array {
+            base: None,
+            changes: HashMap::new(),
+            len: 0,
+        }
+    }
+    fn empty_object() -> Self {
+        Self::Object {
+            base: None,
+            changes: HashMap::new(),
+        }
+    }
+
+    fn contains(&self, path: &[String]) -> bool {
+        let Some((key, rest)) = path.split_first() else {
+            return true;
+        };
+        match self {
+            Self::Existing(value) => {
+                child(value, key).is_some_and(|value| Self::Existing(value).contains(rest))
+            }
+            Self::Object { base, changes } => changes.get(key).map_or_else(
+                || {
+                    base.and_then(|fields| fields.get(key))
+                        .is_some_and(|value| Self::Existing(value).contains(rest))
+                },
+                |value| value.contains(rest),
+            ),
+            Self::Array { base, changes, len } => {
+                index(key).filter(|&at| at < *len).is_some_and(|at| {
+                    changes.get(&at).map_or_else(
+                        || {
+                            base.and_then(|items| items.get(at)).map_or_else(
+                                || rest.is_empty(),
+                                |value| Self::Existing(value).contains(rest),
+                            )
+                        },
+                        |value| value.contains(rest),
+                    )
+                })
+            }
+            Self::Null => false,
+        }
+    }
+
+    fn expand(&mut self) {
+        if let Self::Existing(value) = self {
+            // Keep untouched children borrowed; large existing property maps
+            // and arrays must not be rescanned or cloned for every write.
+            *self = match value {
+                Value::Object(fields) => Self::Object {
+                    base: Some(fields),
+                    changes: HashMap::new(),
+                },
+                Value::Array(items) => Self::Array {
+                    base: Some(items),
+                    changes: HashMap::new(),
+                    len: items.len(),
+                },
+                _ => Self::Null,
+            };
+        }
+    }
+
+    fn write(
+        &mut self,
+        path: &[String],
+        value: &'a Value,
+        value_cost: CopyCost,
+        destination: &str,
+    ) -> CopyCost {
+        let Some((key, rest)) = path.split_first() else {
+            *self = Self::Existing(value);
+            return value_cost.at(destination.len());
+        };
+        self.expand();
+        let child_key = match self {
+            Self::Array { len, .. } => build_index(key)
+                .map(|at| if key.is_empty() { (*len).max(at) } else { at })
+                .map(|at| at.to_string())
+                .unwrap_or_else(|| {
+                    if key == "-1" {
+                        len.to_string()
+                    } else {
+                        key.clone()
+                    }
+                }),
+            Self::Null => build_index(key).map_or_else(|| key.clone(), |at| at.to_string()),
+            _ => key.clone(),
+        };
+        let child_path = join_path(destination, &escape_key(&child_key));
+        let existing = match self {
+            Self::Object { base, changes } => {
+                if !changes.contains_key(key)
+                    && let Some(value) = base.and_then(|fields| fields.get(key))
+                {
+                    changes.insert(key.clone(), Self::Existing(value));
+                }
+                changes.get_mut(key)
+            }
+            Self::Array { base, changes, len } => index(key).filter(|&at| at < *len).map(|at| {
+                changes.entry(at).or_insert_with(|| {
+                    base.and_then(|items| items.get(at))
+                        .map_or(Self::Null, Self::Existing)
+                })
+            }),
+            _ => None,
+        };
+        if let Some(existing) = existing {
+            return existing.write(rest, value, value_cost, &child_path);
+        }
+        // `built` rejects an oversized numeric key before modifying any ancestor.
+        if rest
+            .iter()
+            .any(|key| build_index(key).is_some_and(|at| at > MAX_PADDED_INDEX))
+        {
+            return CopyCost::default();
+        }
+        let at = build_index(key);
+        if at.is_some_and(|at| at > MAX_PADDED_INDEX) && !matches!(self, Self::Object { .. }) {
+            return CopyCost::default();
+        }
+        if matches!(self, Self::Array { .. }) && at.is_none() && key != "-1" {
+            return CopyCost::default();
+        }
+        // `built` treats a missing -1 segment as an array append, whereas
+        // `set_keys` on an existing scalar treats -1 as an object key.
+        let append = rest.first().is_some_and(|key| key == "-1");
+        let mut built = if append {
+            Self::empty_array()
+        } else {
+            Self::Null
+        };
+        let mut cost = built.write(rest, value, value_cost, &child_path);
+        if append {
+            cost = cost.add(CopyCost {
+                bytes: 2,
+                nodes: 1,
+                path_work: child_path.len(),
+            });
+        }
+        if matches!(self, Self::Null) {
+            *self = if at.is_some() {
+                Self::empty_array()
+            } else {
+                Self::empty_object()
+            };
+            cost = cost.add(CopyCost {
+                bytes: 2,
+                nodes: 1,
+                path_work: destination.len(),
+            });
+        }
+        match self {
+            Self::Object { base, changes } => {
+                let nonempty = base.is_some_and(|fields| !fields.is_empty()) || !changes.is_empty();
+                cost.bytes = cost.bytes.saturating_add(
+                    serde_json::to_string(key).expect("JSON key").len() + 1 + usize::from(nonempty),
+                );
+                changes.insert(key.clone(), built);
+            }
+            Self::Array { changes, len, .. } => {
+                let at = at.unwrap_or(*len);
+                for pad in *len..at {
+                    cost = cost.add(CopyCost {
+                        bytes: 4 + usize::from(pad != 0),
+                        nodes: 1,
+                        path_work: destination.len() + 1 + pad.to_string().len(),
+                    });
+                }
+                let inserted_at = (*len).max(at);
+                cost.bytes = cost.bytes.saturating_add(usize::from(inserted_at != 0));
+                changes.insert(inserted_at, built);
+                *len = inserted_at + 1;
+            }
+            _ => unreachable!("expanded or created a container"),
+        }
+        cost
+    }
 }
 
 /// Keywords Gemini rejects, removed wherever they are a keyword rather than a
@@ -914,24 +1106,35 @@ fn merge_conditionals(doc: &mut Value, budget: &mut SchemaCopyBudget) {
         } else {
             continue;
         };
-        let destination = join_path(&parent, "properties");
-        let Some(mut cost) = copy_cost(found).map(|cost| cost.at(destination.len())) else {
-            break;
+        let parent_value = if parent.is_empty() {
+            &*doc
+        } else {
+            get(doc, &parent).expect("conditional parent")
         };
-        for key in found.as_object().expect("matched an object").keys() {
-            cost = cost.add(copy_path_cost(&join_path(&destination, &escape_key(key))));
+        let mut target = CopyTarget::Existing(parent_value);
+        let mut cost = CopyCost::default();
+        let mut writes = Vec::new();
+        for (key, value) in found.as_object().expect("matched an object") {
+            let relative = format!("properties.{}", escape_key(key));
+            let path_keys = keys(&relative);
+            if target.contains(&path_keys) {
+                continue;
+            }
+            let Some(value_cost) = copy_cost(value) else {
+                return;
+            };
+            cost = cost.add(target.write(&path_keys, value, value_cost, &parent));
+            writes.push((join_path(&parent, &relative), value));
         }
         if budget.spend(cost).is_none() {
             break;
         }
-        let Value::Object(properties) = found.clone() else {
-            unreachable!("matched an object");
-        };
-        for (key, value) in properties {
-            let destination = join_path(&parent, &format!("properties.{}", escape_key(&key)));
-            if get(doc, &destination).is_none() {
-                set(doc, &destination, value);
-            }
+        let writes: Vec<_> = writes
+            .into_iter()
+            .map(|(path, value)| (path, value.clone()))
+            .collect();
+        for (path, value) in writes {
+            set(doc, &path, value);
         }
     }
 }
@@ -1092,24 +1295,26 @@ fn required_only_branch_cost(
     let Some(mut cost) = copy_cost(item).map(|cost| cost.at(destination.len())) else {
         return BranchCopyCost::OverBudget;
     };
-    cost = cost.add(CopyCost {
-        bytes: 32,
-        nodes: 2,
-        path_work: 2 * (destination.len() + 11),
-    });
+    let object_type = Value::from("object");
+    let mut target = CopyTarget::Existing(item);
     for name in required {
         let name = str_of(Some(name));
-        let property_cost = property_costs.entry(name.to_string()).or_insert_with(|| {
-            copy_cost(get(parent_props, &escape_key(&name)).expect("checked required name"))
-        });
+        let property = get(parent_props, &escape_key(&name)).expect("checked required name");
+        let property_cost = property_costs
+            .entry(name.to_string())
+            .or_insert_with(|| copy_cost(property));
         let Some(property_cost) = *property_cost else {
             return BranchCopyCost::OverBudget;
         };
-        let path = join_path(destination, &format!("properties.{}", escape_key(&name)));
-        cost = cost
-            .add(property_cost.at(path.len()))
-            .add(copy_path_cost(&path));
+        let path = format!("properties.{}", escape_key(&name));
+        cost = cost.add(target.write(&keys(&path), property, property_cost, destination));
     }
+    cost = cost.add(target.write(
+        &["type".to_owned()],
+        &object_type,
+        copy_cost(&object_type).expect("object type fits"),
+        destination,
+    ));
     BranchCopyCost::Cost(cost)
 }
 
