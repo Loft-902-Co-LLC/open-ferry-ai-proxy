@@ -93,6 +93,7 @@ pub(super) fn identity_map(request: Option<&Value>) -> HashMap<String, ToolIdent
                 name: descriptor.local_name,
                 namespace: descriptor.namespace,
                 custom: descriptor.custom,
+                tool_search: false,
             };
             (name, identity)
         })
