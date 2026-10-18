@@ -50,6 +50,7 @@ mod config_keys;
 mod config_lists;
 mod config_read;
 mod config_settings;
+mod config_v8_etag;
 mod config_v8_write;
 mod config_write;
 mod credential_files;

@@ -23,6 +23,11 @@
 //!   [`ConfigWriter::edit_v8`](crate::ConfigWriter::edit_v8) and
 //!   [`V8EditError`](crate::V8EditError) for its answers). A saved change
 //!   answers `{"config-version":8,"status":"ok"}`.
+//! - Each of those writes may send `If-Match` (see [`crate::config_etag`]):
+//!   one that doesn't match the file as it is now answers 412
+//!   `{"error":"precondition_failed"}` with the current `ETag`, before the
+//!   body or the path is looked at, and writes nothing. A saved change
+//!   answers the new file's `ETag`.
 //!
 //! Each write is made under the config write lock, becomes the config the
 //! handlers read, and has the service load the file again, as
@@ -47,6 +52,11 @@
 //! - A v8 path that isn't UTF-8 answers 400 `invalid_path` to `PUT` and
 //!   `PATCH`, and 404 `not_found` to `DELETE`, before the file is read.
 //!   Upstream uses its bytes as a key.
+//! - `If-Match` is checked under the config write lock, which every write
+//!   through this API takes, on the file as it is read just before the
+//!   writer reads it. Another process that writes the file in between (as
+//!   `open-ferry config` can) isn't caught; upstream's check is under its
+//!   handler lock alone, so the same holds there.
 //! - Those of [`crate::config_write`].
 
 use std::sync::Arc;
@@ -56,11 +66,13 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::{MethodRouter, put};
-use http::StatusCode;
+use http::{HeaderMap, StatusCode};
+use open_ferry_core::config::save::sha256_hex;
 use open_ferry_core::config::{Config, ConfigError, ConfigErrorKind};
 
 use crate::Route;
 use crate::auth_files::run_blocking;
+use crate::config_etag::{if_match_lines, if_match_satisfied, precondition_failed, with_etag};
 use crate::config_write::{self, V8Edit, V8EditError, V8Method};
 use crate::json::{self, Json};
 use crate::state::ManagementState;
@@ -81,8 +93,16 @@ pub(crate) fn routes() -> Vec<Route> {
         Route::key(
             "/v8/management/config.yaml",
             put(
-                |State(state): State<ManagementState>, body: Body| async move {
-                    edit_with_body(&state, V8Method::Put, Some(Vec::new()), body, true).await
+                |State(state): State<ManagementState>, headers: HeaderMap, body: Body| async move {
+                    edit_with_body(
+                        &state,
+                        &headers,
+                        V8Method::Put,
+                        Some(Vec::new()),
+                        body,
+                        true,
+                    )
+                    .await
                 },
             ),
         ),
@@ -90,25 +110,31 @@ pub(crate) fn routes() -> Vec<Route> {
             "/v8/management/config/{*path}",
             put(
                 |State(state): State<ManagementState>,
+                 headers: HeaderMap,
                  path: Result<Path<String>, PathRejection>,
                  body: Body| async move {
-                    edit_with_body(&state, V8Method::Put, parts(path), body, false).await
+                    edit_with_body(&state, &headers, V8Method::Put, parts(path), body, false).await
                 },
             )
             .patch(
                 |State(state): State<ManagementState>,
+                 headers: HeaderMap,
                  path: Result<Path<String>, PathRejection>,
                  body: Body| async move {
-                    edit_with_body(&state, V8Method::Patch, parts(path), body, false).await
+                    edit_with_body(&state, &headers, V8Method::Patch, parts(path), body, false)
+                        .await
                 },
             )
             .delete(
                 |State(state): State<ManagementState>,
+                 headers: HeaderMap,
                  path: Result<Path<String>, PathRejection>| async move {
+                    let if_match = if_match_lines(&headers);
                     match parts(path) {
                         Some(path) => {
                             edit(
                                 &state,
+                                if_match,
                                 V8Edit {
                                     method: V8Method::Delete,
                                     path,
@@ -118,10 +144,7 @@ pub(crate) fn routes() -> Vec<Route> {
                             )
                             .await
                         }
-                        None => match config_write::writer(&state) {
-                            Ok(_) => config_write::v8_error_response(&V8EditError::NotFound),
-                            Err(response) => response,
-                        },
+                        None => refuse(&state, if_match, V8EditError::NotFound, true).await,
                     }
                 },
             ),
@@ -132,22 +155,39 @@ pub(crate) fn routes() -> Vec<Route> {
 /// `PUT` and `PATCH` of the whole config, as JSON.
 fn whole_config() -> MethodRouter<ManagementState> {
     put(
-        |State(state): State<ManagementState>, body: Body| async move {
-            edit_with_body(&state, V8Method::Put, Some(Vec::new()), body, false).await
+        |State(state): State<ManagementState>, headers: HeaderMap, body: Body| async move {
+            edit_with_body(
+                &state,
+                &headers,
+                V8Method::Put,
+                Some(Vec::new()),
+                body,
+                false,
+            )
+            .await
         },
     )
     .patch(
-        |State(state): State<ManagementState>, body: Body| async move {
-            edit_with_body(&state, V8Method::Patch, Some(Vec::new()), body, false).await
+        |State(state): State<ManagementState>, headers: HeaderMap, body: Body| async move {
+            edit_with_body(
+                &state,
+                &headers,
+                V8Method::Patch,
+                Some(Vec::new()),
+                body,
+                false,
+            )
+            .await
         },
     )
 }
 
 /// `DELETE /v8/management/config/`: the path is empty, which the writer
 /// refuses.
-async fn delete_whole(State(state): State<ManagementState>) -> Response {
+async fn delete_whole(State(state): State<ManagementState>, headers: HeaderMap) -> Response {
     edit(
         &state,
+        if_match_lines(&headers),
         V8Edit {
             method: V8Method::Delete,
             path: Vec::new(),
@@ -174,6 +214,7 @@ fn parts(path: Result<Path<String>, PathRejection>) -> Option<Vec<String>> {
 /// change. A path that names no key answers 400 `invalid_path`.
 async fn edit_with_body(
     state: &ManagementState,
+    headers: &HeaderMap,
     method: V8Method,
     path: Option<Vec<String>>,
     body: Body,
@@ -183,11 +224,13 @@ async fn edit_with_body(
         Ok(body) => body,
         Err(response) => return response,
     };
+    let if_match = if_match_lines(headers);
     let Some(path) = path else {
-        return config_write::v8_error_response(&V8EditError::InvalidPath);
+        return refuse(state, if_match, V8EditError::InvalidPath, false).await;
     };
     edit(
         state,
+        if_match,
         V8Edit {
             method,
             path,
@@ -199,31 +242,103 @@ async fn edit_with_body(
 }
 
 /// Has the writer make `edit` under the write lock, then the service load
-/// the file (upstream's `ConfigV8` for a change).
-async fn edit(state: &ManagementState, edit: V8Edit) -> Response {
+/// the file (upstream's `ConfigV8` for a change). With `If-Match` lines, the
+/// file must still have the tag one of them names, else the answer is 412
+/// and nothing is written. The answer carries the `ETag` of the file
+/// written.
+async fn edit(state: &ManagementState, if_match: Vec<String>, edit: V8Edit) -> Response {
     let writer = match config_write::writer(state) {
         Ok(writer) => writer,
         Err(response) => return response,
     };
     let state = state.clone();
     config_write::run_task(async move {
-        {
+        let sha256 = {
             let _guard = state.config_write_lock().lock().await;
+            if let Err(response) = check_if_match(&state, &if_match).await {
+                return response;
+            }
             match run_blocking(move || writer.edit_v8(&edit)).await {
-                Ok((config, sha256)) => state.set_loaded_config(Arc::new(config), sha256),
+                Ok((config, sha256)) => {
+                    state.set_loaded_config(Arc::new(config), sha256.clone());
+                    sha256
+                }
                 Err(error) => return config_write::v8_error_response(&error),
             }
-        }
+        };
+        // The version actually on disk: the writer's hash of what it wrote,
+        // else the file read back. Without either, upstream sends no tag
+        // rather than guess one.
+        let sha256 = match sha256 {
+            Some(sha256) => Some(sha256),
+            None => {
+                let state = state.clone();
+                run_blocking(move || state.read_config_file().ok().map(|data| sha256_hex(&data)))
+                    .await
+            }
+        };
         config_write::reload(&state).await;
-        json::response(
+        let response = json::response(
             StatusCode::OK,
             &Json::map([
                 ("config-version", Json::Int(8)),
                 ("status", Json::Str("ok".into())),
             ]),
-        )
+        );
+        match sha256 {
+            Some(sha256) => with_etag(response, &sha256),
+            None => response,
+        }
     })
     .await
+}
+
+/// A write that is refused before any change is made, with `error`: the
+/// `If-Match` is still checked first, as upstream checks it before it reads
+/// the path or the body. With `writer_first`, a service without a writer
+/// answers its own error before either.
+async fn refuse(
+    state: &ManagementState,
+    if_match: Vec<String>,
+    error: V8EditError,
+    writer_first: bool,
+) -> Response {
+    if writer_first && let Err(response) = config_write::writer(state) {
+        return response;
+    }
+    let state = state.clone();
+    config_write::run_task(async move {
+        let _guard = state.config_write_lock().lock().await;
+        match check_if_match(&state, &if_match).await {
+            Ok(()) => config_write::v8_error_response(&error),
+            Err(response) => response,
+        }
+    })
+    .await
+}
+
+/// Checks the `If-Match` lines against the config file as it is now: `Ok`
+/// when there are none, or one passes; else the 412 with the file's current
+/// tag, or 500 `read_failed` when the file can't be read. Called under the
+/// config write lock, so no write of this API lands between the check and
+/// the change.
+async fn check_if_match(state: &ManagementState, if_match: &[String]) -> Result<(), Response> {
+    if if_match.is_empty() {
+        return Ok(());
+    }
+    let state = state.clone();
+    let hash = run_blocking(move || state.read_config_file().map(|data| sha256_hex(&data))).await;
+    let Ok(hash) = hash else {
+        return Err(json::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "read_failed",
+        ));
+    };
+    if if_match_satisfied(if_match, &hash) {
+        Ok(())
+    } else {
+        Err(precondition_failed(&hash))
+    }
 }
 
 /// `PUT /v0/management/config.yaml` (upstream's `PutConfigYAML`).

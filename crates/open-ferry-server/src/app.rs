@@ -36,7 +36,7 @@ use crate::{access_log, request_context, request_log};
 /// The response headers browsers may read (`corsExposedResponseHeaders`).
 const CORS_EXPOSED_HEADERS: &str = "X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, \
     X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, \
-    X-SERVER-VERSION, X-SERVER-BUILD-DATE, Location, Retry-After, X-Request-Id, \
+    X-SERVER-VERSION, X-SERVER-BUILD-DATE, Location, Retry-After, ETag, X-Request-Id, \
     OpenAI-Request-Id";
 
 /// The path prefixes safe mode shuts.
@@ -343,6 +343,24 @@ mod tests {
     use super::*;
 
     mod body_limits;
+
+    // Not upstream's: upstream's TestConfigV8ETagExposedForCORS runs the
+    // management API through the server; here the management API is served
+    // by the service, so this checks the exposed header list it relies on.
+    #[test]
+    fn cors_exposes_the_etag_header() {
+        let mut headers = HeaderMap::new();
+        set_cors_headers(&mut headers);
+        let exposed = headers[header::ACCESS_CONTROL_EXPOSE_HEADERS]
+            .to_str()
+            .unwrap();
+        assert!(
+            exposed
+                .split(',')
+                .any(|name| name.trim().eq_ignore_ascii_case("ETag")),
+            "{exposed}"
+        );
+    }
 
     #[test]
     fn safe_mode_shuts_proxy_paths() {

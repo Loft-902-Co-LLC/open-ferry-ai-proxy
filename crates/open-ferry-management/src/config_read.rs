@@ -102,6 +102,7 @@ use http::{HeaderValue, StatusCode, header};
 use open_ferry_core::auth::synthesizer::{
     StableIdGenerator, SynthesisContext, format_sorted_headers, synthesize_config_auths,
 };
+use open_ferry_core::config::save::sha256_hex;
 use open_ferry_core::config::{AnyValue, Config, V8Document};
 use open_ferry_translate::go::{json_float, to_lower};
 
@@ -109,6 +110,7 @@ pub(crate) use config_json::{Fields, strings, thinking_fields};
 
 use crate::Route;
 use crate::auth_files::{auth_index, run_blocking};
+use crate::config_etag::with_etag;
 use crate::json::{self, Json, write_string};
 use crate::state::ManagementState;
 
@@ -565,8 +567,10 @@ async fn read_v8(state: &ManagementState, read: V8Read) -> Response {
             Ok(document) => document,
             Err(error) => return invalid_config(&error.to_string()),
         };
+        // The file's version, which a write sends back as `If-Match`.
+        let hash = sha256_hex(&data);
         let parts = match read {
-            V8Read::Yaml => return yaml_response(data),
+            V8Read::Yaml => return with_etag(yaml_response(data), &hash),
             V8Read::Json(None) => return json::error(StatusCode::NOT_FOUND, "not_found"),
             V8Read::Json(Some(parts)) => parts,
         };
@@ -584,12 +588,18 @@ async fn read_v8(state: &ManagementState, read: V8Read) -> Response {
         document.project_aliases(&parts.join("."));
         document.redact_turn_secrets();
         set_auth_indexes(&state, &data, &mut document);
-        let value = match document.value(&parts) {
-            None => return json::error(StatusCode::NOT_FOUND, "not_found"),
-            Some(Err(_)) => json::error(StatusCode::INTERNAL_SERVER_ERROR, "decode_failed"),
-            Some(Ok(value)) => any_response(&value),
-        };
-        no_store(value)
+        match document.value(&parts) {
+            None => json::error(StatusCode::NOT_FOUND, "not_found"),
+            // Upstream sets both headers before it decodes.
+            Some(Err(_)) => with_etag(
+                no_store(json::error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "decode_failed",
+                )),
+                &hash,
+            ),
+            Some(Ok(value)) => with_etag(no_store(any_response(&value)), &hash),
+        }
     })
     .await
 }

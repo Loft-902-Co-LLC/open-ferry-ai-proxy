@@ -243,7 +243,10 @@ pub(crate) fn should_mask_query_param(key: &str) -> bool {
         return false;
     }
     let key = key.strip_suffix("[]").unwrap_or(&key);
+    // The management API deletes a client API key by `?value=<key>`, so a
+    // plain `value` parameter can carry a full secret into a request log.
     key == "key"
+        || key == "value"
         || ["api-key", "apikey", "api_key", "token", "secret"]
             .iter()
             .any(|part| key.contains(part))
@@ -851,6 +854,20 @@ mod tests {
             mask_sensitive_query("monkey=1234567890"),
             "monkey=1234567890"
         );
+    }
+
+    // Ported from TestMaskSensitiveQueryMasksValue: deleting a client API key
+    // by value passes the secret as `?value=`, so a log masks it; `index`
+    // and the known secret parameters behave as before.
+    #[test]
+    fn masks_the_value_query_parameter() {
+        let secret = "sk-secret-client-key";
+        let masked = mask_sensitive_query(&format!("value={secret}"));
+        assert!(!masked.contains(secret), "{masked}");
+        assert_eq!(masked, "value=sk-s...-key");
+        assert_eq!(mask_sensitive_query("index=3"), "index=3");
+        let masked = mask_sensitive_query(&format!("key={secret}&access_token={secret}"));
+        assert!(!masked.contains(secret), "{masked}");
     }
 
     // Not upstream's: an OAuth callback's code and state, and the other
