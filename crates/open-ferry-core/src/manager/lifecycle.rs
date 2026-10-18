@@ -2260,7 +2260,26 @@ impl Manager {
             // still be written look stale.
             let requested = requested_partitions(&writing);
             let binding = store.binding_generation();
-            let saved = if let Some(tail) = lease {
+            // Marks the save's refresh operations written as soon as its write
+            // lands, while check (vi)'s hold still keeps out a pass of this id:
+            // a pass that found one unwritten would commit it again over a
+            // newer file. Returns whether any operation was unwritten.
+            let land = |path: &str| {
+                let unwritten = has_unwritten_refresh_work(&writing);
+                if !path.is_empty() {
+                    let refresh = match &writing.codex_persist_intent {
+                        crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) => {
+                            Some(patch)
+                        }
+                        _ => None,
+                    };
+                    for patch in writing.codex_pending_refresh.iter().chain(refresh) {
+                        patch.mark_written();
+                    }
+                }
+                unwritten
+            };
+            let (saved, unwritten) = if let Some(tail) = lease {
                 let mut refused = |resolved: &CodexOrigin, proof: OriginProof| {
                     self.record_refused_tail(&auth.id, epoch, tail, resolved, proof);
                 };
@@ -2268,7 +2287,10 @@ impl Manager {
                     .save_bound(&writing, &tail.origin, &mut refused)
                     .map_err(ManagerError::Store)?
                 {
-                    Some(path) => path,
+                    Some(path) => {
+                        let unwritten = land(&path);
+                        (path, unwritten)
+                    }
                     None => return Ok(super::Persisted::Skipped),
                 }
             } else {
@@ -2282,7 +2304,10 @@ impl Manager {
                     .save_guarded(&writing, &mut guard)
                     .map_err(ManagerError::Store)?
                 {
-                    GuardedSave::Written(path) => path,
+                    GuardedSave::Written(path) => {
+                        let unwritten = land(&path);
+                        (path, unwritten)
+                    }
                     GuardedSave::Deferred(reason) => {
                         self.record_owed_save(&auth.id, epoch, generation, reason);
                         return Ok(super::Persisted::Deferred(reason));
@@ -2307,7 +2332,7 @@ impl Manager {
             if crate::auth::codex_refresh::is_codex_auth(&writing) {
                 self.lock().missing_file_deferrals.remove(&auth.id);
             }
-            if has_unwritten_refresh_work(&writing)
+            if unwritten
                 && self
                     .lock()
                     .auths
@@ -2348,13 +2373,6 @@ impl Manager {
                         &disk,
                     );
                 }
-            }
-            let refresh = match &writing.codex_persist_intent {
-                crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) => Some(patch),
-                _ => None,
-            };
-            for patch in writing.codex_pending_refresh.iter().chain(refresh) {
-                patch.mark_written();
             }
             // Only a Configuration save of the owed generation, or a later one,
             // covers what a refused save left owed to the file.

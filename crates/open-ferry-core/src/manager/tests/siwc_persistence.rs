@@ -2154,6 +2154,78 @@ async fn consumed_pending_outer_is_not_embedded_in_later_siwc_refresh() {
     assert_eq!(disk(&dir)["siwc"]["refresh_token"], "siwc-refresh-new");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_after_check_vi_releases_finds_the_saved_operation_written() {
+    let (dir, store, manager, _gate) = disk_manager();
+    // The fault is on the unleased refresh save, so the first refresh gets no
+    // lease and leaves its outer operation pending. The SIWC pass runs leased.
+    store.lease_unsupported.store(true, Ordering::SeqCst);
+    manager.register_executor(expiry_executor());
+    store.fail_refresh.store(true, Ordering::SeqCst);
+    manager.force_refresh("codex.json").await.unwrap();
+    let pending = manager
+        .get("codex.json")
+        .unwrap()
+        .codex_pending_refresh
+        .clone();
+    assert_eq!(pending.len(), 1, "an outer operation is pending");
+    assert!(!pending[0].is_written(), "and it is not written");
+    store.lease_unsupported.store(false, Ordering::SeqCst);
+    let mut counter = (*manager.get("codex.json").unwrap()).clone();
+    counter.success = 1;
+    // The counter save writes the outer operation and is held once check
+    // (vi)'s hold on the refresh mutex is released.
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let entered = Arc::new(Notify::new());
+    let notify = entered.clone();
+    let armed = AtomicBool::new(true);
+    *lock(&manager.shared.unleased_saved_hook) = Some(Arc::new(move |auth| {
+        if auth.success == 1 && armed.swap(false, Ordering::SeqCst) {
+            notify.notify_one();
+            lock(&release_rx)
+                .recv_timeout(Duration::from_secs(60))
+                .expect("counter save released");
+        }
+    }));
+    let hold = SaveHold {
+        release: Some(release_tx),
+        entered,
+    };
+    let saving = manager.clone();
+    let counter_task = tokio::task::spawn_blocking(move || {
+        saving.persist(
+            &counter,
+            counter.registration_epoch,
+            counter.generation,
+            0,
+            crate::manager::lifecycle::Save::Yes,
+        )
+    });
+    hold.wait_entered().await;
+    assert!(
+        pending[0].is_written(),
+        "the operation is marked written before check (vi)'s hold drops"
+    );
+    assert_eq!(disk(&dir)["expired"], "2099-02-01T00:00:00Z");
+    outside_expiry(&dir);
+    // A SIWC pass of this id can start now. It must not commit the written
+    // outer operation again over the newer file.
+    manager.register_executor(siwc_rotation_executor());
+    let refreshing = manager.clone();
+    let refresh_task = tokio::spawn(async move { refreshing.force_refresh("codex.json").await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(hold);
+    assert!(matches!(
+        counter_task.await.unwrap().unwrap(),
+        super::super::Persisted::Written { .. }
+    ));
+    refresh_task.await.unwrap().unwrap();
+    *lock(&manager.shared.unleased_saved_hook) = None;
+    assert_eq!(disk(&dir)["expired"], "2099-03-01T00:00:00Z");
+    assert_eq!(disk(&dir)["siwc"]["refresh_token"], "siwc-refresh-new");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn stale_counter_save_parked_across_siwc_refresh_is_deferred() {
     let (dir, store, manager, _gate) = disk_manager();
