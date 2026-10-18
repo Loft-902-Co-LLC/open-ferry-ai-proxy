@@ -729,8 +729,10 @@ fn normalize_tool(
     if is_custom {
         json::set(&mut out, "type", Value::from(FUNCTION));
     }
-    if tool_type == WEB_SEARCH && tool.get("external_web_access").is_some() {
-        json::delete(&mut out, "external_web_access");
+    if tool_type == WEB_SEARCH {
+        for field in ["external_web_access", "search_context_size"] {
+            json::delete(&mut out, field);
+        }
     }
     if callable && !has_parameters {
         json::set(
