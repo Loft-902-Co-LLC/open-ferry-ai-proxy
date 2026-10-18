@@ -90,7 +90,7 @@ const CONDITIONAL_COPY_ALLOWANCE: usize = 1 << 16;
 /// Keywords Gemini rejects, removed wherever they are a keyword rather than a
 /// name. Upstream's list also has `additionalProperties`, which this cleaner
 /// keeps.
-const UNSUPPORTED_KEYWORDS: [&str; 29] = [
+const UNSUPPORTED_KEYWORDS: [&str; 30] = [
     "$schema",
     "$defs",
     "definitions",
@@ -116,6 +116,7 @@ const UNSUPPORTED_KEYWORDS: [&str; 29] = [
     "prefill",
     "deprecated",
     "encrypted",
+    "discriminator",
     "additionalItems",
     "unevaluatedProperties",
     "unevaluatedItems",
