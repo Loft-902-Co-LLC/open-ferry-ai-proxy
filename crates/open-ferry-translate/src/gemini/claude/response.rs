@@ -207,8 +207,6 @@ impl GeminiToClaudeStream {
         out
     }
 
-    /// The end of the stream: closes the message, if it was started, with an
-    /// empty text block if nothing else was sent.
     fn malformed(&self) -> bool {
         self.finish_reason == "MALFORMED_FUNCTION_CALL" && !self.saw_tool_call
     }
@@ -221,6 +219,8 @@ impl GeminiToClaudeStream {
         }
     }
 
+    /// The end of the stream: closes the message, if it was started, with an
+    /// empty text block if nothing else was sent.
     fn finish(&mut self, out: &mut String) {
         if self.malformed() {
             self.finish_malformed(out);
