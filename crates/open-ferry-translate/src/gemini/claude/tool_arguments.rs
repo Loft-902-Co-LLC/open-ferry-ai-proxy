@@ -14,7 +14,7 @@ use crate::common::gemini::sanitize_gemini_function_name;
 use crate::common::tool_names::canonical_tool_name;
 use crate::json::{path, str_of};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 mod reclean;
 
@@ -86,7 +86,7 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
 
 #[derive(Default, Clone)]
 struct Info<'a> {
-    properties: BTreeMap<String, Vec<&'a Value>>,
+    properties: BTreeMap<String, Schemas<'a>>,
     required: BTreeSet<String>,
     allows: bool,
     forbids: bool,
@@ -99,7 +99,7 @@ struct Info<'a> {
 impl<'a> Info<'a> {
     fn merge(&mut self, other: Self) {
         for (key, values) in other.properties {
-            for value in values {
+            for value in values.values {
                 unique(self.properties.entry(key.clone()).or_default(), value);
             }
         }
@@ -136,14 +136,35 @@ impl<'a> Info<'a> {
             && !self.dynamic()
     }
 }
-fn unique<'a>(values: &mut Vec<&'a Value>, value: &'a Value) {
-    let serialized = value.to_string();
-    if !values
-        .iter()
-        .map(|existing| existing.to_string())
-        .any(|existing| existing == serialized)
-    {
-        values.push(value);
+// Keep first-seen order and cache the text compared by appendUniqueSchema.
+#[derive(Default, Clone)]
+struct Schemas<'a> {
+    values: Vec<&'a Value>,
+    serialized: HashSet<String>,
+}
+impl<'a> std::ops::Deref for Schemas<'a> {
+    type Target = [&'a Value];
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+impl<'a> IntoIterator for Schemas<'a> {
+    type Item = &'a Value;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
+}
+impl<'a, 'b> IntoIterator for &'b Schemas<'a> {
+    type Item = &'b &'a Value;
+    type IntoIter = std::slice::Iter<'b, &'a Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+fn unique<'a>(values: &mut Schemas<'a>, value: &'a Value) {
+    if values.serialized.insert(value.to_string()) {
+        values.values.push(value);
     }
 }
 fn array<'a>(schema: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
@@ -167,7 +188,7 @@ fn gjson_array(value: Option<&Value>) -> impl Iterator<Item = &Value> {
 }
 
 fn branches(schema: &Value) -> Option<Vec<&Value>> {
-    let mut out = Vec::new();
+    let mut out = Schemas::default();
     for key in ["anyOf", "oneOf"] {
         if let Some(value) = schema.get(key) {
             for branch in value.as_array()? {
@@ -180,7 +201,7 @@ fn branches(schema: &Value) -> Option<Vec<&Value>> {
             }
         }
     }
-    Some(out)
+    Some(out.values)
 }
 fn local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
     let mut current = root;
@@ -387,7 +408,7 @@ fn items<'a>(
     if depth > 16 || !schema.is_object() {
         return None;
     }
-    let mut result = Vec::new();
+    let mut result = Schemas::default();
     if let Some(reference) = schema.get("$ref") {
         let reference = str_of(Some(reference)).into_owned();
         if !reference.starts_with("#/") || !visited.insert(reference.clone()) {
@@ -417,7 +438,7 @@ fn items<'a>(
     if let Some(item) = schema.get("items") {
         unique(&mut result, item);
     }
-    Some(result)
+    Some(result.values)
 }
 
 fn candidate_accepts(infos: &[Info<'_>], key: Option<&str>, current: &Value) -> bool {
@@ -524,8 +545,8 @@ fn clean_value(
         return;
     }
     if let Some(values) = value.as_array_mut() {
-        let mut original_items = Vec::new();
-        let mut translated_items = Vec::new();
+        let mut original_items = Schemas::default();
+        let mut translated_items = Schemas::default();
         for schema in originals {
             let Some(resolved) = items(schema, root, 0, &mut BTreeSet::new()) else {
                 return;
@@ -579,7 +600,7 @@ fn clean_value(
         if info.parent_accepts(key, value) || candidate_accepts(&infos, Some(key), value) {
             continue;
         }
-        let mut translated_children = Vec::new();
+        let mut translated_children = Schemas::default();
         for schema in translated {
             if let Some(children) = analyze(schema, schema).properties.get(key) {
                 for child in children {
