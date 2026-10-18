@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use futures_util::StreamExt;
+
 use super::support::*;
 use crate::auth::AuthError;
 use crate::exec::{Dispatcher, ExecError, TransportFault};
@@ -374,4 +376,146 @@ async fn execute_does_not_poison_credential_on_pre_http_transport_failure() {
         .expect("second Execute() error, want success on the still-available credential");
     assert_eq!(&resp.payload[..], b"ok", "second Execute() payload");
     assert_eq!(calls.load(Ordering::SeqCst), 2, "executor calls");
+}
+
+/// Upstream's TestManager_HTTP2ClosedConnectionRespectsRequestRetry: a closed
+/// HTTP/2 connection never cools the credential, and a call gets its request
+/// retry round on every path.
+///
+/// Deviation: besides upstream's two Go messages, the cases are hyper's
+/// texts for the same failures and an opaque error an executor marked as a
+/// lifecycle fault from the typed hyper error.
+#[tokio::test(start_paused = true)]
+async fn http2_closed_connection_respects_request_retry() {
+    use super::support::Kind;
+
+    let failures = [
+        ExecError::upstream(
+            0,
+            "http2: client connection force closed via ClientConn.Close",
+        ),
+        ExecError::upstream(0, "http2: client conn is closed"),
+        ExecError::upstream(0, "operation was canceled: connection closed"),
+        ExecError::upstream(0, "connection closed before message completed"),
+        ExecError::upstream(0, "error sending request: client error (Connect)")
+            .with_transport(TransportFault::Lifecycle),
+    ];
+    for fail in failures {
+        for kind in [Kind::Execute, Kind::Stream, Kind::Count] {
+            for retries in [0, 1] {
+                let name = format!("{}/{kind:?}/retries={retries}", fail.message);
+                let h = Harness::new(Settings {
+                    request_retry: retries,
+                    ..Settings::default()
+                });
+                let (executor, calls) =
+                    transport_then_success("openai-compatibility", fail.clone());
+                h.executor(&executor);
+                let model = "http2-retry";
+                let auth_id = "http2-auth";
+                h.add(auth(auth_id, "openai-compatibility"), &[model]);
+                let provs = providers(&["openai-compatibility"]);
+                let call = || async {
+                    match kind {
+                        Kind::Execute => h
+                            .manager
+                            .execute(&provs, request(model), options())
+                            .await
+                            .map(|_| ()),
+                        Kind::Count => h
+                            .manager
+                            .count_tokens(&provs, request(model), options())
+                            .await
+                            .map(|_| ()),
+                        Kind::Stream => {
+                            let mut opts = options();
+                            opts.stream = true;
+                            let mut response = h
+                                .manager
+                                .execute_stream(&provs, request(model), opts)
+                                .await?;
+                            while let Some(chunk) = response.chunks.next().await {
+                                chunk?;
+                            }
+                            Ok(())
+                        }
+                    }
+                };
+                let result = call().await;
+                assert_no_cooldown(&h, auth_id, model);
+                if retries == 0 {
+                    let err = result.expect_err(&name);
+                    assert_eq!(err.message, fail.message, "{name}");
+                    assert_eq!(calls.load(Ordering::SeqCst), 1, "{name}");
+                    call()
+                        .await
+                        .unwrap_or_else(|e| panic!("{name}: next request: {e}"));
+                } else {
+                    result.unwrap_or_else(|e| panic!("{name}: no retry round used: {e}"));
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 2, "{name}");
+                assert_no_cooldown(&h, auth_id, model);
+            }
+        }
+    }
+}
+
+/// Upstream's TestExecuteRetriesConfiguredClaudeHandshakeTimeoutToConfiguredRounds:
+/// request-retry 3 is the first attempt plus three more rounds for the
+/// executor's own handshake deadline, and one attempt for the caller's.
+///
+/// Deviation: as in the other handshake tests, the typed configured-deadline
+/// error is a deadline error marked as a transient transport fault.
+#[tokio::test(start_paused = true)]
+async fn execute_retries_configured_claude_handshake_timeout_to_configured_rounds() {
+    use crate::exec::ErrorKind;
+
+    let url = "Post \"https://api.anthropic.com/v1/messages\"";
+    let cases = [
+        (
+            "configured handshake timeout",
+            ExecError::new(
+                ErrorKind::DeadlineExceeded,
+                format!("{url}: claude tls: handshake upstream: tls handshake timeout: context deadline exceeded"),
+            )
+            .with_transport(TransportFault::Transient),
+            4,
+        ),
+        (
+            "caller deadline",
+            ExecError::new(
+                ErrorKind::DeadlineExceeded,
+                format!("{url}: context deadline exceeded"),
+            ),
+            1,
+        ),
+    ];
+    for (name, fail, want_calls) in cases {
+        let h = Harness::new(Settings {
+            request_retry: 3,
+            ..Settings::default()
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let executor = FakeExecutor::with("claude", move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Reply::Err(fail.clone())
+        });
+        h.executor(&executor);
+        let model = "claude-handshake-retry";
+        let auth_id = "claude-handshake-auth";
+        h.add(auth(auth_id, "claude"), &[model]);
+
+        let result = h
+            .manager
+            .execute(&providers(&["claude"]), request(model), options())
+            .await;
+        assert!(result.is_err(), "{name}: want the final handshake failure");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            want_calls,
+            "{name}: executor calls"
+        );
+        assert_no_cooldown(&h, auth_id, model);
+    }
 }
