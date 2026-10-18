@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/gemini_content_turns.go
 // (EnsureGeminiLeadingUserContent, EnsureGeminiTrailingUserContent,
-// EnsureGeminiBoundaryUserContent) and helps/vertex_payload_helpers.go
+// EnsureGeminiBoundaryUserContent, DropGeminiTrailingThoughtOnlyContent) and helps/vertex_payload_helpers.go
 // (StripVertexOpenAIResponsesToolCallIDs) (v8.0.27, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -55,6 +55,34 @@ pub(crate) fn ensure_trailing_user(body: &mut Value, path: &str) {
         return;
     }
     contents.push(empty_user_turn());
+}
+
+/// `DropGeminiTrailingThoughtOnlyContent`: removes trailing reasoning turns,
+/// retaining at least one turn. Run before adding the synthetic user turn.
+pub(crate) fn drop_trailing_thought_only(body: &mut Value, path: &str) {
+    let Some(Value::Array(contents)) = json::get_mut(body, path) else {
+        return;
+    };
+    while contents.len() > 1 && contents.last().is_some_and(thought_only_model_turn) {
+        contents.pop();
+    }
+}
+
+fn thought_only_model_turn(content: &Value) -> bool {
+    matches!(
+        json::str_of(content.get("role")).as_str(),
+        "model" | "assistant"
+    ) && content
+        .get("parts")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            !parts.is_empty()
+                && parts.iter().all(|part| {
+                    json::bool_of(part.get("thought"))
+                        && part.get("functionCall").is_none()
+                        && part.get("functionResponse").is_none()
+                })
+        })
 }
 
 /// `EnsureGeminiBoundaryUserContent`: both of the above.

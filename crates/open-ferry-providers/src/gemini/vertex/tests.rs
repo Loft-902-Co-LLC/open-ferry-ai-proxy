@@ -1038,3 +1038,65 @@ async fn answers_hide_the_key_and_token() {
         assert!(text.contains("[redacted]"), "{text}");
     }
 }
+
+// Ported from TestGeminiVertexDropsTrailingReasoningTurn. The common preparation
+// path is tested directly: both auth modes send precisely this prepared body.
+#[test]
+fn drops_trailing_reasoning_turn() {
+    let user =
+        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}]});
+    let reasoning = json!({"type":"reasoning","id":"rs_test_1","summary":[{"type":"summary_text","text":"I should say hi briefly."}]});
+    let mut signed = reasoning.clone();
+    signed["encrypted_content"] =
+        json!("EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA");
+    let user_turn = json!({"role":"user","parts":[{"text":"say hi"}]});
+    for (input, want) in [
+        (json!([user, reasoning]), json!([user_turn])),
+        (json!([user, signed]), json!([user_turn])),
+        (
+            json!([user, {"type":"function_call","call_id":"call_1","name":"run","arguments":"{}"}, {"type":"function_call_output","call_id":"call_1","output":"done"}, reasoning]),
+            json!([
+                user_turn,
+                {"role":"model","parts":[{"functionCall":{"name":"run","args":{}},"thoughtSignature":"skip_thought_signature_validator"}]},
+                {"role":"user","parts":[{"functionResponse":{"name":"run","response":{"result":"done"}}}]}
+            ]),
+        ),
+        (
+            json!([user, reasoning, {"type":"message","role":"user","content":[{"type":"input_text","text":"again"}]}]),
+            json!([
+                user_turn,
+                {"role":"model","parts":[{"text":"I should say hi briefly.","thought":true}]},
+                {"role":"user","parts":[{"text":"again"}]}
+            ]),
+        ),
+    ] {
+        for streaming in [false, true] {
+            let request = request("gemini-4-argon", &json!({"input":input}).to_string());
+            let body = executor()
+                .prepare(&request, &options(&Format::OPENAI_RESPONSE), streaming)
+                .unwrap();
+            assert_eq!(body["contents"], want);
+        }
+    }
+}
+
+// Ported from TestGeminiVertexTrailingReasoningDropPrecedesPayloadRules.
+#[test]
+fn trailing_reasoning_cleanup_precedes_payload_rules() {
+    let configured = json!([{"role":"user","parts":[{"text":"configured"}]},{"role":"model","parts":[{"text":"configured thought","thought":true}]}]);
+    let config: Config = serde_json::from_value(json!({"payload":{"override-raw":[{
+        "models":[{"name":"gemini-4-argon"}],"params":{"contents":configured.to_string()}
+    }]}}))
+    .unwrap();
+    let executor = executor().with_config(Arc::new(config));
+    let request = request(
+        "gemini-4-argon",
+        r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}]},{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}]}"#,
+    );
+    for streaming in [false, true] {
+        let body = executor
+            .prepare(&request, &options(&Format::OPENAI_RESPONSE), streaming)
+            .unwrap();
+        assert_eq!(body["contents"], configured);
+    }
+}
