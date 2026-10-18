@@ -6691,6 +6691,10 @@ pub(super) fn seeded() -> Seeded {
         .unwrap_or_else(|| {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ofp-scratch")
         });
+    // The store's `join` cleans the paths it resolves, and on Unix
+    // `std::path::absolute` keeps the `..` above, so a clean root makes
+    // `rig.path()` name the file as a lease's origin does.
+    let root = crate::auth::path::clean(&root);
     std::fs::create_dir_all(&root).unwrap();
     let dir = tempfile::tempdir_in(root).unwrap();
     let files = Arc::new(FileStore::new(dir.path()));
