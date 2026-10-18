@@ -20,6 +20,13 @@
 //! answer is translated against the body as it was before the rules, and
 //! read as the call asked for it whatever `stream` a rule writes.
 //!
+//! A client of another protocol that sets no output limit (`max_tokens` or
+//! `max_completion_tokens`, `max_output_tokens`, or
+//! `generationConfig.maxOutputTokens`, and not null) is given the model's
+//! registered one by the translator. The default rules check the client's
+//! request translated without that `max_tokens`, so a default rule for it
+//! applies, and a limit the client sent is kept.
+//!
 //! The key is the `api_key` attribute, or else the OAuth access token,
 //! which [`refresh`](ClaudeExecutor::refresh) renews 4 hours before it
 //! expires.
@@ -119,6 +126,30 @@ pub struct ClaudeExecutor {
     base_url: String,
     oauth_endpoints: Endpoints,
     model_level_cooling: bool,
+}
+
+/// `stripTranslatedDefaultMaxTokens`'s test: whether the client's own request
+/// asked for an output limit in its protocol. Without one, the `max_tokens`
+/// the translator made up is not the client's, and a payload default rule may
+/// set it.
+fn asks_for_max_tokens(from: &Format, request: &Value) -> bool {
+    let asked = |paths: &[&str]| {
+        paths.iter().any(|path| {
+            path.split('.')
+                .try_fold(request, |value, key| value.get(key))
+                .is_some_and(|value| !value.is_null())
+        })
+    };
+    if *from == Format::OPENAI {
+        asked(&["max_tokens", "max_completion_tokens"])
+    } else if *from == Format::OPENAI_RESPONSE {
+        asked(&["max_output_tokens"])
+    } else if *from == Format::GEMINI {
+        asked(&["generationConfig.maxOutputTokens"])
+    } else {
+        // Claude's own body, or a format upstream leaves alone.
+        true
+    }
 }
 
 impl ClaudeExecutor {
@@ -234,7 +265,14 @@ impl ClaudeExecutor {
         }
         // The rules see the body as it is sent. Upstream tracks only the
         // diagnostics path, for its cloaking, which isn't ported.
-        self.apply_payload_rules(request, options, base_model, upstream_stream, &mut body);
+        self.apply_payload_rules(
+            request,
+            options,
+            base_model,
+            upstream_stream,
+            true,
+            &mut body,
+        );
         let extra_betas = extract_and_remove_betas(&mut body);
         // Nor does one that a payload rule writes reach Claude.
         strip_prompt_cache_options(&mut body);
@@ -250,33 +288,49 @@ impl ClaudeExecutor {
 
     /// Applies the config's payload rules to `body`, the body as it is sent
     /// (`helps.NewPayloadFinalizer`); the original request is translated
-    /// streaming if `stream`.
+    /// streaming if `stream`. With `strip_default_max_tokens`, the translated
+    /// original has no `max_tokens` the client didn't ask for, so a default
+    /// rule for it applies (a token count passes `false`, as upstream's does).
     fn apply_payload_rules(
         &self,
         request: &Request,
         options: &Options,
         base_model: &str,
         stream: bool,
+        strip_default_max_tokens: bool,
         body: &mut Value,
     ) {
         let registry = self.response_registry(&options.source_format);
-        let translate = registry.as_ref().map(|registry| {
-            move |mut payload| {
-                compat::before_translation(
-                    self.config.as_deref(),
-                    options,
-                    &Format::CLAUDE,
-                    &mut payload,
-                );
-                registry.translate_request(
+        let translate = |mut payload: Value| {
+            let strip =
+                strip_default_max_tokens && !asks_for_max_tokens(&options.source_format, &payload);
+            compat::before_translation(
+                self.config.as_deref(),
+                options,
+                &Format::CLAUDE,
+                &mut payload,
+            );
+            let mut translated = match &registry {
+                Some(registry) => registry.translate_request(
                     &options.source_format,
                     &Format::CLAUDE,
                     base_model,
                     payload,
                     stream,
-                )
+                ),
+                None => Registry::global().translate_request(
+                    &options.source_format,
+                    &Format::CLAUDE,
+                    base_model,
+                    payload,
+                    stream,
+                ),
+            };
+            if strip {
+                json::delete(&mut translated, "max_tokens");
             }
-        });
+            translated
+        };
         let target = payload::Target {
             executor: "claude",
             protocol: &Format::CLAUDE,
@@ -284,9 +338,7 @@ impl ClaudeExecutor {
             root: "",
             stream,
             tracked: &[],
-            translate: translate
-                .as_ref()
-                .map(|translate| translate as &dyn Fn(Value) -> Value),
+            translate: Some(&translate as &dyn Fn(Value) -> Value),
         };
         payload::apply(self.config.as_deref(), &target, request, options, body);
     }
@@ -570,7 +622,14 @@ impl ClaudeExecutor {
         for field in ["metadata", "context_management", "diagnostics"] {
             json::delete(&mut body, field);
         }
-        self.apply_payload_rules(request, options, base_model, translate_stream, &mut body);
+        self.apply_payload_rules(
+            request,
+            options,
+            base_model,
+            translate_stream,
+            false,
+            &mut body,
+        );
         if self.tool_search_enabled() {
             tool_search::drop_deferred_cache_control(&mut body);
         }

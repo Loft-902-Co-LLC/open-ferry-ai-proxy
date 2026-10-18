@@ -15,6 +15,9 @@
 //! has no Claude block. The rest of the message is still sent, but a user
 //! message left with nothing is refused with an [`UnsupportedPartError`].
 //!
+//! A request without `max_tokens` (or with a null one) is given the model's
+//! registered output limit, as [`default_max_tokens`] says.
+//!
 //! Deviations from upstream:
 //! - `metadata.user_id` is only set to an ID the client sent, in
 //!   `metadata.user_id` or `user`. Without one, upstream derives an ID from
@@ -37,8 +40,8 @@ use serde_json::{Map, Value, json};
 
 use crate::common::cache_control;
 use crate::common::claude::{
-    MessageAccumulator, apply_reasoning_effort, client_user_id, generate_tool_call_id,
-    sanitize_function_name, sanitize_tool_id, structured_output_instruction,
+    MessageAccumulator, apply_reasoning_effort, client_user_id, default_max_tokens,
+    generate_tool_call_id, sanitize_function_name, sanitize_tool_id, structured_output_instruction,
 };
 use crate::common::parts::UserTurnDrops;
 use crate::go;
@@ -47,8 +50,6 @@ use crate::models::ModelCatalog;
 use crate::registry::UnsupportedPartError;
 use crate::schema::normalize_claude_tool_input_schema;
 use crate::thinking::summary::apply_translated_to_claude;
-
-const DEFAULT_MAX_TOKENS: i64 = 32000;
 
 /// Converts a Chat Completions request body into a Claude Messages request
 /// body for `model_name`. `stream` is whether the client asked to stream.
@@ -87,7 +88,10 @@ fn convert(
 ) -> (Value, Option<UnsupportedPartError>) {
     let mut out = Map::new();
     out.insert("model".into(), model_name.into());
-    out.insert("max_tokens".into(), DEFAULT_MAX_TOKENS.into());
+    out.insert(
+        "max_tokens".into(),
+        default_max_tokens(model_name, models).into(),
+    );
     out.insert("messages".into(), json!([]));
     let metadata = match client_user_id(request) {
         Some(user_id) => object([("user_id", user_id.into())]),
@@ -99,9 +103,14 @@ fn convert(
         apply_reasoning_effort(&mut out, &str_of(Some(effort)), model_name, models);
     }
     // OpenAI deprecated max_tokens for max_completion_tokens, so either works.
-    if let Some(max_tokens) = request
-        .get("max_tokens")
-        .or_else(|| request.get("max_completion_tokens"))
+    // A null one counts as omitted (`firstExisting`).
+    if let Some(max_tokens) = [
+        request.get("max_tokens"),
+        request.get("max_completion_tokens"),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| !value.is_null())
     {
         out.insert("max_tokens".into(), int_of(max_tokens).into());
     }

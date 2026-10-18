@@ -68,8 +68,8 @@ use super::web_search::{
 use crate::apply_patch;
 use crate::common::cache_control;
 use crate::common::claude::{
-    apply_reasoning_effort, client_user_id, generate_tool_call_id, sanitize_function_name,
-    sanitize_tool_id, structured_output_instruction,
+    apply_reasoning_effort, client_user_id, default_max_tokens, generate_tool_call_id,
+    max_completion_tokens, sanitize_function_name, sanitize_tool_id, structured_output_instruction,
 };
 use crate::common::parts::UserTurnDrops;
 use crate::common::responses::{extract_responses_call_id, normalize_responses_tool_call_outputs};
@@ -81,9 +81,6 @@ use crate::registry::UnsupportedPartError;
 use crate::schema::normalize_claude_tool_input_schema;
 use crate::signature::{Provider, compatible_signature_for_provider};
 use crate::thinking::summary::apply_translated_to_claude;
-
-const DEFAULT_MAX_TOKENS: i64 = 32000;
-const DEFAULT_FABLE_MAX_TOKENS: i64 = 64000;
 
 /// `ClaudeResponsesRedactedThinkingPrefix`: marks a reasoning item's
 /// `encrypted_content` as the data of a Claude `redacted_thinking` block.
@@ -264,29 +261,6 @@ fn convert(
     let mut out = Value::Object(out);
     apply_translated_to_claude(&mut out, request, "openai-response", model_name, models);
     (out, drops.err())
-}
-
-/// `defaultClaudeResponsesMaxTokensForModel`: the registered output limit,
-/// capped at 64000 for Fable, or the historical default without a limit.
-fn default_max_tokens(model_name: &str, models: &ModelCatalog) -> i64 {
-    let fable = go::to_lower(model_name.trim()).contains("fable");
-    let default = if fable {
-        DEFAULT_FABLE_MAX_TOKENS
-    } else {
-        DEFAULT_MAX_TOKENS
-    };
-    match max_completion_tokens(model_name, models) {
-        Some(limit) if !fable || limit < default => limit,
-        _ => default,
-    }
-}
-
-/// The most output tokens the catalog says the model takes, if it says.
-fn max_completion_tokens(model_name: &str, models: &ModelCatalog) -> Option<i64> {
-    models
-        .lookup(model_name)
-        .map(|model| model.max_completion_tokens)
-        .filter(|&limit| limit > 0)
 }
 
 /// `normalizeCodexAgentMessages`: Codex's multi-agent `agent_message` items
