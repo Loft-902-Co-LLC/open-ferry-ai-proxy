@@ -71,11 +71,11 @@
 //!   slightly exceed what is written, but never falls short. Each retry
 //!   translates with fresh limits. Below all limits, output matches upstream.
 //!   A conditional branch that does not fit, and all later branches at the
-//!   same or shallower depths, add nothing
-//!   to their parents. If the combined cost of all required-only branches in
-//!   a union does not fit, its entire keyword is dropped, leaving the parent
-//!   schema rather than retaining a stricter partial union. Upstream copies
-//!   without bound, multiplying nested properties at each level.
+//!   same or shallower depths, add nothing to their parents. If the combined
+//!   cost of all required-only branches in a union does not fit, its entire
+//!   keyword is dropped, leaving the parent schema rather than retaining a
+//!   stricter partial union. Upstream copies without bound, multiplying nested
+//!   properties at each level.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
