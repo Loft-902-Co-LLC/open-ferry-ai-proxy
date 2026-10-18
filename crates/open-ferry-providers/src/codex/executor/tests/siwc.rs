@@ -1,5 +1,6 @@
-// Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth_test.go
-// and codex_executor_compact_test.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth_test.go,
+// codex_executor_compact_test.go and codex_executor_siwc_configuration_update_test.go
+// (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use open_ferry_core::auth::codex_refresh::CodexPersistIntent;
@@ -1088,4 +1089,117 @@ async fn siwc_adopted_outer_with_failing_siwc_is_an_error() {
     assert!(result.is_err());
     assert!(outer.requests().is_empty());
     assert_eq!(siwc.requests().len(), 1);
+}
+
+// Ported from TestStripCodexSIWCUnsupportedFieldsConfigurationUpdates.
+#[test]
+fn siwc_configuration_update_effort_cases() {
+    for (updates, want) in [
+        (
+            json!([{"reasoning":{"effort":"low"}}, {"reasoning":{"effort":"high"}}]),
+            "high",
+        ),
+        (json!([{"tools":[]}]), "medium"),
+        (json!([{"reasoning":{"effort":"low"}}, {"tools":[]}]), "low"),
+        (
+            json!([{"reasoning":{"effort":"low"}}, {"reasoning":{"effort":42}}, {"reasoning":{"effort":null}}, {"reasoning":{"effort":"  "}}]),
+            "low",
+        ),
+        (json!([{"reasoning":{"effort":" High "}}]), "high"),
+        (json!([{"reasoning":{"effort":"none"}}]), "none"),
+        (json!([{"reasoning":{"effort":"auto"}}]), "auto"),
+    ] {
+        let mut input = updates.as_array().unwrap().clone();
+        for update in &mut input {
+            update["type"] = json!("configuration_update");
+        }
+        input.insert(1, json!({"role":"user","content":"hi"}));
+        let mut body =
+            json!({"input":input,"reasoning":{"effort":"medium","summary":"auto","other":7}});
+        crate::codex::siwc_request::apply_body(&mut body, false, false, false);
+        assert_eq!(body["input"], json!([{"role":"user","content":"hi"}]));
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort":want,"summary":"auto","other":7})
+        );
+    }
+    let mut body = json!({"input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}},{"role":"user","content":"hi"}]});
+    crate::codex::siwc_request::apply_body(&mut body, false, false, false);
+    assert_eq!(body["reasoning"]["effort"], "xhigh");
+    assert_eq!(body["input"], json!([{"role":"user","content":"hi"}]));
+}
+
+const UPDATE_BODY: &str = r#"{"model":"gpt-6-astra","prompt_cache_key":"siwc-update-session","reasoning":{"effort":"medium","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"configuration_update","reasoning":{"effort":"high"}}]}"#;
+
+// Ported from TestCodexExecutorUseSIWCStripsConfigurationUpdatesBeforePayloadFinalizer,
+// TestCodexExecutorCompactUseSIWCStripsConfigurationUpdates,
+// TestCodexExecutorExecuteStreamUseSIWCStripsConfigurationUpdates,
+// TestCodexExecutorUseSIWCKeepsSuffixEffortOverConfigurationUpdate,
+// TestCodexExecutorUseSIWCInvalidSuffixPromotesConfigurationUpdate and
+// TestCodexExecutorWithoutSIWCKeepsConfigurationUpdates.
+#[tokio::test]
+async fn siwc_http_collapses_updates_before_finalizer_and_respects_suffix() {
+    use open_ferry_core::config::{AnyValue, PayloadModelRule, PayloadRule};
+    for path in ["execute", "stream", "compact"] {
+        for (model, siwc, override_effort, want) in [
+            ("gpt-6-astra", true, false, "high"),
+            ("gpt-6-astra(xhigh)", true, false, "xhigh"),
+            ("gpt-6-astra(invalid)", true, false, "high"),
+            ("gpt-6-astra", true, true, "xhigh"),
+            ("gpt-6-astra", false, false, "medium"),
+        ] {
+            let mock = Mock::start(if path == "compact" {
+                Reply::json(r#"{"id":"resp_mock","output":[]}"#)
+            } else {
+                Reply::sse(SSE)
+            })
+            .await;
+            let mut auth = siwc_auth(&mock.url);
+            auth.metadata.insert("use_siwc".into(), json!(siwc));
+            let mut config = Config::default();
+            if override_effort {
+                config.payload.r#override.push(PayloadRule {
+                    models: vec![PayloadModelRule {
+                        name: "gpt-6-astra".into(),
+                        protocol: if path == "compact" {
+                            "openai-response"
+                        } else {
+                            "codex"
+                        }
+                        .into(),
+                        ..Default::default()
+                    }],
+                    params: vec![("reasoning.effort".into(), AnyValue::Str("xhigh".into()))],
+                });
+            }
+            let exec = executor().with_config(Arc::new(config));
+            let req = request(model, UPDATE_BODY);
+            let opts = if path == "compact" {
+                compact_options("openai-response")
+            } else {
+                options("openai-response")
+            };
+            if path == "stream" {
+                let (_, error) = collect(
+                    exec.execute_stream(Arc::new(auth), req, opts)
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                assert!(error.is_none());
+            } else {
+                exec.execute(Arc::new(auth), req, opts).await.unwrap();
+            }
+            let body = mock.last().json();
+            assert_eq!(
+                body["reasoning"]["effort"], want,
+                "{path} {model} siwc={siwc}"
+            );
+            assert_eq!(
+                body["input"].as_array().unwrap().len(),
+                if siwc { 1 } else { 3 }
+            );
+            assert_eq!(body["reasoning"]["summary"], "auto");
+        }
+    }
 }

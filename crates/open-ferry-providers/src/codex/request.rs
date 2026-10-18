@@ -514,6 +514,7 @@ pub(crate) fn prepare_body(
             &mut body,
             super::siwc_request::explicit_instructions(&payload),
             kind == Kind::Compact,
+            crate::thinking::has_thinking_suffix(&request.model),
         );
     } else {
         normalize_instructions(&mut body, native);

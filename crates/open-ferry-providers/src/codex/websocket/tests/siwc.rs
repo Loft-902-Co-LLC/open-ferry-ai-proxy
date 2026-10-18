@@ -1,4 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth_test.go
+// and codex_executor_siwc_configuration_update_test.go
 // (TestCodexWebsocketsExecutorUseSIWCExecuteAndStream) (v8.0.32, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -559,4 +560,36 @@ async fn siwc_secrets_are_redacted_from_messages_errors_and_connection_logs() {
     assert!(!text.contains(TOKEN));
     assert!(!text.contains(DEVICE));
     executor.close_execution_session("siwc-secrets");
+}
+
+// Ported from TestCodexWebsocketsExecuteUseSIWCStripsConfigurationUpdates and
+// TestCodexWebsocketsPrepareStreamUseSIWCKeepsSuffixEffort.
+#[tokio::test]
+async fn siwc_websocket_collapses_updates_and_preserves_suffix_effort() {
+    let payload = r#"{"prompt_cache_key":"siwc-update-session","reasoning":{"effort":"medium","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"hi"},{"type":"configuration_update","reasoning":{"effort":"high"}}]}"#;
+    for streaming in [false, true] {
+        for (model, want) in [("gpt-6-astra", "high"), ("gpt-6-astra(xhigh)", "xhigh")] {
+            let server = Server::once(&[COMPLETED]).await;
+            let auth = Arc::new(credential(&format!("{}/v1", server.url)));
+            let executor = executor_with(Config::default());
+            let req = request(model, payload);
+            let opts = attempted_options("", false);
+            if streaming {
+                let (_, error) =
+                    collect(executor.execute_stream(auth, req, opts).await.unwrap()).await;
+                assert!(error.is_none());
+            } else {
+                executor.execute(auth, req, opts).await.unwrap();
+            }
+            let record = server.record();
+            let body = json(&record.messages[0]);
+            assert_eq!(
+                body["input"],
+                serde_json::json!([{"role":"user","content":"hi"}])
+            );
+            assert_eq!(body["reasoning"]["effort"], want);
+            assert_eq!(body["reasoning"]["summary"], "auto");
+            assert_eq!(body["prompt_cache_key"], "siwc-update-session");
+        }
+    }
 }
