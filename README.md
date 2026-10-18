@@ -243,11 +243,11 @@ When a model fails on a credential with an overload or another error that should
 
 <!-- parity-summary:start -->
 <!-- Written by tools/parity's --summary option. Don't edit it by hand: rerun the tool. -->
-Against CLIProxyAPI v8.0.27 (commit `bf9341629ef2`), built with go1.26.4, with `--random 5000 --seed 1`: 6,429 hand-written and 553,320 random cases in all.
+Against CLIProxyAPI v8.0.32 (commit `911f49cbd49f`), built with go1.26.4, with `--random 5000 --seed 1`: 6,429 hand-written and 553,320 random cases in all.
 
 | Suites | Cases | Identical | Equivalent | Known | Different |
 |---:|---:|---:|---:|---:|---:|
-| 108 | 559,749 | 508,171 | 51,476 | 102 | 0 |
+| 108 | 559,749 | 508,225 | 51,422 | 102 | 0 |
 
 <details>
 <summary>Each suite</summary>
@@ -295,7 +295,7 @@ Against CLIProxyAPI v8.0.27 (commit `bf9341629ef2`), built with go1.26.4, with `
 | Claude Messages signature sanitizers | 5,012 | 4,985 | 27 | 0 | 0 |
 | Gemini thought signature sanitizer and validators | 5,006 | 5,006 | 0 | 0 | 0 |
 | Translator registry, requests | 7,914 | 6,963 | 925 | 26 | 0 |
-| Translator registry, streaming responses | 9,140 | 8,947 | 190 | 3 | 0 |
+| Translator registry, streaming responses | 9,140 | 8,950 | 187 | 3 | 0 |
 | Translator registry, non-streaming responses | 8,896 | 8,670 | 225 | 1 | 0 |
 | Translator registry, lookups and token counts | 5,108 | 5,108 | 0 | 0 | 0 |
 | Completions → Chat Completions request | 5,040 | 4,435 | 601 | 4 | 0 |
@@ -304,11 +304,11 @@ Against CLIProxyAPI v8.0.27 (commit `bf9341629ef2`), built with go1.26.4, with `
 | Gemini → Gemini request | 5,026 | 5,025 | 1 | 0 | 0 |
 | Gemini passthrough response, streaming | 5,023 | 5,023 | 0 | 0 | 0 |
 | Gemini passthrough response, non-streaming | 5,028 | 5,028 | 0 | 0 | 0 |
-| Claude → Gemini request | 5,039 | 4,814 | 224 | 1 | 0 |
-| Claude → Gemini request, compatibility mode | 5,039 | 4,814 | 224 | 1 | 0 |
-| Gemini → Claude response, streaming | 5,034 | 4,912 | 122 | 0 | 0 |
+| Claude → Gemini request | 5,039 | 4,817 | 221 | 1 | 0 |
+| Claude → Gemini request, compatibility mode | 5,039 | 4,817 | 221 | 1 | 0 |
+| Gemini → Claude response, streaming | 5,034 | 4,950 | 84 | 0 | 0 |
 | Gemini → Claude response, non-streaming | 5,028 | 5,028 | 0 | 0 | 0 |
-| Chat Completions → Gemini request | 5,059 | 4,832 | 226 | 1 | 0 |
+| Chat Completions → Gemini request | 5,059 | 4,839 | 219 | 1 | 0 |
 | Gemini → Chat Completions response, streaming | 5,030 | 4,895 | 135 | 0 | 0 |
 | Gemini → Chat Completions response, non-streaming | 5,027 | 4,669 | 358 | 0 | 0 |
 | Thinking settings for Codex and Responses | 5,031 | 5,030 | 0 | 1 | 0 |
