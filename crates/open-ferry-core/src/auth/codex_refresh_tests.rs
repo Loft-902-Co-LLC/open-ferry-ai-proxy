@@ -1644,4 +1644,21 @@ fn partition_helpers_report_requested_rotated_and_landed() {
     assert_eq!(both.landed_in(&siwc_rotated.metadata), siwc);
     assert!(!both.landed_in(&before.metadata).any());
     assert!(!none.landed_in(&after.metadata).any());
+
+    // An operation that kept its tokens and changed only `last_refresh` has
+    // the unwritten file's identity: only the changed value shows it landed.
+    let mut kept_tokens = before.clone();
+    kept_tokens
+        .metadata
+        .insert("last_refresh".into(), json!("2026-10-13T12:00:00Z"));
+    kept_tokens.metadata["siwc"]["last_refresh"] = json!("2026-10-13T12:00:00Z");
+    let kept = CredentialRefreshPatch::new(&before.metadata, &kept_tokens.metadata, true, true);
+    assert!(!kept.landed_in(&before.metadata).any());
+    assert_eq!(kept.landed_in(&kept_tokens.metadata), all);
+    // A value the operation did not change may differ: the write leaves it.
+    let mut other_value = after.clone();
+    other_value
+        .metadata
+        .insert("last_refresh".into(), json!("2026-10-14T12:00:00Z"));
+    assert_eq!(both.landed_in(&other_value.metadata), all);
 }

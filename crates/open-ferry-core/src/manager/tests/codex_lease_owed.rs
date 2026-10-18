@@ -9,8 +9,8 @@
 //! partition names only.
 
 use super::siwc_persistence::{
-    LeaseReadHook, Probe, REFRESH_SOURCE, Rig, bounded, code_only, fixture, fn_bodies, mutated,
-    observed, partition, pending_b, rig, token_count,
+    LeaseReadHook, Probe, REFRESH_SOURCE, Rig, bounded, code_only, expiry_executor, fixture,
+    fn_bodies, mutated, observed, partition, pending_b, rig, token_count,
 };
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::{Auth, CodexOrigin, SaveDeferral};
@@ -564,6 +564,50 @@ async fn b32_d_a_write_that_did_not_land_is_committed_again_and_live_is_sent() {
             }
         );
         assert_eq!(rig.manager.refresh_hold(ID), None);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_exhausted_commit_that_kept_the_tokens_is_not_confirmed_by_identity() {
+    // Every commit attempt fails before it writes, and the confirming read
+    // succeeds. The rotation kept the tokens and changed only the expiry, so
+    // the file that read returns has the rotation's identity but not its
+    // expiry: outer did not land, and the tail's save writes it.
+    // Mutation: the confirming read judged on identity alone (the rotation
+    // would count as written with nothing marked or pending, and the tail's
+    // Configuration save would keep the file's old expiry).
+    bounded(async {
+        let rig = rig();
+        rig.manager.register_executor(expiry_executor());
+        quick_commit_retries(&rig);
+        rig.store
+            .fail_lease_commit
+            .store(u32::MAX, Ordering::SeqCst);
+        let at_tail_view = Arc::new(Mutex::new(None));
+        let (seen, manager) = (at_tail_view.clone(), rig.manager.clone());
+        at_tail(&rig, move |_| *lock(&seen) = Some(view(&manager)));
+        rig.manager.force_refresh(ID).await.unwrap();
+        *lock(&rig.manager.shared.lease_tail_hook) = None;
+        assert!(
+            rig.store.lease_commit_attempts.load(Ordering::SeqCst) >= 1,
+            "the commit ran"
+        );
+        assert_eq!(
+            lock(&at_tail_view).take().expect("the tail hook ran"),
+            View {
+                outer: (true, "different"),
+                siwc: (false, "none"),
+                pending: vec![false],
+                intent_written: Some(false),
+            }
+        );
+        assert_eq!(
+            rig.disk()["expired"],
+            "2099-02-01T00:00:00Z",
+            "the tail's save wrote the expiry"
+        );
+        assert_eq!(rig.disk()["refresh_token"], "outer-refresh-old");
     })
     .await;
 }
