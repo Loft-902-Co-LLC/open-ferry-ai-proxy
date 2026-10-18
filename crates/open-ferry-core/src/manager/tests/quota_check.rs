@@ -486,6 +486,51 @@ async fn a_stale_success_while_a_check_is_leased_keeps_its_claim() {
     assert!(rig.call(MODEL).await);
 }
 
+// Not upstream's: another model's failure, recorded while the credential's
+// check runs, doesn't make the check's own success look stale: the
+// credential's rest is ordered by the credential's own watermark.
+#[tokio::test(start_paused = true)]
+async fn another_models_failure_does_not_make_the_check_stale() {
+    use crate::auth::AuthError;
+    use crate::manager::CallResult;
+
+    let rig = Rig::new(MINUTE, &["m1", "m2"]);
+    // D is dispatched on m2, then B on m1; B gets the credential-wide answer.
+    let d = rig.h.manager.next_execution_seq();
+    let b = rig.h.manager.next_execution_seq();
+    let reset = rig.at(72 * HOUR);
+    rig.h.manager.mark_result(&CallResult {
+        model: "m1".into(),
+        ..outcome(false, b, Some(72 * HOUR), true)
+    });
+    assert_eq!(rig.checks(), [check("", rig.at(MINUTE), reset, MINUTE)]);
+    rig.h.clock.advance(MINUTE);
+
+    // The check C goes out on m1 and stays in flight.
+    rig.answer(Answer::Ok);
+    rig.executor.set_delay(Duration::from_secs(10));
+    let manager = rig.h.manager.clone();
+    let checking = tokio::spawn(async move { call(&manager, "m1").await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(rig.checks()[0].checking);
+
+    // D fails on m2 meanwhile, with an error of the model's own.
+    rig.h.manager.mark_result(&CallResult {
+        model: "m2".into(),
+        error: Some(AuthError {
+            code: "server_error".into(),
+            message: "boom".into(),
+            retryable: true,
+            http_status: 500,
+        }),
+        ..outcome(false, d, None, false)
+    });
+
+    // C's success is recovery: the credential's rest is over.
+    assert!(checking.await.expect("join"));
+    assert_eq!(rig.checks(), []);
+}
+
 // Not upstream's: a check answered with another failure lets the next call
 // check, once that failure's own cooldown is over.
 #[tokio::test(start_paused = true)]
