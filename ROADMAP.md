@@ -25,7 +25,7 @@ What v1 still needs:
 ## v1: a complete proxy for one person or a small team
 
 Already in place:
-- **Parity with CLIProxyAPI v8.0.20, its latest release, for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; what we do differently is listed in UPSTREAM.md.
+- **Parity with CLIProxyAPI v8.0.27 for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; what we do differently is listed in UPSTREAM.md.
 - CLIProxyAPI's config and auth directory, read as they are.
 - The OpenAI, Claude and Gemini client APIs, over HTTP and WebSocket.
 - The credential manager.
@@ -45,6 +45,7 @@ Already in place:
   - a layout that works on a phone as well as on a desktop.
 - Each Claude and Codex credential's quota as the provider's last response gave it: the management API lists it, and the dashboard shows how much of each window is used, when it starts over, and which one stopped the account.
 - Codex's response steering on the Responses WebSocket (`upstream.codex.response-steering`, experimental and off by default, as upstream).
+- Sign in with ChatGPT on a Codex credential: `-siwc-bind FILE` or the dashboard's **Add OpenAI API access** binds it, and the credential's requests then use those tokens. See [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
 - Session affinity (`routing.session-affinity`, off by default as upstream): a conversation stays on the credential that served it, so its prompt cache stays warm, and moves only when that credential can't serve. Session IDs are only routing keys: none is sent upstream, logged or saved.
 - **Routing by quota,** open-ferry's own (`routing.strategy: quota`): it picks by the quota Claude and Codex report, the credential whose limit resets soonest or the one with the most left, keeping a reserve on each. See [docs/routing.md](docs/routing.md).
 - **A cap on long quota rests,** open-ferry's own (`routing.quota.check-after`, off by default): when a provider says its limit resets hours or days from now, one request goes through after the cap to check, and the wait doubles each time the answer is the same. The management API says when the next check is.
