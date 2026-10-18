@@ -49,7 +49,7 @@ use crate::common::gemini::{
 };
 use crate::common::parts::{UserTurnDrops, count_sendable_gemini_parts};
 use crate::gemini::common::attach_default_safety_settings;
-use crate::gemini_schema::clean_json_schema_for_gemini_json_schema;
+use crate::gemini_schema::{SchemaCopyBudget, clean_json_schema_for_gemini_json_schema};
 use crate::go;
 use crate::json::{float_of, int_of, object, path, set_path, str_of};
 use crate::models::ModelCatalog;
@@ -508,6 +508,7 @@ fn convert_tools(tools: Option<&Value>) -> (Vec<Value>, bool) {
     let Some(Value::Array(tools)) = tools else {
         return (Vec::new(), false);
     };
+    let mut copy_budget = SchemaCopyBudget::default();
     let mut declarations = Vec::new();
     let mut has_strict_tool = false;
     for tool in tools {
@@ -520,7 +521,7 @@ fn convert_tools(tools: Option<&Value>) -> (Vec<Value>, bool) {
         let Some(schema @ Value::Object(_)) = fields.get("input_schema") else {
             continue;
         };
-        let parameters = clean_json_schema_for_gemini_json_schema(schema);
+        let parameters = clean_json_schema_for_gemini_json_schema(schema, &mut copy_budget);
         let mut declaration = fields.clone();
         declaration.shift_remove("input_schema");
         declaration.insert("parametersJsonSchema".to_owned(), parameters);

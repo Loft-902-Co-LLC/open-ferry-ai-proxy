@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 
 use crate::apply_patch;
 use crate::common::gemini::{GEMINI_FUNCTION_NAME_LIMIT, sanitize_gemini_function_name};
-use crate::gemini_schema::clean_json_schema_for_gemini_json_schema;
+use crate::gemini_schema::{SchemaCopyBudget, clean_json_schema_for_gemini_json_schema};
 use crate::go;
 use crate::json::lenient::{self, Found};
 use crate::json::{object, path, str_of};
@@ -363,6 +363,7 @@ pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarat
             },
         );
     }
+    let mut copy_budget = SchemaCopyBudget::default();
     for (name, descriptor) in &winning {
         let gemini_name = if descriptor.client_search {
             shim.clone()
@@ -410,12 +411,12 @@ pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarat
                     "limit":{"type":"number","description":"Maximum number of tools to return."}
                 },"required":["query"],"additionalProperties":false})
                     },
-                    clean_json_schema_for_gemini_json_schema,
+                    |schema| clean_json_schema_for_gemini_json_schema(schema, &mut copy_budget),
                 )
         } else {
             tool_parameters(descriptor.tool).map_or_else(
                 || Value::Object(Default::default()),
-                clean_json_schema_for_gemini_json_schema,
+                |schema| clean_json_schema_for_gemini_json_schema(schema, &mut copy_budget),
             )
         };
         out.declarations.push(object([
