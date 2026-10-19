@@ -1,0 +1,32 @@
+# CPython 3.12 wheels for ubuntu-24.04 x86_64, macos-15 arm64, and Windows x86_64.
+# Windows hashes retain candidate packaging support; its prerequisite probe installs no packages.
+# SHA256 values verified against https://pypi.org/pypi/<package>/<version>/json.
+# Pin all dependencies; install with --require-hashes --only-binary=:all:.
+
+# cryptography-46.0.3-cp311-abi3-macosx_10_9_universal2.whl
+# cryptography-46.0.3-cp311-abi3-manylinux_2_34_x86_64.whl
+# cryptography-46.0.3-cp311-abi3-win_amd64.whl
+cryptography==46.0.3 \
+    --hash=sha256:109d4ddfadf17e8e7779c39f9b18111a09efb969a301a31e987416a0191ed93a \
+    --hash=sha256:10b01676fc208c3e6feeb25a8b83d81767e8059e1fe86e1dc62d10a3018fa926 \
+    --hash=sha256:a9a3008438615669153eb86b26b61e09993921ebdd75385ddd748702c5adfddb
+
+# pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl
+# pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+# pyyaml-6.0.3-cp312-cp312-win_amd64.whl
+PyYAML==6.0.3 \
+    --hash=sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0 \
+    --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc \
+    --hash=sha256:5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b
+
+# cffi-2.0.0-cp312-cp312-macosx_11_0_arm64.whl
+# cffi-2.0.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+# cffi-2.0.0-cp312-cp312-win_amd64.whl
+cffi==2.0.0 \
+    --hash=sha256:8eca2a813c1cb7ad4fb74d368c2ffbbb4789d377ee5bb8df98373c2cc0dee76c \
+    --hash=sha256:3e17ed538242334bf70832644a32a7aae3d83b57567f9fd60a26257e992b79ba \
+    --hash=sha256:da68248800ad6320861f129cd9c1bf96ca849a2771a59e0344e88681905916f5
+
+# pycparser-2.23-py3-none-any.whl
+pycparser==2.23 \
+    --hash=sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934

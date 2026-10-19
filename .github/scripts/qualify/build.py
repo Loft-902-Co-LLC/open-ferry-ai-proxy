@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -107,9 +108,12 @@ def main():
                 run(["cargo", "build", "--release", "--locked", "-p", "open-ferry",
                      "--target", target, "--message-format=json"], env=env, stdout=output)
             run([sys.executable, "-I", "crates/open-ferry/check-release.py", str(events)])
-            # Windows CreateProcess searches System32 before PATH for a bare
-            # name, which otherwise selects the unrelated WSL bash.exe.
-            run([os.environ.get("QUALIFY_BASH", "bash"), ".github/scripts/package-release.sh"], env=env)
+            # Packaging emits a release step output. Keep qualification's output
+            # separate, including when this script runs outside GitHub Actions.
+            with tempfile.TemporaryDirectory(prefix="open-ferry-package-") as scratch:
+                env["GITHUB_OUTPUT"] = str(Path(scratch) / "output")
+                # Windows callers can select Git Bash explicitly, avoiding WSL.
+                run([os.environ.get("QUALIFY_BASH", "bash"), ".github/scripts/package-release.sh"], env=env)
             suffix = ".zip" if os.name == "nt" else ".tar.gz"
             archive = f"open-ferry-{version}-{target}{suffix}"
             destination = WORK / "mirror" / "download" / f"v{version}"

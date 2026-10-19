@@ -9,10 +9,11 @@ name: Release
 # linux/arm64, pushes it to ghcr.io/loft-902-co-llc/open-ferry and attests
 # it.
 #
-# Running the workflow by hand (workflow_dispatch) is a dry run: it builds,
-# packages and checksums the same archives, builds and tests the image for
-# both platforms, and keeps them as workflow artifacts, but signs, attests,
-# publishes and pushes nothing.
+# Running the workflow by hand (workflow_dispatch) defaults to a full dry run:
+# it builds, packages and checksums the same archives, builds and tests the
+# image for both platforms, and qualifies throwaway candidates. The inputs
+# can select qualification alone or just the Windows prerequisite probe.
+# Dispatches never sign release assets, attest, publish or push anything.
 #
 # See RELEASING.md.
 
@@ -26,7 +27,7 @@ on:
         type: boolean
         default: false
       qualification_fault:
-        description: 'Negative control; bad-signature deliberately fails qualification'
+        description: 'Negative control; bad-signature passes only after verifying the exact signature rejection'
         type: choice
         options: [none, bad-signature]
         default: none
@@ -39,7 +40,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}${{ inputs.qualification_preflight_only && '-preflight' || '' }}
+  group: release-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.qualification_preflight_only && '-preflight' || '' }}
   cancel-in-progress: false
 
 env:
@@ -105,7 +106,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   dashboard:
-    if: ${{ !inputs.qualification_preflight_only }}
+    if: github.event_name != 'workflow_dispatch' || !inputs.qualification_preflight_only
     name: Build the dashboard
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -149,7 +150,7 @@ jobs:
           if-no-files-found: error
 
   rust-licenses:
-    if: ${{ !inputs.qualification_preflight_only }}
+    if: github.event_name != 'workflow_dispatch' || !inputs.qualification_preflight_only
     name: Write the Rust crates' licenses
     runs-on: ubuntu-24.04
     timeout-minutes: 30
