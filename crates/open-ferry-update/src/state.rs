@@ -512,6 +512,12 @@ impl State {
     /// Gives the state an outcome the journal carried: upserts its record
     /// and marks the version failed, if the outcome says so. Idempotent.
     pub fn apply_outcome(&mut self, record: &SwitchRecord, mark_failed: Option<&str>) {
+        if record.how == how::ROLLBACK
+            && record.result.as_deref() == Some(result::ROLLED_BACK)
+            && !record.from.is_empty()
+        {
+            self.rolled_back = Some(record.from.clone());
+        }
         self.upsert_record(record.clone());
         if let Some(version) = mark_failed {
             self.mark_failed(version);
@@ -781,6 +787,20 @@ mod tests {
             confirmed.installed_binary.as_deref(),
             Some(installed_binary::PENDING)
         );
+        let mut state = State::default();
+        state.apply_outcome(&update, None);
+        assert_eq!(state.rolled_back, None);
+        state.apply_outcome(&rollback, None);
+        assert_eq!(state.rolled_back.as_deref(), Some("2"));
+        state.apply_outcome(
+            &SwitchRecord {
+                result: Some(result::FAILED_TO_LOAD.into()),
+                from: "3".into(),
+                ..rollback
+            },
+            None,
+        );
+        assert_eq!(state.rolled_back.as_deref(), Some("2"));
     }
 
     // Not upstream's: the failure constructors carry phase, blame and why.
