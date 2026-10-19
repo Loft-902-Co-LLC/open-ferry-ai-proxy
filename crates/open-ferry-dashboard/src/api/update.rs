@@ -60,6 +60,8 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 Ok(view) => {
                     if let Some(snapshot) = &view.supervisor {
                         live.supervisor = Some(snapshot.clone());
+                        live.snapshot_at = Some(Instant::now());
+                        live.failed_reads = 0;
                     }
                     // Admission publishes the live switch before returning its id.
                     // Only a read begun after acceptance can clear the pending flag.
@@ -86,6 +88,11 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                     Value::Null,
                 ),
             };
+            let stale = error.is_some();
+            if stale {
+                live.failed_reads = live.failed_reads.saturating_add(1);
+            }
+            let snapshot_age_seconds = live.snapshot_at.map(|at| at.elapsed().as_secs_f64());
             let switching = &snapshot["switch"];
             let phase = switching["status"]
                 .as_str()
@@ -100,7 +107,10 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 "watch_until": switching["watch_until"],
                 "switch": switching,
                 "last_switch": last,
-                "switching_disabled": error.as_deref().map(Value::from).unwrap_or_else(|| snapshot["switching_disabled"].clone()),
+                "switching_disabled": snapshot["switching_disabled"],
+                "stale": stale,
+                "snapshot_age_seconds": snapshot_age_seconds,
+                "failed_reads": live.failed_reads,
                 "error": error,
             })
         }
@@ -143,6 +153,8 @@ struct Live {
     request: Option<SwitchRequest>,
     task: Option<JoinHandle<()>>,
     supervisor: Option<Value>,
+    snapshot_at: Option<Instant>,
+    failed_reads: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]

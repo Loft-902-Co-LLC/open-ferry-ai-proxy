@@ -515,23 +515,36 @@ async fn dropping_the_http_request_does_not_drop_its_preparation() {
 }
 
 #[tokio::test]
-async fn status_keeps_the_switch_phase_through_an_unreachable_supervisor() {
+async fn status_marks_a_cached_supervisor_stale_and_keeps_its_disabled_reason() {
     let fake = Switcher::new(Duration::ZERO, None);
     let (dash, _scratch) = supervised(fake.clone());
     *fake.snapshot.lock().unwrap() = serde_json::json!({
         "state": "switching", "active_version": "0.1.0",
         "switch": { "id": "switch-1", "phase": "loading", "status": "waiting-for-signins", "watch_until": "2026-10-18T16:10:00Z" },
-        "switching_disabled": null,
+        "switching_disabled": "a switch is already active",
     });
     let body = dash.get(STATUS).await.json(StatusCode::OK);
     assert_eq!(body["supervisor"]["phase"], "waiting-for-signins");
     assert_eq!(body["supervisor"]["watch_until"], "2026-10-18T16:10:00Z");
+    assert_eq!(body["supervisor"]["stale"], false);
+    assert_eq!(body["supervisor"]["failed_reads"], 0);
     *fake.snapshot.lock().unwrap() = serde_json::Value::Null;
     let body = dash.get(STATUS).await.json(StatusCode::OK);
     assert_eq!(body["supervisor"]["form"], "supervised");
     assert_eq!(body["supervisor"]["phase"], "waiting-for-signins");
     assert_eq!(body["supervisor"]["rollback_target"], "0.0.9");
     assert!(body["supervisor"]["error"].is_string());
+    assert_eq!(body["supervisor"]["stale"], true);
+    assert_eq!(body["supervisor"]["failed_reads"], 1);
+    assert!(body["supervisor"]["snapshot_age_seconds"].is_number());
+    assert_eq!(
+        body["supervisor"]["switching_disabled"],
+        "a switch is already active"
+    );
+    for count in 2..=5 {
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(body["supervisor"]["failed_reads"], count);
+    }
 }
 
 #[tokio::test]
