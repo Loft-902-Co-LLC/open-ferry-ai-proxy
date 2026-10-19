@@ -256,3 +256,27 @@ async fn an_unreadable_or_future_journal_keeps_live_status_and_state_history_ava
         assert_eq!(std::fs::read_to_string(journal).unwrap(), bytes);
     }
 }
+
+#[tokio::test]
+async fn corrupt_state_keeps_live_status_and_the_journal_without_repairing_state() {
+    let f = Fixture::new().await;
+    let mut journal = Journal::first_start(artifact("0.2.0"), None);
+    journal.previous = Some(artifact("0.1.0"));
+    write(&f, &journal);
+    std::fs::write(f.data.state_file(), "{truncated").unwrap();
+    let view = service(&f, Some(json!({"state":"idle"})))
+        .switch_view()
+        .await
+        .unwrap();
+    assert_eq!(view.supervisor.unwrap()["state"], "idle");
+    assert_eq!(view.rollback_target.as_deref(), Some("0.1.0"));
+    assert!(view.last.is_none());
+    assert_eq!(
+        view.notes,
+        ["the update state could not be read; its history is unavailable"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.data.state_file()).unwrap(),
+        "{truncated"
+    );
+}

@@ -582,7 +582,14 @@ impl Real {
         ));
         let service = UpdateService::new(self.0.clone(), http_fetch(), config)
             .with_switcher(switcher.clone());
-        if request != Request::Check {
+        let root = self.0.data.root().to_owned();
+        let known = tokio::task::spawn_blocking(move || {
+            root.join("supervisor.json").exists()
+                || root.join(open_ferry_update::journal::JOURNAL_FILE).exists()
+        })
+        .await
+        .map_err(preparation_stopped)?;
+        if request != Request::Check || !known {
             let binary = match self.0.install() {
                 Install::SelfUpdating { binary } => binary,
                 Install::NotifyOnly(_) if request == Request::Cancel => self
@@ -617,18 +624,6 @@ impl Real {
             }
         }
         let view = service.switch_view().await.map_err(switch_error)?;
-        if request == Request::Check && view.supervisor.is_none() {
-            let root = self.0.data.root().to_owned();
-            let known = tokio::task::spawn_blocking(move || {
-                root.join("supervisor.json").exists()
-                    || root.join(open_ferry_update::journal::JOURNAL_FILE).exists()
-            })
-            .await
-            .map_err(preparation_stopped)?;
-            if !known {
-                return Ok(None);
-            }
-        }
         Ok(Some(Supervised {
             real: Real(self.0.clone(), self.1),
             service,
@@ -1426,6 +1421,9 @@ fn supervisor_status(status: &mut Status, view: &SwitchView) {
 }
 
 fn say_supervisor(view: &SwitchView, console: &mut Console<'_>) {
+    for note in &view.notes {
+        console.say(format!("Switch records: {note}."));
+    }
     if let Some(snapshot) = &view.supervisor {
         let phase = snapshot["switch"]["phase"]
             .as_str()

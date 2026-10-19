@@ -41,6 +41,7 @@ impl SupervisedFake {
                 unreachable: None,
                 rollback_target: Some("0.0.9".into()),
                 last: None,
+                notes: Vec::new(),
             },
             cancel: CancelOutcome::Nothing,
             error: RefCell::new(None),

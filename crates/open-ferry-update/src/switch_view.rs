@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::journal::Phase;
 use crate::state::{State, SwitchRecord};
-use crate::{SwitchError, UpdateError, UpdateService, Updater};
+use crate::{SwitchError, UpdateService, Updater};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SwitchView {
@@ -18,6 +18,8 @@ pub struct SwitchView {
     pub unreachable: Option<String>,
     pub rollback_target: Option<String>,
     pub last: Option<LastSwitch>,
+    /// Optional durable records could not be read; live status remains useful.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,9 +49,11 @@ impl UpdateService {
             ),
             tokio::time::timeout(Duration::from_secs(1), records),
         );
-        let (rollback_target, last) = records
-            .map_err(|_| SwitchError::TimedOut)?
-            .map_err(|_| SwitchError::Protocol("reading switch records stopped".into()))??;
+        let (rollback_target, last, notes) = match records {
+            Ok(Ok(records)) => records,
+            Ok(Err(_)) => (None, None, vec!["reading switch records stopped".into()]),
+            Err(_) => (None, None, vec!["reading switch records timed out".into()]),
+        };
         let (supervisor, unreachable) = match live.unwrap_or(Err(SwitchError::TimedOut)) {
             Ok(snapshot) => (Some(snapshot), None),
             Err(error) => (None, Some(unreachable_reason(&error).into())),
@@ -60,6 +64,7 @@ impl UpdateService {
             unreachable,
             rollback_target,
             last,
+            notes,
         })
     }
 }
@@ -75,13 +80,13 @@ fn unreachable_reason(error: &SwitchError) -> &'static str {
     }
 }
 
-fn records(updater: &Updater) -> Result<(Option<String>, Option<SwitchRecord>), SwitchError> {
+fn records(updater: &Updater) -> (Option<String>, Option<SwitchRecord>, Vec<String>) {
     let journal = crate::switching::pending_journal(updater);
-    let state =
-        State::load_strict(&updater.data.state_file()).map_err(|error| UpdateError::Io {
-            what: "read the update state",
-            error: error.to_string(),
-        })?;
+    let mut notes = Vec::new();
+    let state = State::load_strict(&updater.data.state_file()).unwrap_or_else(|_| {
+        notes.push("the update state could not be read; its history is unavailable".into());
+        State::default()
+    });
     // Reuse the state merger in memory: pending terminal patches retain the
     // original operation's fields, and late older outcomes stay behind it.
     let mut merged = State::default();
@@ -107,7 +112,7 @@ fn records(updater: &Updater) -> Result<(Option<String>, Option<SwitchRecord>), 
             merged.upsert_record(outcome.record.clone());
         }
     }
-    Ok((rollback_target, merged.last_switch))
+    (rollback_target, merged.last_switch, notes)
 }
 
 fn last_switch(record: SwitchRecord, snapshot: Option<&Value>) -> LastSwitch {
