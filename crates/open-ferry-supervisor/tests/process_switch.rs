@@ -101,7 +101,30 @@ fn row_a_b_never_greets_within_the_load_timeout() {
         ..Tm::default()
     };
     let _sup = fx.start(&tm);
-    switch_b(&fx);
+    let result = switch_b(&fx);
+    assert!(
+        [
+            "the new version did not start within the load timeout",
+            "the worker did not connect in time",
+        ]
+        .contains(&result["why"].as_str().unwrap_or_default()),
+        "{result}"
+    );
+    // The load budget covers process startup too. Under load the deadline
+    // can cancel the spawn before the probe reaches main and writes its pid.
+    // A probe that did start must be gone; an absent pid is not a failed test
+    // precondition when startup itself used the budget.
+    let probe_gone = match std::fs::read_to_string(fx.root().join("cfg").join("pid")) {
+        Ok(pid) => {
+            let pid = pid.trim().parse().expect("the probe's pid");
+            fx.wait_for("the timed-out probe to exit", || {
+                (!alive(pid)).then_some(())
+            });
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("could not read the probe's pid: {error}\n{}", fx.dump()),
+    };
     fx.assert_columns(Columns {
         state: Some(StateCol::Record(
             Rec {
@@ -113,7 +136,7 @@ fn row_a_b_never_greets_within_the_load_timeout() {
             &[B],
         )),
         spawns: Some(1),
-        probe_gone: true,
+        probe_gone,
         running: &[1],
         not_resumed: &[1],
         not_handed_over: &[1],
