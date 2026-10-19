@@ -31,7 +31,8 @@ const STOP: u64 = 10_000;
 /// supervisor's own delay in noticing the loss (seen at up to about 1 s on
 /// Windows) and the journal write `worker_lost` (core.rs) makes before the
 /// status can show it.
-/// A correct run has a bound of at least `STOP - UNCERTAINTY_MAX` = 5 s.
+/// A correct run has a bound of at least `STOP - UNCERTAINTY_MAX` = 6 s,
+/// less the allowed wall-clock slack, still above `LOSS_MIN` = 5 s.
 /// An immediate kill has a true gap under 0.5 s, so a bound under 0.5 s, 4.5 s
 /// below `LOSS_MIN`. The windows are taken in the test process from `Instant`,
 /// so a step of the wall clock cannot move them. Only the lag is measured
@@ -43,7 +44,9 @@ const LOSS_MIN: Duration = Duration::from_millis(STOP / 2);
 /// under load is harmless when the other windows are small; rejecting every
 /// round trip over 500 ms rejected such valid measurements. The cap follows
 /// from the unchanged stop budget and lower bound, rather than machine speed.
-const UNCERTAINTY_MAX: Duration = Duration::from_millis(STOP / 2);
+/// Four seconds leaves one second above `LOSS_MIN`, including the 200 ms
+/// allowed wall-clock slack, instead of spending the entire five-second gap.
+const UNCERTAINTY_MAX: Duration = Duration::from_secs(4);
 
 fn tm(watch: u64) -> Tm {
     Tm {
@@ -272,9 +275,9 @@ fn measure(
 
 /// Runs `body` while a watcher times worker `n` from its loss to its exit, and
 /// asserts the lower bound of the gap kept the budget. A trouble with the
-/// measurement itself (a slow round trip, a wide window, a watcher that was
-/// not ready before `body` released the fault) fails the set-up, in words that
-/// say so, and not the property.
+/// measurement itself (combined uncertainty over the cap, or a watcher that
+/// was not ready before `body` released the fault) fails the set-up, in words
+/// that say so, and not the property.
 fn budgeted<R>(fx: &Fx, n: usize, cause: &str, body: impl FnOnce() -> R) -> R {
     let done = AtomicBool::new(false);
     let ready = AtomicBool::new(false);
