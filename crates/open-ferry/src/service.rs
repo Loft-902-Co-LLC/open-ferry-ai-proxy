@@ -190,6 +190,8 @@ use crate::tls;
 
 mod management_listener;
 pub(crate) mod serve_loop;
+#[cfg(test)]
+mod shutdown_diagnostics;
 pub(crate) mod worker;
 
 /// How often background refresh looks for tokens to renew.
@@ -243,6 +245,10 @@ pub async fn run(
     options: Options,
     stop: impl Future<Output = ()>,
 ) -> ExitCode {
+    #[cfg(test)]
+    let _run_end = shutdown_diagnostics::RunEnd(shutdown_diagnostics::current());
+    #[cfg(test)]
+    shutdown_diagnostics::record("run startup");
     if let Err(error) = ensure_auth_dir(&auth_dir) {
         tracing::error!(
             "failed to create auth directory {}: {error}",
@@ -338,6 +344,8 @@ pub async fn run(
         }
     }
 
+    #[cfg(test)]
+    shutdown_diagnostics::record("watcher setup");
     let mut events = match start_watcher(
         &config_path,
         &config,
@@ -357,6 +365,8 @@ pub async fn run(
         }
     };
     tracing::info!("file watcher started for config and auth directory changes");
+    #[cfg(test)]
+    shutdown_diagnostics::record("service loop (awaiting stop)");
 
     let shutdown = async {
         match &keep_alive {
@@ -371,16 +381,32 @@ pub async fn run(
     loop {
         tokio::select! {
             () = &mut shutdown => {
+                #[cfg(test)]
+                shutdown_diagnostics::record("stop received");
                 tracing::debug!("shutdown signal received, shutting down...");
                 break;
             }
             result = &mut server => {
+                #[cfg(test)]
+                shutdown_diagnostics::record("server ended; stop update checks");
                 stop_update_checks(&service.management).await;
+                #[cfg(test)]
+                shutdown_diagnostics::record("stop catalogs");
                 service.stop_catalogs();
+                #[cfg(test)]
+                shutdown_diagnostics::record("stop auto refresh");
                 service.manager.stop_auto_refresh();
+                #[cfg(test)]
+                shutdown_diagnostics::record("stop OAuth sessions");
                 service.management.shutdown().await;
+                #[cfg(test)]
+                shutdown_diagnostics::record("stop ledger");
                 stop_ledger(&service.ledger).await;
+                #[cfg(test)]
+                shutdown_diagnostics::record("flush cooldowns");
                 open_ferry_core::manager::cooldown_store::flush(&service.manager);
+                #[cfg(test)]
+                shutdown_diagnostics::record("return from run");
                 return exit_code(result);
             }
             () = service.work(&config_path, &mut events) => {}
@@ -388,7 +414,10 @@ pub async fn run(
     }
     service.close_sync();
     service.close_reloads();
-    shut_down(&service, &stop_server, server).await
+    let code = shut_down(&service, &stop_server, server).await;
+    #[cfg(test)]
+    shutdown_diagnostics::record("return from run");
+    code
 }
 
 type Server = tokio::task::JoinHandle<io::Result<()>>;
@@ -654,10 +683,20 @@ async fn shut_down_within(
     server: Option<Server>,
     timeout: Duration,
 ) -> ExitCode {
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop update checks");
     stop_update_checks(&service.management).await;
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop catalogs");
     service.stop_catalogs();
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop auto refresh");
     service.manager.stop_auto_refresh();
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop OAuth sessions");
     service.management.shutdown().await;
+    #[cfg(test)]
+    shutdown_diagnostics::record("drain server");
     let _ = stop.send(true);
     let code = match server {
         None => ExitCode::SUCCESS,
@@ -670,8 +709,14 @@ async fn shut_down_within(
             }
         },
     };
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop ledger");
     stop_ledger(&service.ledger).await;
+    #[cfg(test)]
+    shutdown_diagnostics::record("flush cooldowns");
     open_ferry_core::manager::cooldown_store::flush(&service.manager);
+    #[cfg(test)]
+    shutdown_diagnostics::record("shutdown complete");
     code
 }
 
@@ -738,7 +783,23 @@ async fn shut_down_by(
 /// write the records it was sent (see [`Ledger::shutdown`]).
 async fn stop_ledger(ledger: &Ledger) {
     let ledger = ledger.clone();
-    let stopped = tokio::task::spawn_blocking(move || ledger.shutdown());
+    #[cfg(test)]
+    let trace = shutdown_diagnostics::current();
+    #[cfg(test)]
+    if let Some(trace) = &trace {
+        trace.ledger_join("queued");
+    }
+    let stopped = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(trace) = &trace {
+            trace.ledger_join("joining");
+        }
+        ledger.shutdown();
+        #[cfg(test)]
+        if let Some(trace) = &trace {
+            trace.ledger_join("joined");
+        }
+    });
     if tokio::time::timeout(LEDGER_SHUTDOWN_TIMEOUT, stopped)
         .await
         .is_err()
@@ -1772,6 +1833,10 @@ impl Service {
     /// that can't be opened is unavailable, and the server runs on without
     /// it.
     fn start_ledger(&mut self) {
+        #[cfg(test)]
+        if let Some(trace) = shutdown_diagnostics::current() {
+            trace.ledger_started(&self.observability.log_dir);
+        }
         self.ledger = match &self.observability.log_dir {
             Some(dir) => Ledger::start(dir, &self.observability.usage),
             None => Ledger::unavailable("there is no log directory"),
@@ -12258,6 +12323,8 @@ auth-dir: '{}'
         // auth directory with the gate open for good.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn an_unsupervised_run_serves_the_credentials_of_its_auth_dir() {
+            use crate::service::{LEDGER_SHUTDOWN_TIMEOUT, shutdown_diagnostics};
+
             let dir = tempfile::tempdir().unwrap();
             let auth_dir = dir.path().join("auth");
             std::fs::create_dir(&auth_dir).unwrap();
@@ -12278,15 +12345,19 @@ auth-dir: '{}'
             .unwrap();
             let config = Config::load(&path).unwrap();
             let (stop, stopped) = oneshot::channel::<()>();
-            let served = tokio::spawn(run(
-                config,
-                path,
-                auth_dir,
-                LogLevel::detached(),
-                Options::default(),
-                async move {
-                    let _ = stopped.await;
-                },
+            let trace = Arc::new(shutdown_diagnostics::Trace::default());
+            let served = tokio::spawn(shutdown_diagnostics::TRACE.scope(
+                trace.clone(),
+                run(
+                    config,
+                    path,
+                    auth_dir,
+                    LogLevel::detached(),
+                    Options::default(),
+                    async move {
+                        let _ = stopped.await;
+                    },
+                ),
             ));
             let addr = SocketAddr::from(([127, 0, 0, 1], port));
             wait_listening(addr).await;
@@ -12294,11 +12365,20 @@ auth-dir: '{}'
             let answer = fetch(addr, "GET", LIST, &[key]).await;
             assert_eq!(answer.status, 200, "{}", answer.body);
             assert!(answer.body.contains("codex.json"), "{}", answer.body);
+            trace.stop_requested();
             let _ = stop.send(());
+            // No request is left in flight: fetch reads a Connection: close
+            // response, and wait_listening drops its request-less socket.
+            // The ledger alone may use its full product shutdown budget.
+            // Allow another fifth of that budget for scheduling, watcher
+            // setup finishing and the otherwise idle shutdown stages.
+            let shutdown_wait = LEDGER_SHUTDOWN_TIMEOUT + LEDGER_SHUTDOWN_TIMEOUT / 5;
             assert_eq!(
-                tokio::time::timeout(Duration::from_secs(5), served)
+                tokio::time::timeout(shutdown_wait, served)
                     .await
-                    .expect("service task exits within 5s")
+                    .unwrap_or_else(|_| panic!(
+                        "service task did not exit within {shutdown_wait:?}:\n{trace}"
+                    ))
                     .unwrap(),
                 ExitCode::SUCCESS
             );
