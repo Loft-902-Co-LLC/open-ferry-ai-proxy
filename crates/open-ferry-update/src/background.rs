@@ -721,6 +721,13 @@ async fn checked(
                         SwitchError::Update(UpdateError::Busy) => {
                             tracing::debug!("automatic switch deferred: another update is running");
                         }
+                        SwitchError::Update(
+                            UpdateError::NothingStaged | UpdateError::NotNewer { .. },
+                        ) => {
+                            tracing::debug!(
+                                "automatic switch deferred: no newer version is staged"
+                            );
+                        }
                         SwitchError::Untrusted(_)
                         | SwitchError::Unreachable(_)
                         | SwitchError::Update(_) => {
@@ -748,7 +755,12 @@ impl Live {
             Some(SwitchError::Unreachable(_)) => Some(
                 "the supervisor cannot be reached; automatic switching will try again at the next check",
             ),
-            Some(SwitchError::Update(error)) if !matches!(error, UpdateError::Busy) => {
+            Some(SwitchError::Update(error))
+                if !matches!(
+                    error,
+                    UpdateError::Busy | UpdateError::NothingStaged | UpdateError::NotNewer { .. }
+                ) =>
+            {
                 Some("the automatic switch could not be prepared; trying again at the next check")
             }
             _ => None,
@@ -923,6 +935,11 @@ mod tests {
         for error in [
             SwitchError::Refused("watching".into()),
             SwitchError::Update(UpdateError::Busy),
+            SwitchError::Update(UpdateError::NothingStaged),
+            SwitchError::Update(UpdateError::NotNewer {
+                running: "0.2.0".into(),
+                latest: "0.2.0".into(),
+            }),
             SwitchError::UpdatesOff,
             SwitchError::Skipped(Report::SkippedFailed {
                 version: "0.2.0".into(),

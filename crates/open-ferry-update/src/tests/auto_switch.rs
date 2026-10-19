@@ -288,8 +288,13 @@ async fn automatic_errors_keep_the_clients_request_certainty_and_never_resend() 
                 running: "0.2.0".into(),
                 latest: "0.2.0".into(),
             }),
-            "WARN",
-            "the automatic switch could not be prepared",
+            "DEBUG",
+            "no newer version is staged",
+        ),
+        (
+            SwitchError::Update(UpdateError::NothingStaged),
+            "DEBUG",
+            "no newer version is staged",
         ),
         (
             SwitchError::TimedOut,
