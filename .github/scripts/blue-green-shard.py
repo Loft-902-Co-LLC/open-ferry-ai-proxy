@@ -29,21 +29,39 @@ UNITS = "(units)"
 # missing here counts as DEFAULT, and the plan names it, so its time can be
 # added.
 DEFAULT = 30.0
+MACOS_LAUNCHD_SECONDS = 59.8
 WEIGHTS = {
-    # Initial estimates from Linux; replace with macOS runner timings after its first run.
+    # Run 39196994705: sum nextest case durations by target across the packages.
+    # Units include the 2.7 s doc step; common test compilation is not assigned.
     "macOS": {
-        "process_switch": 215.5,
-        "process_crash": 152.4,
-        "process_lost_channel": 132.7,
-        "process_recovery": 123.9,
-        "process_ladder": 84.7,
-        "process_detect": 49.2,
-        "process_mode": 33.7,
-        "supervise": 29.9,
-        "process_real": 23.5,
-        "process_stop": 22.2,
-        "process_endpoint": 15.1,
-        UNITS: 52.0,
+        "process_switch": 271.8,
+        "process_crash": 216.7,
+        "process_recovery": 142.1,
+        "process_lost_channel": 140.6,
+        "process_ladder": 89.7,
+        "process_detect": 53.7,
+        "process_mode": 42.6,
+        "supervise": 30.7,
+        "process_real": 29.2,
+        "process_stop": 25.5,
+        "fake_worker": 24.3,
+        "process_endpoint": 20.4,
+        "process_driver": 13.3,
+        "subcommands": 12.2,
+        "process_install_self": 10.9,
+        "process_service_run": 9.8,
+        "process_supervise": 7.6,
+        "startup": 7.3,
+        "migrate": 1.7,
+        "worker_channel": 0.4,
+        "endpoint": 0.3,
+        "unix_process": 0.2,
+        "process_launchd": 0.0,
+        "process_service_scm": 0.0,
+        "process_system": 0.0,
+        "windows_process": 0.0,
+        "windows_sockets": 0.0,
+        UNITS: 271.8,
     },
     "Linux": {
         "process_switch": 215.5,
@@ -141,6 +159,9 @@ def main(argv):
     items.append((weights[UNITS], UNITS))
     items.sort(key=lambda item: (-item[0], item[1]))
     loads = [0.0] * count
+    if runner_os == "macOS":
+        # Shard 1 also builds and runs the real LaunchAgent test (same native run).
+        loads[0] = MACOS_LAUNCHD_SECONDS
     plan = [[] for _ in range(count)]
     for weight, name in items:
         least = min(range(count), key=lambda i: (loads[i], i))
