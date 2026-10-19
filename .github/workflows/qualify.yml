@@ -57,7 +57,12 @@ jobs:
           python -I -m pip install --disable-pip-version-check cryptography==46.0.3 PyYAML==6.0.3
 
       - name: Build and package A and B with one throwaway key
-        run: python -I .github/scripts/qualify/build.py "$RUNNER_TEMP/open-ferry-qualification"
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            export QUALIFY_BASH
+            QUALIFY_BASH=$(cygpath -w "$BASH")
+          fi
+          python -I .github/scripts/qualify/build.py "$RUNNER_TEMP/open-ferry-qualification"
 
       - name: Qualify the user service
         if: runner.os != 'Windows'

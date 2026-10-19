@@ -107,7 +107,9 @@ def main():
                 run(["cargo", "build", "--release", "--locked", "-p", "open-ferry",
                      "--target", target, "--message-format=json"], env=env, stdout=output)
             run([sys.executable, "-I", "crates/open-ferry/check-release.py", str(events)])
-            run(["bash", ".github/scripts/package-release.sh"], env=env)
+            # Windows CreateProcess searches System32 before PATH for a bare
+            # name, which otherwise selects the unrelated WSL bash.exe.
+            run([os.environ.get("QUALIFY_BASH", "bash"), ".github/scripts/package-release.sh"], env=env)
             suffix = ".zip" if os.name == "nt" else ".tar.gz"
             archive = f"open-ferry-{version}-{target}{suffix}"
             destination = WORK / "mirror" / "download" / f"v{version}"
