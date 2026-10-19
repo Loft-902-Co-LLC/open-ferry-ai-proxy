@@ -7120,3 +7120,78 @@ async fn after_the_switch_off_a_drain_ending_writes_no_s2() {
 async fn after_the_switch_off_a_drain_ending_queues_no_s2_retry_when_the_write_would_fail() {
     a_drain_ends_after_the_switch_off(true).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn automatic_admission_rechecks_state_and_pending_journal_exclusions() {
+    use open_ferry_update::journal::MarkFailed;
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    for pending in [false, true] {
+        for rolled_back in [false, true] {
+            for auto in [false, true] {
+                let mut rig = Rig::new().await;
+                let root = tempfile::tempdir().unwrap();
+                rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+                let mut state = State::default();
+                if pending {
+                    let mut record =
+                        SwitchRecord::started("earlier", "rollback", "2.0.0", "1.0.0", "now");
+                    record.result = Some("rolled-back".into());
+                    rig.rt
+                        .as_mut()
+                        .unwrap()
+                        .journal
+                        .as_mut()
+                        .unwrap()
+                        .push_outcome(Outcome {
+                            record: if rolled_back {
+                                record
+                            } else {
+                                SwitchRecord::default()
+                            },
+                            mark_failed: (!rolled_back).then(|| MarkFailed {
+                                version: "2.0.0".into(),
+                                why: "failed its watch".into(),
+                            }),
+                        });
+                } else if rolled_back {
+                    state.rolled_back = Some("2.0.0".into());
+                } else {
+                    state.mark_failed("2.0.0");
+                }
+                state.save(&rig.cfg.data.state_file()).unwrap();
+                let (_core, replies) = go!(rig, update(auto));
+                if auto {
+                    assert!(
+                        matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+                        if reason.contains("automatic switching skips it")),
+                        "{replies:?}"
+                    );
+                    assert_eq!(rig.driver.places().len(), 1, "no standby was started");
+                } else {
+                    assert_eq!(done_result(&replies)["result"], "switched");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_admission_refuses_unreadable_exclusions_but_manual_admission_still_works() {
+    for auto in [false, true] {
+        let mut rig = Rig::new().await;
+        let root = tempfile::tempdir().unwrap();
+        rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+        std::fs::write(rig.cfg.data.state_file(), "not state JSON").unwrap();
+        let (_core, replies) = go!(rig, update(auto));
+        if auto {
+            assert!(
+                matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+                if reason == "automatic switch exclusions could not be read"),
+                "{replies:?}"
+            );
+        } else {
+            assert_eq!(done_result(&replies)["result"], "switched");
+        }
+    }
+}
