@@ -385,7 +385,7 @@ fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Watching {
     )
     .expect("open the original worker")
     .expect("the original worker still runs");
-    let _replacement = budgeted(fx, 2, cause, || {
+    budgeted(fx, 2, cause, || {
         let mut sw = fx.update(B);
         sw.accepted();
         // At J3, B has loaded and cannot yet reach `go`, where its channel
@@ -410,18 +410,14 @@ fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Watching {
         change();
         fx.release("journal.before:J-R1");
         sw.done().expect("a done result");
-        #[cfg(windows)]
-        {
-            replacement
+        Watching {
+            _supervisor: sup,
+            #[cfg(windows)]
+            _original: original,
+            #[cfg(windows)]
+            _replacement: replacement,
         }
-    });
-    Watching {
-        _supervisor: sup,
-        #[cfg(windows)]
-        _original: original,
-        #[cfg(windows)]
-        _replacement,
-    }
+    })
 }
 
 struct Watching {
