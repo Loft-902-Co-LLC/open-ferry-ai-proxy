@@ -239,7 +239,7 @@ describe("supervised updates", () => {
   it.each(["waiting-for-signins", "loading", "handing-over", "taking-over", "watching", "cancelled", "switching", "stopping"])("shows the %s phase", async (phase) => {
     server(updateStatus({ supervisor: supervisorStatus({ phase }) }));
     const { card } = await openUpdates();
-    expect(await within(card).findByText(`Switch: ${phase.replaceAll("-", " ")}`)).toBeVisible();
+    expect(await within(card).findByText((["switching", "stopping"].includes(phase) ? `The supervisor is ${phase}` : `Switch: ${phase.replaceAll("-", " ")}`))).toBeVisible();
     expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
   });
 
@@ -547,8 +547,8 @@ it.each(["cancelled", "switching", "stopping"])("polls %s until the supervisor r
   let reads = 0;
   mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => ({ json: updateStatus({ supervisor: supervisorStatus({ phase: ++reads === 1 ? phase : "idle" }) }) })));
   const { card } = await openUpdates();
-  await within(card).findByText(`Switch: ${phase}`);
-  await waitFor(() => { expect(card).not.toHaveTextContent(`Switch: ${phase}`); }, { timeout: 5_000 });
+  await within(card).findByText((["switching", "stopping"].includes(phase) ? `The supervisor is ${phase}` : `Switch: ${phase}`));
+  await waitFor(() => { expect(card).not.toHaveTextContent((["switching", "stopping"].includes(phase) ? `The supervisor is ${phase}` : `Switch: ${phase}`)); }, { timeout: 5_000 });
   const ended = reads;
   await new Promise((resolve) => setTimeout(resolve, 2_100));
   expect(reads).toBe(ended);

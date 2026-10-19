@@ -27,3 +27,10 @@ it.each(["preparing", "accepted"] as const)("hides cached %s while the parent sh
   expect(screen.queryByText("Switch accepted")).not.toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
+
+
+it.each(["switching", "stopping"])("titles supervisor state %s without calling it a switch phase", (phase) => {
+  render(<SwitchStatus status={updateStatus({ supervisor: supervisorStatus({ phase, switch: null }) })} onRetry={vi.fn()} />);
+  expect(screen.getByText(`The supervisor is ${phase}`)).toBeVisible();
+  expect(screen.queryByText(`Switch: ${phase}`)).not.toBeInTheDocument();
+});
