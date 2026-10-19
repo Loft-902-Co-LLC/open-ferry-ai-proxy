@@ -7617,3 +7617,52 @@ async fn automatic_cooldown_bounds_future_stamps_without_extending_them_on_each_
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_ignores_bad_stamps_but_keeps_permanent_exclusions() {
+    use crate::clock::Clock;
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    for has_end in [false, true] {
+        for exclusion in ["none", "failed", "rolled-back"] {
+            let mut rig = Rig::new().await;
+            let root = tempfile::tempdir().unwrap();
+            rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+            let mut record = SwitchRecord::failed_to_load(
+                "bad-stamp",
+                "update",
+                "1.0.0",
+                "2.0.0",
+                "unreadable",
+                "handing-over",
+                "environment",
+                "interrupted",
+            );
+            if has_end {
+                record.at = rig.clock.now().to_rfc3339();
+                record.ended_at = Some("unreadable".into());
+            }
+            let mut state = State {
+                history: vec![record],
+                ..Default::default()
+            };
+            match exclusion {
+                "failed" => state.mark_failed("2.0.0"),
+                "rolled-back" => state.rolled_back = Some("2.0.0".into()),
+                _ => {}
+            }
+            state.save(&rig.cfg.data.state_file()).unwrap();
+            let (_core, replies) = go!(rig, update(true));
+            if exclusion == "none" {
+                assert_eq!(done_result(&replies)["result"], "switched");
+            } else {
+                assert!(
+                    matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+                    if reason.contains("automatic switching skips it")),
+                    "{exclusion}: {replies:?}"
+                );
+                assert_eq!(rig.driver.places().len(), 1);
+            }
+        }
+    }
+}

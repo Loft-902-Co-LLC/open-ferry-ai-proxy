@@ -62,6 +62,8 @@ pub(crate) fn unfinished_at(record: &SwitchRecord) -> Option<chrono::DateTime<ch
     {
         return None;
     }
+    // An unreadable stamp skips only this cooldown: failing closed would block
+    // automatic updates forever. Failed/rolled-back exclusions still apply.
     chrono::DateTime::parse_from_rfc3339(record.ended_at.as_deref().unwrap_or(&record.at))
         .ok()
         .map(|ended| ended.with_timezone(&chrono::Utc))
