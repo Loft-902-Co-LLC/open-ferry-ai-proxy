@@ -480,3 +480,14 @@ it("cancels an in-flight poll before publishing optimistic preparation", async (
   expect(within(card).getByText("Preparing the switch")).toBeVisible();
   await act(async () => { releasePost({ status: 202, json: { accepted: true, id: "install-1" } }); });
 });
+
+
+it("labels a check recorded before the current worker version", async () => {
+  server(updateStatus({ supervisor: supervisorStatus({ running_version: "0.2.0" }) }));
+  const { card } = await openUpdates();
+  await within(card).findByText("Running", { selector: "dt" });
+  expect(fact(card, "Running")).toBe("0.2.0");
+  expect(fact(card, "Latest release")).toBe("0.1.0 (last checked)");
+  expect(fact(card, "Last check")).toMatch(/checked before the running version changed$/);
+  expect(fact(card, "Last check")).not.toContain("up to date");
+});

@@ -106,7 +106,7 @@ test("installs from About after confirmation and follows the handover", async ({
   await expect(card.getByText("Switch accepted")).toBeVisible({ timeout: 6_000 });
   for (const phase of ["waiting-for-signins", "loading", "handing-over", "taking-over", "watching"]) {
     if (phase === "handing-over") watched.server.failNextUpdatePoll();
-    watched.server.setUpdates(updateStatus({ switch_request: {
+    watched.server.setUpdates(updateStatus({ latest_version: "0.2.0", update_available: phase !== "watching", last_result: "staged", switch_request: {
       action: "install", state: "accepted", id: "e2e-install", pending: false, reason: null,
     }, supervisor: supervisorStatus({
       phase, running_version: phase === "watching" ? "0.2.0" : "0.1.0",
@@ -120,7 +120,7 @@ test("installs from About after confirmation and follows the handover", async ({
     await expect(card.getByText(`Switch: ${phase.replaceAll("-", " ")}`)).toBeVisible({ timeout: 6_000 });
     await shot(page, `updates-${phase}`);
   }
-  watched.server.setUpdates(updateStatus({ supervisor: supervisorStatus({
+  watched.server.setUpdates(updateStatus({ running_version: "0.2.0", installed_version: "0.2.0", latest_version: "0.2.0", supervisor: supervisorStatus({
     running_version: "0.2.0", rollback_target: "0.1.0",
     last_switch: { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: "2026-10-18T16:00:00Z" },
   }) }));
@@ -140,6 +140,7 @@ test("shows update outcomes and unavailable switching under the policy", async (
   await signIn(page);
   const states = [
     { name: "plain", status: updateStatus() },
+    { name: "older-check", status: updateStatus({ supervisor: supervisorStatus({ running_version: "0.2.0" }) }) },
     { name: "available", status: updateStatus({ supervisor: supervisorStatus(), latest_version: "0.2.0", update_available: true }) },
     { name: "disabled", status: updateStatus({ supervisor: supervisorStatus({ switching_disabled: "the journal is stale" }) }) },
     { name: "refused", status: updateStatus({ supervisor: supervisorStatus(), switch_request: { action: "install" as const, state: "refused" as const, id: null, pending: false, reason: "sign-ins are pending" } }) },
@@ -154,6 +155,9 @@ test("shows update outcomes and unavailable switching under the policy", async (
     watched.server.setUpdates(state.status);
     await page.goto("about");
     await expect(page.getByRole("region", { name: "Updates" }).getByText("Running", { exact: true })).toBeVisible();
+    if (state.name === "older-check") {
+      await expect(page.getByRole("region", { name: "Updates" })).toContainText("checked before the running version changed");
+    }
     await shot(page, `updates-${state.name}`);
     if (state.name.startsWith("retry-")) {
       await page.getByRole("button", { name: "Install now" }).click();
