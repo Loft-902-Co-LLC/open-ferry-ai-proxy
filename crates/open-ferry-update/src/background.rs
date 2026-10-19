@@ -227,12 +227,16 @@ impl UpdateService {
                         if !found.is_newer() {
                             return Err(UpdateError::NothingStaged.into());
                         }
-                        switching::skipped(&updater, &state, &found.release.version)?;
+                        if auto {
+                            switching::skipped(&updater, &state, &found.release.version)?;
+                        }
                         updater.stage(&found, &mut state).await?;
                         found.release.version
                     }
                 };
-                switching::skipped(updater, &state, &version)?;
+                if auto {
+                    switching::skipped(updater, &state, &version)?;
+                }
                 let sha256 = state
                     .staged_sha256
                     .as_deref()
