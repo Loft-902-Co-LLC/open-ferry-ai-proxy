@@ -19,7 +19,7 @@ import {
   type UpdateStatus,
   type SwitchStarted,
 } from "../../api/update";
-import { switchInProgress, useUpdateStatus } from "../../api/updateStatus";
+import { useUpdateStatus } from "../../api/updateStatus";
 import { Alert } from "../../components/Alert";
 import { Badge, type BadgeTone } from "../../components/Badge";
 import { Button } from "../../components/Button";
@@ -265,7 +265,7 @@ export function UpdatesCard({ className }: { className?: string }) {
       }
     >
       {status.isPending && <Loading>Asking the server…</Loading>}
-      {status.isError && !switchInProgress(data) &&
+      {status.isError && !status.hidePollError &&
         (isUpdatesUnavailable(status.error) ? (
           <p className="text-muted">
             This server doesn&apos;t check for updates, as one the terminal dashboard (
