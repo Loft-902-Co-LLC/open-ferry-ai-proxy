@@ -163,12 +163,17 @@ fn cli(fx: &Fx, label: &str, flags: &[&str]) -> (i32, Value) {
 /// returns immediately and is never sent again. Traffic keeps running.
 fn switch_cli(fx: &Fx, label: &str, flags: &[&str]) -> (i32, Value) {
     let deadline = Instant::now() + LONG;
-    let busy = format!(
-        "{}. The supervisor request was not sent.",
-        UpdateError::Busy
-    );
+    let busy_display = UpdateError::Busy.to_string();
+    let busy = format!("{busy_display}. The supervisor request was not sent.");
     loop {
         let (code, value) = cli(fx, label, flags);
+        assert!(
+            !value["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with(&busy_display) && error != busy),
+            "{label}: the busy refusal's wording changed; update switch_cli's expected not-sent message: {value}\n{}",
+            log(fx)
+        );
         if code != 1
             || value["result"] != "error"
             || value["error"] != busy
