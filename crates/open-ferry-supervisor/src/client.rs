@@ -1,6 +1,5 @@
-//! What the update CLI, the install scripts' `install-self` and `service
-//! uninstall` ask of a supervisor that may be running: whether one runs
-//! (design 10.3 and 10.4), and that it stop.
+//! Local supervisor clients: detection and stopping for installers, and
+//! status, switches and cancellation for supervised updates.
 //!
 //! [`detect`] decides whether the installed binary may be replaced. It runs
 //! only under the caller's update lock, and answers [`Detection::Clear`] only
@@ -21,6 +20,9 @@ use crate::endpoint::{EndpointError, Identity, Location, connect};
 use crate::process::SupervisorLock;
 use crate::protocol::{Channel, EndpointReply, EndpointRequest, VERSION};
 use crate::timings::DETECT_TIMEOUT;
+
+mod switching;
+pub use switching::{EndpointSwitcher, SwitchRequest, cancel, status, switch};
 
 /// The most of `supervisor.json` that is read.
 const RECORD_LIMIT: u64 = 64 * 1024;
@@ -1251,5 +1253,200 @@ mod tests {
         };
         assert!(seen.contains("supervisor.json"), "{seen}");
         assert!(probe(dirs.data(), &identity(), soon(2)).await.is_none());
+    }
+
+    fn update_request() -> SwitchRequest {
+        SwitchRequest {
+            to: "2.0.0".into(),
+            sha256: "ab".repeat(32),
+            pin: "pin".into(),
+            how: crate::protocol::How::Update,
+            auto: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_client_yields_progress_and_done_and_checks_the_operation_id() {
+        use open_ferry_update::{SwitchError, SwitchEvent};
+        for wrong_id in [false, true] {
+            let dirs = Dirs::new();
+            let endpoint = serve(
+                location_for(dirs.data()),
+                move |request, mut stream| async move {
+                    let request: EndpointRequest = serde_json::from_str(&request).unwrap();
+                    assert!(matches!(
+                        request,
+                        EndpointRequest::Switch { auto: false, .. }
+                    ));
+                    reply(&mut stream, r#"{"type":"accepted","v":1,"id":"one"}"#).await;
+                    reply(
+                        &mut stream,
+                        r#"{"type":"progress","v":1,"id":"one","phase":"loading"}"#,
+                    )
+                    .await;
+                    let id = if wrong_id { "other" } else { "one" };
+                    reply(&mut stream, &format!(r#"{{"type":"done","v":1,"id":"{id}","result":{{"result":"switched"}}}}"#)).await;
+                },
+            );
+            write_record(dirs.data(), &endpoint.location, 1);
+            let mut handle = switch(dirs.data(), &identity(), update_request(), soon(5))
+                .await
+                .unwrap();
+            assert_eq!(handle.id, "one");
+            assert_eq!(
+                handle.next(soon(5)).await.unwrap(),
+                Some(SwitchEvent::Progress {
+                    phase: "loading".into()
+                })
+            );
+            let done = handle.next(soon(5)).await;
+            if wrong_id {
+                assert!(matches!(done, Err(SwitchError::Protocol(_))));
+            } else {
+                assert!(matches!(done, Ok(Some(SwitchEvent::Done { .. }))));
+            }
+            assert_eq!(handle.next(soon(5)).await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_client_reports_refusal_eof_and_bad_versions() {
+        use open_ferry_update::SwitchError;
+        for (first, last) in [
+            (r#"{"type":"error","v":1,"reason":"busy"}"#, None),
+            (r#"{"type":"accepted","v":2,"id":"one"}"#, None),
+            (r#"{"type":"accepted","v":1,"id":"one"}"#, None),
+            (
+                r#"{"type":"accepted","v":1,"id":"one"}"#,
+                Some(r#"{"type":"error","v":1,"reason":"stopping"}"#),
+            ),
+        ] {
+            let dirs = Dirs::new();
+            let endpoint = serve(location_for(dirs.data()), move |_, mut stream| async move {
+                reply(&mut stream, first).await;
+                if let Some(last) = last {
+                    reply(&mut stream, last).await;
+                }
+            });
+            write_record(dirs.data(), &endpoint.location, 1);
+            let outcome = switch(dirs.data(), &identity(), update_request(), soon(5)).await;
+            if first.contains("busy") {
+                assert!(matches!(outcome, Err(SwitchError::Refused(_))));
+            } else if first.contains("\"v\":2") {
+                assert!(matches!(outcome, Err(SwitchError::Protocol(_))));
+            } else {
+                let error = outcome.unwrap().next(soon(5)).await.unwrap_err();
+                if last.is_some() {
+                    assert!(matches!(error, SwitchError::Refused(_)));
+                } else {
+                    assert!(matches!(error, SwitchError::Stopped), "{error}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_client_progress_timeout_preserves_a_partial_frame() {
+        use open_ferry_update::{SwitchError, SwitchEvent};
+        let dirs = Dirs::new();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let sending = release.clone();
+        let endpoint = serve(location_for(dirs.data()), move |_, mut stream| {
+            let sending = sending.clone();
+            async move {
+                reply(&mut stream, r#"{"type":"accepted","v":1,"id":"one"}"#).await;
+                stream
+                    .write_all(br#"{"type":"done","v":1,"id":"one","result":"#)
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+                sending.notified().await;
+                reply(&mut stream, r#"{}}"#).await;
+            }
+        });
+        write_record(dirs.data(), &endpoint.location, 1);
+        let mut handle = switch(dirs.data(), &identity(), update_request(), soon(5))
+            .await
+            .unwrap();
+        assert!(matches!(
+            handle
+                .next(Instant::now() + Duration::from_millis(50))
+                .await,
+            Err(SwitchError::TimedOut)
+        ));
+        release.notify_one();
+        assert!(matches!(
+            handle.next(soon(5)).await.unwrap(),
+            Some(SwitchEvent::Done { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn status_and_cancel_use_the_endpoint_without_touching_locks() {
+        use open_ferry_update::CancelOutcome;
+        for answer in ["cancelled", "too_late", "nothing"] {
+            let dirs = Dirs::new();
+            let _lifetime = SupervisorLock::try_acquire(dirs.data()).unwrap();
+            let _install = InstallLock::try_acquire(&dirs.installed()).unwrap();
+            let endpoint = serve(
+                location_for(dirs.data()),
+                move |request, mut stream| async move {
+                    let request: EndpointRequest = serde_json::from_str(&request).unwrap();
+                    let response = match request {
+                        EndpointRequest::Status { .. } => EndpointReply::Status {
+                            v: VERSION,
+                            snapshot: serde_json::to_value(crate::snapshot::Snapshot::default())
+                                .unwrap(),
+                        },
+                        EndpointRequest::Cancel { .. } => match answer {
+                            "cancelled" => EndpointReply::Cancelled { v: VERSION },
+                            "too_late" => EndpointReply::TooLate { v: VERSION },
+                            _ => EndpointReply::Error {
+                                v: VERSION,
+                                reason: "nothing is switching".into(),
+                            },
+                        },
+                        other => panic!("{other:?}"),
+                    };
+                    reply(&mut stream, &serde_json::to_string(&response).unwrap()).await;
+                },
+            );
+            write_record(dirs.data(), &endpoint.location, 1);
+            assert_eq!(
+                status(dirs.data(), &identity(), soon(5)).await.unwrap(),
+                crate::snapshot::Snapshot::default()
+            );
+            assert_eq!(
+                cancel(dirs.data(), &identity(), soon(5)).await.unwrap(),
+                match answer {
+                    "cancelled" => CancelOutcome::Cancelled,
+                    "too_late" => CancelOutcome::TooLate,
+                    _ => CancelOutcome::Nothing,
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_client_bounds_record_reads_and_never_sends_after_the_deadline() {
+        use open_ferry_update::SwitchError;
+        let dirs = Dirs::new();
+        let (endpoint, asked) = watched(&dirs, r#"{"type":"accepted","v":1,"id":"one"}"#);
+        write_record(dirs.data(), &endpoint.location, 1);
+        let stall = Stalled::new(&READ_STALLS, dirs.data(), STALL);
+        let began = Instant::now();
+        assert!(matches!(
+            switch(
+                dirs.data(),
+                &identity(),
+                update_request(),
+                began + Duration::from_millis(100)
+            )
+            .await,
+            Err(SwitchError::TimedOut)
+        ));
+        assert!(began.elapsed() < Duration::from_millis(100) + MARGIN);
+        assert!(stall.entered());
+        assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
