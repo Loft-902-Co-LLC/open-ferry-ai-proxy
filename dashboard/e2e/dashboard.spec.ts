@@ -145,6 +145,64 @@ test("installs from About after confirmation and follows the handover", async ({
   expectClean(watched);
 });
 
+test("keeps an old request unconfirmed and confirms a live switch after handover", async ({ page }) => {
+  const original = updateStatus({ latest_version: "0.2.0", staged_version: "0.2.0", update_available: true, last_result: "staged",
+    supervisor: supervisorStatus(), switch_request: {
+      request_id: "old-request", action: "install", state: "refused", id: null, reason: "sign-ins are pending", pending: false,
+    },
+  });
+  const watched = await watch(page, { updates: original });
+  let posts = 0;
+  await page.route("**/open-ferry/api/v1/update/install", async (route) => { posts += 1; await route.abort("connectionreset"); });
+  await signIn(page);
+  await page.goto("about");
+  const card = page.getByRole("region", { name: "Updates" });
+  await card.getByRole("button", { name: "Install now" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Install now" }).click();
+  await expect(card.getByText("The switch could not be confirmed")).toBeVisible();
+  await expect(card.getByText("Switch refused")).toBeVisible();
+  await shot(page, "updates-unconfirmed-old-request");
+  watched.server.setUpdates({ ...original, switch_request: null, supervisor: supervisorStatus({ phase: "handing-over",
+    switch: { id: "new-worker-switch", how: "update", from: "0.1.0", to: "0.2.0" },
+  }) });
+  await card.getByRole("button", { name: "Check now" }).click();
+  await expect(card.getByText("Switch: handing over")).toBeVisible();
+  await expect(card.getByText("The switch could not be confirmed")).toHaveCount(0);
+  await shot(page, "updates-confirmed-after-handover");
+  watched.server.setUpdates({ ...original, switch_request: null, supervisor: supervisorStatus({ phase: "stopping", switch: null }) });
+  await expect(card.getByText("The supervisor is stopping")).toBeVisible({ timeout: 6_000 });
+  await shot(page, "updates-supervisor-stopping");
+  expect(posts).toBe(1);
+  expect(watched.consoleErrors).toEqual([expect.stringContaining("net::ERR_CONNECTION_RESET")]);
+  watched.consoleErrors.length = 0;
+  expectClean(watched);
+});
+
+test("asks for a new status read when an unanswered switch exhausts polling", async ({ page }) => {
+  const watched = await watch(page, { updates: updateStatus({ latest_version: "0.2.0", staged_version: "0.2.0", update_available: true, last_result: "staged", supervisor: supervisorStatus() }) });
+  await signIn(page);
+  await page.goto("about");
+  const card = page.getByRole("region", { name: "Updates" });
+  await expect(card.getByRole("button", { name: "Install now" })).toBeVisible();
+  let posts = 0;
+  let failedPolls = 0;
+  await page.route("**/open-ferry/api/v1/update/install", async (route) => { posts += 1; await route.abort("connectionreset"); });
+  await page.route("**/open-ferry/api/v1/update", async (route) => { failedPolls += 1; await route.abort("connectionreset"); });
+  await card.getByRole("button", { name: "Install now" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Install now" }).click();
+  await expect(card).toContainText("Checking its status");
+  await expect(card).toContainText("Read the status again to see whether it started.", { timeout: 15_000 });
+  await expect(card).not.toContainText("Checking its status");
+  await expect(card.getByRole("button", { name: "Try again" })).toBeVisible();
+  await shot(page, "updates-unconfirmed-exhausted");
+  await page.waitForTimeout(2_100);
+  expect(posts).toBe(1);
+  expect(failedPolls).toBe(5);
+  expect(watched.consoleErrors).toEqual(Array.from({ length: 6 }, () => expect.stringContaining("net::ERR_CONNECTION_RESET")));
+  watched.consoleErrors.length = 0;
+  expectClean(watched);
+});
+
 test("shows update outcomes and unavailable switching under the policy", async ({ page }) => {
   const watched = await watch(page);
   await signIn(page);
