@@ -1588,6 +1588,7 @@ async fn follow_until<U: Updates>(
     outcome.operation_id = Some(handle.id.clone());
     console.say(format!("Switch {} accepted. Ctrl-C stops following; the supervisor continues the switch. Use `open-ferry update -cancel` to ask it to cancel.", handle.id));
     tokio::pin!(stop);
+    let mut listen_for_stop = true;
     let until = tokio::time::Instant::now() + following_budget();
     loop {
         let remaining = until.saturating_duration_since(tokio::time::Instant::now());
@@ -1596,8 +1597,12 @@ async fn follow_until<U: Updates>(
         }
         let event = tokio::select! {
             biased;
-            stopped = &mut stop => {
-                if let Err(error) = stopped { return outcome.failed(console, format!("could not listen for Ctrl-C: {error}; the supervisor continues the switch")); }
+            stopped = &mut stop, if listen_for_stop => {
+                if let Err(error) = stopped {
+                    console.say(format!("Could not listen for Ctrl-C: {error}. Still following switch {}.", handle.id));
+                    listen_for_stop = false;
+                    continue;
+                }
                 console.say("Stopped following. The supervisor continues the switch; it was not cancelled. Use `open-ferry update -check` to see its status.");
                 return outcome.with("following-stopped", 0);
             }
@@ -1643,6 +1648,10 @@ async fn follow_until<U: Updates>(
                         },
                         0,
                     );
+                }
+                if word == "cancelled" {
+                    console.say(format!("Switch {} was cancelled.", handle.id));
+                    return outcome.with("cancelled", 0);
                 }
                 let reason = record
                     .why

@@ -487,3 +487,51 @@ async fn the_real_backend_does_not_reuse_a_stage_that_is_already_running() {
         Err(UpdateError::Verify(VerifyError::NoTrustedKey))
     ));
 }
+
+#[tokio::test]
+async fn another_clients_cancellation_is_reported_as_cancelled() {
+    let fake = SupervisedFake::new("cancelled");
+    let ran = go(
+        Request::Update,
+        &fake,
+        &settings("", None),
+        true,
+        true,
+        None,
+    )
+    .await;
+    assert_eq!((ran.code, ran.result), (0, "cancelled"));
+    assert!(
+        ran.json()["message"]
+            .as_str()
+            .unwrap()
+            .contains("was cancelled")
+    );
+}
+
+#[tokio::test]
+async fn a_ctrl_c_registration_error_keeps_following_the_accepted_operation() {
+    let fake = SupervisedFake::new("switched");
+    let Changed::Supervised { handle, record } = fake.changed("update", "0.2.0") else {
+        unreachable!()
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut console = Console::new(true, &mut out, &mut err);
+    let outcome = follow_until(
+        &fake,
+        handle,
+        record,
+        Outcome::new("update", &settings("", None)),
+        &mut console,
+        async { Err(io::Error::other("registration failed")) },
+    )
+    .await;
+    assert_eq!((outcome.code, outcome.result), (0, "updated"));
+    assert_eq!(outcome.operation_id.as_deref(), Some("operation"));
+    assert!(
+        console
+            .said
+            .iter()
+            .any(|line| line.contains("Still following switch operation"))
+    );
+}
