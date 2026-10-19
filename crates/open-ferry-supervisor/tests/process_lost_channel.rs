@@ -14,7 +14,7 @@ use under_test::*;
 /// The stop budget these tests run with. A worker whose channel is lost gets
 /// this long to exit by itself, then the supervisor uses its handle (the
 /// worker's `kill_at`, set when the loss is seen). Measured here: the kill
-/// comes 1.0 to 1.5 s after the loss with a 1 s budget.
+/// comes after the 10 s budget, allowing for the supervisor's tick.
 const STOP: u64 = 10_000;
 
 /// The least time that may pass between the loss and the process being gone:
@@ -24,29 +24,26 @@ const STOP: u64 = 10_000;
 /// can have been seen (the receive of the first status poll that showed it)
 /// and the earliest the exit can have happened (the start of the last liveness
 /// check that found the process alive), so it is short of the true gap by at
-/// most three amounts: the loss's window between two polls and the exit's
-/// window between two checks, each at most `WINDOW`, and the lag of the status,
-/// at most `LAG_MAX` (set-up fails otherwise). The lag is the time from the
+/// most three amounts: the loss's window between two polls, the exit's
+/// window between two checks, and the lag of the status. Their sum must fit
+/// `UNCERTAINTY_MAX` (set-up fails otherwise). The lag is the time from the
 /// command that caused the loss to the poll that showed it, so it holds the
 /// supervisor's own delay in noticing the loss (seen at up to about 1 s on
 /// Windows) and the journal write `worker_lost` (core.rs) makes before the
 /// status can show it.
-/// Margins, the uncertainty included: a correct run has a bound of at least
-/// `STOP - 2 * WINDOW - LAG_MAX` = 7 s, 2 s above `LOSS_MIN` (5 s); an
-/// immediate kill has a true gap under 0.5 s, so a bound under 0.5 s, 4.5 s
+/// A correct run has a bound of at least `STOP - UNCERTAINTY_MAX` = 5 s.
+/// An immediate kill has a true gap under 0.5 s, so a bound under 0.5 s, 4.5 s
 /// below `LOSS_MIN`. The windows are taken in the test process from `Instant`,
 /// so a step of the wall clock cannot move them. Only the lag is measured
 /// against the wall clock (the supervisor's log), and a step there fails the
 /// set-up (it is checked against the `Instant`s) and cannot make the test pass.
 const LOSS_MIN: Duration = Duration::from_millis(STOP / 2);
 
-/// The widest a status round trip, the window the loss or the exit lies in,
-/// or the lag of the loss in the status, may be before the measurement is not trusted. Breaking it fails the
-/// set-up, not the property under test.
-const WINDOW: Duration = Duration::from_millis(500);
-
-/// The most the loss may show in the status after the command that caused it.
-const LAG_MAX: Duration = Duration::from_millis(2_000);
+/// Spend the available measurement margin as a whole. A 1.5 s status poll
+/// under load is harmless when the other windows are small; rejecting every
+/// round trip over 500 ms rejected such valid measurements. The cap follows
+/// from the unchanged stop budget and lower bound, rather than machine speed.
+const UNCERTAINTY_MAX: Duration = Duration::from_millis(STOP / 2);
 
 fn tm(watch: u64) -> Tm {
     Tm {
@@ -117,7 +114,7 @@ fn arm(fx: &Fx, phase_at: &str) -> &'static str {
 /// worker, not the last command sent (a later one, such as `peers_gone`, would
 /// make a slow loss look fresh). A missing line, a repeated one, or a poll
 /// instant before the command (a step of the clock) fails the set-up, as does a
-/// lag over `LAG_MAX`.
+/// lag that, with the sampling windows, exceeds `UNCERTAINTY_MAX`.
 fn loss_lag(log: &[Value], pid: u32, cause: &str, shown_ms: u64) -> Result<Duration, String> {
     let lines: Vec<u64> = log
         .iter()
@@ -135,13 +132,17 @@ fn loss_lag(log: &[Value], pid: u32, cause: &str, shown_ms: u64) -> Result<Durat
             "the status showed the loss at {shown_ms}, before its cause `{cause}` at {caused_ms}: the clock stepped"
         ));
     };
-    let lag = Duration::from_millis(lag);
-    if lag > LAG_MAX {
+    Ok(Duration::from_millis(lag))
+}
+
+fn check_uncertainty(loss: Duration, lag: Duration, exit: Duration) -> Result<(), String> {
+    let total = loss + lag + exit;
+    if total > UNCERTAINTY_MAX {
         return Err(format!(
-            "the loss showed in the status {lag:?} after `{cause}` was sent to the worker, over {LAG_MAX:?}"
+            "the measurement uncertainty is {total:?} (loss window {loss:?}, status lag {lag:?}, exit window {exit:?}), over {UNCERTAINTY_MAX:?}"
         ));
     }
-    Ok(lag)
+    Ok(())
 }
 
 #[test]
@@ -150,7 +151,12 @@ fn the_lag_is_taken_from_the_command_that_caused_the_loss() {
     // `go` at 1000, then a later `peers_gone` at 2600: the loss shows at 3200,
     // 2200 ms after its cause, which is slow, though 600 ms after the last send.
     let log = [cmd("send:go", 1000), cmd("send:peers_gone", 2600)];
-    let slow = loss_lag(&log, 7, "send:go", 3200).unwrap_err();
+    let lag = loss_lag(&log, 7, "send:go", 3200).unwrap();
+    assert_eq!(lag, Duration::from_millis(2200));
+    // A slow status is usable while the total uncertainty fits the budget.
+    assert!(check_uncertainty(Duration::from_millis(1530), lag, POLL).is_ok());
+    // The later command must not make an over-budget measurement look fresh.
+    let slow = check_uncertainty(Duration::from_secs(3), lag, POLL).unwrap_err();
     assert!(slow.contains("over"), "{slow}");
     assert_eq!(
         loss_lag(&log, 7, "send:go", 1300).unwrap(),
@@ -199,12 +205,6 @@ fn measure(
         let status = fx.status();
         let received = Instant::now();
         let received_ms = now_ms();
-        if received.duration_since(sent) > WINDOW {
-            return Some(Err(format!(
-                "a status round trip took {:?}, over {WINDOW:?}",
-                received.duration_since(sent)
-            )));
-        }
         if let Some(status) = status {
             let lost = fx.pid_of(n).is_some_and(|pid| {
                 status["workers"].as_array().is_some_and(|workers| {
@@ -227,12 +227,6 @@ fn measure(
         }
         pause();
     };
-    if loss_hi.duration_since(loss_lo) > WINDOW {
-        return Some(Err(format!(
-            "the loss lies in a window of {:?}, over {WINDOW:?}",
-            loss_hi.duration_since(loss_lo)
-        )));
-    }
     let pid = fx.pid_of(n).expect("a lost worker has a pid");
     // How late the loss shows (see `loss_lag`), in the wall clock of the
     // supervisor's log. A step of that clock since the watcher began would
@@ -245,9 +239,10 @@ fn measure(
             "the wall clock moved {wall_ms} ms while the monotonic clock moved {mono_ms} ms, so the loss's lag cannot be told"
         )));
     }
-    if let Err(why) = loss_lag(&fx.driver_log(), pid, cause, shown_ms) {
-        return Some(Err(why));
-    }
+    let lag = match loss_lag(&fx.driver_log(), pid, cause, shown_ms) {
+        Ok(lag) => lag,
+        Err(why) => return Some(Err(why)),
+    };
     // The process was alive at the loss (the fixture's other tests say so), so
     // the earliest exit is no earlier than the loss's start; a check that finds
     // it gone at once leaves the bound at zero, which the test then fails.
@@ -262,11 +257,12 @@ fn measure(
         if up {
             alive_from = before;
         } else {
-            if after.duration_since(alive_from) > WINDOW {
-                return Some(Err(format!(
-                    "the exit lies in a window of {:?}, over {WINDOW:?}",
-                    after.duration_since(alive_from)
-                )));
+            if let Err(why) = check_uncertainty(
+                loss_hi.duration_since(loss_lo),
+                lag,
+                after.duration_since(alive_from),
+            ) {
+                return Some(Err(why));
             }
             return Some(Ok(alive_from.saturating_duration_since(loss_hi)));
         }
