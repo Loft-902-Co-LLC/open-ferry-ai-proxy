@@ -98,11 +98,13 @@ If `install-self` cannot publish the receipt, it reports the failure and tries t
 open-ferry update
 ```
 
-While a supervisor runs, `update` and `-rollback` refuse to change its binary or records, and say how to stop the service first. `-check` and `-mode` remain available.
+While a supervisor runs for this data directory, `open-ferry update` and `-rollback` switch workers on the same listener while existing requests finish. `-check` also shows the supervisor's phase, running version, rollback target, watch deadline and last outcome, and whether switching is disabled and why. `-cancel` asks it to cancel before the new worker takes over. Ctrl-C after acceptance stops following; the supervisor continues the switch. Updating, rolling back or cancelling a machine install needs root or an administrator.
+
+A timeout, a lost connection or an unreadable reply to a supervised update, rollback or cancellation leaves its outcome unknown. Run `open-ferry update -check` and do not resend the request. The command exits with 1; its JSON result is `outcome-unknown`.
 
 In the plain form, it checks for the latest release, says what it would do, and asks. Then it downloads the release (or takes the copy the server staged), checks it as above, and puts it in place of the installed binary: it copies the new binary beside the old one and renames it over the old, so the path never holds half a binary. The old binary is kept in the data directory for a rollback. On Windows, which won't replace a running `.exe`, the old one is first renamed `open-ferry.exe.old`, removed at the next update. `-yes` installs without asking; without a terminal to ask in, and without `-yes`, it installs nothing. Its flags and exit codes are in [docs/cli.md](cli.md#open-ferry-update).
 
-Nothing is restarted: the running server goes on with the old binary until you restart it, and `open-ferry update -check` says that a restart is needed. `open-ferry update` says how to restart for your system:
+In the plain form, nothing is restarted: the running server goes on with the old binary until you restart it, and `open-ferry update -check` says that a restart is needed. `open-ferry update` says how to restart for your system:
 
 | Running as | Restart |
 |---|---|
