@@ -51,9 +51,9 @@ enum How {
 }
 
 /// The binary, copied into `root/bin` where the data directory's trust check
-/// accepts it, with the markers the worker answers with and a config on
-/// `port` with self-update off.
-fn prepare(root: &Path, port: u16) -> PathBuf {
+/// accepts it, with the markers the worker answers with. Keep this immutable
+/// across bind retries: Windows may still be unmapping a killed worker.
+fn prepare(root: &Path) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join(NAME);
@@ -68,18 +68,17 @@ fn prepare(root: &Path, port: u16) -> PathBuf {
         )
         .unwrap();
     }
-    std::fs::write(root.join("config.yaml"), config_text(root, port, "off")).unwrap();
     exe
 }
 
 /// Starts the supervisor in `root` as `how`, with `root` as its working
 /// directory; its output goes to `root/out.log`.
-fn spawn(root: &Path, port: u16, how: How) -> Sup {
-    let exe = prepare(root, port);
+fn spawn(root: &Path, exe: &Path, port: u16, how: How) -> Sup {
+    std::fs::write(root.join("config.yaml"), config_text(root, port, "off")).unwrap();
     // The wrapper appends here: keep each attempt's bind evidence separate.
     std::fs::write(root.join("service.log"), b"").unwrap();
     let log = std::fs::File::create(root.join("out.log")).unwrap();
-    let mut command = Command::new(&exe);
+    let mut command = Command::new(exe);
     match how {
         How::Directly => {
             command
@@ -135,6 +134,7 @@ fn launch_with_first_port(
     first_port: Option<u16>,
     budget: Duration,
 ) -> (Sup, u16) {
+    let exe = prepare(root);
     let until = Instant::now() + budget;
     for attempt in 0..8 {
         assert!(
@@ -146,7 +146,7 @@ fn launch_with_first_port(
         } else {
             free_port()
         };
-        let mut sup = spawn(root, port, how);
+        let mut sup = spawn(root, &exe, port, how);
         loop {
             let exit = sup.try_exit();
             let log = dump(root);
