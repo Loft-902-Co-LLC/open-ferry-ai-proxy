@@ -653,7 +653,7 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 {"action": "install", "state": "preparing", "id": null, "reason": null, "pending": true}
 ```
 
-`state` is `preparing`, `accepted`, `refused`, `failed` or `unknown` (the supervisor did not answer and may have accepted). `id` is set after acceptance; `reason` explains refusal, failure or uncertainty. `pending` means preparation or observation of the accepted switch is still pending. The request remains until a newer request replaces it. This in-memory request state ends when the worker exits; the supervisor's live switch and durable last outcome remain available across a handover.
+`state` is `preparing`, `accepted`, `refused`, `failed` or `unknown` (the supervisor did not answer and may have accepted). `id` is set after acceptance; `reason` explains refusal, failure or uncertainty. `pending` means preparation or observation of an accepted or uncertain request is still pending. The request remains until a newer request replaces it. This in-memory request state ends when the worker exits; the supervisor's live switch and durable last outcome remain available across a handover.
 
 Poll every one or two seconds while preparing or switching; stop after it ends. Retry a failed status poll quietly during handover. Never resend a switch request after an ambiguous timeout; read status first.
 
@@ -687,7 +687,7 @@ The supervisor owns the switch. The route does not wait for handover or watch co
 
 At most one preparation runs per dashboard state. A second request while one runs returns `409 already_preparing`, with the message `already preparing`. `GET /update` reports eventual acceptance or refusal, including a refusal after the `202 preparing` response.
 
-An acceptance timeout or a stream ending without a reply is ambiguous: the answer is `202 {"uncertain": true}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The status then retains the reason with state `failed`; check the live switch and last outcome before deciding to retry.
+An acceptance timeout or a stream ending without a reply is ambiguous: the answer is `202 {"uncertain": true}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The request retains state `unknown` and its reason, with `pending: false`; the read alone cannot prove its outcome. Check the live switch and last outcome before deciding to retry.
 
 If the supervisor accepted the switch and then ended it with an error before the route returned, the answer is `202 {"failed": true, "reason": "..."}`. `switch_request.state` is `failed` and keeps that reason. This is a failed accepted operation, not a refusal.
 

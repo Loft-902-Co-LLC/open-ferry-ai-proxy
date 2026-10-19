@@ -369,3 +369,29 @@ describe("switch failures", () => {
     expect(card).not.toHaveTextContent("the supervisor cannot be reached");
   });
 });
+
+describe("uncertain switch observation", () => {
+  it("keeps the unknown outcome after status is read and permits an explicit retry", async () => {
+    let reads = 0;
+    const api = mockApi(
+      route("GET", CHECK_PATH, { json: {} }),
+      route("GET", UPDATE, () => {
+        reads += 1;
+        return { json: updateStatus({
+          supervisor: supervisorStatus(), staged_version: "0.2.0",
+          switch_request: { action: "install", state: "unknown", id: null, reason: "the outcome is unknown", pending: reads === 1 },
+        }) };
+      }),
+    );
+    const { card } = await openUpdates();
+    await within(card).findByText("the outcome is unknown");
+    expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
+    expect(await within(card).findByRole("button", { name: "Install now" }, { timeout: 5_000 })).toBeEnabled();
+    expect(card).toHaveTextContent("The switch could not be confirmed");
+    expect(card).not.toHaveTextContent("Switch failed");
+    expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(0);
+    const observedReads = reads;
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    expect(reads).toBe(observedReads);
+  }, 8_000);
+});

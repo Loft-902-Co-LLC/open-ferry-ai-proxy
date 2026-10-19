@@ -10,7 +10,7 @@ export const CHECKING_POLL_MS = 2_000;
 
 export function switchInProgress(status: UpdateStatus | undefined): boolean {
   const supervisor = status?.supervisor;
-  return status?.switch_request?.pending === true || status?.switch_request?.state === "unknown" ||
+  return status?.switch_request?.pending === true ||
     (supervisor != null && !["idle", "degraded", "stopping"].includes(supervisor.phase));
 }
 

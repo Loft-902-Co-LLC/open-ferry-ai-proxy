@@ -67,10 +67,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                         && view.supervisor.is_some()
                         && read_started >= request.finished_at
                     {
-                        if request.state == "unknown" {
-                            request.state = "failed";
-                        }
-                        if request.state == "accepted" {
+                        if matches!(request.state, "unknown" | "accepted") {
                             request.pending = false;
                         }
                     }
@@ -193,6 +190,7 @@ impl SwitchRequest {
                 } else {
                     "failed"
                 };
+                request.pending = request.state == "unknown";
                 request.code = if matches!(error, SwitchError::NotSupervised) {
                     "not_supervised"
                 } else if matches!(error, SwitchError::Update(UpdateError::Busy)) {
@@ -258,7 +256,7 @@ impl Requests {
                         "already preparing",
                     ));
                 }
-                if request.state == "unknown" {
+                if request.state == "unknown" && request.pending {
                     return Err(ApiError::new(
                         StatusCode::CONFLICT,
                         "switch_uncertain",

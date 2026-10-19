@@ -466,8 +466,17 @@ async fn an_ambiguous_request_is_never_resent_and_requires_a_status_read_before_
             .error(StatusCode::CONFLICT, "switch_uncertain");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         let body = dash.get(STATUS).await.json(StatusCode::OK);
-        assert_eq!(body["switch_request"]["state"], "failed");
+        assert_eq!(body["switch_request"]["state"], "unknown");
+        assert_eq!(body["switch_request"]["pending"], false);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        dash.call(Method::POST, INSTALL, "")
+            .await
+            .json(StatusCode::ACCEPTED);
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            2,
+            "only an explicit later request retries"
+        );
     }
 }
 
