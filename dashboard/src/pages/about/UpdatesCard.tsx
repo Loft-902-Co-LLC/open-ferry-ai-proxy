@@ -231,24 +231,22 @@ export function UpdatesCard({ className }: { className?: string }) {
         switch_request: optimistic,
       });
       return {
-        previousRequest: JSON.stringify(before?.switch_request),
-        optimisticRequest: JSON.stringify(optimistic),
+        previousRead: status.lastRead,
         lastSwitch: JSON.stringify(before?.supervisor?.last_switch),
       };
     },
     onSettled: () => client.invalidateQueries({ queryKey: apiQueryKey(UPDATE) }),
   });
   const { isError: switchError, reset: resetSwitch, context: switchContext } = switching;
-  const latestRequest = data?.switch_request;
-  const lastSwitch = data?.supervisor?.last_switch;
+  const latestRequest = status.lastRead?.switch_request;
+  const lastSwitch = status.lastRead?.supervisor?.last_switch;
   useEffect(() => {
-    if (!switchError || switchContext === undefined) return;
-    const request = JSON.stringify(latestRequest);
+    if (!switchError || switchContext === undefined || status.lastRead === switchContext.previousRead) return;
     if ((lastSwitch != null && JSON.stringify(lastSwitch) !== switchContext.lastSwitch) ||
-      (latestRequest != null && request !== switchContext.previousRequest && request !== switchContext.optimisticRequest)) {
+      (latestRequest != null && latestRequest.action === switching.variables)) {
       resetSwitch();
     }
-  }, [switchError, switchContext, latestRequest, lastSwitch, resetSwitch]);
+  }, [switchError, switchContext, status.lastRead, latestRequest, lastSwitch, resetSwitch, switching.variables]);
   const supervisor = data?.supervisor;
   const preparing = switching.isPending || data?.switch_request?.pending === true;
   const stagedVersion = data?.staged_version;
@@ -346,7 +344,7 @@ export function UpdatesCard({ className }: { className?: string }) {
         ) : (
           <ProblemNotice problem={callProblem(check.error)} live />
         ))}
-      {switching.isError && <Alert tone="warn" live title="The switch request failed">
+      {switching.isError && <Alert tone="warn" live title={callProblem(switching.error).kind === "unreachable" ? "The switch could not be confirmed" : "The switch request failed"}>
         <p>{callProblem(switching.error).kind === "unreachable" ?
           "The server did not answer. Checking its status; the request will not be sent again." :
           isApiError(switching.error) ? switching.error.detail ?? switching.error.message : "The server refused the switch."}</p>
