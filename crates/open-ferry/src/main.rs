@@ -65,6 +65,8 @@ mod service;
 mod settings;
 mod siwc_bind;
 mod supervised;
+#[cfg(test)]
+mod test_tracing;
 mod tls;
 mod tui;
 mod update;

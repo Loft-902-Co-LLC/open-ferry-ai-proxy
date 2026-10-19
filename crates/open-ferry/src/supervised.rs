@@ -1316,6 +1316,7 @@ mod tests {
 
     #[test]
     fn unreadable_config_warning_names_the_retained_mode() {
+        crate::test_tracing::keep_every_callsite_open();
         struct Output(Arc<Mutex<Vec<u8>>>);
         impl io::Write for Output {
             fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {

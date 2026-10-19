@@ -54,6 +54,7 @@ impl<S: Subscriber> Layer<S> for Logged {
 
 /// Runs `work` with the log captured on this thread.
 fn capture<T>(work: impl FnOnce() -> T) -> (T, Logged) {
+    crate::test_tracing::keep_every_callsite_open();
     let logged = Logged::default();
     let subscriber = tracing_subscriber::registry().with(logged.clone());
     let result = tracing::subscriber::with_default(subscriber, work);
@@ -151,6 +152,34 @@ mod listeners {
         let warned = logged.at_least(Level::WARN);
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(warned[0].contains("metrics"), "{warned:?}");
+    }
+
+    #[test]
+    fn captures_a_production_callsite_first_reached_without_a_subscriber() {
+        fn warn_about_unknown_listener() {
+            let (main, address) = loopback();
+            assert!(
+                Topology::from_welcome(
+                    &[
+                        entry(MAIN, address, false),
+                        entry("metrics", address, false)
+                    ],
+                    vec![(MAIN.into(), main)],
+                )
+                .is_ok()
+            );
+        }
+
+        let ((), logged) = capture(|| {
+            std::thread::spawn(warn_about_unknown_listener)
+                .join()
+                .unwrap();
+            // Reuse the capture's subscriber: a new dispatch rebuilds interest.
+            warn_about_unknown_listener();
+        });
+        let lines = logged.at_least(Level::WARN);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("ignoring the unknown listener \"metrics\""));
     }
 
     #[test]
