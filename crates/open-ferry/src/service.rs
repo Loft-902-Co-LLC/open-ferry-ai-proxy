@@ -436,13 +436,58 @@ fn prepare_update_checks(
     match Updater::for_this_binary(fetch, data) {
         Ok(updater) => {
             let updates = UpdateService::new(updater, make_fetch, config);
-            Some(updates)
+            if let Some(data_dir) = data_dir {
+                match worker_update_switcher(probe, data_dir) {
+                    Ok(switcher) => Some(updates.with_switcher(Arc::new(switcher))),
+                    Err(error) => {
+                        tracing::warn!("supervised update requests are unavailable: {error}");
+                        Some(updates)
+                    }
+                }
+            } else {
+                Some(updates)
+            }
         }
         Err(error) => {
             tracing::warn!("update checks don't run: {error}");
             None
         }
     }
+}
+
+/// The welcome names the worker's data directory. Match the machine home
+/// just as scope authorization does; never probe the supervisor's locks.
+fn worker_update_switcher(
+    probe: &dyn crate::scope::Probe,
+    data_dir: &Path,
+) -> Result<open_ferry_supervisor::client::EndpointSwitcher, String> {
+    use open_ferry_supervisor::endpoint::Identity;
+    let identity = Identity::current(worker_update_kind(probe, data_dir)?)
+        .map_err(|error| error.to_string())?;
+    Ok(open_ferry_supervisor::client::EndpointSwitcher::new(
+        data_dir, identity,
+    ))
+}
+
+fn worker_update_kind(
+    probe: &dyn crate::scope::Probe,
+    data_dir: &Path,
+) -> Result<open_ferry_supervisor::endpoint::ServiceKind, String> {
+    use open_ferry_supervisor::endpoint::ServiceKind;
+    let root = data_dir
+        .to_str()
+        .ok_or("the worker data directory isn't valid Unicode")?;
+    let platform = probe.platform();
+    let machine = crate::scope::machine_root(probe)?;
+    Ok(
+        if machine.is_some_and(|machine| {
+            platform.is_within(root, &machine) && platform.is_within(&machine, root)
+        }) {
+            ServiceKind::System
+        } else {
+            ServiceKind::User
+        },
+    )
 }
 
 /// Authorizes the worker's records, or the ordinary server's account records.
@@ -463,10 +508,40 @@ fn update_check_data(
 
 #[cfg(test)]
 mod update_check_scope_tests {
-    use super::update_check_data;
+    use super::{update_check_data, worker_update_kind};
     use crate::os_service::Platform;
     use crate::update::scope_probe::Fake;
     use std::path::Path;
+
+    #[test]
+    fn workers_expect_the_machine_owner_only_for_the_machine_home() {
+        use open_ferry_supervisor::endpoint::ServiceKind;
+        for platform in [Platform::Windows, Platform::Linux, Platform::MacOs] {
+            let probe = Fake::new(platform, false);
+            let account = probe.account.clone().unwrap();
+            assert_eq!(
+                worker_update_kind(&probe, Path::new(&account)).unwrap(),
+                ServiceKind::User
+            );
+            if let Some(machine) = crate::scope::machine_root(&probe).unwrap() {
+                assert_eq!(
+                    worker_update_kind(&probe, Path::new(&machine)).unwrap(),
+                    ServiceKind::System
+                );
+                if platform == Platform::Windows {
+                    assert_eq!(
+                        worker_update_kind(&probe, Path::new(&machine.to_uppercase())).unwrap(),
+                        ServiceKind::System
+                    );
+                }
+                let nested = platform.join(&machine, "other");
+                assert_eq!(
+                    worker_update_kind(&probe, Path::new(&nested)).unwrap(),
+                    ServiceKind::User
+                );
+            }
+        }
+    }
 
     #[test]
     fn privileged_checks_refuse_untrusted_account_and_worker_records() {
