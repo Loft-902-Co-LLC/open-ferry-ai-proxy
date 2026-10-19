@@ -220,6 +220,7 @@ fn a_killed_supervisor_stays_a_zombie_until_the_guard_drops() {
     assert!(exists(), "the killed supervisor was reaped by `kill`");
     assert!(sup.try_exit().is_some(), "no exit status was seen");
     assert!(exists(), "the killed supervisor was reaped by `try_exit`");
+    assert!(!alive(pid as u32), "the zombie was reported as running");
     drop(sup);
     assert!(!exists(), "the guard did not reap the supervisor");
 }

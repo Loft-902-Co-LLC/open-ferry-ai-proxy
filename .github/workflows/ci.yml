@@ -329,11 +329,12 @@ jobs:
         run: cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-run
 
       # Fail promptly on platform plumbing before the longer process matrix.
-      - name: Check macOS ACLs and worker descriptor passing
+      - name: Check macOS ACLs and worker process plumbing
         if: runner.os == 'macOS' && matrix.shard == 1 && github.event_name != 'push'
         run: |
           cargo nextest run --profile ci -p open-ferry-supervisor --locked --features blue-green-test --lib -E 'test(trust::unix::) | test(endpoint::unix::)'
           cargo nextest run --profile ci -p open-ferry-supervisor --locked --features blue-green-test --test unix_process
+          cargo nextest run --profile ci -p open-ferry-supervisor --locked --features blue-green-test --test process_stop -E 'test(=a_killed_supervisor_stays_a_zombie_until_the_guard_drops)'
 
       - name: This runner's share of the tests
         id: shard
