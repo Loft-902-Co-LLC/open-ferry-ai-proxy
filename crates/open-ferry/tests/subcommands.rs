@@ -736,7 +736,11 @@ fn update_shows_its_usage_and_sets_the_mode() {
     for (args, message) in [
         (
             &["update", "-check", "-rollback"][..],
-            "use only one of -check, -rollback and -mode",
+            "use only one of -cancel, -check, -rollback and -mode",
+        ),
+        (
+            &["update", "-cancel", "-check"],
+            "use only one of -cancel, -check, -rollback and -mode",
         ),
         (
             &["update", "-mode", "sometimes"],
