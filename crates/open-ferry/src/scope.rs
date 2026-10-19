@@ -1424,17 +1424,15 @@ fn known_machine_root(probe: &dyn Probe) -> Result<String, Refusal> {
     }
 }
 
-pub(crate) const MACOS_ROOT_REFUSAL: &str =
-    "open-ferry doesn't support running as root on macOS in this version";
+/// Why macOS refuses machine-wide installs and running as root.
+pub(crate) const MACOS_SYSTEM_REFUSAL: &str =
+    "open-ferry doesn't support machine-wide installs or running as root on macOS in this version";
 
-/// The refusal of every privileged process on macOS.
+/// The refusal of machine-wide installs and privileged processes on macOS.
 fn macos_refusal() -> Refusal {
     Refusal {
-        reason: MACOS_ROOT_REFUSAL.to_owned(),
-        remedy: Some(
-            "Run it without sudo; installs for the whole machine come to macOS in a later version."
-                .to_owned(),
-        ),
+        reason: MACOS_SYSTEM_REFUSAL.to_owned(),
+        remedy: Some("Run it without sudo or -system.".to_owned()),
     }
 }
 

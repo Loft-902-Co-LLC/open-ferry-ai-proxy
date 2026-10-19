@@ -35,8 +35,8 @@
 //! [`windows`]). With `-system` it is the machine's, started at boot as
 //! root on Linux (a systemd system unit), or LocalSystem on Windows (a
 //! Windows service). macOS refuses `install -system`: this version doesn't
-//! support running as root on macOS. As `~` would then be that account's
-//! home, `install -system` refuses a config whose auth directory is under `~`;
+//! support machine-wide installs or running as root there. As `~` would then
+//! be that account's home, `install -system` refuses a config whose auth directory is under `~`;
 //! and as the service runs with root's rights, it refuses a binary or a
 //! config that anyone but root (on Windows, the administrators) can change.
 //! Installing or removing a system service needs root, or an administrator.
@@ -1958,7 +1958,7 @@ const NO_MACHINE_INSTALL: &str = "no machine-wide install of this binary: instal
 fn macos_system_refusal() -> String {
     format!(
         "{}. Install a user service with `open-ferry service install` without -system.",
-        scope::MACOS_ROOT_REFUSAL
+        scope::MACOS_SYSTEM_REFUSAL
     )
 }
 

@@ -276,7 +276,7 @@ case ${OPEN_FERRY_INSTALL_BASE_URL:-} in
     ;;
 esac
 if [ "$os" = Darwin ] && { [ "$system" = 1 ] || [ "$uid" = 0 ]; }; then
-  die "open-ferry doesn't support running as root on macOS in this version. Run it without sudo; installs for the whole machine come to macOS in a later version."
+  die "open-ferry doesn't support machine-wide installs or running as root on macOS in this version. Run it without sudo or --system."
 fi
 if [ "$system" = 1 ]; then
   [ "$uid" = 0 ] || die "installing open-ferry for the whole machine needs root. Run it with sudo."

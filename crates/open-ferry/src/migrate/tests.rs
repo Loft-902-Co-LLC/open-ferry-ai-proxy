@@ -4147,7 +4147,7 @@ fn blocks_switching_a_stopped_launch_daemon() {
     );
     has(
         &ran.out,
-        "open-ferry doesn't support running as root on macOS in this version.",
+        "open-ferry doesn't support machine-wide installs or running as root on macOS in this version.",
     );
     has(&ran.out, "The switch is blocked: nothing was changed.");
     read_only(&fake);
