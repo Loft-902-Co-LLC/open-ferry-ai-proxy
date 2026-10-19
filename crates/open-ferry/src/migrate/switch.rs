@@ -616,8 +616,16 @@ fn service_plan(
     let (Some(config), true) = (assessment.config.as_deref(), assessment.loaded) else {
         return;
     };
-    match os_service::prepare_install(machine, context, target, config, found.cwd.as_deref(), true)
-    {
+    let updating = machine.service_updating(context, target.system());
+    match os_service::prepare_install(
+        machine,
+        context,
+        target,
+        config,
+        found.cwd.as_deref(),
+        true,
+        &updating,
+    ) {
         Ok(prepared) => {
             if target.system() && !prepared.account.privileged() {
                 let command = match platform {
@@ -628,10 +636,10 @@ fn service_plan(
                 plan.command = command;
             }
             let location = target.location(context).unwrap_or_default();
+            plan.steps.push(prepared.form);
             plan.steps.push(format!(
-                "Install open-ferry as {} ({location}), running `{} -config {}` in {}, and start it: {}.",
+                "Install open-ferry as {} ({location}), with config {}, in {}, and start it: {}.",
                 target.kind(),
-                prepared.definition.exe,
                 prepared.definition.config,
                 prepared.definition.dir,
                 summarize(&prepared.plan)
@@ -1929,6 +1937,7 @@ fn execute_service(
         .clone()
         .ok_or("CLIProxyAPI's service isn't known, so nothing was changed")?;
     // Everything that can refuse refuses before a change.
+    let updating = machine.service_updating(context, target.system());
     let prepared = os_service::prepare_install(
         machine,
         context,
@@ -1936,8 +1945,10 @@ fn execute_service(
         base.config,
         base.found.cwd.as_deref(),
         false,
+        &updating,
     )
     .map_err(|error| format!("{error}\nNothing was changed."))?;
+    say(out, format_args!("{}", prepared.form));
     let backup = back_up(
         machine,
         platform,

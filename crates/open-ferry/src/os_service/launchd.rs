@@ -2,11 +2,10 @@
 //!
 //! By default it is an agent, `~/Library/LaunchAgents/<label>.plist`,
 //! loaded into the user's GUI domain (`launchctl bootstrap gui/<uid>`): it
-//! runs as them while they are logged in. With `-system` it is a daemon,
-//! `/Library/LaunchDaemons/<label>.plist`, in the system domain, run as
-//! root from boot. launchd starts it at load, and again when it exits with
-//! a failure; what it prints goes to `~/Library/Logs/open-ferry.log`, or
-//! `/Library/Logs/open-ferry.log` for the daemon.
+//! runs as them while they are logged in. launchd starts it at load, and
+//! again when it exits with a failure; what it prints goes to
+//! `~/Library/Logs/open-ferry.log`. Installing with `-system` is refused;
+//! the system-domain paths remain available to inspect and remove a daemon.
 
 use std::fmt::Write as _;
 

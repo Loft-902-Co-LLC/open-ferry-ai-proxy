@@ -23,7 +23,7 @@ use open_ferry_supervisor::endpoint::ServiceKind;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::check::{self, Finding};
-use crate::os_service::{self, Cmd, Output, Owner, System};
+use crate::os_service::{self, Cmd, Context, Output, Owner, System, Updating};
 
 /// A running process, as far as `migrate` reads it. Its `Debug` leaves out
 /// its arguments and environment, which can hold secrets.
@@ -174,6 +174,8 @@ pub(crate) trait Machine: System {
     fn symlink(&mut self, target: &str, link: &str) -> io::Result<()>;
     /// The binary the install receipt names, if there is a receipt.
     fn installed_binary(&mut self) -> Option<String>;
+    /// Which form `service install` would choose for this scope.
+    fn service_updating(&self, context: &Context, system: bool) -> Updating;
     /// Creates `path`, which only its owner can open on Unix.
     fn create_private_dir(&mut self, path: &str) -> io::Result<()>;
     /// Makes the new file `path` hold `data`. It fails if anything is at
@@ -543,6 +545,10 @@ pub(super) fn privileged_run(probe: &dyn crate::scope::Probe) -> bool {
 }
 
 impl Machine for Host {
+    fn service_updating(&self, context: &Context, system: bool) -> Updating {
+        Updating::assess_service(context, system)
+    }
+
     fn create_machine_dir(&mut self, path: &str) -> io::Result<()> {
         crate::scope::Probe::create_machine_dir(&mut crate::scope::Host, path)
     }

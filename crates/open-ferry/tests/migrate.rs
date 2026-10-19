@@ -5,6 +5,8 @@
 //! scheduled tasks. The server is started only on a port on 127.0.0.1 that
 //! nothing listened on, with its config, auth directory and logs in a
 //! temporary directory, and only the process the test started is killed.
+//! With blue-green-test, the supervised service form also serves an isolated
+//! migration config and stops through its supervisor; no service is installed.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -318,4 +320,102 @@ async fn a_keyless_foreign_server_is_rejected() {
         !accepted,
         "a foreign keyless server passed the fixture identity check"
     );
+}
+
+#[cfg(feature = "blue-green-test")]
+#[path = "../../open-ferry-supervisor/tests/under_test/mod.rs"]
+mod under_test;
+
+// Not upstream's: the service form migrate installs serves its preserved
+// config through a real supervisor, and the uninstall stop ends that run.
+#[cfg(feature = "blue-green-test")]
+#[test]
+fn serves_the_migrated_config_with_the_supervisor() {
+    use open_ferry_supervisor::client::{self, StopOutcome};
+    use open_ferry_supervisor::endpoint::{Identity, ServiceKind};
+    use under_test::{Permit, Sup, isolate, scratch, write_executable};
+
+    if privilege::privileged() {
+        eprintln!(
+            "skipped serves_the_migrated_config_with_the_supervisor: requires an unprivileged account"
+        );
+        return;
+    }
+    let _permit = Permit::take();
+    let dir = scratch();
+    let root = dir.path();
+    let working = root.join("cpa");
+    let bin = root.join("bin");
+    std::fs::create_dir(&working).unwrap();
+    std::fs::create_dir(&bin).unwrap();
+    let exe = bin.join(format!("open-ferry{}", std::env::consts::EXE_SUFFIX));
+    write_executable(&exe, &std::fs::read(OPEN_FERRY).unwrap());
+    let data = root.join("data");
+    let config = working.join("config.yaml");
+    let key = format!("migrated-{}", root.file_name().unwrap().to_string_lossy());
+    let log_path = root.join("supervisor.log");
+    let until = Instant::now() + LONG;
+    for _ in 0..8 {
+        let (socket, port) = closed_port();
+        std::fs::write(&config, format!(
+            "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\napi-keys:\n  - '{key}'\nself-update:\n  mode: off\n",
+            working.join("auths").display()
+        )).unwrap();
+        let log = std::fs::File::create(&log_path).unwrap();
+        let mut command = Command::new(&exe);
+        #[cfg(windows)]
+        command.args(["service", "run"]);
+        command
+            .arg("-supervise")
+            .arg("-config")
+            .arg(&config)
+            .arg("-data-dir")
+            .arg(&data);
+        #[cfg(unix)]
+        if let Some(endpoint) = under_test::endpoint_flag(root) {
+            command.arg("-test-endpoint").arg(endpoint);
+        }
+        isolate(&mut command);
+        command
+            .current_dir(&working)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log);
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        drop(socket);
+        let mut supervisor = Sup::adopt(when_runnable(|| command.spawn()), root);
+        loop {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            assert!(supervisor.try_exit().is_none(), "supervisor exited:\n{log}");
+            if answers_as_ours(port, &key) {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let identity = Identity::current(ServiceKind::User).unwrap();
+                let stopped =
+                    runtime.block_on(client::stop(&data, &identity, Instant::now() + LONG));
+                assert_eq!(stopped, StopOutcome::Stopped, "{log}");
+                while supervisor.try_exit().is_none() {
+                    assert!(Instant::now() < until, "supervisor did not exit:\n{log}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                assert!(!answers_as_ours(port, &key));
+                return;
+            }
+            let conflict = log.lines().any(|line| {
+                line.contains("failed to bind the main listener")
+                    && ["(os error 98)", "(os error 48)", "(os error 10048)"]
+                        .iter()
+                        .any(|code| line.contains(code))
+            });
+            assert!(Instant::now() < until, "supervisor did not answer:\n{log}");
+            if conflict {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    panic!("no free port within the startup budget");
 }

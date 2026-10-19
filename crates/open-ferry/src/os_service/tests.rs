@@ -4002,7 +4002,7 @@ fn every_system_form_requires_real_trust_of_the_exe_config_and_working_directory
                 } else {
                     Updating::plain(Ok(MACHINE_DATA.to_owned()), "no machine install")
                 };
-                let error = prepare_install_with(
+                let error = prepare_install(
                     &mut fake,
                     &context,
                     Target::new(platform, true),
@@ -4248,7 +4248,7 @@ fn a_system_service_chooses_only_a_trusted_self_updating_machine_install() {
         Updating::assess_system(&probe, &machine, &context)
             .why_plain
             .as_deref(),
-        Some(MACOS_SYSTEM_PLAIN)
+        Some(MACOS_SYSTEM_REFUSAL)
     );
 }
 
@@ -5351,5 +5351,79 @@ fn privileged_account_install_refuses_before_context_or_receipt_assessment() {
             assert!(fake.events.is_empty());
             assert!(fake.reads.borrow().is_empty());
         }
+    }
+}
+
+#[test]
+fn user_install_assessment_selects_the_form_and_keeps_the_plain_reason() {
+    use open_ferry_update::install::NotSelfUpdating;
+    for why in [
+        None,
+        Some(NotSelfUpdating::NoReceipt),
+        Some(NotSelfUpdating::Container),
+        Some(NotSelfUpdating::ReadOnly("/bin".to_owned())),
+    ] {
+        let install = match &why {
+            Some(why) => Install::NotifyOnly(why.clone()),
+            None => Install::SelfUpdating {
+                binary: linux().exe.into(),
+            },
+        };
+        let updating = Updating::from_install(Ok(LINUX_DATA.to_owned()), &install);
+        let mut fake = Fake::default().uid(1000).file(LINUX_CONFIG, CONFIG);
+        let prepared = prepare_install(
+            &mut fake,
+            &linux(),
+            Target::SystemdUser,
+            LINUX_CONFIG,
+            Some("/home/me/working"),
+            true,
+            &updating,
+        )
+        .unwrap();
+        assert_eq!(prepared.definition.dir, "/home/me/working");
+        assert_eq!(
+            prepared.definition.data_dir.as_deref(),
+            why.is_none().then_some(LINUX_DATA)
+        );
+        if let Some(why) = why {
+            assert!(
+                prepared.form.contains(&why.to_string()),
+                "{}",
+                prepared.form
+            );
+            assert!(prepared.form.contains("Installing the plain form"));
+        } else {
+            assert!(prepared.form.contains("Installing the supervised form"));
+        }
+        assert!(
+            fake.events
+                .iter()
+                .all(|event| event.starts_with("run id -u")
+                    || event.starts_with("run systemctl --user show"))
+        );
+    }
+}
+
+#[test]
+fn macos_system_install_refuses_before_context_or_receipt_assessment() {
+    for dry_run in [false, true] {
+        let mut fake = Fake::default().uid(0);
+        let mut command = vec!["install", "-system"];
+        if dry_run {
+            command.push("-dry-run");
+        }
+        let request = parse(args(&command)).unwrap();
+        let result = run(
+            &mut fake,
+            Platform::MacOs,
+            &request,
+            || panic!("must not discover context for a macOS system install"),
+            |_, _| panic!("must not assess a refused install"),
+            &mut Vec::new(),
+        );
+        assert_eq!(result.unwrap_err(), MACOS_SYSTEM_REFUSAL);
+        assert!(fake.events.is_empty());
+        assert!(fake.reads.borrow().is_empty());
     }
 }
