@@ -165,7 +165,7 @@ test("keeps an old request unconfirmed and confirms a live switch after handover
   watched.server.setUpdates({ ...original, switch_request: null, supervisor: supervisorStatus({ phase: "handing-over",
     switch: { id: "new-worker-switch", how: "update", from: "0.1.0", to: "0.2.0" },
   }) });
-  await card.getByRole("button", { name: "Check now" }).click();
+  await card.getByRole("button", { name: "Read status" }).click();
   await expect(card.getByText("Switch: handing over")).toBeVisible();
   await expect(card.getByText("The switch could not be confirmed")).toHaveCount(0);
   await shot(page, "updates-confirmed-after-handover");
@@ -191,7 +191,7 @@ test("asks for a new status read when an unanswered switch exhausts polling", as
   await card.getByRole("button", { name: "Install now" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Install now" }).click();
   await expect(card).toContainText("Checking its status");
-  await expect(card).toContainText("Read the status again to see whether it started.", { timeout: 15_000 });
+  await expect(card).toContainText("Choose Read status to see whether it started.", { timeout: 15_000 });
   await expect(card).not.toContainText("Checking its status");
   await expect(card.getByRole("button", { name: "Try again" })).toBeVisible();
   await shot(page, "updates-unconfirmed-exhausted");

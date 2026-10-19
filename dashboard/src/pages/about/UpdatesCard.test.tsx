@@ -584,11 +584,12 @@ it("keeps an unanswered POST alert when a fresh read reports only an old same-ac
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
   await within(card).findByText("The switch could not be confirmed");
   const before = reads;
-  await user.click(within(card).getByRole("button", { name: "Check now" }));
+  await user.click(within(card).getByRole("button", { name: "Read status" }));
   await waitFor(() => { expect(reads).toBeGreaterThan(before); });
   expect(within(card).getByText("The switch could not be confirmed")).toBeVisible();
   expect(within(card).getByText("sign-ins are pending")).toBeVisible();
   expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+  expect(api.callsTo("POST", UPDATE_CHECK)).toHaveLength(0);
 });
 
 
@@ -639,7 +640,7 @@ it.each(["install", "rollback"] as const)("clears an unanswered %s when a new wo
 it("asks for a status read after an unanswered POST exhausts polling", async () => {
   let posted = false;
   let failedReads = 0;
-  mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => {
+  const api = mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => {
     if (posted) { failedReads += 1; throw new TypeError("offline"); }
     return { json: updateStatus({ staged_version: "0.2.0", supervisor: supervisorStatus() }) };
   }), route("POST", UPDATE_INSTALL, () => { posted = true; throw new TypeError("no reply"); }));
@@ -647,9 +648,14 @@ it("asks for a status read after an unanswered POST exhausts polling", async () 
   await user.click(await within(card).findByRole("button", { name: "Install now" }));
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
   await within(card).findByText(/Checking its status/);
-  await waitFor(() => { expect(card).toHaveTextContent("Read the status again to see whether it started."); }, { timeout: 15_000 });
+  expect(within(card).queryByRole("button", { name: "Read status" })).not.toBeInTheDocument();
+  await waitFor(() => { expect(card).toHaveTextContent("Choose Read status to see whether it started."); }, { timeout: 15_000 });
   expect(card).not.toHaveTextContent("Checking its status");
   expect(failedReads).toBe(5);
+  await user.click(within(card).getByRole("button", { name: "Read status" }));
+  await waitFor(() => { expect(failedReads).toBe(6); });
+  expect(api.callsTo("POST", UPDATE_CHECK)).toHaveLength(0);
+  expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
 });
 
 
