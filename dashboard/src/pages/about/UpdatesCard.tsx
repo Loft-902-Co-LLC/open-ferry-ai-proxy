@@ -350,7 +350,8 @@ export function UpdatesCard({ className }: { className?: string }) {
         ))}
       {switching.isError && <Alert tone="warn" live title={callProblem(switching.error).kind === "unreachable" ? "The switch could not be confirmed" : "The switch request failed"}>
         <p>{callProblem(switching.error).kind === "unreachable" ?
-          "The server did not answer. Checking its status; the request will not be sent again." :
+          (status.polling ? "The server did not answer. Checking its status; the request will not be sent again." :
+            "The server did not answer. Read the status again to see whether it started. The request will not be sent again.") :
           isApiError(switching.error) ? switching.error.detail ?? switching.error.message : "The server refused the switch."}</p>
       </Alert>}
       <ConfirmDialog

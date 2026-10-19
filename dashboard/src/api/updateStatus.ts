@@ -72,5 +72,5 @@ export function useUpdateStatus() {
       (query.state.data?.checking === true || recoveringSupervisor || switchInProgress(query.state.data))
         ? CHECKING_POLL_MS : false,
   });
-  return { ...query, lastRead, recoveringSupervisor, hidePollError: (switchInProgress(query.data) || recoveringSupervisor) && !exhausted };
+  return { ...query, lastRead, recoveringSupervisor, polling: !exhausted && (query.data?.checking === true || recoveringSupervisor || switchInProgress(query.data)), hidePollError: (switchInProgress(query.data) || recoveringSupervisor) && !exhausted };
 }
