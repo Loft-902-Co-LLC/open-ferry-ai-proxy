@@ -69,6 +69,7 @@ struct Live {
     checking: bool,
     next_check: Option<chrono::DateTime<Utc>>,
     install: Option<Install>,
+    automatic_error: Option<String>,
 }
 
 pub(crate) struct Inner {
@@ -530,20 +531,66 @@ async fn checked(
         if service.switcher().is_ok() {
             match service.install_now(true).await {
                 Ok(handle) => {
+                    inner
+                        .live
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .automatic_warning(None);
                     tracing::info!(operation = %handle.id, %version, "automatic switch accepted");
                     tokio::spawn(follow_switch(handle));
                 }
-                Err(SwitchError::Ended(reason)) => {
-                    tracing::info!(%version, %reason, "automatic switch ended");
+                Err(error) => {
+                    let warning = inner
+                        .live
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .automatic_warning(Some(&error));
+                    match error {
+                        SwitchError::Ended(reason) => {
+                            tracing::info!(%version, %reason, "automatic switch ended");
+                        }
+                        SwitchError::TimedOut | SwitchError::Stopped | SwitchError::Protocol(_) => {
+                            tracing::info!(%version, state = "uncertain", "no answer from the supervisor; it may have taken the automatic switch; see its status");
+                        }
+                        SwitchError::Update(UpdateError::Busy) => {
+                            tracing::debug!("automatic switch deferred: another update is running");
+                        }
+                        SwitchError::Untrusted(_)
+                        | SwitchError::Unreachable(_)
+                        | SwitchError::Update(_) => {
+                            if let Some(reason) = warning {
+                                tracing::warn!(%version, %reason, "automatic switch could not start");
+                            }
+                        }
+                        _ => tracing::debug!("automatic switch deferred: {error}"),
+                    }
                 }
-                Err(SwitchError::TimedOut | SwitchError::Stopped | SwitchError::Protocol(_)) => {
-                    tracing::info!(%version, state = "uncertain", "no answer from the supervisor; it may have taken the automatic switch; see its status");
-                }
-                Err(error) => tracing::debug!("automatic switch deferred: {error}"),
             }
         }
     }
     outcome
+}
+
+/// Keep local errors out of logs: their detail can contain endpoint or file paths.
+impl Live {
+    fn automatic_warning(&mut self, error: Option<&SwitchError>) -> Option<&'static str> {
+        let reason = match error {
+            Some(SwitchError::Untrusted(_)) => Some(
+                "the supervisor's endpoint failed its ownership check; automatic switches are paused",
+            ),
+            Some(SwitchError::Unreachable(_)) => Some(
+                "the supervisor cannot be reached; automatic switching will try again at the next check",
+            ),
+            Some(SwitchError::Update(error)) if !matches!(error, UpdateError::Busy) => {
+                Some("the automatic switch could not be prepared; trying again at the next check")
+            }
+            _ => None,
+        };
+        let key = reason.map(|_| error.unwrap().to_string());
+        let changed = self.automatic_error != key;
+        self.automatic_error = key;
+        reason.filter(|_| changed)
+    }
 }
 
 async fn follow_switch(mut handle: SwitchHandle) {
@@ -641,4 +688,46 @@ fn set_checking(inner: &Inner, checking: bool) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .checking = checking;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_warnings_are_path_free_and_repeat_only_when_the_reason_changes() {
+        let mut live = Live::default();
+        for error in [
+            SwitchError::Untrusted("/private/endpoint".into()),
+            SwitchError::Unreachable("/private/socket".into()),
+            SwitchError::Update(UpdateError::Io {
+                what: "read /private/state",
+                error: "denied".into(),
+            }),
+        ] {
+            let reason = live.automatic_warning(Some(&error)).unwrap();
+            assert!(!reason.contains("/private"));
+            assert!(live.automatic_warning(Some(&error)).is_none());
+            assert!(live.automatic_warning(None).is_none());
+            assert_eq!(live.automatic_warning(Some(&error)), Some(reason));
+        }
+        for error in [
+            SwitchError::Refused("watching".into()),
+            SwitchError::Update(UpdateError::Busy),
+            SwitchError::UpdatesOff,
+            SwitchError::Skipped(Report::SkippedFailed {
+                version: "0.2.0".into(),
+            }),
+            SwitchError::TimedOut,
+            SwitchError::Stopped,
+            SwitchError::Protocol("/private/reply".into()),
+        ] {
+            assert!(live.automatic_warning(Some(&error)).is_none());
+        }
+        let first = SwitchError::Unreachable("first reason".into());
+        let second = SwitchError::Unreachable("second reason".into());
+        assert!(live.automatic_warning(Some(&first)).is_some());
+        assert!(live.automatic_warning(Some(&second)).is_some());
+        assert!(live.automatic_warning(Some(&second)).is_none());
+    }
 }
