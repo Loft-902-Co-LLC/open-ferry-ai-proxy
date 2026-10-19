@@ -17,6 +17,7 @@ const ID_TYPE_UID: libc::c_int = 0;
 
 unsafe extern "C" {
     fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
+    fn acl_valid(acl: *mut c_void) -> libc::c_int;
     fn acl_free(allocation: *mut c_void) -> libc::c_int;
     fn acl_get_entry(
         acl: *mut c_void,
@@ -54,12 +55,20 @@ pub(super) fn check(fd: RawFd, owner: u32) -> Result<(), String> {
         };
     }
     let acl = Allocation(acl);
+    // SAFETY: this is the separately owned ACL returned above. Validate it once so
+    // EINVAL from the known FIRST/NEXT iterator ids can only mean the end.
+    if unsafe { acl_valid(acl.0) } != 0 {
+        return Err(unreadable());
+    }
     let mut which = ACL_FIRST_ENTRY;
     loop {
         let mut entry = ptr::null_mut();
         // SAFETY: the ACL is owned and valid, and entry is an out-pointer.
-        if unsafe { acl_get_entry(acl.0, which, &mut entry) } != 0 {
-            return if io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+        let result = unsafe { acl_get_entry(acl.0, which, &mut entry) };
+        if result != 0 {
+            return if result == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
+            {
                 Ok(())
             } else {
                 Err(unreadable())
