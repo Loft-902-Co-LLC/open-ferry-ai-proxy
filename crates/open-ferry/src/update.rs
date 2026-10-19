@@ -1479,7 +1479,6 @@ async fn update<U: Updates>(
 }
 
 fn supervisor_status(status: &mut Status, view: &SwitchView) {
-    status.previous_version = view.rollback_target.clone();
     if let Some(snapshot) = &view.supervisor {
         if let Some(running) = snapshot["active_version"].as_str() {
             status.running_version = running.into();
@@ -1488,11 +1487,6 @@ fn supervisor_status(status: &mut Status, view: &SwitchView) {
             status.installed_version = installed.into();
         }
         status.restart_needed = snapshot["needs_restart"].as_bool().unwrap_or(false);
-        if let Some(why) = snapshot["switching_disabled"].as_str() {
-            status.can_update_itself = false;
-            status.why_not = Some(why.into());
-            status.why_not_code = Some("switching-disabled");
-        }
     }
 }
 
