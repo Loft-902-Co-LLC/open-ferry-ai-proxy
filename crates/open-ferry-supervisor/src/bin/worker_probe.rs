@@ -54,6 +54,9 @@ fn main() {
             std::process::exit(4);
         }
     };
+    if mode.trim() == "stall" {
+        std::fs::write(dir.join("control-taken"), "yes").expect("control marker");
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

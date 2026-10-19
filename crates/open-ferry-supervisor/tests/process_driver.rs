@@ -294,6 +294,9 @@ async fn check_handshake_survivor(cancel: bool) {
     let spawning = tokio::spawn(async move { driver.spawn(request, events).await });
     wait_for_file(&rig.dir.path().join("pid")).await;
     if cancel {
+        // Darwin getpeername can reject a socket whose peer closed before take().
+        // Cancel the stalled handshake only once the probe has taken its channel.
+        wait_for_file(&rig.dir.path().join("control-taken")).await;
         spawning.abort();
         assert!(spawning.await.unwrap_err().is_cancelled());
     } else {
