@@ -1037,26 +1037,61 @@ mod tests {
 
     #[tokio::test]
     async fn a_held_lock_with_no_endpoint_is_retried_until_the_deadline_and_then_timed_out() {
+        held_lock_without_endpoint_times_out(None).await;
+    }
+
+    #[tokio::test]
+    async fn a_held_lock_with_no_endpoint_times_out_during_the_record_read() {
+        held_lock_without_endpoint_times_out(Some(&READ_STALLS)).await;
+    }
+
+    #[tokio::test]
+    async fn a_held_lock_with_no_endpoint_times_out_during_the_lock_check() {
+        held_lock_without_endpoint_times_out(Some(&LOCK_STALLS)).await;
+    }
+
+    async fn held_lock_without_endpoint_times_out(stalls: Option<&'static Stalls>) {
         let dirs = Dirs::new();
         let _supervisor = SupervisorLock::try_acquire(dirs.data()).unwrap();
+        let stall = stalls.map(|table| Stalled::new(table, dirs.data(), STALL));
         let began = Instant::now();
-        // Room for at least one full pass (ask, then check the lock) on a
-        // loaded machine; a 900 ms deadline could end inside the first check.
-        let outcome = stop(
-            dirs.data(),
-            &identity(),
-            Instant::now() + Duration::from_secs(3),
+        let deadline = began + Duration::from_secs(3);
+        // The deadline may fall before an endpoint is located, during its
+        // exchange, while checking the lock, or between retries. None proves
+        // that the held lock is free, and the reason need not name a phase.
+        let outcome = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline + MARGIN),
+            stop(dirs.data(), &identity(), deadline),
         )
-        .await;
+        .await
+        .expect("stop ignored its deadline");
+        let returned = Instant::now();
         let StopOutcome::TimedOut(seen) = outcome else {
             panic!("{outcome:?}");
         };
-        assert!(seen.contains("not reachable"), "{seen}");
         assert!(
-            began.elapsed() < Duration::from_secs(10),
-            "{:?}",
-            began.elapsed()
+            !seen.is_empty(),
+            "the timeout must explain what was last seen"
         );
+        assert!(
+            returned >= deadline,
+            "stop returned before its deadline: {:?}",
+            returned.duration_since(began)
+        );
+        // Keep the existing scheduling margin, but do not wait out a whole
+        // five-second filesystem stall when the three-second deadline ends.
+        assert!(
+            returned < deadline + MARGIN,
+            "stop ignored its deadline: {:?}",
+            returned.duration_since(began)
+        );
+        if let Some(stall) = stall {
+            assert!(
+                stall.entered(),
+                "the forced filesystem step was never reached"
+            );
+            stall.wait_finished().await;
+        }
     }
 
     #[tokio::test]
