@@ -239,7 +239,15 @@ impl UpdateService {
                                 == crate::release::Verdict::Newer
                         };
                         if !newer {
-                            return Err(UpdateError::NothingStaged.into());
+                            return Err(if auto {
+                                UpdateError::NothingStaged
+                            } else {
+                                UpdateError::NotNewer {
+                                    running: updater.running.clone(),
+                                    latest: found.release.version.clone(),
+                                }
+                            }
+                            .into());
                         }
                         if auto {
                             switching::skipped(&updater, &state, &found.release.version)?;

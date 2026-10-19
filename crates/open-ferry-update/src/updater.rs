@@ -133,6 +133,8 @@ pub enum UpdateError {
     },
     /// The install doesn't update itself.
     NotSelfUpdating(NotSelfUpdating),
+    /// The latest release is already running, or the running version is newer.
+    NotNewer { running: String, latest: String },
     /// Nothing is staged to switch to.
     NothingStaged,
     /// The rollback target changed after the caller confirmed it.
@@ -173,6 +175,8 @@ impl fmt::Display for UpdateError {
                 "the staged open-ferry {version} changed since it was checked"
             ),
             Self::NotSelfUpdating(why) => why.fmt(f),
+            Self::NotNewer { running, latest } if running == latest => write!(f, "already running the latest release, open-ferry {running}"),
+            Self::NotNewer { running, latest } => write!(f, "open-ferry {running} is already running; the latest release is {latest}, which is not newer"),
             Self::NothingStaged => f.write_str("no version is staged"),
             Self::RollbackChanged { expected, actual } => write!(f,
                 "rollback target changed: expected {expected}, now {}; run `open-ferry update -check`",
