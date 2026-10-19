@@ -703,10 +703,11 @@ export async function mockServer(
         if (updates?.supervisor == null) {
           return json(route, { error: "not_supervised", message: "run open-ferry update on the server's computer, then restart it" }, 409);
         }
+        const request_id = `request-${String(server.switchRequests.length)}`;
         updates = { ...updates, switch_request: {
-          request_id: `request-${String(server.switchRequests.length)}`, action: "install", state: "preparing", id: null, reason: null, pending: true,
+          request_id, action: "install", state: "preparing", id: null, reason: null, pending: true,
         } };
-        return json(route, { preparing: true }, 202);
+        return json(route, { preparing: true, request_id }, 202);
       }
       case "GET /open-ferry/api/v1/usage/ledger":
         return json(route, ledger({ newest: calls[0]?.time ?? null }));

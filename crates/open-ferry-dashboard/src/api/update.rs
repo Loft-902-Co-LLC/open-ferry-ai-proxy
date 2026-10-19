@@ -265,17 +265,23 @@ impl SwitchRequest {
 
     fn response(&self) -> Result<Response, ApiError> {
         match self.state {
-            "preparing" => Ok(json(StatusCode::ACCEPTED, &value!({"preparing": true}))),
+            "preparing" => Ok(json(
+                StatusCode::ACCEPTED,
+                &value!({"preparing": true, "request_id": self.request_id}),
+            )),
             "accepted" => Ok(json(
                 StatusCode::ACCEPTED,
-                &value!({"accepted": true, "id": self.id}),
+                &value!({"accepted": true, "id": self.id, "request_id": self.request_id}),
             )),
-            "unknown" => Ok(json(StatusCode::ACCEPTED, &value!({"uncertain": true}))),
+            "unknown" => Ok(json(
+                StatusCode::ACCEPTED,
+                &value!({"uncertain": true, "request_id": self.request_id}),
+            )),
             // Defensive: current install/rollback clients return at Accepted.
             // Later failures are read from supervisor.last_switch.
             "failed" if self.code == "switch_ended" => Ok(json(
                 StatusCode::ACCEPTED,
-                &value!({"failed": true, "reason": self.reason}),
+                &value!({"failed": true, "reason": self.reason, "request_id": self.request_id}),
             )),
             _ => Err(ApiError::new(
                 StatusCode::CONFLICT,
@@ -306,6 +312,7 @@ impl Requests {
         action: &'static str,
     ) -> Result<Response, ApiError> {
         let (send, receive) = oneshot::channel();
+        let preparing;
         {
             let mut live = self
                 .0
@@ -328,9 +335,10 @@ impl Requests {
                     ));
                 }
             }
-            let preparing = SwitchRequest::preparing(action);
+            preparing = SwitchRequest::preparing(action);
             live.request = Some(preparing.clone());
             let requests = self.clone();
+            let task_request = preparing.clone();
             live.task = Some(tokio::spawn(async move {
                 let result = AssertUnwindSafe(async {
                     if action == "install" {
@@ -347,7 +355,7 @@ impl Requests {
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(SwitchError::Stopped));
-                let request = preparing.finish(result);
+                let request = task_request.finish(result);
                 requests
                     .0
                     .lock()
@@ -358,7 +366,7 @@ impl Requests {
         }
         match tokio::time::timeout(Duration::from_millis(900), receive).await {
             Ok(Ok(request)) => request.response(),
-            _ => SwitchRequest::preparing(action).response(),
+            _ => preparing.response(),
         }
     }
 }
