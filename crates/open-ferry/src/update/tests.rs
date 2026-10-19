@@ -1381,12 +1381,11 @@ fn an_explicit_mode_config_does_not_require_privilege_for_machine_records() {
 
 #[test]
 fn update_refuses_an_untrusted_config_before_reading_or_writing_it() {
-    use crate::os_service::Platform;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.yaml");
     let text = "not: [valid YAML";
     std::fs::write(&path, text).unwrap();
-    let mut probe = scope_probe::Fake::new(Platform::HOST.unwrap(), true);
+    let mut probe = scope_probe::Fake::new(config_trust_platform(), true);
     probe
         .file(path.to_str().unwrap())
         .untrust(dir.path().to_str().unwrap());
@@ -1450,12 +1449,11 @@ fn a_missing_authorized_config_keeps_the_no_config_behavior() {
 
 #[test]
 fn trusted_and_unprivileged_configs_still_load_and_change_mode() {
-    use crate::os_service::Platform;
     for privileged in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "port: 18000\n").unwrap();
-        let mut probe = scope_probe::Fake::new(Platform::HOST.unwrap(), privileged);
+        let mut probe = scope_probe::Fake::new(config_trust_platform(), privileged);
         probe.file(path.to_str().unwrap());
         if !privileged {
             probe.untrust(dir.path().to_str().unwrap());
@@ -1473,9 +1471,8 @@ fn trusted_and_unprivileged_configs_still_load_and_change_mode() {
 
 #[test]
 fn privileged_config_flags_preserve_dot_components_for_authorization() {
-    use crate::os_service::Platform;
     for privileged in [false, true] {
-        let platform = Platform::HOST.unwrap();
+        let platform = config_trust_platform();
         let mut probe = scope_probe::Fake::new(platform, privileged);
         let account = scope::Probe::account_dir(&probe).unwrap();
         probe.dir(&account);
@@ -1500,5 +1497,16 @@ fn privileged_config_flags_preserve_dot_components_for_authorization() {
                 assert!(scope::authorize_file(&probe, &path).unwrap());
             }
         }
+    }
+}
+
+fn config_trust_platform() -> crate::os_service::Platform {
+    // The fake exercises machine trust on native path syntax. macOS refuses privileged
+    // operation altogether; command_scope covers that refusal on every host.
+    use crate::os_service::Platform;
+    if cfg!(windows) {
+        Platform::Windows
+    } else {
+        Platform::Linux
     }
 }
