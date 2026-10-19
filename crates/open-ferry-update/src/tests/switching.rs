@@ -688,16 +688,23 @@ async fn a_manual_install_checks_again_when_the_stage_is_already_running() {
 
 #[tokio::test]
 async fn a_manual_install_does_not_switch_to_the_running_release_during_its_watch() {
-    let mut f = Fixture::new().await;
-    f.release("0.2.0");
-    let (old, _) = service(&f, "auto");
-    old.check_once().await.unwrap().unwrap();
-    f.updater.running = "0.2.0".into();
-    // The installed file remains 0.1.0 until watch confirmation.
-    let (service, fake) = service(&f, "auto");
-    assert!(matches!(
-        service.install_now(false).await,
-        Err(SwitchError::Update(UpdateError::NothingStaged))
-    ));
-    assert!(fake.calls.lock().unwrap().is_empty());
+    for running in ["0.2.0", "0.3.0"] {
+        let mut f = Fixture::new().await;
+        f.release("0.2.0");
+        let (old, _) = service(&f, "auto");
+        old.check_once().await.unwrap().unwrap();
+        f.updater.running = running.into();
+        // The installed file remains 0.1.0 until watch confirmation.
+        let (service, fake) = service(&f, "auto");
+        let error = service.install_now(false).await.unwrap_err();
+        assert!(
+            matches!(&error, SwitchError::Update(UpdateError::NotNewer { running: current, latest }) if current == running && latest == "0.2.0")
+        );
+        assert!(error.to_string().contains(if running == "0.2.0" {
+            "already running the latest release"
+        } else {
+            "which is not newer"
+        }));
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
 }
