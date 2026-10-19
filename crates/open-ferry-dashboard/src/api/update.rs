@@ -85,6 +85,8 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                     )
                 }
                 Err(error) => {
+                    // Defensive: switch_view currently fails only with
+                    // NotSupervised, handled above.
                     tracing::warn!("dashboard API: read update switch records: {error}");
                     (
                         live.supervisor.clone().unwrap_or(Value::Null),
