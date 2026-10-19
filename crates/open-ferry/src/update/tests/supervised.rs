@@ -20,6 +20,7 @@ struct SupervisedFake {
     base: Fake,
     view: SwitchView,
     cancel: CancelOutcome,
+    error: RefCell<Option<SwitchError>>,
     events: RefCell<VecDeque<Result<SwitchEvent, SwitchError>>>,
 }
 
@@ -42,6 +43,7 @@ impl SupervisedFake {
                 last: None,
             },
             cancel: CancelOutcome::Nothing,
+            error: RefCell::new(None),
             events: RefCell::new(VecDeque::from([
                 Ok(SwitchEvent::Progress {
                     phase: "loading".into(),
@@ -85,16 +87,25 @@ impl Updates for SupervisedFake {
     fn rollback_plan(&self) -> Result<RollbackPlan, UpdateError> {
         self.base.rollback_plan()
     }
-    async fn update(&self, (): ()) -> Result<Changed, UpdateError> {
+    async fn update(&self, (): ()) -> Result<Changed, SwitchError> {
         self.base.calls.borrow_mut().push("update");
+        if let Some(error) = self.error.borrow_mut().take() {
+            return Err(error);
+        }
         Ok(self.changed("update", "0.2.0"))
     }
-    async fn rollback(&self) -> Result<Changed, UpdateError> {
+    async fn rollback(&self) -> Result<Changed, SwitchError> {
         self.base.calls.borrow_mut().push("rollback");
+        if let Some(error) = self.error.borrow_mut().take() {
+            return Err(error);
+        }
         Ok(self.changed("rollback", "0.0.9"))
     }
-    async fn cancel(&self) -> Result<CancelOutcome, UpdateError> {
+    async fn cancel(&self) -> Result<CancelOutcome, SwitchError> {
         self.base.calls.borrow_mut().push("cancel");
+        if let Some(error) = self.error.borrow_mut().take() {
+            return Err(error);
+        }
         Ok(self.cancel)
     }
 }
@@ -265,6 +276,101 @@ async fn failed_done_and_ended_after_acceptance_return_failure_with_the_operatio
             );
         } else {
             assert_eq!(ran.json()["supervisor_result"]["result"], "failed-to-load");
+        }
+    }
+}
+
+#[tokio::test]
+async fn mutation_errors_keep_request_certainty_in_text_and_json() {
+    for request in [Request::Update, Request::Rollback, Request::Cancel] {
+        for json in [false, true] {
+            for error in [
+                SwitchError::NotSupervised,
+                SwitchError::UpdatesOff,
+                SwitchError::Update(UpdateError::Busy),
+                SwitchError::Skipped(open_ferry_update::Report::SkippedFailed {
+                    version: "0.2.0".into(),
+                }),
+                SwitchError::Unreachable("no endpoint".into()),
+                SwitchError::Untrusted("wrong owner".into()),
+                SwitchError::Refused("busy".into()),
+                SwitchError::TimedOut,
+                SwitchError::Stopped,
+                SwitchError::Protocol("bad reply".into()),
+            ] {
+                let (word, result) = match &error {
+                    SwitchError::TimedOut | SwitchError::Stopped | SwitchError::Protocol(_) => (
+                        "Outcome unknown; run `open-ferry update -check`",
+                        "outcome-unknown",
+                    ),
+                    SwitchError::Refused(_) => ("did not take the request", "supervised"),
+                    SwitchError::Update(_) => ("request was not sent", "error"),
+                    _ => ("request was not sent", "supervised"),
+                };
+                let fake = SupervisedFake::new("switched");
+                *fake.error.borrow_mut() = Some(error);
+                let ran = go(request, &fake, &settings("off", None), true, json, None).await;
+                assert_eq!((ran.code, ran.result), (1, result), "{ran:?}");
+                let message = if json {
+                    ran.json()["error"].as_str().unwrap().to_owned()
+                } else {
+                    ran.err.clone()
+                };
+                assert!(message.contains(word), "{message}");
+                if result == "outcome-unknown" {
+                    assert!(message.contains("Do not resend the request"), "{message}");
+                    assert!(
+                        !message.contains("was not sent") && !message.contains("refused"),
+                        "{message}"
+                    );
+                }
+                assert_eq!(
+                    fake.base
+                        .calls()
+                        .iter()
+                        .filter(|&&call| call == request.action())
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_lost_outcome_after_acceptance_keeps_the_operation_id_and_never_resends() {
+    for request in [Request::Update, Request::Rollback] {
+        for json in [false, true] {
+            for error in [
+                SwitchError::TimedOut,
+                SwitchError::Stopped,
+                SwitchError::Protocol("bad reply".into()),
+            ] {
+                let fake = SupervisedFake::new("switched");
+                *fake.events.borrow_mut() = VecDeque::from([Err(error)]);
+                let ran = go(request, &fake, &settings("", None), true, json, None).await;
+                assert_eq!((ran.code, ran.result), (1, "outcome-unknown"), "{ran:?}");
+                let message = if json {
+                    let value = ran.json();
+                    assert_eq!(value["operation_id"], "operation");
+                    value["error"].as_str().unwrap().to_owned()
+                } else {
+                    ran.err.clone()
+                };
+                assert!(
+                    message.contains("Outcome unknown; run `open-ferry update -check`"),
+                    "{message}"
+                );
+                assert!(message.contains("Do not resend the request"), "{message}");
+                assert_eq!(
+                    fake.base
+                        .calls()
+                        .iter()
+                        .filter(|&&call| call == request.action())
+                        .count(),
+                    1
+                );
+            }
         }
     }
 }

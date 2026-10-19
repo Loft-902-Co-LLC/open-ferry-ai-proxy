@@ -400,13 +400,13 @@ impl Updates for Fake {
         self.plan.clone().ok_or(UpdateError::NoPrevious)
     }
 
-    async fn update(&self, (): ()) -> Result<Changed, UpdateError> {
+    async fn update(&self, (): ()) -> Result<Changed, SwitchError> {
         self.calls.borrow_mut().push("update");
         if self.supervised {
-            return Err(UpdateError::Supervised("a supervisor runs".to_owned()));
+            return Err(UpdateError::Supervised("a supervisor runs".to_owned()).into());
         }
         if self.switch_fails {
-            return Err(UpdateError::Busy);
+            return Err(UpdateError::Busy.into());
         }
         let offer = self.latest.as_ref().unwrap();
         Ok(Changed::Replaced(SwitchRecord {
@@ -419,10 +419,10 @@ impl Updates for Fake {
         }))
     }
 
-    async fn rollback(&self) -> Result<Changed, UpdateError> {
+    async fn rollback(&self) -> Result<Changed, SwitchError> {
         self.calls.borrow_mut().push("rollback");
         if self.supervised {
-            return Err(UpdateError::Supervised("a supervisor runs".to_owned()));
+            return Err(UpdateError::Supervised("a supervisor runs".to_owned()).into());
         }
         let plan = self.plan.as_ref().unwrap();
         Ok(Changed::Replaced(SwitchRecord {
