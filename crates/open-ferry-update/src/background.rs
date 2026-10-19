@@ -687,6 +687,11 @@ async fn checked(
                         .unwrap_or_else(PoisonError::into_inner)
                         .automatic_warning(Some(&error));
                     match error {
+                        SwitchError::Disabled(_) => {
+                            if let Some(reason) = warning {
+                                tracing::info!(%version, %reason, "automatic switches are off");
+                            }
+                        }
                         SwitchError::Ended(reason) => {
                             tracing::info!(%version, %reason, "automatic switch ended");
                         }
@@ -716,6 +721,7 @@ async fn checked(
 impl Live {
     fn automatic_warning(&mut self, error: Option<&SwitchError>) -> Option<&'static str> {
         let reason = match error {
+            Some(SwitchError::Disabled(_)) => Some("the supervisor has switching disabled"),
             Some(SwitchError::Untrusted(_)) => Some(
                 "the supervisor's endpoint failed its ownership check; automatic switches are paused",
             ),
@@ -880,6 +886,7 @@ mod tests {
     fn automatic_warnings_are_path_free_and_repeat_only_when_the_reason_changes() {
         let mut live = Live::default();
         for error in [
+            SwitchError::Disabled("/private/policy".into()),
             SwitchError::Untrusted("/private/endpoint".into()),
             SwitchError::Unreachable("/private/socket".into()),
             SwitchError::Update(UpdateError::Io {

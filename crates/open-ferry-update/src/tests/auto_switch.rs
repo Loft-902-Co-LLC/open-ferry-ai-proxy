@@ -1,6 +1,6 @@
 //! Automatic checks use the shared switch client only in supervised auto mode.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -71,6 +71,7 @@ struct Fake {
     data: crate::DataDir,
     calls: Mutex<Vec<(String, bool)>>,
     refuse: bool,
+    errors: Mutex<VecDeque<SwitchError>>,
     progress: Mutex<Option<Box<dyn SwitchProgress>>>,
     poll_gate: Mutex<Option<Arc<PollGate>>>,
     gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -115,6 +116,9 @@ impl Switcher for Fake {
             }
             if self.refuse {
                 return Err(SwitchError::Refused("busy: watching".into()));
+            }
+            if let Some(error) = self.errors.lock().unwrap().pop_front() {
+                return Err(error);
             }
             Ok(SwitchHandle::new(
                 "auto".into(),
@@ -170,6 +174,7 @@ fn service(
         data: f.data.clone(),
         calls: Mutex::new(Vec::new()),
         refuse,
+        errors: Mutex::new(VecDeque::new()),
         progress: Mutex::new(None),
         poll_gate: Mutex::new(None),
         gate: Mutex::new(None),
@@ -197,6 +202,38 @@ async fn an_auto_check_stages_and_starts_one_switch() {
         3,
         "switching reuses the stage"
     );
+}
+
+#[tokio::test]
+async fn disabled_switching_logs_once_at_info_without_its_local_reason() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    *fake.errors.lock().unwrap() = VecDeque::from([
+        SwitchError::Disabled("/private/first-policy".into()),
+        SwitchError::Disabled("/private/second-policy".into()),
+    ]);
+    let log = Capture::default();
+    async {
+        service.check_once().await.unwrap().unwrap();
+        service.check_once().await.unwrap().unwrap();
+    }
+    .with_subscriber(log.clone())
+    .await;
+    let events = log.0.lock().unwrap();
+    let notices: Vec<_> = events
+        .iter()
+        .filter(|event| event.contains("automatic switches are off"))
+        .collect();
+    assert_eq!(notices.len(), 1, "{events:?}");
+    assert!(notices[0].starts_with("INFO"), "{events:?}");
+    assert!(notices[0].contains("the supervisor has switching disabled"));
+    assert!(events.iter().all(|event| !event.contains("/private/")));
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.contains("the supervisor cannot be reached"))
+    );
+    assert_eq!(fake.calls.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
