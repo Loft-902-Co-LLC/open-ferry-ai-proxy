@@ -80,6 +80,7 @@ async function signIn(page: Page) {
 }
 
 test("installs from About after confirmation and follows the handover", async ({ page }) => {
+  test.setTimeout(45_000);
   const staged = updateStatus({
     supervisor: supervisorStatus(), latest_version: "0.2.0", staged_version: "0.2.0", update_available: true,
   });
@@ -105,7 +106,6 @@ test("installs from About after confirmation and follows the handover", async ({
   } });
   await expect(card.getByText("Switch accepted")).toBeVisible({ timeout: 6_000 });
   for (const phase of ["waiting-for-signins", "loading", "handing-over", "taking-over", "watching"]) {
-    if (phase === "handing-over") watched.server.failNextUpdatePoll();
     watched.server.setUpdates(updateStatus({ latest_version: "0.2.0", update_available: phase !== "watching", last_result: "staged", switch_request: {
       action: "install", state: "accepted", id: "e2e-install", pending: false, reason: null,
     }, supervisor: supervisorStatus({
@@ -113,11 +113,21 @@ test("installs from About after confirmation and follows the handover", async ({
       rollback_target: "0.1.0", watch_until: phase === "watching" ? "2026-10-18T16:10:00Z" : null,
       switch: { id: "e2e-install", how: "update", from: "0.1.0", to: "0.2.0" },
     }) }));
-    if (phase === "handing-over") {
-      await expect.poll(() => watched.server.failedUpdatePolls).toBe(1);
-      await expect(card.getByRole("button", { name: "Try again" })).toHaveCount(0);
-    }
     await expect(card.getByText(`Switch: ${phase.replaceAll("-", " ")}`)).toBeVisible({ timeout: 6_000 });
+    if (phase === "handing-over") {
+      watched.server.failNextUpdatePoll();
+      const recovery = watched.server.holdNextUpdatePoll();
+      await recovery.started;
+      try {
+        expect(watched.server.failedUpdatePolls).toBe(1);
+        await expect(card.getByRole("button", { name: "Try again" })).toHaveCount(0);
+        await expect(card.getByText("The server didn't answer", { exact: true })).toHaveCount(0);
+        await expect(card.getByText("Switch: handing over")).toBeVisible();
+        await shot(page, "updates-handing-over-poll-failing");
+      } finally {
+        recovery.release();
+      }
+    }
     await shot(page, `updates-${phase}`);
   }
   watched.server.setUpdates(updateStatus({ running_version: "0.2.0", installed_version: "0.2.0", latest_version: "0.2.0", supervisor: supervisorStatus({
@@ -142,6 +152,8 @@ test("shows update outcomes and unavailable switching under the policy", async (
     { name: "plain", status: updateStatus() },
     { name: "older-check", status: updateStatus({ supervisor: supervisorStatus({ running_version: "0.2.0" }) }) },
     { name: "available", status: updateStatus({ supervisor: supervisorStatus(), latest_version: "0.2.0", update_available: true }) },
+    { name: "cancelled", status: updateStatus({ supervisor: supervisorStatus({ phase: "cancelled", switch: { id: "e2e-cancel", how: "update", from: "0.1.0", to: "0.2.0" } }) }) },
+    { name: "stale", status: updateStatus({ supervisor: supervisorStatus({ phase: "handing-over", stale: true, error: "the supervisor cannot be reached", failed_reads: 5, snapshot_age_seconds: 60 }) }) },
     { name: "disabled", status: updateStatus({ supervisor: supervisorStatus({ switching_disabled: "the journal is stale" }) }) },
     { name: "refused", status: updateStatus({ supervisor: supervisorStatus(), switch_request: { action: "install" as const, state: "refused" as const, id: null, pending: false, reason: "sign-ins are pending" } }) },
     { name: "rolled-back", status: updateStatus({ supervisor: supervisorStatus({ last_switch: { how: "rollback", auto: null, from: "0.2.0", to: "0.1.0", result: "rolled-back", reason: null, at: null } }) }) },
