@@ -363,3 +363,32 @@ async fn the_real_backend_uses_live_status_to_follow_a_quiet_phase() {
     assert_eq!((outcome.code, outcome.result), (0, "updated"));
     assert!(endpoint.statuses.load(Ordering::SeqCst) >= 2);
 }
+
+#[tokio::test]
+async fn check_reuses_its_view_and_a_missing_record_says_no_supervisor_is_running() {
+    let f = Fixture::new().await;
+    let endpoint = Endpoint::new(&f, Some("untrusted"));
+    let real = backend(&f, endpoint.clone(), Request::Check).await;
+    assert_eq!(
+        real.view.unreachable.as_deref(),
+        Some(if cfg!(unix) {
+            "no supervisor is running"
+        } else {
+            "the supervisor endpoint was not trusted"
+        })
+    );
+    let _ = go(
+        Request::Check,
+        &real,
+        &settings("auto", None),
+        false,
+        true,
+        None,
+    )
+    .await;
+    assert_eq!(
+        endpoint.statuses.load(Ordering::SeqCst),
+        1,
+        "check must reuse its initial view"
+    );
+}
