@@ -7672,3 +7672,84 @@ async fn automatic_cooldown_ignores_bad_stamps_but_keeps_permanent_exclusions() 
         }
     }
 }
+
+async fn distinct_cooldown_anchor(case: &str) {
+    use crate::clock::Clock;
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    let mut rig = Rig::new().await;
+    let root = tempfile::tempdir().unwrap();
+    rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+    let original = rig.clock.now() + chrono::Duration::days(3);
+    let mut earlier = SwitchRecord::failed_to_load(
+        "earlier",
+        "update",
+        "1.0.0",
+        if case == "other-target" {
+            "3.0.0"
+        } else {
+            "2.0.0"
+        },
+        &original.to_rfc3339(),
+        "handing-over",
+        "environment",
+        "interrupted",
+    );
+    earlier.ended_at = Some(original.to_rfc3339());
+    let mut core = core_of!(rig);
+    core.remember_outcome(&earlier);
+    rig.clock
+        .advance(Duration::from_secs(if case == "clock-caught-up" {
+            3 * 24 * 3600
+        } else {
+            3600
+        }));
+    let mut fresh = earlier.clone();
+    if case != "other-target" {
+        fresh.id = "fresh".into();
+    }
+    fresh.to = "2.0.0".into();
+    core.write_state(
+        "S3",
+        &Outcome {
+            record: fresh.clone(),
+            mark_failed: None,
+        },
+        false,
+    );
+    State {
+        history: vec![fresh],
+        ..Default::default()
+    }
+    .save(&rig.cfg.data.state_file())
+    .unwrap();
+    rig.clock.advance(Duration::from_secs(5 * 3600 - 1));
+    let (tx, mut rx) = unbounded_channel();
+    core.handle_switch(update(true), tx).await;
+    let replies = drain(&mut rx);
+    assert!(
+        matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+        if reason.contains("trying again later")),
+        "{case}: a fresh outcome needs its full five hours: {replies:?}"
+    );
+    assert_eq!(rig.driver.places().len(), 1);
+    rig.clock.advance(Duration::from_secs(1));
+    let (tx, mut rx) = unbounded_channel();
+    core.handle_switch(update(true), tx).await;
+    assert_eq!(done_result(&drain(&mut rx))["result"], "switched");
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_anchors_distinguish_ids_with_the_same_future_stamp() {
+    distinct_cooldown_anchor("new-id").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_anchors_distinguish_targets_with_the_same_id_and_stamp() {
+    distinct_cooldown_anchor("other-target").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_anchors_give_a_fresh_failure_five_hours_when_the_clock_catches_up() {
+    distinct_cooldown_anchor("clock-caught-up").await;
+}
