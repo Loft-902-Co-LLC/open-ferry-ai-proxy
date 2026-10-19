@@ -651,3 +651,27 @@ it("asks for a status read after an unanswered POST exhausts polling", async () 
   expect(card).not.toHaveTextContent("Checking its status");
   expect(failedReads).toBe(5);
 });
+
+
+it.each(["request", "live switch"])("keeps an unanswered alert for an old %s after a cached remount", async (old) => {
+  const original = updateStatus({ staged_version: "0.2.0", supervisor: supervisorStatus({
+    switch: old === "live switch" ? { id: "old-switch", how: "update", from: "0.0.9", to: "0.1.0" } : null,
+  }), switch_request: old === "request" ? {
+    request_id: "old-request", action: "install", state: "refused", id: null, reason: "sign-ins are pending", pending: false,
+  } : null });
+  const api = server(original);
+  api.use(route("POST", UPDATE_INSTALL, () => { throw new TypeError("reply lost"); }));
+  const { router, user } = await openUpdates();
+  await screen.findByRole("button", { name: "Install now" });
+  await act(async () => { await router.navigate("/missing"); });
+  expect(screen.queryByRole("region", { name: "Updates" })).not.toBeInTheDocument();
+  await act(async () => { await router.navigate("/about"); });
+  const card = screen.getByRole("region", { name: "Updates" });
+  expect(api.callsTo("GET", UPDATE)).toHaveLength(1); // Remounted from a fresh cache, with no lastRead for this mount.
+  await user.click(within(card).getByRole("button", { name: "Install now" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+  await waitFor(() => { expect(api.callsTo("GET", UPDATE)).toHaveLength(2); });
+  await within(card).findByRole("button", { name: "Install now" });
+  expect(within(card).getByText("The switch could not be confirmed")).toBeVisible();
+  expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+});
