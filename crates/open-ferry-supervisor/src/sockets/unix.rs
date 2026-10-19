@@ -65,21 +65,7 @@ pub unsafe fn take_listeners(count: usize) -> io::Result<Vec<TcpListener>> {
                 "inherited socket is not TCP",
             ));
         }
-        let mut listening: libc::c_int = 0;
-        let mut size = std::mem::size_of_val(&listening) as libc::socklen_t;
-        // Darwin returns the option bit, not necessarily 1; any nonzero value is true.
-        // SAFETY: initialized output and size point to valid storage.
-        if unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ACCEPTCONN,
-                (&mut listening as *mut libc::c_int).cast(),
-                &mut size,
-            )
-        } != 0
-            || listening == 0
-        {
+        if !is_listening(fd)? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "inherited fd is not a listening socket",
@@ -90,6 +76,50 @@ pub unsafe fn take_listeners(count: usize) -> io::Result<Vec<TcpListener>> {
         result.push(listener);
     }
     Ok(result)
+}
+
+#[cfg(target_os = "macos")]
+fn is_listening(fd: RawFd) -> io::Result<bool> {
+    // Darwin does not implement getsockopt(SO_ACCEPTCONN). Its TCP state query
+    // establishes the same fact without accepting or changing the socket.
+    const TCPS_LISTEN: u8 = 1;
+    // SAFETY: tcp_connection_info contains integer fields and padding.
+    let mut info: libc::tcp_connection_info = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of_val(&info) as libc::socklen_t;
+    // SAFETY: info and size are valid output storage for this query.
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_CONNECTION_INFO,
+            (&mut info as *mut libc::tcp_connection_info).cast(),
+            &mut size,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(size > 0 && info.tcpi_state == TCPS_LISTEN)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_listening(fd: RawFd) -> io::Result<bool> {
+    let mut listening: libc::c_int = 0;
+    let mut size = std::mem::size_of_val(&listening) as libc::socklen_t;
+    // SAFETY: initialized output and size point to valid storage.
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ACCEPTCONN,
+            (&mut listening as *mut libc::c_int).cast(),
+            &mut size,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(listening != 0)
 }
 
 /// Consume LISTEN_FDS and the private control descriptor at single-threaded startup.
@@ -161,4 +191,30 @@ pub(crate) fn sources(listeners: &[TcpListener], control: &UnixStream) -> io::Re
         .map(|s| duplicate(s.as_raw_fd()))
         .chain(std::iter::once(duplicate(control.as_raw_fd())))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_listener_is_distinguished_from_connected_and_bound_streams() {
+        // Not upstream's: SO_ACCEPTCONN is not available on Darwin, and a TCP fd alone
+        // does not prove that the inherited socket is listening.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(is_listening(listener.as_raw_fd()).unwrap());
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        assert!(!is_listening(stream.as_raw_fd()).unwrap());
+        let bound =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        bound
+            .bind(
+                &"127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap()
+                    .into(),
+            )
+            .unwrap();
+        assert!(!is_listening(bound.as_raw_fd()).unwrap());
+    }
 }
