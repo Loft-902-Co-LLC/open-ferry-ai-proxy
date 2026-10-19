@@ -361,6 +361,61 @@ jobs:
     timeout-minutes: 60
     steps: *blue-green-steps
 
+  blue-green-tests-musl:
+    name: blue-green (Alpine musl)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUST_ALPINE: docker.io/library/rust:1-alpine3.24@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: blue-green-musl
+
+      # Run in a step: GitHub's JavaScript actions need glibc. The tests and
+      # their workers are built and run natively against Alpine's musl.
+      - name: Build and test on Alpine
+        if: github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            -v "$HOME/.cargo/registry:/usr/local/cargo/registry" \
+            -e CARGO_BUILD_JOBS=4 -e CARGO_INCREMENTAL -e CARGO_PROFILE_DEV_DEBUG \
+            -e CARGO_TERM_COLOR -e EVENT \
+            "$RUST_ALPINE" sh -eu -c '
+              apk add --no-cache clang cmake make perl linux-headers curl
+              rustup toolchain install --profile minimal --component clippy
+              rustc -vV
+              test "$(rustc -vV | sed -n "s/^host: //p")" = x86_64-unknown-linux-musl
+              name=cargo-nextest-0.9.146-x86_64-unknown-linux-musl.tar.gz
+              curl --fail --silent --show-error --location --proto "=https" --tlsv1.2 \
+                -o /tmp/nextest.tar.gz "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/$name"
+              echo "b64617e8640624e8f9ba99819e37d7971154e97836d7ae4774fed4715501a6aa  /tmp/nextest.tar.gz" | sha256sum -c -
+              tar -xzf /tmp/nextest.tar.gz -C /usr/local/cargo/bin
+              cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
+              if [ "$EVENT" = push ]; then
+                cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-run
+              else
+                cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test
+                cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --doc
+              fi
+            '
+
+      - name: Save the cache
+        if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.key }}
+
   # The required checks check and blue-green, one per OS: each passes when that
   # OS's jobs passed, or were skipped as the run's event allows (see the top).
   # They run unless the run was cancelled, so that a job that failed, or was
@@ -414,15 +469,15 @@ jobs:
 
   blue-green:
     name: blue-green (${{ matrix.os }})
-    needs: [changes, blue-green-tests-ubuntu, blue-green-tests-windows, blue-green-tests-macos]
+    needs: [changes, blue-green-tests-ubuntu, blue-green-tests-windows, blue-green-tests-macos, blue-green-tests-musl]
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            jobs: blue-green-tests-ubuntu blue-green-tests-macos
-            queue-only: blue-green-tests-ubuntu blue-green-tests-macos
+            jobs: blue-green-tests-ubuntu blue-green-tests-macos blue-green-tests-musl
+            queue-only: blue-green-tests-ubuntu blue-green-tests-macos blue-green-tests-musl
           - os: windows-latest
             jobs: blue-green-tests-windows
             queue-only: blue-green-tests-windows

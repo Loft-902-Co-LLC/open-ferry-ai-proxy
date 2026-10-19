@@ -801,6 +801,19 @@ mod tests {
         assert_eq!(fs::read_to_string(&from).unwrap(), "newer");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_renameat2_syscall_never_replaces_on_musl_too() {
+        // Not upstream's: exercise the syscall itself, without a publication fallback.
+        let (_dir, from, to) = file_pair(false);
+        native_rename_noreplace(&from, &to).expect("native renameat2");
+        fs::write(&from, "newer").unwrap();
+        let error = native_rename_noreplace(&from, &to).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&from).unwrap(), "newer");
+    }
+
     // Not upstream's. With the native attempt reported unsupported (an
     // injected report, not a failure this platform produces), a file falls
     // back to a hard link and the source name is removed.
