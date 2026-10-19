@@ -41,6 +41,12 @@ if ($Child) {
         exit 0
     }
     if ($ProbeOnly) {
+        @{
+            account = $identity.Name
+            is_admin = $false
+            profile = $env:USERPROFILE
+            session_id = (Get-Process -Id $PID).SessionId
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $diagnostics 'standard-account.json')
         $taskName = 'open-ferry-user-probe'
         $shellPath = (Get-Process -Id $PID).Path
         $arguments = "-NoProfile -NonInteractive -File `"$PSCommandPath`" -Child -ProbeTask -Python `"$Python`" -Work `"$Work`""
@@ -53,7 +59,10 @@ if ($Child) {
             while (-not (Test-Path -LiteralPath $probePath)) {
                 if ([DateTime]::UtcNow -gt $deadline) {
                     $info = Get-ScheduledTaskInfo -TaskName $taskName
-                    throw "Standard-account interactive task did not run: LastTaskResult=$($info.LastTaskResult)."
+                    $task = Get-ScheduledTask -TaskName $taskName
+                    $info | Format-List * | Out-String | Set-Content -LiteralPath (Join-Path $diagnostics 'task-info.txt')
+                    $task | Format-List * | Out-String | Set-Content -LiteralPath (Join-Path $diagnostics 'task-state.txt')
+                    throw "Standard-account interactive task did not run: state=$($task.State), LastTaskResult=$($info.LastTaskResult)."
                 }
                 Start-Sleep -Seconds 2
             }
@@ -85,7 +94,11 @@ $qualificationPassword.MakeReadOnly()
 $qualificationCredential = [Management.Automation.PSCredential]::new(".\$accountName", $qualificationPassword)
 $created = $false
 $process = $null
+$started = Get-Date
 try {
+    & wevtutil.exe sl Microsoft-Windows-TaskScheduler/Operational /e:true
+    if ($LASTEXITCODE -ne 0) { throw 'Could not enable the Task Scheduler event log.' }
+    & quser.exe 2>&1 | Out-String | Set-Content -LiteralPath (Join-Path $diagnostics 'interactive-sessions.txt')
     $account = New-LocalUser -Name $accountName -Password $qualificationPassword -AccountNeverExpires -PasswordNeverExpires
     $created = $true
     $usersGroup = Get-LocalGroup -SID 'S-1-5-32-545'
@@ -110,6 +123,10 @@ try {
     }
 } finally {
     if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+    Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; StartTime = $started } -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -like '*open-ferry-user-probe*' } |
+        ForEach-Object { @{ id = $_.Id; time = $_.TimeCreated.ToString('o'); message = $_.Message } } |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $diagnostics 'task-events.json')
     if ($created) { Remove-LocalUser -Name $accountName }
     $qualificationPassword.Dispose()
 }
