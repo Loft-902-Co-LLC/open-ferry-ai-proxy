@@ -1,6 +1,5 @@
-//! What to tell a user whose update or install meets a running supervisor:
-//! updating while it runs comes in a later version, so stop the background
-//! service, try again, and start the service again.
+//! How to stop a service before replacing its installed file directly.
+//! Supervised updates use `open-ferry update` without stopping the service.
 
 use open_ferry_supervisor::endpoint::ServiceKind;
 
@@ -20,8 +19,7 @@ pub(crate) fn stop_and_retry(kind: ServiceKind, again: &str) -> String {
         ServiceKind::System => (" as root", "open-ferry -supervise -system"),
     };
     format!(
-        "Updating open-ferry while its supervisor runs comes in a later version. \
-         Stop the service{whose}, {again}, and start the service again:\n  {stop}\n  {start}\n\
+        "Stop the service{whose}, {again}, and start the service again:\n  {stop}\n  {start}\n\
          If you started `{yourself}` yourself, stop that instead."
     )
 }

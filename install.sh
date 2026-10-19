@@ -593,7 +593,7 @@ case $status in
   0) ;;
   3)
     run rm -f "$staged"
-    die "open-ferry runs as a background service: install-self said how to stop it, above. Nothing was changed."
+    die "open-ferry runs as a background service: use 'open-ferry update' to switch versions without downtime (as root for a system service). Nothing was changed."
     ;;
   4)
     run rm -f "$staged"
