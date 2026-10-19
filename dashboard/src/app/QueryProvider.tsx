@@ -12,7 +12,7 @@ import { useSession } from "../session/session";
  * ledger that couldn't be opened stays so until the server restarts, and a
  * server that runs no update checks never will.
  */
-function shouldRetry(failureCount: number, error: unknown): boolean {
+export function shouldRetry(failureCount: number, error: unknown): boolean {
   if (isApiError(error) && error.status >= 400 && error.status < 500) {
     return false;
   }
