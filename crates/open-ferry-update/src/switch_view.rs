@@ -76,7 +76,7 @@ fn unreachable_reason(error: &SwitchError) -> &'static str {
 }
 
 fn records(updater: &Updater) -> Result<(Option<String>, Option<SwitchRecord>), SwitchError> {
-    let journal = crate::switching::journal(updater)?;
+    let journal = crate::switching::pending_journal(updater);
     let state =
         State::load_strict(&updater.data.state_file()).map_err(|error| UpdateError::Io {
             what: "read the update state",
@@ -93,7 +93,9 @@ fn records(updater: &Updater) -> Result<(Option<String>, Option<SwitchRecord>), 
         merged.upsert_record(record);
     }
     let mut rollback_target = None;
-    if let Some(journal) = journal.journal() {
+    if let Some(view) = journal
+        && let Some(journal) = view.journal()
+    {
         rollback_target = journal
             .switch
             .as_ref()
