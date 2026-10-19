@@ -26,8 +26,10 @@ use crate::{Report, UpdateError, Updater};
 ///   Read status; never resend the request.
 ///
 /// Before writing, lookup/connect/readiness deadlines and request encoding
-/// failures are `Unreachable`; preparation task failures are `Update`. Only
-/// timeouts after writing starts are `TimedOut`.
+/// failures are `Unreachable`; preparation task failures are `Update`.
+/// A failed or timed-out write with no bytes accepted is also `Unreachable`.
+/// After any bytes are accepted (including pipe buffering), timeouts are
+/// `TimedOut` and write/flush errors are `Stopped`.
 ///
 /// `Ended` is a known terminal reply after acceptance, with its reason.
 #[derive(Debug)]
@@ -46,7 +48,7 @@ pub enum SwitchError {
     Refused(String),
     /// The supervisor accepted the switch, then ended it with this reason.
     Ended(String),
-    /// Sending or reading failed, or the stream ended without a terminal reply.
+    /// Bytes were accepted before sending failed, or reading ended without a terminal reply.
     Stopped,
 }
 

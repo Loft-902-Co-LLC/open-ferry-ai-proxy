@@ -1518,4 +1518,42 @@ mod tests {
         .await;
         assert!(matches!(result, Err(SwitchError::Unreachable(why)) if why.contains("encode")));
     }
+    #[tokio::test]
+    async fn request_counts_accepted_bytes_for_first_write_failures_timeouts_and_flush_errors() {
+        use open_ferry_update::SwitchError;
+        use switching::tests::{FailingWriter, Failure};
+        for failure in [Failure::FirstWrite, Failure::PendingWrite, Failure::Flush] {
+            let dirs = Dirs::new();
+            write_record(dirs.data(), &location_for(dirs.data()), 1);
+            let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let flush = matches!(failure, Failure::Flush);
+            let result = switching::request(
+                dirs.data(),
+                &identity(),
+                EndpointRequest::Cancel { v: VERSION },
+                soon(1),
+                |_| async {
+                    Ok((
+                        tokio::io::empty(),
+                        FailingWriter {
+                            failure,
+                            polls: polls.clone(),
+                        },
+                    ))
+                },
+            )
+            .await;
+            assert!(
+                polls.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                "the fake first write must be polled"
+            );
+            if flush {
+                assert!(matches!(result, Err(SwitchError::Stopped)));
+            } else {
+                assert!(
+                    matches!(result, Err(SwitchError::Unreachable(why)) if why.ends_with("before sending"))
+                );
+            }
+        }
+    }
 }
