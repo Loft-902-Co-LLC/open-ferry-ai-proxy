@@ -136,6 +136,7 @@ mod imp {
     fn tokio_copy(listener: &TcpListener) -> io::Result<tokio::net::TcpListener> {
         // Non-blocking mode is not carried over to a clone, so set it on the copy.
         let copy = listener.try_clone()?;
+        open_ferry_supervisor::sockets::windows::set_no_inherit(&copy)?;
         copy.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(copy)
     }
