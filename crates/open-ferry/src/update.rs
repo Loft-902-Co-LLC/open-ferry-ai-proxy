@@ -672,6 +672,7 @@ impl Real {
             SwitchView {
                 supervisor: None,
                 unreachable: None,
+                switching_disabled: false,
                 rollback_target: None,
                 last: None,
                 notes: Vec::new(),
