@@ -1,6 +1,11 @@
 //! Supervised preparation uses the lock and pin, then calls the endpoint.
 
 use std::sync::{Arc, Mutex};
+use std::sync::{
+    Condvar,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 use std::time::Instant;
 
 use super::support::*;
@@ -425,4 +430,94 @@ async fn an_unacknowledged_install_failure_cannot_regress_a_successful_retry() {
     assert_eq!(checked.last_switch.as_ref(), Some(&record));
     assert_eq!(checked.history, [record]);
     assert_eq!(checked.rolled_back.as_deref(), Some("0.4.0"));
+}
+
+struct HeldRunner {
+    entered: AtomicBool,
+    released: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl crate::runner::Runner for HeldRunner {
+    fn version<'a>(
+        &'a self,
+        binary: &'a std::path::Path,
+        _: Duration,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.entered.store(true, Ordering::SeqCst);
+            let (released, _) = self
+                .wake
+                .wait_timeout_while(
+                    self.released.lock().unwrap(),
+                    Duration::from_secs(5),
+                    |released| !*released,
+                )
+                .unwrap();
+            if !*released {
+                return Err("test preparation was not released".into());
+            }
+            std::fs::read_to_string(binary)
+                .map_err(|error| error.to_string())
+                .map(|text| text.trim().into())
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancelled_preparation_keeps_its_lock_without_blocking_the_runtime_or_sending() {
+    for rollback in [false, true] {
+        let mut f = Fixture::new().await;
+        let runner = Arc::new(HeldRunner {
+            entered: AtomicBool::new(false),
+            released: Mutex::new(false),
+            wake: Condvar::new(),
+        });
+        f.updater.runner = runner.clone();
+        if rollback {
+            let mut journal = Journal::first_start(artifact("0.2.0"), None);
+            journal.previous = Some(artifact("0.1.0"));
+            write_journal(&f, &journal);
+            std::fs::create_dir_all(f.data.version_dir("0.1.0")).unwrap();
+            std::fs::write(f.data.binary("0.1.0", "open-ferry"), good_binary("0.1.0")).unwrap();
+        } else {
+            f.release("0.2.0");
+        }
+        let (service, fake) = service(&f, "notify");
+        let started = Instant::now();
+        let task = tokio::spawn(async move {
+            if rollback {
+                service.roll_back().await
+            } else {
+                service.install_now(false).await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runner.entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the runtime remains responsive during blocking preparation");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            matches!(f.updater.lock(), Err(UpdateError::Busy)),
+            "the detached task still owns its guard"
+        );
+        *runner.released.lock().unwrap() = true;
+        runner.wake.notify_all();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while f.updater.lock().is_err() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the preparation released its lock");
+        assert!(
+            fake.calls.lock().unwrap().is_empty(),
+            "a cancelled caller never sends a switch"
+        );
+    }
 }

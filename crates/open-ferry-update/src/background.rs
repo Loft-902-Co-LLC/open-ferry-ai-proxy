@@ -197,43 +197,51 @@ impl UpdateService {
         if auto && snapshot.settings.mode == SelfUpdateMode::Off {
             return Err(SwitchError::UpdatesOff);
         }
-        let updater = &self.inner.updater;
-        let pin = {
-            let _lock = updater.lock()?;
-            let mut state = switching::read_state(updater)?;
-            let staged = state
-                .staged
-                .clone()
-                .filter(|version| state.latest.as_ref().is_none_or(|latest| latest == version));
-            let version = match staged {
-                Some(version) => version,
-                None => {
-                    let fetch = (self.inner.make_fetch)(&snapshot.proxy_url).map_err(|error| {
-                        UpdateError::Fetch {
-                            what: "the release list",
-                            error,
+        let inner = Arc::clone(&self.inner);
+        let runtime = tokio::runtime::Handle::current();
+        // The task owns the guard even if the caller stops waiting. Blocking
+        // hashes, file writes and fsyncs must not hold up the async runtime.
+        let pin = tokio::task::spawn_blocking(move || {
+            runtime.block_on(async move {
+                let updater = &inner.updater;
+                let _lock = updater.lock()?;
+                let mut state = switching::read_state(updater)?;
+                let staged = state
+                    .staged
+                    .clone()
+                    .filter(|version| state.latest.as_ref().is_none_or(|latest| latest == version));
+                let version = match staged {
+                    Some(version) => version,
+                    None => {
+                        let fetch = (inner.make_fetch)(&snapshot.proxy_url).map_err(|error| {
+                            UpdateError::Fetch {
+                                what: "the release list",
+                                error,
+                            }
+                        })?;
+                        let updater = Updater {
+                            fetch,
+                            ..updater.clone()
+                        };
+                        let found = updater.latest(&state).await?;
+                        if !found.is_newer() {
+                            return Err(UpdateError::NothingStaged.into());
                         }
-                    })?;
-                    let updater = Updater {
-                        fetch,
-                        ..updater.clone()
-                    };
-                    let found = updater.latest(&state).await?;
-                    if !found.is_newer() {
-                        return Err(UpdateError::NothingStaged.into());
+                        switching::skipped(&updater, &state, &found.release.version)?;
+                        updater.stage(&found, &mut state).await?;
+                        found.release.version
                     }
-                    switching::skipped(&updater, &state, &found.release.version)?;
-                    updater.stage(&found, &mut state).await?;
-                    found.release.version
-                }
-            };
-            switching::skipped(updater, &state, &version)?;
-            let sha256 = state
-                .staged_sha256
-                .as_deref()
-                .ok_or(UpdateError::NothingStaged)?;
-            updater.pin_staged(&version, sha256)?
-        };
+                };
+                switching::skipped(updater, &state, &version)?;
+                let sha256 = state
+                    .staged_sha256
+                    .as_deref()
+                    .ok_or(UpdateError::NothingStaged)?;
+                Ok::<_, SwitchError>(updater.pin_staged(&version, sha256)?)
+            })
+        })
+        .await
+        .map_err(|_| SwitchError::Protocol("preparing the update stopped".into()))??;
         if auto && self.settings().mode == SelfUpdateMode::Off {
             return Err(SwitchError::UpdatesOff);
         }
@@ -250,13 +258,18 @@ impl UpdateService {
     /// under the lock; drop it before requesting a rollback. No pin is sent.
     pub async fn roll_back(&self) -> Result<SwitchHandle, SwitchError> {
         let switcher = self.switcher()?;
-        let target = {
-            let updater = &self.inner.updater;
-            let _lock = updater.lock()?;
-            let target = switching::rollback_target(updater)?;
-            updater.validate_previous(&target).await?;
-            target
-        };
+        let updater = self.inner.updater.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let target = tokio::task::spawn_blocking(move || {
+            runtime.block_on(async move {
+                let _lock = updater.lock()?;
+                let target = switching::rollback_target(&updater)?;
+                updater.validate_previous(&target).await?;
+                Ok::<_, SwitchError>(target)
+            })
+        })
+        .await
+        .map_err(|_| SwitchError::Protocol("preparing the rollback stopped".into()))??;
         switcher
             .rollback(&target, std::time::Instant::now() + Duration::from_secs(3))
             .await
