@@ -43,7 +43,7 @@ if ($Child) {
     if ($ProbeOnly) {
         @{
             account = $identity.Name
-            is_admin = $false
+            is_admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
             profile = $env:USERPROFILE
             session_id = (Get-Process -Id $PID).SessionId
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $diagnostics 'standard-account.json')

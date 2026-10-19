@@ -21,7 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.preflight_only && '["windows-latest"]' || '["ubuntu-latest", "windows-latest", "macos-15"]') }}
+        # Hosted Windows has only an elevated console user. A genuine standard
+        # account's InteractiveToken task is refused (Task Scheduler event 332).
+        # Keep its explicit prerequisite probe; never count it as qualification.
+        os: ${{ fromJSON(inputs.preflight_only && '["windows-latest"]' || '["ubuntu-latest", "macos-15"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -40,6 +43,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: State hosted qualification coverage
+        if: ${{ !inputs.preflight_only }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          Qualifies real Linux systemd user and macOS GUI LaunchAgent services.
+          Windows user qualification remains blocked: the hosted console is elevated,
+          and a standard account's InteractiveToken task is refused (scheduler event 332).
+          Machine installers cannot use the throwaway loopback mirror.
+          See RELEASING.md for evidence and the remaining three-platform release gate.
+          EOF
 
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
