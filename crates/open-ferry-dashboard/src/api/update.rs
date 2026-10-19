@@ -66,10 +66,9 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                     if let Some(request) = live.request.as_mut()
                         && view.supervisor.is_some()
                         && read_started >= request.finished_at
+                        && matches!(request.state, "unknown" | "accepted")
                     {
-                        if matches!(request.state, "unknown" | "accepted") {
-                            request.pending = false;
-                        }
+                        request.pending = false;
                     }
                     (
                         view.supervisor
