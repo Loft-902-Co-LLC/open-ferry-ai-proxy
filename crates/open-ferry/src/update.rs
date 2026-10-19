@@ -860,7 +860,10 @@ impl Updates for Supervised {
                     .latest
                     .as_ref()
                     .is_none_or(|latest| latest == *version)
-                    && open_ferry_update::release::valid_version(version)
+                    && version.parse().is_ok_and(|latest| {
+                        open_ferry_update::release::compare(&installed, &latest)
+                            == open_ferry_update::release::Verdict::Newer
+                    })
             })
         {
             let newer = version.parse().is_ok_and(|latest| {
