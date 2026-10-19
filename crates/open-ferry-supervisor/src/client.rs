@@ -278,7 +278,7 @@ async fn lock_is_free(data_dir: &Path, deadline: Instant) -> Option<io::Result<b
     let dir = data_dir.to_owned();
     within(deadline, move || {
         #[cfg(test)]
-        tests::stall(&tests::LOCK_STALLS, &dir);
+        let _finished = tests::stall(&tests::LOCK_STALLS, &dir);
         match SupervisorLock::try_acquire(&dir) {
             Ok(lock) => {
                 drop(lock);
@@ -522,11 +522,11 @@ mod tests {
     /// How long a file-system step takes, by data directory, and whether it
     /// has been entered: the steps run on threads of their own, which a
     /// thread-local could not reach.
-    type Stalls = std::sync::Mutex<Vec<(PathBuf, Duration, bool)>>;
+    type Stalls = std::sync::Mutex<Vec<(PathBuf, Duration, bool, bool)>>;
     pub(super) static READ_STALLS: Stalls = std::sync::Mutex::new(Vec::new());
     pub(super) static LOCK_STALLS: Stalls = std::sync::Mutex::new(Vec::new());
 
-    pub(super) fn stall(table: &Stalls, data_dir: &Path) {
+    pub(super) fn stall(table: &'static Stalls, data_dir: &Path) -> Finished {
         let delay = table
             .lock()
             .unwrap()
@@ -539,6 +539,24 @@ mod tests {
         if let Some(delay) = delay {
             std::thread::sleep(delay);
         }
+        Finished(table, data_dir.to_owned())
+    }
+
+    /// The abandoned operation has released its lock and file handle.
+    pub(super) struct Finished(&'static Stalls, PathBuf);
+
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            if let Some(entry) = self
+                .0
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|(path, ..)| path == &self.1)
+            {
+                entry.3 = true;
+            }
+        }
     }
 
     /// A stall in `table` for `data_dir`, until dropped.
@@ -549,7 +567,7 @@ mod tests {
             table
                 .lock()
                 .unwrap()
-                .push((data_dir.to_owned(), delay, false));
+                .push((data_dir.to_owned(), delay, false, false));
             Self(table, data_dir.to_owned())
         }
 
@@ -559,7 +577,26 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|(path, _, entered)| path == &self.1 && *entered)
+                .any(|(path, _, entered, _)| path == &self.1 && *entered)
+        }
+
+        async fn wait_finished(&self) {
+            tokio::time::timeout(STALL + MARGIN, async {
+                loop {
+                    let finished = self
+                        .0
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(path, _, _, finished)| path == &self.1 && *finished);
+                    if finished {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the abandoned lock check did not finish");
         }
     }
 
@@ -1181,7 +1218,7 @@ mod tests {
         assert!(matches!(outcome, StopOutcome::TimedOut(_)), "{outcome:?}");
         // The abandoned check takes the lock after its stall and lets it go
         // at once: nothing is held once it has ended.
-        tokio::time::sleep(STALL + Duration::from_millis(300)).await;
+        stall.wait_finished().await;
         drop(SupervisorLock::try_acquire(dirs.data()).unwrap());
     }
 
