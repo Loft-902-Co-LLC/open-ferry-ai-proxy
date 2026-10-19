@@ -1,3 +1,4 @@
+import { focusManager } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -118,4 +119,31 @@ it("retries an initial status read before a switch is known", async () => {
   await act(() => vi.advanceTimersByTimeAsync(10));
   expect(reads).toBe(3);
   expect(result.current.isSuccess).toBe(true);
+});
+
+
+it("reveals one failed poll at the deadline while the tab stays unfocused", async () => {
+  fakePollClock();
+  let reads = 0;
+  mockApi(route("GET", UPDATE, () => {
+    if (++reads > 1) throw new TypeError("offline");
+    return { json: updateStatus({ supervisor: supervisorStatus({ phase: "handing-over" }) }) };
+  }));
+  const { result, unmount } = observeStatus();
+  try {
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    act(() => { void result.current.refetch(); });
+    await act(() => vi.advanceTimersByTimeAsync(10));
+    expect(reads).toBe(2);
+    expect(result.current.isError).toBe(true);
+    expect(result.current.hidePollError).toBe(true);
+    focusManager.setFocused(false);
+    await act(() => vi.advanceTimersByTimeAsync(MAX_POLL_ERROR_MS));
+    expect(result.current.hidePollError).toBe(false);
+    await act(() => vi.advanceTimersByTimeAsync(4_001));
+    expect(reads).toBe(2);
+  } finally {
+    unmount();
+    focusManager.setFocused(undefined);
+  }
 });
