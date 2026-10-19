@@ -1562,7 +1562,8 @@ async fn cancel<U: Updates>(
     }
 }
 
-// Cover preparation, hand-over and recovery budgets, but not the watch or drain.
+// Approximate follow bound, excluding the watch and drain. Manual switches
+// skip SIGNIN_WAIT; here it stands in for stop and kill waits not counted below.
 fn following_budget() -> Duration {
     use open_ferry_supervisor::timings::*;
     LOAD_TIMEOUT * 2
