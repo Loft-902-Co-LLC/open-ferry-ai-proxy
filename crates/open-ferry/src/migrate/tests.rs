@@ -14,7 +14,7 @@ use super::machine::{Answer, Entry, EntryKind, Held, Launch, Machine, Parent, Pr
 use super::switch::backup_dir;
 use super::*;
 use crate::check::{Finding, Level};
-use crate::os_service::{Cmd, Context, Output, Owner, Platform, System, Updating};
+use crate::os_service::{self, Cmd, Context, Output, Owner, Platform, System, Updating};
 
 /// What the fake's binaries hold: open-ferry's, and CLIProxyAPI's.
 const OPEN_FERRY: &[u8] = b"open-ferry binary";
