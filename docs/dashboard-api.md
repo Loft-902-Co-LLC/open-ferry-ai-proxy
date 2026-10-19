@@ -663,7 +663,7 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 {"request_id": "46ca8ce60267177eaa54e796448145e0", "action": "install", "state": "preparing", "id": null, "reason": null, "pending": true}
 ```
 
-`request_id` is an additive opaque, random identifier generated once per request, unique across workers. It stays the same through preparation and the final request state. Clients can distinguish a new request from an older request for the same action.
+`request_id` is an additive string field, currently 32 lowercase hex characters. Treat it as opaque. It is random, so it differs between requests and workers in practice; uniqueness is not guaranteed. It stays the same through preparation and the final request state. The POST 202 reply carries the same `request_id` as GET. Clients can distinguish a new request from an older request for the same action.
 
 If a preparation task ends without recording a result, GET reports `state: "failed"` with reason `"preparing the switch stopped"`. This recovery is not a 409 response.
 
@@ -690,20 +690,20 @@ Manual installs may retry a version that failed here or was rolled back from. Th
 The route waits about 900 ms for acceptance. If accepted, it returns `202`:
 
 ```json
-{"accepted": true, "id": "7c1f"}
+{"accepted": true, "id": "7c1f", "request_id": "46ca8ce60267177eaa54e796448145e0"}
 ```
 
 The supervisor owns the switch. The route does not wait for handover or watch confirmation, and disconnecting does not cancel it. If preparation or acceptance takes longer, the task continues in the background and the answer is `202`:
 
 ```json
-{"preparing": true}
+{"preparing": true, "request_id": "46ca8ce60267177eaa54e796448145e0"}
 ```
 
 At most one preparation runs per dashboard state. A second request while one runs returns `409 already_preparing`, with the message `already preparing`. `GET /update` reports eventual acceptance or refusal, including a refusal after the `202 preparing` response.
 
-An acceptance timeout, a protocol error after sending the switch request, or a stream ending without an acceptance or refusal reply is ambiguous: the answer is `202 {"uncertain": true}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The request retains state `unknown` and its reason, with `pending: false`; the read alone cannot prove its outcome. Check the live switch and last outcome before deciding to retry. An unreachable endpoint means the request was not sent and is a known failure.
+An acceptance timeout, a protocol error after sending the switch request, or a stream ending without an acceptance or refusal reply is ambiguous: the answer is `202 {"uncertain": true, "request_id": "..."}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The request retains state `unknown` and its reason, with `pending: false`; the read alone cannot prove its outcome. Check the live switch and last outcome before deciding to retry. An unreachable endpoint means the request was not sent and is a known failure.
 
-The client returns at acceptance. Later switch failures are observed through `supervisor.last_switch`, including its reason. As a defensive fallback for a client returning `Ended` directly, the route maps it to `202 {"failed": true, "reason": "..."}` and a failed `switch_request`; this is not expected from the current install or rollback path.
+The client returns at acceptance. Later switch failures are observed through `supervisor.last_switch`, including its reason. As a defensive fallback for a client returning `Ended` directly, the route maps it to `202 {"failed": true, "reason": "...", "request_id": "..."}` and a failed `switch_request`; this is not expected from the current install or rollback path.
 
 A supervisor refusal before the response returns `409 switch_refused` with its reason unchanged in `message`. A local preparation failure (download, verification, missing staged release, I/O or journal error) returns `409 switch_failed` with a short reason; detailed diagnostics go to the server log. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
 
