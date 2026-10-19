@@ -59,6 +59,12 @@ Every error is a status and a body:
 | 409 | `changed_since` | `POST /config/undo`: the config file was changed since the last write that kept a backup (as by a hand edit), so the undo would lose that change too, and the body didn't send `force`. |
 | 409 | `config_changed` | `POST /config/undo`: the config file or its backup isn't the one the body's `config_sha256` or `backup_sha256` names. |
 | 409 | `updates_off` | `POST /update/check` while updates are off. |
+| 409 | `already_preparing` | An install or rollback preparation is already running in this worker. |
+| 409 | `switch_uncertain` | A previous request may have been accepted; read fresh supervisor status before explicitly retrying. |
+| 409 | `switch_refused` | The supervisor refused the switch before acceptance; its reason is in `message`. |
+| 409 | `switch_failed` | Local preparation failed, or a trusted supervisor endpoint could not be reached before sending. |
+| 409 | `not_supervised` | This install has no supervisor; `message` gives command-line update and restart instructions. |
+| 409 | `update_busy` | An update check or mutation holds the update lock; try again shortly. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
 | 502 | `claude_cli_failed` | A `claude-cli` entry's Claude Code couldn't be run, or its answer wasn't what was expected. |
