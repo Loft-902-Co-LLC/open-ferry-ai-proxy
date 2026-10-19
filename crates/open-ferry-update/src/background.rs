@@ -25,6 +25,7 @@ use open_ferry_core::config::{Config, SelfUpdateMode};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tracing::instrument::WithSubscriber;
 
 use crate::fetch::{Fetch, FetchError, HttpFetch};
 use crate::install::{self, Install};
@@ -76,6 +77,7 @@ struct Live {
 struct Tasks {
     timer: Option<JoinHandle<()>>,
     spawned: Vec<JoinHandle<()>>,
+    followers: Vec<JoinHandle<()>>,
     stopped: bool,
 }
 
@@ -84,6 +86,24 @@ impl Tasks {
         self.spawned.retain(|task| !task.is_finished());
         if !self.stopped {
             self.spawned.push(tokio::spawn(future));
+        }
+    }
+
+    fn follow(&mut self, handle: SwitchHandle) {
+        self.followers.retain(|task| !task.is_finished());
+        self.followers.push(tokio::spawn(
+            follow_switch(handle).with_current_subscriber(),
+        ));
+    }
+}
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        if let Some(task) = &self.timer {
+            task.abort();
+        }
+        for task in self.spawned.iter().chain(&self.followers) {
+            task.abort();
         }
     }
 }
@@ -167,7 +187,8 @@ impl UpdateService {
         }
     }
 
-    /// Stops the loop, explicit checks, and progress followers.
+    /// Stops the loop and explicit checks. Accepted switches are still followed
+    /// if this worker resumes after a failed handover; they never send requests.
     pub fn stop(&self) {
         let mut tasks = self
             .inner
@@ -566,7 +587,7 @@ async fn checked(
                         .tasks
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .spawn(follow_switch(handle));
+                        .follow(handle);
                 }
                 Err(error) => {
                     let warning = inner
@@ -722,6 +743,10 @@ fn set_checking(inner: &Inner, checking: bool) {
         .unwrap_or_else(PoisonError::into_inner)
         .checking = checking;
 }
+
+#[cfg(test)]
+#[path = "tests/auto_log.rs"]
+pub(crate) mod test_log;
 
 #[cfg(test)]
 mod tests {
