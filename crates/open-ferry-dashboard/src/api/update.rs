@@ -23,7 +23,9 @@ use axum::extract::State;
 use axum::response::Response;
 use futures_util::FutureExt;
 use http::StatusCode;
-use open_ferry_update::{CheckNow, SwitchError, SwitchHandle, UpdateError, UpdateService};
+use open_ferry_update::{
+    CheckNow, SwitchError, SwitchHandle, SwitchView, UpdateError, UpdateService,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as value};
 use tokio::sync::oneshot;
@@ -55,10 +57,28 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     live.recover_finished_task();
-    let supervisor = match view {
+    let supervisor = supervisor_status(view, &mut live, read_started, &status.running_version);
+    let mut body = value!(status);
+    body["supervisor"] = supervisor;
+    body["switch_request"] = value!(live.request);
+    if let Some(request) = &live.request
+        && matches!(request.state, "failed" | "refused")
+    {
+        body["switch_request"]["code"] = value!(request.code);
+    }
+    Ok(ok(&body))
+}
+
+fn supervisor_status(
+    view: Result<SwitchView, SwitchError>,
+    live: &mut Live,
+    read_started: Instant,
+    running_version: &str,
+) -> Value {
+    match view {
         Err(SwitchError::NotSupervised) => Value::Null,
         view => {
-            let (snapshot, mut error, rollback_target, last, notes) = match view {
+            let (snapshot, mut error, rollback_target, last, notes, policy_disabled) = match view {
                 Ok(view) => {
                     if let Some(snapshot) = &view.supervisor {
                         live.supervisor = Some(snapshot.clone());
@@ -82,6 +102,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                         view.rollback_target,
                         value!(view.last),
                         view.notes,
+                        view.switching_disabled,
                     )
                 }
                 Err(error) => {
@@ -94,10 +115,10 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                         None,
                         Value::Null,
                         Vec::new(),
+                        false,
                     )
                 }
             };
-            let policy_disabled = error.as_deref() == Some("switching is disabled");
             if policy_disabled {
                 error = None;
                 live.failed_reads = 0;
@@ -122,7 +143,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
             value!({
                 "form": "supervised",
                 "phase": phase,
-                "running_version": snapshot["active_version"].as_str().unwrap_or(&status.running_version),
+                "running_version": snapshot["active_version"].as_str().unwrap_or(running_version),
                 "rollback_target": rollback_target,
                 "watch_until": switching["watch_until"],
                 "switch": switching,
@@ -135,16 +156,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 "notes": notes,
             })
         }
-    };
-    let mut body = value!(status);
-    body["supervisor"] = supervisor;
-    body["switch_request"] = value!(live.request);
-    if let Some(request) = &live.request
-        && matches!(request.state, "failed" | "refused")
-    {
-        body["switch_request"]["code"] = value!(request.code);
     }
-    Ok(ok(&body))
 }
 
 /// `POST /update/check`'s answer.
@@ -448,6 +460,38 @@ pub(crate) async fn rollback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_status_depends_on_the_flag_even_when_the_message_changes() {
+        for reason in [
+            "switching is disabled",
+            "policy prevents switching",
+            "a differently worded status message",
+        ] {
+            for disabled in [false, true] {
+                let view = SwitchView {
+                    supervisor: None,
+                    unreachable: Some(reason.into()),
+                    switching_disabled: disabled,
+                    rollback_target: None,
+                    last: None,
+                    notes: Vec::new(),
+                };
+                let mut live = Live {
+                    failed_reads: 2,
+                    ..Default::default()
+                };
+                let supervisor = supervisor_status(Ok(view), &mut live, Instant::now(), "0.1.0");
+                assert_eq!(supervisor["stale"], !disabled);
+                assert_eq!(supervisor["failed_reads"], if disabled { 0 } else { 3 });
+                assert_eq!(
+                    supervisor["switching_disabled"],
+                    value!(disabled.then_some("switching is disabled"))
+                );
+                assert_eq!(supervisor["error"], value!((!disabled).then_some(reason)));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn a_task_ending_without_a_result_reports_failed_preparation() {

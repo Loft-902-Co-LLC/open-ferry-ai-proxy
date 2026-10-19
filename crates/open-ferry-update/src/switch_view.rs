@@ -16,6 +16,9 @@ pub struct SwitchView {
     pub supervisor: Option<Value>,
     /// A short reason, without endpoint paths or transport details.
     pub unreachable: Option<String>,
+    /// Local policy disables switching rather than failing a status read.
+    #[serde(skip)]
+    pub switching_disabled: bool,
     pub rollback_target: Option<String>,
     pub last: Option<LastSwitch>,
     /// Optional durable records could not be read; live status remains useful.
@@ -64,17 +67,20 @@ impl UpdateService {
                 false,
             ),
         };
-        let (supervisor, unreachable) = match live.unwrap_or(Err(SwitchError::TimedOut)) {
-            Ok(snapshot) => (Some(snapshot), None),
-            Err(error) => (
-                None,
-                Some(unreachable_reason(&error, missing_endpoint).into()),
-            ),
-        };
+        let (supervisor, unreachable, switching_disabled) =
+            match live.unwrap_or(Err(SwitchError::TimedOut)) {
+                Ok(snapshot) => (Some(snapshot), None, false),
+                Err(error) => (
+                    None,
+                    Some(unreachable_reason(&error, missing_endpoint).into()),
+                    matches!(error, SwitchError::Disabled(_)),
+                ),
+            };
         let last = last.map(|record| last_switch(record, supervisor.as_ref()));
         Ok(SwitchView {
             supervisor,
             unreachable,
+            switching_disabled,
             rollback_target,
             last,
             notes,

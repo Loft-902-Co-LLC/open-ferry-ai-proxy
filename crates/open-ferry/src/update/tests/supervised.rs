@@ -41,6 +41,7 @@ impl SupervisedFake {
                     json!({"state":"watching", "active_version":"0.1.0", "installed_version":"0.1.0", "switch":{"phase":"watching", "watch_until":"2026-10-18T01:10:00Z"}, "switching_disabled":null}),
                 ),
                 unreachable: None,
+                switching_disabled: false,
                 rollback_target: Some("0.0.9".into()),
                 last: None,
                 notes: Vec::new(),

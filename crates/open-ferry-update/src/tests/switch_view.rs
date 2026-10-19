@@ -107,6 +107,7 @@ async fn idle_and_watching_use_the_same_rollback_target_as_roll_back() {
             Some(if watching { "0.2.0" } else { "0.1.0" })
         );
         assert!(view.last.is_none() && view.unreachable.is_none());
+        assert!(!view.switching_disabled);
         assert!(view.supervisor.is_some());
         assert_eq!(
             std::fs::read(f.data.root().join(crate::journal::JOURNAL_FILE)).unwrap(),
@@ -210,6 +211,7 @@ async fn unreachable_keeps_durable_data_without_exposing_transport_details() {
     write(&f, &journal);
     let view = service(&f, None).switch_view().await.unwrap();
     assert!(view.supervisor.is_none());
+    assert!(!view.switching_disabled);
     assert_eq!(
         view.unreachable.as_deref(),
         Some("the supervisor cannot be reached")
@@ -316,4 +318,24 @@ async fn disabled_switching_is_distinct_in_the_view_without_exposing_private_pol
     let view = service.switch_view().await.unwrap();
     assert!(view.supervisor.is_none());
     assert_eq!(view.unreachable.as_deref(), Some("switching is disabled"));
+}
+
+#[tokio::test]
+async fn the_disabled_flag_is_typed_and_does_not_change_the_serialized_view() {
+    let f = Fixture::new().await;
+    for disabled in [false, true] {
+        let service = service(&f, None).with_switcher(Arc::new(Fake(None, disabled)));
+        let view = service.switch_view().await.unwrap();
+        assert_eq!(view.switching_disabled, disabled);
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            json!({
+                "supervisor": null,
+                "unreachable": if disabled { "switching is disabled" } else { "the supervisor cannot be reached" },
+                "rollback_target": null,
+                "last": null,
+                "notes": [],
+            })
+        );
+    }
 }
