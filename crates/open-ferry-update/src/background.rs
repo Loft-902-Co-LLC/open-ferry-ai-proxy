@@ -70,7 +70,7 @@ struct Live {
     checking: bool,
     next_check: Option<chrono::DateTime<Utc>>,
     install: Option<Install>,
-    automatic_error: Option<String>,
+    automatic_error: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -695,9 +695,8 @@ impl Live {
             }
             _ => None,
         };
-        let key = reason.map(|_| error.unwrap().to_string());
-        let changed = self.automatic_error != key;
-        self.automatic_error = key;
+        let changed = self.automatic_error != reason;
+        self.automatic_error = reason;
         reason.filter(|_| changed)
     }
 }
@@ -841,11 +840,16 @@ mod tests {
         ] {
             assert!(live.automatic_warning(Some(&error)).is_none());
         }
-        let first = SwitchError::Unreachable("first reason".into());
-        let second = SwitchError::Unreachable("second reason".into());
+        let first = SwitchError::Unreachable("NotFound".into());
+        let second = SwitchError::Unreachable("ConnectionRefused".into());
         assert!(live.automatic_warning(Some(&first)).is_some());
-        assert!(live.automatic_warning(Some(&second)).is_some());
         assert!(live.automatic_warning(Some(&second)).is_none());
+        assert!(live.automatic_warning(Some(&first)).is_none());
+        assert!(
+            live.automatic_warning(Some(&SwitchError::Untrusted("different category".into())))
+                .is_some()
+        );
+        assert!(live.automatic_warning(Some(&second)).is_some());
     }
 
     struct QuietProgress {
