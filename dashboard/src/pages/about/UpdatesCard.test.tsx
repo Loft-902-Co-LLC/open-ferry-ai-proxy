@@ -261,12 +261,15 @@ describe("supervised updates", () => {
     expect(await within(card).findByText("Switch accepted")).toBeVisible();
   });
 
-  it("shows why switching is disabled", async () => {
+  it("shows policy-disabled status without a failed-read alert", async () => {
     server(updateStatus({ update_available: true, supervisor: supervisorStatus({
-      rollback_target: "0.0.9", switching_disabled: "the journal is stale",
+      rollback_target: "0.0.9", switching_disabled: "switching is disabled", error: null, stale: false,
     }) }));
     const { card } = await openUpdates();
-    expect(await within(card).findByText("the journal is stale")).toBeVisible();
+    expect(await within(card).findByText("Switching is unavailable")).toBeVisible();
+    expect(card).toHaveTextContent("switching is disabled");
+    expect(card).not.toHaveTextContent("The supervisor status could not be read");
+    expect(within(card).queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Roll back" })).not.toBeInTheDocument();
   });

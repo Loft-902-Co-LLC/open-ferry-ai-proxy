@@ -382,17 +382,47 @@ async fn disabled_status_and_post_agree_without_exposing_policy_details() {
         "private policy path".into(),
     ));
     let (dash, _scratch) = supervised(fake);
-    let body = dash.get(STATUS).await.json(StatusCode::OK);
-    assert_eq!(
-        body["supervisor"]["switching_disabled"],
-        "switching is disabled"
-    );
-    assert_eq!(body["supervisor"]["error"], "switching is disabled");
+    for _ in 0..2 {
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(
+            body["supervisor"]["switching_disabled"],
+            "switching is disabled"
+        );
+        assert!(body["supervisor"]["error"].is_null());
+        assert_eq!(body["supervisor"]["stale"], false);
+        assert_eq!(body["supervisor"]["failed_reads"], 0);
+    }
     let reason = dash
         .call(Method::POST, INSTALL, "")
         .await
         .error(StatusCode::CONFLICT, "switching_disabled");
     assert_eq!(reason, "switching is disabled");
+}
+
+#[tokio::test]
+async fn policy_disabled_reads_keep_the_previous_snapshot() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, _scratch) = supervised(fake.clone());
+    let before = dash.get(STATUS).await.json(StatusCode::OK);
+    *fake.snapshot.lock().unwrap() = serde_json::Value::Null;
+    assert_eq!(
+        dash.get(STATUS).await.json(StatusCode::OK)["supervisor"]["failed_reads"],
+        1
+    );
+    fake.disabled.store(true, Ordering::SeqCst);
+    for _ in 0..2 {
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        for field in ["phase", "running_version", "switch", "watch_until"] {
+            assert_eq!(body["supervisor"][field], before["supervisor"][field]);
+        }
+        assert!(body["supervisor"]["error"].is_null());
+        assert_eq!(body["supervisor"]["stale"], false);
+        assert_eq!(body["supervisor"]["failed_reads"], 0);
+        assert_eq!(
+            body["supervisor"]["switching_disabled"],
+            "switching is disabled"
+        );
+    }
 }
 
 #[tokio::test]
