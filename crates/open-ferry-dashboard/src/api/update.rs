@@ -103,6 +103,11 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 .filter(|s| !s.is_empty())
                 .or_else(|| switching["phase"].as_str())
                 .unwrap_or_else(|| snapshot["state"].as_str().unwrap_or("unknown"));
+            let switching_disabled = if error.as_deref() == Some("switching is disabled") {
+                value!("switching is disabled")
+            } else {
+                snapshot["switching_disabled"].clone()
+            };
             value!({
                 "form": "supervised",
                 "phase": phase,
@@ -111,7 +116,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 "watch_until": switching["watch_until"],
                 "switch": switching,
                 "last_switch": last,
-                "switching_disabled": snapshot["switching_disabled"],
+                "switching_disabled": switching_disabled,
                 "stale": stale,
                 "snapshot_age_seconds": snapshot_age_seconds,
                 "failed_reads": live.failed_reads,
@@ -235,6 +240,8 @@ impl SwitchRequest {
                 request.pending = request.state == "unknown";
                 request.code = if matches!(error, SwitchError::NotSupervised) {
                     "not_supervised"
+                } else if matches!(error, SwitchError::Disabled(_)) {
+                    "switching_disabled"
                 } else if matches!(error, SwitchError::Update(UpdateError::Busy)) {
                     "update_busy"
                 } else if matches!(error, SwitchError::Ended(_)) {
@@ -443,6 +450,16 @@ mod tests {
             "switch_failed",
             StatusCode::CONFLICT,
         );
+    }
+    #[test]
+    fn disabled_is_not_sent_and_keeps_its_details_private() {
+        let request = SwitchRequest::preparing("install")
+            .finish(Err(SwitchError::Disabled("private policy path".into())));
+        assert_eq!(request.state, "failed");
+        assert!(!request.pending);
+        let error = request.response().unwrap_err();
+        assert_eq!(error.code, "switching_disabled");
+        assert_eq!(request.reason.as_deref(), Some("switching is disabled"));
     }
     #[test]
     fn update_errors_are_failures_to_prepare() {
