@@ -1607,6 +1607,7 @@ mod prepared {
         )
         .unwrap();
         let gate = prepared.service.gate.clone();
+        let manager = prepared.service.manager.clone();
         let data = dir.path().join("data");
         let lease = lease_slot(Some(ProcessLease(Some(
             Lease::try_take(&data).unwrap().unwrap(),
@@ -1661,6 +1662,33 @@ mod prepared {
         assert_eq!(gate.state(), GateState::Closed);
         assert!(control.resume_accept().await.is_err());
         assert!(Lease::try_take(&data).unwrap().is_none());
+        let mut answer = String::new();
+        let read = tokio::time::timeout(WAIT, request.read_to_string(&mut answer))
+            .await
+            .expect("the refused upload never answered");
+        assert!(
+            read.is_ok()
+                || read
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset),
+            "{read:?}"
+        );
+        // close_sync gives the handler SyncError::Stopped (503). Cutting
+        // the server may close the connection before that response is sent.
+        assert!(
+            answer.is_empty() || answer.starts_with("HTTP/1.1 503"),
+            "failed activation answered the upload with {answer:?}"
+        );
+        // Uploads persist before queuing runtime synchronization. Refusing
+        // that queue keeps the already saved file, but must not publish it.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("auth/test.json")).unwrap(),
+            body
+        );
+        assert!(
+            manager.list().is_empty(),
+            "failed activation applied the queued credential"
+        );
     }
 
     #[tokio::test]
