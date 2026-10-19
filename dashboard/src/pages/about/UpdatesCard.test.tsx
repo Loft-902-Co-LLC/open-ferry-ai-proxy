@@ -476,9 +476,9 @@ it("cancels an in-flight poll before publishing optimistic preparation", async (
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
   await waitFor(() => { expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1); });
   await within(card).findByText("Preparing the switch");
-  await act(async () => { releasePoll({ json: original }); });
+  await act(async () => { releasePoll({ json: original }); await Promise.resolve(); });
   expect(within(card).getByText("Preparing the switch")).toBeVisible();
-  await act(async () => { releasePost({ status: 202, json: { accepted: true, id: "install-1" } }); });
+  await act(async () => { releasePost({ status: 202, json: { accepted: true, id: "install-1" } }); await Promise.resolve(); });
 });
 
 
