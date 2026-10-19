@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use super::support::*;
 use crate::fetch::{BoxFuture, Fetch, FetchError};
-use crate::journal::Artifact;
+use crate::journal::{Artifact, Journal, MarkFailed, Outcome};
 use crate::pins::Pin;
+use crate::state::SwitchRecord;
 use crate::{
     CancelOutcome, CheckNow, Report, SwitchError, SwitchEvent, SwitchHandle, SwitchProgress,
     Switcher, UpdateService,
@@ -350,8 +351,17 @@ async fn a_refused_stage_is_retried_only_on_the_next_check() {
     let (service, fake, fetch) = service(&f, "auto", "0.2.0", true);
     service.check_once().await.unwrap().unwrap();
     assert_eq!(fake.calls.lock().unwrap().len(), 1);
-    tokio::task::yield_now().await;
+    tokio::time::pause();
+    let interval = Duration::from_secs(6 * 3600);
+    service.start(interval);
+    while service.status().next_check.is_none() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(interval - Duration::from_secs(1)).await;
     assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    // Move the timer away again so the explicit next check is the only one.
+    service.start(interval);
+    tokio::time::resume();
     service.check_once().await.unwrap().unwrap();
     assert_eq!(
         *fake.calls.lock().unwrap(),
@@ -367,6 +377,100 @@ async fn a_refused_stage_is_retried_only_on_the_next_check() {
     service.set_config(&config("off"));
     assert!(service.check_once().await.is_none());
     assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    service.stop();
+}
+
+#[tokio::test]
+async fn pending_only_journal_exclusions_stop_the_automatic_trigger_without_replaying_state() {
+    for failed in [false, true] {
+        let f = Fixture::new().await;
+        let (service, fake, fetch) = service(&f, "auto", "0.2.0", false);
+        let active = Artifact {
+            version: "0.1.0".into(),
+            sha256: crate::staging::hash_file(&f.installed).unwrap(),
+            size: std::fs::metadata(&f.installed).unwrap().len(),
+        };
+        let mut journal = Journal::first_start(active, None);
+        let record = if failed {
+            SwitchRecord::failed_after_switch(
+                "earlier",
+                "update",
+                "0.1.0",
+                "0.2.0",
+                "2026-10-19T00:00:00Z",
+                "watching",
+                "new-version",
+                "exited",
+                "0.1.0",
+            )
+        } else {
+            SwitchRecord::started(
+                "earlier",
+                "rollback",
+                "0.2.0",
+                "0.1.0",
+                "2026-10-19T00:00:00Z",
+            )
+        };
+        journal.push_outcome(Outcome {
+            record,
+            mark_failed: failed.then(|| MarkFailed {
+                version: "0.2.0".into(),
+                why: "exited".into(),
+            }),
+        });
+        let path = f.data.root().join(crate::journal::JOURNAL_FILE);
+        let bytes = serde_json::to_vec(&journal).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let report = service.check_once().await.unwrap().unwrap().report;
+        assert!(matches!(
+            (failed, report),
+            (true, Report::SkippedFailed { .. }) | (false, Report::SkippedRolledBack { .. })
+        ));
+        assert!(fake.calls.lock().unwrap().is_empty());
+        assert_eq!(fetch.calls.load(Ordering::SeqCst), 2);
+        assert!(!f.data.version_dir("0.2.0").exists());
+        let state = f.updater.state();
+        assert!(state.failed.is_empty() && state.rolled_back.is_none() && state.history.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
+async fn missing_or_odd_welcome_install_paths_only_notify_and_never_stage_or_switch() {
+    for case in ["absent", "missing", "odd"] {
+        let mut f = Fixture::new().await;
+        let kept = f.data.binary("0.1.0", "open-ferry");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, good_binary("0.1.0")).unwrap();
+        f.updater.system = Arc::new(FakeSystem {
+            exe: kept,
+            container: false,
+            writable: true,
+        });
+        let (service, fake, fetch) = service(&f, "auto", "0.2.0", false);
+        let service = match case {
+            "missing" => service.with_installed_path(f.temp.path().join("missing/open-ferry")),
+            "odd" => {
+                let odd = f.temp.path().join("other-program");
+                std::fs::write(&odd, good_binary("0.1.0")).unwrap();
+                service.with_installed_path(odd)
+            }
+            _ => service,
+        };
+        assert!(!service.status().can_update_itself);
+        assert!(matches!(
+            service.check_once().await.unwrap().unwrap().report,
+            Report::Available {
+                why_not: Some(_),
+                ..
+            }
+        ));
+        assert!(f.updater.state().staged.is_none());
+        assert!(!f.data.version_dir("0.2.0").exists());
+        assert_eq!(fetch.calls.load(Ordering::SeqCst), 2);
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
