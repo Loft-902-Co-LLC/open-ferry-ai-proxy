@@ -519,7 +519,7 @@ async fn checked(
         if service.switcher().is_ok() {
             match service.install_now(true).await {
                 Ok(handle) => {
-                    tracing::info!(id = %handle.id, %version, "automatic switch accepted");
+                    tracing::info!(operation = %handle.id, %version, "automatic switch accepted");
                     tokio::spawn(follow_switch(handle));
                 }
                 Err(SwitchError::Ended(reason)) => {
@@ -539,15 +539,15 @@ async fn follow_switch(mut handle: SwitchHandle) {
             .await
         {
             Ok(Some(SwitchEvent::Progress { phase })) => {
-                tracing::debug!(id = %handle.id, %phase, "automatic switch progress");
+                tracing::debug!(operation = %handle.id, state = %phase, "automatic switch progress");
             }
             Ok(Some(SwitchEvent::Done { result })) => {
-                tracing::info!(id = %handle.id, %result, "automatic switch finished");
+                tracing::info!(operation = %handle.id, state = %result, "automatic switch finished");
                 return;
             }
             Ok(None) => return,
             Err(error) => {
-                tracing::info!(id = %handle.id, "automatic switch progress ended: {error}; see supervisor status and update history");
+                tracing::info!(operation = %handle.id, "automatic switch progress ended: {error}; see supervisor status and update history");
                 return;
             }
         }
