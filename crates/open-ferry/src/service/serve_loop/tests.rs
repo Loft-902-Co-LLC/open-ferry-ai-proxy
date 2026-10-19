@@ -1393,6 +1393,8 @@ mod windows_inheritance {
         let mut stream = connect(addr).await;
         within(control.wait_for(|stats| stats.live == 1)).await;
         let mut child = WaitingChild::start().await;
+        // Still open once the child exists, so the child could inherit it.
+        assert_eq!(control.live_count(), 1);
         drop(worker);
         assert_eq!(control.cut(), 0);
         assert_eq!(control.stats().loops, 0);

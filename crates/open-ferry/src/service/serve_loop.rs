@@ -572,8 +572,8 @@ struct ConnCore {
 
 impl ConnCore {
     /// A connection, counted from now. A connection of a cut control is cut
-    /// before it is returned. An error if the socket can't be duplicated,
-    /// and then the connection isn't counted.
+    /// before it is returned. An error if the socket can't be duplicated or
+    /// made non-inheritable, and then the connection isn't counted.
     fn register(shared: &Arc<Shared>, stream: &TcpStream) -> io::Result<Arc<Self>> {
         #[cfg(test)]
         if shared.fail_next_duplicate.swap(false, Ordering::AcqRel) {
@@ -886,7 +886,9 @@ pub(crate) fn run(
                         if let Err(error) =
                             spawn_connection(&shared, stream, peer, acceptor.clone(), app.clone())
                         {
-                            tracing::error!("dropping {peer}: its socket can't be duplicated: {error}");
+                            tracing::error!(
+                                "dropping {peer}: its socket can't be duplicated or made non-inheritable: {error}"
+                            );
                             tokio::select! {
                                 () = tokio::time::sleep(ACCEPT_ERROR_WAIT) => {}
                                 _ = mode.changed() => {}
