@@ -604,7 +604,9 @@ it.each(["Install now", "Roll back"])("disables an open %s confirmation when pol
   const dialog = screen.getByRole("dialog");
   const confirm = within(dialog).getByRole("button", { name: label });
   expect(confirm).toBeEnabled();
+  expect(dialog).not.toHaveTextContent("This is no longer available.");
   await waitFor(() => { expect(confirm).toBeDisabled(); }, { timeout: 5_000 });
+  expect(dialog).toHaveTextContent("This is no longer available. Close this and read the status.");
   await user.click(confirm);
   expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(0);
   expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(0);

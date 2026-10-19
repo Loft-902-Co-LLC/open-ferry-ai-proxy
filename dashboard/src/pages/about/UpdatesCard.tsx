@@ -261,6 +261,7 @@ export function UpdatesCard({ className }: { className?: string }) {
   const trustsReleaseKey = data?.trusts_release_key === true;
   const canInstall = enabled && supervisor.phase === "idle" && available && trustsReleaseKey;
   const canRollback = enabled && ["idle", "watching"].includes(supervisor.phase) && supervisor.rollback_target !== null;
+  const canConfirm = confirm === "rollback" ? canRollback : canInstall;
   const installVersion = data?.latest_version ?? stagedVersion;
   const failedBefore = installVersion != null && data?.failed_versions.includes(installVersion);
   const rolledBackBefore = installVersion != null && data?.rolled_back_version === installVersion;
@@ -360,16 +361,17 @@ export function UpdatesCard({ className }: { className?: string }) {
         title={confirm === "rollback" ? `Roll back to ${supervisor?.rollback_target ?? "the previous version"}?` : "Install the newer release now?"}
         confirmLabel={confirm === "rollback" ? "Roll back" : "Install now"}
         tone="primary"
-        confirmDisabled={confirm === "rollback" ? !canRollback : !canInstall}
+        confirmDisabled={!canConfirm}
         onCancel={() => { setConfirm(null); }}
         onConfirm={() => {
-          if (confirm !== null && (confirm === "rollback" ? canRollback : canInstall)) {
+          if (confirm !== null && canConfirm) {
             switching.mutate(confirm);
             setConfirm(null);
           }
         }}
       >
         <p>The supervisor starts the {confirm === "rollback" ? "previous" : "new"} version and hands the running server over to it. Existing requests can finish.</p>
+        {!canConfirm && <p>This is no longer available. Close this and read the status.</p>}
         {confirm === "install" && failedBefore && <p>
           Version {installVersion} failed here before. Install it again?
         </p>}
