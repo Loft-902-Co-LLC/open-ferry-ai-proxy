@@ -101,7 +101,12 @@ fn row_a_b_never_greets_within_the_load_timeout() {
         ..Tm::default()
     };
     let _sup = fx.start(&tm);
-    let result = switch_b(&fx);
+    let mut sw = fx.update(B);
+    sw.accepted();
+    let accepted = std::time::Instant::now();
+    let result = sw.done().expect("a done result");
+    let elapsed = accepted.elapsed();
+    fx.wait_settled();
     assert!(
         [
             "the new version did not start within the load timeout",
@@ -115,16 +120,18 @@ fn row_a_b_never_greets_within_the_load_timeout() {
     // A probe that did start must be gone; an absent pid is not a failed test
     // precondition when startup itself used the budget.
     let probe_gone = match std::fs::read_to_string(fx.root().join("cfg").join("pid")) {
-        Ok(pid) => {
-            let pid = pid.trim().parse().expect("the probe's pid");
-            fx.wait_for("the timed-out probe to exit", || {
-                (!alive(pid)).then_some(())
-            });
-            true
-        }
+        Ok(pid) => pid.trim().parse::<u32>().is_ok_and(|pid| pid != 0),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => panic!("could not read the probe's pid: {error}\n{}", fx.dump()),
     };
+    if !probe_gone {
+        assert!(
+            elapsed >= std::time::Duration::from_millis(tm.load),
+            "the probe left no complete pid, but the switch settled in {elapsed:?}, before its {} ms load budget\n{}",
+            tm.load,
+            fx.dump()
+        );
+    }
     fx.assert_columns(Columns {
         state: Some(StateCol::Record(
             Rec {
