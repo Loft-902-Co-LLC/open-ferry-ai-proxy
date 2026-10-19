@@ -58,6 +58,8 @@ cargo build --release -p open-ferry --bin open-ferry --no-default-features
 
 CI pins cargo-nextest 0.9.146. Its `ci` profile runs each test in a separate process, with at most two process tests on Unix and four on Windows, no retries, and a ten-minute hung-test limit. Plain `cargo test --features blue-green-test` still works: the in-process gates serialize the Unix process tests to avoid inherited executable-write and lock descriptors (Windows permits four). The supervisor's `startup` and `supervise` targets now require `blue-green-test`; a feature-off run skips them instead of ever using the user's default endpoint. Doc tests stay on `cargo test --doc`.
 
+The merge queue and workflow_dispatch also run the blue-green suite on ARM64 macOS 15 and native x86_64 musl in Alpine. macOS uses three shards. Alpine runs the whole suite as an ordinary user. The existing blue-green Ubuntu aggregate includes these results. The macOS job runs extended ACL and process checks and, when its GUI domain is available, a real LaunchAgent install, serve and uninstall test.
+
 To run every check on a branch of this repository before it's queued, run the CI workflow on it from the Actions tab. A change only to files under `dashboard/` skips the Rust checks, unless a Rust test reads one of the files.
 
 For a change to the dashboard app, CI also runs these in `dashboard/`, with the Node version in `dashboard/.nvmrc`:
