@@ -72,6 +72,7 @@ struct Fake {
     calls: Mutex<Vec<(String, bool)>>,
     refuse: bool,
     progress: Mutex<Option<Box<dyn SwitchProgress>>>,
+    poll_gate: Mutex<Option<Arc<PollGate>>>,
     gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
@@ -86,6 +87,22 @@ impl Switcher for Fake {
         _deadline: Instant,
     ) -> BoxFuture<'a, Result<SwitchHandle, SwitchError>> {
         Box::pin(async move {
+            let gate = self.poll_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                {
+                    let (released, _) = gate
+                        .wake
+                        .wait_timeout_while(
+                            gate.released.lock().unwrap(),
+                            Duration::from_secs(5),
+                            |released| !*released,
+                        )
+                        .unwrap();
+                    assert!(*released, "the test must release the in-progress poll");
+                }
+                tokio::task::yield_now().await;
+            }
             assert!(
                 self.data.try_lock().unwrap().is_some(),
                 "endpoint called under the update lock"
@@ -154,6 +171,7 @@ fn service(
         calls: Mutex::new(Vec::new()),
         refuse,
         progress: Mutex::new(None),
+        poll_gate: Mutex::new(None),
         gate: Mutex::new(None),
     });
     let make_fetch: crate::background::MakeFetch = {
@@ -304,32 +322,43 @@ impl Drop for PendingProgress {
 
 #[tokio::test]
 async fn dropping_the_service_closes_an_accepted_switch_progress_stream() {
-    let f = Fixture::new().await;
-    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
-    let polled = Arc::new(tokio::sync::Notify::new());
-    let dropped = Arc::new(AtomicBool::new(false));
-    *fake.progress.lock().unwrap() = Some(Box::new(PendingProgress {
-        polled: polled.clone(),
-        dropped: dropped.clone(),
-    }));
-    service.check_once().await.unwrap().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), polled.notified())
+    for stop_first in [false, true] {
+        let f = Fixture::new().await;
+        let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        *fake.progress.lock().unwrap() = Some(Box::new(PendingProgress {
+            polled: polled.clone(),
+            dropped: dropped.clone(),
+        }));
+        service.start(Duration::from_secs(3600));
+        service.check_once().await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), polled.notified())
+            .await
+            .unwrap();
+        if stop_first {
+            service.stop();
+        }
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "stop keeps followers alive"
+        );
+        let other = service.clone();
+        drop(service);
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "another service clone owns the follower"
+        );
+        drop(other);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
         .unwrap();
-    service.stop();
-    assert!(
-        !dropped.load(Ordering::SeqCst),
-        "stop keeps followers alive"
-    );
-    drop(service);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !dropped.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -632,4 +661,55 @@ async fn a_switch_follower_logs_its_outcome_after_update_checks_stop() {
     .await
     .unwrap();
     assert_eq!(fake.calls.lock().unwrap().len(), 1);
+}
+
+struct PollGate {
+    entered: tokio::sync::Notify,
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_stop_waits_for_a_running_poll_before_returning_without_a_send() {
+    for earlier in ["none", "sync-stop", "replaced-timer"] {
+        let f = Fixture::new().await;
+        let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+        let gate = Arc::new(PollGate {
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        *fake.poll_gate.lock().unwrap() = Some(gate.clone());
+        if earlier == "replaced-timer" {
+            service.start(Duration::ZERO);
+        } else {
+            assert_eq!(service.check_now(), CheckNow::Started);
+        }
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await
+            .unwrap();
+        match earlier {
+            "sync-stop" => service.stop(),
+            "replaced-timer" => service.start(Duration::from_secs(3600)),
+            _ => {}
+        }
+        let stopped = service.stop_and_wait();
+        tokio::pin!(stopped);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut stopped)
+                .await
+                .is_err(),
+            "stop must join the poll on the other worker: {earlier}"
+        );
+        *gate.released.lock().unwrap() = true;
+        gate.wake.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), &mut stopped)
+            .await
+            .unwrap();
+        assert!(
+            fake.calls.lock().unwrap().is_empty(),
+            "the abort wins before the send: {earlier}"
+        );
+        assert_eq!(service.check_now(), CheckNow::Off);
+    }
 }

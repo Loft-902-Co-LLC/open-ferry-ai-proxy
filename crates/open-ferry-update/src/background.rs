@@ -95,15 +95,35 @@ impl Tasks {
             follow_switch(handle).with_current_subscriber(),
         ));
     }
-}
 
-impl Drop for Tasks {
-    fn drop(&mut self) {
+    fn abort_all(&mut self) {
+        self.stopped = true;
         if let Some(task) = &self.timer {
             task.abort();
         }
         for task in self.spawned.iter().chain(&self.followers) {
             task.abort();
+        }
+    }
+}
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}
+
+/// Public service clones own the tasks; the tasks themselves only own Inner.
+struct Owner(std::sync::Weak<Inner>);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        if let Some(inner) = self.0.upgrade() {
+            inner
+                .tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .abort_all();
         }
     }
 }
@@ -119,6 +139,7 @@ pub(crate) struct Inner {
     /// Held through switch preparation and the endpoint's admission reply.
     requesting: Arc<tokio::sync::Mutex<()>>,
     tasks: Mutex<Tasks>,
+    stopping: tokio::sync::Mutex<()>,
     switcher: Mutex<Option<Arc<dyn Switcher>>>,
     installed: Mutex<Option<PathBuf>>,
 }
@@ -127,6 +148,7 @@ pub(crate) struct Inner {
 #[derive(Clone)]
 pub struct UpdateService {
     pub(crate) inner: Arc<Inner>,
+    _owner: Option<Arc<Owner>>,
 }
 
 impl std::fmt::Debug for UpdateService {
@@ -141,18 +163,21 @@ impl UpdateService {
     /// [`start`](Self::start) to begin checking.
     pub fn new(updater: Updater, make_fetch: MakeFetch, config: &Config) -> Self {
         let (snapshot, _) = watch::channel(snapshot_of(config));
+        let inner = Arc::new(Inner {
+            updater,
+            make_fetch,
+            snapshot,
+            live: Mutex::new(Live::default()),
+            running: Arc::new(tokio::sync::Mutex::new(())),
+            requesting: Arc::new(tokio::sync::Mutex::new(())),
+            tasks: Mutex::new(Tasks::default()),
+            stopping: tokio::sync::Mutex::new(()),
+            switcher: Mutex::new(None),
+            installed: Mutex::new(None),
+        });
         let service = Self {
-            inner: Arc::new(Inner {
-                updater,
-                make_fetch,
-                snapshot,
-                live: Mutex::new(Live::default()),
-                running: Arc::new(tokio::sync::Mutex::new(())),
-                requesting: Arc::new(tokio::sync::Mutex::new(())),
-                tasks: Mutex::new(Tasks::default()),
-                switcher: Mutex::new(None),
-                installed: Mutex::new(None),
-            }),
+            _owner: Some(Arc::new(Owner(Arc::downgrade(&inner)))),
+            inner,
         };
         service.log_settings(None);
         service
@@ -184,24 +209,57 @@ impl UpdateService {
         tasks.stopped = false;
         if let Some(old) = tasks.timer.replace(tokio::spawn(run(inner, first_check))) {
             old.abort();
+            tasks.spawned.push(old);
         }
     }
 
     /// Stops the loop and explicit checks. Accepted switches are still followed
     /// if this worker resumes after a failed handover; they never send requests.
     pub fn stop(&self) {
+        self.abort_checks();
+    }
+
+    /// Stops checks and waits for any poll already running on another thread.
+    /// Accepted switches keep their followers. A stuck poll gets five seconds.
+    pub async fn stop_and_wait(&self) {
+        let _stopping = self.inner.stopping.lock().await;
+        self.abort_checks();
+        let tasks = {
+            let mut tasks = self
+                .inner
+                .tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut stopped = std::mem::take(&mut tasks.spawned);
+            stopped.extend(tasks.timer.take());
+            stopped
+        };
+        let stopped = async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(5), stopped)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "update checks have not stopped after five seconds; continuing shutdown"
+            );
+        }
+    }
+
+    fn abort_checks(&self) {
         let mut tasks = self
             .inner
             .tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         tasks.stopped = true;
-        if let Some(task) = tasks.timer.take() {
+        for task in tasks.timer.iter().chain(&tasks.spawned) {
             task.abort();
         }
-        for task in tasks.spawned.drain(..) {
-            task.abort();
-        }
+        drop(tasks);
         set_checking(&self.inner, false);
         set_next_check(&self.inner, None);
     }
@@ -573,6 +631,7 @@ async fn checked(
     {
         let service = UpdateService {
             inner: Arc::clone(inner),
+            _owner: None,
         };
         if service.switcher().is_ok() {
             match service.install_now(true).await {

@@ -375,7 +375,7 @@ pub async fn run(
                 break;
             }
             result = &mut server => {
-                stop_update_checks(&service.management);
+                stop_update_checks(&service.management).await;
                 service.stop_catalogs();
                 service.manager.stop_auto_refresh();
                 service.management.shutdown().await;
@@ -631,9 +631,9 @@ mod update_check_scope_tests {
 }
 
 /// Stops the update checks, if they run.
-fn stop_update_checks(management: &ManagementState) {
+async fn stop_update_checks(management: &ManagementState) {
     if let Some(updates) = management.updates() {
-        updates.stop();
+        updates.stop_and_wait().await;
     }
 }
 
@@ -654,7 +654,7 @@ async fn shut_down_within(
     server: Option<Server>,
     timeout: Duration,
 ) -> ExitCode {
-    stop_update_checks(&service.management);
+    stop_update_checks(&service.management).await;
     service.stop_catalogs();
     service.manager.stop_auto_refresh();
     service.management.shutdown().await;
@@ -686,7 +686,7 @@ async fn shut_down_by(
     deadline: tokio::time::Instant,
     reserve: Duration,
 ) -> bool {
-    stop_update_checks(&service.management);
+    let _ = tokio::time::timeout_at(deadline, stop_update_checks(&service.management)).await;
     service.stop_catalogs();
     service.manager.stop_auto_refresh();
     let requests_deadline = deadline
@@ -8423,7 +8423,7 @@ self-update:
             updates.settings().mode,
             open_ferry_update::SelfUpdateMode::Off
         );
-        stop_update_checks(&service.management);
+        stop_update_checks(&service.management).await;
     }
 
     #[tokio::test]

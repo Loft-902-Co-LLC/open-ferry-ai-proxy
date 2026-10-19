@@ -115,7 +115,9 @@ impl Handles {
 
     /// Stops what [`start_background`](Self::start_background) starts.
     async fn stop_background(&self) {
-        let management = self.management.clone();
+        if let Some(updates) = self.management.updates() {
+            updates.stop_and_wait().await;
+        }
         let manager = self.manager.clone();
         let controls = self.file_log.controls().clone();
         #[cfg(test)]
@@ -123,9 +125,6 @@ impl Handles {
         let _ = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             held.hold_step("stop_background");
-            if let Some(updates) = management.updates() {
-                updates.stop();
-            }
             manager.stop_auto_refresh();
             controls.set_rotation(false);
         })
