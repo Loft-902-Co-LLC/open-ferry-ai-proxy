@@ -423,6 +423,7 @@ async fn get(address: SocketAddr, path: &str) -> String {
 
 /// Captures what the worker logs on this thread's runtime.
 fn capture_here() -> (tracing::subscriber::DefaultGuard, Logged) {
+    crate::test_tracing::keep_every_callsite_open();
     let logged = Logged::default();
     let guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(logged.clone()));
