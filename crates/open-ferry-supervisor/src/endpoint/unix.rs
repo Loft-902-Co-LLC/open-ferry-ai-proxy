@@ -780,7 +780,8 @@ mod tests {
         // Not upstream's: exercise confstr and validate the actual user's endpoint ancestry.
         let identity = Identity::current(ServiceKind::User).expect("identity");
         let temp = darwin_user_temp_dir().expect("Darwin user temp directory");
-        let location = Location::resolve(&identity, Path::new("/unused")).expect("safe runtime root");
+        let location =
+            Location::resolve(&identity, Path::new("/unused")).expect("safe runtime root");
         assert_eq!(location.root, temp);
         assert_eq!(location.name, "open-ferry");
         let system = candidates(&Identity::for_uid(ServiceKind::System, 0));
