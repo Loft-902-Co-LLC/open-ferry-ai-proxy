@@ -220,7 +220,8 @@ export function UpdatesCard({ className }: { className?: string }) {
   const switching = useMutation({
     mutationFn: (action: "install" | "rollback") =>
       call<SwitchStarted>(action === "install" ? UPDATE_INSTALL : UPDATE_ROLLBACK, { method: "POST" }),
-    onMutate: (action) => {
+    onMutate: async (action) => {
+      await client.cancelQueries({ queryKey: apiQueryKey(UPDATE) });
       const before = client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE));
       const optimistic = { action, state: "preparing" as const, id: null, reason: null, pending: true };
       client.setQueryData<UpdateStatus>(apiQueryKey(UPDATE), (old) => old === undefined ? old : {
