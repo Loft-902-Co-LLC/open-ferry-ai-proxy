@@ -1571,6 +1571,15 @@ mod prepared {
 
     #[tokio::test]
     async fn a_partial_resume_failure_settles_an_owned_management_write() {
+        partial_resume_failure_settles_an_owned_management_write(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_partial_resume_failure_settles_an_owned_management_write_with_a_held_server() {
+        partial_resume_failure_settles_an_owned_management_write(true).await;
+    }
+
+    async fn partial_resume_failure_settles_an_owned_management_write(hold_server: bool) {
         use crate::service::worker::{ProcessLease, activate};
         let dir = tempfile::tempdir().unwrap();
         let (main, main_address) = loopback();
@@ -1603,7 +1612,11 @@ mod prepared {
             Lease::try_take(&data).unwrap().unwrap(),
         ))));
         let control = prepared.handles.control.clone();
+        let resume_failed = Arc::new(tokio::sync::Notify::new());
+        let failure_at = Arc::new(std::sync::OnceLock::new());
         let activation = tokio::spawn({
+            let resume_failed = resume_failed.clone();
+            let failure_at = failure_at.clone();
             async move {
                 activate(
                     prepared,
@@ -1611,10 +1624,13 @@ mod prepared {
                     lease,
                     &Timing {
                         fail_listener_when_sync_queued: true,
-                        // Force resume_accept to settle before the server's
-                        // first poll; the queued-write injection must survive
-                        // until the listeners have actually started.
-                        hold_server: Some(Arc::new(tokio::sync::Notify::new())),
+                        // Cover both the ordinary ordering and resume_accept
+                        // settling before the server's first poll.
+                        hold_server: hold_server.then(|| Arc::new(tokio::sync::Notify::new())),
+                        resume_error: Some(Arc::new(move |_| {
+                            failure_at.set(tokio::time::Instant::now()).unwrap();
+                            resume_failed.notify_one();
+                        })),
                         activation_stop_budget: Duration::from_millis(200),
                         ..Timing::default()
                     },
@@ -1628,10 +1644,19 @@ mod prepared {
         request.write_all(format!(
             "POST /v0/management/auth-files?name=test.json HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer test-password\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
         ).as_bytes()).await.unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(2), activation)
+        // Watcher startup does blocking filesystem work before the injected
+        // listener failure. Give that precondition the fixture's setup wait;
+        // the two-second guard measures settling the owned write afterward.
+        tokio::time::timeout(WAIT, resume_failed.notified())
             .await
-            .expect("activation hung on the owned management write")
-            .unwrap();
+            .expect("activation did not reach the queued-write listener failure");
+        let result = tokio::time::timeout_at(
+            *failure_at.get().unwrap() + Duration::from_secs(2),
+            activation,
+        )
+        .await
+        .expect("activation hung on the owned management write")
+        .unwrap();
         assert!(result.is_err());
         assert_eq!(gate.state(), GateState::Closed);
         assert!(control.resume_accept().await.is_err());
