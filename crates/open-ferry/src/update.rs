@@ -913,14 +913,10 @@ impl Updates for Supervised {
                     })
             })
         {
-            let newer = version.parse().is_ok_and(|latest| {
-                open_ferry_update::release::compare(&installed, &latest)
-                    == open_ferry_update::release::Verdict::Newer
-            });
             return Ok(Offer {
                 latest: version.clone(),
                 installed,
-                newer,
+                newer: true,
                 failed_here: state.has_failed(version),
                 rolled_back: state.rolled_back.as_ref() == Some(version),
                 install: self.real.0.install(),
