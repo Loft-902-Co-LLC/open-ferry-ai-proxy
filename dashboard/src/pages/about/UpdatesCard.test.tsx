@@ -290,11 +290,13 @@ describe("supervised updates", () => {
 
   it("polls through handover failures quietly and stops after the switch", async () => {
     let reads = 0;
+    let releaseRecovery!: (reply: MockReply) => void;
     const api = mockApi(
       route("GET", CHECK_PATH, { json: {} }),
       route("GET", UPDATE, () => {
         reads += 1;
         if (reads === 2) { throw new TypeError("handover"); }
+        if (reads === 3) return new Promise<MockReply>((resolve) => { releaseRecovery = resolve; });
         return { json: updateStatus({ supervisor: supervisorStatus({
           phase: reads === 1 ? "handing-over" : "idle",
           last_switch: reads === 1 ? null : { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: null },
@@ -303,6 +305,14 @@ describe("supervised updates", () => {
     );
     const { card } = await openUpdates();
     await within(card).findByText("Switch: handing over");
+    await waitFor(() => { expect(reads).toBe(3); }, { timeout: 6_000 });
+    // The failed read has settled, and recovery is still held in flight.
+    expect(within(card).queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(within(card).queryByText("The server didn't answer", { exact: true })).not.toBeInTheDocument();
+    await act(async () => {
+      releaseRecovery({ json: updateStatus({ supervisor: supervisorStatus({ last_switch: { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: null } }) }) });
+      await Promise.resolve();
+    });
     expect(await within(card).findByText("Switched to 0.2.0", undefined, { timeout: 8_000 })).toBeVisible();
     expect(within(card).queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
     const finishedReads = api.callsTo("GET", UPDATE).length;
