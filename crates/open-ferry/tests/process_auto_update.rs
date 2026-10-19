@@ -98,6 +98,7 @@ impl Waits<'_> {
                 "active": view["active"],
                 "switch": view["switch"],
                 "outcomes": view["outcomes"],
+                "workers": view["workers"],
             },
             "dashboard": dashboard,
             "server.requests()": self.server.requests(),
@@ -437,20 +438,30 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
     std::fs::write(seams.join("fault.exit-after"), "go@99.0.0").unwrap();
     std::fs::write(seams.join("auto.before_check.release"), []).unwrap();
     let data = data_dir::DataDir::at(root.join("data"));
+    // J-R2 clears the switch before S3 writes the failed version to state.
+    // Released workers also write drain history when they exit. Wait for both
+    // to finish: a check accepted while either holds the update lock can end
+    // Busy without changing last_check or making any release requests.
     waits
-        .until("the watch failure and completed rollback", || {
-            let state = open_ferry_update::state::State::load(&data.state_file());
-            let view = journal(root);
-            let failed = state.has_failed("99.0.0")
-                || view["outcomes"].as_array().is_some_and(|outcomes| {
-                    outcomes
-                        .iter()
-                        .any(|outcome| outcome["mark_failed"]["version"] == "99.0.0")
+        .until(
+            "the rollback reports and released workers to settle",
+            || {
+                let state = open_ferry_update::state::State::load(&data.state_file());
+                let view = journal(root);
+                let reported = state.has_failed("99.0.0")
+                    && view["outcomes"].as_array().is_some_and(Vec::is_empty);
+                let alone = view["workers"].as_array().is_some_and(|workers| {
+                    workers.len() == 1
+                        && workers[0]["version"] == env!("CARGO_PKG_VERSION")
+                        && workers[0]["role"] == "active"
+                        && workers[0]["lost"] == false
                 });
-            failed
-                && view["active"]["version"] == env!("CARGO_PKG_VERSION")
-                && view["switch"].is_null()
-        })
+                reported
+                    && alone
+                    && view["active"]["version"] == env!("CARGO_PKG_VERSION")
+                    && view["switch"].is_null()
+            },
+        )
         .await;
     waits
         .until("the returned worker to serve HTTP", || {
@@ -482,8 +493,12 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
         answer.contains("started"),
         "dashboard starts the explicit check: {answer}"
     );
+    let completion = format!(
+        "the explicit check to skip the failed release (last_check != {previous:?}, requests >= {})",
+        before + 2
+    );
     waits
-        .until("the explicit check to skip the failed release", || {
+        .until(&completion, || {
             let state = open_ferry_update::state::State::load(&data.state_file());
             state.last_check != previous
                 && server.requests() >= before + 2
