@@ -84,10 +84,13 @@ fn failed_switch_to_c(fx: &Fx, before_return: impl FnOnce()) -> Sup {
     fx.wait_settled();
     fx.wait_journal("the install", |j| j["install_pending"].is_null());
     fx.fault("exit-after", "go@C");
+    // A->B has settled; only C's confirmation waits for its exit to be seen.
+    fx.hold("watch.before_confirm");
     fx.hold("journal.before:J-R1");
     let mut second = fx.update(C);
     second.accepted();
     fx.wait_arrived("journal.before:J-R1");
+    fx.release("watch.before_confirm");
     fx.wait_dead(2);
     fx.wait_dead(3);
     before_return();

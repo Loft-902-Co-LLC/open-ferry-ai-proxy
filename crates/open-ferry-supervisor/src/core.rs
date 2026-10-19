@@ -1945,6 +1945,21 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
         {
             return;
         }
+        // Not upstream's, test builds only: defer confirmation without
+        // blocking the event loop. Journal/state barriers block exit handling
+        // too; this fence lets an exit at `go` end the watch even when the
+        // runner takes longer than its deadline to report the worker's exit.
+        // Uses the existing test-seam .hold/.arrived/.release files.
+        #[cfg(feature = "blue-green-test")]
+        {
+            let seams = self.cfg.data.root().join(".blue-green-test");
+            if seams.join("watch.before_confirm.hold").exists()
+                && !seams.join("watch.before_confirm.release").exists()
+            {
+                let _ = std::fs::write(seams.join("watch.before_confirm.arrived"), []);
+                return;
+            }
+        }
         self.confirm().await;
     }
 
