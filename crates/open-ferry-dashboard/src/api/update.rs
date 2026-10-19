@@ -169,10 +169,11 @@ impl Live {
                 && request.state == "preparing"
             {
                 tracing::warn!("dashboard API: switch preparation task ended without a result");
-                self.request = Some(SwitchRequest::finished(
-                    request.action,
-                    Err(SwitchError::Stopped),
-                ));
+                let mut stopped = SwitchRequest::preparing(request.action);
+                stopped.state = "failed";
+                stopped.pending = false;
+                stopped.reason = Some("preparing the switch stopped".to_owned());
+                self.request = Some(stopped);
             }
         }
     }
@@ -366,7 +367,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_task_ending_without_a_result_recovers_preparation_as_unknown() {
+    async fn a_task_ending_without_a_result_reports_failed_preparation() {
         let task = tokio::spawn(async {});
         while !task.is_finished() {
             tokio::task::yield_now().await;
@@ -379,10 +380,11 @@ mod tests {
         live.recover_finished_task();
         assert!(live.task.is_none());
         let request = live.request.unwrap();
-        assert_eq!(request.state, "unknown");
-        assert!(
-            request.pending,
-            "status must be read before an explicit retry"
+        assert_eq!(request.state, "failed");
+        assert!(!request.pending);
+        assert_eq!(
+            request.reason.as_deref(),
+            Some("preparing the switch stopped")
         );
     }
 
