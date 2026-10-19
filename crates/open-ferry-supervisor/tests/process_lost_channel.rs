@@ -24,10 +24,11 @@ const STOP: u64 = 10_000;
 /// can have been seen (the receive of the first status poll that showed it)
 /// and the earliest the exit can have happened (the start of the last liveness
 /// check that found the process alive), so it is short of the true gap by at
-/// most three amounts: the loss's window between two polls, the exit's
-/// window between two checks, and the lag of the status. Their sum must fit
-/// `UNCERTAINTY_MAX` (set-up fails otherwise). The lag is the time from the
-/// command that caused the loss to the poll that showed it, so it holds the
+/// most the union of the loss's polling window and status lag, plus the exit's
+/// window between two checks. Both loss intervals end at the first reply that
+/// shows the loss, so their union is the longer one. The union plus the exit
+/// window must fit `UNCERTAINTY_MAX` (set-up fails otherwise). The lag runs
+/// from the command that caused the loss to the poll that showed it. It holds the
 /// supervisor's own delay in noticing the loss (seen at up to about 1 s on
 /// Windows) and the journal write `worker_lost` (core.rs) makes before the
 /// status can show it.
@@ -117,7 +118,7 @@ fn arm(fx: &Fx, phase_at: &str) -> &'static str {
 /// worker, not the last command sent (a later one, such as `peers_gone`, would
 /// make a slow loss look fresh). A missing line, a repeated one, or a poll
 /// instant before the command (a step of the clock) fails the set-up, as does a
-/// lag that, with the sampling windows, exceeds `UNCERTAINTY_MAX`.
+/// loss-interval union that, with the exit window, exceeds `UNCERTAINTY_MAX`.
 fn loss_lag(log: &[Value], pid: u32, cause: &str, shown_ms: u64) -> Result<Duration, String> {
     let lines: Vec<u64> = log
         .iter()
@@ -139,13 +140,30 @@ fn loss_lag(log: &[Value], pid: u32, cause: &str, shown_ms: u64) -> Result<Durat
 }
 
 fn check_uncertainty(loss: Duration, lag: Duration, exit: Duration) -> Result<(), String> {
-    let total = loss + lag + exit;
+    // The polling window and status lag share their end at loss_hi. The exit
+    // window starts at or after loss_hi, so only that window is added in full.
+    let union = loss.max(lag);
+    let total = union + exit;
     if total > UNCERTAINTY_MAX {
         return Err(format!(
-            "the measurement uncertainty is {total:?} (loss window {loss:?}, status lag {lag:?}, exit window {exit:?}), over {UNCERTAINTY_MAX:?}"
+            "the measurement uncertainty is {total:?} (loss union {union:?}, polling window {loss:?}, status lag {lag:?}, exit window {exit:?}), over {UNCERTAINTY_MAX:?}"
         ));
     }
     Ok(())
+}
+
+#[test]
+fn overlapping_loss_windows_are_counted_once() {
+    // Both loss intervals end at the first status reply showing the loss.
+    // A three-second interval contains the 2.2-second one in either order;
+    // with the later 0.9-second exit window, the union is 3.9 s, within 4 s.
+    let long = Duration::from_secs(3);
+    let short = Duration::from_millis(2200);
+    let exit = Duration::from_millis(900);
+    assert!(check_uncertainty(long, short, exit).is_ok());
+    assert!(check_uncertainty(short, long, exit).is_ok());
+    // The separate exit window still counts in full and can exceed the cap.
+    assert!(check_uncertainty(long, short, Duration::from_millis(1100)).is_err());
 }
 
 #[test]
@@ -159,7 +177,8 @@ fn the_lag_is_taken_from_the_command_that_caused_the_loss() {
     // A slow status is usable while the total uncertainty fits the budget.
     assert!(check_uncertainty(Duration::from_millis(1530), lag, POLL).is_ok());
     // The later command must not make an over-budget measurement look fresh.
-    let slow = check_uncertainty(Duration::from_secs(3), lag, POLL).unwrap_err();
+    let slow =
+        check_uncertainty(Duration::from_millis(500), lag, Duration::from_secs(2)).unwrap_err();
     assert!(slow.contains("over"), "{slow}");
     assert_eq!(
         loss_lag(&log, 7, "send:go", 1300).unwrap(),
