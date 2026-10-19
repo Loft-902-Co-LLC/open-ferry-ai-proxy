@@ -88,6 +88,8 @@ Any other install, such as the container image, a package manager's copy, a buil
 
 A system service installed before this version, as a plain systemd unit or Windows service, keeps using root's or LocalSystem's account records. Reinstall it with `open-ferry service install -system` (uninstall the old service first) for the supervised machine form. Rerunning either binary installer does not reinstall the service; it prints the service-install command.
 
+A service that `open-ferry migrate` installs takes the same form as one from `open-ferry service install`: supervised when the install can update itself, plain otherwise, and `migrate` says why ([docs/cli.md](cli.md#open-ferry-migrate)).
+
 If `install-self` cannot publish the receipt, it reports the failure and tries to restore the previous binary and receipt; the installer fails. If restoration fails too, it names the files to restore by hand.
 
 **A drop-in made by `open-ferry migrate`.** On Linux and macOS with an install receipt, [`migrate`](migrating-from-cliproxyapi.md#the-drop-in-switch) puts a symbolic link under CLIProxyAPI's file name that leads to the installed open-ferry, so `open-ferry update` replaces the binary the link leads to, and the next start runs the new version. On Windows, and without an install receipt, it puts a copy there. The copy is another path than the receipt names, so it reports a new release but doesn't install it. To update it, run `open-ferry migrate -undo`, then `open-ferry migrate` again, after `open-ferry update` has updated the installed one. Only one `migrate` runs at a time: a second one exits with 1 and changes nothing. The lock is per record location, which follows `XDG_CONFIG_HOME`, `HOME` or `APPDATA`: a run that sees another location for the same CLIProxyAPI doesn't wait for the other, and fails when it moves CLIProxyAPI's binary, which never replaces a file, without changing CLIProxyAPI's binary. Don't move or replace `<binary>` or `<binary>.cliproxyapi` by hand while a drop-in is in place: use `open-ferry migrate -undo`, which puts the binary back only if it is the one recorded.
@@ -105,6 +107,8 @@ The supervisor refuses an automatic request unless the mode is `auto`. Changing 
 Automatic checks skip releases that failed here or were rolled back from. When an attempt ends without a completed switch, automatic updates wait at least five hours before trying that version again. Manual requests are not held by this cooldown.
 
 A timeout, a lost connection or an unreadable reply to a supervised update, rollback or cancellation leaves its outcome unknown. Run `open-ferry update -check` and do not resend the request. The command exits with 1; its JSON result is `outcome-unknown`.
+
+The supervisor switches only while its directories and version binaries are safe from other accounts: owned by you (or root) and writable by no one else. Otherwise it disables switching or refuses that version, and `open-ferry update -check` says why. On macOS this covers extended ACLs; on Linux, a user service also accepts a directory writable by your private group. [docs/cli.md](cli.md#what-it-installs) has the details.
 
 In the plain form, it checks for the latest release, says what it would do, and asks. Then it downloads the release (or takes the copy the server staged), checks it as above, and puts it in place of the installed binary: it copies the new binary beside the old one and renames it over the old, so the path never holds half a binary. The old binary is kept in the data directory for a rollback. On Windows, which won't replace a running `.exe`, the old one is first renamed `open-ferry.exe.old`, removed at the next update. `-yes` installs without asking; without a terminal to ask in, and without `-yes`, it installs nothing. Its flags and exit codes are in [docs/cli.md](cli.md#open-ferry-update).
 
@@ -183,8 +187,8 @@ minisign prints `Signature and comment signature verified` and the trusted comme
 - **The server's log** says at start whether updates are on, notify-only or off, what set that and how often it looks; once for each new release; and, at warn, when a check fails. A failed check never stops the server.
 - **`open-ferry update -check`** checks now and says what it found, and changes nothing; `-json` prints it as one JSON object.
 - **`open-ferry check`** has a `self-update` finding: the mode and what set it, how often it looks, and whether this install updates itself. It makes no request.
-- **The dashboard's About page** shows the status: the mode and what set it, the versions, the last and next check and what the last one found, and what to do next, such as a restart or `open-ferry update`. It has a Check now while updates aren't off.
-- **The dashboard API** has the status, `GET /open-ferry/api/v1/update`, and a check now, `POST /open-ferry/api/v1/update/check` ([docs/dashboard-api.md](dashboard-api.md#updates)).
+- **The dashboard's About page** shows the status: the mode and what set it, the versions, the last and next check and what the last one found, and what to do next, such as a restart or `open-ferry update`. It has a Check now while updates aren't off. For a supervised install it also has Install now, for a newer release, and Roll back, to the version the supervisor kept. Each asks for confirmation, and the Updates card follows preparation, handover and the watch window. A plain install shows the command to run on the server instead.
+- **The dashboard API** has the status, `GET /open-ferry/api/v1/update`, a check now, `POST /open-ferry/api/v1/update/check`, and, for a supervised install, `POST /open-ferry/api/v1/update/install` and `POST /open-ferry/api/v1/update/rollback` ([docs/dashboard-api.md](dashboard-api.md#updates)).
 
 ## CLIProxyAPI
 

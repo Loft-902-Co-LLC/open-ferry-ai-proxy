@@ -300,6 +300,8 @@ Every service runs open-ferry in the config's directory, so the `.env` file ther
 
 The macOS supervisor checks extended ACLs on its data and install directories, the versions directory, the version binaries it uses, its journal and supervisor lock file, and their directory chains. It refuses grants that let anyone other than the owner or root write, add or delete files, change permissions or ownership, including inherit-only grants. Read-only and deny entries are allowed. An unreadable ACL fails the trust check, disabling switching or refusing the version binary.
 
+On Linux, a user service's supervisor also accepts a directory its group can write when that group is your private group: it has your name, it is your primary group, and no other account belongs to it. It reads `/etc/passwd` and `/etc/group` for that only when `/etc/nsswitch.conf` gives `passwd` and `group` only sources root controls (`files`, `systemd` or `compat`). When the file is missing, as on Alpine, or names a directory service such as `sss` or `ldap`, the exception is refused: keep those directories writable only by their owner.
+
 **On Windows**, the service is a scheduled task by default, not a Windows service. That is deliberate:
 
 - **Your sign-ins live in your profile.** The config's `~` paths, the auth directory's among them, are the home of the account open-ferry runs as. A Windows service runs as a service account, whose profile isn't yours, so it wouldn't see your sign-ins.
