@@ -94,7 +94,7 @@ impl Updates for SupervisedFake {
         }
         Ok(self.changed("update", "0.2.0"))
     }
-    async fn rollback(&self) -> Result<Changed, SwitchError> {
+    async fn rollback(&self, _expected: &str) -> Result<Changed, SwitchError> {
         self.base.calls.borrow_mut().push("rollback");
         if let Some(error) = self.error.borrow_mut().take() {
             return Err(error);

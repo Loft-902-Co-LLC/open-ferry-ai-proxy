@@ -234,7 +234,7 @@ async fn an_unsupervised_service_refuses_every_switch_method_clearly() {
     );
     for error in [
         service.install_now(false).await.unwrap_err(),
-        service.roll_back().await.unwrap_err(),
+        service.roll_back("0.1.0").await.unwrap_err(),
         service.supervisor().await.unwrap_err(),
         service.cancel_switch().await.unwrap_err(),
     ] {
@@ -325,7 +325,7 @@ async fn rollback_uses_the_watch_from_or_previous_and_validates_before_unlocking
             good_binary(&target.version),
         )
         .unwrap();
-        service.roll_back().await.unwrap();
+        service.roll_back(&target.version).await.unwrap();
         assert_eq!(
             *fake.calls.lock().unwrap(),
             [(target.version.clone(), false)]
@@ -333,7 +333,7 @@ async fn rollback_uses_the_watch_from_or_previous_and_validates_before_unlocking
         fake.calls.lock().unwrap().clear();
         std::fs::write(f.data.binary(&target.version, "open-ferry"), b"changed").unwrap();
         assert!(matches!(
-            service.roll_back().await,
+            service.roll_back(&target.version).await,
             Err(SwitchError::Update(UpdateError::StagedChanged { .. }))
         ));
         assert!(fake.calls.lock().unwrap().is_empty());
@@ -569,7 +569,7 @@ async fn cancelled_preparation_keeps_its_lock_without_blocking_the_runtime_or_se
         let started = Instant::now();
         let task = tokio::spawn(async move {
             if rollback {
-                service.roll_back().await
+                service.roll_back("0.1.0").await
             } else {
                 service.install_now(false).await
             }
@@ -653,4 +653,20 @@ async fn preparation_longer_than_the_acceptance_window_still_leaves_a_full_windo
     let (service, fake) = service(&f, "notify");
     service.install_now(false).await.unwrap();
     assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), false)]);
+}
+
+#[tokio::test]
+async fn rollback_refuses_a_target_changed_since_confirmation_without_sending() {
+    let f = Fixture::new().await;
+    let (service, fake) = service(&f, "notify");
+    let mut journal = Journal::first_start(artifact("0.1.0"), None);
+    journal.previous = Some(artifact("0.2.0"));
+    write_journal(&f, &journal);
+    let error = service.roll_back("0.1.0").await.unwrap_err();
+    assert!(
+        matches!(&error, SwitchError::Update(UpdateError::Supervised(why))
+        if why.contains("expected 0.1.0, now 0.2.0")),
+        "{error}"
+    );
+    assert!(fake.calls.lock().unwrap().is_empty());
 }
