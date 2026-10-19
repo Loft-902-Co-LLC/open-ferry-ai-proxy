@@ -432,6 +432,7 @@ jobs:
               # deliberately relaxes the CLI privilege boundary for mounted configs.
               addgroup -g "$TEST_GID" bluegreen
               adduser -D -u "$TEST_UID" -G bluegreen bluegreen
+              chown -R "$TEST_UID:$TEST_GID" /usr/local/cargo/registry
               su -s /bin/sh bluegreen -c "
                 set -eu
                 export HOME=/home/bluegreen PATH=/usr/local/cargo/bin:\$PATH
