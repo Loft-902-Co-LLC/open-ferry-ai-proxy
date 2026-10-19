@@ -26,6 +26,18 @@ WORK = Path(sys.argv[1]).resolve()
 OUT = WORK / "diagnostics"
 LABEL = "io.github.loft-902-co-llc.open-ferry"
 SECRETS = []
+SIGNATURE_ERROR = "SHA256SUMS is signed with a key this build doesn't trust"
+
+
+class UpdateFailure(RuntimeError):
+    """The updater's own error, kept distinct from harness failures."""
+
+
+class QualificationFailure(RuntimeError):
+    def __init__(self, failures):
+        self.failures = failures
+        super().__init__("; ".join(f"{phase}: {type(error).__name__}: {error}"
+                                 for phase, error in failures))
 
 
 def clean(value):
@@ -160,6 +172,7 @@ class Qualification:
         self.port = free_port()
         self.load = None
         self.installed_service = False
+        self.fault_confirmed = False
         self.env = dict(os.environ)
         self.env.pop("OPEN_FERRY_SELF_UPDATE", None)
         if self.os == "Windows":
@@ -197,7 +210,8 @@ class Qualification:
             try:
                 last = self.api()
                 write(OUT / "status.json", json.dumps(last, indent=2) + "\n")
-                require(not last.get("last_error"), "update failed: " + str(last.get("last_error")))
+                if last.get("last_error"):
+                    raise UpdateFailure("update failed: " + str(last["last_error"]))
                 if predicate(last):
                     record("Verified " + name)
                     write(OUT / (name.replace(" ", "-") + ".json"), json.dumps(last, indent=2) + "\n")
@@ -207,6 +221,46 @@ class Qualification:
                 last = {"status_poll_error": clean(error)}
             time.sleep(2)
         raise RuntimeError(f"timed out waiting for {name}: {clean(json.dumps(last))}")
+
+    def check_after_flip(self, seconds=90):
+        deadline = time.monotonic() + seconds
+        attempts = 0
+        while time.monotonic() < deadline:
+            self.load.healthy()
+            answer = self.api("/check", "POST").get("check")
+            attempts += 1
+            require(answer in ("started", "running"), "check-now was not accepted")
+            if answer == "started":
+                record(f"Confirmed a check started after latest moved to B ({attempts} attempts)")
+                return
+            # An existing check may have read A before the flip. Only 'started'
+            # confirms a new check; 'running' never satisfies this gate.
+            time.sleep(2)
+        raise RuntimeError("timed out starting a new check after latest moved to B")
+
+    def verify_signature_control(self, error):
+        require(type(error) is UpdateFailure and str(error) == "update failed: " + SIGNATURE_ERROR,
+                "bad-signature control did not produce the exact expected updater error")
+        status = self.api()
+        write(OUT / "signature-rejected.json", json.dumps(status, indent=2) + "\n")
+        require(status.get("last_error") == SIGNATURE_ERROR and status.get("last_result") == "error"
+                and not status.get("checking") and self.stable(status, self.a)
+                and not status.get("staged_version")
+                and not (status.get("supervisor") or {}).get("last_switch"),
+                "bad-signature control did not leave supervised A unchanged")
+        self.load.healthy()
+        counts = self.load.snapshot()["counts"]
+        for phase in ("baseline", "auto"):
+            require(counts.get(f"{phase}.requests", 0) > 0, f"no requests covered {phase}")
+        suffix = ".zip" if self.os == "Windows" else ".tar.gz"
+        archive = f"/download/v{self.b}/open-ferry-{self.b}-{self.candidates['target']}{suffix}"
+        with Mirror.lock:
+            requests = dict(Mirror.requests)
+        require(requests.get("/latest/download/SHA256SUMS.minisig", 0) > 0,
+                "bad-signature control never requested a signature")
+        require(requests.get(archive, 0) == 0, "untrusted B archive was requested")
+        self.fault_confirmed = True
+        record("Verified exact bad-signature rejection: supervised A unchanged, B archive never requested")
 
     def stable(self, status, version, how=None):
         supervisor = status.get("supervisor") or {}
@@ -294,8 +348,9 @@ class Qualification:
 
     def uninstall(self):
         if self.load:
-            self.load.finish()
+            load = self.load
             self.load = None
+            load.finish()
         command([self.exe, "service", "uninstall"], env=self.env, timeout=120)
         self.installed_service = False
         deadline = time.monotonic() + 60
@@ -343,6 +398,7 @@ class Qualification:
                                      functools.partial(Mirror, directory=str(WORK / "mirror")))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        failures = []
         try:
             self.install(f"http://127.0.0.1:{server.server_port}")
             self.load = Load(self.port, self.client)
@@ -351,9 +407,17 @@ class Qualification:
             with Mirror.lock:
                 Mirror.latest = self.b
             # Only a check is requested: no install command or install API is used for A -> B.
-            require(self.api("/check", "POST").get("check") in ("started", "running"),
-                    "check-now was not accepted")
-            self.until("automatic B after watch", lambda value: self.stable(value, self.b, "update"), seconds=900)
+            self.check_after_flip()
+            try:
+                self.until("automatic B after watch", lambda value: self.stable(value, self.b, "update"), seconds=900)
+            except UpdateFailure as error:
+                if self.candidates["fault"] != "bad-signature":
+                    raise
+                self.verify_signature_control(error)
+            if self.candidates["fault"] == "bad-signature":
+                require(self.fault_confirmed, "bad-signature control unexpectedly switched to B")
+                self.uninstall()
+                return
             # Durable outcomes currently report auto:null. The production worker's
             # explicit acceptance log proves this used its automatic switch path.
             self.logs()
@@ -373,23 +437,42 @@ class Qualification:
             require(command([self.exe, "--version"]).stdout.strip() == f"open-ferry {self.a}",
                     "rollback did not restore the installed binary")
             self.uninstall()
+        except Exception as error:
+            # Preserve the first error before cleanup can raise another one.
+            failures.append(("lifecycle", error))
+            record(f"Lifecycle failed: {type(error).__name__}: {error}")
         finally:
-            try:
+            def finish_load():
                 if self.load:
-                    self.load.finish()
-            finally:
-                self.load = None
+                    load = self.load
+                    self.load = None
+                    load.finish()
+
+            def remove_service():
+                if self.installed_service or (self.data / "service.json").exists():
+                    self.uninstall()
+
+            def stop_mirror():
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=10)
+                with Mirror.lock:
+                    requests = dict(Mirror.requests)
+                write(OUT / "mirror-requests.json", json.dumps(requests, indent=2) + "\n")
+                if self.fault_confirmed:
+                    require(not any(path.startswith(f"/download/v{self.b}/") and count
+                                    for path, count in requests.items()),
+                            "bad-signature control requested a B asset before mirror shutdown")
+
+            for phase, cleanup in (("load cleanup", finish_load), ("diagnostics", self.logs),
+                                   ("service cleanup", remove_service), ("mirror cleanup", stop_mirror)):
                 try:
-                    self.logs()
-                finally:
-                    try:
-                        if self.installed_service or (self.data / "service.json").exists():
-                            command([self.exe, "service", "uninstall"], env=self.env, check=False, timeout=120)
-                    finally:
-                        server.shutdown()
-                        server.server_close()
-                        thread.join(timeout=10)
-                        write(OUT / "mirror-requests.json", json.dumps(dict(Mirror.requests), indent=2) + "\n")
+                    cleanup()
+                except Exception as error:
+                    failures.append((phase, error))
+                    record(f"{phase} failed: {type(error).__name__}: {error}")
+            if failures:
+                raise QualificationFailure(failures) from failures[0][1]
 
 
 def main():
@@ -400,9 +483,17 @@ def main():
         result.update(qualification.candidates)
         qualification.run()
         result["passed"] = True
-        record("PASS: supervised user service A -> automatic B -> rollback A -> uninstall, zero failed load requests")
+        if qualification.candidates["fault"] == "bad-signature":
+            result["expected_failure"] = SIGNATURE_ERROR
+            result["fault_confirmed"] = qualification.fault_confirmed
+            record("PASS: exact bad-signature rejection, B archive never requested, zero failed load requests, uninstalled")
+        else:
+            record("PASS: supervised user service A -> automatic B -> rollback A -> uninstall, zero failed load requests")
     except Exception as error:
-        result["error"] = clean(f"{type(error).__name__}: {error}")
+        failures = error.failures if isinstance(error, QualificationFailure) else [("setup", error)]
+        result["errors"] = [{"phase": phase, "error": clean(f"{type(failure).__name__}: {failure}")}
+                            for phase, failure in failures]
+        result["error"] = result["errors"][0]["error"]
         record("FAIL: " + result["error"])
     finally:
         write(OUT / "result.json", json.dumps(result, indent=2) + "\n")
