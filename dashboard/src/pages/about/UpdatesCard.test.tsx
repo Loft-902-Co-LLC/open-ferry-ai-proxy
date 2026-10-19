@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { pollFailuresExhausted, switchInProgress } from "../../api/updateStatus";
@@ -455,4 +455,28 @@ it.each(["request", "outcome"])("clears a POST error when status supplies a newe
   await user.click(within(card).getByRole("button", { name: "Check now" }));
   await within(card).findByText(newer === "request" ? "Switch failed" : "Switched to 0.2.0");
   expect(within(card).queryByText("The switch request failed")).not.toBeInTheDocument();
+});
+
+
+it("cancels an in-flight poll before publishing optimistic preparation", async () => {
+  const original = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
+  let reads = 0;
+  let releasePoll!: (reply: MockReply) => void;
+  let releasePost!: (reply: MockReply) => void;
+  const api = mockApi(
+    route("GET", CHECK_PATH, { json: {} }),
+    route("GET", UPDATE, () => ++reads === 2 ? new Promise<MockReply>((resolve) => { releasePoll = resolve; }) : { json: original }),
+    route("POST", UPDATE_CHECK, { status: 202, json: { check: "started" } }),
+    route("POST", UPDATE_INSTALL, () => new Promise<MockReply>((resolve) => { releasePost = resolve; })),
+  );
+  const { card, user } = await openUpdates();
+  await user.click(await within(card).findByRole("button", { name: "Check now" }));
+  await waitFor(() => { expect(reads).toBe(2); });
+  await user.click(within(card).getByRole("button", { name: "Install now" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+  await waitFor(() => { expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1); });
+  await within(card).findByText("Preparing the switch");
+  await act(async () => { releasePoll({ json: original }); });
+  expect(within(card).getByText("Preparing the switch")).toBeVisible();
+  await act(async () => { releasePost({ status: 202, json: { accepted: true, id: "install-1" } }); });
 });
