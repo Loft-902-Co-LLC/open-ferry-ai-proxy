@@ -127,7 +127,7 @@ async fn staged_install_pins_before_calling_without_the_lock_or_a_download() {
     let f = Fixture::new().await;
     f.release("0.2.0");
     let (service, fake) = service(&f, "auto");
-    service.check_once().await.unwrap().unwrap();
+    f.updater.check(crate::SelfUpdateMode::Auto).await.unwrap();
     let requests = f.server.requests();
     let mut handle = service.install_now(true).await.unwrap();
     assert_eq!(handle.id, "accepted");
@@ -177,7 +177,7 @@ async fn a_missing_or_changed_staged_binary_is_refused_without_calling_the_endpo
         let f = Fixture::new().await;
         f.release("0.2.0");
         let (service, fake) = service(&f, "auto");
-        service.check_once().await.unwrap().unwrap();
+        f.updater.check(crate::SelfUpdateMode::Auto).await.unwrap();
         let binary = f.data.binary("0.2.0", "open-ferry");
         if missing {
             std::fs::remove_file(binary).unwrap();
@@ -403,7 +403,7 @@ async fn a_manual_install_reuses_a_staged_excluded_version_without_downloading_i
         let f = Fixture::new().await;
         f.release("0.2.0");
         let (service, fake) = service(&f, "auto");
-        service.check_once().await.unwrap().unwrap();
+        f.updater.check(crate::SelfUpdateMode::Auto).await.unwrap();
         let mut state = f.updater.state();
         if failed {
             state.mark_failed("0.2.0");

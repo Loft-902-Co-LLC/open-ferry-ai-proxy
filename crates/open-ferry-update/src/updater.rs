@@ -697,7 +697,7 @@ impl Updater {
     /// latest release and, in `auto` on an install that updates itself,
     /// stages it. It records the outcome in the state, holding the lock.
     pub async fn check(&self, mode: SelfUpdateMode) -> Result<CheckResult, UpdateError> {
-        self.check_with_pending(mode, false).await
+        self.check_with_pending(mode, false, &self.install()).await
     }
 
     /// Supervised checks include pending retry exclusions, read-only. Ordinary
@@ -706,6 +706,7 @@ impl Updater {
         &self,
         mode: SelfUpdateMode,
         supervised: bool,
+        install: &Install,
     ) -> Result<CheckResult, UpdateError> {
         let _lock = self.lock()?;
         let mut state = self.state();
@@ -714,7 +715,7 @@ impl Updater {
         } else {
             Default::default()
         };
-        let outcome = self.check_locked(mode, &mut state, &pending).await;
+        let outcome = self.check_locked(mode, install, &mut state, &pending).await;
         state.last_check = Some(now());
         match &outcome {
             Ok(result) => {
@@ -739,6 +740,7 @@ impl Updater {
     async fn check_locked(
         &self,
         mode: SelfUpdateMode,
+        install: &Install,
         state: &mut State,
         pending: &crate::switching::Exclusions,
     ) -> Result<CheckResult, UpdateError> {
@@ -750,7 +752,7 @@ impl Updater {
         } else if let Some(report) = pending.report(state, &version) {
             report
         } else {
-            match (mode, self.install()) {
+            match (mode, install) {
                 (SelfUpdateMode::Auto, Install::SelfUpdating { .. }) => {
                     let staged = self.stage(&found, state).await;
                     state.latest = Some(version.clone());

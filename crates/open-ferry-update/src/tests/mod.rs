@@ -1,6 +1,7 @@
 //! Not upstream's: the update crate's tests.
 
 mod archive;
+mod auto_switch;
 mod background;
 mod blue_green;
 mod fetch;
