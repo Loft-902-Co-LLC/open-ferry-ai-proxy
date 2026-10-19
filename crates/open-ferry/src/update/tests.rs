@@ -10,16 +10,19 @@ use serde_json::Value;
 
 use super::*;
 
+mod supervised;
+
 mod command_scope {
     use super::*;
     use crate::os_service::Platform;
     use crate::scope::{Probe, Scope, State};
     use crate::update::scope_probe::{Fake, Node};
 
-    const REQUESTS: [Request; 4] = [
+    const REQUESTS: [Request; 5] = [
         Request::Check,
         Request::Update,
         Request::Rollback,
+        Request::Cancel,
         Request::Mode(SelfUpdateMode::Off),
     ];
 
@@ -397,7 +400,7 @@ impl Updates for Fake {
         self.plan.clone().ok_or(UpdateError::NoPrevious)
     }
 
-    async fn update(&self, (): ()) -> Result<SwitchRecord, UpdateError> {
+    async fn update(&self, (): ()) -> Result<Changed, UpdateError> {
         self.calls.borrow_mut().push("update");
         if self.supervised {
             return Err(UpdateError::Supervised("a supervisor runs".to_owned()));
@@ -406,30 +409,30 @@ impl Updates for Fake {
             return Err(UpdateError::Busy);
         }
         let offer = self.latest.as_ref().unwrap();
-        Ok(SwitchRecord {
+        Ok(Changed::Replaced(SwitchRecord {
             from: offer.installed.clone(),
             to: offer.latest.clone(),
             how: "update".to_owned(),
             binary: BINARY.to_owned(),
             restart_needed: true,
             ..SwitchRecord::default()
-        })
+        }))
     }
 
-    async fn rollback(&self) -> Result<SwitchRecord, UpdateError> {
+    async fn rollback(&self) -> Result<Changed, UpdateError> {
         self.calls.borrow_mut().push("rollback");
         if self.supervised {
             return Err(UpdateError::Supervised("a supervisor runs".to_owned()));
         }
         let plan = self.plan.as_ref().unwrap();
-        Ok(SwitchRecord {
+        Ok(Changed::Replaced(SwitchRecord {
             from: plan.installed.clone(),
             to: plan.previous.clone(),
             how: "rollback".to_owned(),
             binary: BINARY.to_owned(),
             restart_needed: true,
             ..SwitchRecord::default()
-        })
+        }))
     }
 }
 
@@ -477,9 +480,9 @@ fn settings(mode: &str, env: Option<&str>) -> Settings {
 
 /// Runs `request` with `fake`, as `update` with `-yes` if `yes` and
 /// `-json` if `json`, the prompt answering `answer`.
-async fn go(
+async fn go<U: Updates>(
     request: Request,
-    fake: &Fake,
+    fake: &U,
     settings: &Settings,
     yes: bool,
     json: bool,
@@ -1113,6 +1116,10 @@ fn options(args: &[&str]) -> Options {
 fn the_flags_make_one_request() {
     assert_eq!(request(&options(&[])), Ok(Request::Update));
     assert_eq!(request(&options(&["-check"])), Ok(Request::Check));
+    assert_eq!(request(&options(&["-cancel"])), Ok(Request::Cancel));
+    for flag in ["-check", "-rollback", "-mode=off"] {
+        assert!(request(&options(&["-cancel", flag])).is_err());
+    }
     assert_eq!(
         request(&options(&["--rollback", "--yes"])),
         Ok(Request::Rollback)
