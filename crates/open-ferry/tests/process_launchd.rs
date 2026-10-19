@@ -105,7 +105,7 @@ fn a_user_launchagent_serves_and_uninstalls_within_its_exit_timeout() {
         plist.contains("-supervise"),
         "the service must use its real supervisor"
     );
-    assert!(plist.contains("<integer>60</integer>"));
+    assert!(plist.contains("<key>ExitTimeOut</key>\n\t<integer>60</integer>"));
     fx.wait_for("launchd's worker to serve", || http_get(port, "/"));
     let data = DataDir::at(fx.data());
     let record: serde_json::Value =
