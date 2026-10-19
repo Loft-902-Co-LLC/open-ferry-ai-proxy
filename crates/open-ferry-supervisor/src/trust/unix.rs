@@ -1147,6 +1147,25 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_nsswitch_disables_the_private_group_exception_on_musl_too() {
+        // Not upstream's: Alpine may omit nsswitch.conf. Keep the exception off unless
+        // the complete local-only membership policy can be established.
+        let root = account_root(
+            None,
+            "sam:x:1000:1000::/home/sam:/bin/sh\n",
+            "sam:x:1000:\n",
+        );
+        let db = SystemAccounts::rooted(root.path());
+        assert!(db.user_name(1000).is_none());
+        assert!(db.user_primary_gid(1000).is_none());
+        assert!(db.group_name(1000).is_none());
+        assert!(db.group_members(1000).is_none());
+        assert!(db.primary_members(1000).is_none());
+        assert!(private_group(&db, 1000, 1000).is_err());
+    }
+
     fn euid() -> u32 {
         // SAFETY: `geteuid` has no preconditions.
         unsafe { libc::geteuid() }
