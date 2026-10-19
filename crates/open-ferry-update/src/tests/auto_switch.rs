@@ -95,7 +95,7 @@ impl Switcher for Fake {
                         .wake
                         .wait_timeout_while(
                             gate.released.lock().unwrap(),
-                            Duration::from_secs(5),
+                            Duration::from_secs(30),
                             |released| !*released,
                         )
                         .unwrap();
@@ -712,4 +712,153 @@ async fn async_stop_waits_for_a_running_poll_before_returning_without_a_send() {
         );
         assert_eq!(service.check_now(), CheckNow::Off);
     }
+}
+
+struct HeldPoll(Arc<PollGate>);
+
+impl HeldPoll {
+    async fn start(service: &UpdateService, fake: &Fake) -> Self {
+        let held = Self(Arc::new(PollGate {
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        }));
+        *fake.poll_gate.lock().unwrap() = Some(held.0.clone());
+        assert_eq!(service.check_now(), CheckNow::Started);
+        tokio::time::timeout(Duration::from_secs(5), held.0.entered.notified())
+            .await
+            .unwrap();
+        held
+    }
+
+    fn release(&self) {
+        *self.0.released.lock().unwrap() = true;
+        self.0.wake.notify_one();
+    }
+}
+
+impl Drop for HeldPoll {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_async_stop_keeps_the_poll_for_the_next_stop() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let held = HeldPoll::start(&service, &fake).await;
+    let mut first = Box::pin(service.stop_and_wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut first)
+            .await
+            .is_err()
+    );
+    drop(first);
+    let mut second = Box::pin(service.stop_and_wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err(),
+        "cancelling a stop must put the held poll back"
+    );
+    held.release();
+    tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap();
+    assert!(fake.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timed_out_async_stop_keeps_the_poll_for_the_next_stop() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let held = HeldPoll::start(&service, &fake).await;
+    let logs = Capture::default();
+    tokio::time::timeout(
+        Duration::from_secs(7),
+        service.stop_and_wait().with_subscriber(logs.clone()),
+    )
+    .await
+    .unwrap();
+    let mut second = Box::pin(service.stop_and_wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err(),
+        "the five-second escape must put the held poll back"
+    );
+    held.release();
+    tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap();
+    assert!(fake.calls.lock().unwrap().is_empty());
+    assert!(logs.0.lock().unwrap().iter().any(|line| {
+        line.contains("update checks have not stopped after five seconds; continuing")
+            && !line.contains("shutdown")
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_async_stop_aborts_checks_before_it_can_take_the_gate() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let held = HeldPoll::start(&service, &fake).await;
+    let mut first = Box::pin(service.stop_and_wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut first)
+            .await
+            .is_err()
+    );
+    service.start(Duration::from_secs(3600));
+    let mut second = Box::pin(service.stop_and_wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        service.check_now(),
+        CheckNow::Off,
+        "a queued stop must already abort checks"
+    );
+    drop(second);
+    held.release();
+    tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap();
+    assert!(fake.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_async_stop_aborts_a_timer_restarted_while_it_waits_for_the_gate() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let held = HeldPoll::start(&service, &fake).await;
+    let mut first = Box::pin(service.stop_and_wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut first)
+            .await
+            .is_err()
+    );
+    let mut second = Box::pin(service.stop_and_wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err()
+    );
+    service.start(Duration::from_secs(3600));
+    drop(first);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err(),
+        "the held poll must remain tracked across the first stop's cancellation"
+    );
+    held.release();
+    tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("the restarted timer must have been aborted before it was taken");
+    assert_eq!(service.check_now(), CheckNow::Off);
+    assert!(fake.calls.lock().unwrap().is_empty());
 }

@@ -96,12 +96,16 @@ impl Tasks {
         ));
     }
 
-    fn abort_all(&mut self) {
+    fn abort_checks(&mut self) {
         self.stopped = true;
-        if let Some(task) = &self.timer {
+        for task in self.timer.iter().chain(&self.spawned) {
             task.abort();
         }
-        for task in self.spawned.iter().chain(&self.followers) {
+    }
+
+    fn abort_all(&mut self) {
+        self.abort_checks();
+        for task in &self.followers {
             task.abort();
         }
     }
@@ -110,6 +114,53 @@ impl Tasks {
 impl Drop for Tasks {
     fn drop(&mut self) {
         self.abort_all();
+    }
+}
+
+/// Retains join handles across a cancelled wait or its five-second escape.
+struct StoppedChecks<'a> {
+    tasks: &'a Mutex<Tasks>,
+    unfinished: Vec<JoinHandle<()>>,
+    // Drop returns the handles before releasing the next stop's gate.
+    _stopping: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl<'a> StoppedChecks<'a> {
+    fn new(tasks: &'a Mutex<Tasks>, stopping: tokio::sync::MutexGuard<'a, ()>) -> Self {
+        let unfinished = {
+            let mut tasks = tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            // A start may have replaced the timer while we waited for the gate.
+            // Only take handles we abort in this same critical section.
+            tasks.abort_checks();
+            let mut unfinished = std::mem::take(&mut tasks.spawned);
+            unfinished.extend(tasks.timer.take());
+            unfinished
+        };
+        Self {
+            tasks,
+            unfinished,
+            _stopping: stopping,
+        }
+    }
+
+    async fn wait(&mut self) {
+        while let Some(task) = self.unfinished.last_mut() {
+            let _ = task.await;
+            self.unfinished.pop();
+        }
+    }
+}
+
+impl Drop for StoppedChecks<'_> {
+    fn drop(&mut self) {
+        self.unfinished.retain(|task| !task.is_finished());
+        if !self.unfinished.is_empty() {
+            self.tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .spawned
+                .append(&mut self.unfinished);
+        }
     }
 }
 
@@ -222,30 +273,14 @@ impl UpdateService {
     /// Stops checks and waits for any poll already running on another thread.
     /// Accepted switches keep their followers. A stuck poll gets five seconds.
     pub async fn stop_and_wait(&self) {
-        let _stopping = self.inner.stopping.lock().await;
         self.abort_checks();
-        let tasks = {
-            let mut tasks = self
-                .inner
-                .tasks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let mut stopped = std::mem::take(&mut tasks.spawned);
-            stopped.extend(tasks.timer.take());
-            stopped
-        };
-        let stopped = async move {
-            for task in tasks {
-                let _ = task.await;
-            }
-        };
-        if tokio::time::timeout(Duration::from_secs(5), stopped)
+        let stopping = self.inner.stopping.lock().await;
+        let mut stopped = StoppedChecks::new(&self.inner.tasks, stopping);
+        if tokio::time::timeout(Duration::from_secs(5), stopped.wait())
             .await
             .is_err()
         {
-            tracing::warn!(
-                "update checks have not stopped after five seconds; continuing shutdown"
-            );
+            tracing::warn!("update checks have not stopped after five seconds; continuing");
         }
     }
 
@@ -255,10 +290,7 @@ impl UpdateService {
             .tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        tasks.stopped = true;
-        for task in tasks.timer.iter().chain(&tasks.spawned) {
-            task.abort();
-        }
+        tasks.abort_checks();
         drop(tasks);
         set_checking(&self.inner, false);
         set_next_check(&self.inner, None);
