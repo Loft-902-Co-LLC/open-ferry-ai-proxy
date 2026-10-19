@@ -12,11 +12,16 @@ use crate::pins::Pin;
 use crate::state::SwitchRecord;
 use crate::{CancelOutcome, SwitchError, SwitchHandle, Switcher, UpdateService};
 
-struct Fake(Option<Value>);
+struct Fake(Option<Value>, bool);
 
 impl Switcher for Fake {
     fn status(&self, _: Instant) -> BoxFuture<'_, Result<Value, SwitchError>> {
         Box::pin(async {
+            if self.1 {
+                return Err(SwitchError::Disabled(
+                    "private endpoint path policy details".into(),
+                ));
+            }
             self.0.clone().ok_or_else(|| {
                 SwitchError::Unreachable("private endpoint path and transport details".into())
             })
@@ -51,7 +56,7 @@ fn service(f: &Fixture, snapshot: Option<Value>) -> UpdateService {
         crate::background::http_fetch(),
         &Default::default(),
     )
-    .with_switcher(Arc::new(Fake(snapshot)))
+    .with_switcher(Arc::new(Fake(snapshot, false)))
 }
 
 fn artifact(version: &str) -> Artifact {
@@ -297,4 +302,18 @@ async fn records_with_no_result_stay_unknown_for_updates_and_rollbacks() {
             .unwrap();
         assert_eq!(view.last.unwrap().result, "unknown");
     }
+}
+
+#[tokio::test]
+async fn disabled_switching_is_distinct_in_the_view_without_exposing_private_policy_details() {
+    let f = Fixture::new().await;
+    let service = UpdateService::new(
+        f.updater.clone(),
+        crate::background::http_fetch(),
+        &Default::default(),
+    )
+    .with_switcher(Arc::new(Fake(None, true)));
+    let view = service.switch_view().await.unwrap();
+    assert!(view.supervisor.is_none());
+    assert_eq!(view.unreachable.as_deref(), Some("switching is disabled"));
 }

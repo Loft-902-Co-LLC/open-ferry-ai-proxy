@@ -226,9 +226,7 @@ fn before_send_timeout() -> SwitchError {
 fn endpoint_error(error: EndpointError) -> SwitchError {
     match error {
         EndpointError::Io(error) => SwitchError::Unreachable(error.to_string()),
-        EndpointError::SwitchingDisabled(why) => {
-            SwitchError::Unreachable(format!("switching is disabled: {why}"))
-        }
+        EndpointError::SwitchingDisabled(why) => SwitchError::Disabled(why),
         other => SwitchError::Untrusted(other.to_string()),
     }
 }
@@ -465,12 +463,16 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn disabled_switching_is_unavailable_and_keeps_the_policy_reason() {
+    fn disabled_switching_has_its_own_error_and_keeps_the_policy_reason() {
         let error = endpoint_error(EndpointError::SwitchingDisabled(
             "no private runtime directory".into(),
         ));
         assert!(
-            matches!(&error, SwitchError::Unreachable(reason) if reason == "switching is disabled: no private runtime directory")
+            matches!(&error, SwitchError::Disabled(reason) if reason == "no private runtime directory")
+        );
+        assert_eq!(
+            error.to_string(),
+            "switching is disabled: no private runtime directory"
         );
     }
 }

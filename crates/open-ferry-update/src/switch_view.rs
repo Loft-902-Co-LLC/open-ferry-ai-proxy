@@ -84,6 +84,7 @@ impl UpdateService {
 
 fn unreachable_reason(error: &SwitchError, missing_endpoint: bool) -> &'static str {
     match error {
+        SwitchError::Disabled(_) => "switching is disabled",
         SwitchError::TimedOut => "the supervisor did not answer in time",
         SwitchError::Untrusted(_) if cfg!(unix) && missing_endpoint => "no supervisor is running",
         SwitchError::Untrusted(_) => "the supervisor endpoint was not trusted",
