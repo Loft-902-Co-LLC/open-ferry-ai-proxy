@@ -62,7 +62,7 @@ Every error is a status and a body:
 | 409 | `already_preparing` | An install or rollback preparation is already running in this worker. |
 | 409 | `switch_uncertain` | A previous request may have been accepted; read fresh supervisor status before explicitly retrying. |
 | 409 | `switch_refused` | The supervisor refused the switch before acceptance; its reason is in `message`. |
-| 409 | `switch_failed` | Preparation failed (`Update` other than busy, including a stopped task), the endpoint was untrusted or unreachable before sending, automatic updates were off, or the release was skipped. |
+| 409 | `switch_failed` | Preparation failed (`Update` other than busy), the endpoint was untrusted or unreachable before sending, automatic updates were off, or the release was skipped. |
 | 409 | `not_supervised` | This install has no supervisor; `message` gives command-line update and restart instructions. |
 | 409 | `update_busy` | An update check or mutation holds the update lock; try again shortly. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
@@ -651,7 +651,7 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 }
 ```
 
-- **`phase`** is the current switch status, such as `waiting-for-signins`, `loading`, `handing-over`, `taking-over`, `watching` or `cancelled`. Without a switch it is the supervisor's state (`idle`, `degraded` or `stopping`); it is `unknown` before a live snapshot can be read.
+- **`phase`** is the current switch status, such as `waiting-for-signins`, `loading`, `handing-over`, `taking-over`, `watching` or `cancelled`. Without a switch it is the supervisor's state (`idle`, `degraded`, `switching` or `stopping`); it is `unknown` before a live snapshot can be read.
 - **`running_version`** is the supervisor's active worker version; while the request is served by a draining worker it can differ from the top-level running version. **`rollback_target`** is the version a rollback would select now, or `null`. During a watch it is the switch's source version. **`watch_until`** is the watch deadline or `null`.
 - **`switch`** is the live supervisor switch snapshot, or `null`. It may include additional supervisor fields. **`last_switch`** is the newest finished switch from pending journal outcomes and state history, or `null`. Its `result` is an opaque kebab-case outcome; clients should display a readable fallback for unknown values. `reason`, `from` and `at` can be `null`. `auto` is `true` only when recorded as automatic, `false` when recorded as manual, and `null` when unknown.
 - **`switching_disabled`** is the reason switching is unavailable, or `null`. **`error`** says why the live supervisor or switch records could not be read. A failed read keeps the last snapshot available in this worker; it never changes a supervised install into a plain one. Durable rollback and outcome fields are read independently. A read error never replaces `switching_disabled`.
@@ -664,6 +664,8 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 ```
 
 `request_id` is an additive opaque, random identifier generated once per request, unique across workers. It stays the same through preparation and the final request state. Clients can distinguish a new request from an older request for the same action.
+
+If a preparation task ends without recording a result, GET reports `state: "failed"` with reason `"preparing the switch stopped"`. This recovery is not a 409 response.
 
 `state` is `preparing`, `accepted`, `refused`, `failed` or `unknown` (the supervisor did not answer and may have accepted). `id` is set after acceptance; `reason` explains refusal, failure or uncertainty. `pending` means preparation or observation of an accepted or uncertain request is still pending. The request remains until a newer request replaces it. This in-memory request state ends when the worker exits; the supervisor's live switch and durable last outcome remain available across a handover.
 
