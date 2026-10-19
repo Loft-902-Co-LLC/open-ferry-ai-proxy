@@ -2251,6 +2251,7 @@ mod tests {
             fn effective_mode(&self) -> crate::host::ModeSnapshot {
                 crate::host::ModeSnapshot {
                     off: false,
+                    auto: true,
                     mode_gen: 0,
                 }
             }
@@ -2398,6 +2399,7 @@ mod tests {
             fn effective_mode(&self) -> crate::host::ModeSnapshot {
                 crate::host::ModeSnapshot {
                     off: false,
+                    auto: true,
                     mode_gen: 0,
                 }
             }
@@ -2634,6 +2636,7 @@ mod tests {
         fn effective_mode(&self) -> crate::host::ModeSnapshot {
             crate::host::ModeSnapshot {
                 off: false,
+                auto: true,
                 mode_gen: 0,
             }
         }

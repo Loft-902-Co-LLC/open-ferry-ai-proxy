@@ -531,8 +531,8 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 request.admitted
             );
         }
-        if request.auto && reading.off {
-            return refuse("updates are off".to_owned());
+        if request.auto && !reading.auto {
+            return refuse("automatic updates are not on".to_owned());
         }
         let to = match self.validate_target(&request, &from).await {
             Ok(to) => to,

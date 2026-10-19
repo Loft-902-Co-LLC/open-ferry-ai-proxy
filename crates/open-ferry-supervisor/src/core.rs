@@ -738,7 +738,10 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
     /// last reading (5.3).
     pub(crate) fn eval_mode(&mut self) -> crate::host::ModeSnapshot {
         let now = self.host.effective_mode();
-        if self.mode_last.is_some_and(|last| last != now) {
+        if self
+            .mode_last
+            .is_some_and(|last| last.off != now.off || last.mode_gen != now.mode_gen)
+        {
             self.mode_gen += 1;
         }
         self.mode_last = Some(now);

@@ -156,6 +156,7 @@ fn environment_mode() -> Option<String> {
 /// What `effective_mode` last reported and last complained of.
 struct ModeState {
     off: bool,
+    auto: bool,
     mode_gen: u64,
     /// The last read failure that was logged, so one that goes on is
     /// logged once.
@@ -202,6 +203,7 @@ impl SupervisedHost {
             // Until a read works, nothing may be switched.
             mode: Mutex::new(ModeState {
                 off: true,
+                auto: false,
                 mode_gen: 0,
                 complained: None,
             }),
@@ -278,11 +280,12 @@ impl Host for SupervisedHost {
     fn effective_mode(&self) -> ModeSnapshot {
         // Quietly: this runs every supervisor tick while switching.
         let read = crate::settings::load_quietly(&crate::scope::Host, &self.config_path)
-            .map(|config| Settings::resolve(&config.self_update, (self.env)().as_deref()).mode)
-            .map(|mode| mode == SelfUpdateMode::Off);
+            .map(|config| Settings::resolve(&config.self_update, (self.env)().as_deref()).mode);
         let mut state = self.mode.lock().unwrap_or_else(|e| e.into_inner());
         match read {
-            Ok(off) => {
+            Ok(mode) => {
+                let off = mode == SelfUpdateMode::Off;
+                state.auto = mode == SelfUpdateMode::Auto;
                 state.complained = None;
                 if off != state.off {
                     state.off = off;
@@ -302,6 +305,7 @@ impl Host for SupervisedHost {
         }
         ModeSnapshot {
             off: state.off,
+            auto: state.auto,
             mode_gen: state.mode_gen,
         }
     }
@@ -1236,12 +1240,14 @@ mod tests {
             host.effective_mode(),
             ModeSnapshot {
                 off: true,
+                auto: false,
                 mode_gen: 0
             }
         );
         write(dir.path(), "self-update:\n  mode: auto\n");
         let first = host.effective_mode();
         assert!(!first.off);
+        assert!(first.auto);
         assert_eq!(host.effective_mode(), first, "no change, no new generation");
         write(dir.path(), "self-update:\n  mode: \"off\"\n");
         let second = host.effective_mode();
@@ -1250,7 +1256,12 @@ mod tests {
         write(dir.path(), "self-update:\n  mode: notify\n");
         let third = host.effective_mode();
         assert!(!third.off);
+        assert!(!third.auto);
         assert!(third.mode_gen > second.mode_gen);
+        write(dir.path(), "self-update:\n  mode: auto\n");
+        let fourth = host.effective_mode();
+        assert!(fourth.auto);
+        assert_eq!(fourth.mode_gen, third.mode_gen);
     }
 
     #[test]
@@ -1283,6 +1294,17 @@ mod tests {
         std::fs::write(&path, "port: [not, a, port\n").unwrap();
         assert_eq!(host.effective_mode(), before);
         std::fs::remove_file(&path).unwrap();
+        assert_eq!(host.effective_mode(), before);
+    }
+
+    #[test]
+    fn unreadable_config_keeps_notify_instead_of_enabling_automatic_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "self-update:\n  mode: notify\n");
+        let host = mode_host(dir.path(), Arc::new(Mutex::new(None)));
+        let before = host.effective_mode();
+        assert!(!before.off && !before.auto);
+        std::fs::remove_file(path).unwrap();
         assert_eq!(host.effective_mode(), before);
     }
 
