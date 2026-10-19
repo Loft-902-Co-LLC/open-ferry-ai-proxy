@@ -174,7 +174,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                             }
                             Event::Lost(why) => {
                                 self.worker_lost(wid, &why);
-                                return Waited::PeerGone { lost: true, why: format!("the new version's control channel was lost before take over: {why}") };
+                                return Waited::PeerGone { lost: true, why: "the new version's control channel was lost before take over".to_owned() };
                             }
                             Event::Message(message) => self.note_message(wid, &message),
                         }
@@ -493,7 +493,8 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             return refuse("busy: watching".to_owned());
         }
         if let Some(why) = &self.rt.disabled {
-            return refuse(format!("switching is disabled: {why}"));
+            tracing::debug!("switching is disabled: {why}");
+            return refuse("switching is disabled; see the supervisor log".to_owned());
         }
         if self.rt.journal.is_none() {
             return refuse("there is no journal".to_owned());
@@ -652,7 +653,10 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             How::Update => {
                 self.disk
                     .check_pin(&request.pin, &request.to, &request.sha256, self.clock.now())
-                    .map_err(|why| format!("the pin was refused: {why}"))?;
+                    .map_err(|why| {
+                        tracing::warn!("the switch pin was refused: {why}");
+                        "the pin was refused".to_owned()
+                    })?;
                 if request.sha256.eq_ignore_ascii_case(&from.sha256) {
                     return Err("that version is already running".to_owned());
                 }
@@ -680,7 +684,10 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
         let artifact = self
             .disk
             .artifact(&request.to, &request.sha256)
-            .map_err(|why| format!("{}: {why}", request.to))?;
+            .map_err(|why| {
+                tracing::warn!("the kept switch target was refused: {why}");
+                "the kept copy is missing or doesn't match".to_owned()
+            })?;
         if request.how == How::Rollback {
             // 5.4: a rollback validates its own target, the hash above and
             // then the binary's own `--version`.
@@ -695,12 +702,15 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 // `open-ferry 11.0.0` and `open-ferry 1.0.0-rc.1` contain `1.0.0`.
                 Ok(text) if text == format!("open-ferry {}", request.to) => {}
                 Ok(text) => {
-                    return Err(format!(
-                        "{}: its --version printed {text:?}, not that version",
-                        request.to
-                    ));
+                    tracing::warn!("the rollback target's --version printed {text:?}");
+                    return Err(
+                        "the rollback target's --version printed a different version".to_owned(),
+                    );
                 }
-                Err(why) => return Err(format!("{}: its --version failed: {why}", request.to)),
+                Err(why) => {
+                    tracing::warn!("the rollback target's --version failed: {why}");
+                    return Err("the rollback target's --version failed".to_owned());
+                }
             }
         }
         Ok(artifact)
@@ -748,8 +758,15 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
 
         // Step 2: J1.
         if let Err(why) = self.write_j1(open, superseding.as_deref()) {
-            let why = format!("could not write the journal: {why}");
-            return self.end_failed(open, Phase::Loading, Blame::Environment, &why, false, false);
+            tracing::warn!("could not write the switch journal: {why}");
+            return self.end_failed(
+                open,
+                Phase::Loading,
+                Blame::Environment,
+                "could not write the journal",
+                false,
+                false,
+            );
         }
         // Item 5's hook: the pin is consumed only after J1 has landed.
         self.consume_pin_when_durable(&request.pin);
@@ -794,12 +811,12 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             if let Some(ended) = self.cancel_then_a(open, a).await {
                 return ended;
             }
-            let why = format!("could not write the journal: {why}");
+            tracing::warn!("could not write the switch journal: {why}");
             return self.end_failed(
                 open,
                 Phase::HandingOver,
                 Blame::Environment,
-                &why,
+                "could not write the journal",
                 true,
                 false,
             );
@@ -885,9 +902,13 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             if !self.kill_and_wait(b).await {
                 return Ended::Stopped;
             }
-            let why = format!("could not write the journal: {why}");
+            tracing::warn!("could not write the switch journal: {why}");
             return self
-                .back_to_a(open, a, Some((Blame::Environment, &why)))
+                .back_to_a(
+                    open,
+                    a,
+                    Some((Blame::Environment, "could not write the journal")),
+                )
                 .await;
         }
         self.progress(replies, open, false);
@@ -932,9 +953,8 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                         self.worker_lost(b, &why);
                         return Some((
                             true,
-                            format!(
-                                "the new version's control channel was lost before take over: {why}"
-                            ),
+                            "the new version's control channel was lost before take over"
+                                .to_owned(),
                         ));
                     }
                     Event::Message(message) => self.note_message(b, &message),
@@ -1305,8 +1325,12 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                     return Err(ended);
                 }
                 self.refuse_untrusted(&binary, &open.to.version, &why);
-                let why = format!("the new version is not a trusted binary: {why}");
-                return Err(self.end_load_failed(open, Blame::Environment, &why, false));
+                return Err(self.end_load_failed(
+                    open,
+                    Blame::Environment,
+                    "the new version is not a trusted binary",
+                    false,
+                ));
             }
             Ok(Err(error)) => {
                 if !self.wait_survivor(b).await {
@@ -1324,7 +1348,22 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 } else {
                     Blame::NewVersion
                 };
-                return Err(self.end_load_failed(open, blame, &error.to_string(), false));
+                tracing::warn!("the new version could not start: {error}");
+                let why = match &error {
+                    SpawnError::Missing => "the worker binary is missing",
+                    SpawnError::HashMismatch { .. } => {
+                        "the worker binary no longer matches its hash"
+                    }
+                    SpawnError::Timeout => "the worker did not connect in time",
+                    SpawnError::Handshake(reason)
+                        if reason.contains("missing required capabilities") =>
+                    {
+                        "the worker is missing required capabilities"
+                    }
+                    SpawnError::Handshake(_) => "the worker's greeting failed",
+                    _ => "the worker could not start",
+                };
+                return Err(self.end_load_failed(open, blame, why, false));
             }
             Err(_) => {
                 if !self.wait_survivor(b).await {
@@ -1377,7 +1416,14 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 }
                 return Err(self.end_cancelled(open));
             }
-            Waited::Msg(Message::LoadFailed { reason }) => (Blame::NewVersion, reason, false),
+            Waited::Msg(Message::LoadFailed { reason }) => {
+                tracing::warn!("the new version could not load: {reason}");
+                (
+                    Blame::NewVersion,
+                    "the new version could not load".to_owned(),
+                    false,
+                )
+            }
             Waited::Msg(Message::Incompatible { needs_supervisor }) => (
                 Blame::Environment,
                 format!("the new version needs supervisor protocol {needs_supervisor}"),
@@ -1754,13 +1800,18 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 // missing or corrupt handover (`handover:`) or anything else is the
                 // new version's.
                 let lease = reason.starts_with("lease:");
+                tracing::warn!("the new version could not take over: {reason}");
                 (
                     if lease {
                         Blame::Environment
                     } else {
                         Blame::NewVersion
                     },
-                    format!("the new version could not take over: {reason}"),
+                    if lease {
+                        "the new version could not take over: the worker lease conflicts".to_owned()
+                    } else {
+                        "the new version could not take over".to_owned()
+                    },
                 )
             }
             Waited::Exited(info) => (

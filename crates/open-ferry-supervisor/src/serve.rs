@@ -55,7 +55,8 @@ where
         Ok(Ok(Some(frame))) => frame,
         Ok(Ok(None)) => return,
         Ok(Err(why)) => {
-            let _ = channel.send(&error(&format!("bad request: {why}"))).await;
+            tracing::debug!("bad endpoint request: {why}");
+            let _ = channel.send(&error("bad request")).await;
             return;
         }
         Err(_) => {
@@ -130,8 +131,9 @@ where
         } => {
             if let Some(why) = serve.shared.snapshot().switching_disabled {
                 // Answered from the snapshot, without the core (v3 3.8).
+                tracing::debug!("switching is disabled: {why}");
                 let _ = channel
-                    .send(&error(&format!("switching is disabled: {why}")))
+                    .send(&error("switching is disabled; see the supervisor log"))
                     .await;
                 return;
             }
@@ -314,6 +316,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bad_request_does_not_echo_private_paths() {
+        let (serve, _rx) = serve();
+        let replies = ask(
+            &serve,
+            serde_json::json!({
+                "type": "switch", "v": 1, "to": "2.0.0", "sha256": "ab", "pin": "p",
+                "how": "/private/update-test/invalid", "auto": false,
+                "admitted": {"while_off": false, "mode_gen": 0},
+            }),
+        )
+        .await;
+        assert!(
+            matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason == "bad request"),
+            "{replies:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_switch_request_is_handed_to_the_core_and_its_replies_streamed() {
         let (serve, mut rx) = serve();
         let core = tokio::spawn(async move {
@@ -355,10 +375,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_switch_while_switching_is_disabled_is_refused_with_the_reason() {
+    async fn a_switch_while_switching_is_disabled_has_a_path_free_reason() {
         let (serve, mut rx) = serve();
         serve.shared.publish(crate::snapshot::Snapshot {
-            switching_disabled: Some("the journal is unreadable".to_owned()),
+            switching_disabled: Some("the journal /private/account/state is unreadable".to_owned()),
             ..crate::snapshot::Snapshot::default()
         });
         let request = serde_json::json!({
@@ -369,7 +389,7 @@ mod tests {
         let replies = ask(&serve, request).await;
         assert!(
             matches!(&replies[..], [EndpointReply::Error { reason, .. }]
-                if reason.contains("disabled") && reason.contains("the journal is unreadable")),
+                if reason == "switching is disabled; see the supervisor log"),
             "{replies:?}"
         );
         assert!(rx.try_recv().is_err(), "the core was never asked");

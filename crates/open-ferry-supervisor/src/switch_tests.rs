@@ -1262,7 +1262,7 @@ async fn a_request_with_no_live_pin_or_a_wrong_hash_or_the_running_version_is_re
     let mut rig = Rig::new().await;
     let (_c, replies) = go!(rig, wrong);
     assert!(
-        matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason.contains("hashes"))
+        matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason == "the kept copy is missing or doesn't match")
     );
     let mut same = update(false);
     same.to = "1.0.0".to_owned();
@@ -7194,4 +7194,122 @@ async fn automatic_admission_refuses_unreadable_exclusions_but_manual_admission_
             assert_eq!(done_result(&replies)["result"], "switched");
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn switch_refusals_keep_private_paths_in_the_supervisor_log() {
+    for case in [
+        "pin",
+        "artifact",
+        "disabled",
+        "version-output",
+        "version-error",
+    ] {
+        let mut rig = Rig::new().await;
+        let mut request = update(false);
+        let expected = match case {
+            "pin" => {
+                request.pin = "/private/update-test/pin".into();
+                "the pin was refused"
+            }
+            "artifact" => {
+                request.to = "/private/update-test/binary".into();
+                "the kept copy is missing or doesn't match"
+            }
+            "disabled" => {
+                rig.rt.as_mut().unwrap().disabled =
+                    Some("untrusted /private/update-test/binary".into());
+                "switching is disabled; see the supervisor log"
+            }
+            _ => {
+                with_previous(&mut rig);
+                request = rollback_to("0.9.0", crate::testkit::SHA_3);
+                let reply = if case == "version-output" {
+                    Ok("wrong binary /private/update-test/binary".into())
+                } else {
+                    Err("could not open /private/update-test/binary".into())
+                };
+                rig.cfg.runner = std::sync::Arc::new(crate::testkit::ScriptedRunner(reply));
+                if case == "version-output" {
+                    "the rollback target's --version printed a different version"
+                } else {
+                    "the rollback target's --version failed"
+                }
+            }
+        };
+        let (_core, replies) = go!(rig, request);
+        assert!(
+            matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason == expected),
+            "{case}: {replies:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn worker_failure_outcomes_do_not_record_private_paths() {
+    for taking_over in [false, true] {
+        let mut rig = Rig::new().await;
+        let message = if taking_over {
+            crate::protocol::Message::TakeFailed {
+                reason: "lease: /private/update-test/lease is held".into(),
+            }
+        } else {
+            crate::protocol::Message::LoadFailed {
+                reason: "cannot read /private/update-test/config".into(),
+            }
+        };
+        rig.driver.on(
+            "2.0.0",
+            if taking_over { "take_over" } else { "spawn" },
+            vec![Step::Msg(message)],
+        );
+        let (core, replies) = go!(rig, update(false));
+        let result = done_result(&replies);
+        assert_eq!(
+            result["why"],
+            if taking_over {
+                "the new version could not take over: the worker lease conflicts"
+            } else {
+                "the new version could not load"
+            }
+        );
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("/private/")
+        );
+        assert!(
+            !serde_json::to_string(&rig.disk.state.lock().unwrap().state)
+                .unwrap()
+                .contains("/private/")
+        );
+        assert!(
+            !serde_json::to_string(&core.rt.journal)
+                .unwrap()
+                .contains("/private/")
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn watch_failure_outcomes_do_not_record_private_paths() {
+    let mut rig = Rig::new().await;
+    let (mut core, replies) = go!(rig, update(false));
+    let id = done_result(&replies)["id"].as_str().unwrap().to_owned();
+    core.window_failure("worker failure at /private/update-test/config")
+        .await;
+    let outcome = stated(&rig.disk, &id);
+    assert_eq!(
+        outcome.record.why.as_deref(),
+        Some("the new version failed during its watch")
+    );
+    assert_eq!(
+        outcome.mark_failed.unwrap().why,
+        "the new version failed during its watch"
+    );
+    assert!(
+        !serde_json::to_string(&core.rt.journal)
+            .unwrap()
+            .contains("/private/")
+    );
 }
