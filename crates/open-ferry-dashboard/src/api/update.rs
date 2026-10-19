@@ -53,6 +53,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
         .0
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    live.recover_finished_task();
     let supervisor = match view {
         Err(SwitchError::NotSupervised) => Value::Null,
         view => {
@@ -158,6 +159,23 @@ struct Live {
     supervisor: Option<Value>,
     snapshot_at: Option<Instant>,
     failed_reads: u32,
+}
+
+impl Live {
+    fn recover_finished_task(&mut self) {
+        if self.task.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.task = None;
+            if let Some(request) = &self.request
+                && request.state == "preparing"
+            {
+                tracing::warn!("dashboard API: switch preparation task ended without a result");
+                self.request = Some(SwitchRequest::finished(
+                    request.action,
+                    Err(SwitchError::Stopped),
+                ));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -276,6 +294,7 @@ impl Requests {
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            live.recover_finished_task();
             if let Some(request) = &live.request {
                 if request.state == "preparing" {
                     return Err(ApiError::new(
@@ -345,6 +364,27 @@ pub(crate) async fn rollback(State(state): State<DashboardState>) -> Result<Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_task_ending_without_a_result_recovers_preparation_as_unknown() {
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut live = Live {
+            request: Some(SwitchRequest::preparing("install")),
+            task: Some(task),
+            ..Default::default()
+        };
+        live.recover_finished_task();
+        assert!(live.task.is_none());
+        let request = live.request.unwrap();
+        assert_eq!(request.state, "unknown");
+        assert!(
+            request.pending,
+            "status must be read before an explicit retry"
+        );
+    }
 
     fn assert_error(error: SwitchError, state: &str, code: &str, status: StatusCode) {
         let request = SwitchRequest::finished("install", Err(error));
