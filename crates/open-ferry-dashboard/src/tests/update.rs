@@ -214,8 +214,11 @@ impl open_ferry_update::SwitchProgress for Progress {
     }
 }
 
+type StatusGate = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+
 struct Switcher {
     delay: Duration,
+    status_gate: std::sync::Mutex<Option<StatusGate>>,
     error: std::sync::Mutex<Option<open_ferry_update::SwitchError>>,
     calls: AtomicUsize,
     snapshot: std::sync::Mutex<serde_json::Value>,
@@ -225,6 +228,7 @@ impl Switcher {
     fn new(delay: Duration, refusal: Option<&'static str>) -> Arc<Self> {
         Arc::new(Self {
             delay,
+            status_gate: std::sync::Mutex::new(None),
             error: std::sync::Mutex::new(
                 refusal.map(|reason| open_ferry_update::SwitchError::Refused(reason.into())),
             ),
@@ -257,6 +261,11 @@ impl open_ferry_update::Switcher for Switcher {
     ) -> BoxFuture<'_, Result<serde_json::Value, open_ferry_update::SwitchError>> {
         Box::pin(async move {
             let snapshot = self.snapshot.lock().unwrap().clone();
+            let gate = self.status_gate.lock().unwrap().take();
+            if let Some((started, release)) = gate {
+                started.notify_one();
+                release.notified().await;
+            }
             if snapshot.is_null() {
                 Err(open_ferry_update::SwitchError::Unreachable(
                     "fake endpoint".into(),
@@ -549,7 +558,7 @@ async fn status_marks_a_cached_supervisor_stale_and_keeps_its_disabled_reason() 
 }
 
 #[tokio::test]
-async fn status_exposes_the_durable_outcome_without_artifact_paths() {
+async fn status_prefers_a_pending_journal_outcome_to_older_state_history() {
     use open_ferry_update::journal::{JOURNAL_FILE, Journal, Outcome};
     use open_ferry_update::state::SwitchRecord;
     let fake = Switcher::new(Duration::ZERO, None);
@@ -565,7 +574,14 @@ async fn status_exposes_the_durable_outcome_without_artifact_paths() {
     );
     record.result = Some("rolled-back".into());
     record.why = Some("the operator requested it".into());
-    record.binary = "a path the dashboard must not return".into();
+    let data = DataDir::at(scratch.path());
+    let mut state = open_ferry_update::State::load(&data.state_file());
+    let mut older =
+        SwitchRecord::started("older", "update", "0.0.9", "0.1.0", "2026-10-17T16:00:00Z");
+    older.result = Some("switched".into());
+    state.upsert_record(older);
+    state.save(&data.state_file()).unwrap();
+    let state_before = std::fs::read(data.state_file()).unwrap();
     journal.outcomes.push(Outcome {
         record,
         mark_failed: None,
@@ -577,11 +593,17 @@ async fn status_exposes_the_durable_outcome_without_artifact_paths() {
     assert_eq!(last["to"], "0.1.0");
     assert_eq!(last["reason"], "the operator requested it");
     assert!(last["auto"].is_null());
-    assert!(last.get("binary").is_none());
+    assert_eq!(last["how"], "rollback");
+    assert_eq!(last["from"], "0.2.0");
+    assert_eq!(
+        std::fs::read(data.state_file()).unwrap(),
+        state_before,
+        "GET did not flush the pending outcome into state"
+    );
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_busy_update_lock_answers_promptly_without_calling_the_supervisor() {
+async fn a_busy_update_lock_returns_conflict_without_calling_the_supervisor() {
     let fake = Switcher::new(Duration::ZERO, None);
     let (dash, scratch) = supervised(fake.clone());
     let data = DataDir::at(scratch.path());
@@ -642,4 +664,28 @@ async fn unreadable_switch_records_return_a_fixed_reason() {
             .to_string()
             .contains(&scratch.path().to_string_lossy().into_owned())
     );
+}
+
+#[tokio::test]
+async fn a_status_read_started_before_acceptance_does_not_clear_pending() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, _scratch) = supervised(fake.clone());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *fake.status_gate.lock().unwrap() = Some((started.clone(), release.clone()));
+    let read = dash.get(STATUS);
+    tokio::pin!(read);
+    tokio::select! {
+        _ = &mut read => panic!("the old snapshot must stay gated"),
+        () = started.notified() => {}
+    }
+    dash.call(Method::POST, INSTALL, "")
+        .await
+        .json(StatusCode::ACCEPTED);
+    release.notify_one();
+    let stale_read = read.await.json(StatusCode::OK);
+    assert_eq!(stale_read["switch_request"]["state"], "accepted");
+    assert_eq!(stale_read["switch_request"]["pending"], true);
+    let fresh_read = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(fresh_read["switch_request"]["pending"], false);
 }

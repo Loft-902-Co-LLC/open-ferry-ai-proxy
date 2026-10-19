@@ -100,12 +100,23 @@ test("installs from About after confirmation and follows the handover", async ({
   await expect(card.getByText("Preparing the switch")).toBeVisible();
   expect(watched.server.switchRequests).toEqual(["install"]);
   await shot(page, "updates-preparing");
+  watched.server.setUpdates({ ...staged, switch_request: {
+    action: "install", state: "accepted", id: "e2e-install", pending: true, reason: null,
+  } });
+  await expect(card.getByText("Switch accepted")).toBeVisible({ timeout: 6_000 });
   for (const phase of ["waiting-for-signins", "loading", "handing-over", "taking-over", "watching"]) {
-    watched.server.setUpdates(updateStatus({ supervisor: supervisorStatus({
+    if (phase === "handing-over") watched.server.failNextUpdatePoll();
+    watched.server.setUpdates(updateStatus({ switch_request: {
+      action: "install", state: "accepted", id: "e2e-install", pending: false, reason: null,
+    }, supervisor: supervisorStatus({
       phase, running_version: phase === "watching" ? "0.2.0" : "0.1.0",
       rollback_target: "0.1.0", watch_until: phase === "watching" ? "2026-10-18T16:10:00Z" : null,
       switch: { id: "e2e-install", how: "update", from: "0.1.0", to: "0.2.0" },
     }) }));
+    if (phase === "handing-over") {
+      await expect.poll(() => watched.server.failedUpdatePolls).toBe(1);
+      await expect(card.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    }
     await expect(card.getByText(`Switch: ${phase.replaceAll("-", " ")}`)).toBeVisible({ timeout: 6_000 });
     await shot(page, `updates-${phase}`);
   }
@@ -117,6 +128,10 @@ test("installs from About after confirmation and follows the handover", async ({
   await expect(card.getByRole("button", { name: "Roll back" })).toBeVisible();
   await shot(page, "updates-switched");
   expect(watched.server.switchRequests).toEqual(["install"]);
+  expect(watched.server.failedUpdatePolls).toBe(1);
+  // Chromium reports the deliberately reset connection; all other errors are unexpected.
+  expect(watched.consoleErrors).toEqual([expect.stringContaining("net::ERR_CONNECTION_RESET")]);
+  watched.consoleErrors.length = 0;
   expectClean(watched);
 });
 

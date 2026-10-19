@@ -534,6 +534,8 @@ export interface MockOptions {
 
 export interface MockServer {
   setUpdates: (status: UpdateStatus) => void;
+  failNextUpdatePoll: () => void;
+  failedUpdatePolls: number;
   switchRequests: string[];
   /** API calls the table doesn't answer, as "METHOD /path". */
   unhandled: string[];
@@ -558,6 +560,7 @@ export async function mockServer(
 ): Promise<MockServer> {
   const now = Date.now();
   let updates = options.updates;
+  let failUpdatePoll = false;
   const connected = options.credentials ?? true;
   const writable = options.writable ?? true;
   const separate = options.separateManagement ?? false;
@@ -581,6 +584,8 @@ export async function mockServer(
   const logs = recentLogs(calls).map((entry) => ({ ...entry, size: logFile(entry).length }));
   const server: MockServer = {
     setUpdates: (status) => { updates = status; },
+    failNextUpdatePoll: () => { failUpdatePoll = true; },
+    failedUpdatePolls: 0,
     switchRequests: [],
     unhandled: [],
     offOrigin: [],
@@ -650,6 +655,11 @@ export async function mockServer(
           }),
         );
       case "GET /open-ferry/api/v1/update": {
+        if (failUpdatePoll) {
+          failUpdatePoll = false;
+          server.failedUpdatePolls += 1;
+          return route.abort("connectionreset");
+        }
         if (updates !== undefined) {
           return json(route, updates);
         }
