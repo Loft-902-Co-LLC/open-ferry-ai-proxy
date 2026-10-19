@@ -450,14 +450,12 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
                 let view = journal(root);
                 let reported = state.has_failed("99.0.0")
                     && view["outcomes"].as_array().is_some_and(Vec::is_empty);
-                let alone = view["workers"].as_array().is_some_and(|workers| {
-                    workers.len() == 1
-                        && workers[0]["version"] == env!("CARGO_PKG_VERSION")
-                        && workers[0]["role"] == "active"
-                        && workers[0]["lost"] == false
-                });
+                let drained = state
+                    .history
+                    .iter()
+                    .any(|record| record.to == "99.0.0" && record.drained_ms.is_some());
                 reported
-                    && alone
+                    && drained
                     && view["active"]["version"] == env!("CARGO_PKG_VERSION")
                     && view["switch"].is_null()
             },
@@ -484,6 +482,12 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
         .until("the prior last_check second to end", || {
             previous.as_deref()
                 != Some(&chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        })
+        .await;
+    // S2's rename can be visible before its writer releases the update lock.
+    waits
+        .until("the drain writer to release the update lock", || {
+            data.try_lock().unwrap().is_some()
         })
         .await;
     let before = server.requests();
@@ -513,16 +517,8 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
             && record.result.as_deref() == Some("failed-after-switch")
             && record.returned_to.as_deref() == Some(env!("CARGO_PKG_VERSION"))
     });
-    let view = journal(root);
-    let pending = view["outcomes"].as_array().is_some_and(|outcomes| {
-        outcomes.iter().any(|outcome| {
-            outcome["record"]["to"] == "99.0.0"
-                && outcome["record"]["result"] == "failed-after-switch"
-                && outcome["record"]["returned_to"] == env!("CARGO_PKG_VERSION")
-        })
-    });
     assert!(
-        recorded || pending,
-        "the supervisor recorded the watch failure and return: {state:?}, {view}"
+        recorded,
+        "the supervisor recorded the watch failure and return: {state:?}"
     );
 }
