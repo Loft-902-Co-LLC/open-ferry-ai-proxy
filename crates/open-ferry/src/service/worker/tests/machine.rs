@@ -128,7 +128,7 @@ struct WriteProbe {
     writes: std::sync::atomic::AtomicUsize,
     /// When the first stalled write began, which is when its send timeout
     /// started.
-    first_stall: std::sync::OnceLock<Instant>,
+    first_stall: std::sync::OnceLock<tokio::time::Instant>,
 }
 
 struct ProbedWriter {
@@ -147,7 +147,7 @@ impl tokio::io::AsyncWrite for ProbedWriter {
                 .writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if probe.stall.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = probe.first_stall.set(Instant::now());
+                let _ = probe.first_stall.set(tokio::time::Instant::now());
                 probe.arrived.notify_one();
                 return std::task::Poll::Pending;
             }
@@ -2011,12 +2011,14 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     let mut setup = Setup::new(Role::Active);
     setup.stop_ms = 100;
     setup.write_probe = Some(probe.clone());
-    // A long send timeout, so the two behaviours are far apart in absolute
-    // terms: a loaded machine's delay doesn't grow with it.
     let send_timeout = Duration::from_secs(5);
     setup.timing.send_timeout = send_timeout;
     let mut rig = setup.start();
     assert_eq!(rig.fake().recv_status().await.2, "active");
+    // Startup uses real sockets and disk I/O. Freeze time only once active,
+    // so this checks the send and stop deadlines without counting delays in
+    // scheduling the worker or waking the task that observes its exit.
+    tokio::time::pause();
     probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
     rig.fake().send(Message::Ping).await;
     tokio::time::timeout(WAIT, probe.arrived.notified())
@@ -2029,15 +2031,18 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
         .await
         .expect("the worker didn't exit in time")
         .unwrap();
-    let exited = Instant::now();
+    let exited = tokio::time::Instant::now();
     assert!(succeeded(code));
-    // Counted from the first stalled write, when the send timeout began:
-    // about 5.1 s. The wrong behaviour waits out the send timeout again, so
-    // at least about 10.1 s. The bound of 8 s leaves about 2.9 s over the
-    // right time and about 2.1 s under the wrong one, whatever delays the
-    // test thread.
+    // One send timeout plus the stop budget is about 5.1 s of Tokio time.
+    // A second full send timeout still takes at least 10 s and fails the
+    // unchanged 8 s bound, even when no wall-clock time elapses.
     let stalled_at = *probe.first_stall.get().unwrap();
-    assert!(exited.duration_since(stalled_at) < Duration::from_secs(8));
+    let elapsed = exited.duration_since(stalled_at);
+    assert!(elapsed >= send_timeout, "the first send did not time out");
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "the stalled send and stop took {elapsed:?} of Tokio time"
+    );
     assert!(!rig.lease_is_free());
 }
 
