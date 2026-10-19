@@ -191,11 +191,10 @@ fn request(port: u16) -> Result<String, String> {
             key.eq_ignore_ascii_case(name).then(|| value.trim())
         })
     };
-    if let Some(size) = header("content-length") {
-        let expected: usize = size.parse().map_err(|_| "invalid Content-Length")?;
-        if body.len() != expected {
-            return Err("incomplete response body".into());
-        }
+    let size = header("content-length").ok_or("missing Content-Length")?;
+    let expected: usize = size.parse().map_err(|_| "invalid Content-Length")?;
+    if body.len() != expected {
+        return Err("incomplete response body".into());
     }
     match header("x-open-ferry-test-marker") {
         Some(marker @ ("before" | "after")) => Ok(marker.into()),

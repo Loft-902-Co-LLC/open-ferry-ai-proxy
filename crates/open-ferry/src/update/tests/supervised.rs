@@ -556,3 +556,41 @@ async fn supervised_json_keeps_install_policy_and_plain_previous_fields_additive
     assert_eq!(status.why_not.as_deref(), Some("original install reason"));
     assert_eq!(status.why_not_code, Some("no-receipt"));
 }
+
+#[tokio::test]
+async fn interactive_yes_and_no_confirm_the_supervised_update_and_rollback() {
+    for request in [Request::Update, Request::Rollback] {
+        for answer in [false, true] {
+            let fake = SupervisedFake::new(if request == Request::Update {
+                "switched"
+            } else {
+                "rolled-back"
+            });
+            let ran = go(
+                request,
+                &fake,
+                &settings("auto", None),
+                false,
+                false,
+                Some(answer),
+            )
+            .await;
+            assert_eq!(
+                ran.asked,
+                [if request == Request::Update {
+                    "Install it?"
+                } else {
+                    "Roll back?"
+                }]
+            );
+            if answer {
+                assert_eq!(ran.code, 0);
+                assert!(fake.base.calls().contains(&request.action()));
+            } else {
+                assert_eq!(ran.result, "declined");
+                assert_eq!(ran.code, if request == Request::Update { 3 } else { 1 });
+                assert!(!fake.base.calls().contains(&request.action()));
+            }
+        }
+    }
+}
