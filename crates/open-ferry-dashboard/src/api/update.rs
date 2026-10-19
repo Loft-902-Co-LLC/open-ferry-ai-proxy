@@ -200,7 +200,10 @@ impl SwitchRequest {
                 request.pending = false;
                 request.state = if matches!(error, SwitchError::Refused(_)) {
                     "refused"
-                } else if matches!(error, SwitchError::TimedOut | SwitchError::Stopped) {
+                } else if matches!(
+                    error,
+                    SwitchError::TimedOut | SwitchError::Stopped | SwitchError::Protocol(_)
+                ) {
                     "unknown"
                 } else {
                     "failed"
@@ -338,6 +341,110 @@ pub(crate) async fn rollback(State(state): State<DashboardState>) -> Result<Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_error(error: SwitchError, state: &str, code: &str, status: StatusCode) {
+        let request = SwitchRequest::finished("install", Err(error));
+        assert_eq!(request.state, state);
+        assert_eq!(request.pending, state == "unknown");
+        if status == StatusCode::CONFLICT {
+            let error = request.response().unwrap_err();
+            assert_eq!(error.code, code);
+        } else {
+            assert_eq!(request.response().unwrap().status(), status);
+        }
+    }
+
+    #[test]
+    fn not_supervised_is_a_refusal_to_start() {
+        assert_error(
+            SwitchError::NotSupervised,
+            "failed",
+            "not_supervised",
+            StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn updates_off_is_a_failure_to_start() {
+        assert_error(
+            SwitchError::UpdatesOff,
+            "failed",
+            "switch_refused",
+            StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn update_errors_are_failures_to_prepare() {
+        assert_error(
+            SwitchError::Update(UpdateError::NothingStaged),
+            "failed",
+            "switch_refused",
+            StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn skipped_is_a_failure_to_start() {
+        assert_error(
+            SwitchError::Skipped(open_ferry_update::Report::SkippedFailed {
+                version: "0.2.0".into(),
+            }),
+            "failed",
+            "switch_refused",
+            StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn timed_out_might_have_been_accepted() {
+        assert_error(SwitchError::TimedOut, "unknown", "", StatusCode::ACCEPTED);
+    }
+    #[test]
+    fn unreachable_means_the_request_was_not_sent() {
+        assert_error(
+            SwitchError::Unreachable("offline".into()),
+            "failed",
+            "switch_refused",
+            StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn untrusted_is_a_failure_to_start() {
+        assert_error(
+            SwitchError::Untrusted("untrusted".into()),
+            "failed",
+            "switch_refused",
+            StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn protocol_might_have_been_accepted() {
+        assert_error(
+            SwitchError::Protocol("bad reply".into()),
+            "unknown",
+            "",
+            StatusCode::ACCEPTED,
+        );
+    }
+    #[test]
+    fn refused_is_a_known_refusal() {
+        assert_error(
+            SwitchError::Refused("busy".into()),
+            "refused",
+            "switch_refused",
+            StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn ended_is_a_known_failed_switch() {
+        assert_error(
+            SwitchError::Ended("exited".into()),
+            "failed",
+            "",
+            StatusCode::ACCEPTED,
+        );
+    }
+    #[test]
+    fn stopped_might_have_been_accepted() {
+        assert_error(SwitchError::Stopped, "unknown", "", StatusCode::ACCEPTED);
+    }
 
     #[test]
     fn preparation_errors_use_fixed_reasons_and_refusals_pass_through() {

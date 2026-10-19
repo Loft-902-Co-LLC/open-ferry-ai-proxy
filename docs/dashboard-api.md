@@ -691,7 +691,7 @@ The supervisor owns the switch. The route does not wait for handover or watch co
 
 At most one preparation runs per dashboard state. A second request while one runs returns `409 already_preparing`, with the message `already preparing`. `GET /update` reports eventual acceptance or refusal, including a refusal after the `202 preparing` response.
 
-An acceptance timeout or a stream ending without a reply is ambiguous: the answer is `202 {"uncertain": true}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The request retains state `unknown` and its reason, with `pending: false`; the read alone cannot prove its outcome. Check the live switch and last outcome before deciding to retry.
+An acceptance timeout, an invalid reply, or a stream ending without a reply is ambiguous: the answer is `202 {"uncertain": true}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The request retains state `unknown` and its reason, with `pending: false`; the read alone cannot prove its outcome. Check the live switch and last outcome before deciding to retry. An unreachable endpoint means the request was not sent and is a known failure.
 
 If the supervisor accepted the switch and then ended it with an error before the route returned, the answer is `202 {"failed": true, "reason": "..."}`. `switch_request.state` is `failed` and keeps that reason. This is a failed accepted operation, not a refusal.
 
