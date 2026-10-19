@@ -229,7 +229,7 @@ impl UpdateService {
             .try_lock_owned()
             .map_err(|_| UpdateError::Busy)?;
         let snapshot = self.inner.snapshot.borrow().clone();
-        if auto && snapshot.settings.mode == SelfUpdateMode::Off {
+        if auto && snapshot.settings.mode != SelfUpdateMode::Auto {
             return Err(SwitchError::UpdatesOff);
         }
         let running = Arc::clone(&self.inner.running)
@@ -307,7 +307,7 @@ impl UpdateService {
             what: "prepare the update",
             error: error.to_string(),
         })??;
-        if auto && self.settings().mode == SelfUpdateMode::Off {
+        if auto && self.settings().mode != SelfUpdateMode::Auto {
             return Err(SwitchError::UpdatesOff);
         }
         switcher
