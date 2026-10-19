@@ -138,21 +138,33 @@ fn a_user_launchagent_serves_and_uninstalls_within_its_exit_timeout() {
         String::from_utf8_lossy(&removed.stdout),
         String::from_utf8_lossy(&removed.stderr)
     );
+    // bootout can return before the job exits. Its processes and lifetime lock
+    // must be gone within the same ExitTimeOut, measured from the command's start.
+    loop {
+        let supervisor_alive = process_alive(pid, started);
+        let worker_alive = workers
+            .iter()
+            .any(|&(pid, started)| process_alive(pid, started));
+        if !supervisor_alive && !worker_alive {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "uninstall exceeded launchd's ExitTimeOut: supervisor={supervisor_alive}, worker={worker_alive}\n{}",
+            std::fs::read_to_string(fx.root().join("Library/Logs/open-ferry.log"))
+                .unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         began.elapsed() < Duration::from_secs(60),
         "uninstall exceeded launchd's ExitTimeOut"
     );
-    assert!(
-        !process_alive(pid, started),
-        "supervisor survived uninstall"
-    );
-    assert!(
-        workers
-            .iter()
-            .all(|&(pid, started)| !process_alive(pid, started)),
-        "worker survived uninstall"
-    );
     SupervisorLock::try_acquire(data.root()).expect("supervisor lifetime lock released");
+    eprintln!(
+        "LaunchAgent served and released its supervisor, workers and lock in {:.3}s after uninstall began",
+        began.elapsed().as_secs_f64()
+    );
     assert!(
         !Command::new("launchctl")
             .args(["print", &name])

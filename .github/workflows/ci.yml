@@ -362,7 +362,7 @@ jobs:
         if: steps.launchd.outputs.available == 'true'
         env:
           OFP_TEST_LAUNCHD: "1"
-        run: cargo nextest run --profile ci -p open-ferry --locked --features blue-green-test --test process_launchd --run-ignored only -E 'test(=a_user_launchagent_serves_and_uninstalls_within_its_exit_timeout)'
+        run: cargo nextest run --profile ci -p open-ferry --locked --features blue-green-test --test process_launchd --run-ignored only --success-output immediate -E 'test(=a_user_launchagent_serves_and_uninstalls_within_its_exit_timeout)'
 
       - name: Save the cache
         if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
