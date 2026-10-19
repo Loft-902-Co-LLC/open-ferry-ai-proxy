@@ -660,8 +660,10 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 **`switch_request`** describes the latest dashboard install or rollback request in this worker, or `null`:
 
 ```json
-{"action": "install", "state": "preparing", "id": null, "reason": null, "pending": true}
+{"request_id": "46ca8ce60267177eaa54e796448145e0", "action": "install", "state": "preparing", "id": null, "reason": null, "pending": true}
 ```
+
+`request_id` is an additive opaque, random identifier generated once per request, unique across workers. It stays the same through preparation and the final request state. Clients can distinguish a new request from an older request for the same action.
 
 `state` is `preparing`, `accepted`, `refused`, `failed` or `unknown` (the supervisor did not answer and may have accepted). `id` is set after acceptance; `reason` explains refusal, failure or uncertainty. `pending` means preparation or observation of an accepted or uncertain request is still pending. The request remains until a newer request replaces it. This in-memory request state ends when the worker exits; the supervisor's live switch and durable last outcome remain available across a handover.
 

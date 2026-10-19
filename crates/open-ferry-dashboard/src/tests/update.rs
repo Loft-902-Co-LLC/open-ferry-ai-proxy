@@ -437,10 +437,10 @@ async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
             dash.call(Method::POST, path, "")
                 .await
                 .error(StatusCode::CONFLICT, "already_preparing");
-            assert_eq!(
-                dash.get(STATUS).await.json(StatusCode::OK)["switch_request"]["state"],
-                "preparing"
-            );
+            let preparing = dash.get(STATUS).await.json(StatusCode::OK);
+            assert_eq!(preparing["switch_request"]["state"], "preparing");
+            let request_id = preparing["switch_request"]["request_id"].as_str().unwrap();
+            assert_eq!(request_id.len(), 32);
             tokio::time::advance(Duration::from_secs(5)).await;
             tokio::task::yield_now().await;
             let body = dash.get(STATUS).await.json(StatusCode::OK);
@@ -452,6 +452,7 @@ async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
                     "accepted"
                 }
             );
+            assert_eq!(body["switch_request"]["request_id"], request_id);
             assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         }
     }
@@ -758,5 +759,27 @@ async fn post_recovers_a_dead_preparation_before_admitting_a_new_request() {
         let body = dash.get(STATUS).await.json(StatusCode::OK);
         assert_eq!(body["switch_request"]["state"], "accepted");
         assert!(body["switch_request"]["reason"].is_null());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn request_ids_differ_between_requests_and_workers() {
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let (dash, _scratch) = supervised(Switcher::new(Duration::ZERO, None));
+        for _ in 0..2 {
+            dash.call(Method::POST, INSTALL, "")
+                .await
+                .json(StatusCode::ACCEPTED);
+            let status = dash.get(STATUS).await.json(StatusCode::OK);
+            assert!(
+                ids.insert(
+                    status["switch_request"]["request_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                )
+            );
+        }
     }
 }

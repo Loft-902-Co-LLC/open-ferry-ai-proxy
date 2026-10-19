@@ -702,7 +702,7 @@ export async function mockServer(
           return json(route, { error: "not_supervised", message: "run open-ferry update on the server's computer, then restart it" }, 409);
         }
         updates = { ...updates, switch_request: {
-          action: "install", state: "preparing", id: null, reason: null, pending: true,
+          request_id: `request-${String(server.switchRequests.length)}`, action: "install", state: "preparing", id: null, reason: null, pending: true,
         } };
         return json(route, { preparing: true }, 202);
       }

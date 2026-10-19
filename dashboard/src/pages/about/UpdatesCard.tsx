@@ -225,7 +225,7 @@ export function UpdatesCard({ className }: { className?: string }) {
     onMutate: async (action) => {
       await client.cancelQueries({ queryKey: apiQueryKey(UPDATE) });
       const before = client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE));
-      const optimistic = { action, state: "preparing" as const, id: null, reason: null, pending: true };
+      const optimistic = { request_id: null, action, state: "preparing" as const, id: null, reason: null, pending: true };
       client.setQueryData<UpdateStatus>(apiQueryKey(UPDATE), (old) => old === undefined ? old : {
         ...old,
         switch_request: optimistic,
@@ -243,7 +243,8 @@ export function UpdatesCard({ className }: { className?: string }) {
   useEffect(() => {
     if (!switchError || switchContext === undefined || status.lastRead === switchContext.previousRead) return;
     if ((lastSwitch != null && JSON.stringify(lastSwitch) !== switchContext.lastSwitch) ||
-      (latestRequest?.action === switching.variables)) {
+      (latestRequest?.action === switching.variables &&
+        latestRequest.request_id !== switchContext.previousRead?.switch_request?.request_id)) {
       resetSwitch();
     }
   }, [switchError, switchContext, status.lastRead, latestRequest, lastSwitch, resetSwitch, switching.variables]);

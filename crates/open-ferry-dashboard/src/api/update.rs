@@ -169,7 +169,8 @@ impl Live {
                 && request.state == "preparing"
             {
                 tracing::warn!("dashboard API: switch preparation task ended without a result");
-                let mut stopped = SwitchRequest::preparing(request.action);
+                let mut stopped = request.clone();
+                stopped.finished_at = Instant::now();
                 stopped.state = "failed";
                 stopped.pending = false;
                 stopped.reason = Some("preparing the switch stopped".to_owned());
@@ -181,6 +182,7 @@ impl Live {
 
 #[derive(Clone, Debug, Serialize)]
 struct SwitchRequest {
+    request_id: String,
     action: &'static str,
     state: &'static str,
     id: Option<String>,
@@ -195,6 +197,7 @@ struct SwitchRequest {
 impl SwitchRequest {
     fn preparing(action: &'static str) -> Self {
         Self {
+            request_id: format!("{:032x}", rand::random::<u128>()),
             action,
             state: "preparing",
             id: None,
@@ -205,8 +208,10 @@ impl SwitchRequest {
         }
     }
 
-    fn finished(action: &'static str, result: Result<SwitchHandle, SwitchError>) -> Self {
-        let mut request = Self::preparing(action);
+    fn finish(mut self, result: Result<SwitchHandle, SwitchError>) -> Self {
+        let request = &mut self;
+        request.finished_at = Instant::now();
+        let action = request.action;
         match result {
             Ok(handle) => {
                 request.state = "accepted";
@@ -255,7 +260,7 @@ impl SwitchRequest {
                 });
             }
         }
-        request
+        self
     }
 
     fn response(&self) -> Result<Response, ApiError> {
@@ -323,7 +328,8 @@ impl Requests {
                     ));
                 }
             }
-            live.request = Some(SwitchRequest::preparing(action));
+            let preparing = SwitchRequest::preparing(action);
+            live.request = Some(preparing.clone());
             let requests = self.clone();
             live.task = Some(tokio::spawn(async move {
                 let result = AssertUnwindSafe(async {
@@ -341,7 +347,7 @@ impl Requests {
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(SwitchError::Stopped));
-                let request = SwitchRequest::finished(action, result);
+                let request = preparing.finish(result);
                 requests
                     .0
                     .lock()
@@ -400,7 +406,7 @@ mod tests {
     }
 
     fn assert_error(error: SwitchError, state: &str, code: &str, status: StatusCode) {
-        let request = SwitchRequest::finished("install", Err(error));
+        let request = SwitchRequest::preparing("install").finish(Err(error));
         assert_eq!(request.state, state);
         assert_eq!(request.pending, state == "unknown");
         if status == StatusCode::CONFLICT {
@@ -515,13 +521,11 @@ mod tests {
             }),
             SwitchError::Update(UpdateError::Journal("private journal path".into())),
         ] {
-            let request = SwitchRequest::finished("install", Err(error));
+            let request = SwitchRequest::preparing("install").finish(Err(error));
             assert!(!request.reason.unwrap().contains("private"));
         }
-        let request = SwitchRequest::finished(
-            "install",
-            Err(SwitchError::Refused("sign-ins are pending".into())),
-        );
+        let request = SwitchRequest::preparing("install")
+            .finish(Err(SwitchError::Refused("sign-ins are pending".into())));
         assert_eq!(request.reason.as_deref(), Some("sign-ins are pending"));
     }
 }
