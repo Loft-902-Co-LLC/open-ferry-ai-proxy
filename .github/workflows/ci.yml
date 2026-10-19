@@ -295,7 +295,7 @@ jobs:
             --output "$temp/$name" \
             "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$VERSION/$name"
           if [[ "$RUNNER_OS" == macOS ]]; then
-            echo "$sha256  $temp/$name" | shasum -a 256 --check
+            echo "$sha256  $temp/$name" | shasum -a 256 --check --strict
           else
             echo "$sha256  $temp/$name" | sha256sum --check --strict
           fi
