@@ -236,6 +236,79 @@ async fn disabled_switching_logs_once_at_info_without_its_local_reason() {
     assert_eq!(fake.calls.lock().unwrap().len(), 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn automatic_errors_keep_the_clients_request_certainty_and_never_resend() {
+    use crate::UpdateError;
+
+    for (error, level, message) in [
+        (
+            SwitchError::Unreachable("/private/pre-send-timeout".into()),
+            "WARN",
+            "the supervisor cannot be reached",
+        ),
+        (
+            SwitchError::Update(UpdateError::Io {
+                what: "prepare the update",
+                error: "/private/preparation-task".into(),
+            }),
+            "WARN",
+            "the automatic switch could not be prepared",
+        ),
+        (
+            SwitchError::Update(UpdateError::RollbackChanged {
+                expected: "0.1.0".into(),
+                actual: Some("0.0.9".into()),
+            }),
+            "WARN",
+            "the automatic switch could not be prepared",
+        ),
+        (
+            SwitchError::Update(UpdateError::NotNewer {
+                running: "0.2.0".into(),
+                latest: "0.2.0".into(),
+            }),
+            "WARN",
+            "the automatic switch could not be prepared",
+        ),
+        (
+            SwitchError::TimedOut,
+            "INFO",
+            "it may have taken the automatic switch",
+        ),
+        (
+            SwitchError::Stopped,
+            "INFO",
+            "it may have taken the automatic switch",
+        ),
+        (
+            SwitchError::Protocol("/private/partial-reply".into()),
+            "INFO",
+            "it may have taken the automatic switch",
+        ),
+    ] {
+        let f = Fixture::new().await;
+        let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+        fake.errors.lock().unwrap().push_back(error);
+        let log = Capture::default();
+        async {
+            service.check_once().await.unwrap().unwrap();
+            tokio::time::advance(Duration::from_secs(5 * 60)).await;
+            tokio::task::yield_now().await;
+        }
+        .with_subscriber(log.clone())
+        .await;
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        let events = log.0.lock().unwrap();
+        let notices: Vec<_> = events
+            .iter()
+            .filter(|event| event.contains(message))
+            .collect();
+        assert_eq!(notices.len(), 1, "{events:?}");
+        assert!(notices[0].starts_with(level), "{events:?}");
+        assert!(events.iter().all(|event| !event.contains("/private/")));
+    }
+}
+
 #[tokio::test]
 async fn overlapping_automatic_checks_send_only_one_switch_request() {
     let f = Fixture::new().await;

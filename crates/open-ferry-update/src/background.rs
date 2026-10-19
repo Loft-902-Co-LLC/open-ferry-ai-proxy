@@ -686,6 +686,9 @@ async fn checked(
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .automatic_warning(Some(&error));
+                    // Unreachable and Update mean nothing was sent. Uncertain
+                    // requests are never resent here; future checks still pass
+                    // the supervisor's admission and outcome cooldown checks.
                     match error {
                         SwitchError::Disabled(_) => {
                             if let Some(reason) = warning {
