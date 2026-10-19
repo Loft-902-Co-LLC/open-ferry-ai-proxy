@@ -243,11 +243,39 @@ pub fn alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use open_ferry_supervisor::process::windows::ProcessHandle;
-        match ProcessHandle::open_pid(pid) {
-            Ok(Some(handle)) => matches!(handle.try_wait(), Ok(None)),
-            Ok(None) => false,
-            Err(_) => true,
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+
+        // Only ask to wait: ProcessHandle::open_pid also needs terminate rights
+        // and a creation time, neither of which is needed here.
+        // SAFETY: an invalid pid only fails the call; the handle is owned below.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error().map(|code| code as u32) {
+                // No such worker. Access denied still means the process exists.
+                Some(ERROR_INVALID_PARAMETER) => false,
+                Some(ERROR_ACCESS_DENIED) => true,
+                // An unknown answer must fail the test, not prove alive or dead.
+                _ => panic!("can't open process {pid} to check whether it runs: {error}"),
+            };
+        }
+        // SAFETY: OpenProcess returned a valid handle whose ownership we take.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        // SAFETY: the owned handle has SYNCHRONIZE rights and stays open.
+        match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => false,
+            WAIT_TIMEOUT => true,
+            // A failed wait says nothing about liveness; fail rather than guess.
+            result => panic!(
+                "can't check whether process {pid} runs: wait returned {result:#x}: {}",
+                io::Error::last_os_error()
+            ),
         }
     }
     #[cfg(target_os = "macos")]

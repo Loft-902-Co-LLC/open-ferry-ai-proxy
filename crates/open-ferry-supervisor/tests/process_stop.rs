@@ -15,6 +15,68 @@ fn assert_not_killed(fx: &Fx, n: usize) {
     assert!(!sent.contains(&"kill".to_owned()), "worker {n}: {sent:?}");
 }
 
+// Not upstream's: an exited process may still have a handle and deny terminate
+// rights. Checking liveness must not mistake that denial for a running worker.
+#[cfg(windows)]
+#[test]
+fn windows_liveness_distinguishes_running_missing_and_exited_processes() {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Command, Stdio};
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetKernelObjectSecurity};
+
+    assert!(alive(std::process::id()), "this test process is running");
+    assert!(!alive(u32::MAX), "an invalid pid is not a running worker");
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--list")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(!alive(child.id()), "an exited child is not running");
+
+    // Keep the parent's existing handle, but allow new handles only to wait.
+    let sddl: Vec<u16> = "D:(A;;0x00100000;;;WD)\0".encode_utf16().collect();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the SDDL is NUL-terminated and descriptor is a valid out pointer.
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        },
+        0,
+        "{}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: the child handle is still owned and the descriptor is valid.
+    let changed = unsafe {
+        SetKernelObjectSecurity(child.as_raw_handle(), DACL_SECURITY_INFORMATION, descriptor)
+    };
+    let error = std::io::Error::last_os_error();
+    // SAFETY: the conversion allocated this descriptor with LocalAlloc.
+    unsafe { LocalFree(descriptor) };
+    assert_ne!(changed, 0, "{error}");
+    assert_eq!(
+        open_ferry_supervisor::process::windows::ProcessHandle::open_pid(child.id())
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(
+        !alive(child.id()),
+        "lack of terminate rights does not make an exited child run"
+    );
+}
+
 #[test]
 fn a_stop_ends_the_worker_gracefully_within_the_stop_budget() {
     let fx = Fx::new();
