@@ -201,6 +201,7 @@ impl Dash {
             Ledger::unavailable("the test has none")
         };
         let state = DashboardState {
+            update_requests: Default::default(),
             management,
             ledger,
             assets,

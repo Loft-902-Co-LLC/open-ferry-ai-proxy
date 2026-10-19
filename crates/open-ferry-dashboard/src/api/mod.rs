@@ -22,7 +22,7 @@ mod claude_cli;
 mod client_setup;
 mod config;
 mod request_logs;
-mod update;
+pub(crate) mod update;
 mod usage;
 
 use std::net::SocketAddr;
@@ -127,6 +127,14 @@ pub(crate) fn routes(state: &DashboardState) -> Router<DashboardState> {
         .route(
             &format!("{PREFIX}/update/check"),
             route(axum::routing::post(update::check)),
+        )
+        .route(
+            &format!("{PREFIX}/update/install"),
+            route(axum::routing::post(update::install)),
+        )
+        .route(
+            &format!("{PREFIX}/update/rollback"),
+            route(axum::routing::post(update::rollback)),
         );
     api.merge(other_paths)
         .layer(middleware::map_response(no_store))

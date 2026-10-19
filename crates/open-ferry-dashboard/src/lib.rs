@@ -97,6 +97,7 @@ pub fn router_for_guarded(
     claude_guard: Option<open_ferry_providers::claude_cli::SpawnGuard>,
 ) -> Router {
     router_from(DashboardState {
+        update_requests: Default::default(),
         claude_guard,
         management,
         ledger,
@@ -129,6 +130,8 @@ pub enum Listener {
 /// What the dashboard's handlers share.
 #[derive(Clone)]
 pub(crate) struct DashboardState {
+    /// A slow update request outlives the HTTP request that started it.
+    pub(crate) update_requests: api::update::Requests,
     /// The management API's state: the config, the access checks, the
     /// model registry and the log directory.
     pub(crate) management: ManagementState,
