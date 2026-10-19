@@ -373,6 +373,8 @@ fn a_lost_b_in_taking_over_gets_the_budget_then_its_handle_then_a_resumes() {
 fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Watching {
     let cause = arm(fx, "watching@B");
     fx.hold("journal.before:J-R1");
+    #[cfg(windows)]
+    fx.hold("journal.before:J3");
     let sup = fx.start(&tm(60_000));
     // A exits well before B's lost-channel budget ends. Keep its process
     // object until the caller finishes asserting: reopening its numeric pid
@@ -383,9 +385,23 @@ fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Watching {
     )
     .expect("open the original worker")
     .expect("the original worker still runs");
-    budgeted(fx, 2, cause, || {
+    let _replacement = budgeted(fx, 2, cause, || {
         let mut sw = fx.update(B);
         sw.accepted();
+        // At J3, B has loaded and cannot yet reach `go`, where its channel
+        // is lost. Retain its process object too, before the supervisor ends
+        // it and starts worker 3, so wait_dead(2) and killed: &[2] keep B's pid.
+        #[cfg(windows)]
+        let replacement = {
+            fx.wait_arrived("journal.before:J3");
+            let process = open_ferry_supervisor::process::windows::ProcessHandle::open_pid(
+                fx.pid_of(2).expect("the replacement worker was started"),
+            )
+            .expect("open the replacement worker")
+            .expect("the replacement worker still runs");
+            fx.release("journal.before:J3");
+            process
+        };
         fx.wait_arrived("journal.before:J-R1");
         // The supervisor reaches J-R1 only after B has exited: the replacement
         // does not run, and nothing is decided, while B holds anything.
@@ -394,11 +410,17 @@ fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Watching {
         change();
         fx.release("journal.before:J-R1");
         sw.done().expect("a done result");
+        #[cfg(windows)]
+        {
+            replacement
+        }
     });
     Watching {
         _supervisor: sup,
         #[cfg(windows)]
         _original: original,
+        #[cfg(windows)]
+        _replacement,
     }
 }
 
@@ -406,6 +428,8 @@ struct Watching {
     _supervisor: Sup,
     #[cfg(windows)]
     _original: open_ferry_supervisor::process::windows::ProcessHandle,
+    #[cfg(windows)]
+    _replacement: open_ferry_supervisor::process::windows::ProcessHandle,
 }
 
 #[test]
