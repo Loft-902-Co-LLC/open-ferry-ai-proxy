@@ -179,6 +179,10 @@ pub struct SwitchRecord {
     pub to: String,
     /// When, RFC 3339.
     pub at: String,
+    /// When the supervisor decided the outcome, RFC 3339. Older records
+    /// only have `at`, the operation's start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
     /// `update` or `rollback`.
     pub how: String,
     /// The binary replaced.
@@ -385,6 +389,7 @@ impl SwitchRecord {
 
         if incoming.result.is_some() {
             replace(&mut self.result, &incoming.result);
+            replace(&mut self.ended_at, &incoming.ended_at);
             replace(&mut self.phase, &incoming.phase);
             replace(&mut self.why, &incoming.why);
             replace(&mut self.blame, &incoming.blame);
@@ -849,6 +854,26 @@ mod tests {
         assert!(!record.confirmed);
         assert_eq!(record.installed_binary.as_deref(), Some("unchanged"));
         assert_eq!(installed_binary::failed("busy"), "failed: busy");
+    }
+
+    #[test]
+    fn an_outcome_time_survives_state_upserts_and_later_patches() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("state.json");
+        let mut state = State::default();
+        let mut record = SwitchRecord::started("one", "update", "1", "2", "2026-10-19T00:00:00Z");
+        state.upsert_record(record.clone());
+        record.result = Some(result::FAILED_AFTER_SWITCH.into());
+        record.ended_at = Some("2026-10-19T00:10:00Z".into());
+        state.upsert_record(record.clone());
+        state.upsert_record(SwitchRecord {
+            id: "one".into(),
+            ..Default::default()
+        });
+        state.save(&path).unwrap();
+        let loaded = State::load_strict(&path).unwrap();
+        assert_eq!(loaded.last_switch, Some(record.clone()));
+        assert_eq!(loaded.history, [record]);
     }
 
     // Not upstream's: a record updated in place keeps its place and its id.

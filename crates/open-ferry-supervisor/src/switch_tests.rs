@@ -7197,6 +7197,115 @@ async fn automatic_admission_refuses_unreadable_exclusions_but_manual_admission_
 }
 
 #[tokio::test(start_paused = true)]
+async fn automatic_admission_cools_down_unfinished_targets_for_six_hours() {
+    use crate::clock::Clock;
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    for source in ["history", "last", "journal", "pending"] {
+        for auto in [false, true] {
+            for elapsed in [6 * 3600 - 1, 6 * 3600] {
+                let mut rig = Rig::new().await;
+                let root = tempfile::tempdir().unwrap();
+                rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+                let mut record = SwitchRecord::failed_to_load(
+                    "earlier",
+                    "update",
+                    "1.0.0",
+                    "2.0.0",
+                    &(rig.clock.now() - chrono::Duration::hours(1)).to_rfc3339(),
+                    "handing-over",
+                    "environment",
+                    "the old worker was lost",
+                );
+                record.ended_at = Some(rig.clock.now().to_rfc3339());
+                let mut state = State::default();
+                let outcome = Outcome {
+                    record: record.clone(),
+                    mark_failed: None,
+                };
+                match source {
+                    "history" => state.history.push(record),
+                    "last" => state.last_switch = Some(record),
+                    "journal" => rig
+                        .rt
+                        .as_mut()
+                        .unwrap()
+                        .journal
+                        .as_mut()
+                        .unwrap()
+                        .push_outcome(outcome),
+                    "pending" => rig
+                        .rt
+                        .as_mut()
+                        .unwrap()
+                        .pending
+                        .push(crate::core::PendingState {
+                            name: "S3",
+                            outcome,
+                            attempts: 1,
+                            due: tokio::time::Instant::now(),
+                            in_journal: false,
+                        }),
+                    _ => unreachable!(),
+                }
+                state.save(&rig.cfg.data.state_file()).unwrap();
+                rig.clock.advance(Duration::from_secs(elapsed));
+                let (_core, replies) = go!(rig, update(auto));
+                if auto && elapsed < 6 * 3600 {
+                    assert!(
+                        matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+                        if reason == "a recent switch to that version did not finish; trying again later"),
+                        "{source}: {replies:?}"
+                    );
+                    assert_eq!(rig.driver.places().len(), 1);
+                } else {
+                    assert_eq!(done_result(&replies)["result"], "switched", "{source}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_uses_old_timestamps_and_ignores_successes_and_other_targets() {
+    use crate::clock::Clock;
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    for case in ["old", "switched", "other-target"] {
+        let mut rig = Rig::new().await;
+        let root = tempfile::tempdir().unwrap();
+        rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+        let mut record = SwitchRecord::started(
+            "earlier",
+            "update",
+            "1.0.0",
+            "2.0.0",
+            &rig.clock.now().to_rfc3339(),
+        );
+        if case != "switched" {
+            record.result = Some("failed-to-load".into());
+        }
+        if case == "other-target" {
+            record.to = "3.0.0".into();
+        }
+        State {
+            history: vec![record],
+            ..Default::default()
+        }
+        .save(&rig.cfg.data.state_file())
+        .unwrap();
+        let (_core, replies) = go!(rig, update(true));
+        if case == "old" {
+            assert!(
+                matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason.contains("trying again later"))
+            );
+        } else {
+            assert_eq!(done_result(&replies)["result"], "switched");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn switch_refusals_keep_private_paths_in_the_supervisor_log() {
     for case in [
         "pin",

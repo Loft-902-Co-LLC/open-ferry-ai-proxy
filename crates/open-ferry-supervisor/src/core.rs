@@ -2526,7 +2526,7 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
     pub(crate) fn return_outcome(&self, returning: &Returning) -> Outcome {
         let open = &returning.open;
         let ret = &returning.ret;
-        let record = if open.reached_ready {
+        let mut record = if open.reached_ready {
             SwitchRecord::failed_after_switch(
                 &open.id,
                 open.how.as_str(),
@@ -2552,6 +2552,7 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
             record.returned_to = Some(ret.target.version.clone());
             record
         };
+        record.ended_at = Some(self.stamp());
         // `mark_failed` only for an update: a rollback's target is an older
         // version the auto-updater never offers.
         let mark_failed =
