@@ -48,6 +48,22 @@ def sign(private, key_id, data, version):
     )
 
 
+def candidate_signature(private, key_id, data, version, fault):
+    signer, signer_id = private, key_id
+    if version == VERSIONS[1] and fault != "none":
+        signer = Ed25519PrivateKey.generate()
+        if fault == "untrusted-key":
+            signer_id = os.urandom(8)
+            while signer_id == key_id:
+                signer_id = os.urandom(8)
+        elif fault != "bad-signature":
+            raise RuntimeError("unknown qualification fault")
+        # bad-signature retains the trusted ID but signs both the prehash and
+        # trusted comment with the other key. The format stays valid; the real
+        # verifier selects the trusted key and rejects the Ed25519 signature.
+    return sign(signer, signer_id, data, version)
+
+
 def main():
     WORK.mkdir(parents=True, exist_ok=False)
     diagnostics = WORK / "diagnostics"
@@ -112,7 +128,8 @@ def main():
             # separate, including when this script runs outside GitHub Actions.
             with tempfile.TemporaryDirectory(prefix="open-ferry-package-") as scratch:
                 env["GITHUB_OUTPUT"] = str(Path(scratch) / "output")
-                # Windows callers can select Git Bash explicitly, avoiding WSL.
+                # Windows lifecycle unexercised since 962f661f: no hosted
+                # unelevated interactive logon. Retain explicit Git Bash selection.
                 run([os.environ.get("QUALIFY_BASH", "bash"), ".github/scripts/package-release.sh"], env=env)
             suffix = ".zip" if os.name == "nt" else ".tar.gz"
             archive = f"open-ferry-{version}-{target}{suffix}"
@@ -126,11 +143,8 @@ def main():
                 for name in sorted((archive, "install.sh", "install.ps1"))
             )
             write(destination / "SHA256SUMS", sums)
-            signer = private
-            signer_id = key_id
-            if os.environ.get("QUALIFY_FAULT") == "bad-signature" and version == VERSIONS[1]:
-                signer, signer_id = Ed25519PrivateKey.generate(), os.urandom(8)
-            write(destination / "SHA256SUMS.minisig", sign(signer, signer_id, sums.encode(), version))
+            write(destination / "SHA256SUMS.minisig", candidate_signature(
+                private, key_id, sums.encode(), version, os.environ.get("QUALIFY_FAULT", "none")))
             print(f"Packaged native candidate {version} for {target}", flush=True)
         write(WORK / "candidates.json", json.dumps({
             "versions": VERSIONS, "target": target,

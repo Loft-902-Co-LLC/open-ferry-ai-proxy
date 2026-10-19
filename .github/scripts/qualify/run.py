@@ -26,7 +26,10 @@ WORK = Path(sys.argv[1]).resolve()
 OUT = WORK / "diagnostics"
 LABEL = "io.github.loft-902-co-llc.open-ferry"
 SECRETS = []
-SIGNATURE_ERROR = "SHA256SUMS is signed with a key this build doesn't trust"
+SIGNATURE_ERRORS = {
+    "untrusted-key": "SHA256SUMS is signed with a key this build doesn't trust",
+    "bad-signature": "SHA256SUMS doesn't match its signature",
+}
 
 
 class UpdateFailure(RuntimeError):
@@ -168,6 +171,7 @@ class Qualification:
     def __init__(self):
         self.os = platform.system()
         self.candidates = json.loads((WORK / "candidates.json").read_text(encoding="utf-8"))
+        require(self.candidates["fault"] in ("none", *SIGNATURE_ERRORS), "unknown qualification fault")
         self.a, self.b = self.candidates["versions"]
         self.port = free_port()
         self.load = None
@@ -176,6 +180,7 @@ class Qualification:
         self.env = dict(os.environ)
         self.env.pop("OPEN_FERRY_SELF_UPDATE", None)
         if self.os == "Windows":
+            # Unexercised since 962f661f: no hosted unelevated interactive logon.
             import ctypes
             require(not ctypes.windll.shell32.IsUserAnAdmin(),
                     "the user qualification needs an unelevated token; the limited task did not provide one")
@@ -239,28 +244,31 @@ class Qualification:
         raise RuntimeError("timed out starting a new check after latest moved to B")
 
     def verify_signature_control(self, error):
-        require(type(error) is UpdateFailure and str(error) == "update failed: " + SIGNATURE_ERROR,
-                "bad-signature control did not produce the exact expected updater error")
+        fault = self.candidates["fault"]
+        expected = SIGNATURE_ERRORS[fault]
+        require(type(error) is UpdateFailure and str(error) == "update failed: " + expected,
+                f"{fault} control did not produce the exact expected updater error")
         status = self.api()
         write(OUT / "signature-rejected.json", json.dumps(status, indent=2) + "\n")
-        require(status.get("last_error") == SIGNATURE_ERROR and status.get("last_result") == "error"
+        require(status.get("last_error") == expected and status.get("last_result") == "error"
                 and not status.get("checking") and self.stable(status, self.a)
                 and not status.get("staged_version")
                 and not (status.get("supervisor") or {}).get("last_switch"),
-                "bad-signature control did not leave supervised A unchanged")
+                f"{fault} control did not leave supervised A unchanged")
         self.load.healthy()
         counts = self.load.snapshot()["counts"]
         for phase in ("baseline", "auto"):
             require(counts.get(f"{phase}.requests", 0) > 0, f"no requests covered {phase}")
+        # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
         suffix = ".zip" if self.os == "Windows" else ".tar.gz"
         archive = f"/download/v{self.b}/open-ferry-{self.b}-{self.candidates['target']}{suffix}"
         with Mirror.lock:
             requests = dict(Mirror.requests)
         require(requests.get("/latest/download/SHA256SUMS.minisig", 0) > 0,
-                "bad-signature control never requested a signature")
+                f"{fault} control never requested a signature")
         require(requests.get(archive, 0) == 0, "untrusted B archive was requested")
         self.fault_confirmed = True
-        record("Verified exact bad-signature rejection: supervised A unchanged, B archive never requested")
+        record(f"Verified exact {fault} rejection: supervised A unchanged, B archive never requested")
 
     def stable(self, status, version, how=None):
         supervisor = status.get("supervisor") or {}
@@ -291,6 +299,7 @@ class Qualification:
             command(["launchctl", "print", f"gui/{os.getuid()}"], sensitive=True)
             record("GUI launchd domain available; machine form is refused by the product")
         else:
+            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             command(["schtasks.exe", "/query", "/tn", "open-ferry"], check=False)
             record("Unelevated interactive account available; machine form omitted: elevated installer ignores the loopback mirror")
 
@@ -299,12 +308,17 @@ class Qualification:
         self.env["OPEN_FERRY_UPDATE_BASE_URL"] = base
         record("Installing candidate A with the release install script (init output withheld)")
         if self.os == "Windows":
+            # Unexercised since 962f661f: no hosted unelevated interactive logon.
             args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                     "-File", str(Path.cwd() / "install.ps1"), "-NoAttestation", "-NoMigrate"]
         else:
             args = ["sh", str(Path.cwd() / "install.sh"), "--no-attestation", "--no-migrate"]
         command(args, env=self.env, sensitive=True, timeout=180)
-        config = yaml.safe_load(self.config.read_text(encoding="utf-8"))
+        try:
+            config = yaml.safe_load(self.config.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            # Parser diagnostics include source snippets before keys are registered.
+            raise RuntimeError("generated config is not valid YAML") from None
         self.management = config["management"]["secret-key"]
         self.client = config["access"]["api-keys"][0]
         SECRETS.extend((self.management, *config["access"]["api-keys"]))
@@ -330,6 +344,7 @@ class Qualification:
         elif self.os == "Darwin":
             definition = (Path.home() / f"Library/LaunchAgents/{LABEL}.plist").read_text(encoding="utf-8")
         else:
+            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             definition = command(["schtasks.exe", "/query", "/tn", "open-ferry", "/xml"]).stdout
         require("-supervise" in definition and "-data-dir" in definition,
                 "service manager definition is not the supervised form")
@@ -340,6 +355,7 @@ class Qualification:
 
     def processes(self):
         if self.os == "Windows":
+            # Unexercised since 962f661f: no hosted unelevated interactive logon.
             result = command(["tasklist.exe", "/fi", "IMAGENAME eq open-ferry.exe", "/fo", "csv", "/nh"])
             return '"open-ferry.exe"' in result.stdout.lower()
         result = command(["pgrep", "-x", "open-ferry"], check=False)
@@ -358,6 +374,7 @@ class Qualification:
             require(time.monotonic() < deadline, "uninstall left an open-ferry process running")
             time.sleep(1)
         with socket.socket() as listener:
+            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             if self.os != "Windows":
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", self.port))
@@ -372,6 +389,7 @@ class Qualification:
             require(result.returncode != 0 and not (Path.home() / f"Library/LaunchAgents/{LABEL}.plist").exists(),
                     "LaunchAgent still exists")
         else:
+            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             result = command(["schtasks.exe", "/query", "/tn", "open-ferry"], check=False)
             require(result.returncode != 0, "scheduled task still exists")
         record("Verified uninstall: no open-ferry processes, port free, service and service record gone")
@@ -382,6 +400,7 @@ class Qualification:
                              env=self.env, check=False, sensitive=True)
             write(OUT / "supervisor-worker.log", result.stdout)
         else:
+            # Windows log path unexercised since 962f661f: no hosted unelevated interactive logon.
             source = (Path.home() / "Library/Logs/open-ferry.log" if self.os == "Darwin"
                       else self.config.parent / "service.log")
             if source.exists():
@@ -411,11 +430,11 @@ class Qualification:
             try:
                 self.until("automatic B after watch", lambda value: self.stable(value, self.b, "update"), seconds=900)
             except UpdateFailure as error:
-                if self.candidates["fault"] != "bad-signature":
+                if self.candidates["fault"] not in SIGNATURE_ERRORS:
                     raise
                 self.verify_signature_control(error)
-            if self.candidates["fault"] == "bad-signature":
-                require(self.fault_confirmed, "bad-signature control unexpectedly switched to B")
+            if self.candidates["fault"] in SIGNATURE_ERRORS:
+                require(self.fault_confirmed, f"{self.candidates['fault']} control unexpectedly switched to B")
                 self.uninstall()
                 return
             # Durable outcomes currently report auto:null. The production worker's
@@ -462,7 +481,7 @@ class Qualification:
                 if self.fault_confirmed:
                     require(not any(path.startswith(f"/download/v{self.b}/") and count
                                     for path, count in requests.items()),
-                            "bad-signature control requested a B asset before mirror shutdown")
+                            f"{self.candidates['fault']} control requested a B asset before mirror shutdown")
 
             for phase, cleanup in (("load cleanup", finish_load), ("diagnostics", self.logs),
                                    ("service cleanup", remove_service), ("mirror cleanup", stop_mirror)):
@@ -483,10 +502,11 @@ def main():
         result.update(qualification.candidates)
         qualification.run()
         result["passed"] = True
-        if qualification.candidates["fault"] == "bad-signature":
-            result["expected_failure"] = SIGNATURE_ERROR
+        if qualification.candidates["fault"] in SIGNATURE_ERRORS:
+            result["expected_failure"] = SIGNATURE_ERRORS[qualification.candidates["fault"]]
             result["fault_confirmed"] = qualification.fault_confirmed
-            record("PASS: exact bad-signature rejection, B archive never requested, zero failed load requests, uninstalled")
+            record(f"PASS: exact {qualification.candidates['fault']} rejection, B archive never requested, "
+                   "zero failed load requests, uninstalled")
         else:
             record("PASS: supervised user service A -> automatic B -> rollback A -> uninstall, zero failed load requests")
     except Exception as error:
