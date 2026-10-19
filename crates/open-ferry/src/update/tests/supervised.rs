@@ -301,6 +301,37 @@ async fn failed_done_and_ended_after_acceptance_return_failure_with_the_operatio
 }
 
 #[tokio::test]
+async fn a_changed_rollback_target_keeps_the_supervised_cli_result_and_message() {
+    for json in [false, true] {
+        let fake = SupervisedFake::new("switched");
+        *fake.error.borrow_mut() = Some(
+            UpdateError::RollbackChanged {
+                expected: "0.0.9".into(),
+                actual: Some("0.0.8".into()),
+            }
+            .into(),
+        );
+        let ran = go(
+            Request::Rollback,
+            &fake,
+            &settings("off", None),
+            true,
+            json,
+            None,
+        )
+        .await;
+        assert_eq!((ran.code, ran.result), (1, "supervised"));
+        let message = "rollback target changed: expected 0.0.9, now 0.0.8; run `open-ferry update -check`. The supervisor request was not sent.";
+        if json {
+            assert_eq!(ran.json()["error"], message);
+        } else {
+            assert_eq!(ran.err, format!("{NAME}: {message}\n"));
+        }
+        assert_eq!(fake.base.calls(), ["rollback"]);
+    }
+}
+
+#[tokio::test]
 async fn mutation_errors_keep_request_certainty_in_text_and_json() {
     for request in [Request::Update, Request::Rollback, Request::Cancel] {
         for json in [false, true] {

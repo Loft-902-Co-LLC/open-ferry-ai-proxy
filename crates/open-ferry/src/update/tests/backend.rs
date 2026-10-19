@@ -305,7 +305,8 @@ async fn rollback_checks_the_confirmed_target_again_and_record_merges_pending_pa
         Ok(_) => panic!("stale target accepted"),
     };
     assert!(
-        matches!(error, SwitchError::Update(UpdateError::Supervised(ref why)) if why.contains("expected 0.1.0, now 0.2.0"))
+        matches!(error, SwitchError::Update(UpdateError::RollbackChanged { expected, actual })
+            if expected == "0.1.0" && actual.as_deref() == Some("0.2.0"))
     );
     let record = real.record("operation").unwrap();
     assert_eq!(record.to, "0.2.0");
