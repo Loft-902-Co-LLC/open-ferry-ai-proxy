@@ -76,15 +76,19 @@ pub(super) fn check(fd: RawFd, owner: u32) -> Result<(), String> {
             return Err(unreadable());
         }
         match tag {
+            // Deny entries cannot grant a change, whatever account they name.
             ACL_EXTENDED_DENY => continue,
             ACL_EXTENDED_ALLOW => {}
             _ => return Err(unreadable()),
         }
+        // Read-only grants need no qualifier lookup either: stale entries for deleted
+        // accounts cannot grant a change and need not disable switching.
         if !can_mutate(permissions) {
             continue;
         }
-        // Do not infer effective access from deny ordering or group membership. Even an
-        // inherit-only write grant can give another account control over future children.
+        // Only mutation grants resolve qualifiers. Owner/root grants pass with any
+        // inheritance flags; all others are refused, including inherit-only grants.
+        // Do not infer effective access from deny ordering or group membership.
         // SAFETY: entry is valid; the qualifier is a separately owned 16-byte UUID.
         let qualifier = unsafe { acl_get_qualifier(entry) };
         if qualifier.is_null() {
