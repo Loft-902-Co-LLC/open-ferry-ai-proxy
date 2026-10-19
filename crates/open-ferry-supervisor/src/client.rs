@@ -1081,28 +1081,69 @@ mod tests {
 
     #[tokio::test]
     async fn a_held_lock_with_no_endpoint_is_retried_until_the_deadline_and_then_timed_out() {
-        held_lock_without_endpoint_times_out(None).await;
+        let (seen, endpoint_reason) = held_lock_without_endpoint_times_out(None).await;
+        // With no server, Unix has no location and Windows' missing-pipe
+        // open fails synchronously. Only the deadline's phase varies.
+        let expected = [
+            (
+                "before an endpoint result",
+                "the supervisor was not asked yet".to_owned(),
+            ),
+            (
+                "completed held-lock check",
+                format!(
+                    "a supervisor holds the lock but its endpoint is not reachable: {endpoint_reason}"
+                ),
+            ),
+            (
+                "unfinished lock check",
+                format!(
+                    "could not determine whether a supervisor holds the lock: {endpoint_reason}"
+                ),
+            ),
+        ];
+        assert!(
+            expected.iter().any(|(_, reason)| reason == &seen),
+            "{seen:?}; allowed deadline phases: {expected:?}"
+        );
     }
 
     #[tokio::test]
     async fn a_held_lock_with_no_endpoint_times_out_during_the_record_read() {
-        held_lock_without_endpoint_times_out(Some(&READ_STALLS)).await;
+        let (seen, _) = held_lock_without_endpoint_times_out(Some(&READ_STALLS)).await;
+        assert_eq!(seen, "the supervisor was not asked yet");
     }
 
     #[tokio::test]
     async fn a_held_lock_with_no_endpoint_times_out_during_the_lock_check() {
-        held_lock_without_endpoint_times_out(Some(&LOCK_STALLS)).await;
+        let (seen, endpoint_reason) =
+            held_lock_without_endpoint_times_out(Some(&LOCK_STALLS)).await;
+        assert_eq!(
+            seen,
+            format!("could not determine whether a supervisor holds the lock: {endpoint_reason}")
+        );
     }
 
-    async fn held_lock_without_endpoint_times_out(stalls: Option<&'static Stalls>) {
+    async fn held_lock_without_endpoint_times_out(
+        stalls: Option<&'static Stalls>,
+    ) -> (String, String) {
         let dirs = Dirs::new();
         let _supervisor = SupervisorLock::try_acquire(dirs.data()).unwrap();
+        // Capture the OS/location detail before installing a stall. Keep the
+        // expected contextual wording independent of stop's own formatting.
+        let endpoint_reason = match locate(dirs.data(), &identity()) {
+            Ok(location) => match connect(&location, &identity()).await {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("the fixture's missing endpoint unexpectedly served"),
+            },
+            Err(why) => format!("no endpoint location is known for this data directory: {why}"),
+        };
         let stall = stalls.map(|table| Stalled::new(table, dirs.data(), STALL));
         let began = Instant::now();
         let deadline = began + Duration::from_secs(3);
         // The deadline may fall before an endpoint is located, during its
-        // exchange, while checking the lock, or between retries. None proves
-        // that the held lock is free, and the reason need not name a phase.
+        // exchange, while checking the lock, or between retries. The caller
+        // checks the exact reason(s) its selected phase permits.
         let outcome = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline + MARGIN),
             stop(dirs.data(), &identity(), deadline),
@@ -1113,10 +1154,6 @@ mod tests {
         let StopOutcome::TimedOut(seen) = outcome else {
             panic!("{outcome:?}");
         };
-        assert!(
-            !seen.is_empty(),
-            "the timeout must explain what was last seen"
-        );
         assert!(
             returned >= deadline,
             "stop returned before its deadline: {:?}",
@@ -1136,6 +1173,7 @@ mod tests {
             );
             stall.wait_finished().await;
         }
+        (seen, endpoint_reason)
     }
 
     #[tokio::test]
