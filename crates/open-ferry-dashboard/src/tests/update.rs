@@ -366,6 +366,14 @@ fn supervised(fake: Arc<Switcher>) -> (Dash, tempfile::TempDir) {
 const INSTALL: &str = "/open-ferry/api/v1/update/install";
 const ROLLBACK: &str = "/open-ferry/api/v1/update/rollback";
 
+fn switch_body(path: &str) -> &str {
+    if path == ROLLBACK {
+        r#"{"target":"0.0.9"}"#
+    } else {
+        ""
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn disabled_status_and_post_agree_without_exposing_policy_details() {
     let fake = Switcher::new(Duration::ZERO, None);
@@ -388,6 +396,76 @@ async fn disabled_status_and_post_agree_without_exposing_policy_details() {
 }
 
 #[tokio::test]
+async fn rollback_does_not_send_when_the_confirmed_target_changes_or_disappears() {
+    use open_ferry_update::journal::{JOURNAL_FILE, Journal};
+    for removed in [false, true] {
+        let fake = Switcher::new(Duration::ZERO, None);
+        let (dash, scratch) = supervised(fake.clone());
+        assert_eq!(
+            dash.get(STATUS).await.json(StatusCode::OK)["supervisor"]["rollback_target"],
+            "0.0.9"
+        );
+        let path = scratch.path().join(JOURNAL_FILE);
+        let mut journal: Journal = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if removed {
+            journal.previous = None;
+        } else {
+            journal.previous.as_mut().unwrap().version = "0.1.0".into();
+        }
+        std::fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        let reason = dash
+            .call(Method::POST, ROLLBACK, switch_body(ROLLBACK))
+            .await
+            .error(StatusCode::CONFLICT, "rollback_target_changed");
+        assert_eq!(
+            reason,
+            "the rollback target changed; read status and confirm again"
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn rollback_requires_the_confirmed_target() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, _scratch) = supervised(fake.clone());
+    for (body, code) in [
+        ("", "invalid_json"),
+        ("{}", "invalid_request"),
+        (r#"{"target":" "}"#, "invalid_request"),
+    ] {
+        dash.call(Method::POST, ROLLBACK, body)
+            .await
+            .error(StatusCode::BAD_REQUEST, code);
+    }
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn not_sent_transport_and_preparation_errors_do_not_stay_pending() {
+    for error in [
+        open_ferry_update::SwitchError::Unreachable(
+            "pre-send timeout or zero accepted bytes".into(),
+        ),
+        open_ferry_update::UpdateError::Io {
+            what: "prepare the rollback",
+            error: "preparation JoinError".into(),
+        }
+        .into(),
+    ] {
+        let fake = Switcher::new(Duration::ZERO, None);
+        *fake.error.lock().unwrap() = Some(error);
+        let (dash, _scratch) = supervised(fake);
+        dash.call(Method::POST, INSTALL, "")
+            .await
+            .error(StatusCode::CONFLICT, "switch_failed");
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(body["switch_request"]["state"], "failed");
+        assert_eq!(body["switch_request"]["pending"], false);
+    }
+}
+
+#[tokio::test]
 async fn unsupervised_switches_explain_how_to_update_and_status_has_no_supervisor() {
     let data = tempfile::tempdir().unwrap();
     let config = keyed_config();
@@ -396,7 +474,7 @@ async fn unsupervised_switches_explain_how_to_update_and_status_has_no_superviso
     assert!(dash.get(STATUS).await.json(StatusCode::OK)["supervisor"].is_null());
     for path in [INSTALL, ROLLBACK] {
         let reason = dash
-            .call(Method::POST, path, "")
+            .call(Method::POST, path, switch_body(path))
             .await
             .error(StatusCode::CONFLICT, "not_supervised");
         assert!(reason.contains("open-ferry update"), "{reason}");
@@ -413,7 +491,7 @@ async fn accepted_switches_answer_with_the_id_without_following_progress() {
         let fake = Switcher::new(Duration::ZERO, None);
         let (dash, _scratch) = supervised(fake.clone());
         let reply = dash
-            .call(Method::POST, path, "")
+            .call(Method::POST, path, switch_body(path))
             .await
             .json(StatusCode::ACCEPTED);
         assert_eq!(reply["accepted"], true);
@@ -457,12 +535,12 @@ async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
             let (dash, _scratch) = supervised(fake.clone());
             let start = tokio::time::Instant::now();
             let reply = dash
-                .call(Method::POST, path, "")
+                .call(Method::POST, path, switch_body(path))
                 .await
                 .json(StatusCode::ACCEPTED);
             assert_eq!(reply["preparing"], true);
             assert!(start.elapsed() < Duration::from_secs(1));
-            dash.call(Method::POST, path, "")
+            dash.call(Method::POST, path, switch_body(path))
                 .await
                 .error(StatusCode::CONFLICT, "already_preparing");
             let preparing = dash.get(STATUS).await.json(StatusCode::OK);
@@ -529,7 +607,7 @@ async fn switch_routes_have_the_same_auth_and_unavailable_errors() {
         dash.send(request(LOCAL, Method::POST, path, ""))
             .await
             .error(StatusCode::UNAUTHORIZED, "missing_management_key");
-        dash.call(Method::POST, path, "")
+        dash.call(Method::POST, path, switch_body(path))
             .await
             .error(StatusCode::SERVICE_UNAVAILABLE, "updates_unavailable");
     }
@@ -781,7 +859,7 @@ async fn post_recovers_a_dead_preparation_before_admitting_a_new_request() {
             .ended_preparation_for_test(action)
             .await;
         let reply = dash
-            .call(Method::POST, path, "")
+            .call(Method::POST, path, switch_body(path))
             .await
             .json(StatusCode::ACCEPTED);
         assert_eq!(reply["accepted"], true);
