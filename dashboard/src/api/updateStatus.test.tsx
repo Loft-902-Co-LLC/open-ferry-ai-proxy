@@ -9,7 +9,7 @@ import { mockApi, route } from "../test/mockApi";
 import { TEST_KEY } from "../test/renderApp";
 import { storeKey } from "./keyStorage";
 import { UPDATE } from "./update";
-import { STATUS_POLL_TIMEOUT_MS, useUpdateStatus } from "./updateStatus";
+import { MAX_POLL_ERROR_MS, STATUS_POLL_TIMEOUT_MS, useUpdateStatus } from "./updateStatus";
 
 function observeStatus() {
   storeKey(TEST_KEY);
@@ -55,4 +55,35 @@ it("times out hanging polls individually and reaches the failed-poll limit", asy
   expect(result.current.hidePollError).toBe(false);
   await act(() => vi.advanceTimersByTimeAsync(2_001));
   expect(reads).toBe(6);
+});
+
+
+it("ignores an old deadline callback queued just as a successful read arrives", async () => {
+  fakePollClock();
+  const timers = vi.spyOn(globalThis, "setTimeout");
+  let fail = false;
+  let active = false;
+  mockApi(route("GET", UPDATE, () => {
+    if (fail) throw new TypeError("offline");
+    return { json: updateStatus({ supervisor: supervisorStatus({ phase: active ? "handing-over" : "idle" }) }) };
+  }));
+  const { result } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  fail = true;
+  await act(async () => { await result.current.refetch(); });
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  const callback = timers.mock.calls.find(([, delay]) => delay === MAX_POLL_ERROR_MS)?.[0];
+  expect(typeof callback).toBe("function");
+  await act(() => vi.advanceTimersByTimeAsync(MAX_POLL_ERROR_MS - 1));
+  fail = false;
+  active = true;
+  await act(async () => { await result.current.refetch(); });
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  // Even a callback already queued before the success may still run.
+  await act(async () => { if (typeof callback === "function") callback(); await Promise.resolve(); });
+  expect(result.current.hidePollError).toBe(true);
+  expect(result.current.isError).toBe(false);
+  const read = result.current.lastRead;
+  await act(() => vi.advanceTimersByTimeAsync(2_001));
+  expect(result.current.lastRead).not.toBe(read);
 });

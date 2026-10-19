@@ -33,13 +33,13 @@ export function useUpdateStatus() {
   const call = useApiCall();
   const [lastRead, setLastRead] = useState<UpdateStatus>();
   const [failures, setFailures] = useState({ count: 0, since: null as number | null });
-  const [deadlineReached, setDeadlineReached] = useState(false);
+  const [, refreshDeadline] = useState(0);
   useEffect(() => {
     if (failures.since === null) return;
-    const timer = setTimeout(() => { setDeadlineReached(true); }, Math.max(0, MAX_POLL_ERROR_MS - (Date.now() - failures.since)));
+    const timer = setTimeout(() => { refreshDeadline((revision) => revision + 1); }, Math.max(0, MAX_POLL_ERROR_MS - (Date.now() - failures.since)));
     return () => { clearTimeout(timer); };
   }, [failures.since]);
-  const exhausted = deadlineReached || pollFailuresExhausted(failures.count, failures.since);
+  const exhausted = pollFailuresExhausted(failures.count, failures.since);
   const query = useQuery<UpdateStatus>({
     queryKey: apiQueryKey(UPDATE),
     queryFn: async ({ signal }) => {
@@ -48,7 +48,6 @@ export function useUpdateStatus() {
         if (!signal.aborted) {
           setLastRead(status);
           setFailures({ count: 0, since: null });
-          setDeadlineReached(false);
         }
         return status;
       } catch (error) {
