@@ -588,6 +588,7 @@ mod quiet_tests {
             },
             mark_failed: None,
         };
+        crate::test_tracing::keep_every_callsite_open();
         let events = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(Events(events.clone()), || {
             for _ in 0..3 {

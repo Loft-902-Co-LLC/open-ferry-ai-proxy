@@ -36,4 +36,6 @@ mod status_tests;
 #[cfg(test)]
 mod switch_tests;
 #[cfg(test)]
+mod test_tracing;
+#[cfg(test)]
 mod testkit;

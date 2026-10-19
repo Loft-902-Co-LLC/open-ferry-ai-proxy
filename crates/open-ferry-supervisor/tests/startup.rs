@@ -27,6 +27,10 @@ use open_ferry_update::fetch::BoxFuture;
 use open_ferry_update::runner::Runner;
 use open_ferry_update::staging::hash_file;
 
+#[cfg(test)]
+#[path = "../src/test_tracing.rs"]
+mod test_tracing;
+
 const NAME: &str = if cfg!(windows) {
     "open-ferry.exe"
 } else {
@@ -2368,6 +2372,7 @@ async fn an_orphaned_partial_outcome_is_noted_once_at_startup_and_retained() {
     store.write(&mut journal, "fixture").unwrap();
     let mut registry = Registry::new();
     use tracing::instrument::WithSubscriber;
+    test_tracing::keep_every_callsite_open();
     let log = StartupLog::default();
     let mut started = start(&rig.cfg, &rig.host, &driver, &mut registry, &SystemClock)
         .with_subscriber(log.clone())

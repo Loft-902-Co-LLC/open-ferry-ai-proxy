@@ -303,6 +303,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessCapture {
 #[tokio::test(flavor = "current_thread")]
 async fn declared_oversize_is_access_logged_before_authentication() {
     use tracing_subscriber::layer::SubscriberExt;
+    crate::test_tracing::keep_every_callsite_open();
     let capture = AccessCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
