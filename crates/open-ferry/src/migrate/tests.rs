@@ -4105,8 +4105,8 @@ fn switches_brew_services_and_back() {
 }
 
 // Not upstream's: a launch daemon that isn't loaded is read from its plist,
-// but open-ferry can't yet check who may change its files on macOS, so it
-// doesn't switch to a launchd daemon.
+// but this version doesn't support running as root on macOS, so it doesn't
+// switch to a launchd daemon.
 #[test]
 fn blocks_switching_a_stopped_launch_daemon() {
     let context = macos_root();
@@ -4147,7 +4147,7 @@ fn blocks_switching_a_stopped_launch_daemon() {
     );
     has(
         &ran.out,
-        "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root.",
+        "open-ferry doesn't support running as root on macOS in this version.",
     );
     has(&ran.out, "The switch is blocked: nothing was changed.");
     read_only(&fake);

@@ -4245,10 +4245,8 @@ fn a_system_service_chooses_only_a_trusted_self_updating_machine_install() {
     let mut context = context;
     context.platform = Platform::MacOs;
     assert_eq!(
-        Updating::assess_system(&probe, &machine, &context)
-            .why_plain
-            .as_deref(),
-        Some(MACOS_SYSTEM_REFUSAL)
+        Updating::assess_system(&probe, &machine, &context).why_plain,
+        Some(macos_system_refusal())
     );
 }
 
@@ -5422,7 +5420,7 @@ fn macos_system_install_refuses_before_context_or_receipt_assessment() {
             |_, _| panic!("must not assess a refused install"),
             &mut Vec::new(),
         );
-        assert_eq!(result.unwrap_err(), MACOS_SYSTEM_REFUSAL);
+        assert_eq!(result.unwrap_err(), macos_system_refusal());
         assert!(fake.events.is_empty());
         assert!(fake.reads.borrow().is_empty());
     }

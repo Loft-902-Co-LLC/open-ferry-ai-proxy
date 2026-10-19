@@ -34,8 +34,8 @@
 //! [`launchd`]), and on Windows a scheduled task at the user's logon (see
 //! [`windows`]). With `-system` it is the machine's, started at boot as
 //! root on Linux (a systemd system unit), or LocalSystem on Windows (a
-//! Windows service). macOS refuses `install -system` until it can check
-//! who may change the service's files. As `~` would then be that account's
+//! Windows service). macOS refuses `install -system`: this version doesn't
+//! support running as root on macOS. As `~` would then be that account's
 //! home, `install -system` refuses a config whose auth directory is under `~`;
 //! and as the service runs with root's rights, it refuses a binary or a
 //! config that anyone but root (on Windows, the administrators) can change.
@@ -777,7 +777,7 @@ fn install_refusal(
     }
     if request.system {
         if platform == Platform::MacOs {
-            return Err(MACOS_SYSTEM_REFUSAL.to_owned());
+            return Err(macos_system_refusal());
         }
         return Ok(());
     }
@@ -1954,7 +1954,13 @@ pub(crate) struct Definition {
 }
 
 const NO_MACHINE_INSTALL: &str = "no machine-wide install of this binary: install it with install.sh --system / install.ps1 -System";
-const MACOS_SYSTEM_REFUSAL: &str = "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root. Install a user service with `open-ferry service install` without -system.";
+
+fn macos_system_refusal() -> String {
+    format!(
+        "{}. Install a user service with `open-ferry service install` without -system.",
+        scope::MACOS_ROOT_REFUSAL
+    )
+}
 
 /// The data directory `open-ferry update` would use for the service's
 /// account, from the starting environment of `context` (before any `.env`),
@@ -2075,7 +2081,7 @@ impl Updating {
     ) -> Updating {
         let unavailable = |why: String| Updating::plain(Err(why.clone()), why);
         if context.platform == Platform::MacOs {
-            return unavailable(MACOS_SYSTEM_REFUSAL.to_owned());
+            return unavailable(macos_system_refusal());
         }
         let home = match scope::lookup(probe, &context.exe) {
             Ok(home) if home.scope == scope::Scope::Machine => home,
