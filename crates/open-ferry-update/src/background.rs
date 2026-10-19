@@ -28,6 +28,7 @@ use tokio::time::Instant;
 use crate::fetch::{Fetch, FetchError, HttpFetch};
 use crate::install::Install;
 use crate::settings::{self, Settings};
+use crate::switching::{self, CancelOutcome, SwitchError, SwitchHandle, Switcher};
 use crate::updater::{CheckResult, Status, UpdateError, Updater};
 
 /// When the first check runs after the start, at random between these.
@@ -77,6 +78,7 @@ struct Inner {
     /// Held while a check runs, so two never do.
     running: Arc<tokio::sync::Mutex<()>>,
     task: Mutex<Option<JoinHandle<()>>>,
+    switcher: Mutex<Option<Arc<dyn Switcher>>>,
 }
 
 /// The server's update check: cheap to clone, one loop for all clones.
@@ -105,6 +107,7 @@ impl UpdateService {
                 live: Mutex::new(Live::default()),
                 running: Arc::new(tokio::sync::Mutex::new(())),
                 task: Mutex::new(None),
+                switcher: Mutex::new(None),
             }),
         };
         service.log_settings(None);
@@ -153,6 +156,117 @@ impl UpdateService {
     /// The settings in force.
     pub fn settings(&self) -> Settings {
         self.inner.snapshot.borrow().settings.clone()
+    }
+
+    /// Attach local supervisor access before sharing the service. All clones
+    /// use it; this does not connect, check locks, or start a switch.
+    pub fn with_switcher(self, switcher: Arc<dyn Switcher>) -> Self {
+        *self
+            .inner
+            .switcher
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(switcher);
+        self
+    }
+
+    fn switcher(&self) -> Result<Arc<dyn Switcher>, SwitchError> {
+        self.inner
+            .switcher
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or(SwitchError::NotSupervised)
+    }
+
+    /// The supervisor's complete endpoint snapshot. Bounded to 750 ms.
+    pub async fn supervisor(&self) -> Result<serde_json::Value, SwitchError> {
+        self.switcher()?
+            .status(std::time::Instant::now() + Duration::from_millis(750))
+            .await
+    }
+
+    /// Stage the newest known release if needed, pin under the update lock,
+    /// release it, and ask the supervisor to update. Returns at acceptance,
+    /// before loading, hand-over, or the watch window. Preparing an unstaged
+    /// release can download it; callers with a short response budget should
+    /// prepare it in a background task. A timeout may have sent the request:
+    /// read status before retrying. Manual installs also work in `off` mode.
+    pub async fn install_now(&self, auto: bool) -> Result<SwitchHandle, SwitchError> {
+        let switcher = self.switcher()?;
+        let snapshot = self.inner.snapshot.borrow().clone();
+        if auto && snapshot.settings.mode == SelfUpdateMode::Off {
+            return Err(SwitchError::UpdatesOff);
+        }
+        let updater = &self.inner.updater;
+        let pin = {
+            let _lock = updater.lock()?;
+            let mut state = switching::refresh_outcomes(updater)?;
+            let staged = state
+                .staged
+                .clone()
+                .filter(|version| state.latest.as_ref().is_none_or(|latest| latest == version));
+            let version = match staged {
+                Some(version) => version,
+                None => {
+                    let fetch = (self.inner.make_fetch)(&snapshot.proxy_url).map_err(|error| {
+                        UpdateError::Fetch {
+                            what: "the release list",
+                            error,
+                        }
+                    })?;
+                    let updater = Updater {
+                        fetch,
+                        ..updater.clone()
+                    };
+                    let found = updater.latest(&state).await?;
+                    if !found.is_newer() {
+                        return Err(UpdateError::NothingStaged.into());
+                    }
+                    switching::skipped(&state, &found.release.version)?;
+                    updater.stage(&found, &mut state).await?;
+                    found.release.version
+                }
+            };
+            switching::skipped(&state, &version)?;
+            let sha256 = state
+                .staged_sha256
+                .as_deref()
+                .ok_or(UpdateError::NothingStaged)?;
+            updater.pin_staged(&version, sha256)?
+        };
+        if auto && self.settings().mode == SelfUpdateMode::Off {
+            return Err(SwitchError::UpdatesOff);
+        }
+        switcher
+            .update(
+                &pin,
+                auto,
+                std::time::Instant::now() + Duration::from_secs(3),
+            )
+            .await
+    }
+
+    /// Validate the journal's `switch.from` during a watch, else `previous`,
+    /// under the lock; drop it before requesting a rollback. No pin is sent.
+    pub async fn roll_back(&self) -> Result<SwitchHandle, SwitchError> {
+        let switcher = self.switcher()?;
+        let target = {
+            let updater = &self.inner.updater;
+            let _lock = updater.lock()?;
+            let target = switching::rollback_target(updater)?;
+            updater.validate_previous(&target).await?;
+            target
+        };
+        switcher
+            .rollback(&target, std::time::Instant::now() + Duration::from_secs(3))
+            .await
+    }
+
+    /// Ask the supervisor to cancel its current switch, if still possible.
+    pub async fn cancel_switch(&self) -> Result<CancelOutcome, SwitchError> {
+        self.switcher()?
+            .cancel(std::time::Instant::now() + Duration::from_millis(750))
+            .await
     }
 
     fn log_settings(&self, previous: Option<&Settings>) {
@@ -319,6 +433,15 @@ async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, Update
         fetch,
         ..inner.updater.clone()
     };
+    if inner
+        .switcher
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some()
+    {
+        let _lock = updater.lock()?;
+        switching::refresh_outcomes(&updater)?;
+    }
     let install = updater.install();
     inner
         .live
