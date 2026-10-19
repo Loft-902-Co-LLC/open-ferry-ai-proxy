@@ -577,6 +577,14 @@ fn macos_refuses_every_privileged_process() {
     fake.with_receipt(account, BINARY).file(BINARY);
     let refusal = refused(lookup(&fake, BINARY));
     assert_eq!(refusal, macos_refusal());
+    assert_eq!(
+        refusal.reason,
+        "open-ferry doesn't support machine-wide installs or running as root on macOS in this version"
+    );
+    assert_eq!(
+        refusal.remedy.as_deref(),
+        Some("Run it without sudo or -system.")
+    );
     assert_eq!(refused(authorize(&fake, account)), refusal);
     assert_eq!(refused(provision(&mut fake)), refusal);
     assert_eq!(refused(machine_auth_dir(&fake)), refusal);
@@ -587,6 +595,8 @@ fn macos_refuses_every_privileged_process() {
     assert_eq!(root_of(&home), account);
     assert_eq!(authorize(&fake, account), Ok(()));
     assert_eq!(machine_root(&fake), Ok(None));
+    assert_eq!(refused(provision(&mut fake)), refusal);
+    assert_eq!(refused(machine_auth_dir(&fake)), refusal);
 }
 
 #[test]

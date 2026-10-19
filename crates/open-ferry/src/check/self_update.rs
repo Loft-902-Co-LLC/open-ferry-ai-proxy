@@ -251,7 +251,7 @@ mod scope_tests {
             assert!(found[0].fix.contains(match platform {
                 Platform::Windows => "not opened as administrator",
                 Platform::Linux => "without sudo",
-                Platform::MacOs => "macOS",
+                Platform::MacOs => "without sudo or -system",
             }));
             assert!(
                 probe.reads.borrow().is_empty(),

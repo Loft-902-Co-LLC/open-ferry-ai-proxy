@@ -1270,7 +1270,7 @@ class InstallShTests(Case):
                     self.assertIn("inside a container: installing for root's own account", result.output)
 
     def test_privilege_refusals_happen_before_downloads(self):
-        macos = "open-ferry doesn't support running as root on macOS in this version. Run it without sudo; installs for the whole machine come to macOS in a later version."
+        macos = "open-ferry doesn't support machine-wide installs or running as root on macOS in this version. Run it without sudo or --system."
         cases = (
             ("Linux", "0", ["--system"], "installing open-ferry for the whole machine needs root. Run it with sudo."),
             ("MINGW64_NT", "1", ["--system"], "--system is supported only on Linux."),

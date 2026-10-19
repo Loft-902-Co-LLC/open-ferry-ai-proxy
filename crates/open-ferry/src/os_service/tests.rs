@@ -5405,8 +5405,8 @@ fn user_install_assessment_selects_the_form_and_keeps_the_plain_reason() {
 
 #[test]
 fn macos_system_install_refuses_before_context_or_receipt_assessment() {
-    for dry_run in [false, true] {
-        let mut fake = Fake::default().uid(0);
+    for (uid, dry_run) in [(0, false), (0, true), (501, false), (501, true)] {
+        let mut fake = Fake::default().uid(uid);
         let mut command = vec!["install", "-system"];
         if dry_run {
             command.push("-dry-run");
@@ -5420,7 +5420,10 @@ fn macos_system_install_refuses_before_context_or_receipt_assessment() {
             |_, _| panic!("must not assess a refused install"),
             &mut Vec::new(),
         );
-        assert_eq!(result.unwrap_err(), macos_system_refusal());
+        assert_eq!(
+            result.unwrap_err(),
+            "open-ferry doesn't support machine-wide installs or running as root on macOS in this version. Install a user service with `open-ferry service install` without -system."
+        );
         assert!(fake.events.is_empty());
         assert!(fake.reads.borrow().is_empty());
     }
