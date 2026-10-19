@@ -1589,7 +1589,7 @@ async fn follow_until<U: Updates>(
         if remaining.is_zero() {
             return outcome.failed_switch(console, &SwitchError::TimedOut, true);
         }
-        let event = tokio::select! {
+        let mut event = tokio::select! {
             biased;
             stopped = &mut stop, if listen_for_stop => {
                 if let Err(error) = stopped {
@@ -1602,6 +1602,35 @@ async fn follow_until<U: Updates>(
             }
             event = handle.next(Instant::now() + remaining.min(Duration::from_secs(30))) => event,
         };
+        if matches!(event, Err(SwitchError::TimedOut)) {
+            let live = updates.live_supervisor().await;
+            if matches!(live, Ok(Some(ref snapshot))
+                if snapshot["switch"]["id"].as_str() == Some(&handle.id))
+            {
+                continue;
+            }
+            // Status can become idle just before Done reaches this connection.
+            let grace = until
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(Duration::from_secs(3));
+            event = handle.next(Instant::now() + grace).await;
+            if !matches!(
+                event,
+                Ok(Some(SwitchEvent::Done { .. })) | Err(SwitchError::Ended(_))
+            ) {
+                if let Some(current) = updates
+                    .record(&handle.id)
+                    .filter(|record| record.result.is_some())
+                {
+                    record = current;
+                    event = Ok(Some(SwitchEvent::Done {
+                        result: serde_json::json!({"result":record.result,"why":record.why}),
+                    }));
+                } else {
+                    return outcome.failed_switch(console, &SwitchError::Stopped, true);
+                }
+            }
+        }
         match event {
             Ok(Some(SwitchEvent::Progress { phase })) => {
                 console.say(format!("Switch {}: {phase}.", handle.id));
@@ -1653,15 +1682,6 @@ async fn follow_until<U: Updates>(
                     .or_else(|| result["why"].as_str())
                     .unwrap_or(&word);
                 return outcome.failed(console, format!("the supervised switch ended: {reason}"));
-            }
-            Err(SwitchError::TimedOut) => {
-                let live = updates.live_supervisor().await;
-                if matches!(live, Ok(Some(ref snapshot))
-                    if snapshot["switch"]["id"].as_str() == Some(&handle.id))
-                {
-                    continue;
-                }
-                return outcome.failed_switch(console, &SwitchError::TimedOut, true);
             }
             Err(error) => return outcome.failed_switch(console, &error, true),
             Ok(None) => return outcome.failed_switch(console, &SwitchError::Stopped, true),

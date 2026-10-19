@@ -22,6 +22,8 @@ struct SupervisedFake {
     cancel: CancelOutcome,
     error: RefCell<Option<SwitchError>>,
     events: RefCell<VecDeque<Result<SwitchEvent, SwitchError>>>,
+    probed: Arc<std::sync::atomic::AtomicBool>,
+    recorded: RefCell<Option<SwitchRecord>>,
 }
 
 impl SupervisedFake {
@@ -45,6 +47,8 @@ impl SupervisedFake {
             },
             cancel: CancelOutcome::Nothing,
             error: RefCell::new(None),
+            probed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            recorded: RefCell::new(None),
             events: RefCell::new(VecDeque::from([
                 Ok(SwitchEvent::Progress {
                     phase: "loading".into(),
@@ -81,6 +85,17 @@ impl Updates for SupervisedFake {
     }
     async fn switch_view(&self) -> Result<Option<SwitchView>, UpdateError> {
         Ok(Some(self.view.clone()))
+    }
+    async fn live_supervisor(&self) -> Result<Option<Value>, SwitchError> {
+        self.probed.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.view.supervisor.clone())
+    }
+    fn record(&self, id: &str) -> Option<SwitchRecord> {
+        self.recorded
+            .borrow()
+            .as_ref()
+            .filter(|record| record.id == id)
+            .cloned()
     }
     async fn latest(&self) -> Result<Offer<()>, UpdateError> {
         self.base.latest().await
@@ -592,5 +607,87 @@ async fn interactive_yes_and_no_confirm_the_supervised_update_and_rollback() {
                 assert!(!fake.base.calls().contains(&request.action()));
             }
         }
+    }
+}
+
+struct AfterStatus {
+    probed: Arc<std::sync::atomic::AtomicBool>,
+    reply: Option<Result<SwitchEvent, SwitchError>>,
+}
+impl SwitchProgress for AfterStatus {
+    fn next(&mut self, _: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+        Box::pin(async move {
+            if !self.probed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(SwitchError::TimedOut);
+            }
+            self.reply.take().unwrap_or(Err(SwitchError::Stopped))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_terminal_reply_or_record_published_during_the_status_probe_is_not_lost() {
+    for case in ["done", "ended", "record", "failed-record", "missing"] {
+        let mut fake = SupervisedFake::new("switched");
+        fake.view.supervisor = Some(json!({"state":"idle", "switch":null}));
+        let reply = match case {
+            "done" => Some(Ok(SwitchEvent::Done {
+                result: json!({"result":"cancelled"}),
+            })),
+            "ended" => Some(Err(SwitchError::Ended("stopping".into()))),
+            _ => None,
+        };
+        if matches!(case, "record" | "failed-record") {
+            let mut recorded = SwitchRecord::started(
+                "operation",
+                "update",
+                "0.1.0",
+                "0.2.0",
+                "2026-10-19T01:00:00Z",
+            );
+            if case == "failed-record" {
+                recorded.result = Some("failed-to-load".into());
+                recorded.why = Some("could not load".into());
+            }
+            *fake.recorded.borrow_mut() = Some(recorded);
+        }
+        let handle = SwitchHandle::new(
+            "operation".into(),
+            Box::new(AfterStatus {
+                probed: fake.probed.clone(),
+                reply,
+            }),
+        );
+        let record = SwitchRecord::started(
+            "operation",
+            "update",
+            "0.1.0",
+            "0.2.0",
+            "2026-10-19T01:00:00Z",
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut console = Console::new(true, &mut out, &mut err);
+        let outcome = follow_until(
+            &fake,
+            handle,
+            record,
+            Outcome::new("update", &settings("auto", None)),
+            &mut console,
+            std::future::pending(),
+        )
+        .await;
+        assert!(fake.probed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(outcome.operation_id.as_deref(), Some("operation"));
+        assert_eq!(
+            (outcome.code, outcome.result),
+            match case {
+                "done" => (0, "cancelled"),
+                "record" => (0, "updated"),
+                "missing" => (1, "outcome-unknown"),
+                _ => (1, "error"),
+            },
+            "case {case}"
+        );
+        assert!(fake.base.calls().is_empty(), "following must never resend");
     }
 }
