@@ -231,7 +231,7 @@ export function UpdatesCard({ className }: { className?: string }) {
         switch_request: optimistic,
       });
       return {
-        previousRead: status.lastRead,
+        previousRead: status.lastRead ?? before,
         lastSwitch: JSON.stringify(before?.supervisor?.last_switch),
       };
     },
