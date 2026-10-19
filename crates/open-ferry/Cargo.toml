@@ -61,6 +61,11 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [dev-dependencies]
 open-ferry-update = { workspace = true, features = ["test-support"] }
+flate2 = "1.1.10"
+minisign = "0.10.0"
+tar = { version = "0.4.46", default-features = false }
+url = "2.5.8"
+zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2"] }
 open-ferry-tui = { workspace = true, features = ["test-support"] }
 futures-util = { version = "0.3.34", features = ["sink"] }
 hyper = { version = "1.11.1", default-features = false, features = ["client", "http1", "http2", "server"] }

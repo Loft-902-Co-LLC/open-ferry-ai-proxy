@@ -1764,10 +1764,12 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
+ "flate2",
  "futures-util",
  "hyper",
  "hyper-util",
  "libc",
+ "minisign",
  "open-ferry-core",
  "open-ferry-dashboard",
  "open-ferry-management",
@@ -1787,6 +1789,7 @@ dependencies = [
  "socket2",
  "subtle",
  "sysinfo",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -1794,8 +1797,10 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
+ "url",
  "windows-service",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
