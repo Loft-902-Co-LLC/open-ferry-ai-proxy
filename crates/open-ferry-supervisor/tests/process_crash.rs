@@ -54,27 +54,26 @@ fn crash_at(seam: &str, run: Run, want: Want) {
     fx.stage(B, "B");
     // An older record, which every recovery must keep.
     let old = fx.seed_history();
-    let watch = match run {
-        Run::Good => 1_500,
-        Run::FailLoad => 1_500,
-        Run::Return => 20_000,
-    };
     match run {
         Run::Good => {}
         Run::FailLoad => fx.fault("fail-load", "@B"),
-        Run::Return => fx.fault("exit-after", "go@B"),
+        Run::Return => {
+            fx.fault("exit-after", "go@B");
+            // Keep confirmation pending until the exit opens the return.
+            fx.hold("watch.before_confirm");
+        }
     }
     fx.hold(seam);
-    let mut first = fx.start(&Tm {
-        watch,
-        ..Tm::default()
-    });
+    let mut first = fx.start(&Tm::default());
     let mut sw = fx.update(B);
     let id = sw.accepted();
     fx.wait_arrived(seam);
     let before = fx.driver_log().iter().filter(|v| v["k"] == "spawn").count();
     // By its handle, held inside the write: nothing of its own runs afterwards.
     first.kill();
+    if matches!(run, Run::Return) {
+        fx.release("watch.before_confirm");
+    }
     drop(sw);
     // The workers die with it (the job object, or EOF on their channels).
     let pids: Vec<u32> = (1..=before).filter_map(|n| fx.pid_of(n)).collect();

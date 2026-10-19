@@ -556,12 +556,11 @@ fn row_f_b_exits_inside_the_watch_window() {
     let fx = Fx::new();
     fx.stage(B, "B");
     fx.fault("exit-after", "go@B");
-    let tm = Tm {
-        watch: 20_000,
-        ..Tm::default()
-    };
-    let _sup = fx.start(&tm);
+    // Exit handling stays live while confirmation is fenced off.
+    fx.hold("watch.before_confirm");
+    let _sup = fx.start(&Tm::default());
     let result = switch_b(&fx);
+    fx.release("watch.before_confirm");
     eprintln!("{result}");
     // A may still be draining; it is left to finish and is not resumed. The
     // fresh A runs from versions/1.0.0, and the forward switch's own record
@@ -602,8 +601,9 @@ fn row_f_a_still_draining_is_not_resumed_while_the_fresh_from_starts() {
     let fx = Fx::new();
     fx.stage(B, "B");
     fx.fault("exit-after", "go@B");
+    // Exit handling stays live while confirmation is fenced off.
+    fx.hold("watch.before_confirm");
     let tm = Tm {
-        watch: 20_000,
         drain: 60_000,
         ..Tm::default()
     };
@@ -611,6 +611,7 @@ fn row_f_a_still_draining_is_not_resumed_while_the_fresh_from_starts() {
     let held = fx.hold_partial();
     fx.wait_live(1);
     switch_b(&fx);
+    fx.release("watch.before_confirm");
     fx.assert_columns(Columns {
         state: Some(StateCol::Record(
             Rec {
@@ -647,14 +648,14 @@ fn row_f_a_still_draining_is_not_resumed_while_the_fresh_from_starts() {
 /// (after B is dead and A is gone, before the fresh `from` is tried).
 fn row_f_then(fx: &Fx, change: impl FnOnce()) -> Sup {
     fx.fault("exit-after", "go@B");
+    // Exit handling stays live while confirmation is fenced off.
+    fx.hold("watch.before_confirm");
     fx.hold("journal.before:J-R1");
-    let sup = fx.start(&Tm {
-        watch: 20_000,
-        ..Tm::default()
-    });
+    let sup = fx.start(&Tm::default());
     let mut sw = fx.update(B);
     sw.accepted();
     fx.wait_arrived("journal.before:J-R1");
+    fx.release("watch.before_confirm");
     // A's binary is a running image on Windows until A has exited.
     fx.wait_dead(1);
     fx.wait_dead(2);
@@ -1003,10 +1004,13 @@ fn row_j_the_rollback_target_exits_and_no_automatic_switch_follows() {
     fx.wait_settled();
     // The rollback target is A again (worker 3); it exits as soon as it is live.
     fx.fault("exit-after", "go@A");
+    // The forward watch has ended; fence only the rollback's confirmation.
+    fx.hold("watch.before_confirm");
     let mut sw = fx.rollback(A);
     sw.accepted();
     sw.done().expect("a done result");
     fx.wait_settled();
+    fx.release("watch.before_confirm");
     // The fresh worker of the version the rollback came from, and no more.
     fx.wait_for("the fresh B", || {
         (fx.status()?["workers"]
@@ -1207,15 +1211,15 @@ fn row_m_j_r1_the_return_is_acted_on_after_three_failed_writes() {
     let fx = Fx::new();
     fx.stage(B, "B");
     fx.fault("exit-after", "go@B");
+    // Exit handling stays live while confirmation is fenced off.
+    fx.hold("watch.before_confirm");
     fx.fail("journal.fail:J-R1");
-    let _sup = fx.start(&Tm {
-        watch: 20_000,
-        ..Tm::default()
-    });
+    let _sup = fx.start(&Tm::default());
     let mut sw = fx.update(B);
     sw.accepted();
     sw.done().expect("a done result");
     fx.wait_settled();
+    fx.release("watch.before_confirm");
     assert!(fx.failed("journal.fail:J-R1") >= 3);
     // The worker that failed is replaced all the same: row f's result.
     fx.assert_columns(Columns {
@@ -1462,20 +1466,19 @@ fn late_write(
     let fx = Fx::new();
     fx.stage(B, "B");
     let old = fx.seed_history();
-    let watch = match flow {
-        Flow::Return => 20_000,
-        Flow::FailLoad | Flow::Good => 1_000,
-    };
     match flow {
         Flow::FailLoad => fx.fault("fail-load", "@B"),
-        Flow::Return => fx.fault("exit-after", "go@B"),
+        Flow::Return => {
+            fx.fault("exit-after", "go@B");
+            fx.hold("watch.before_confirm");
+        }
         Flow::Good => {}
     }
     for point in points {
         fx.fail(point);
     }
     let mut first = fx.start(&Tm {
-        watch,
+        watch: 1_000,
         ..Tm::default()
     });
     let mut sw = fx.update(B);
@@ -1490,6 +1493,7 @@ fn late_write(
         }),
         Flow::Return => {
             fx.wait_for("the fresh from", || fx.pid_of(3).filter(|p| alive(*p)));
+            fx.release("watch.before_confirm");
         }
         Flow::FailLoad => fx.wait_dead(2),
     };

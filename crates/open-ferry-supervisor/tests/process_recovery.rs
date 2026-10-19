@@ -37,10 +37,13 @@ fn killed_with_a_return_open(fx: &Fx) {
     fx.wait_settled();
     fx.wait_journal("the install", |j| j["install_pending"].is_null());
     fx.fault("exit-after", "go@C");
+    // A->B has settled; only C's confirmation waits for its exit to be seen.
+    fx.hold("watch.before_confirm");
     fx.hold("journal.after:J-R1");
     let mut second = fx.update(C);
     second.accepted();
     fx.wait_arrived("journal.after:J-R1");
+    fx.release("watch.before_confirm");
     // By its handle, held inside the write: nothing of its own runs afterwards.
     sup.kill();
     drop(second);
@@ -486,10 +489,13 @@ fn the_installed_rung_runs_from_the_installed_path(without_the_record: bool) {
     }
     // The switch to C fails; its return starts with C's fault out of the way.
     fx.fault("exit-after", "go@C");
+    // A->B has settled; only C's confirmation waits for its exit to be seen.
+    fx.hold("watch.before_confirm");
     fx.hold("journal.before:J-R1");
     let mut second = fx.update(C);
     second.accepted();
     fx.wait_arrived("journal.before:J-R1");
+    fx.release("watch.before_confirm");
     fx.wait_dead(2);
     fx.wait_dead(3);
     fx.fault("exit-after", "welcome@0.0.0");
