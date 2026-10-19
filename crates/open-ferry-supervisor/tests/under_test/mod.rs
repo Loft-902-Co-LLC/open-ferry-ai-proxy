@@ -229,23 +229,33 @@ pub fn now_ms() -> u64 {
 }
 
 /// Whether process `pid` still runs (a zombie, not yet reaped, does not).
+/// Unexpected Windows query errors fail the calling test.
+#[track_caller]
 pub fn alive(pid: u32) -> bool {
+    match liveness(pid) {
+        Ok(running) => running,
+        Err(error) => panic!("can't check whether process {pid} runs: {error}"),
+    }
+}
+
+/// The platform probe, returning unexpected Windows query errors to its caller.
+fn liveness(pid: u32) -> io::Result<bool> {
     #[cfg(target_os = "linux")]
     {
-        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => {
                 stat.rsplit_once(')')
                     .and_then(|(_, rest)| rest.trim_start().chars().next())
                     != Some('Z')
             }
             Err(_) => false,
-        }
+        })
     }
     #[cfg(windows)]
     {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows_sys::Win32::Foundation::{
-            ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
         };
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -258,39 +268,39 @@ pub fn alive(pid: u32) -> bool {
         if handle.is_null() {
             let error = io::Error::last_os_error();
             return match error.raw_os_error().map(|code| code as u32) {
-                // No such worker. Access denied still means the process exists.
-                Some(ERROR_INVALID_PARAMETER) => false,
-                Some(ERROR_ACCESS_DENIED) => true,
-                // An unknown answer must fail the test, not prove alive or dead.
-                _ => panic!("can't open process {pid} to check whether it runs: {error}"),
+                // No such worker.
+                Some(ERROR_INVALID_PARAMETER) => Ok(false),
+                // The process object exists (running, or exited but still held
+                // open). Keep it as possibly running: stop/cleanup checks must
+                // not pass without evidence that it exited.
+                Some(ERROR_ACCESS_DENIED) => Ok(true),
+                _ => Err(error),
             };
         }
         // SAFETY: OpenProcess returned a valid handle whose ownership we take.
         let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
         // SAFETY: the owned handle has SYNCHRONIZE rights and stays open.
         match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
-            WAIT_OBJECT_0 => false,
-            WAIT_TIMEOUT => true,
-            // A failed wait says nothing about liveness; fail rather than guess.
-            result => panic!(
-                "can't check whether process {pid} runs: wait returned {result:#x}: {}",
-                io::Error::last_os_error()
-            ),
+            WAIT_OBJECT_0 => Ok(false),
+            WAIT_TIMEOUT => Ok(true),
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            result => Err(io::Error::other(format!("wait returned {result:#x}"))),
         }
     }
     #[cfg(target_os = "macos")]
     {
         // kill(pid, 0) also succeeds for the zombie the supervisor guard deliberately
         // retains. Use the same zombie-aware identity query as production.
-        match open_ferry_supervisor::process::unix::start_time(pid) {
+        let running = match open_ferry_supervisor::process::unix::start_time(pid) {
             Ok(started) => started.is_some(),
             Err(_) => true,
-        }
+        };
+        Ok(running)
     }
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     {
         // SAFETY: signal 0 only checks the id.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+        Ok(unsafe { libc::kill(pid as i32, 0) == 0 })
     }
 }
 
@@ -391,12 +401,20 @@ impl DriverLog {
         let _ = self.file.lock().unwrap().write_all(text.as_bytes());
     }
     fn alive_now(&self) -> Vec<u32> {
-        self.pids
-            .lock()
-            .unwrap()
-            .iter()
-            .copied()
-            .filter(|pid| alive(*pid))
+        let pids = self.pids.lock().unwrap().clone();
+        pids.into_iter()
+            .filter(|&pid| match liveness(pid) {
+                Ok(running) => running,
+                Err(error) => {
+                    // This runs in the supervisor: record the unknown result,
+                    // retaining a possibly running worker rather than claiming
+                    // it exited. No query runs while the pids mutex is held.
+                    self.line(json!({
+                        "k": "liveness_unknown", "pid": pid, "error": error.to_string(),
+                    }));
+                    true
+                }
+            })
             .collect()
     }
 }
