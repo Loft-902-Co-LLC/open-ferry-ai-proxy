@@ -80,7 +80,7 @@ curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/lates
 | `--config PATH` | `-ConfigPath PATH` | The config to keep, or to write when there's none |
 | `--target TARGET` | | Install the build for this target rather than this system's, such as `x86_64-unknown-linux-musl` |
 | `--no-attestation` | `-NoAttestation` | Don't check the attestation, even when `gh` is installed. The `SHA256SUMS` check still runs |
-| `--no-auto-update` | `-NoAutoUpdate` | Install with automatic updates off (`self-update.mode: off` in the config). Otherwise open-ferry keeps itself up to date; [docs/updates.md](docs/updates.md) says how, and every way to turn that off |
+| `--no-auto-update` | `-NoAutoUpdate` | Install with automatic updates off (`self-update.mode: off` in the config). The default `auto` mode checks for releases and stages them for `open-ferry update` to install; [docs/updates.md](docs/updates.md) describes updates and every way to turn those checks off |
 | `--migrate` | `-Migrate` | When CLIProxyAPI is found, switch it to open-ferry without asking, as for an unattended install. The script fails (exit code 1) when it can't be switched, or the switch fails; with no CLIProxyAPI, it only says so |
 | `--no-migrate` | `-NoMigrate` | Don't look for CLIProxyAPI |
 
