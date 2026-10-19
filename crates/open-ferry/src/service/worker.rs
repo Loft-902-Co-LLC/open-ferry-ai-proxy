@@ -1547,6 +1547,7 @@ struct Prepared {
 /// and what it shares.
 struct Context {
     data_dir: PathBuf,
+    installed: PathBuf,
     hooks: Hooks,
     control: ServeControl,
     /// Update checks of a test, in place of the real ones.
@@ -1602,6 +1603,7 @@ async fn start(
     }
     let context = Context {
         data_dir: welcome.installation.data_dir.clone(),
+        installed: welcome.installation.installed.clone(),
         hooks,
         control,
         #[cfg(test)]
@@ -1727,10 +1729,10 @@ fn prepare(
             service.management = service.management.clone().with_updates(updates);
             first_check = Duration::ZERO;
         } else {
-            service.prepare_update_checks(Some(&context.data_dir));
+            service.prepare_update_checks(Some((&context.data_dir, &context.installed)));
         }
         #[cfg(not(test))]
-        service.prepare_update_checks(Some(&context.data_dir));
+        service.prepare_update_checks(Some((&context.data_dir, &context.installed)));
     }
     let handles = Handles {
         gate: service.gate.clone(),

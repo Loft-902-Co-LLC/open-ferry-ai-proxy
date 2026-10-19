@@ -4,8 +4,8 @@
 //! at random), then one every `check-every`, give or take a tenth. In
 //! `notify` mode, or on an install that doesn't update itself, a check
 //! logs a newer release once per version; in `auto` it also stages it, and
-//! logs that once. Nothing is switched or restarted here: `open-ferry
-//! update` switches, and a restart runs the new binary.
+//! logs that once. A supervised worker also asks its supervisor to switch
+//! to the staged release. A plain server leaves it staged for installation.
 //!
 //! In `off` mode no check runs and no request is made; the loop waits for
 //! the config to change. Turning updates off while a check runs stops it
@@ -16,6 +16,7 @@
 //! A failed check is logged once, at warn, and the server goes on; the
 //! state file and the status keep its error until the next check.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -26,10 +27,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::fetch::{Fetch, FetchError, HttpFetch};
-use crate::install::Install;
+use crate::install::{self, Install};
+use crate::receipt::Receipt;
 use crate::settings::{self, Settings};
-use crate::switching::{self, CancelOutcome, SwitchError, SwitchHandle, Switcher};
-use crate::updater::{CheckResult, Status, UpdateError, Updater};
+use crate::switching::{self, CancelOutcome, SwitchError, SwitchEvent, SwitchHandle, Switcher};
+use crate::updater::{CheckResult, Report, Status, UpdateError, Updater};
 
 /// When the first check runs after the start, at random between these.
 pub const FIRST_CHECK: (Duration, Duration) =
@@ -79,6 +81,7 @@ pub(crate) struct Inner {
     running: Arc<tokio::sync::Mutex<()>>,
     task: Mutex<Option<JoinHandle<()>>>,
     switcher: Mutex<Option<Arc<dyn Switcher>>>,
+    installed: Mutex<Option<PathBuf>>,
 }
 
 /// The server's update check: cheap to clone, one loop for all clones.
@@ -108,6 +111,7 @@ impl UpdateService {
                 running: Arc::new(tokio::sync::Mutex::new(())),
                 task: Mutex::new(None),
                 switcher: Mutex::new(None),
+                installed: Mutex::new(None),
             }),
         };
         service.log_settings(None);
@@ -117,6 +121,20 @@ impl UpdateService {
     /// Starts the loop on the current runtime, its first check after
     /// `first_check` (see [`FIRST_CHECK`]).
     pub fn start(&self, first_check: Duration) {
+        #[cfg(feature = "blue-green-test")]
+        let first_check = if self
+            .inner
+            .updater
+            .data
+            .root()
+            .join(".blue-green-test")
+            .join("update-now")
+            .exists()
+        {
+            Duration::ZERO
+        } else {
+            first_check
+        };
         let inner = Arc::clone(&self.inner);
         let task = tokio::spawn(run(inner, first_check));
         let mut slot = self
@@ -166,6 +184,17 @@ impl UpdateService {
             .switcher
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(switcher);
+        self
+    }
+
+    /// Assess the installed path from the authenticated supervisor welcome.
+    /// A worker's own executable may be a kept version of that installation.
+    pub fn with_installed_path(self, installed: PathBuf) -> Self {
+        *self
+            .inner
+            .installed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(installed);
         self
     }
 
@@ -357,7 +386,7 @@ impl UpdateService {
                 .unwrap_or_else(PoisonError::into_inner);
             (live.checking, live.next_check, live.install.clone())
         };
-        let install = install.unwrap_or_else(|| self.inner.updater.install());
+        let install = install.unwrap_or_else(|| assessed_install(&self.inner));
         let mut status = self.inner.updater.status(&settings, &install);
         status.checking = checking;
         status.next_check = next_check
@@ -376,8 +405,7 @@ impl UpdateService {
         };
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            let _guard = guard;
-            checked(&inner).await;
+            checked(&inner, guard).await;
         });
         CheckNow::Started
     }
@@ -385,8 +413,8 @@ impl UpdateService {
     /// Runs one check now and waits for it, as the loop would: `None` when
     /// updates are off, or turn off while it runs.
     pub async fn check_once(&self) -> Option<Result<CheckResult, UpdateError>> {
-        let _guard = self.inner.running.lock().await;
-        checked(&self.inner).await
+        let guard = Arc::clone(&self.inner.running).lock_owned().await;
+        checked(&self.inner, guard).await
     }
 }
 
@@ -424,8 +452,8 @@ async fn run(inner: Arc<Inner>, first_check: Duration) {
             }
         }
         {
-            let _guard = inner.running.lock().await;
-            checked(&inner).await;
+            let guard = Arc::clone(&inner.running).lock_owned().await;
+            checked(&inner, guard).await;
         }
         due = Instant::now() + settings::jittered(changes.borrow().settings.check_every);
     }
@@ -445,8 +473,11 @@ fn set_next_check(inner: &Inner, due: Option<Instant>) {
 
 /// Runs one check in the mode in force, logging its outcome, unless
 /// updates are off; stops it if they are turned off meanwhile. The caller
-/// holds `running`.
-async fn checked(inner: &Inner) -> Option<Result<CheckResult, UpdateError>> {
+/// passes `running`, which is released before asking for a switch.
+async fn checked(
+    inner: &Arc<Inner>,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Option<Result<CheckResult, UpdateError>> {
     let mut changes = inner.snapshot.subscribe();
     let snapshot = changes.borrow_and_update().clone();
     if snapshot.settings.mode == SelfUpdateMode::Off {
@@ -460,7 +491,6 @@ async fn checked(inner: &Inner) -> Option<Result<CheckResult, UpdateError>> {
             None
         }
     };
-    set_checking(inner, false);
     match &outcome {
         Some(Ok(result)) if result.news => {
             tracing::info!("{}", result.report.describe(&inner.updater.running));
@@ -474,10 +504,86 @@ async fn checked(inner: &Inner) -> Option<Result<CheckResult, UpdateError>> {
         Some(Err(error)) => tracing::warn!("update check failed: {error}"),
         None => {}
     }
+    set_checking(inner, false);
+    drop(guard);
+    if let Some(Ok(CheckResult {
+        report: Report::Staged { version },
+        ..
+    })) = &outcome
+        && version != &inner.updater.running
+        && inner.snapshot.borrow().settings.mode == SelfUpdateMode::Auto
+    {
+        let service = UpdateService {
+            inner: Arc::clone(inner),
+        };
+        if service.switcher().is_ok() {
+            match service.install_now(true).await {
+                Ok(handle) => {
+                    tracing::info!(id = %handle.id, %version, "automatic switch accepted");
+                    tokio::spawn(follow_switch(handle));
+                }
+                Err(SwitchError::Ended(reason)) => {
+                    tracing::info!(%version, %reason, "automatic switch ended");
+                }
+                Err(error) => tracing::debug!("automatic switch deferred: {error}"),
+            }
+        }
+    }
     outcome
 }
 
+async fn follow_switch(mut handle: SwitchHandle) {
+    loop {
+        match handle
+            .next(std::time::Instant::now() + Duration::from_secs(120))
+            .await
+        {
+            Ok(Some(SwitchEvent::Progress { phase })) => {
+                tracing::debug!(id = %handle.id, %phase, "automatic switch progress");
+            }
+            Ok(Some(SwitchEvent::Done { result })) => {
+                tracing::info!(id = %handle.id, %result, "automatic switch finished");
+                return;
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::info!(id = %handle.id, "automatic switch progress ended: {error}; see supervisor status and update history");
+                return;
+            }
+        }
+    }
+}
+
+fn assessed_install(inner: &Inner) -> Install {
+    let installed = inner
+        .installed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match installed.as_deref() {
+        Some(path) => install::assess_for(
+            inner.updater.system.as_ref(),
+            Receipt::load(&inner.updater.data.receipt_file()),
+            path,
+        ),
+        None => inner.updater.install(),
+    }
+}
+
 async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, UpdateError> {
+    #[cfg(feature = "blue-green-test")]
+    {
+        let root = inner.updater.data.root().to_path_buf();
+        tokio::task::spawn_blocking(move || crate::test_seams::hit(&root, "auto.before_check"))
+            .await
+            .map_err(|error| UpdateError::Io {
+                what: "wait at the test check barrier",
+                error: error.to_string(),
+            })?
+            .map_err(|error| UpdateError::Io {
+                what: "wait at the test check barrier",
+                error: error.to_string(),
+            })?;
+    }
     let fetch = (inner.make_fetch)(&snapshot.proxy_url).map_err(|error| UpdateError::Fetch {
         what: "the release list",
         error,
@@ -491,14 +597,14 @@ async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, Update
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .is_some();
-    let install = updater.install();
+    let install = assessed_install(inner);
     inner
         .live
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .install = Some(install);
+        .install = Some(install.clone());
     updater
-        .check_with_pending(snapshot.settings.mode, supervised)
+        .check_with_pending(snapshot.settings.mode, supervised, &install)
         .await
 }
 

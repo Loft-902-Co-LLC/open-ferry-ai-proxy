@@ -1319,6 +1319,11 @@ mod prepared {
     pub(super) fn context(dir: &std::path::Path) -> Context {
         Context {
             data_dir: dir.join("data"),
+            installed: dir.join("bin").join(if cfg!(windows) {
+                "open-ferry.exe"
+            } else {
+                "open-ferry"
+            }),
             hooks: Hooks::default(),
             control: crate::service::serve_loop::ServeControl::new(),
             updates: None,

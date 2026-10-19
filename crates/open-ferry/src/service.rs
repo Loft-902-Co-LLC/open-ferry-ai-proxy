@@ -407,14 +407,15 @@ async fn in_scope<T>(operation: Option<Operation>, work: impl FnOnce() -> T) -> 
 /// checks follow `config`'s `self-update`; while it is `off` they make no
 /// request.
 ///
-/// A supervised worker passes the data directory its supervisor named
-/// (`welcome.installation.data_dir`); an ordinary run takes the user's from
-/// the environment.
+/// A supervised worker passes the data directory and installed binary from
+/// its authenticated welcome; an ordinary run takes the user's data directory
+/// from the environment.
 fn prepare_update_checks(
     probe: &dyn crate::scope::Probe,
     config: &Config,
-    data_dir: Option<&Path>,
+    installation: Option<(&Path, &Path)>,
 ) -> Option<UpdateService> {
+    let data_dir = installation.map(|(data_dir, _)| data_dir);
     let data = match update_check_data(probe, data_dir) {
         Ok(data) => data,
         Err(error) => {
@@ -435,7 +436,28 @@ fn prepare_update_checks(
     };
     match Updater::for_this_binary(fetch, data) {
         Ok(updater) => {
+            #[cfg(feature = "blue-green-test")]
+            let updater = {
+                let mut updater = updater;
+                if let Some(version) = crate::seams::update_version() {
+                    updater.running = version;
+                }
+                let key = updater
+                    .data
+                    .root()
+                    .join(".blue-green-test")
+                    .join("release-key");
+                if let Ok(text) = std::fs::read_to_string(key) {
+                    updater.keys = open_ferry_update::keys::ReleaseKeys::parse(&text)
+                        .expect("the process test release key");
+                }
+                updater
+            };
             let updates = UpdateService::new(updater, make_fetch, config);
+            let updates = match installation {
+                Some((_, installed)) => updates.with_installed_path(installed.to_path_buf()),
+                None => updates,
+            };
             if let Some(data_dir) = data_dir {
                 match worker_update_switcher(probe, data_dir) {
                     Ok(switcher) => Some(updates.with_switcher(Arc::new(switcher))),
@@ -1411,9 +1433,11 @@ impl Service {
     }
 
     /// Attaches the updater before any router clones the management state.
-    /// `data_dir` is the supervised worker's; `None` is the user's.
-    fn prepare_update_checks(&mut self, data_dir: Option<&Path>) {
-        if let Some(updates) = prepare_update_checks(self.probe.as_ref(), &self.config, data_dir) {
+    /// `installation` names the worker's data and installed binary; `None` is the user's.
+    fn prepare_update_checks(&mut self, installation: Option<(&Path, &Path)>) {
+        if let Some(updates) =
+            prepare_update_checks(self.probe.as_ref(), &self.config, installation)
+        {
             self.management = self.management.clone().with_updates(updates);
         }
     }

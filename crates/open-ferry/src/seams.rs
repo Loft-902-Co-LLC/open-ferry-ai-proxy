@@ -7,7 +7,7 @@
 //! synchronous persist barrier runs inside the refresh's blocking save.
 
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,6 +19,19 @@ const DIR: &str = ".blue-green-test";
 /// How long a worker under test lives at most: a safety net against
 /// orphans. No test may depend on it.
 const SAFETY_NET: Duration = Duration::from_secs(600);
+
+/// A signed test release carries its version in a trailer on the real binary.
+/// Only the automatic-update process tests use this trailer.
+pub fn update_version() -> Option<String> {
+    let mut file = std::fs::File::open(std::env::current_exe().ok()?).ok()?;
+    let size = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(128))).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let (_, version) = text.rsplit_once("\n--update-test-version ")?;
+    Some(version.strip_suffix("--")?.to_owned())
+}
 
 /// Installs the file barriers once, rooted only in the supplied test data dir.
 pub fn install_barriers(data_dir: &Path) -> io::Result<()> {
@@ -127,7 +140,7 @@ pub fn binary_marker() -> io::Result<String> {
     match std::fs::read_to_string(path) {
         Ok(marker) => Ok(marker.trim().to_owned()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Ok(env!("CARGO_PKG_VERSION").to_owned())
+            Ok(update_version().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned()))
         }
         Err(error) => Err(error),
     }

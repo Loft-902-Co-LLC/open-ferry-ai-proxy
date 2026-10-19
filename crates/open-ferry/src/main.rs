@@ -110,7 +110,10 @@ fn main() -> ExitCode {
     };
     if flags.version {
         // What the updater checks a downloaded binary prints.
-        println!("open-ferry {}", open_ferry_update::CURRENT_VERSION);
+        let version = open_ferry_update::CURRENT_VERSION.to_owned();
+        #[cfg(feature = "blue-green-test")]
+        let version = seams::update_version().unwrap_or(version);
+        println!("open-ferry {version}");
         return ExitCode::SUCCESS;
     }
     // The blue-green entries come before anything that starts a thread or
