@@ -669,12 +669,18 @@ pub async fn connect(
     location: &Location,
     identity: &Identity,
 ) -> Result<ClientStream, EndpointError> {
-    let opened = open_endpoint_dir(location, identity, false)
-        .map_err(Fail::for_client)?
-        .ok_or_else(|| EndpointError::Io(io::Error::from(io::ErrorKind::NotFound)))?;
-    check_socket_entry(&opened, identity, true)
-        .map_err(Fail::for_client)?
-        .ok_or_else(|| EndpointError::Io(io::Error::from(io::ErrorKind::NotFound)))?;
+    let (location, owner) = (location.clone(), identity.clone());
+    let opened = tokio::task::spawn_blocking(move || {
+        let opened = open_endpoint_dir(&location, &owner, false)
+            .map_err(Fail::for_client)?
+            .ok_or_else(|| EndpointError::Io(io::Error::from(io::ErrorKind::NotFound)))?;
+        check_socket_entry(&opened, &owner, true)
+            .map_err(Fail::for_client)?
+            .ok_or_else(|| EndpointError::Io(io::Error::from(io::ErrorKind::NotFound)))?;
+        Ok::<_, EndpointError>(opened)
+    })
+    .await
+    .map_err(|_| EndpointError::Io(io::Error::other("checking the endpoint path stopped")))??;
     let stream = UnixStream::connect(&opened.socket).await?;
     match stream.peer_cred() {
         Ok(cred) if cred.uid() == identity.uid => Ok(stream),
