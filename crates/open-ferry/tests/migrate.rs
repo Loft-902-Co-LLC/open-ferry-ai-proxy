@@ -16,9 +16,13 @@ use std::time::{Duration, Instant};
 
 #[path = "support/privilege.rs"]
 mod privilege;
+#[cfg(not(feature = "blue-green-test"))]
 #[path = "../../open-ferry-supervisor/tests/under_test/timeouts.rs"]
 mod timeouts;
+#[cfg(not(feature = "blue-green-test"))]
 use timeouts::LONG;
+#[cfg(feature = "blue-green-test")]
+use under_test::LONG;
 
 const OPEN_FERRY: &str = env!("CARGO_BIN_EXE_open-ferry");
 
