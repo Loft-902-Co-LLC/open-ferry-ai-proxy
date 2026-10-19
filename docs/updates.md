@@ -100,7 +100,7 @@ open-ferry update
 
 While a supervisor runs for this data directory, `open-ferry update` and `-rollback` switch workers on the same listener while existing requests finish. `-check` also shows the supervisor's phase, running version, rollback target, watch deadline and last outcome, and whether switching is disabled and why. `-cancel` asks it to cancel before the new worker takes over. Ctrl-C after acceptance stops following; the supervisor continues the switch. Updating, rolling back or cancelling a machine install needs root or an administrator.
 
-The supervisor refuses an automatic request unless the mode is `auto`. Changing to `notify` leaves an accepted switch running. Only `off` cancels an accepted switch, while cancellation is still possible.
+The supervisor refuses an automatic request unless the mode is `auto`. Changing to `notify` leaves an accepted switch running. Of the modes, only `off` cancels an accepted switch, while cancellation is still possible.
 
 Automatic checks skip releases that failed here or were rolled back from. When an attempt ends without a completed switch, automatic updates wait at least five hours before trying that version again. Manual requests are not held by this cooldown.
 
