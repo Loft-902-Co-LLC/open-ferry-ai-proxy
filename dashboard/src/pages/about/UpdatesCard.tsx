@@ -32,6 +32,8 @@ import { Spinner } from "../../components/Spinner";
 import { formatDateTime, formatSeconds } from "../../lib/format";
 import { SwitchStatus } from "./SwitchStatus";
 
+type SwitchAction = { action: "install" } | { action: "rollback"; target: string };
+
 const UPDATES_DOC_URL =
   "https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/updates.md";
 
@@ -218,11 +220,14 @@ export function UpdatesCard({ className }: { className?: string }) {
     onSettled: () => client.invalidateQueries({ queryKey: apiQueryKey(UPDATE) }),
   });
   const data = status.data;
-  const [confirm, setConfirm] = useState<"install" | "rollback" | null>(null);
+  const [confirm, setConfirm] = useState<SwitchAction | null>(null);
   const switching = useMutation({
-    mutationFn: (action: "install" | "rollback") =>
-      call<SwitchStarted>(action === "install" ? UPDATE_INSTALL : UPDATE_ROLLBACK, { method: "POST" }),
-    onMutate: async (action) => {
+    mutationFn: (request: SwitchAction) =>
+      call<SwitchStarted>(request.action === "install" ? UPDATE_INSTALL : UPDATE_ROLLBACK, {
+        method: "POST",
+        json: request.action === "rollback" ? { target: request.target } : undefined,
+      }),
+    onMutate: async ({ action }) => {
       await client.cancelQueries({ queryKey: apiQueryKey(UPDATE) });
       const before = client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE));
       const optimistic = { request_id: null, action, state: "preparing" as const, id: null, reason: null, pending: true };
@@ -245,9 +250,9 @@ export function UpdatesCard({ className }: { className?: string }) {
   useEffect(() => {
     if (!switchError || switchContext === undefined || status.lastRead === switchContext.previousRead) return;
     if ((lastSwitch != null && JSON.stringify(lastSwitch) !== switchContext.lastSwitch) ||
-      (latestRequest?.action === switching.variables &&
+      (latestRequest?.action === switching.variables.action &&
         latestRequest.request_id !== switchContext.previousRead?.switch_request?.request_id) ||
-      (liveSwitch?.how === (switching.variables === "install" ? "update" : "rollback") &&
+      (liveSwitch?.how === (switching.variables.action === "install" ? "update" : "rollback") &&
         liveSwitch.id !== switchContext.previousRead?.supervisor?.switch?.id)) {
       resetSwitch();
     }
@@ -262,7 +267,7 @@ export function UpdatesCard({ className }: { className?: string }) {
   const trustsReleaseKey = data?.trusts_release_key === true;
   const canInstall = enabled && supervisor.phase === "idle" && available && trustsReleaseKey;
   const canRollback = enabled && ["idle", "watching"].includes(supervisor.phase) && supervisor.rollback_target !== null;
-  const canConfirm = confirm === "rollback" ? canRollback : canInstall;
+  const canConfirm = confirm?.action === "rollback" ? canRollback && confirm.target === supervisor.rollback_target : canInstall;
   const installVersion = data?.latest_version ?? stagedVersion;
   const failedBefore = installVersion != null && data?.failed_versions.includes(installVersion);
   const rolledBackBefore = installVersion != null && data?.rolled_back_version === installVersion;
@@ -317,8 +322,10 @@ export function UpdatesCard({ className }: { className?: string }) {
           <Notices status={data} />
           <SwitchStatus polling={status.polling} recoveringSupervisor={status.recoveringSupervisor} status={data} onRetry={() => { void status.refetch(); }} hidePhase={status.isError && !status.hidePollError} />
           {(canInstall || canRollback) && <div className="flex flex-wrap gap-2">
-            {canInstall && <Button variant="primary" onClick={() => { setConfirm("install"); }}>Install now</Button>}
-            {canRollback && <Button onClick={() => { setConfirm("rollback"); }}>Roll back</Button>}
+            {canInstall && <Button variant="primary" onClick={() => { setConfirm({ action: "install" }); }}>Install now</Button>}
+            {canRollback && <Button onClick={() => {
+              if (supervisor.rollback_target !== null) setConfirm({ action: "rollback", target: supervisor.rollback_target });
+            }}>Roll back</Button>}
           </div>}
           <Facts status={data} />
           {data.supervisor === null && <p className="max-w-prose text-muted">
@@ -359,8 +366,8 @@ export function UpdatesCard({ className }: { className?: string }) {
       </Alert>}
       <ConfirmDialog
         open={confirm !== null}
-        title={confirm === "rollback" ? `Roll back to ${supervisor?.rollback_target ?? "the previous version"}?` : "Install the newer release now?"}
-        confirmLabel={confirm === "rollback" ? "Roll back" : "Install now"}
+        title={confirm?.action === "rollback" ? `Roll back to ${confirm.target}?` : "Install the newer release now?"}
+        confirmLabel={confirm?.action === "rollback" ? "Roll back" : "Install now"}
         tone="primary"
         confirmDisabled={!canConfirm}
         onCancel={() => { setConfirm(null); }}
@@ -371,12 +378,12 @@ export function UpdatesCard({ className }: { className?: string }) {
           }
         }}
       >
-        <p>The supervisor starts the {confirm === "rollback" ? "previous" : "new"} version and hands the running server over to it. Existing requests can finish.</p>
+        <p>The supervisor starts the {confirm?.action === "rollback" ? "previous" : "new"} version and hands the running server over to it. Existing requests can finish.</p>
         {!canConfirm && <p>This is no longer available. Close this and read the status.</p>}
-        {confirm === "install" && failedBefore && <p>
+        {confirm?.action === "install" && failedBefore && <p>
           Version {installVersion} failed here before. Install it again?
         </p>}
-        {confirm === "install" && rolledBackBefore && <p>
+        {confirm?.action === "install" && rolledBackBefore && <p>
           Version {installVersion} was rolled back from. Install it again?
         </p>}
       </ConfirmDialog>

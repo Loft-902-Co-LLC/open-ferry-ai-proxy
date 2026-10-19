@@ -18,17 +18,18 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::body::Body;
 use axum::extract::State;
 use axum::response::Response;
 use futures_util::FutureExt;
 use http::StatusCode;
 use open_ferry_update::{CheckNow, SwitchError, SwitchHandle, UpdateError, UpdateService};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as value};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::{ApiError, json, ok};
+use super::{ApiError, json, ok, read_body};
 use crate::DashboardState;
 
 /// The server's update checks, or the error saying there are none.
@@ -344,6 +345,7 @@ impl Requests {
         &self,
         updates: UpdateService,
         action: &'static str,
+        rollback_target: Option<String>,
     ) -> Result<Response, ApiError> {
         let (send, receive) = oneshot::channel();
         let preparing;
@@ -378,16 +380,14 @@ impl Requests {
                     if action == "install" {
                         updates.install_now(false).await
                     } else {
-                        let target = updates
-                            .switch_view()
-                            .await?
-                            .rollback_target
-                            .ok_or(UpdateError::NoPrevious)?;
+                        let target = rollback_target.ok_or(UpdateError::NoPrevious)?;
                         updates.roll_back(&target).await
                     }
                 })
                 .catch_unwind()
                 .await
+                // A panic can happen after dispatch. Client preparation JoinErrors
+                // arrive as Update, before anything is sent.
                 .unwrap_or_else(|_| Err(SwitchError::Stopped));
                 let request = task_request.finish(result);
                 requests
@@ -409,15 +409,31 @@ impl Requests {
 pub(crate) async fn install(State(state): State<DashboardState>) -> Result<Response, ApiError> {
     state
         .update_requests
-        .start(updates(&state)?.clone(), "install")
+        .start(updates(&state)?.clone(), "install", None)
         .await
 }
 
-/// `POST /update/rollback`.
-pub(crate) async fn rollback(State(state): State<DashboardState>) -> Result<Response, ApiError> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollbackInput {
+    target: String,
+}
+
+/// `POST /update/rollback`, bound to the version the caller confirmed.
+pub(crate) async fn rollback(
+    State(state): State<DashboardState>,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let updates = updates(&state)?.clone();
+    let input: RollbackInput = read_body(body).await?;
+    if input.target.trim().is_empty() {
+        return Err(ApiError::invalid(
+            "target must name the confirmed rollback version",
+        ));
+    }
     state
         .update_requests
-        .start(updates(&state)?.clone(), "rollback")
+        .start(updates, "rollback", Some(input.target))
         .await
 }
 

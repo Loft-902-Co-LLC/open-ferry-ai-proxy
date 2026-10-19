@@ -233,6 +233,7 @@ describe("supervised updates", () => {
     await user.click(within(dialog).getByRole("button", { name: "Roll back" }));
     expect(await within(card).findByText("Rolled back to 0.1.0")).toBeVisible();
     expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(1);
+    expect(api.callsTo("POST", UPDATE_ROLLBACK)[0].json()).toEqual({ target: "0.1.0" });
     expect(card).not.toHaveTextContent("Automatic switch");
   });
 
@@ -351,6 +352,21 @@ describe("manual install retries", () => {
 });
 
 describe("switch failures", () => {
+  it("keeps the confirmed rollback target fixed when a poll changes it", async () => {
+    let reads = 0;
+    const api = mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => ({ json: updateStatus({
+      supervisor: supervisorStatus({ phase: "watching", rollback_target: ++reads === 1 ? "0.1.0" : "0.0.9" }),
+    }) })));
+    const { card, user } = await openUpdates();
+    await user.click(await within(card).findByRole("button", { name: "Roll back" }));
+    const dialog = screen.getByRole("dialog", { name: "Roll back to 0.1.0?" });
+    const confirm = within(dialog).getByRole("button", { name: "Roll back" });
+    await waitFor(() => { expect(confirm).toBeDisabled(); }, { timeout: 5_000 });
+    expect(dialog).toHaveAccessibleName("Roll back to 0.1.0?");
+    expect(dialog).toHaveTextContent("This is no longer available. Close this and read the status.");
+    expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(0);
+  });
+
   it.each([false, true])("shows already-latest as information with a recorded request: %s", async (recorded) => {
     const original = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
     const api = server(original);
