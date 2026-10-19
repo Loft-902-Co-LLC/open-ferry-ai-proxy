@@ -779,7 +779,19 @@ mod real_survivor {
             .unwrap();
             if matches!(how, How2::Incompatible | How2::Stop) {
                 // Incompatible: the probe answers at once. Stop: it stalls.
-                until("the probe", || config.join("pid").exists()).await;
+                // This precondition includes the real driver's trust/hash
+                // checks and process startup. The generic 30 s fixture wait
+                // can expire while the supervisor still permits a healthy
+                // load (60 s here); use that load budget for this event too.
+                // Unlike a timeout-only test, this one needs a real child to
+                // prove that its exit is awaited, so an absent pid must fail.
+                tokio::time::timeout(rig.cfg.timings.load, async {
+                    while !config.join("pid").exists() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .expect("the probe starts within the supervisor's load budget");
             }
             if matches!(how, How2::Stop) {
                 tx.send(Command::Stop).unwrap();
