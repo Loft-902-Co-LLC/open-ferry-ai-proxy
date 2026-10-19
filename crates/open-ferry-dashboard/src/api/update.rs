@@ -220,9 +220,6 @@ fn rollback_changed(error: &SwitchError, action: &str) -> bool {
     match error {
         SwitchError::Update(UpdateError::RollbackChanged { .. }) => true,
         SwitchError::Update(UpdateError::NoPrevious) => action == "rollback",
-        SwitchError::Update(UpdateError::Supervised(reason)) => {
-            action == "rollback" && reason.starts_with("rollback target changed:")
-        }
         _ => false,
     }
 }
@@ -535,7 +532,6 @@ mod tests {
                 actual: None,
             },
             UpdateError::NoPrevious,
-            UpdateError::Supervised("rollback target changed: private details".into()),
         ] {
             let request = SwitchRequest::preparing("rollback").finish(Err(error.into()));
             assert_eq!(request.state, "failed");
@@ -549,15 +545,25 @@ mod tests {
                 Some("the rollback target changed; read status and confirm again")
             );
         }
-        let request = SwitchRequest::preparing("rollback").finish(Err(SwitchError::Refused(
-            "rollback target changed: refused".into(),
-        )));
-        assert_eq!(request.state, "refused");
-        assert_eq!(request.code, "switch_refused");
-        assert_eq!(
-            request.reason.as_deref(),
-            Some("rollback target changed: refused")
-        );
+    }
+
+    #[test]
+    fn rollback_confirmation_depends_on_the_error_kind() {
+        for detail in [
+            "first diagnostic wording",
+            "a differently worded diagnostic",
+        ] {
+            let changed =
+                SwitchRequest::preparing("rollback").finish(Err(UpdateError::RollbackChanged {
+                    expected: detail.into(),
+                    actual: Some("another target".into()),
+                }
+                .into()));
+            assert_eq!(changed.code, "rollback_target_changed");
+            let supervised = SwitchRequest::preparing("rollback")
+                .finish(Err(UpdateError::Supervised(detail.into()).into()));
+            assert_eq!(supervised.code, "switch_failed");
+        }
     }
 
     #[test]

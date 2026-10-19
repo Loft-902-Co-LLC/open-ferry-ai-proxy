@@ -471,10 +471,11 @@ impl UpdateService {
                 let _lock = updater.lock()?;
                 let target = switching::rollback_target(&updater)?;
                 if target.version != expected {
-                    return Err(UpdateError::Supervised(format!(
-                        "rollback target changed: expected {expected}, now {}; run `open-ferry update -check`",
-                        target.version
-                    )).into());
+                    return Err(UpdateError::RollbackChanged {
+                        expected,
+                        actual: Some(target.version),
+                    }
+                    .into());
                 }
                 updater.validate_previous(&target).await?;
                 Ok::<_, SwitchError>(target)
@@ -482,7 +483,10 @@ impl UpdateService {
             prepared.map(|target| (target, request))
         })
         .await
-        .map_err(|error| UpdateError::Io { what: "prepare the rollback", error: error.to_string() })??;
+        .map_err(|error| UpdateError::Io {
+            what: "prepare the rollback",
+            error: error.to_string(),
+        })??;
         switcher
             .rollback(&target, std::time::Instant::now() + acceptance)
             .await

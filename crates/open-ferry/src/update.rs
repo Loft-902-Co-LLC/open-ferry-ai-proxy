@@ -1241,7 +1241,7 @@ impl Outcome {
             | SwitchError::Unreachable(_)
             | SwitchError::Untrusted(_) => (
                 format!("{error}. The supervisor request was not sent."),
-                if matches!(error, SwitchError::Update(error) if !matches!(error, UpdateError::Supervised(_)))
+                if matches!(error, SwitchError::Update(error) if !matches!(error, UpdateError::Supervised(_) | UpdateError::RollbackChanged { .. }))
                 {
                     "error"
                 } else {

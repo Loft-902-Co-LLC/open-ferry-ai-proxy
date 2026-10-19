@@ -665,9 +665,13 @@ async fn rollback_refuses_a_target_changed_since_confirmation_without_sending() 
     write_journal(&f, &journal);
     let error = service.roll_back("0.1.0").await.unwrap_err();
     assert!(
-        matches!(&error, SwitchError::Update(UpdateError::Supervised(why))
-        if why.contains("expected 0.1.0, now 0.2.0")),
+        matches!(&error, SwitchError::Update(UpdateError::RollbackChanged { expected, actual })
+        if expected == "0.1.0" && actual.as_deref() == Some("0.2.0")),
         "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "rollback target changed: expected 0.1.0, now 0.2.0; run `open-ferry update -check`"
     );
     assert!(fake.calls.lock().unwrap().is_empty());
 }
