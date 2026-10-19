@@ -150,6 +150,8 @@ function Notices({ status }: { status: UpdateStatus }) {
 
 function Facts({ status }: { status: UpdateStatus }) {
   const updates = UPDATES[status.updates];
+  const runningVersion = status.supervisor?.running_version ?? status.running_version;
+  const checkBeforeSwitch = status.last_result === "up-to-date" && status.latest_version !== null && status.latest_version !== runningVersion;
   const rollbackTarget = status.supervisor?.rollback_target ?? status.previous_version;
   const skipped = [
     ...status.failed_versions,
@@ -161,9 +163,9 @@ function Facts({ status }: { status: UpdateStatus }) {
         <Badge tone={updates.tone}>{updates.label}</Badge> {SOURCES[status.mode_source]}
       </Fact>
       <Fact term="Running">
-        <Version>{status.supervisor?.running_version ?? status.running_version}</Version>
+        <Version>{runningVersion}</Version>
       </Fact>
-      {status.installed_version !== status.running_version && (
+      {status.installed_version !== runningVersion && (
         <Fact term="Installed">
           <Version>{status.installed_version}</Version>
         </Fact>
@@ -172,7 +174,7 @@ function Facts({ status }: { status: UpdateStatus }) {
         {status.latest_version === null ? (
           "not checked yet"
         ) : (
-          <Version>{status.latest_version}</Version>
+          <><Version>{status.latest_version}</Version>{checkBeforeSwitch && " (last checked)"}</>
         )}
       </Fact>
       {rollbackTarget !== null && (
@@ -189,7 +191,7 @@ function Facts({ status }: { status: UpdateStatus }) {
         {status.last_check === null
           ? "none yet"
           : `${formatDateTime(status.last_check)}${
-              status.last_result === null ? "" : `: ${RESULTS[status.last_result]}`
+              status.last_result === null ? "" : `: ${checkBeforeSwitch ? "checked before the running version changed" : RESULTS[status.last_result]}`
             }`}
       </Fact>
       <Fact term="Next check">
