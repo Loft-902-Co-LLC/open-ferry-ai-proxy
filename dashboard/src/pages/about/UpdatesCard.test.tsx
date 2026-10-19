@@ -338,3 +338,34 @@ describe("manual install retries", () => {
     expect(card).not.toHaveTextContent("ready to install");
   });
 });
+
+describe("switch failures", () => {
+  it("shows an accepted switch that ended with an error as failed", async () => {
+    const status = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
+    const api = server(status);
+    api.use(route("POST", UPDATE_INSTALL, () => {
+      api.use(route("GET", UPDATE, { json: {
+        ...status,
+        switch_request: { action: "install", state: "failed", id: null, reason: "the new worker exited", pending: false },
+      } }));
+      return { status: 202, json: { failed: true, reason: "the new worker exited" } };
+    }));
+    const { card, user } = await openUpdates();
+    await user.click(await within(card).findByRole("button", { name: "Install now" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+    expect(await within(card).findByText("Switch failed")).toBeVisible();
+    expect(card).toHaveTextContent("the new worker exited");
+    expect(card).not.toHaveTextContent("Switch refused");
+    expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+  });
+
+  it("keeps a cached handover phase without showing a supervisor read error", async () => {
+    server(updateStatus({ supervisor: supervisorStatus({
+      phase: "handing-over", error: "the supervisor cannot be reached",
+      switching_disabled: "the supervisor cannot be reached",
+    }) }));
+    const { card } = await openUpdates();
+    expect(await within(card).findByText("Switch: handing over")).toBeVisible();
+    expect(card).not.toHaveTextContent("the supervisor cannot be reached");
+  });
+});

@@ -216,8 +216,7 @@ impl open_ferry_update::SwitchProgress for Progress {
 
 struct Switcher {
     delay: Duration,
-    refusal: Option<&'static str>,
-    timed_out: bool,
+    error: std::sync::Mutex<Option<open_ferry_update::SwitchError>>,
     calls: AtomicUsize,
     snapshot: std::sync::Mutex<serde_json::Value>,
 }
@@ -226,8 +225,9 @@ impl Switcher {
     fn new(delay: Duration, refusal: Option<&'static str>) -> Arc<Self> {
         Arc::new(Self {
             delay,
-            refusal,
-            timed_out: false,
+            error: std::sync::Mutex::new(
+                refusal.map(|reason| open_ferry_update::SwitchError::Refused(reason.into())),
+            ),
             calls: AtomicUsize::new(0),
             snapshot: std::sync::Mutex::new(serde_json::json!({
                 "state": "idle", "active_version": "0.1.0", "switch": null, "switching_disabled": null,
@@ -240,11 +240,8 @@ impl Switcher {
     ) -> Result<open_ferry_update::SwitchHandle, open_ferry_update::SwitchError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
-        if self.timed_out {
-            return Err(open_ferry_update::SwitchError::TimedOut);
-        }
-        if let Some(reason) = self.refusal {
-            return Err(open_ferry_update::SwitchError::Refused(reason.into()));
+        if let Some(error) = self.error.lock().unwrap().take() {
+            return Err(error);
         }
         Ok(open_ferry_update::SwitchHandle::new(
             "switch-1".into(),
@@ -450,23 +447,28 @@ async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
 }
 
 #[tokio::test]
-async fn a_timeout_is_never_resent_and_requires_a_status_read_before_another_request() {
-    let mut fake = Switcher::new(Duration::ZERO, None);
-    Arc::get_mut(&mut fake).unwrap().timed_out = true;
-    let (dash, _scratch) = supervised(fake.clone());
-    assert_eq!(
+async fn an_ambiguous_request_is_never_resent_and_requires_a_status_read_before_another_request() {
+    for error in [
+        open_ferry_update::SwitchError::TimedOut,
+        open_ferry_update::SwitchError::Stopped,
+    ] {
+        let fake = Switcher::new(Duration::ZERO, None);
+        *fake.error.lock().unwrap() = Some(error);
+        let (dash, _scratch) = supervised(fake.clone());
+        assert_eq!(
+            dash.call(Method::POST, INSTALL, "")
+                .await
+                .json(StatusCode::ACCEPTED),
+            serde_json::json!({"uncertain": true})
+        );
         dash.call(Method::POST, INSTALL, "")
             .await
-            .json(StatusCode::ACCEPTED),
-        serde_json::json!({"uncertain": true})
-    );
-    dash.call(Method::POST, INSTALL, "")
-        .await
-        .error(StatusCode::CONFLICT, "switch_uncertain");
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-    let body = dash.get(STATUS).await.json(StatusCode::OK);
-    assert_eq!(body["switch_request"]["state"], "failed");
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+            .error(StatusCode::CONFLICT, "switch_uncertain");
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(body["switch_request"]["state"], "failed");
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
@@ -565,4 +567,33 @@ async fn a_busy_update_lock_answers_promptly_without_calling_the_supervisor() {
         .error(StatusCode::CONFLICT, "update_busy");
     assert_eq!(reason, "busy, try again shortly");
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_accepted_switch_that_ends_with_an_error_is_failed_rather_than_refused() {
+    for delay in [Duration::ZERO, Duration::from_secs(5)] {
+        let fake = Switcher::new(delay, None);
+        *fake.error.lock().unwrap() = Some(open_ferry_update::SwitchError::Ended(
+            "the new worker exited".into(),
+        ));
+        let (dash, _scratch) = supervised(fake.clone());
+        let body = dash
+            .call(Method::POST, INSTALL, "")
+            .await
+            .json(StatusCode::ACCEPTED);
+        if delay.is_zero() {
+            assert_eq!(
+                body,
+                serde_json::json!({"failed": true, "reason": "the new worker exited"})
+            );
+        } else {
+            assert_eq!(body, serde_json::json!({"preparing": true}));
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+        }
+        let status = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(status["switch_request"]["state"], "failed");
+        assert_eq!(status["switch_request"]["reason"], "the new worker exited");
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    }
 }
