@@ -340,6 +340,7 @@ fn make_record(switch: &Switch, now: &str, result: &str) -> SwitchRecord {
         from: switch.from.version.clone(),
         to: switch.to.version.clone(),
         at: now.to_owned(),
+        ended_at: Some(now.to_owned()),
         how: switch.how.as_str().to_owned(),
         result: Some(result.to_owned()),
         blue_green: true,

@@ -648,6 +648,34 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                     "that version was rolled back from; automatic switching skips it".to_owned(),
                 );
             }
+            let now = self.clock.now();
+            let cooling_down = state
+                .history
+                .iter()
+                .chain(state.last_switch.iter())
+                .chain(journal.outcomes.iter().map(|outcome| &outcome.record))
+                .chain(
+                    self.rt
+                        .pending
+                        .iter()
+                        .map(|pending| &pending.outcome.record),
+                )
+                .any(|record| {
+                    record.to == request.to
+                        && record
+                            .result
+                            .as_deref()
+                            .is_some_and(|result| result != "switched")
+                        && chrono::DateTime::parse_from_rfc3339(
+                            record.ended_at.as_deref().unwrap_or(&record.at),
+                        )
+                        .is_ok_and(|ended| now < ended + chrono::Duration::hours(6))
+                });
+            if cooling_down {
+                return Err(
+                    "a recent switch to that version did not finish; trying again later".to_owned(),
+                );
+            }
         }
         match request.how {
             How::Update => {
@@ -1483,6 +1511,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             why,
         );
         record.restart_needed = restart_needed;
+        record.ended_at = Some(self.stamp());
         if restart_needed {
             self.rt.needs_restart = true;
             // This supervisor decided it, so a replay by another version
