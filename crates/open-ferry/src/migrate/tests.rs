@@ -7238,33 +7238,43 @@ fn a_process_whose_arguments_cant_be_read_stops_the_undo_as_before() {
 #[test]
 fn undo_names_and_waits_for_a_supervisor_and_its_workers() {
     let (mut fake, context) = binary_task(true);
+    // service_runners excludes this process. Synthetic pids must not happen
+    // to name it (Windows can assign the old worker pid, 9100, to the test).
+    let supervisor_pid = std::process::id().wrapping_add(1);
+    let worker_pid = std::process::id().wrapping_add(2);
+    fake.next_pid = supervisor_pid;
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     let config = r"C:\Users\me\cpa\config.yaml";
     let versions = r"C:\Users\me\AppData\Local\open-ferry\versions\1.0.0\open-ferry.exe";
-    fake.procs.get_mut(&9001).unwrap().args = strings(&["-supervise", "-config", config]);
-    let supervisor = fake.procs.get(&9001).unwrap().clone();
+    fake.procs.get_mut(&supervisor_pid).unwrap().args = strings(&["-supervise", "-config", config]);
+    let supervisor = fake.procs.get(&supervisor_pid).unwrap().clone();
     let worker = Proc {
-        pid: 9100,
-        started: Some(12000),
+        pid: worker_pid,
+        started: supervisor.started.map(|started| started + 1),
         exe: Some(versions.to_owned()),
         args: strings(&["-worker", "-config", config, "-worker-control", "3"]),
         ..supervisor
     };
-    fake.procs.insert(9100, worker);
+    fake.procs.insert(worker_pid, worker);
     fake.effects.remove("schtasks.exe /end /tn open-ferry");
-    fake.on("schtasks.exe /end /tn open-ferry", Effect::End(9001));
+    fake.on(
+        "schtasks.exe /end /tn open-ferry",
+        Effect::End(supervisor_pid),
+    );
 
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.out,
-        "open-ferry runs with the supervisor (process 9001) and its workers (process 9100); waiting for them to end.",
+        &format!(
+            "open-ferry runs with the supervisor (process {supervisor_pid}) and its workers (process {worker_pid}); waiting for them to end."
+        ),
     );
-    has(&undo.all(), "process 9100 still runs");
+    has(&undo.all(), &format!("process {worker_pid} still runs"));
     has(&undo.all(), "75 seconds after it was stopped");
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
 
-    fake.end(9100);
+    fake.end(worker_pid);
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
