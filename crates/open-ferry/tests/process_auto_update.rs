@@ -80,7 +80,7 @@ impl Waits<'_> {
         let data = data_dir::DataDir::at(self.root.join("data"));
         let state = open_ferry_update::state::State::load(&data.state_file());
         let view = journal(self.root);
-        let dashboard = match try_update_request(self.port, "GET", "") {
+        let dashboard = match try_update_request(self.port, "GET", "", Duration::from_secs(2)) {
             Ok((status, answer)) => serde_json::json!({
                 "status": status,
                 "body": answer.split_once("\r\n\r\n").map(|(_, body)| body),
@@ -288,9 +288,13 @@ async fn prepare() -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
         {
             break;
         }
+        let last_status = match status {
+            Ok(_) => "not idle",
+            Err(_) => "status request failed",
+        };
         assert!(
             Instant::now() < due,
-            "the supervisor never became idle: {status:?}\n{:#}\n{}",
+            "the supervisor never became idle: {last_status}\n{:#}\n{}",
             waits.observed(),
             dump(root)
         );
@@ -386,12 +390,16 @@ async fn a_background_check_switches_the_real_supervised_worker_without_failed_r
 }
 
 fn update_request(port: u16, method: &str, suffix: &str) -> (u16, String) {
-    try_update_request(port, method, suffix).unwrap()
+    try_update_request(port, method, suffix, Duration::from_secs(10)).unwrap()
 }
 
-fn try_update_request(port: u16, method: &str, suffix: &str) -> std::io::Result<(u16, String)> {
+fn try_update_request(
+    port: u16,
+    method: &str,
+    suffix: &str,
+    wait: Duration,
+) -> std::io::Result<(u16, String)> {
     use std::io::{Read, Write};
-    let wait = Duration::from_secs(10);
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = std::net::TcpStream::connect_timeout(&address, wait)?;
     stream.set_read_timeout(Some(wait))?;
