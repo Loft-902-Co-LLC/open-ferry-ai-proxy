@@ -609,3 +609,28 @@ it.each(["Install now", "Roll back"])("disables an open %s confirmation when pol
   expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(0);
   expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
 });
+
+
+it.each(["install", "rollback"] as const)("clears an unanswered %s when a new worker reports a new matching live switch", async (action) => {
+  const oldSwitch = { id: "old-switch", how: action === "install" ? "update" : "rollback", from: "0.0.9", to: "0.1.0" };
+  const original = updateStatus({ staged_version: "0.2.0", supervisor: supervisorStatus({ switch: oldSwitch, rollback_target: "0.0.9" }) });
+  const api = server(original);
+  api.use(route("POST", action === "install" ? UPDATE_INSTALL : UPDATE_ROLLBACK, () => { throw new TypeError("reply lost"); }),
+    route("POST", UPDATE_CHECK, { status: 202, json: { check: "started" } }));
+  const { card, user } = await openUpdates();
+  const label = action === "install" ? "Install now" : "Roll back";
+  await user.click(await within(card).findByRole("button", { name: label }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: label }));
+  await within(card).findByText("The switch could not be confirmed");
+  // The old live switch is no evidence about this POST.
+  expect(within(card).getByText("The switch could not be confirmed")).toBeVisible();
+  for (const how of [action === "install" ? "rollback" : "update", oldSwitch.how]) {
+    api.use(route("GET", UPDATE, { json: { ...original, switch_request: null,
+      supervisor: supervisorStatus({ phase: "handing-over", switch: { ...oldSwitch, id: "new-switch", how } }),
+    } }));
+    await user.click(within(card).getByRole("button", { name: "Check now" }));
+    await within(card).findByText("Switch: handing over");
+    if (how !== oldSwitch.how) expect(within(card).getByText("The switch could not be confirmed")).toBeVisible();
+    else await waitFor(() => { expect(card).not.toHaveTextContent("The switch could not be confirmed"); });
+  }
+});

@@ -240,14 +240,17 @@ export function UpdatesCard({ className }: { className?: string }) {
   const { isError: switchError, reset: resetSwitch, context: switchContext } = switching;
   const latestRequest = status.lastRead?.switch_request;
   const lastSwitch = status.lastRead?.supervisor?.last_switch;
+  const liveSwitch = status.lastRead?.supervisor?.switch;
   useEffect(() => {
     if (!switchError || switchContext === undefined || status.lastRead === switchContext.previousRead) return;
     if ((lastSwitch != null && JSON.stringify(lastSwitch) !== switchContext.lastSwitch) ||
       (latestRequest?.action === switching.variables &&
-        latestRequest.request_id !== switchContext.previousRead?.switch_request?.request_id)) {
+        latestRequest.request_id !== switchContext.previousRead?.switch_request?.request_id) ||
+      (liveSwitch != null && liveSwitch.how === (switching.variables === "install" ? "update" : "rollback") &&
+        liveSwitch.id !== switchContext.previousRead?.supervisor?.switch?.id)) {
       resetSwitch();
     }
-  }, [switchError, switchContext, status.lastRead, latestRequest, lastSwitch, resetSwitch, switching.variables]);
+  }, [switchError, switchContext, status.lastRead, latestRequest, lastSwitch, liveSwitch, resetSwitch, switching.variables]);
   const supervisor = data?.supervisor;
   const preparing = switching.isPending || data?.switch_request?.pending === true;
   const stagedVersion = data?.staged_version;
