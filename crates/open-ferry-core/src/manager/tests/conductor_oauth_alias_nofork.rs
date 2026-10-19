@@ -45,8 +45,13 @@
 //! - `concurrent_reconcile_and_mark_result`,
 //!   `concurrent_reconcile_mark_result_full_consistency`,
 //!   `concurrent_operations_natural_final_consistency`: goroutines become
-//!   futures joined on one thread with paused time. They interleave at each
-//!   sleep, deterministically. The saved credential stands in for the store.
+//!   futures joined on one thread with paused time and cooperative yields.
+//!   `execute` records results on blocking threads, so publication order is
+//!   deliberately not fixed. The recording registry uses the real registry's
+//!   epoch and generation checks. The saved credential stands in for the store.
+//! - Not upstream's: `delayed_result_projection_preserves_natural_consistency`
+//!   uses a persistence barrier to force an older result to publish after a
+//!   newer reset or failure. Both suspension directions must stay consistent.
 //! - `concurrent_high_load_stability_epoch_and_reconcile`: the same, with
 //!   yields. The pick worker calls `execute`, which also records a success.
 //! - `scheduler_stale_disabled_snapshot_cannot_remove_active_entry`,
@@ -86,6 +91,7 @@
 
 use super::cooldown_state_store::RecordingStore;
 use super::support::*;
+use crate::manager::lock;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -784,7 +790,7 @@ async fn manager_no_fork_alias_concurrent_reconcile_and_mark_result() {
     h.executor(&echo(ANTIGRAVITY));
     h.add(saved_active(ID, ANTIGRAVITY), &[ROUTE]);
 
-    let tick = || tokio::time::sleep(Duration::from_millis(1));
+    let tick = tokio::task::yield_now;
     let reconciler = async {
         for _ in 0..ITERATIONS {
             h.manager.reconcile_registry_model_states(ID);
@@ -1021,7 +1027,7 @@ async fn manager_no_fork_alias_concurrent_reconcile_mark_result_full_consistency
     h.executor(&echo(ANTIGRAVITY));
     h.add(saved_active(ID, ANTIGRAVITY), &[ROUTE]);
 
-    let tick = || tokio::time::sleep(Duration::from_micros(50));
+    let tick = tokio::task::yield_now;
     let reconciler = async {
         for _ in 0..ITERATIONS {
             h.manager.reconcile_registry_model_states(ID);
@@ -1078,6 +1084,72 @@ async fn manager_no_fork_alias_concurrent_reconcile_mark_result_full_consistency
     tokio::join!(reconciler, route_marker, target_marker, caller);
 
     assert_natural_consistency(&h, ID, ROUTE, TARGET);
+}
+
+/// A delayed result may publish after a newer mutation on another thread.
+/// Force both directions instead of depending on the blocking-pool schedule.
+#[tokio::test(start_paused = true)]
+async fn manager_no_fork_alias_delayed_result_projection_preserves_natural_consistency() {
+    const ID: &str = "delayed-projection-auth";
+    for older_cooling in [true, false] {
+        let h = Harness::with_store(route_settings());
+        h.add(saved_active(ID, ANTIGRAVITY), &[ROUTE]);
+        let failure = rate_limited(ID, ANTIGRAVITY, TARGET, ROUTE, "429 rate limit", MIN10);
+        // An older success must clear a cooldown before a newer failure restores it.
+        if !older_cooling {
+            h.manager.mark_result(&failure);
+        }
+        let older_generation = h.get(ID).generation + 1;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        *lock(&h.manager.shared.persist_hook) = Some(Arc::new(move |auth| {
+            if auth.generation == older_generation {
+                entered_tx.send(()).expect("announce older result");
+                lock(&release_rx)
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release older result");
+            }
+        }));
+        std::thread::scope(|scope| {
+            let older = scope.spawn(|| {
+                let result = if older_cooling {
+                    failure.clone()
+                } else {
+                    succeeded(ID, ANTIGRAVITY, TARGET, ROUTE)
+                };
+                h.manager.mark_result(&result);
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("older result committed before newer mutation");
+            let reset = if older_cooling {
+                h.manager.reset_quota(ID).map(|_| ())
+            } else {
+                h.manager.mark_result(&failure);
+                Ok(())
+            };
+            release_tx.send(()).expect("release older result");
+            older.join().expect("older result finished");
+            reset.expect("newer mutation persisted");
+        });
+        *lock(&h.manager.shared.persist_hook) = None;
+
+        assert_natural_consistency(&h, ID, ROUTE, TARGET);
+        let current = h.get(ID);
+        assert_eq!(
+            is_cooling(&current.model_states[TARGET], h.now()),
+            !older_cooling
+        );
+        assert_eq!(h.store.stored(ID).unwrap().generation, current.generation);
+        let published = h.models.published();
+        assert_eq!(published.last().unwrap().generation, current.generation);
+        assert!(
+            published
+                .iter()
+                .all(|batch| batch.generation != older_generation)
+        );
+    }
 }
 
 /// Upstream's tests 19 and 23: a cooldown, then the alias goes and the
@@ -1384,7 +1456,7 @@ async fn manager_no_fork_alias_concurrent_operations_natural_final_consistency()
     h.executor(&echo(ANTIGRAVITY));
     h.add(saved_active(ID, ANTIGRAVITY), &[ROUTE_N]);
 
-    let tick = || tokio::time::sleep(Duration::from_micros(100));
+    let tick = tokio::task::yield_now;
     let reconciler = async {
         for _ in 0..ITERATIONS {
             h.manager.reconcile_registry_model_states(ID);
