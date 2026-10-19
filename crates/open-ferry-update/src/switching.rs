@@ -25,6 +25,10 @@ use crate::{Report, UpdateError, Updater};
 /// - `TimedOut`, `Stopped` and `Protocol`: the request may have been taken.
 ///   Read status; never resend the request.
 ///
+/// Before writing, lookup/connect/readiness deadlines and request encoding
+/// failures are `Unreachable`; preparation task failures are `Update`. Only
+/// timeouts after writing starts are `TimedOut`.
+///
 /// `Ended` is a known terminal reply after acceptance, with its reason.
 #[derive(Debug)]
 pub enum SwitchError {

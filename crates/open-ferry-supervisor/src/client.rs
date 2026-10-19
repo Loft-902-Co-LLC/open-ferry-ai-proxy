@@ -1453,10 +1453,69 @@ mod tests {
                 began + Duration::from_millis(100)
             )
             .await,
-            Err(SwitchError::TimedOut)
+            Err(SwitchError::Unreachable(why)) if why == "timed out before sending"
         ));
         assert!(began.elapsed() < Duration::from_millis(100) + MARGIN);
         assert!(stall.entered());
         assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn request_classifies_pre_send_failures_and_a_mid_write_endpoint_failure() {
+        use open_ferry_update::SwitchError;
+        let dirs = Dirs::new();
+        let location = location_for(dirs.data());
+        write_record(dirs.data(), &location, 1);
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = switching::request(
+            dirs.data(),
+            &identity(),
+            EndpointRequest::Cancel { v: VERSION },
+            soon(5),
+            |_| async {
+                Ok((
+                    tokio::io::empty(),
+                    switching::tests::PartialWriteError(writes.clone()),
+                ))
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(SwitchError::Stopped)));
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let result = switching::request(
+            dirs.data(),
+            &identity(),
+            EndpointRequest::Cancel { v: VERSION },
+            Instant::now() + Duration::from_millis(30),
+            |_| async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok((tokio::io::empty(), tokio::io::sink()))
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SwitchError::Unreachable(why)) if why == "timed out before sending")
+        );
+        let mut oversized = update_request();
+        oversized.pin = "p".repeat(crate::protocol::MAX_FRAME);
+        let result = switching::request(
+            dirs.data(),
+            &identity(),
+            EndpointRequest::Switch {
+                v: VERSION,
+                to: oversized.to,
+                sha256: oversized.sha256,
+                pin: oversized.pin,
+                how: oversized.how,
+                auto: false,
+                admitted: crate::protocol::Admission {
+                    while_off: false,
+                    mode_gen: 0,
+                },
+            },
+            soon(5),
+            |_| async { Ok((tokio::io::empty(), tokio::io::sink())) },
+        )
+        .await;
+        assert!(matches!(result, Err(SwitchError::Unreachable(why)) if why.contains("encode")));
     }
 }
