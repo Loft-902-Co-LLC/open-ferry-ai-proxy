@@ -534,6 +534,7 @@ export interface MockOptions {
 
 export interface MockServer {
   setUpdates: (status: UpdateStatus) => void;
+  holdNextUpdatePoll: () => { started: Promise<void>; release: () => void };
   failNextUpdatePoll: () => void;
   failedUpdatePolls: number;
   switchRequests: string[];
@@ -561,6 +562,7 @@ export async function mockServer(
   const now = Date.now();
   let updates = options.updates;
   let failUpdatePoll = false;
+  let updatePollGate: { started: () => void; wait: Promise<void> } | undefined;
   const connected = options.credentials ?? true;
   const writable = options.writable ?? true;
   const separate = options.separateManagement ?? false;
@@ -584,6 +586,14 @@ export async function mockServer(
   const logs = recentLogs(calls).map((entry) => ({ ...entry, size: logFile(entry).length }));
   const server: MockServer = {
     setUpdates: (status) => { updates = status; },
+    holdNextUpdatePoll: () => {
+      let started!: () => void;
+      let release!: () => void;
+      const began = new Promise<void>((resolve) => { started = resolve; });
+      const wait = new Promise<void>((resolve) => { release = resolve; });
+      updatePollGate = { started, wait };
+      return { started: began, release };
+    },
     failNextUpdatePoll: () => { failUpdatePoll = true; },
     failedUpdatePolls: 0,
     switchRequests: [],
@@ -659,6 +669,12 @@ export async function mockServer(
           failUpdatePoll = false;
           server.failedUpdatePolls += 1;
           return route.abort("connectionreset");
+        }
+        if (updatePollGate !== undefined) {
+          const gate = updatePollGate;
+          updatePollGate = undefined;
+          gate.started();
+          await gate.wait;
         }
         if (updates !== undefined) {
           return json(route, updates);
