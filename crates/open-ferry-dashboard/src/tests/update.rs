@@ -621,3 +621,24 @@ async fn an_accepted_switch_that_ends_with_an_error_is_failed_rather_than_refuse
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
     }
 }
+
+#[tokio::test]
+async fn unreadable_switch_records_return_a_fixed_reason() {
+    let (dash, scratch) = supervised(Switcher::new(Duration::ZERO, None));
+    std::fs::write(
+        DataDir::at(scratch.path()).state_file(),
+        b"invalid private state data",
+    )
+    .unwrap();
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(
+        body["supervisor"]["error"],
+        "the update records could not be read"
+    );
+    assert!(body["supervisor"]["switching_disabled"].is_null());
+    assert!(
+        !body
+            .to_string()
+            .contains(&scratch.path().to_string_lossy().into_owned())
+    );
+}

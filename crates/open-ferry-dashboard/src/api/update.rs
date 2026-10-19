@@ -81,12 +81,15 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                         value!(view.last),
                     )
                 }
-                Err(error) => (
-                    live.supervisor.clone().unwrap_or(Value::Null),
-                    Some(error.to_string()),
-                    None,
-                    Value::Null,
-                ),
+                Err(error) => {
+                    tracing::warn!("dashboard API: read update switch records: {error}");
+                    (
+                        live.supervisor.clone().unwrap_or(Value::Null),
+                        Some("the update records could not be read".to_owned()),
+                        None,
+                        Value::Null,
+                    )
+                }
             };
             let stale = error.is_some();
             if stale {
@@ -193,6 +196,7 @@ impl SwitchRequest {
                 drop(handle);
             }
             Err(error) => {
+                tracing::warn!("dashboard API: prepare {action} switch: {error}");
                 request.pending = false;
                 request.state = if matches!(error, SwitchError::Refused(_)) {
                     "refused"
@@ -216,8 +220,14 @@ impl SwitchRequest {
                     SwitchError::TimedOut => "the supervisor did not answer in time; the request may have been accepted; read update status before trying again".to_owned(),
                     SwitchError::Stopped => "the supervisor connection ended without an answer; the outcome is unknown; read update status before trying again".to_owned(),
                     SwitchError::Update(UpdateError::Busy) => "busy, try again shortly".to_owned(),
-                    SwitchError::Ended(reason) => reason,
-                    error => error.to_string(),
+                    SwitchError::Ended(reason) | SwitchError::Refused(reason) => reason,
+                    SwitchError::Untrusted(_) => "the supervisor endpoint was not trusted".to_owned(),
+                    SwitchError::Unreachable(_) => "the supervisor cannot be reached; the request was not sent".to_owned(),
+                    SwitchError::Protocol(_) => "the supervisor reply was not understood; read update status before trying again".to_owned(),
+                    SwitchError::Update(_) => "the release could not be prepared; check the server log".to_owned(),
+                    SwitchError::UpdatesOff => "automatic updates are off".to_owned(),
+                    SwitchError::Skipped(_) => "the release was skipped".to_owned(),
+                    SwitchError::Disabled(_) => "switching is disabled".to_owned(),
                 });
             }
         }
@@ -323,4 +333,31 @@ pub(crate) async fn rollback(State(state): State<DashboardState>) -> Result<Resp
         .update_requests
         .start(updates(&state)?.clone(), "rollback")
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preparation_errors_use_fixed_reasons_and_refusals_pass_through() {
+        for error in [
+            SwitchError::Untrusted("private endpoint path".into()),
+            SwitchError::Unreachable("private socket path".into()),
+            SwitchError::Protocol("private reply details".into()),
+            SwitchError::Update(UpdateError::Io {
+                what: "read",
+                error: "private state path".into(),
+            }),
+            SwitchError::Update(UpdateError::Journal("private journal path".into())),
+        ] {
+            let request = SwitchRequest::finished("install", Err(error));
+            assert!(!request.reason.unwrap().contains("private"));
+        }
+        let request = SwitchRequest::finished(
+            "install",
+            Err(SwitchError::Refused("sign-ins are pending".into())),
+        );
+        assert_eq!(request.reason.as_deref(), Some("sign-ins are pending"));
+    }
 }
