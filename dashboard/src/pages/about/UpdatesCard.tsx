@@ -244,6 +244,8 @@ export function UpdatesCard({ className }: { className?: string }) {
   });
   const { isError: switchError, reset: resetSwitch, context: switchContext } = switching;
   const alreadyLatest = isApiError(switching.error) && switching.error.code === "already_latest";
+  const switchUnconfirmed = switching.isError && callProblem(switching.error).kind === "unreachable";
+  const readErrorVisible = status.isError && !status.hidePollError;
   const latestRequest = status.lastRead?.switch_request;
   const lastSwitch = status.lastRead?.supervisor?.last_switch;
   const liveSwitch = status.lastRead?.supervisor?.switch;
@@ -295,7 +297,7 @@ export function UpdatesCard({ className }: { className?: string }) {
       }
     >
       {status.isPending && <Loading>Asking the server…</Loading>}
-      {status.isError && !status.hidePollError &&
+      {readErrorVisible &&
         (isUpdatesUnavailable(status.error) ? (
           <p className="text-muted">
             This server doesn&apos;t check for updates, as one the terminal dashboard (
@@ -320,7 +322,7 @@ export function UpdatesCard({ className }: { className?: string }) {
       {data !== undefined && (
         <>
           <Notices status={data} />
-          <SwitchStatus polling={status.polling} recoveringSupervisor={status.recoveringSupervisor} status={data} onRetry={() => { void status.refetch(); }} hidePhase={status.isError && !status.hidePollError} />
+          <SwitchStatus polling={status.polling} recoveringSupervisor={status.recoveringSupervisor} status={data} onRetry={() => { void status.refetch(); }} hidePhase={readErrorVisible} hideRetry={switchUnconfirmed} />
           {(canInstall || canRollback) && <div className="flex flex-wrap gap-2">
             {canInstall && <Button variant="primary" onClick={() => { setConfirm({ action: "install" }); }}>Install now</Button>}
             {canRollback && <Button onClick={() => {
@@ -357,12 +359,13 @@ export function UpdatesCard({ className }: { className?: string }) {
         ) : (
           <ProblemNotice problem={callProblem(check.error)} live />
         ))}
-      {switching.isError && <Alert tone={alreadyLatest ? "info" : "warn"} live title={alreadyLatest ? "Already running the latest release" : callProblem(switching.error).kind === "unreachable" ? "The switch could not be confirmed" : "The switch request failed"}>
-        <p>{callProblem(switching.error).kind === "unreachable" ?
+      {switching.isError && <Alert tone={alreadyLatest ? "info" : "warn"} live title={alreadyLatest ? "Already running the latest release" : switchUnconfirmed ? "The switch could not be confirmed" : "The switch request failed"}>
+        <p>{switchUnconfirmed ?
           (status.polling ? "The server did not answer. Checking its status; the request will not be sent again." :
+            readErrorVisible ? "The server did not answer. Choose Try again to see whether it started. The request will not be sent again." :
             "The server did not answer. Choose Read status to see whether it started. The request will not be sent again.") :
           isApiError(switching.error) ? switching.error.detail ?? switching.error.message : "The server refused the switch."}</p>
-        {callProblem(switching.error).kind === "unreachable" && !status.polling && <Button size="sm" onClick={() => { void status.refetch(); }}>Read status</Button>}
+        {switchUnconfirmed && !status.polling && !readErrorVisible && <Button size="sm" onClick={() => { void status.refetch(); }}>Read status</Button>}
       </Alert>}
       <ConfirmDialog
         open={confirm !== null}

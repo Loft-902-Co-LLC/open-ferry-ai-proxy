@@ -9,7 +9,7 @@ function readable(word: string): string {
 }
 
 /** The supervisor's current work and its durable last outcome. */
-export function SwitchStatus({ status, onRetry, hidePhase = false, recoveringSupervisor = false, polling = false }: { status: UpdateStatus; onRetry: () => void; hidePhase?: boolean; recoveringSupervisor?: boolean; polling?: boolean }) {
+export function SwitchStatus({ status, onRetry, hidePhase = false, hideRetry = false, recoveringSupervisor = false, polling = false }: { status: UpdateStatus; onRetry: () => void; hidePhase?: boolean; hideRetry?: boolean; recoveringSupervisor?: boolean; polling?: boolean }) {
   const supervisor = status.supervisor;
   const request = status.switch_request;
   const last = supervisor?.last_switch;
@@ -26,7 +26,7 @@ export function SwitchStatus({ status, onRetry, hidePhase = false, recoveringSup
     </Alert>}
     {request?.reason != null && <Alert tone={request.code === "already_latest" ? "info" : "warn"} live title={request.code === "already_latest" ? "Already running the latest release" : request.state === "refused" ? "Switch refused" : request.state === "failed" ? "Switch failed" : "The switch could not be confirmed"}>
       <p className="break-words">{request.reason}</p>
-      {!hidePhase && request.state === "unknown" && request.pending && supervisor?.error == null && <Button size="sm" onClick={onRetry}>Read status</Button>}
+      {!hidePhase && !hideRetry && request.state === "unknown" && request.pending && supervisor?.error == null && <Button size="sm" onClick={onRetry}>Read status</Button>}
     </Alert>}
     {!hidePhase && supervisor?.error === null && switchInProgress({ ...status, switch_request: null }) && <Alert tone="info" live title={supervisor.switch === null && ["switching", "stopping"].includes(supervisor.phase) ?
       `The supervisor is ${supervisor.phase}` : `Switch: ${readable(supervisor.phase)}`}>
@@ -35,11 +35,11 @@ export function SwitchStatus({ status, onRetry, hidePhase = false, recoveringSup
     </Alert>}
     {!hidePhase && recoveringSupervisor && supervisor?.error === null && <Alert tone="warn" live title="The supervisor is recovering">
       <p>{polling ? "Reading its status." : "Choose Read status to see whether it has recovered."}</p>
-      {!polling && <Button size="sm" onClick={onRetry}>Read status</Button>}
+      {!polling && !hideRetry && <Button size="sm" onClick={onRetry}>Read status</Button>}
     </Alert>}
     {supervisor?.error != null && <Alert tone="warn" live title="The supervisor status could not be read">
       <p>{supervisor.error}</p>
-      {!hidePhase && <Button size="sm" onClick={onRetry}>Try again</Button>}
+      {!hidePhase && !hideRetry && <Button size="sm" onClick={onRetry}>Try again</Button>}
     </Alert>}
     {supervisor?.switching_disabled != null && <Alert tone="warn" title="Switching is unavailable">
       <p className="break-words">{supervisor.switching_disabled}</p>
