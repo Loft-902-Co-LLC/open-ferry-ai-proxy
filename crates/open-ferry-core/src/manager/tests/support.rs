@@ -18,7 +18,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +35,8 @@ use crate::exec::{Dispatcher, ExecError, Format, Options, Request, Response, Str
 use crate::executor::ProviderExecutor;
 use crate::manager::select::{ClientModels, ModelProjection};
 use crate::manager::{Clock, Manager, Settings, lock};
+use crate::models::ModelInfo;
+use crate::registry::ModelRegistry;
 
 /// The kind of call an executor got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,10 +321,12 @@ pub(crate) struct Published {
     pub(crate) projections: Vec<ModelProjection>,
 }
 
-/// The model registry: the models each credential serves.
+/// A recording wrapper around the real model registry. Its epoch and generation
+/// checks must also apply in tests: result persistence can run on blocking
+/// threads, so an older snapshot can be published after a newer one.
 #[derive(Default)]
 pub(crate) struct FakeModels {
-    clients: Mutex<HashMap<String, (Vec<String>, u64)>>,
+    registry: ModelRegistry,
     published: Mutex<Vec<Published>>,
 }
 
@@ -330,23 +334,27 @@ impl FakeModels {
     /// Registers `models` for credential `client_id`, bumping its epoch
     /// (upstream's `RegisterClient`).
     pub(crate) fn register(&self, client_id: &str, models: &[&str]) {
-        let mut clients = lock(&self.clients);
-        let entry = clients.entry(client_id.to_owned()).or_default();
-        entry.0 = models.iter().map(|m| (*m).to_owned()).collect();
-        entry.1 += 1;
+        let models: Vec<_> = models
+            .iter()
+            .map(|model| ModelInfo {
+                id: (*model).to_owned(),
+                ..ModelInfo::default()
+            })
+            .collect();
+        self.registry.register_client(client_id, "", &models);
     }
 
     /// Forgets `client_id`'s models (upstream's `UnregisterClient`).
     pub(crate) fn unregister(&self, client_id: &str) {
-        lock(&self.clients).remove(client_id);
+        self.registry.unregister_client(client_id);
     }
 
-    /// Every publish so far.
+    /// Every accepted publish so far.
     pub(crate) fn published(&self) -> Vec<Published> {
         lock(&self.published).clone()
     }
 
-    /// The last projection published for `model` of `client_id`.
+    /// The last accepted projection for `model` of `client_id`.
     pub(crate) fn projection(&self, client_id: &str, model: &str) -> Option<ModelProjection> {
         lock(&self.published)
             .iter()
@@ -363,17 +371,11 @@ impl FakeModels {
 
 impl ClientModels for FakeModels {
     fn models_for_client(&self, client_id: &str) -> Vec<String> {
-        lock(&self.clients)
-            .get(client_id)
-            .map(|(models, _)| models.clone())
-            .unwrap_or_default()
+        ClientModels::models_for_client(&self.registry, client_id)
     }
 
     fn models_and_epoch_for_client(&self, client_id: &str) -> (Vec<String>, u64) {
-        lock(&self.clients)
-            .get(client_id)
-            .cloned()
-            .unwrap_or_default()
+        ClientModels::models_and_epoch_for_client(&self.registry, client_id)
     }
 
     fn apply_client_model_projections(
@@ -383,7 +385,16 @@ impl ClientModels for FakeModels {
         generation: u64,
         projections: &[ModelProjection],
     ) -> bool {
-        lock(&self.published).push(Published {
+        // Keep the log in the same order as registry application, even if
+        // another thread reaches this method between application and recording.
+        let mut published = lock(&self.published);
+        if !self
+            .registry
+            .apply_client_model_projections(client_id, epoch, generation, projections)
+        {
+            return false;
+        }
+        published.push(Published {
             client_id: client_id.to_owned(),
             epoch,
             generation,
