@@ -62,9 +62,12 @@ Every error is a status and a body:
 | 409 | `already_preparing` | An install or rollback preparation is already running in this worker. |
 | 409 | `switch_uncertain` | A previous request may have been accepted; read fresh supervisor status before explicitly retrying. |
 | 409 | `switch_refused` | The supervisor refused the switch before acceptance; its reason is in `message`. |
-| 409 | `switch_failed` | Preparation failed (`Update` other than busy), the endpoint was untrusted or unreachable before sending, automatic updates were off, or the release was skipped. |
+| 409 | `switch_failed` | Preparation failed without a more specific code, the endpoint was untrusted or unreachable before sending, automatic updates were off, or the release was skipped. |
 | 409 | `not_supervised` | This install has no supervisor; `message` gives command-line update and restart instructions. |
 | 409 | `update_busy` | An update check or mutation holds the update lock; try again shortly. |
+| 409 | `switching_disabled` | Switching is disabled; the request was not sent. The reason is fixed and omits policy paths. |
+| 409 | `rollback_target_changed` | The confirmed rollback target changed or disappeared; read status and confirm again. Nothing was sent. |
+| 409 | `already_latest` | The latest release is already running, or the running version is newer. Nothing was sent; show this as information. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
 | 502 | `claude_cli_failed` | A `claude-cli` entry's Claude Code couldn't be run, or its answer wasn't what was expected. |
@@ -645,6 +648,7 @@ What updates are doing. It reads the update state on disk and, when supervised, 
   },
   "switching_disabled": null,
   "error": null,
+  "notes": [],
   "stale": false,
   "snapshot_age_seconds": 0.01,
   "failed_reads": 0
@@ -654,8 +658,9 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 - **`phase`** is the current switch status, such as `waiting-for-signins`, `loading`, `handing-over`, `taking-over`, `watching` or `cancelled`. Without a switch it is the supervisor's state (`idle`, `degraded`, `switching` or `stopping`); it is `unknown` before a live snapshot can be read.
 - **`running_version`** is the supervisor's active worker version; while the request is served by a draining worker it can differ from the top-level running version. **`rollback_target`** is the version a rollback would select now, or `null`. During a watch it is the switch's source version. **`watch_until`** is the watch deadline or `null`.
 - **`switch`** is the live supervisor switch snapshot, or `null`. It may include additional supervisor fields. **`last_switch`** is the newest finished switch from pending journal outcomes and state history, or `null`. Its `result` is an opaque kebab-case outcome; clients should display a readable fallback for unknown values. `reason`, `from` and `at` can be `null`. `auto` is `true` only when recorded as automatic, `false` when recorded as manual, and `null` when unknown.
-- **`switching_disabled`** is the reason switching is unavailable, or `null`. **`error`** says why the live supervisor or switch records could not be read. A failed read keeps the last snapshot available in this worker; it never changes a supervised install into a plain one. Durable rollback and outcome fields are read independently. A read error never replaces `switching_disabled`.
-- **`stale`** is true when the live supervisor or switch-records read failed. **`snapshot_age_seconds`** is the cached snapshot's age, or `null` before any successful read. **`failed_reads`** counts consecutive unsuccessful status reads in this worker, shared by every tab that reads it; a successful read resets it. Show the read error instead of the cached phase. Stop treating a stale phase as running after five failed reads or a snapshot age of 30 seconds, whichever comes first. `unknown` is not a running phase. Keep polling a worker's `preparing` request even when its supervisor snapshot is stale. `cancelled` stays in progress until the switch finishes unwinding; the supervisor states `switching` and `stopping` also need observation.
+- **`switching_disabled`** is the supervisor's reason switching is unavailable, or `null`. A policy-disabled status read sets it to the same fixed `switching is disabled` reason as the POST error. **`error`** says why the live supervisor could not be read. A failed read keeps the last snapshot available in this worker; it never changes a supervised install into a plain one. Other read errors never replace `switching_disabled`.
+- **`notes`** lists fixed warnings about optional switch records. A missing or unreadable record does not discard live status or make it stale. Durable rollback and outcome fields are read independently.
+- **`stale`** is true when the live supervisor read failed. **`snapshot_age_seconds`** is the cached snapshot's age, or `null` before any successful read. **`failed_reads`** counts consecutive unsuccessful status reads in this worker, shared by every tab that reads it; a successful read resets it. Show the read error instead of the cached phase. Stop treating a stale phase as running after five failed reads or a snapshot age of 30 seconds, whichever comes first. `unknown` is not a running phase. Keep polling a worker's `preparing` request even when its supervisor snapshot is stale. `cancelled` stays in progress until the switch finishes unwinding; the supervisor states `switching` and `stopping` also need observation.
 
 **`switch_request`** describes the latest dashboard install or rollback request in this worker, or `null`:
 
@@ -664,6 +669,8 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 ```
 
 `request_id` is an additive string field, currently 32 lowercase hex characters. Treat it as opaque. It is random, so it differs between requests and workers in practice; uniqueness is not guaranteed. It stays the same through preparation and the final request state. The POST 202 reply carries the same `request_id` as GET. Clients can distinguish a new request from an older request for the same action.
+
+Failed and refused requests also carry **`code`**, using the conflict codes above, or `switch_ended` for the defensive accepted-failure case below. In particular, `already_latest` is informational, even though no switch started.
 
 If a preparation task ends without recording a result, GET reports `state: "failed"` with reason `"preparing the switch stopped"`. This recovery is not a 409 response.
 
@@ -683,7 +690,9 @@ Starts a check now, in the background, as the server's own checks run: in `auto`
 
 ### `POST /open-ferry/api/v1/update/install` and `POST /open-ferry/api/v1/update/rollback`
 
-Ask the supervisor to install the latest known staged release (downloading and checking it first if needed), or to roll back to its current rollback target. No body. Both use the same management-key and address checks as the other update routes. Manual installs also work while automatic updates are off.
+Install takes no body. Rollback requires `{"target":"0.1.0"}`, the version shown when the user confirmed it. The target is checked under the update lock. If it changed or disappeared, read status and ask for confirmation again; do not silently select the new target.
+
+Ask the supervisor to install the latest known staged release (downloading and checking it first if needed), or to roll back to the confirmed target. Both use the same management-key and address checks as the other update routes. Manual installs also work while automatic updates are off.
 
 Manual installs may retry a version that failed here or was rolled back from. The confirmation warns about that history and still allows installation. A background check holding the update lock returns `409 update_busy` with `busy, try again shortly`.
 
@@ -706,6 +715,8 @@ An acceptance timeout, a protocol error after sending the switch request, or a s
 The client returns at acceptance. Later switch failures are observed through `supervisor.last_switch`, including its reason. As a defensive fallback for a client returning `Ended` directly, the route maps it to `202 {"failed": true, "reason": "...", "request_id": "..."}` and a failed `switch_request`; this is not expected from the current install or rollback path.
 
 A supervisor refusal before the response returns `409 switch_refused` with its reason unchanged in `message`. A local preparation failure (download, verification, missing staged release, I/O or journal error) returns `409 switch_failed` with a short reason; detailed diagnostics go to the server log. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
+
+Policy-disabled switching returns `409 switching_disabled`; a changed or removed rollback target returns `409 rollback_target_changed`; an already-running latest release returns `409 already_latest`. These are not sent. A pre-send timeout or a failed write before any byte is accepted is `Unreachable`, also not sent. Client preparation task failures are `Update` errors and not sent. `TimedOut`, `Stopped` and `Protocol` remain uncertain; read status rather than resending.
 
 ---
 

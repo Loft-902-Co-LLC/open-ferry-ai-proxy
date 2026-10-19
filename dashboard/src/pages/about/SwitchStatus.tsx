@@ -44,6 +44,9 @@ export function SwitchStatus({ status, onRetry, hidePhase = false, recoveringSup
     {supervisor?.switching_disabled != null && <Alert tone="warn" title="Switching is unavailable">
       <p className="break-words">{supervisor.switching_disabled}</p>
     </Alert>}
+    {supervisor?.notes != null && supervisor.notes.length > 0 && <Alert tone="warn" title="Some switch records could not be read">
+      {supervisor.notes.map((note) => <p key={note}>{note}</p>)}
+    </Alert>}
     {last != null && <Alert tone={last.reason === null ? "info" : "warn"} title={outcome ?? "Last switch"}>
       <p>{last.auto === true && "Automatic switch. "}{last.at !== null && formatDateTime(last.at)}</p>
       {last.reason !== null && <p className="break-words">{last.reason}</p>}

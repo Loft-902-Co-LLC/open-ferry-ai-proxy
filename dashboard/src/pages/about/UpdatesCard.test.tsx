@@ -233,7 +233,7 @@ describe("supervised updates", () => {
     await user.click(within(dialog).getByRole("button", { name: "Roll back" }));
     expect(await within(card).findByText("Rolled back to 0.1.0")).toBeVisible();
     expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(1);
-    expect(api.callsTo("POST", UPDATE_ROLLBACK)[0].json()).toEqual({ target: "0.1.0" });
+    expect(api.callsTo("POST", UPDATE_ROLLBACK)[0]?.json()).toEqual({ target: "0.1.0" });
     expect(card).not.toHaveTextContent("Automatic switch");
   });
 
@@ -352,6 +352,16 @@ describe("manual install retries", () => {
 });
 
 describe("switch failures", () => {
+  it("shows optional history warnings while keeping live controls available", async () => {
+    server(updateStatus({ staged_version: "0.2.0", supervisor: supervisorStatus({
+      notes: ["the update state could not be read; its history is unavailable"],
+    }) }));
+    const { card } = await openUpdates();
+    expect(await within(card).findByText("Some switch records could not be read")).toBeVisible();
+    expect(within(card).getByRole("button", { name: "Install now" })).toBeEnabled();
+    expect(card).not.toHaveTextContent("The supervisor status could not be read");
+  });
+
   it("keeps the confirmed rollback target fixed when a poll changes it", async () => {
     let reads = 0;
     const api = mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => ({ json: updateStatus({

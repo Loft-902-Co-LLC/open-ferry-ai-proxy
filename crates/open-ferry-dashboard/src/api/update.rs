@@ -58,7 +58,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
     let supervisor = match view {
         Err(SwitchError::NotSupervised) => Value::Null,
         view => {
-            let (snapshot, error, rollback_target, last) = match view {
+            let (snapshot, error, rollback_target, last, notes) = match view {
                 Ok(view) => {
                     if let Some(snapshot) = &view.supervisor {
                         live.supervisor = Some(snapshot.clone());
@@ -81,6 +81,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                         view.unreachable,
                         view.rollback_target,
                         value!(view.last),
+                        view.notes,
                     )
                 }
                 Err(error) => {
@@ -90,6 +91,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                         Some("the update records could not be read".to_owned()),
                         None,
                         Value::Null,
+                        Vec::new(),
                     )
                 }
             };
@@ -122,6 +124,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 "snapshot_age_seconds": snapshot_age_seconds,
                 "failed_reads": live.failed_reads,
                 "error": error,
+                "notes": notes,
             })
         }
     };
@@ -256,22 +259,22 @@ impl SwitchRequest {
                     "failed"
                 };
                 request.pending = request.state == "unknown";
-                request.code = if target_changed {
-                    "rollback_target_changed"
-                } else if matches!(error, SwitchError::NotSupervised) {
-                    "not_supervised"
-                } else if matches!(error, SwitchError::Disabled(_)) {
-                    "switching_disabled"
-                } else if matches!(error, SwitchError::Update(UpdateError::NotNewer { .. })) {
-                    "already_latest"
-                } else if matches!(error, SwitchError::Update(UpdateError::Busy)) {
-                    "update_busy"
-                } else if matches!(error, SwitchError::Ended(_)) {
-                    "switch_ended"
-                } else if matches!(error, SwitchError::Refused(_)) {
-                    "switch_refused"
-                } else {
-                    "switch_failed"
+                request.code = match &error {
+                    _ if target_changed => "rollback_target_changed",
+                    SwitchError::NotSupervised => "not_supervised",
+                    SwitchError::Disabled(_) => "switching_disabled",
+                    SwitchError::Update(UpdateError::NotNewer { .. }) => "already_latest",
+                    SwitchError::Update(UpdateError::Busy) => "update_busy",
+                    SwitchError::Ended(_) => "switch_ended",
+                    SwitchError::Refused(_) => "switch_refused",
+                    SwitchError::UpdatesOff
+                    | SwitchError::Update(_)
+                    | SwitchError::Skipped(_)
+                    | SwitchError::TimedOut
+                    | SwitchError::Unreachable(_)
+                    | SwitchError::Untrusted(_)
+                    | SwitchError::Protocol(_)
+                    | SwitchError::Stopped => "switch_failed",
                 };
                 request.reason = Some(if target_changed {
                     "the rollback target changed; read status and confirm again".to_owned()
