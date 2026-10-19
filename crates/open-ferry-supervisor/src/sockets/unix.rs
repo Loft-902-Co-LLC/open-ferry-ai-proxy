@@ -67,6 +67,7 @@ pub unsafe fn take_listeners(count: usize) -> io::Result<Vec<TcpListener>> {
         }
         let mut listening: libc::c_int = 0;
         let mut size = std::mem::size_of_val(&listening) as libc::socklen_t;
+        // Darwin returns the option bit, not necessarily 1; any nonzero value is true.
         // SAFETY: initialized output and size point to valid storage.
         if unsafe {
             libc::getsockopt(
@@ -77,7 +78,7 @@ pub unsafe fn take_listeners(count: usize) -> io::Result<Vec<TcpListener>> {
                 &mut size,
             )
         } != 0
-            || listening != 1
+            || listening == 0
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
