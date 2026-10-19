@@ -1151,7 +1151,7 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
     assert!(rest.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_poisoned_partial_channel_attempts_no_further_write() {
     use crate::service::worker::{State, Worker};
     let (ours, mut peer) = duplex(4096);
@@ -1191,7 +1191,15 @@ async fn a_poisoned_partial_channel_attempts_no_further_write() {
         config_path: PathBuf::new(),
         timing: Timing::default(),
     };
+    // No Stop is pending here: unlike an interruptible stop, this send must
+    // wait for its configured timeout. The duplex channel needs no real I/O.
+    let began = tokio::time::Instant::now();
     worker.send_status().await;
+    let elapsed = began.elapsed();
+    assert!(
+        elapsed >= worker.send_timeout,
+        "the stalled send timed out early after {elapsed:?}"
+    );
     assert!(worker.channel_lost);
     let mut prefix = [0; 3];
     tokio::time::timeout(WAIT, peer.read_exact(&mut prefix))
