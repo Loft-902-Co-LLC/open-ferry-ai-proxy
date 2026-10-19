@@ -199,6 +199,17 @@ struct SwitchRequest {
     code: &'static str,
 }
 
+fn rollback_changed(error: &SwitchError, action: &str) -> bool {
+    match error {
+        SwitchError::Update(UpdateError::RollbackChanged { .. }) => true,
+        SwitchError::Update(UpdateError::NoPrevious) => action == "rollback",
+        SwitchError::Update(UpdateError::Supervised(reason)) => {
+            action == "rollback" && reason.starts_with("rollback target changed:")
+        }
+        _ => false,
+    }
+}
+
 impl SwitchRequest {
     fn preparing(action: &'static str) -> Self {
         Self {
@@ -226,6 +237,7 @@ impl SwitchRequest {
             }
             Err(error) => {
                 tracing::warn!("dashboard API: prepare {action} switch: {error}");
+                let target_changed = rollback_changed(&error, action);
                 request.pending = false;
                 request.state = if matches!(error, SwitchError::Refused(_)) {
                     "refused"
@@ -238,7 +250,9 @@ impl SwitchRequest {
                     "failed"
                 };
                 request.pending = request.state == "unknown";
-                request.code = if matches!(error, SwitchError::NotSupervised) {
+                request.code = if target_changed {
+                    "rollback_target_changed"
+                } else if matches!(error, SwitchError::NotSupervised) {
                     "not_supervised"
                 } else if matches!(error, SwitchError::Disabled(_)) {
                     "switching_disabled"
@@ -251,7 +265,10 @@ impl SwitchRequest {
                 } else {
                     "switch_failed"
                 };
-                request.reason = Some(match error {
+                request.reason = Some(if target_changed {
+                    "the rollback target changed; read status and confirm again".to_owned()
+                } else {
+                    match error {
                     SwitchError::NotSupervised => "this install is not supervised; run `open-ferry update` (or `open-ferry update -rollback`) on the server's computer, then restart the server".to_owned(),
                     SwitchError::TimedOut => "the supervisor did not answer in time; the request may have been accepted; read update status before trying again".to_owned(),
                     SwitchError::Stopped => "the supervisor connection ended without an answer; the outcome is unknown; read update status before trying again".to_owned(),
@@ -264,6 +281,7 @@ impl SwitchRequest {
                     SwitchError::UpdatesOff => "automatic updates are off".to_owned(),
                     SwitchError::Skipped(_) => "the release was skipped".to_owned(),
                     SwitchError::Disabled(_) => "switching is disabled".to_owned(),
+                }
                 });
             }
         }
@@ -468,6 +486,42 @@ mod tests {
             "failed",
             "switch_failed",
             StatusCode::CONFLICT,
+        );
+    }
+    #[test]
+    fn changed_or_removed_rollback_targets_require_confirmation_again() {
+        for error in [
+            UpdateError::RollbackChanged {
+                expected: "0.1.0".into(),
+                actual: Some("0.0.9".into()),
+            },
+            UpdateError::RollbackChanged {
+                expected: "0.1.0".into(),
+                actual: None,
+            },
+            UpdateError::NoPrevious,
+            UpdateError::Supervised("rollback target changed: private details".into()),
+        ] {
+            let request = SwitchRequest::preparing("rollback").finish(Err(error.into()));
+            assert_eq!(request.state, "failed");
+            assert!(!request.pending);
+            assert_eq!(
+                request.response().unwrap_err().code,
+                "rollback_target_changed"
+            );
+            assert_eq!(
+                request.reason.as_deref(),
+                Some("the rollback target changed; read status and confirm again")
+            );
+        }
+        let request = SwitchRequest::preparing("rollback").finish(Err(SwitchError::Refused(
+            "rollback target changed: refused".into(),
+        )));
+        assert_eq!(request.state, "refused");
+        assert_eq!(request.code, "switch_refused");
+        assert_eq!(
+            request.reason.as_deref(),
+            Some("rollback target changed: refused")
         );
     }
     #[test]
