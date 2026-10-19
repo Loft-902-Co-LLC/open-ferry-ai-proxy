@@ -49,6 +49,22 @@ use crate::timings::Backoff;
 /// every second (5.3); everything else is as coarse.
 pub const TICK: Duration = Duration::from_secs(1);
 
+pub(crate) const AUTOMATIC_COOLDOWN: chrono::Duration = chrono::Duration::hours(6);
+
+pub(crate) fn unfinished_at(record: &SwitchRecord) -> Option<chrono::DateTime<chrono::Utc>> {
+    if record.to.is_empty()
+        || !record
+            .result
+            .as_deref()
+            .is_some_and(|result| result != "switched")
+    {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(record.ended_at.as_deref().unwrap_or(&record.at))
+        .ok()
+        .map(|ended| ended.with_timezone(&chrono::Utc))
+}
+
 /// What the endpoint's handlers ask of the core.
 #[derive(Debug)]
 pub enum Command {
@@ -613,6 +629,8 @@ pub struct Core<'a, D: Driver, H: Host, S: Disk> {
     /// evaluation, and a generation that grows when one differs from it.
     pub(crate) mode_last: Option<crate::host::ModeSnapshot>,
     pub(crate) mode_gen: u64,
+    /// Non-switched targets stay cooled down even when history evicts them.
+    pub(crate) automatic_cooldowns: BTreeMap<String, chrono::DateTime<chrono::Utc>>,
     /// The active worker, watched through the waits before its hand over.
     pub(crate) watch_a: Option<WorkerId>,
     /// Where A's ladder stood when A was removed during a switch, read before
@@ -679,7 +697,7 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
         commands: &'a mut UnboundedReceiver<Command>,
         rt: Runtime,
     ) -> Self {
-        Self {
+        let mut core = Self {
             cfg,
             driver,
             host,
@@ -697,13 +715,26 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
             not_durable: false,
             mode_last: None,
             mode_gen: 0,
+            automatic_cooldowns: BTreeMap::new(),
             watch_a: None,
             a_progress: None,
             deferred: Deferred::default(),
             spawning: None,
             listed_survivors: Vec::new(),
             keep_cache: std::sync::Mutex::new(None),
+        };
+        let records: Vec<_> = core
+            .rt
+            .journal
+            .iter()
+            .flat_map(|journal| &journal.outcomes)
+            .chain(core.rt.pending.iter().map(|pending| &pending.outcome))
+            .map(|outcome| outcome.record.clone())
+            .collect();
+        for record in records {
+            core.remember_outcome(&record);
         }
+        core
     }
 
     // ---- small helpers ----------------------------------------------------
@@ -712,6 +743,22 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
         self.clock
             .now()
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    pub(crate) fn prune_automatic_cooldowns(&mut self) {
+        let now = self.clock.now();
+        self.automatic_cooldowns
+            .retain(|_, ended| now - *ended < AUTOMATIC_COOLDOWN);
+    }
+
+    fn remember_outcome(&mut self, record: &SwitchRecord) {
+        self.prune_automatic_cooldowns();
+        if let Some(ended) = unfinished_at(record) {
+            self.automatic_cooldowns
+                .entry(record.to.clone())
+                .and_modify(|last| *last = (*last).max(ended))
+                .or_insert(ended);
+        }
     }
 
     pub(crate) fn stamp_before(&self, ago: Duration) -> String {
@@ -974,6 +1021,7 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
         let in_journal = in_journal || journal_outcome.is_some();
         // Retire the superseded retry even when this new write fails.
         self.rt.pending.retain(|held| held.outcome.record.id != *id);
+        self.remember_outcome(&complete.record);
         match self.disk.write_state(name, &complete) {
             Ok(()) => {
                 if in_journal {
@@ -1693,6 +1741,7 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
     // ---- timers -----------------------------------------------------------
 
     pub(crate) async fn on_tick(&mut self) {
+        self.prune_automatic_cooldowns();
         self.tick_background().await;
         self.tick_watch().await;
         self.tick_restart().await;
