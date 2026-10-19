@@ -111,10 +111,11 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 .filter(|s| !s.is_empty())
                 .or_else(|| switching["phase"].as_str())
                 .unwrap_or_else(|| snapshot["state"].as_str().unwrap_or("unknown"));
-            let switching_disabled = if policy_disabled {
+            let switching_disabled = if policy_disabled || !snapshot["switching_disabled"].is_null()
+            {
                 value!("switching is disabled")
             } else {
-                snapshot["switching_disabled"].clone()
+                Value::Null
             };
             value!({
                 "form": "supervised",

@@ -663,7 +663,7 @@ async fn dropping_the_http_request_does_not_drop_its_preparation() {
 }
 
 #[tokio::test]
-async fn status_marks_a_cached_supervisor_stale_and_keeps_its_disabled_reason() {
+async fn status_marks_a_cached_supervisor_stale_and_keeps_switching_disabled() {
     let fake = Switcher::new(Duration::ZERO, None);
     let (dash, _scratch) = supervised(fake.clone());
     *fake.snapshot.lock().unwrap() = serde_json::json!({
@@ -687,11 +687,27 @@ async fn status_marks_a_cached_supervisor_stale_and_keeps_its_disabled_reason() 
     assert!(body["supervisor"]["snapshot_age_seconds"].is_number());
     assert_eq!(
         body["supervisor"]["switching_disabled"],
-        "a switch is already active"
+        "switching is disabled"
     );
     for count in 2..=5 {
         let body = dash.get(STATUS).await.json(StatusCode::OK);
         assert_eq!(body["supervisor"]["failed_reads"], count);
+    }
+}
+
+#[tokio::test]
+async fn snapshot_disabled_reasons_are_fixed_and_do_not_expose_paths() {
+    let private_path = r"private\state\conflicting-directory";
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, _scratch) = supervised(fake.clone());
+    for reason in [Some(private_path), None] {
+        fake.snapshot.lock().unwrap()["switching_disabled"] = serde_json::json!(reason);
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(
+            body["supervisor"]["switching_disabled"],
+            serde_json::json!(reason.map(|_| "switching is disabled"))
+        );
+        assert!(!body.to_string().contains("private"));
     }
 }
 
