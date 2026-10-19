@@ -1,6 +1,7 @@
 import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import { pollFailuresExhausted } from "../../api/updateStatus";
 import { CHECK_PATH } from "../../api/signIn";
 import { UPDATE, UPDATE_CHECK, UPDATE_INSTALL, UPDATE_ROLLBACK, type UpdateStatus } from "../../api/update";
 import { supervisorStatus, updateStatus } from "../../test/fixtures";
@@ -293,7 +294,7 @@ describe("supervised updates", () => {
       route("GET", CHECK_PATH, { json: {} }),
       route("GET", UPDATE, () => {
         reads += 1;
-        if (reads >= 2 && reads <= 4) { throw new TypeError("handover"); }
+        if (reads === 2) { throw new TypeError("handover"); }
         return { json: updateStatus({ supervisor: supervisorStatus({
           phase: reads === 1 ? "handing-over" : "idle",
           last_switch: reads === 1 ? null : { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: null },
@@ -394,4 +395,30 @@ describe("uncertain switch observation", () => {
     await new Promise((resolve) => setTimeout(resolve, 2_100));
     expect(reads).toBe(observedReads);
   }, 8_000);
+});
+
+
+describe("handover poll failures", () => {
+  it("shows a lasting outage after five failed polls and stops polling", async () => {
+    let reads = 0;
+    const api = mockApi(
+      route("GET", CHECK_PATH, { json: {} }),
+      route("GET", UPDATE, () => {
+        if (++reads > 1) throw new TypeError("offline");
+        return { json: updateStatus({ supervisor: supervisorStatus({ phase: "handing-over" }) }) };
+      }),
+    );
+    const { card } = await openUpdates();
+    await within(card).findByText("Switch: handing over");
+    await within(card).findByRole("button", { name: "Try again" }, { timeout: 12_000 });
+    expect(reads).toBe(6);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    expect(api.callsTo("GET", UPDATE)).toHaveLength(6);
+  });
+
+  it("also ends the quiet period at thirty seconds", () => {
+    expect(pollFailuresExhausted(4, 1_000, 30_999)).toBe(false);
+    expect(pollFailuresExhausted(4, 1_000, 31_000)).toBe(true);
+    expect(pollFailuresExhausted(5, 1_000, 1_001)).toBe(true);
+  });
 });
