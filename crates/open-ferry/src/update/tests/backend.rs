@@ -446,3 +446,32 @@ async fn plain_checks_ignore_held_and_unopenable_install_locks_without_creating_
         assert_eq!(snapshot(f.temp.path()), before);
     }
 }
+
+#[tokio::test]
+async fn plain_rollback_refuses_a_changed_or_removed_confirmed_target() {
+    for actual in [Some("0.0.8"), None] {
+        let f = Fixture::new().await;
+        for version in ["0.0.9", "0.0.8"] {
+            std::fs::create_dir_all(f.data.version_dir(version)).unwrap();
+            std::fs::write(f.data.binary(version, "open-ferry"), good_binary(version)).unwrap();
+        }
+        let mut state = f.updater.state();
+        state.previous = Some("0.0.9".into());
+        f.updater.save(&state).unwrap();
+        let real = Real(f.updater.clone(), ServiceKind::User);
+        let plan = real.rollback_plan().unwrap();
+        state.previous = actual.map(str::to_owned);
+        f.updater.save(&state).unwrap();
+        let before = snapshot(f.temp.path());
+        let error = match real.rollback(&plan.previous).await {
+            Err(error) => error,
+            Ok(_) => panic!("unconfirmed target restored"),
+        };
+        assert!(
+            matches!(&error, SwitchError::Update(UpdateError::RollbackChanged { expected, actual: current }) if expected == "0.0.9" && current.as_deref() == actual)
+        );
+        assert!(error.to_string().contains("expected 0.0.9"));
+        assert!(error.to_string().contains(actual.unwrap_or("none")));
+        assert_eq!(snapshot(f.temp.path()), before);
+    }
+}

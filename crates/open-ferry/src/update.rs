@@ -778,10 +778,17 @@ impl Updates for Real {
             .map_err(SwitchError::from)
     }
 
-    async fn rollback(&self, _expected: &str) -> Result<Changed, SwitchError> {
+    async fn rollback(&self, expected: &str) -> Result<Changed, SwitchError> {
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
+        if state.previous.as_deref() != Some(expected) {
+            return Err(UpdateError::RollbackChanged {
+                expected: expected.into(),
+                actual: state.previous.clone(),
+            }
+            .into());
+        }
         self.0
             .rollback(&mut state)
             .await

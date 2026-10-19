@@ -135,6 +135,11 @@ pub enum UpdateError {
     NotSelfUpdating(NotSelfUpdating),
     /// Nothing is staged to switch to.
     NothingStaged,
+    /// The rollback target changed after the caller confirmed it.
+    RollbackChanged {
+        expected: String,
+        actual: Option<String>,
+    },
     /// There is no earlier version to roll back to.
     NoPrevious,
     /// The switch failed; the installed binary is as it was.
@@ -169,6 +174,9 @@ impl fmt::Display for UpdateError {
             ),
             Self::NotSelfUpdating(why) => why.fmt(f),
             Self::NothingStaged => f.write_str("no version is staged"),
+            Self::RollbackChanged { expected, actual } => write!(f,
+                "rollback target changed: expected {expected}, now {}; run `open-ferry update -check`",
+                actual.as_deref().unwrap_or("none")),
             Self::NoPrevious => f.write_str(
                 "there is no earlier version to roll back to: a rollback needs a switch made by open-ferry update",
             ),
