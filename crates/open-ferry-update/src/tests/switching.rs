@@ -670,3 +670,34 @@ async fn rollback_refuses_a_target_changed_since_confirmation_without_sending() 
     );
     assert!(fake.calls.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_manual_install_checks_again_when_the_stage_is_already_running() {
+    let mut f = Fixture::new().await;
+    f.release("0.2.0");
+    let (old_service, _) = service(&f, "auto");
+    old_service.check_once().await.unwrap().unwrap();
+    f.updater.running = "0.2.0".into();
+    f.release("0.3.0");
+    let (service, fake) = service(&f, "auto");
+    let requests = f.server.requests();
+    service.install_now(false).await.unwrap();
+    assert!(f.server.requests() > requests);
+    assert_eq!(*fake.calls.lock().unwrap(), [("0.3.0".into(), false)]);
+}
+
+#[tokio::test]
+async fn a_manual_install_does_not_switch_to_the_running_release_during_its_watch() {
+    let mut f = Fixture::new().await;
+    f.release("0.2.0");
+    let (old, _) = service(&f, "auto");
+    old.check_once().await.unwrap().unwrap();
+    f.updater.running = "0.2.0".into();
+    // The installed file remains 0.1.0 until watch confirmation.
+    let (service, fake) = service(&f, "auto");
+    assert!(matches!(
+        service.install_now(false).await,
+        Err(SwitchError::Update(UpdateError::NothingStaged))
+    ));
+    assert!(fake.calls.lock().unwrap().is_empty());
+}

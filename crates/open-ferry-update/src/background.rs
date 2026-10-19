@@ -210,10 +210,14 @@ impl UpdateService {
                 let updater = &inner.updater;
                 let _lock = updater.lock()?;
                 let mut state = switching::read_state(updater)?;
-                let staged = state
-                    .staged
-                    .clone()
-                    .filter(|version| state.latest.as_ref().is_none_or(|latest| latest == version));
+                let staged = state.staged.clone().filter(|version| {
+                    state.latest.as_ref().is_none_or(|latest| latest == version)
+                        && (auto
+                            || version.parse().is_ok_and(|latest| {
+                                crate::release::compare(&updater.running, &latest)
+                                    == crate::release::Verdict::Newer
+                            }))
+                });
                 let version = match staged {
                     Some(version) => version,
                     None => {
@@ -228,7 +232,13 @@ impl UpdateService {
                             ..updater.clone()
                         };
                         let found = updater.latest(&state).await?;
-                        if !found.is_newer() {
+                        let newer = if auto {
+                            found.is_newer()
+                        } else {
+                            crate::release::compare(&updater.running, &found.release.semver)
+                                == crate::release::Verdict::Newer
+                        };
+                        if !newer {
                             return Err(UpdateError::NothingStaged.into());
                         }
                         if auto {

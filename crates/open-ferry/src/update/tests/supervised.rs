@@ -452,3 +452,38 @@ async fn a_quiet_loading_phase_longer_than_thirty_seconds_keeps_following() {
     assert_eq!((outcome.code, outcome.result), (0, "updated"));
     assert!(following_budget() > open_ferry_supervisor::timings::ACTIVE_LOAD_TIMEOUT);
 }
+
+#[tokio::test]
+async fn the_real_backend_does_not_reuse_a_stage_that_is_already_running() {
+    let (_dir, data, _) = supervised_rig();
+    let mut updater = real_updater(DataDir::at(data), "", true).unwrap();
+    updater.keys = open_ferry_update::keys::ReleaseKeys::parse("").unwrap();
+    updater.running = "0.2.0".into();
+    let mut state = updater.state();
+    state.staged = Some("0.2.0".into());
+    state.latest = state.staged.clone();
+    updater.save(&state).unwrap();
+    let switcher = Arc::new(client::EndpointSwitcher::new(
+        updater.data.root(),
+        Identity::current(ServiceKind::User).unwrap(),
+    ));
+    let service = UpdateService::new(updater.clone(), http_fetch(), &Config::default())
+        .with_switcher(switcher.clone());
+    let real = Supervised {
+        real: Real(updater, ServiceKind::User),
+        service,
+        switcher,
+        view: {
+            let mut view = SupervisedFake::new("switched").view;
+            view.supervisor.as_mut().unwrap()["active_version"] = json!("0.2.0");
+            view
+        },
+        check: false,
+    };
+    // The normal release check fails before any network I/O without a key.
+    // Returning an Offer would mean the stale stage hid that check.
+    assert!(matches!(
+        real.latest().await,
+        Err(UpdateError::Verify(VerifyError::NoTrustedKey))
+    ));
+}
