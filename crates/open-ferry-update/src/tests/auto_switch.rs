@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::support::*;
+use crate::background::test_log::Capture;
 use crate::fetch::{BoxFuture, Fetch, FetchError};
 use crate::journal::{Artifact, Journal, MarkFailed, Outcome};
 use crate::pins::Pin;
@@ -14,6 +15,7 @@ use crate::{
     CancelOutcome, CheckNow, Report, SwitchError, SwitchEvent, SwitchHandle, SwitchProgress,
     Switcher, UpdateService,
 };
+use tracing::instrument::WithSubscriber;
 
 struct MemoryFetch {
     bodies: HashMap<String, Vec<u8>>,
@@ -301,7 +303,7 @@ impl Drop for PendingProgress {
 }
 
 #[tokio::test]
-async fn stopping_the_service_closes_an_accepted_switch_progress_stream() {
+async fn dropping_the_service_closes_an_accepted_switch_progress_stream() {
     let f = Fixture::new().await;
     let (service, fake, _) = service(&f, "auto", "0.2.0", false);
     let polled = Arc::new(tokio::sync::Notify::new());
@@ -315,6 +317,11 @@ async fn stopping_the_service_closes_an_accepted_switch_progress_stream() {
         .await
         .unwrap();
     service.stop();
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "stop keeps followers alive"
+    );
+    drop(service);
     tokio::time::timeout(Duration::from_secs(5), async {
         while !dropped.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -570,4 +577,59 @@ async fn lowering_the_mode_during_install_preparation_never_sends_an_automatic_r
         ));
         assert!(fake.calls.lock().unwrap().is_empty());
     }
+}
+
+struct LaterProgress {
+    polled: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+impl SwitchProgress for LaterProgress {
+    fn next(&mut self, _deadline: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+        Box::pin(async move {
+            self.polled.notify_one();
+            self.release.notified().await;
+            Ok(SwitchEvent::Done {
+                result: serde_json::json!({"result": "failed-to-load"}),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_switch_follower_logs_its_outcome_after_update_checks_stop() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let polled = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let logs = Capture::default();
+    *fake.progress.lock().unwrap() = Some(Box::new(LaterProgress {
+        polled: polled.clone(),
+        release: release.clone(),
+    }));
+    service
+        .check_once()
+        .with_subscriber(logs.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), polled.notified())
+        .await
+        .unwrap();
+    service.stop();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if logs.0.lock().unwrap().iter().any(|line| {
+                line.starts_with("INFO")
+                    && line.contains("automatic switch finished")
+                    && line.contains("failed-to-load")
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
 }
