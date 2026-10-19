@@ -24,7 +24,7 @@ export function SwitchStatus({ status, onRetry, hidePhase = false, recoveringSup
     {!hidePhase && request?.state === "accepted" && request.pending && <Alert tone="info" live title="Switch accepted">
       <p>Waiting for the supervisor&apos;s status.</p>
     </Alert>}
-    {request?.reason != null && <Alert tone="warn" live title={request.state === "refused" ? "Switch refused" : request.state === "failed" ? "Switch failed" : "The switch could not be confirmed"}>
+    {request?.reason != null && <Alert tone={request.code === "already_latest" ? "info" : "warn"} live title={request.code === "already_latest" ? "Already running the latest release" : request.state === "refused" ? "Switch refused" : request.state === "failed" ? "Switch failed" : "The switch could not be confirmed"}>
       <p className="break-words">{request.reason}</p>
       {!hidePhase && request.state === "unknown" && request.pending && supervisor?.error == null && <Button size="sm" onClick={onRetry}>Read status</Button>}
     </Alert>}

@@ -127,6 +127,11 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
     let mut body = value!(status);
     body["supervisor"] = supervisor;
     body["switch_request"] = value!(live.request);
+    if let Some(request) = &live.request
+        && matches!(request.state, "failed" | "refused")
+    {
+        body["switch_request"]["code"] = value!(request.code);
+    }
     Ok(ok(&body))
 }
 
@@ -256,6 +261,8 @@ impl SwitchRequest {
                     "not_supervised"
                 } else if matches!(error, SwitchError::Disabled(_)) {
                     "switching_disabled"
+                } else if matches!(error, SwitchError::Update(UpdateError::NotNewer { .. })) {
+                    "already_latest"
                 } else if matches!(error, SwitchError::Update(UpdateError::Busy)) {
                     "update_busy"
                 } else if matches!(error, SwitchError::Ended(_)) {
@@ -273,6 +280,7 @@ impl SwitchRequest {
                     SwitchError::TimedOut => "the supervisor did not answer in time; the request may have been accepted; read update status before trying again".to_owned(),
                     SwitchError::Stopped => "the supervisor connection ended without an answer; the outcome is unknown; read update status before trying again".to_owned(),
                     SwitchError::Update(UpdateError::Busy) => "busy, try again shortly".to_owned(),
+                    SwitchError::Update(UpdateError::NotNewer { .. }) => "already running the latest release or a newer version".to_owned(),
                     SwitchError::Ended(reason) | SwitchError::Refused(reason) => reason,
                     SwitchError::Untrusted(_) => "the supervisor endpoint was not trusted".to_owned(),
                     SwitchError::Unreachable(_) => "the supervisor cannot be reached; the request was not sent".to_owned(),
@@ -523,6 +531,23 @@ mod tests {
             request.reason.as_deref(),
             Some("rollback target changed: refused")
         );
+    }
+
+    #[test]
+    fn an_already_running_release_is_not_sent() {
+        for running in ["0.2.0", "0.3.0"] {
+            let request = SwitchRequest::preparing("install").finish(Err(UpdateError::NotNewer {
+                running: running.into(),
+                latest: "0.2.0".into(),
+            }
+            .into()));
+            assert!(!request.pending);
+            assert_eq!(request.response().unwrap_err().code, "already_latest");
+            assert_eq!(
+                request.reason.as_deref(),
+                Some("already running the latest release or a newer version")
+            );
+        }
     }
     #[test]
     fn skipped_is_a_failure_to_start() {

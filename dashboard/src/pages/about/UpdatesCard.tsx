@@ -238,6 +238,7 @@ export function UpdatesCard({ className }: { className?: string }) {
     onSettled: () => client.invalidateQueries({ queryKey: apiQueryKey(UPDATE) }),
   });
   const { isError: switchError, reset: resetSwitch, context: switchContext } = switching;
+  const alreadyLatest = isApiError(switching.error) && switching.error.code === "already_latest";
   const latestRequest = status.lastRead?.switch_request;
   const lastSwitch = status.lastRead?.supervisor?.last_switch;
   const liveSwitch = status.lastRead?.supervisor?.switch;
@@ -349,7 +350,7 @@ export function UpdatesCard({ className }: { className?: string }) {
         ) : (
           <ProblemNotice problem={callProblem(check.error)} live />
         ))}
-      {switching.isError && <Alert tone="warn" live title={callProblem(switching.error).kind === "unreachable" ? "The switch could not be confirmed" : "The switch request failed"}>
+      {switching.isError && <Alert tone={alreadyLatest ? "info" : "warn"} live title={alreadyLatest ? "Already running the latest release" : callProblem(switching.error).kind === "unreachable" ? "The switch could not be confirmed" : "The switch request failed"}>
         <p>{callProblem(switching.error).kind === "unreachable" ?
           (status.polling ? "The server did not answer. Checking its status; the request will not be sent again." :
             "The server did not answer. Choose Read status to see whether it started. The request will not be sent again.") :
