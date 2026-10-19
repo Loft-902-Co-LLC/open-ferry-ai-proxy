@@ -1,0 +1,365 @@
+//! The real supervisor and worker stage a signed release and switch themselves.
+#![cfg(feature = "blue-green-test")]
+
+#[path = "support/privilege.rs"]
+mod privilege;
+#[path = "../../open-ferry-update/src/tests/support.rs"]
+#[allow(dead_code)]
+mod releases;
+#[path = "../../open-ferry-supervisor/tests/under_test/mod.rs"]
+mod under_test;
+
+// The signed-release fixture uses the update crate's own modules.
+use open_ferry_update::{data_dir, fetch, install, keys, release, runner, switch, updater};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
+use under_test::*;
+
+#[cfg(target_os = "linux")]
+#[path = "support/parent_death.rs"]
+mod parent_death;
+
+fn launch(root: &Path, port: u16, base: &str) -> Sup {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join(NAME);
+    write_executable(&exe, &artifact_bytes(env!("CARGO_PKG_VERSION")));
+    let data = data_dir::DataDir::at(root.join("data"));
+    releases::write_receipt(&data, &exe);
+    let mut config = config_text(root, port, "auto");
+    config.push_str("remote-management:\n  secret-key: auto-test-password\n");
+    std::fs::write(root.join("config.yaml"), config).unwrap();
+    let log = std::fs::File::create(root.join("supervisor.log")).unwrap();
+    let mut command = Command::new(&exe);
+    isolate(&mut command);
+    command
+        .arg("-supervise")
+        .arg("-config")
+        .arg(root.join("config.yaml"))
+        .arg("-test-data-dir")
+        .arg(data.root());
+    if let Some(endpoint) = endpoint_flag(root) {
+        command.arg("-test-endpoint").arg(endpoint);
+    }
+    command
+        .env("OPEN_FERRY_UPDATE_BASE_URL", base)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    #[cfg(target_os = "linux")]
+    parent_death::on_test_exit(&mut command);
+    Sup::adopt(command.spawn().unwrap(), root)
+}
+
+fn dump(root: &Path) -> String {
+    std::fs::read_to_string(root.join("supervisor.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.contains("[access_log.rs:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn until(root: &Path, mut condition: impl FnMut() -> bool) {
+    let due = Instant::now() + LONG;
+    while !condition() {
+        assert!(Instant::now() < due, "timed out\n{}", dump(root));
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+fn journal(root: &Path) -> serde_json::Value {
+    std::fs::read(
+        root.join("data")
+            .join(open_ferry_update::journal::JOURNAL_FILE),
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    .unwrap_or_default()
+}
+
+// Requests continue across loading, hand-over and go. Every request must get
+// the root handler's successful response; an I/O failure is also a failure.
+fn complete_get(port: u16) -> (u16, Option<String>) {
+    use std::io::{Read, Write};
+    let wait = Duration::from_secs(5);
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&address, wait).unwrap();
+    stream.set_read_timeout(Some(wait)).unwrap();
+    stream.set_write_timeout(Some(wait)).unwrap();
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("the complete response body");
+    let (head, body) = response.split_once("\r\n\r\n").expect("HTTP headers");
+    let length: usize = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .expect("the root response has a content length");
+    assert_eq!(body.len(), length, "a truncated response: {response}");
+    let status = head
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let marker = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("x-open-ferry-test-marker")
+            .then(|| value.trim().to_owned())
+    });
+    (status, marker)
+}
+
+type Responses = Vec<(u16, Option<String>)>;
+
+struct Requests {
+    stop: Arc<AtomicBool>,
+    new_seen: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<Responses>>,
+}
+impl Requests {
+    fn start(port: u16) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = stop.clone();
+        let new_seen = Arc::new(AtomicBool::new(false));
+        let seen = new_seen.clone();
+        let thread = std::thread::spawn(move || {
+            let mut answers = Vec::new();
+            while !done.load(Ordering::SeqCst) {
+                let answer = complete_get(port);
+                if answer.1.as_deref() == Some("99.0.0") {
+                    seen.store(true, Ordering::SeqCst);
+                }
+                answers.push(answer);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            answers
+        });
+        Self {
+            stop,
+            new_seen,
+            thread: Some(thread),
+        }
+    }
+    fn finish(mut self) -> Responses {
+        self.stop.store(true, Ordering::SeqCst);
+        self.thread.take().unwrap().join().unwrap()
+    }
+}
+impl Drop for Requests {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+async fn prepare() -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
+    let dir = scratch();
+    let root = dir.path();
+    let data = data_dir::DataDir::at(root.join("data"));
+    let seams = data.root().join(".blue-green-test");
+    std::fs::create_dir_all(&seams).unwrap();
+    let key = releases::TestKey::new();
+    std::fs::write(seams.join("release-key"), key.public()).unwrap();
+    std::fs::write(seams.join("update-now"), []).unwrap();
+    std::fs::write(seams.join("auto.before_check.hold"), []).unwrap();
+    let server = releases::ReleaseServer::start().await;
+    let newer = "99.0.0";
+    let mut binary = artifact_bytes(newer);
+    binary.extend_from_slice(format!("\n--update-test-version {newer}--").as_bytes());
+    let name = releases::archive_name(newer, open_ferry_update::TARGET);
+    let archive = releases::release_archive(newer, open_ferry_update::TARGET, &binary);
+    server.publish(&key, newer, &[(name, archive)]);
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let sup = launch(root, port, server.base.as_str());
+    until(root, || http_get(port, "/").is_some()).await;
+    let identity = open_ferry_supervisor::endpoint::Identity::current(
+        open_ferry_supervisor::endpoint::ServiceKind::User,
+    )
+    .unwrap();
+    let due = Instant::now() + LONG;
+    loop {
+        let status = open_ferry_supervisor::client::status(
+            data.root(),
+            &identity,
+            Instant::now() + Duration::from_millis(750),
+        )
+        .await;
+        if status.is_ok_and(|snapshot| snapshot.state == "idle") {
+            break;
+        }
+        assert!(
+            Instant::now() < due,
+            "the supervisor never became idle\n{}",
+            dump(root)
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    until(root, || data.try_lock().unwrap().is_some()).await;
+    (dir, server, sup, port)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_check_switches_the_real_supervised_worker_without_failed_requests() {
+    if privilege::privileged() {
+        eprintln!("skipped: real CLI requires unprivileged scratch");
+        return;
+    }
+    let _permit = Permit::take();
+    let (dir, server, _sup, port) = prepare().await;
+    let root = dir.path();
+    let requests = Requests::start(port);
+    until(root, || {
+        root.join("data/.blue-green-test/auto.before_check.arrived")
+            .exists()
+    })
+    .await;
+    std::fs::write(
+        root.join("data/.blue-green-test/auto.before_check.release"),
+        [],
+    )
+    .unwrap();
+    until(root, || journal(root)["active"]["version"] == "99.0.0").await;
+    until(root, || requests.new_seen.load(Ordering::SeqCst)).await;
+    let answers = requests.finish();
+    assert!(answers.len() > 1);
+    assert!(
+        answers.iter().all(|(status, _)| *status == 200),
+        "{answers:?}"
+    );
+    assert!(
+        answers
+            .iter()
+            .any(|(_, marker)| marker.as_deref() == Some(env!("CARGO_PKG_VERSION")))
+    );
+    assert!(
+        answers
+            .iter()
+            .any(|(_, marker)| marker.as_deref() == Some("99.0.0"))
+    );
+    assert!(
+        server.requests() >= 3,
+        "the worker fetched the signed list and archive"
+    );
+    assert!(
+        dump(root).contains("automatic switch accepted"),
+        "{}",
+        dump(root)
+    );
+}
+
+fn check_now(port: u16) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(stream, "POST /open-ferry/api/v1/update/check HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer auto-test-password\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+    let mut text = String::new();
+    stream.read_to_string(&mut text).unwrap();
+    let status = text
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    (status, text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
+    if privilege::privileged() {
+        eprintln!("skipped: real CLI requires unprivileged scratch");
+        return;
+    }
+    let _permit = Permit::take();
+    let (dir, server, _sup, port) = prepare().await;
+    let root = dir.path();
+    let seams = root.join("data/.blue-green-test");
+    std::fs::write(seams.join("fault.exit-after"), "go@99.0.0").unwrap();
+    std::fs::write(seams.join("auto.before_check.release"), []).unwrap();
+    let data = data_dir::DataDir::at(root.join("data"));
+    until(root, || {
+        let state = open_ferry_update::state::State::load(&data.state_file());
+        let view = journal(root);
+        let failed = state.has_failed("99.0.0")
+            || view["outcomes"].as_array().is_some_and(|outcomes| {
+                outcomes
+                    .iter()
+                    .any(|outcome| outcome["mark_failed"]["version"] == "99.0.0")
+            });
+        failed && view["active"]["version"] == env!("CARGO_PKG_VERSION") && view["switch"].is_null()
+    })
+    .await;
+    until(root, || http_get(port, "/").is_some()).await;
+    let mut before = server.requests();
+    until(root, || {
+        before = server.requests();
+        let (status, answer) = check_now(port);
+        assert_eq!(status, 202, "{answer}\n{}", dump(root));
+        assert!(
+            answer.contains("started") || answer.contains("running"),
+            "dashboard keeps its response shape: {answer}"
+        );
+        answer.contains("started")
+    })
+    .await;
+    until(root, || {
+        server.requests() >= before + 2
+            && open_ferry_update::state::State::load(&data.state_file())
+                .last_result
+                .as_deref()
+                == Some("skipped")
+    })
+    .await;
+    let log = dump(root);
+    assert_eq!(log.matches("automatic switch accepted").count(), 1, "{log}");
+    let state = open_ferry_update::state::State::load(&data.state_file());
+    let recorded = state.history.iter().any(|record| {
+        record.to == "99.0.0"
+            && record.result.as_deref() == Some("failed-after-switch")
+            && record.returned_to.as_deref() == Some(env!("CARGO_PKG_VERSION"))
+    });
+    let view = journal(root);
+    let pending = view["outcomes"].as_array().is_some_and(|outcomes| {
+        outcomes.iter().any(|outcome| {
+            outcome["record"]["to"] == "99.0.0"
+                && outcome["record"]["result"] == "failed-after-switch"
+                && outcome["record"]["returned_to"] == env!("CARGO_PKG_VERSION")
+        })
+    });
+    assert!(
+        recorded || pending,
+        "the supervisor recorded the watch failure and return: {state:?}, {view}"
+    );
+}
