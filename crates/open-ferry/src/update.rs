@@ -643,7 +643,10 @@ impl Real {
         })
         .await
         .map_err(preparation_stopped)?;
-        if request != Request::Check || !known {
+        if request == Request::Check && !known {
+            return Ok(None);
+        }
+        if request != Request::Check {
             let binary = match self.0.install() {
                 Install::SelfUpdating { binary } => binary,
                 Install::NotifyOnly(_) if request == Request::Cancel => self
