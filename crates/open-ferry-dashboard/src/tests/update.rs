@@ -461,8 +461,11 @@ async fn rollback_requires_the_confirmed_target() {
     let (dash, _scratch) = supervised(fake.clone());
     for (body, code) in [
         ("", "invalid_json"),
+        ("{", "invalid_json"),
         ("{}", "invalid_request"),
+        (r#"{"target":""}"#, "invalid_request"),
         (r#"{"target":" "}"#, "invalid_request"),
+        (r#"{"target":"0.0.9","extra":true}"#, "invalid_request"),
     ] {
         dash.call(Method::POST, ROLLBACK, body)
             .await
