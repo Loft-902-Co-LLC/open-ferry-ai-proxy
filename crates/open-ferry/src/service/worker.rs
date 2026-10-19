@@ -2002,26 +2002,8 @@ async fn activate_unless_cancelled(
     if timing.fail_resume_accept {
         control.cut();
     }
-    let resume = control.resume_accept();
-    #[cfg(test)]
-    let resume = async {
-        tokio::select! {
-            result = resume => result,
-            _ = async {
-                let Some(queued) = listener_failure else {
-                    pending::<()>().await;
-                    return;
-                };
-                while service.sync_requests.is_empty() {
-                    tokio::task::yield_now().await;
-                }
-                queued.notify_one();
-                pending::<()>().await;
-            } => unreachable!(),
-        }
-    };
     let resumed = async {
-        resume.await?;
+        control.resume_accept().await?;
         // The spawned server task is first polled when it is scheduled, so
         // `resume_accept` can return before any loop holds a listener (it
         // leaves out the loops not yet polled). `loaded` follows this, so
@@ -2033,6 +2015,26 @@ async fn activate_unless_cancelled(
             hold.notify_one();
         }
         control.await_listeners(expected_listeners).await
+    };
+    #[cfg(test)]
+    let resumed = async {
+        tokio::select! {
+            result = resumed => result,
+            _ = async {
+                let Some(queued) = listener_failure else {
+                    pending::<()>().await;
+                    return;
+                };
+                // A server not polled yet is absent from resume_accept's
+                // counts. Keep the injection alive through await_listeners,
+                // which also waits for those late-starting loops.
+                while service.sync_requests.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                queued.notify_one();
+                pending::<()>().await;
+            } => unreachable!(),
+        }
     };
     if let Err(error) = resumed.await {
         timing.failed.store(true, Ordering::SeqCst);
