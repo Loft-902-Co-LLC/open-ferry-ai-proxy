@@ -6,7 +6,7 @@ What open-ferry is building next, in order. [UPSTREAM.md](UPSTREAM.md) says what
 
 | Milestone | Status |
 |---|---|
-| [v1: a complete proxy](#v1-a-complete-proxy-for-one-person-or-a-small-team) | **In progress.** Everything under "Already in place" works today. Updating with no downtime is being built; the rest waits for the first release. |
+| [v1: a complete proxy](#v1-a-complete-proxy-for-one-person-or-a-small-team) | **In progress.** Everything under "Already in place" works today. Updating with no downtime is built, and is tested with release candidates before the first release; the rest waits for that release. |
 | [After v1: smaller additions](#after-v1-smaller-additions) | Not started |
 | [v2: Realtime](#v2-realtime) | Not started |
 | [v3: plugins](#v3-plugins-if-they-are-worth-it) | Not started |
@@ -16,7 +16,7 @@ What v1 still needs:
 
 | | Status |
 |---|---|
-| Updating with no downtime | **In progress:** the supervisor, worker and services are done on Linux and Windows and for macOS user LaunchAgents, and the command line switches versions. macOS machine services are still refused. Automatic switching and dashboard controls follow separately (listed under "Still to come") |
+| Updating with no downtime | **Built:** on Linux and Windows and for macOS user LaunchAgents, a supervised service switches to each new release by itself, and the command line and the dashboard switch and roll back. macOS machine services are still refused. Two release candidates are tested end to end before 0.1.0 |
 | The release signing key | Not started. It is made when the first release is near. |
 | The first release, 0.1.0 | Waits for the two items above and for testing in real use |
 | A Homebrew tap | Not started; comes after 0.1.0 |
@@ -72,7 +72,7 @@ Still to come:
   1. Done: a supervisor that runs two versions side by side on one port and switches between them, tested with real processes.
   2. Done: open-ferry running under the supervisor, and the switch from one real version to another, tested end to end.
   3. Done on Linux and Windows, and for macOS user LaunchAgents: supported services start open-ferry under the supervisor when they can update themselves, and installer reruns refuse to replace a running supervised install. macOS machine services are still refused.
-  4. Done for the command line: `open-ferry update` and `-rollback` switch versions through the supervisor on the same listener, `-check` shows its live status and last outcome, and `-cancel` asks it to cancel. Automatic switching and dashboard controls follow in separate changes.
+  4. Done: `open-ferry update` and `-rollback` switch versions through the supervisor on the same listener, `-check` shows its live status and last outcome, and `-cancel` asks it to cancel. The dashboard's About page installs and rolls back the same way. In `auto` mode, a supervised service switches to each release it stages by itself.
   5. Done: `open-ferry migrate` installs the same supervised or plain service form as `service install`, the docs describe it, and CI tests blue-green switching on macOS 15 and native x86_64 musl in Alpine.
 - **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
 - **A Homebrew tap.**
