@@ -7122,38 +7122,44 @@ async fn after_the_switch_off_a_drain_ending_queues_no_s2_retry_when_the_write_w
 }
 
 #[tokio::test(start_paused = true)]
-async fn automatic_admission_rechecks_state_and_pending_journal_exclusions() {
+async fn automatic_admission_rechecks_state_journal_and_runtime_pending_exclusions() {
     use open_ferry_update::journal::MarkFailed;
     use open_ferry_update::state::{State, SwitchRecord};
 
-    for pending in [false, true] {
+    for source in ["state", "journal", "pending"] {
         for rolled_back in [false, true] {
             for auto in [false, true] {
                 let mut rig = Rig::new().await;
                 let root = tempfile::tempdir().unwrap();
                 rig.cfg.data = open_ferry_update::DataDir::at(root.path());
                 let mut state = State::default();
-                if pending {
+                if source != "state" {
                     let mut record =
                         SwitchRecord::started("earlier", "rollback", "2.0.0", "1.0.0", "now");
                     record.result = Some("rolled-back".into());
-                    rig.rt
-                        .as_mut()
-                        .unwrap()
-                        .journal
-                        .as_mut()
-                        .unwrap()
-                        .push_outcome(Outcome {
-                            record: if rolled_back {
-                                record
-                            } else {
-                                SwitchRecord::default()
-                            },
-                            mark_failed: (!rolled_back).then(|| MarkFailed {
-                                version: "2.0.0".into(),
-                                why: "failed its watch".into(),
-                            }),
+                    let outcome = Outcome {
+                        record: if rolled_back {
+                            record
+                        } else {
+                            SwitchRecord::default()
+                        },
+                        mark_failed: (!rolled_back).then(|| MarkFailed {
+                            version: "2.0.0".into(),
+                            why: "failed its watch".into(),
+                        }),
+                    };
+                    let rt = rig.rt.as_mut().unwrap();
+                    if source == "journal" {
+                        rt.journal.as_mut().unwrap().push_outcome(outcome);
+                    } else {
+                        rt.pending.push(crate::core::PendingState {
+                            name: "S3",
+                            outcome,
+                            attempts: 1,
+                            due: tokio::time::Instant::now(),
+                            in_journal: false,
                         });
+                    }
                 } else if rolled_back {
                     state.rolled_back = Some("2.0.0".into());
                 } else {
