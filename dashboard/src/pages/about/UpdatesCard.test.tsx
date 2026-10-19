@@ -341,7 +341,7 @@ describe("manual install retries", () => {
 });
 
 describe("switch failures", () => {
-  it("shows an accepted switch that ended with an error as failed", async () => {
+  it("defensively shows a direct ended reply as failed", async () => {
     const status = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
     const api = server(status);
     api.use(route("POST", UPDATE_INSTALL, () => {

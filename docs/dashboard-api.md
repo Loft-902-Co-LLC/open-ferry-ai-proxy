@@ -699,7 +699,7 @@ At most one preparation runs per dashboard state. A second request while one run
 
 An acceptance timeout, an invalid reply, or a stream ending without a reply is ambiguous: the answer is `202 {"uncertain": true}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The request retains state `unknown` and its reason, with `pending: false`; the read alone cannot prove its outcome. Check the live switch and last outcome before deciding to retry. An unreachable endpoint means the request was not sent and is a known failure.
 
-If the supervisor accepted the switch and then ended it with an error before the route returned, the answer is `202 {"failed": true, "reason": "..."}`. `switch_request.state` is `failed` and keeps that reason. This is a failed accepted operation, not a refusal.
+The client returns at acceptance. Later switch failures are observed through `supervisor.last_switch`, including its reason. As a defensive fallback for a client returning `Ended` directly, the route maps it to `202 {"failed": true, "reason": "..."}` and a failed `switch_request`; this is not expected from the current install or rollback path.
 
 A supervisor refusal before the response returns `409 switch_refused` with its reason unchanged in `message`. A local preparation failure (download, verification, missing staged release, I/O or journal error) returns `409 switch_failed` with a short reason; detailed diagnostics go to the server log. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
 

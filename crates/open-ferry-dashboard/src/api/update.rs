@@ -247,6 +247,8 @@ impl SwitchRequest {
                 &value!({"accepted": true, "id": self.id}),
             )),
             "unknown" => Ok(json(StatusCode::ACCEPTED, &value!({"uncertain": true}))),
+            // Defensive: current install/rollback clients return at Accepted.
+            // Later failures are read from supervisor.last_switch.
             "failed" if self.code == "switch_ended" => Ok(json(
                 StatusCode::ACCEPTED,
                 &value!({"failed": true, "reason": self.reason}),
@@ -435,7 +437,7 @@ mod tests {
         );
     }
     #[test]
-    fn ended_is_a_known_failed_switch() {
+    fn defensive_ended_mapping_is_a_known_failed_switch() {
         assert_error(
             SwitchError::Ended("exited".into()),
             "failed",
