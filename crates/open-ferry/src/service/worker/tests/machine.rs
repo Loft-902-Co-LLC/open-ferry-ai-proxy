@@ -2044,6 +2044,7 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     // so this checks the send and stop deadlines without counting delays in
     // scheduling the worker or waking the task that observes its exit.
     tokio::time::pause();
+    let wall_started = Instant::now();
     probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
     rig.fake().send(Message::Ping).await;
     tokio::time::timeout(WAIT, probe.arrived.notified())
@@ -2057,16 +2058,25 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
         .expect("the worker didn't exit in time")
         .unwrap();
     let exited = tokio::time::Instant::now();
+    let wall_elapsed = wall_started.elapsed();
     assert!(succeeded(code));
     // One send timeout plus the stop budget is about 5.1 s of Tokio time.
     // A second full send timeout still takes at least 10 s and fails the
     // unchanged 8 s bound, even when no wall-clock time elapses.
     let stalled_at = *probe.first_stall.get().unwrap();
     let elapsed = exited.duration_since(stalled_at);
-    assert!(elapsed >= send_timeout, "the first send did not time out");
     assert!(
         elapsed < Duration::from_secs(8),
         "the stalled send and stop took {elapsed:?} of Tokio time"
+    );
+    // Paused time cannot detect a blocking sleep or synchronous join on
+    // the runtime thread. Healthy runs take milliseconds of wall time;
+    // a full send timeout leaves ample scheduling margin but rejects an
+    // additional blocking wait of that length. An interruptible send is
+    // also valid, so neither clock has a lower bound.
+    assert!(
+        wall_elapsed < send_timeout,
+        "the stalled send and stop took {wall_elapsed:?} of wall time (Tokio time: {elapsed:?})"
     );
     assert!(!rig.lease_is_free());
 }
