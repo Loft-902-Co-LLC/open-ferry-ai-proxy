@@ -33,6 +33,9 @@ export interface SupervisorStatus {
   last_switch: LastSwitch | null;
   switching_disabled: string | null;
   error: string | null;
+  stale: boolean;
+  snapshot_age_seconds: number | null;
+  failed_reads: number;
 }
 
 export interface SwitchRequest {

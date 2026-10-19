@@ -13,8 +13,10 @@ export const CHECKING_POLL_MS = 2_000;
 
 export function switchInProgress(status: UpdateStatus | undefined): boolean {
   const supervisor = status?.supervisor;
-  return status?.switch_request?.pending === true ||
-    (supervisor != null && !["idle", "degraded", "stopping"].includes(supervisor.phase));
+  if (supervisor?.stale === true && (supervisor.failed_reads >= MAX_FAILED_POLLS ||
+    (supervisor.snapshot_age_seconds ?? 0) * 1_000 >= MAX_POLL_ERROR_MS)) return false;
+  return (status?.switch_request?.pending === true && status.switch_request.state !== "unknown") ||
+    (supervisor != null && ["waiting-for-signins", "loading", "handing-over", "taking-over", "watching"].includes(supervisor.phase));
 }
 
 export const MAX_FAILED_POLLS = 5;

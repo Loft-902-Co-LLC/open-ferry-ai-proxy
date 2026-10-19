@@ -1,7 +1,7 @@
 import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { pollFailuresExhausted } from "../../api/updateStatus";
+import { pollFailuresExhausted, switchInProgress } from "../../api/updateStatus";
 import { CHECK_PATH } from "../../api/signIn";
 import { UPDATE, UPDATE_CHECK, UPDATE_INSTALL, UPDATE_ROLLBACK, type UpdateStatus } from "../../api/update";
 import { supervisorStatus, updateStatus } from "../../test/fixtures";
@@ -360,14 +360,15 @@ describe("switch failures", () => {
     expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
   });
 
-  it("keeps a cached handover phase without showing a supervisor read error", async () => {
+  it("shows a supervisor read error instead of a cached handover phase", async () => {
     server(updateStatus({ supervisor: supervisorStatus({
-      phase: "handing-over", error: "the supervisor cannot be reached",
-      switching_disabled: "the supervisor cannot be reached",
+      phase: "handing-over", stale: true, error: "the supervisor cannot be reached",
+      switching_disabled: "a switch is already active",
     }) }));
     const { card } = await openUpdates();
-    expect(await within(card).findByText("Switch: handing over")).toBeVisible();
-    expect(card).not.toHaveTextContent("the supervisor cannot be reached");
+    expect(await within(card).findByText("The supervisor status could not be read")).toBeVisible();
+    expect(card).not.toHaveTextContent("Switch: handing over");
+    expect(within(card).getByRole("button", { name: "Try again" })).toBeVisible();
   });
 });
 
@@ -384,9 +385,10 @@ describe("uncertain switch observation", () => {
         }) };
       }),
     );
-    const { card } = await openUpdates();
+    const { card, user } = await openUpdates();
     await within(card).findByText("the outcome is unknown");
     expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Read status" }));
     expect(await within(card).findByRole("button", { name: "Install now" }, { timeout: 5_000 })).toBeEnabled();
     expect(card).toHaveTextContent("The switch could not be confirmed");
     expect(card).not.toHaveTextContent("Switch failed");
@@ -421,4 +423,13 @@ describe("handover poll failures", () => {
     expect(pollFailuresExhausted(4, 1_000, 31_000)).toBe(true);
     expect(pollFailuresExhausted(5, 1_000, 1_001)).toBe(true);
   });
+});
+
+
+it("does not keep unknown or expired cached phases running", () => {
+  expect(switchInProgress(updateStatus({ supervisor: supervisorStatus({ phase: "unknown" }) }))).toBe(false);
+  expect(switchInProgress(updateStatus({ switch_request: { action: "install", state: "unknown", pending: true, id: null, reason: "unknown" } }))).toBe(false);
+  for (const stale of [{ failed_reads: 5, snapshot_age_seconds: 1 }, { failed_reads: 1, snapshot_age_seconds: 30 }]) {
+    expect(switchInProgress(updateStatus({ supervisor: supervisorStatus({ phase: "handing-over", stale: true, ...stale }) }))).toBe(false);
+  }
 });

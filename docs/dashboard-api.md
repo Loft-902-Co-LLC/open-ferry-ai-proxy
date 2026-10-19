@@ -638,14 +638,18 @@ What updates are doing. It reads the update state on disk and, when supervised, 
     "result": "switched", "reason": null, "at": "2026-10-17T16:00:00Z"
   },
   "switching_disabled": null,
-  "error": null
+  "error": null,
+  "stale": false,
+  "snapshot_age_seconds": 0.01,
+  "failed_reads": 0
 }
 ```
 
 - **`phase`** is the current switch status, such as `waiting-for-signins`, `loading`, `handing-over`, `taking-over`, `watching`, `returning` or `cancelled`. Without a switch it is the supervisor's state (`idle`, `degraded` or `stopping`); it is `unknown` before a live snapshot can be read.
 - **`running_version`** is the supervisor's active worker version; while the request is served by a draining worker it can differ from the top-level running version. **`rollback_target`** is the version a rollback would select now, or `null`. During a watch it is the switch's source version. **`watch_until`** is the watch deadline or `null`.
 - **`switch`** is the live supervisor switch snapshot, or `null`. It may include additional supervisor fields. **`last_switch`** is the newest finished switch from pending journal outcomes and state history, or `null`. Its `result` is an opaque kebab-case outcome; clients should display a readable fallback for unknown values. `reason`, `from` and `at` can be `null`. `auto` is `true` only when recorded as automatic, `false` when recorded as manual, and `null` when unknown.
-- **`switching_disabled`** is the reason switching is unavailable, or `null`. **`error`** says why the live supervisor could not be read. A failed read keeps the last snapshot available in this worker; it never changes a supervised install into a plain one. Durable rollback and outcome fields are read independently.
+- **`switching_disabled`** is the reason switching is unavailable, or `null`. **`error`** says why the live supervisor could not be read. A failed read keeps the last snapshot available in this worker; it never changes a supervised install into a plain one. Durable rollback and outcome fields are read independently. A read error never replaces `switching_disabled`.
+- **`stale`** is true when the live read failed. **`snapshot_age_seconds`** is the cached snapshot's age, or `null` before any successful read. **`failed_reads`** counts consecutive unsuccessful live reads. Show the read error instead of the cached phase. Stop treating a stale phase as running after five failed reads or a snapshot age of 30 seconds, whichever comes first. `unknown` is not a running phase.
 
 **`switch_request`** describes the latest dashboard install or rollback request in this worker, or `null`:
 
@@ -655,7 +659,7 @@ What updates are doing. It reads the update state on disk and, when supervised, 
 
 `state` is `preparing`, `accepted`, `refused`, `failed` or `unknown` (the supervisor did not answer and may have accepted). `id` is set after acceptance; `reason` explains refusal, failure or uncertainty. `pending` means preparation or observation of an accepted or uncertain request is still pending. The request remains until a newer request replaces it. This in-memory request state ends when the worker exits; the supervisor's live switch and durable last outcome remain available across a handover.
 
-Poll every one or two seconds while preparing or switching; stop after it ends. Retry a failed status poll quietly during handover. Never resend a switch request after an ambiguous timeout; read status first.
+Poll every one or two seconds while preparing or switching; stop after it ends. Retry a failed status poll quietly during handover for at most five consecutive failures or 30 seconds, whichever comes first; then show the error with a retry action and stop polling. Never resend a switch request after an ambiguous timeout; read status first.
 
 ### `POST /open-ferry/api/v1/update/check`
 

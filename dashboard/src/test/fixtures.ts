@@ -441,6 +441,9 @@ export function supervisorStatus(overrides: Partial<SupervisorStatus> = {}): Sup
     last_switch: null,
     switching_disabled: null,
     error: null,
+    stale: false,
+    snapshot_age_seconds: 0,
+    failed_reads: 0,
     ...overrides,
   };
 }

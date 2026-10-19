@@ -1,6 +1,7 @@
 import type { UpdateStatus } from "../../api/update";
 import { switchInProgress } from "../../api/updateStatus";
 import { Alert } from "../../components/Alert";
+import { Button } from "../../components/Button";
 import { formatDateTime } from "../../lib/format";
 
 function readable(word: string): string {
@@ -8,7 +9,7 @@ function readable(word: string): string {
 }
 
 /** The supervisor's current work and its durable last outcome. */
-export function SwitchStatus({ status }: { status: UpdateStatus }) {
+export function SwitchStatus({ status, onRetry, hidePhase = false }: { status: UpdateStatus; onRetry: () => void; hidePhase?: boolean }) {
   const supervisor = status.supervisor;
   const request = status.switch_request;
   const last = supervisor?.last_switch;
@@ -25,12 +26,17 @@ export function SwitchStatus({ status }: { status: UpdateStatus }) {
     </Alert>}
     {request?.reason != null && <Alert tone="warn" live title={request.state === "refused" ? "Switch refused" : request.state === "failed" ? "Switch failed" : "The switch could not be confirmed"}>
       <p className="break-words">{request.reason}</p>
+      {request.state === "unknown" && <Button size="sm" onClick={onRetry}>Read status</Button>}
     </Alert>}
-    {supervisor != null && switchInProgress({ ...status, switch_request: null }) && <Alert tone="info" live title={`Switch: ${readable(supervisor.phase)}`}>
+    {!hidePhase && supervisor != null && supervisor.error === null && switchInProgress({ ...status, switch_request: null }) && <Alert tone="info" live title={`Switch: ${readable(supervisor.phase)}`}>
       {supervisor.switch != null && <p>{supervisor.switch.from} to {supervisor.switch.to}.</p>}
       {supervisor.watch_until !== null && <p>Watching until {formatDateTime(supervisor.watch_until)}.</p>}
     </Alert>}
-    {supervisor?.switching_disabled != null && (supervisor.error === null || !switchInProgress(status)) && <Alert tone="warn" title="Switching is unavailable">
+    {supervisor?.error != null && <Alert tone="warn" live title="The supervisor status could not be read">
+      <p>{supervisor.error}</p>
+      <Button size="sm" onClick={onRetry}>Try again</Button>
+    </Alert>}
+    {supervisor?.switching_disabled != null && <Alert tone="warn" title="Switching is unavailable">
       <p className="break-words">{supervisor.switching_disabled}</p>
     </Alert>}
     {last != null && <Alert tone={last.reason === null ? "info" : "warn"} title={outcome ?? "Last switch"}>
