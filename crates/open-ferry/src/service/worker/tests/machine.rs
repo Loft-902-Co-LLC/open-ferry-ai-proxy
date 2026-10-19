@@ -2036,7 +2036,10 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     let mut setup = Setup::new(Role::Active);
     setup.stop_ms = 100;
     setup.write_probe = Some(probe.clone());
-    let send_timeout = Duration::from_secs(5);
+    // Paused time is free. Leave real blocking work, such as the ledger's
+    // SQLite open/join, 30 s of wall headroom while retaining a bound below
+    // a broken stop's full send-timeout sleep on the runtime thread.
+    let send_timeout = Duration::from_secs(30);
     setup.timing.send_timeout = send_timeout;
     let mut rig = setup.start();
     assert_eq!(rig.fake().recv_status().await.2, "active");
@@ -2053,27 +2056,27 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     rig.fake().send(Message::Stop { budget_ms: 100 }).await;
     // Waits longer than `exit` does, so a faulty run fails the bound below
     // and not the exit wait.
-    let code = tokio::time::timeout(Duration::from_secs(20), rig.worker.take().unwrap())
+    let code = tokio::time::timeout(send_timeout * 3, rig.worker.take().unwrap())
         .await
         .expect("the worker didn't exit in time")
         .unwrap();
     let exited = tokio::time::Instant::now();
     let wall_elapsed = wall_started.elapsed();
     assert!(succeeded(code));
-    // One send timeout plus the stop budget is about 5.1 s of Tokio time.
-    // A second full send timeout still takes at least 10 s and fails the
-    // unchanged 8 s bound, even when no wall-clock time elapses.
+    // Keep the former 3 s margin for the 100 ms stop budget and remaining
+    // cleanup. A second full send timeout takes at least 60 s of Tokio time
+    // and fails this 33 s bound; the exit wait above lets it reach this check.
     let stalled_at = *probe.first_stall.get().unwrap();
     let elapsed = exited.duration_since(stalled_at);
     assert!(
-        elapsed < Duration::from_secs(8),
+        elapsed < send_timeout + Duration::from_secs(3),
         "the stalled send and stop took {elapsed:?} of Tokio time"
     );
-    // Paused time cannot detect a blocking sleep or synchronous join on
-    // the runtime thread. Healthy runs take milliseconds of wall time;
-    // a full send timeout leaves ample scheduling margin but rejects an
-    // additional blocking wait of that length. An interruptible send is
-    // also valid, so neither clock has a lower bound.
+    // spawn_blocking inhibits this paused runtime's clock auto-advance, so
+    // legitimate ledger I/O may outlast the 100 ms stop budget in wall time.
+    // Keep that work below the send timeout, while rejecting a full timeout
+    // spent blocking the runtime. An interruptible Stop remains valid: this
+    // combined send/stop path has no lower bound on either clock.
     assert!(
         wall_elapsed < send_timeout,
         "the stalled send and stop took {wall_elapsed:?} of wall time (Tokio time: {elapsed:?})"
