@@ -7,8 +7,9 @@
 //! and wraps that in a `std::net::TcpListener`. Both processes then hold one
 //! underlying socket with one backlog.
 //!
-//! Every socket made here is created with `WSA_FLAG_NO_HANDLE_INHERIT`, so a
-//! child process never inherits one by accident.
+//! Every socket made here uses `WSA_FLAG_NO_HANDLE_INHERIT`. Sockets rebuilt
+//! from protocol info also need [`set_no_inherit`], because Winsock can ignore
+//! that creation flag for duplicates.
 
 use std::io;
 use std::mem::{MaybeUninit, size_of, zeroed};
@@ -347,26 +348,42 @@ pub fn listener_from_info(info: &str) -> io::Result<TcpListener> {
     if socket == INVALID_SOCKET {
         return Err(wsa_error());
     }
-    let socket = RawSock(socket);
-    // A socket rebuilt from protocol info can come back inheritable whatever the
-    // creation flag says, so clear it explicitly.
-    // SAFETY: `socket.0` is the open socket handle made above.
-    if unsafe { SetHandleInformation(socket.0 as usize as HANDLE, HANDLE_FLAG_INHERIT, 0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if get_option(socket.0, SOL_SOCKET, SO_TYPE)? != SOCK_STREAM {
+    let socket = RawSock(socket).into_listener();
+    set_no_inherit(&socket)?;
+    if get_option(socket.as_raw_socket() as SOCKET, SOL_SOCKET, SO_TYPE)? != SOCK_STREAM {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "the socket in the protocol info is not a stream socket",
         ));
     }
-    if get_option(socket.0, SOL_SOCKET, SO_ACCEPTCONN)? == 0 {
+    if get_option(socket.as_raw_socket() as SOCKET, SOL_SOCKET, SO_ACCEPTCONN)? == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "the socket in the protocol info is not listening",
         ));
     }
-    Ok(socket.into_listener())
+    Ok(socket)
+}
+
+/// Prevents a child from inheriting this socket. Call immediately after a
+/// duplicate is created, before publishing it or spawning a child. Winsock
+/// can ignore `WSA_FLAG_NO_HANDLE_INHERIT` when rebuilding protocol info,
+/// including in std and socket2's `try_clone` (rust-lang/rust#70719).
+/// On failure the caller must drop the duplicate rather than use it.
+pub fn set_no_inherit(socket: &impl AsRawSocket) -> io::Result<()> {
+    // SAFETY: the borrowed socket stays open for the call.
+    let ok = unsafe {
+        SetHandleInformation(
+            socket.as_raw_socket() as usize as HANDLE,
+            HANDLE_FLAG_INHERIT,
+            0,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Whether a child process could inherit the socket's handle.

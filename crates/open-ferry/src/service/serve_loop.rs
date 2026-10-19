@@ -580,6 +580,8 @@ impl ConnCore {
             return Err(io::Error::other("a duplicate that fails, for a test"));
         }
         let socket = SockRef::from(stream).try_clone()?;
+        #[cfg(windows)]
+        open_ferry_supervisor::sockets::windows::set_no_inherit(&socket)?;
         let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
         let core = Arc::new(Self {
             shared: shared.clone(),
@@ -774,6 +776,17 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Tracked<T> {
     }
 }
 
+/// Makes the loop's accepting handle without letting child processes keep it.
+fn duplicate_listener(listener: &std::net::TcpListener) -> io::Result<TcpListener> {
+    let duplicate = listener.try_clone()?;
+    #[cfg(windows)]
+    open_ferry_supervisor::sockets::windows::set_no_inherit(&duplicate)?;
+    // A duplicate starts in blocking mode on Windows, where the mode isn't
+    // shared with the original; a blocking accept would stall the worker.
+    duplicate.set_nonblocking(true)?;
+    TcpListener::from_std(duplicate)
+}
+
 /// Accepts connections on `listener` and serves `app` on them, with `tls`
 /// when it is given, until `control` releases or stops the loop and every
 /// connection task has ended. `control` may be shared by several loops.
@@ -803,14 +816,7 @@ pub(crate) fn run(
             match current {
                 Mode::Running => {
                     if accepting.is_none() {
-                        // A duplicate of a socket starts in blocking mode on
-                        // Windows, where the mode isn't shared with the
-                        // original, and a blocking accept would stall a
-                        // worker, so it is set on the duplicate itself.
-                        let duplicate = listener.try_clone().and_then(|duplicate| {
-                            duplicate.set_nonblocking(true)?;
-                            TcpListener::from_std(duplicate)
-                        });
+                        let duplicate = duplicate_listener(&listener);
                         #[cfg(test)]
                         let duplicate = if shared.fail_next_listener.swap(false, Ordering::AcqRel) {
                             Err(io::Error::other("a listener that fails, for a test"))

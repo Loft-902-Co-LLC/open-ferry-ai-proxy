@@ -1239,3 +1239,167 @@ async fn a_failed_duplicate_takes_the_accept_error_wait() {
     served.control.stop();
     within(served.server).await.unwrap().unwrap();
 }
+
+#[cfg(windows)]
+mod windows_inheritance {
+    use std::io::BufRead;
+    use std::process::{Child, Command, Stdio};
+
+    use open_ferry_supervisor::sockets::windows::is_inheritable;
+
+    use super::*;
+
+    /// A child that announces it is running, then blocks on its stdin. The
+    /// guard kills and waits even when an assertion or handshake panics.
+    struct WaitingChild(Child);
+
+    impl WaitingChild {
+        async fn start() -> Self {
+            let mut child = Self(
+                Command::new("cmd.exe")
+                    .args(["/d", "/q", "/c", "echo ready& set /p finish="])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let stdout = child.0.stdout.take().unwrap();
+            let ready = within(tokio::task::spawn_blocking(move || {
+                let mut line = String::new();
+                std::io::BufReader::new(stdout).read_line(&mut line)?;
+                io::Result::Ok(line)
+            }))
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(ready.trim(), "ready");
+            child.assert_alive();
+            child
+        }
+
+        fn assert_alive(&mut self) {
+            assert!(self.0.try_wait().unwrap().is_none(), "child exited early");
+        }
+    }
+
+    impl Drop for WaitingChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_listener_duplicate_is_not_inheritable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let duplicate = duplicate_listener(&listener).unwrap();
+        assert!(!is_inheritable(&listener).unwrap());
+        assert!(!is_inheritable(&duplicate).unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_connection_duplicate_is_not_inheritable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (_client, accepted) =
+            tokio::join!(connect(listener.local_addr().unwrap()), listener.accept());
+        let (stream, _) = accepted.unwrap();
+        let control = ServeControl::new();
+        let core = ConnCore::register(&control.shared, &stream).unwrap();
+        assert!(!is_inheritable(&stream).unwrap());
+        let socket = core.socket.lock().unwrap();
+        assert!(!is_inheritable(socket.as_ref().unwrap()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_child_cannot_keep_the_listener_alive() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let control = ServeControl::new();
+        let mut serving = pin!(run(listener, None, app(Gate::default()), &control));
+        // Poll exactly once to build the real running-mode duplicate. Keep
+        // it open without polling accept again, so the original backlog's
+        // identity is fixed before the child starts and the listener closes.
+        std::future::poll_fn(|cx| {
+            assert!(serving.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        within(control.await_listeners(1)).await.unwrap();
+        let mut queued = connect(addr).await;
+        assert_eq!(control.live_count(), 0);
+        let mut child = WaitingChild::start().await;
+
+        assert_eq!(control.cut(), 0);
+        within(serving).await.unwrap();
+        assert_eq!(control.stats().loops, 0);
+        let mut response = Vec::new();
+        let _ = within(queued.read_to_end(&mut response)).await;
+        assert!(response.is_empty());
+        child.assert_alive();
+    }
+
+    #[tokio::test]
+    async fn a_child_cannot_keep_a_connection_alive() {
+        // A normal cut calls shutdown on the shared socket, which also
+        // affects an inherited copy and would hide a leaked connection.
+        // Drop a worker runtime instead, as on abrupt worker exit, with an
+        // accepted connection still waiting for its TLS handshake.
+        struct WorkerRuntime {
+            stop: Option<tokio::sync::oneshot::Sender<()>>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl Drop for WorkerRuntime {
+            fn drop(&mut self) {
+                if let Some(stop) = self.stop.take() {
+                    let _ = stop.send(());
+                }
+                if let Some(thread) = self.thread.take() {
+                    let result = thread.join();
+                    if !std::thread::panicking() {
+                        result.unwrap();
+                    }
+                }
+            }
+        }
+
+        let (tls, _client_config, _dir) = certificates();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let control = ServeControl::new();
+        let worker_control = control.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let worker = WorkerRuntime {
+            stop: Some(stop),
+            thread: Some(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    tokio::select! {
+                        _ = stopped => {}
+                        result = run(listener, Some(tls), app(Gate::default()), &worker_control) => {
+                            panic!("worker stopped early: {result:?}");
+                        }
+                    }
+                });
+                // Runtime destruction drops the connection task, its stream
+                // and ConnCore's duplicate without a socket shutdown.
+            })),
+        };
+        within(control.await_listeners(1)).await.unwrap();
+        let mut stream = connect(addr).await;
+        within(control.wait_for(|stats| stats.live == 1)).await;
+        let mut child = WaitingChild::start().await;
+        drop(worker);
+        assert_eq!(control.cut(), 0);
+        assert_eq!(control.stats().loops, 0);
+        assert_eq!(control.live_count(), 0);
+        let mut response = Vec::new();
+        let _ = within(stream.read_to_end(&mut response)).await;
+        assert!(response.is_empty());
+        child.assert_alive();
+    }
+}
