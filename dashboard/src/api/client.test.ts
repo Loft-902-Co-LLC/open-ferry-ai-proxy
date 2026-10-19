@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { mockApi, mockUnreachable, route } from "../test/mockApi";
 import {
@@ -170,4 +170,20 @@ describe("apiDownload", () => {
       detail: "a link",
     });
   });
+});
+
+
+it.each([200, 503])("wraps a timed-out status %s response body as an unanswered request", async (status) => {
+  const response = new Response(null, { status });
+  vi.spyOn(response, "text").mockRejectedValue(new DOMException("body timed out", "TimeoutError"));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+  await expect(apiRequest("fake-key", "/open-ferry/api/v1/update")).rejects.toMatchObject({ name: "ApiError", status: 0, message: "the server didn't answer" });
+});
+
+it("preserves cancellation during a response body read", async () => {
+  const response = new Response();
+  const error = new DOMException("cancelled", "AbortError");
+  vi.spyOn(response, "text").mockRejectedValue(error);
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+  await expect(apiRequest("fake-key", "/open-ferry/api/v1/update")).rejects.toBe(error);
 });

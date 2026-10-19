@@ -8,6 +8,7 @@ import { SessionProvider } from "../session/session";
 import { supervisorStatus, updateStatus } from "../test/fixtures";
 import { mockApi, route } from "../test/mockApi";
 import { TEST_KEY } from "../test/renderApp";
+import { isApiError } from "./client";
 import { storeKey } from "./keyStorage";
 import { UPDATE } from "./update";
 import { MAX_POLL_ERROR_MS, STATUS_POLL_TIMEOUT_MS, useUpdateStatus } from "./updateStatus";
@@ -40,7 +41,7 @@ it("times out hanging polls individually and reaches the failed-poll limit", asy
     if (++reads === 1) return firstFetch(input, init);
     return new Promise((_resolve, reject) => {
       const signal = init?.signal;
-      signal?.addEventListener("abort", () => { reject(new DOMException("status poll aborted", "AbortError")); }, { once: true });
+      signal?.addEventListener("abort", () => { reject(signal.reason as Error); }, { once: true });
     });
   });
   const { result } = observeStatus();
@@ -50,6 +51,7 @@ it("times out hanging polls individually and reaches the failed-poll limit", asy
   expect(result.current.isError).toBe(false);
   await act(() => vi.advanceTimersByTimeAsync(1));
   expect(result.current.isError).toBe(true);
+  expect(isApiError(result.current.error) && result.current.error.status === 0).toBe(true);
   expect(result.current.hidePollError).toBe(true);
   await act(() => vi.advanceTimersByTimeAsync(4 * (2_000 + STATUS_POLL_TIMEOUT_MS)));
   expect(reads).toBe(6);
