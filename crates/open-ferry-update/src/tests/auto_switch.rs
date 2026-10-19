@@ -1,7 +1,7 @@
 //! Automatic checks use the shared switch client only in supervised auto mode.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,14 @@ struct MemoryFetch {
     bodies: HashMap<String, Vec<u8>>,
     calls: AtomicUsize,
     gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    download_ended: tokio::sync::Notify,
+}
+
+struct Downloading<'a>(&'a tokio::sync::Notify);
+impl Drop for Downloading<'_> {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 impl Fetch for MemoryFetch {
@@ -33,6 +41,7 @@ impl Fetch for MemoryFetch {
             if url.path().contains("/download/v")
                 && let Some((arrived, release)) = gate
             {
+                let _downloading = Downloading(&self.download_ended);
                 arrived.notify_one();
                 release.notified().await;
             }
@@ -59,6 +68,7 @@ struct Fake {
     data: crate::DataDir,
     calls: Mutex<Vec<(String, bool)>>,
     refuse: bool,
+    progress: Mutex<Option<Box<dyn SwitchProgress>>>,
     gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
@@ -86,7 +96,14 @@ impl Switcher for Fake {
             if self.refuse {
                 return Err(SwitchError::Refused("busy: watching".into()));
             }
-            Ok(SwitchHandle::new("auto".into(), Box::new(Done)))
+            Ok(SwitchHandle::new(
+                "auto".into(),
+                self.progress
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap_or_else(|| Box::new(Done)),
+            ))
         })
     }
     fn rollback<'a>(
@@ -127,11 +144,13 @@ fn service(
         ]),
         calls: AtomicUsize::new(0),
         gate: Mutex::new(None),
+        download_ended: tokio::sync::Notify::new(),
     });
     let fake = Arc::new(Fake {
         data: f.data.clone(),
         calls: Mutex::new(Vec::new()),
         refuse,
+        progress: Mutex::new(None),
         gate: Mutex::new(None),
     });
     let make_fetch: crate::background::MakeFetch = {
@@ -239,6 +258,70 @@ async fn check_now_uses_the_same_automatic_switch_path() {
     }
     assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), true)]);
     assert!(!service.status().checking);
+}
+
+#[tokio::test]
+async fn stopping_a_check_now_during_staging_prevents_its_switch_request() {
+    let f = Fixture::new().await;
+    let (service, fake, fetch) = service(&f, "auto", "0.2.0", false);
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *fetch.gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    assert_eq!(service.check_now(), CheckNow::Started);
+    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        .await
+        .unwrap();
+    service.stop();
+    tokio::time::timeout(Duration::from_secs(5), fetch.download_ended.notified())
+        .await
+        .unwrap();
+    release.notify_one();
+    assert!(fake.calls.lock().unwrap().is_empty());
+    assert!(!service.status().checking);
+    assert_eq!(service.check_now(), CheckNow::Off);
+}
+
+struct PendingProgress {
+    polled: Arc<tokio::sync::Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl SwitchProgress for PendingProgress {
+    fn next(&mut self, _deadline: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+        self.polled.notify_one();
+        Box::pin(std::future::pending())
+    }
+}
+
+impl Drop for PendingProgress {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn stopping_the_service_closes_an_accepted_switch_progress_stream() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let polled = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    *fake.progress.lock().unwrap() = Some(Box::new(PendingProgress {
+        polled: polled.clone(),
+        dropped: dropped.clone(),
+    }));
+    service.check_once().await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), polled.notified())
+        .await
+        .unwrap();
+    service.stop();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
