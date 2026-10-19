@@ -785,6 +785,7 @@ mod tests {
         assert_eq!(location.root, temp);
         assert_eq!(location.name, "open-ferry");
         let system = candidates(&Identity::for_uid(ServiceKind::System, 0));
+        // Only the candidate string is checked: machine-wide endpoints are refused on macOS.
         assert_eq!(system[0].to_record(), "/var/run/open-ferry/supervisor.sock");
     }
 
