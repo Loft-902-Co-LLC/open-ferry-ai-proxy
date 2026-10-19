@@ -2022,6 +2022,13 @@ mod prepared {
         let (dir, prepared) = prepared(false);
         let gate = prepared.service.gate.clone();
         let address = prepared.topology.main.listener.local_addr().unwrap();
+        // Connect while this worker owns the socket. After shutdown the port
+        // could be reused, or the client could connect to its own endpoint.
+        // Its own backlog must close even if nobody ever accepts from it.
+        let mut connection = tokio::time::timeout(WAIT, TcpStream::connect(address))
+            .await
+            .unwrap()
+            .unwrap();
         let data = dir.path().join("data");
         let lease = lease_slot(Some(ProcessLease(Some(
             Lease::try_take(&data).unwrap().unwrap(),
@@ -2039,13 +2046,11 @@ mod prepared {
         assert!(error.contains("failed to create watcher"), "{error}");
         assert_eq!(gate.state(), GateState::Closed);
         assert!(Lease::try_take(&data).unwrap().is_none());
-        if let Ok(mut connection) = TcpStream::connect(address).await {
-            let mut response = Vec::new();
-            let _ = tokio::time::timeout(WAIT, connection.read_to_end(&mut response))
-                .await
-                .expect("activation failure left the listener running");
-            assert!(response.is_empty());
-        }
+        let mut response = Vec::new();
+        let _ = tokio::time::timeout(WAIT, connection.read_to_end(&mut response))
+            .await
+            .expect("activation failure left the listener running");
+        assert!(response.is_empty());
     }
 
     #[test]

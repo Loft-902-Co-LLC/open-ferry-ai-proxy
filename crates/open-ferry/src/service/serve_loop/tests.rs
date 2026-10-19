@@ -1164,9 +1164,23 @@ async fn a_cut_while_running_stops_accepting() {
     within(served.server).await.unwrap().unwrap();
     assert!(within(served.control.resume_accept()).await.is_err());
     assert_eq!(served.control.stats().accepting, 0);
-    // The socket is closed with the loop, so no one connects.
-    let refused = tokio::time::timeout(WAIT, TcpStream::connect(served.addr)).await;
-    assert!(!matches!(refused, Ok(Ok(_))), "connected after a cut");
+    assert_eq!(served.control.stats().loops, 0);
+    closed(&mut stream).await;
+}
+
+// A queued connection identifies this loop's socket even if its port is
+// reused after the cut, or a later connect would connect to itself.
+#[tokio::test]
+async fn a_cut_while_paused_closes_the_listener_and_its_backlog() {
+    let served = start(None, FIRST_REQUEST_DEADLINE);
+    within(served.control.pause_accept()).await;
+    let mut queued = connect(served.addr).await;
+    assert_eq!(served.control.cut(), 0);
+    within(served.server).await.unwrap().unwrap();
+    assert_eq!(served.control.stats().loops, 0);
+    let mut response = Vec::new();
+    let _ = within(queued.read_to_end(&mut response)).await;
+    assert!(response.is_empty());
 }
 
 // Not upstream's: a cut during a resume neither hangs it nor leaves the

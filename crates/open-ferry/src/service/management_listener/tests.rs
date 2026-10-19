@@ -16,6 +16,7 @@ use tokio::sync::watch;
 
 use super::{Separate, bind_separate, changed, serve_both, spawn};
 use crate::logging::LogLevel;
+use crate::service::serve_loop::ServeControl;
 use crate::service::{Options, Server, Service, run, serve};
 
 const KEY: (&str, &str) = ("Authorization", "Bearer test-secret");
@@ -46,6 +47,7 @@ const KEYED: &str = "remote-management:\n  secret-key: test-secret\n";
 struct Served {
     main: SocketAddr,
     management: SocketAddr,
+    control: ServeControl,
     stop: watch::Sender<bool>,
     server: Server,
 }
@@ -64,9 +66,10 @@ async fn start(service: &Service, tls: Option<Arc<rustls::ServerConfig>>) -> Ser
         listener,
     };
     let (stop, stopped) = watch::channel(false);
+    let control = ServeControl::new();
     let server = spawn(
         service,
-        super::super::serve_loop::ServeControl::new(),
+        control.clone(),
         main,
         separate,
         tls,
@@ -76,6 +79,7 @@ async fn start(service: &Service, tls: Option<Arc<rustls::ServerConfig>>) -> Ser
     Served {
         main: main_addr,
         management,
+        control,
         stop,
         server,
     }
@@ -328,22 +332,39 @@ async fn the_proxys_listener_answers_as_with_management_off() {
 
 #[tokio::test]
 async fn both_listeners_stop_together() {
-    let dir = tempfile::tempdir().unwrap();
-    let service = service(dir.path(), KEYED);
-    let served = start(&service, None).await;
-    assert_eq!(fetch(served.main, "GET", "/healthz", &[]).await.status, 200);
-    let answer = fetch(served.management, "GET", "/v0/management/config", &[KEY]).await;
-    assert_eq!(answer.status, 200);
+    for paused in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path(), KEYED);
+        let served = start(&service, None).await;
+        assert_eq!(fetch(served.main, "GET", "/healthz", &[]).await.status, 200);
+        let answer = fetch(served.management, "GET", "/v0/management/config", &[KEY]).await;
+        assert_eq!(answer.status, 200);
 
-    served.stop.send(true).unwrap();
-    let stopped = tokio::time::timeout(Duration::from_secs(10), served.server).await;
-    assert!(
-        matches!(stopped, Ok(Ok(Ok(())))),
-        "the servers didn't stop: {stopped:?}"
-    );
-    for addr in [served.main, served.management] {
-        let connect = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await;
-        assert!(!matches!(connect, Ok(Ok(_))), "{addr} still accepts");
+        if paused {
+            served.control.pause_accept().await;
+        }
+        // Queue on these listeners before shutdown: a later connect could reach
+        // a reused port or connect to itself after the listener has closed.
+        let queued = [
+            TcpStream::connect(served.main).await.unwrap(),
+            TcpStream::connect(served.management).await.unwrap(),
+        ];
+        served.stop.send(true).unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(10), served.server).await;
+        assert!(
+            matches!(stopped, Ok(Ok(Ok(())))),
+            "the servers didn't stop: {stopped:?}"
+        );
+        for mut connection in queued {
+            let mut response = Vec::new();
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                connection.read_to_end(&mut response),
+            )
+            .await
+            .expect("shutdown left a listener's backlog open");
+            assert!(response.is_empty());
+        }
     }
 }
 
