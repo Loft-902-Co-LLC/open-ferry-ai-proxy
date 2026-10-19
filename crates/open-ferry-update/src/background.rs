@@ -786,7 +786,9 @@ async fn follow_switch(mut handle: SwitchHandle) {
                 tracing::debug!(operation = %handle.id, state = %phase, "automatic switch progress");
             }
             Ok(Ok(Some(SwitchEvent::Done { result }))) => {
-                tracing::info!(operation = %handle.id, state = %result, "automatic switch finished");
+                let outcome = result["result"].as_str().unwrap_or("unknown");
+                let version = result["to"].as_str().unwrap_or("unknown");
+                tracing::info!(operation = %handle.id, result = outcome, version, "automatic switch finished");
                 return;
             }
             Ok(Ok(None)) => return,
@@ -883,6 +885,48 @@ pub(crate) mod test_log;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FinishedProgress;
+
+    impl crate::SwitchProgress for FinishedProgress {
+        fn next(
+            &mut self,
+            _deadline: std::time::Instant,
+        ) -> crate::fetch::BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+            Box::pin(async {
+                Ok(SwitchEvent::Done {
+                    result: serde_json::json!({
+                        "result": "switched", "to": "0.2.0", "from": "0.1.0",
+                        "reason": "/private/verbose-record", "at": "2026-10-19T00:00:00Z",
+                    }),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_follower_logs_only_the_finished_result_and_target() {
+        use tracing::instrument::WithSubscriber;
+        let logs = test_log::Capture::default();
+        follow_switch(SwitchHandle::new(
+            "finished".into(),
+            Box::new(FinishedProgress),
+        ))
+        .with_subscriber(logs.clone())
+        .await;
+        let events = logs.0.lock().unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].starts_with("INFO "), "{events:?}");
+        assert!(events[0].contains("automatic switch finished"));
+        assert!(events[0].contains("result=\"switched\""), "{events:?}");
+        assert!(events[0].contains("version=\"0.2.0\""), "{events:?}");
+        assert!(
+            !events[0].contains("/private/")
+                && !events[0].contains("from=")
+                && !events[0].contains("2026-10-19"),
+            "{events:?}"
+        );
+    }
 
     struct EndedProgress;
 
