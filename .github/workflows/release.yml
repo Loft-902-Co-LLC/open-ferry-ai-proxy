@@ -20,6 +20,16 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      qualification_only:
+        description: 'Run qualification without the release archives and image (default is the full dry run)'
+        type: boolean
+        default: false
+      qualification_fault:
+        description: 'Negative control; bad-signature deliberately fails qualification'
+        type: choice
+        options: [none, bad-signature]
+        default: none
 
 permissions:
   contents: read
@@ -167,6 +177,7 @@ jobs:
           if-no-files-found: error
 
   build:
+    if: github.event_name != 'workflow_dispatch' || !inputs.qualification_only
     name: build (${{ matrix.target }})
     needs: [meta, dashboard, rust-licenses]
     strategy:
@@ -315,34 +326,7 @@ jobs:
 
       - name: Package
         id: package
-        run: |
-          name="open-ferry-$VERSION-$TARGET"
-          exe=open-ferry
-          if [ "$RUNNER_OS" = Windows ]; then exe=open-ferry.exe; fi
-          mkdir -p "dist/$name"
-          cp "target/$TARGET/release/$exe" LICENSE README.md config.example.yaml "dist/$name/"
-          if [ "$RUNNER_OS" != Windows ]; then chmod 755 "dist/$name/$exe"; fi
-          cp -R licenses "dist/$name/"
-          # The licenses of the npm packages built into the dashboard.
-          cp dashboard/dist/third-party-licenses.txt "dist/$name/licenses/dashboard-third-party-licenses.txt"
-          # The licenses of the Rust crates built into this target's binary.
-          if [ ! -s "rust-licenses/$TARGET.txt" ]; then
-            echo "::error::The rust-licenses artifact has no $TARGET.txt: add the target to .github/scripts/rust-licenses.py"
-            exit 1
-          fi
-          cp "rust-licenses/$TARGET.txt" "dist/$name/licenses/rust-third-party-licenses.txt"
-          cd dist
-          if [ "$RUNNER_OS" = Windows ]; then
-            # Windows' own tar is bsdtar, which writes zip files; Git Bash's
-            # tar doesn't.
-            "$(cygpath "$SYSTEMROOT")/System32/tar.exe" -a -cf "$name.zip" "$name"
-            archive="$name.zip"
-          else
-            tar -czf "$name.tar.gz" "$name"
-            archive="$name.tar.gz"
-          fi
-          rm -rf "$name"
-          echo "archive=dist/$archive" >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/package-release.sh
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -722,3 +706,13 @@ jobs:
       - name: Sign out of GHCR
         if: always() && env.PUSH == 'true'
         run: docker logout ghcr.io
+
+  qualification:
+    name: Candidate qualification
+    if: github.event_name == 'workflow_dispatch'
+    needs: [dashboard, rust-licenses]
+    uses: ./.github/workflows/qualify.yml
+    with:
+      fault: ${{ inputs.qualification_fault }}
+    permissions:
+      contents: read
