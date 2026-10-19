@@ -368,7 +368,9 @@ async fn unsupervised_switches_explain_how_to_update_and_status_has_no_superviso
     assert_eq!(fetch.calls(), 0);
 }
 
-#[tokio::test]
+// These acceptance cases freeze async time while the artifact files are read.
+// Slow preparation has its own clock-driven cases below.
+#[tokio::test(start_paused = true)]
 async fn accepted_switches_answer_with_the_id_without_following_progress() {
     for path in [INSTALL, ROLLBACK] {
         let fake = Switcher::new(Duration::ZERO, None);
@@ -390,7 +392,7 @@ async fn accepted_switches_answer_with_the_id_without_following_progress() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_switch_keeps_the_supervisors_reason() {
     let fake = Switcher::new(Duration::ZERO, Some("sign-ins are pending"));
     let (dash, _scratch) = supervised(fake);
@@ -446,7 +448,7 @@ async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_ambiguous_request_is_never_resent_and_requires_a_status_read_before_another_request() {
     for error in [
         open_ferry_update::SwitchError::TimedOut,
@@ -564,7 +566,7 @@ async fn status_exposes_the_durable_outcome_without_artifact_paths() {
     assert!(last.get("binary").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_busy_update_lock_answers_promptly_without_calling_the_supervisor() {
     let fake = Switcher::new(Duration::ZERO, None);
     let (dash, scratch) = supervised(fake.clone());
