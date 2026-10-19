@@ -93,6 +93,7 @@ export interface ConfirmDialogProps {
   /** "danger" for what can't be undone. */
   tone?: "primary" | "danger";
   pending?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -105,6 +106,7 @@ export function ConfirmDialog({
   confirmLabel,
   tone = "danger",
   pending = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -118,7 +120,7 @@ export function ConfirmDialog({
           <Button data-autofocus onClick={onCancel} disabled={pending}>
             Cancel
           </Button>
-          <Button variant={tone} onClick={onConfirm} disabled={pending}>
+          <Button variant={tone} onClick={onConfirm} disabled={pending || confirmDisabled}>
             {pending && <Spinner />}
             {confirmLabel}
           </Button>

@@ -590,3 +590,22 @@ it("keeps an unanswered POST alert when a fresh read reports only an old same-ac
   expect(within(card).getByText("sign-ins are pending")).toBeVisible();
   expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
 });
+
+
+it.each(["Install now", "Roll back"])("disables an open %s confirmation when polling fails", async (label) => {
+  let reads = 0;
+  const api = mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => {
+    if (++reads > 1) throw new TypeError("handover");
+    return { json: updateStatus({ checking: true, staged_version: "0.2.0", supervisor: supervisorStatus({ rollback_target: "0.0.9" }) }) };
+  }));
+  const { card, user } = await openUpdates();
+  await user.click(await within(card).findByRole("button", { name: label }));
+  const dialog = screen.getByRole("dialog");
+  const confirm = within(dialog).getByRole("button", { name: label });
+  expect(confirm).toBeEnabled();
+  await waitFor(() => { expect(confirm).toBeDisabled(); }, { timeout: 5_000 });
+  await user.click(confirm);
+  expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(0);
+  expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(0);
+  expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+});
