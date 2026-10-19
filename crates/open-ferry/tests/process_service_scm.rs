@@ -81,9 +81,16 @@ fn a_hand_run_system_supervisor_refuses_before_starting_any_worker() {
 
 fn worker_line(log: Option<&Path>) {
     let exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let args = ["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
-        "[Console]::Out.WriteLine('worker stdout reaches service.log'); [Console]::Error.WriteLine('worker stderr reaches service.log')".into()];
+        .join("System32")
+        .join("cmd.exe");
+    // Built-in echoes avoid PowerShell's cold start while exercising the same
+    // restricted stdout/stderr inheritance; /d disables any AutoRun commands.
+    let args = [
+        "/d".into(),
+        "/s".into(),
+        "/c".into(),
+        "echo worker stdout reaches service.log&1>&2 echo worker stderr reaches service.log".into(),
+    ];
     let output = log.map(|path| {
         OpenOptions::new()
             .create(true)
@@ -134,8 +141,12 @@ fn worker_output_reaches_the_redirected_service_log() {
         .stderr(log)
         .spawn()
         .unwrap();
-    assert!(wait(&mut child).success());
+    let status = wait(&mut child);
     let text = fs::read_to_string(&log_path).unwrap();
+    assert!(
+        status.success(),
+        "output child exited with {status}:\n{text}"
+    );
     for line in [
         "worker stdout reaches service.log",
         "worker stderr reaches service.log",
