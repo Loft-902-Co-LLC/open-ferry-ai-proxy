@@ -250,7 +250,16 @@ pub fn alive(pid: u32) -> bool {
             Err(_) => true,
         }
     }
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // kill(pid, 0) also succeeds for the zombie the supervisor guard deliberately
+        // retains. Use the same zombie-aware identity query as production.
+        match open_ferry_supervisor::process::unix::start_time(pid) {
+            Ok(started) => started.is_some(),
+            Err(_) => true,
+        }
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     {
         // SAFETY: signal 0 only checks the id.
         unsafe { libc::kill(pid as i32, 0) == 0 }
