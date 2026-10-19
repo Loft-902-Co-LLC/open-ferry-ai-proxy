@@ -39,7 +39,7 @@ it("times out hanging polls individually and reaches the failed-poll limit", asy
     if (++reads === 1) return firstFetch(input, init);
     return new Promise((_resolve, reject) => {
       const signal = init?.signal;
-      signal?.addEventListener("abort", () => { reject(signal.reason); }, { once: true });
+      signal?.addEventListener("abort", () => { reject(new DOMException("status poll aborted", "AbortError")); }, { once: true });
     });
   });
   const { result } = observeStatus();
@@ -73,7 +73,7 @@ it("ignores an old deadline callback queued just as a successful read arrives", 
   act(() => { void result.current.refetch(); });
   await act(() => vi.advanceTimersByTimeAsync(10));
   await act(() => vi.advanceTimersByTimeAsync(0));
-  const callback = timers.mock.calls.find(([, delay]) => delay === MAX_POLL_ERROR_MS)?.[0];
+  const callback = timers.mock.calls.find(([, delay]) => delay === MAX_POLL_ERROR_MS)?.[0] as (() => void) | undefined;
   expect(typeof callback).toBe("function");
   await act(() => vi.advanceTimersByTimeAsync(MAX_POLL_ERROR_MS - 1));
   fail = false;

@@ -243,7 +243,7 @@ export function UpdatesCard({ className }: { className?: string }) {
   useEffect(() => {
     if (!switchError || switchContext === undefined || status.lastRead === switchContext.previousRead) return;
     if ((lastSwitch != null && JSON.stringify(lastSwitch) !== switchContext.lastSwitch) ||
-      (latestRequest != null && latestRequest.action === switching.variables)) {
+      (latestRequest?.action === switching.variables)) {
       resetSwitch();
     }
   }, [switchError, switchContext, status.lastRead, latestRequest, lastSwitch, resetSwitch, switching.variables]);
