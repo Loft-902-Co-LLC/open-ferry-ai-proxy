@@ -641,11 +641,28 @@ async fn checked(
         }
     };
     match &outcome {
-        Some(Ok(result)) if result.news => {
-            tracing::info!("{}", result.report.describe(&inner.updater.running));
-        }
         Some(Ok(result)) => {
-            tracing::debug!("{}", result.report.describe(&inner.updater.running));
+            let message = match &result.report {
+                Report::Staged { version }
+                    if inner.snapshot.borrow().settings.mode == SelfUpdateMode::Auto
+                        && inner
+                            .switcher
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .is_some() =>
+                {
+                    format!(
+                        "open-ferry {version} is downloaded, checked and staged (running {}); asking the supervisor to switch to it",
+                        inner.updater.running
+                    )
+                }
+                report => report.describe(&inner.updater.running),
+            };
+            if result.news {
+                tracing::info!("{message}");
+            } else {
+                tracing::debug!("{message}");
+            }
         }
         Some(Err(UpdateError::Busy)) => {
             tracing::debug!("update check skipped: another update is running");

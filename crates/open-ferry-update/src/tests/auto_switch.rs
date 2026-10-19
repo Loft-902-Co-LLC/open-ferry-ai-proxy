@@ -192,10 +192,31 @@ fn service(
 async fn an_auto_check_stages_and_starts_one_switch() {
     let f = Fixture::new().await;
     let (service, fake, fetch) = service(&f, "auto", "0.2.0", false);
+    let log = Capture::default();
     assert!(matches!(
-        service.check_once().await.unwrap().unwrap().report,
+        service
+            .check_once()
+            .with_subscriber(log.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .report,
         Report::Staged { .. }
     ));
+    let events = log.0.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.contains("asking the supervisor to switch to it")),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.contains("run `open-ferry update`")
+                && !event.contains("then restart open-ferry")),
+        "{events:?}"
+    );
     assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), true)]);
     assert_eq!(
         fetch.calls.load(Ordering::SeqCst),
