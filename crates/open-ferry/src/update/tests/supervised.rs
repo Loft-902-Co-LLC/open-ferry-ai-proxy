@@ -188,7 +188,11 @@ async fn check_keeps_the_live_view_even_when_the_release_check_fails() {
         "watching"
     );
     assert_eq!(value["status"]["running_version"], "0.1.0");
-    assert_eq!(value["status"]["why_not"], "the journal is stale");
+    assert!(value["status"]["why_not"].is_null());
+    assert_eq!(
+        value["switch_view"]["supervisor"]["switching_disabled"],
+        "the journal is stale"
+    );
     assert!(
         value["message"]
             .as_str()
@@ -534,4 +538,21 @@ async fn a_ctrl_c_registration_error_keeps_following_the_accepted_operation() {
             .iter()
             .any(|line| line.contains("Still following switch operation"))
     );
+}
+
+#[tokio::test]
+async fn supervised_json_keeps_install_policy_and_plain_previous_fields_additive() {
+    let fake = SupervisedFake::new("switched");
+    let mut status = fake.status(&settings("auto", None));
+    status.previous_version = Some("0.0.8".into());
+    status.can_update_itself = true;
+    status.why_not = Some("original install reason".into());
+    status.why_not_code = Some("no-receipt");
+    let mut view = fake.view;
+    view.supervisor.as_mut().unwrap()["switching_disabled"] = json!("disabled by supervisor");
+    supervisor_status(&mut status, &view);
+    assert_eq!(status.previous_version.as_deref(), Some("0.0.8"));
+    assert!(status.can_update_itself);
+    assert_eq!(status.why_not.as_deref(), Some("original install reason"));
+    assert_eq!(status.why_not_code, Some("no-receipt"));
 }
