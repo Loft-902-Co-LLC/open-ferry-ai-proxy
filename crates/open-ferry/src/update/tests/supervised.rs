@@ -404,3 +404,51 @@ async fn stopping_the_follower_drops_its_handle_without_cancelling_the_switch() 
     );
     assert!(fake.base.calls().is_empty());
 }
+
+struct QuietPhase(tokio::time::Instant);
+impl SwitchProgress for QuietPhase {
+    fn next(&mut self, deadline: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+        Box::pin(async move {
+            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+                tokio::time::sleep_until(self.0).await;
+                Ok(SwitchEvent::Done {
+                    result: json!({"result":"switched"}),
+                })
+            })
+            .await
+            .map_err(|_| SwitchError::TimedOut)?
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_quiet_loading_phase_longer_than_thirty_seconds_keeps_following() {
+    let mut fake = SupervisedFake::new("switched");
+    fake.view.supervisor.as_mut().unwrap()["switch"] = json!({"id":"operation", "phase":"loading"});
+    let handle = SwitchHandle::new(
+        "operation".into(),
+        Box::new(QuietPhase(
+            tokio::time::Instant::now() + Duration::from_secs(40),
+        )),
+    );
+    let record = SwitchRecord::started(
+        "operation",
+        "update",
+        "0.1.0",
+        "0.2.0",
+        "2026-10-18T01:00:00Z",
+    );
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let mut console = Console::new(true, &mut out, &mut err);
+    let outcome = follow_until(
+        &fake,
+        handle,
+        record,
+        Outcome::new("update", &settings("", None)),
+        &mut console,
+        std::future::pending(),
+    )
+    .await;
+    assert_eq!((outcome.code, outcome.result), (0, "updated"));
+    assert!(following_budget() > open_ferry_supervisor::timings::ACTIVE_LOAD_TIMEOUT);
+}
