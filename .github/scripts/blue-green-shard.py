@@ -3,7 +3,7 @@
 Usage: blue-green-shard.py METADATA OS SHARD COUNT
 
 METADATA is what `cargo metadata --no-deps --format-version 1 --locked`
-prints, OS is the runner's (`Linux` or `Windows`, as RUNNER_OS gives it) and
+prints, OS is the runner's (`Linux`, `Windows` or `macOS`, as RUNNER_OS gives it) and
 SHARD counts from 1. Prints this shard's step outputs: `args`, the target
 filters for its `cargo test`, and `doc`, whether it also runs the doc tests.
 The whole plan goes to stderr.
@@ -30,6 +30,21 @@ UNITS = "(units)"
 # added.
 DEFAULT = 30.0
 WEIGHTS = {
+    # Initial estimates from Linux; replace with macOS runner timings after its first run.
+    "macOS": {
+        "process_switch": 215.5,
+        "process_crash": 152.4,
+        "process_lost_channel": 132.7,
+        "process_recovery": 123.9,
+        "process_ladder": 84.7,
+        "process_detect": 49.2,
+        "process_mode": 33.7,
+        "supervise": 29.9,
+        "process_real": 23.5,
+        "process_stop": 22.2,
+        "process_endpoint": 15.1,
+        UNITS: 52.0,
+    },
     "Linux": {
         "process_switch": 215.5,
         "process_crash": 152.4,

@@ -283,13 +283,22 @@ jobs:
               sha256=809b01f2c94d031ab6cf5f4d4a4f477c8f51b69c96ab3cb2fe4db7ecb222d0d3
               temp=$(cygpath -u "$RUNNER_TEMP")
               ;;
+            macOS)
+              target=universal-apple-darwin
+              sha256=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8
+              temp="$RUNNER_TEMP"
+              ;;
             *) echo "unsupported nextest platform: $RUNNER_OS" >&2; exit 1 ;;
           esac
           name="cargo-nextest-$VERSION-$target.tar.gz"
           curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
             --output "$temp/$name" \
             "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$VERSION/$name"
-          echo "$sha256  $temp/$name" | sha256sum --check --strict
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            echo "$sha256  $temp/$name" | shasum -a 256 --check
+          else
+            echo "$sha256  $temp/$name" | sha256sum --check --strict
+          fi
           mkdir "$temp/nextest-$VERSION"
           tar -xzf "$temp/$name" -C "$temp/nextest-$VERSION"
           if [[ "$RUNNER_OS" == Windows ]]; then
@@ -340,6 +349,15 @@ jobs:
     if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
     strategy: *blue-green-shards
     runs-on: windows-latest
+    timeout-minutes: 60
+    steps: *blue-green-steps
+
+  blue-green-tests-macos:
+    name: blue-green (macos-15, ${{ matrix.shard }} of 3)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request'
+    strategy: *blue-green-shards
+    runs-on: macos-15
     timeout-minutes: 60
     steps: *blue-green-steps
 
@@ -396,15 +414,15 @@ jobs:
 
   blue-green:
     name: blue-green (${{ matrix.os }})
-    needs: [changes, blue-green-tests-ubuntu, blue-green-tests-windows]
+    needs: [changes, blue-green-tests-ubuntu, blue-green-tests-windows, blue-green-tests-macos]
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            jobs: blue-green-tests-ubuntu
-            queue-only: blue-green-tests-ubuntu
+            jobs: blue-green-tests-ubuntu blue-green-tests-macos
+            queue-only: blue-green-tests-ubuntu blue-green-tests-macos
           - os: windows-latest
             jobs: blue-green-tests-windows
             queue-only: blue-green-tests-windows
