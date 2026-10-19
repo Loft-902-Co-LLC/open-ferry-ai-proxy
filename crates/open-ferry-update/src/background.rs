@@ -59,7 +59,7 @@ pub enum CheckNow {
     Started,
     /// A check was running already.
     Running,
-    /// Updates are off, so nothing was checked.
+    /// Updates are off or the service is stopped, so nothing was checked.
     Off,
 }
 
@@ -72,6 +72,22 @@ struct Live {
     automatic_error: Option<String>,
 }
 
+#[derive(Default)]
+struct Tasks {
+    timer: Option<JoinHandle<()>>,
+    spawned: Vec<JoinHandle<()>>,
+    stopped: bool,
+}
+
+impl Tasks {
+    fn spawn(&mut self, future: impl Future<Output = ()> + Send + 'static) {
+        self.spawned.retain(|task| !task.is_finished());
+        if !self.stopped {
+            self.spawned.push(tokio::spawn(future));
+        }
+    }
+}
+
 pub(crate) struct Inner {
     /// The updater, but for its downloader, which each check makes.
     pub(crate) updater: Updater,
@@ -82,7 +98,7 @@ pub(crate) struct Inner {
     running: Arc<tokio::sync::Mutex<()>>,
     /// Held through switch preparation and the endpoint's admission reply.
     requesting: Arc<tokio::sync::Mutex<()>>,
-    task: Mutex<Option<JoinHandle<()>>>,
+    tasks: Mutex<Tasks>,
     switcher: Mutex<Option<Arc<dyn Switcher>>>,
     installed: Mutex<Option<PathBuf>>,
 }
@@ -113,7 +129,7 @@ impl UpdateService {
                 live: Mutex::new(Live::default()),
                 running: Arc::new(tokio::sync::Mutex::new(())),
                 requesting: Arc::new(tokio::sync::Mutex::new(())),
-                task: Mutex::new(None),
+                tasks: Mutex::new(Tasks::default()),
                 switcher: Mutex::new(None),
                 installed: Mutex::new(None),
             }),
@@ -140,28 +156,33 @@ impl UpdateService {
             first_check
         };
         let inner = Arc::clone(&self.inner);
-        let task = tokio::spawn(run(inner, first_check));
-        let mut slot = self
+        let mut tasks = self
             .inner
-            .task
+            .tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(old) = slot.replace(task) {
+        tasks.stopped = false;
+        if let Some(old) = tasks.timer.replace(tokio::spawn(run(inner, first_check))) {
             old.abort();
         }
     }
 
-    /// Stops the loop and any check it runs.
+    /// Stops the loop, explicit checks, and progress followers.
     pub fn stop(&self) {
-        let task = self
+        let mut tasks = self
             .inner
-            .task
+            .tasks
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(task) = task {
+            .unwrap_or_else(PoisonError::into_inner);
+        tasks.stopped = true;
+        if let Some(task) = tasks.timer.take() {
             task.abort();
         }
+        for task in tasks.spawned.drain(..) {
+            task.abort();
+        }
+        set_checking(&self.inner, false);
+        set_next_check(&self.inner, None);
     }
 
     /// Follows a reloaded config: its mode, interval and proxy.
@@ -409,14 +430,19 @@ impl UpdateService {
 
     /// Starts a check now, unless updates are off or one is running.
     pub fn check_now(&self) -> CheckNow {
-        if self.settings().mode == SelfUpdateMode::Off {
+        let mut tasks = self
+            .inner
+            .tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if tasks.stopped || self.settings().mode == SelfUpdateMode::Off {
             return CheckNow::Off;
         }
         let Ok(guard) = Arc::clone(&self.inner.running).try_lock_owned() else {
             return CheckNow::Running;
         };
         let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             checked(&inner, guard).await;
         });
         CheckNow::Started
@@ -537,7 +563,11 @@ async fn checked(
                         .unwrap_or_else(PoisonError::into_inner)
                         .automatic_warning(None);
                     tracing::info!(operation = %handle.id, %version, "automatic switch accepted");
-                    tokio::spawn(follow_switch(handle));
+                    inner
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .spawn(follow_switch(handle));
                 }
                 Err(error) => {
                     let warning = inner
