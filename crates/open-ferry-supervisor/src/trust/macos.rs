@@ -5,6 +5,8 @@ use std::io;
 use std::os::fd::RawFd;
 use std::ptr;
 
+use crate::trust::macos_rights::can_mutate;
+
 // sys/acl.h: Darwin's ACL iterator returns 0 for an entry and EINVAL at the end.
 const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
 const ACL_FIRST_ENTRY: libc::c_int = 0;
@@ -12,10 +14,6 @@ const ACL_NEXT_ENTRY: libc::c_int = -1;
 const ACL_EXTENDED_ALLOW: libc::c_int = 1;
 const ACL_EXTENDED_DENY: libc::c_int = 2;
 const ID_TYPE_UID: libc::c_int = 0;
-// Write/add data, delete, append/add directory, delete child, write attributes,
-// write extended attributes, write security and change owner.
-const MUTATION: u64 =
-    (1 << 2) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 10) | (1 << 12) | (1 << 13);
 
 unsafe extern "C" {
     fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
@@ -82,7 +80,7 @@ pub(super) fn check(fd: RawFd, owner: u32) -> Result<(), String> {
             ACL_EXTENDED_ALLOW => {}
             _ => return Err(unreadable()),
         }
-        if permissions & MUTATION == 0 {
+        if !can_mutate(permissions) {
             continue;
         }
         // Do not infer effective access from deny ordering or group membership. Even an
@@ -110,6 +108,57 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::os::fd::AsRawFd;
+
+    #[test]
+    fn a_generic_write_grant_is_refused_on_a_0700_directory() {
+        // Not upstream's: chmod and acl_set_permset_mask_np cannot set generic rights.
+        // The helper uses the SDK's raw filesec layout and transfers it to fchmodx_np.
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        let helper = root.path().join("generic-acl");
+        assert!(
+            std::process::Command::new("cc")
+                .args(["-Wall", "-Wextra", "-Werror"])
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/macos_generic_acl.c"
+                ))
+                .arg("-o")
+                .arg(&helper)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new(helper)
+                .arg(&directory)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let directory = File::open(directory).unwrap();
+        let acl = Allocation(unsafe { acl_get_fd_np(directory.as_raw_fd(), ACL_TYPE_EXTENDED) });
+        assert!(!acl.0.is_null());
+        let mut entry = ptr::null_mut();
+        assert_eq!(
+            unsafe { acl_get_entry(acl.0, ACL_FIRST_ENTRY, &mut entry) },
+            0
+        );
+        let mut mask = 0;
+        assert_eq!(unsafe { acl_get_permset_mask_np(entry, &mut mask) }, 0);
+        assert_eq!(
+            mask,
+            1 << 23,
+            "the generic right must survive the round trip"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            directory.metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(check(directory.as_raw_fd(), unsafe { libc::geteuid() }).is_err());
+    }
 
     #[test]
     fn an_invalid_descriptor_fails_closed() {
