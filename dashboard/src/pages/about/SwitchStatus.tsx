@@ -18,15 +18,15 @@ export function SwitchStatus({ status, onRetry, hidePhase = false }: { status: U
     last.result === "rolled-back" ? `Rolled back to ${last.to}` :
     `${readable(last.result)}: ${last.to}`;
   return <>
-    {request?.state === "preparing" && <Alert tone="info" live title="Preparing the switch">
+    {!hidePhase && request?.state === "preparing" && <Alert tone="info" live title="Preparing the switch">
       <p>The server is preparing the {request.action === "install" ? "release" : "rollback"}. This can take a few minutes.</p>
     </Alert>}
-    {request?.state === "accepted" && request.pending && <Alert tone="info" live title="Switch accepted">
+    {!hidePhase && request?.state === "accepted" && request.pending && <Alert tone="info" live title="Switch accepted">
       <p>Waiting for the supervisor&apos;s status.</p>
     </Alert>}
     {request?.reason != null && <Alert tone="warn" live title={request.state === "refused" ? "Switch refused" : request.state === "failed" ? "Switch failed" : "The switch could not be confirmed"}>
       <p className="break-words">{request.reason}</p>
-      {request.state === "unknown" && <Button size="sm" onClick={onRetry}>Read status</Button>}
+      {!hidePhase && request.state === "unknown" && request.pending && supervisor?.error == null && <Button size="sm" onClick={onRetry}>Read status</Button>}
     </Alert>}
     {!hidePhase && supervisor?.error === null && switchInProgress({ ...status, switch_request: null }) && <Alert tone="info" live title={`Switch: ${readable(supervisor.phase)}`}>
       {supervisor.switch != null && <p>{supervisor.switch.from} to {supervisor.switch.to}.</p>}
@@ -34,7 +34,7 @@ export function SwitchStatus({ status, onRetry, hidePhase = false }: { status: U
     </Alert>}
     {supervisor?.error != null && <Alert tone="warn" live title="The supervisor status could not be read">
       <p>{supervisor.error}</p>
-      <Button size="sm" onClick={onRetry}>Try again</Button>
+      {!hidePhase && <Button size="sm" onClick={onRetry}>Try again</Button>}
     </Alert>}
     {supervisor?.switching_disabled != null && <Alert tone="warn" title="Switching is unavailable">
       <p className="break-words">{supervisor.switching_disabled}</p>
