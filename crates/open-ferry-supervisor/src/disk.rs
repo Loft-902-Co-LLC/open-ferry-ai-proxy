@@ -1030,7 +1030,15 @@ impl Disk for RealDisk {
             if let Some(hook) = &disk.before_install {
                 hook();
             }
-            install_transaction(&disk, journal)
+            let result = install_transaction(&disk, journal);
+            // Test builds only: the file is durably replaced, the transaction
+            // still owns its locks, and the core has not written J6 yet.
+            #[cfg(feature = "blue-green-test")]
+            if matches!(&result.1, InstallResult::Replaced) {
+                let _ =
+                    open_ferry_update::test_seams::hit(disk.data.root(), "install.after_replace");
+            }
+            result
         };
         match blocking_install(locks, work).await {
             Ok(result) => result,
