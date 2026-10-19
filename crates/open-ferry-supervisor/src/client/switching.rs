@@ -12,7 +12,7 @@ use open_ferry_update::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
 use super::{locate, time_left, within};
-use crate::endpoint::{ClientStream, EndpointError, Identity, connect};
+use crate::endpoint::{ClientStream, EndpointError, Identity, Location, connect};
 use crate::protocol::{Admission, Channel, EndpointReply, EndpointRequest, How, VERSION};
 use crate::snapshot::Snapshot;
 
@@ -40,6 +40,7 @@ pub async fn status(
         identity,
         EndpointRequest::Status { v: VERSION },
         deadline,
+        |location| dial(location, identity),
     )
     .await?;
     match receive(&mut channel, deadline).await? {
@@ -70,7 +71,10 @@ pub async fn switch(
             mode_gen: 0,
         },
     };
-    let mut channel = request(data_dir, identity, request_switch, deadline).await?;
+    let mut channel = request(data_dir, identity, request_switch, deadline, |location| {
+        dial(location, identity)
+    })
+    .await?;
     match receive(&mut channel, deadline).await? {
         EndpointReply::Accepted { id, .. } if !id.is_empty() => Ok(SwitchHandle::new(
             id.clone(),
@@ -91,6 +95,7 @@ pub async fn cancel(
         identity,
         EndpointRequest::Cancel { v: VERSION },
         deadline,
+        |location| dial(location, identity),
     )
     .await?;
     match receive(&mut channel, deadline).await {
@@ -104,34 +109,64 @@ pub async fn cancel(
     }
 }
 
-async fn request(
+async fn dial(
+    location: Location,
+    identity: &Identity,
+) -> Result<(ReadHalf<ClientStream>, WriteHalf<ClientStream>), SwitchError> {
+    let stream = connect(&location, identity).await.map_err(endpoint_error)?;
+    stream
+        .writable()
+        .await
+        .map_err(|error| SwitchError::Unreachable(error.to_string()))?;
+    #[cfg(test)]
+    super::tests::after_writable();
+    Ok(tokio::io::split(stream))
+}
+
+pub(super) async fn request<R, W, F>(
     data_dir: &Path,
     identity: &Identity,
     request: EndpointRequest,
     deadline: Instant,
-) -> Result<EndpointChannel, SwitchError> {
+    dial: impl FnOnce(Location) -> F,
+) -> Result<Channel<R, W>, SwitchError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: std::future::Future<Output = Result<(R, W), SwitchError>>,
+{
+    let encoded = serde_json::to_vec(&request).map_err(|_| {
+        SwitchError::Unreachable("could not encode the request before sending".into())
+    })?;
+    if encoded.len() >= crate::protocol::MAX_FRAME {
+        return Err(SwitchError::Unreachable(
+            "could not encode the request before sending".into(),
+        ));
+    }
     let (dir, owner) = (data_dir.to_owned(), identity.clone());
     let location = within(deadline, move || locate(&dir, &owner))
         .await
-        .ok_or(SwitchError::TimedOut)?
+        .ok_or_else(before_send_timeout)?
         .map_err(SwitchError::Untrusted)?;
-    bounded(deadline, async {
-        let stream = connect(&location, identity).await.map_err(endpoint_error)?;
-        stream
-            .writable()
+    let (reader, writer) =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), dial(location))
             .await
-            .map_err(|error| SwitchError::Unreachable(error.to_string()))?;
-        #[cfg(test)]
-        super::tests::after_writable();
-        if time_left(deadline).is_zero() {
-            return Err(SwitchError::TimedOut);
-        }
-        let (reader, writer) = tokio::io::split(stream);
-        let mut channel = Channel::new(reader, writer);
-        send(&mut channel, &request).await?;
-        Ok(channel)
-    })
+            .map_err(|_| before_send_timeout())??;
+    if time_left(deadline).is_zero() {
+        return Err(before_send_timeout());
+    }
+    let mut channel = Channel::new(reader, writer);
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        send(&mut channel, &request),
+    )
     .await
+    .map_err(|_| SwitchError::TimedOut)??;
+    Ok(channel)
+}
+
+fn before_send_timeout() -> SwitchError {
+    SwitchError::Unreachable("timed out before sending".into())
 }
 
 fn endpoint_error(error: EndpointError) -> SwitchError {
@@ -244,7 +279,7 @@ impl SwitchProgress for Progress {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -264,7 +299,7 @@ mod tests {
         }
     }
 
-    struct PartialWriteError(Arc<AtomicUsize>);
+    pub(in crate::client) struct PartialWriteError(pub(in crate::client) Arc<AtomicUsize>);
 
     impl AsyncWrite for PartialWriteError {
         fn poll_write(
@@ -275,7 +310,10 @@ mod tests {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Poll::Ready(Ok(1))
             } else {
-                Poll::Ready(Err(io::Error::other("send failed")))
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "send failed",
+                )))
             }
         }
 

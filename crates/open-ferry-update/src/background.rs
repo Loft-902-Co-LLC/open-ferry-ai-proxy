@@ -249,7 +249,10 @@ impl UpdateService {
             })
         })
         .await
-        .map_err(|_| SwitchError::Protocol("preparing the update stopped".into()))??;
+        .map_err(|error| UpdateError::Io {
+            what: "prepare the update",
+            error: error.to_string(),
+        })??;
         if auto && self.settings().mode == SelfUpdateMode::Off {
             return Err(SwitchError::UpdatesOff);
         }
@@ -288,7 +291,7 @@ impl UpdateService {
             })
         })
         .await
-        .map_err(|_| SwitchError::Protocol("preparing the rollback stopped".into()))??;
+        .map_err(|error| UpdateError::Io { what: "prepare the rollback", error: error.to_string() })??;
         switcher
             .rollback(&target, std::time::Instant::now() + acceptance)
             .await
