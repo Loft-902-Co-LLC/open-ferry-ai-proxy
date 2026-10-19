@@ -2115,7 +2115,7 @@ impl Updating {
     fn system_form(&self) -> String {
         match self.pinned() {
             Some(dir) => format!(
-                "Installing the supervised form: this binary has a machine-wide install and can update itself. Its data directory is {dir}. Stop the system service before running `open-ferry update` in this version."
+                "Installing the supervised form: this binary has a machine-wide install and can update itself. Its data directory is {dir}. Run `open-ferry update` as root or an administrator to switch versions without downtime."
             ),
             None => self.form(),
         }

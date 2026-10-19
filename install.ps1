@@ -651,7 +651,7 @@ function Install-OpenFerry {
         }
         if ($status -ne 0) {
             switch ($status) {
-                3 { throw 'open-ferry runs as a background service: install-self said how to stop it, above. Nothing was changed.' }
+                3 { throw 'open-ferry runs as a background service: use ''open-ferry update'' to switch versions without downtime (as administrator for a system service). Nothing was changed.' }
                 4 { throw "Couldn't tell whether open-ferry is running from ${exe}: see above. Nothing was changed." }
                 5 { throw 'Gave up waiting for another open-ferry install or update to finish. Nothing was changed; run the installer again.' }
                 6 { throw "The install didn't finish and open-ferry couldn't put things back: see above for the files to restore by hand." }

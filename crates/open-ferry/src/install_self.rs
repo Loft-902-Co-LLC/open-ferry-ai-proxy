@@ -651,8 +651,17 @@ fn supervised_message(running: &Running, kind: ServiceKind) -> String {
             None => who.push(')'),
         }
     }
+    let update = match kind {
+        ServiceKind::User => "Run `open-ferry update` to switch versions without downtime.",
+        ServiceKind::System if cfg!(windows) => {
+            "Run `open-ferry update` in a terminal opened as administrator to switch versions without downtime."
+        }
+        ServiceKind::System => {
+            "Run `sudo open-ferry update` as root to switch versions without downtime."
+        }
+    };
     format!(
-        "{who}, so the binary can't be replaced. Nothing was changed.\n{}",
+        "{who}, so the installer can't replace its binary. Nothing was changed.\n{update}\nTo rerun the installer instead:\n{}",
         hint::stop_and_retry(kind, "run the installer again")
     )
 }
