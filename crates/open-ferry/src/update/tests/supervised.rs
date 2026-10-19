@@ -509,23 +509,17 @@ async fn the_real_backend_does_not_reuse_a_stage_that_is_already_running() {
 
 #[tokio::test]
 async fn another_clients_cancellation_is_reported_as_cancelled() {
-    let fake = SupervisedFake::new("cancelled");
-    let ran = go(
-        Request::Update,
-        &fake,
-        &settings("", None),
-        true,
-        true,
-        None,
-    )
-    .await;
-    assert_eq!((ran.code, ran.result), (0, "cancelled"));
-    assert!(
-        ran.json()["message"]
-            .as_str()
-            .unwrap()
-            .contains("was cancelled")
-    );
+    for request in [Request::Update, Request::Rollback] {
+        let fake = SupervisedFake::new("cancelled");
+        let ran = go(request, &fake, &settings("", None), true, true, None).await;
+        assert_eq!((ran.code, ran.result), (1, "cancelled"));
+        assert!(
+            ran.json()["message"]
+                .as_str()
+                .unwrap()
+                .contains("was cancelled")
+        );
+    }
 }
 
 #[tokio::test]
@@ -681,7 +675,7 @@ async fn a_terminal_reply_or_record_published_during_the_status_probe_is_not_los
         assert_eq!(
             (outcome.code, outcome.result),
             match case {
-                "done" => (0, "cancelled"),
+                "done" => (1, "cancelled"),
                 "record" => (0, "updated"),
                 "missing" => (1, "outcome-unknown"),
                 _ => (1, "error"),

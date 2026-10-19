@@ -396,7 +396,7 @@ With `-json`, it prints one JSON object and nothing else on standard output: `ac
 | Code | When |
 |---|---|
 | 0 | It is up to date, or it did what was asked: installed, rolled back, accepted a cancellation, found nothing switching or set the mode. Also for stopping the follower with Ctrl-C and for `-h` |
-| 1 | It failed, refused, or the supervised outcome is unknown: a download or a check failed, there's no earlier version to roll back to, another update is running, cancellation was too late, the config doesn't load or can't be written, or a rollback wasn't confirmed. An unknown outcome says to check status and not resend. A message says why |
+| 1 | It failed, refused, or the supervised outcome is unknown: a download or a check failed, there's no earlier version to roll back to, another update is running, cancellation was too late, another client cancelled the update or rollback, the config doesn't load or can't be written, or a rollback wasn't confirmed. An unknown outcome says to check status and not resend. A message says why |
 | 2 | Bad usage: an unknown flag, an argument after the flags, a mode that isn't `off`, `notify` or `auto`, or more than one of `-cancel`, `-check`, `-rollback` and `-mode`. The usage follows on standard error |
 | 3 | A newer release is out and wasn't installed: with `-check`, on an install that doesn't update itself, when you answered no, or with no terminal and no `-yes` |
 

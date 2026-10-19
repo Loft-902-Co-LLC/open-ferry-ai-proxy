@@ -1674,7 +1674,7 @@ async fn follow_until<U: Updates>(
                 }
                 if word == "cancelled" {
                     console.say(format!("Switch {} was cancelled.", handle.id));
-                    return outcome.with("cancelled", 0);
+                    return outcome.with("cancelled", 1);
                 }
                 let reason = record
                     .why
