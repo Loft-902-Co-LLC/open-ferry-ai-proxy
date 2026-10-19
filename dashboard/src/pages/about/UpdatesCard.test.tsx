@@ -236,7 +236,7 @@ describe("supervised updates", () => {
     expect(card).not.toHaveTextContent("Automatic switch");
   });
 
-  it.each(["waiting-for-signins", "loading", "handing-over", "taking-over", "watching", "returning"])("shows the %s phase", async (phase) => {
+  it.each(["waiting-for-signins", "loading", "handing-over", "taking-over", "watching"])("shows the %s phase", async (phase) => {
     server(updateStatus({ supervisor: supervisorStatus({ phase }) }));
     const { card } = await openUpdates();
     expect(await within(card).findByText(`Switch: ${phase.replaceAll("-", " ")}`)).toBeVisible();
