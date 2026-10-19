@@ -1207,8 +1207,8 @@ impl Outcome {
         self.with("error", 1)
     }
 
-    /// The outcome of an update that failed with `error`: `supervised`
-    /// when it changed nothing for a supervisor's sake, else `error`.
+    /// An update failure: `supervised` for `UpdateError::Supervised`,
+    /// otherwise `error`.
     fn failed_update(self, console: &mut Console, error: &UpdateError) -> Self {
         let supervised = matches!(error, UpdateError::Supervised(_));
         let mut outcome = self.failed(console, error.to_string());
@@ -1242,7 +1242,12 @@ impl Outcome {
             | SwitchError::Unreachable(_)
             | SwitchError::Untrusted(_) => (
                 format!("{error}. The supervisor request was not sent."),
-                if matches!(error, SwitchError::Update(error) if !matches!(error, UpdateError::Supervised(_) | UpdateError::RollbackChanged { .. }))
+                // Keep the JSON result rollback target changes had before they were typed.
+                if let SwitchError::Update(error) = error
+                    && !matches!(
+                        error,
+                        UpdateError::Supervised(_) | UpdateError::RollbackChanged { .. }
+                    )
                 {
                     "error"
                 } else {
