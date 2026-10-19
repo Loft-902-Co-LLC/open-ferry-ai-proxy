@@ -215,8 +215,10 @@ impl SwitchRequest {
                     "update_busy"
                 } else if matches!(error, SwitchError::Ended(_)) {
                     "switch_ended"
-                } else {
+                } else if matches!(error, SwitchError::Refused(_)) {
                     "switch_refused"
+                } else {
+                    "switch_failed"
                 };
                 request.reason = Some(match error {
                     SwitchError::NotSupervised => "this install is not supervised; run `open-ferry update` (or `open-ferry update -rollback`) on the server's computer, then restart the server".to_owned(),
@@ -368,7 +370,7 @@ mod tests {
         assert_error(
             SwitchError::UpdatesOff,
             "failed",
-            "switch_refused",
+            "switch_failed",
             StatusCode::CONFLICT,
         );
     }
@@ -377,7 +379,7 @@ mod tests {
         assert_error(
             SwitchError::Update(UpdateError::NothingStaged),
             "failed",
-            "switch_refused",
+            "switch_failed",
             StatusCode::CONFLICT,
         );
     }
@@ -388,7 +390,7 @@ mod tests {
                 version: "0.2.0".into(),
             }),
             "failed",
-            "switch_refused",
+            "switch_failed",
             StatusCode::CONFLICT,
         );
     }
@@ -401,7 +403,7 @@ mod tests {
         assert_error(
             SwitchError::Unreachable("offline".into()),
             "failed",
-            "switch_refused",
+            "switch_failed",
             StatusCode::CONFLICT,
         );
     }
@@ -410,7 +412,7 @@ mod tests {
         assert_error(
             SwitchError::Untrusted("untrusted".into()),
             "failed",
-            "switch_refused",
+            "switch_failed",
             StatusCode::CONFLICT,
         );
     }
