@@ -79,12 +79,13 @@ export function apiUrl(path: string, query?: ApiRequest["query"]): string {
 }
 
 /** Reads an answer's body: JSON when it says so and parses, else text. */
-async function readBody(response: Response): Promise<unknown> {
+async function readBody(response: Response, signal?: AbortSignal): Promise<unknown> {
   let text: string;
   try {
     text = await response.text();
   } catch (error) {
-    if (error instanceof DOMException && error.name === "TimeoutError") {
+    if ((error instanceof DOMException && error.name === "TimeoutError") ||
+      (signal?.aborted === true && signal.reason instanceof DOMException && signal.reason.name === "TimeoutError")) {
       throw new ApiError(0, null, null, null);
     }
     throw error;
@@ -149,7 +150,7 @@ async function send(
     throw new ApiError(0, null, null, null);
   }
   if (response.status >= 400) {
-    const data = await readBody(response);
+    const data = await readBody(response, init.signal ?? undefined);
     throw new ApiError(
       response.status,
       stringField(data, "error"),
@@ -178,7 +179,7 @@ export async function apiRequest<T = unknown>(
     signal: request.signal,
     contentType,
   });
-  const data = await readBody(response);
+  const data = await readBody(response, request.signal);
   return { status: response.status, headers: response.headers, data: data as T };
 }
 

@@ -187,3 +187,15 @@ it("preserves cancellation during a response body read", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
   await expect(apiRequest("fake-key", "/open-ferry/api/v1/update")).rejects.toBe(error);
 });
+
+
+it.each([200, 503])("recognizes a body AbortError caused by the status %s timeout signal", async (status) => {
+  const controller = new AbortController();
+  const response = new Response(null, { status });
+  vi.spyOn(response, "text").mockImplementation(() => {
+    controller.abort(new DOMException("deadline", "TimeoutError"));
+    return Promise.reject(new DOMException("body aborted", "AbortError"));
+  });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+  await expect(apiRequest("fake-key", "/open-ferry/api/v1/update", { signal: controller.signal })).rejects.toMatchObject({ name: "ApiError", status: 0 });
+});
