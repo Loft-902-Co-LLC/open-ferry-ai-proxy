@@ -1,6 +1,6 @@
 # Updates
 
-open-ferry keeps itself up to date. By default it looks for a newer release every six hours, and when one is out it downloads it, checks its signature, and gets it ready for `open-ferry update` to install. The server never replaces its own binary and never restarts itself. In a supervised service, the blue-green supervisor starts the staged version, checks it, and switches traffic to it automatically; in the plain form, run `open-ferry update` to install it. You can turn this off, for good, in any of the ways below. CLIProxyAPI has nothing like it ([below](#cliproxyapi)).
+open-ferry keeps itself up to date. By default it looks for a newer release every six hours, and when one is out it downloads it, checks its signature, and gets it ready for `open-ferry update` to install. The server never replaces its own binary and never restarts itself. In a supervised service in `auto` mode, the blue-green supervisor starts the staged version, checks it, and switches traffic to it automatically. `notify` only reports new releases. In the plain form, run `open-ferry update` to install one. You can turn this off, for good, in any of the ways below. CLIProxyAPI has nothing like it ([below](#cliproxyapi)).
 
 ## Turning updates off
 
@@ -43,7 +43,7 @@ With updates off, open-ferry makes no update request of any kind, and stages and
 
 | `self-update.mode` | What the server does |
 |---|---|
-| `auto` (the default) | Looks for a newer release. When there is one, downloads it, checks it, stages it in the [data directory](#files), and logs once that `open-ferry update` installs it in the plain form. In a supervised service, the supervisor tries it and switches traffic after its checks pass |
+| `auto` (the default) | Looks for a newer release. When there is one, downloads it, checks it, and stages it in the [data directory](#files). In a supervised service, asks the supervisor to try it and switch traffic after its checks pass. In the plain form, logs once that `open-ferry update` installs it |
 | `notify` | Looks for a newer release, and logs once for each new version. Downloads nothing else |
 | `off` | Nothing: no request, no staging, no install |
 
@@ -99,6 +99,10 @@ open-ferry update
 ```
 
 While a supervisor runs for this data directory, `open-ferry update` and `-rollback` switch workers on the same listener while existing requests finish. `-check` also shows the supervisor's phase, running version, rollback target, watch deadline and last outcome, and whether switching is disabled and why. `-cancel` asks it to cancel before the new worker takes over. Ctrl-C after acceptance stops following; the supervisor continues the switch. Updating, rolling back or cancelling a machine install needs root or an administrator.
+
+The supervisor refuses an automatic request unless the mode is `auto`. Changing to `notify` leaves an accepted switch running. Only `off` cancels an accepted switch, while cancellation is still possible.
+
+Automatic checks skip releases that failed here or were rolled back from. When an attempt ends without a completed switch, automatic updates wait at least five hours before trying that version again. Manual requests are not held by this cooldown.
 
 A timeout, a lost connection or an unreadable reply to a supervised update, rollback or cancellation leaves its outcome unknown. Run `open-ferry update -check` and do not resend the request. The command exits with 1; its JSON result is `outcome-unknown`.
 
