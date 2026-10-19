@@ -498,10 +498,11 @@ async fn unavailable_pending_outcomes_fall_back_to_state_without_writing_records
                     service.check_once().await.unwrap().unwrap().report,
                     Report::SkippedFailed { .. }
                 ));
-                assert!(matches!(
-                    service.install_now(true).await,
-                    Err(SwitchError::Skipped(_))
-                ));
+                match service.install_now(true).await {
+                    Err(SwitchError::Skipped(_)) if mode == "auto" => {}
+                    Err(SwitchError::UpdatesOff) if mode == "notify" => {}
+                    answer => panic!("unexpected automatic install in {mode}: {answer:?}"),
+                }
                 // Ordinary check reporting is allowed; outcome reconciliation
                 // never writes history or exclusions.
                 assert_eq!(f.updater.state().failed, state.failed);

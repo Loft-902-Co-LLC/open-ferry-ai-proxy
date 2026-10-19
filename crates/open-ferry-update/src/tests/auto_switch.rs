@@ -249,6 +249,10 @@ async fn notify_and_off_leave_an_existing_stage_unused() {
         f.updater.check(crate::SelfUpdateMode::Auto).await.unwrap();
         let (service, fake, fetch) = service(&f, mode, "0.2.0", false);
         service.check_once().await;
+        assert!(matches!(
+            service.install_now(true).await,
+            Err(SwitchError::UpdatesOff)
+        ));
         assert!(fake.calls.lock().unwrap().is_empty());
         assert_eq!(
             fetch.calls.load(Ordering::SeqCst),
@@ -352,6 +356,31 @@ async fn lowering_the_mode_while_staging_never_starts_a_switch() {
         service.set_config(&config(mode));
         release.notify_one();
         check.await.unwrap();
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn lowering_the_mode_during_install_preparation_never_sends_an_automatic_request() {
+    for mode in ["notify", "off"] {
+        let f = Fixture::new().await;
+        let (service, fake, fetch) = service(&f, "auto", "0.2.0", false);
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *fetch.gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
+        let install = tokio::spawn({
+            let service = service.clone();
+            async move { service.install_now(true).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+            .await
+            .unwrap();
+        service.set_config(&config(mode));
+        release.notify_one();
+        assert!(matches!(
+            install.await.unwrap(),
+            Err(SwitchError::UpdatesOff)
+        ));
         assert!(fake.calls.lock().unwrap().is_empty());
     }
 }
