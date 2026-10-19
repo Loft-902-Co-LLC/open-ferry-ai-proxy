@@ -453,6 +453,7 @@ async fn an_ambiguous_request_is_never_resent_and_requires_a_status_read_before_
     for error in [
         open_ferry_update::SwitchError::TimedOut,
         open_ferry_update::SwitchError::Stopped,
+        open_ferry_update::SwitchError::Protocol("bad reply".into()),
     ] {
         let fake = Switcher::new(Duration::ZERO, None);
         *fake.error.lock().unwrap() = Some(error);
