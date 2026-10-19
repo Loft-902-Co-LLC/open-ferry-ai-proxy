@@ -54,10 +54,14 @@ impl Switcher for Fake {
         &'a self,
         pin: &'a Pin,
         auto: bool,
-        _deadline: Instant,
+        deadline: Instant,
     ) -> BoxFuture<'a, Result<SwitchHandle, SwitchError>> {
         Box::pin(async move {
             self.unlocked();
+            assert!(
+                deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(1),
+                "acceptance starts after preparation"
+            );
             let pins = PinStore::new(&self.data.versions())
                 .scan(chrono::Utc::now())
                 .unwrap();
@@ -76,10 +80,14 @@ impl Switcher for Fake {
     fn rollback<'a>(
         &'a self,
         target: &'a Artifact,
-        _deadline: Instant,
+        deadline: Instant,
     ) -> BoxFuture<'a, Result<SwitchHandle, SwitchError>> {
         Box::pin(async move {
             self.unlocked();
+            assert!(
+                deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(3),
+                "rollback leaves time for the supervisor's version probe"
+            );
             assert!(
                 PinStore::new(&self.data.versions())
                     .scan(chrono::Utc::now())
@@ -594,4 +602,55 @@ async fn cancelled_preparation_keeps_its_lock_without_blocking_the_runtime_or_se
             "a cancelled caller never sends a switch"
         );
     }
+}
+
+#[tokio::test]
+async fn a_check_holding_only_the_running_guard_makes_install_answer_busy_at_once() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    let (service, fake) = service(&f, "notify");
+    assert_eq!(service.check_now(), crate::CheckNow::Started);
+    assert!(
+        f.updater.lock().is_ok(),
+        "the check task has not polled yet"
+    );
+    let mut install = Box::pin(service.install_now(false));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        install.as_mut().poll(&mut context),
+        Poll::Ready(Err(SwitchError::Update(UpdateError::Busy)))
+    ));
+    assert!(fake.calls.lock().unwrap().is_empty());
+    // Let the check finish before the fixture goes away.
+    service.check_once().await.unwrap().unwrap();
+}
+
+struct SlowRunner;
+
+impl crate::runner::Runner for SlowRunner {
+    fn version<'a>(
+        &'a self,
+        binary: &'a std::path::Path,
+        _: Duration,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(3_100)).await;
+            std::fs::read_to_string(binary)
+                .map_err(|error| error.to_string())
+                .map(|text| text.trim().into())
+        })
+    }
+}
+
+#[tokio::test]
+async fn preparation_longer_than_the_acceptance_window_still_leaves_a_full_window_to_send() {
+    let mut f = Fixture::new().await;
+    f.release("0.2.0");
+    f.updater.runner = Arc::new(SlowRunner);
+    let (service, fake) = service(&f, "notify");
+    service.install_now(false).await.unwrap();
+    assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), false)]);
 }

@@ -197,12 +197,16 @@ impl UpdateService {
         if auto && snapshot.settings.mode == SelfUpdateMode::Off {
             return Err(SwitchError::UpdatesOff);
         }
+        let running = Arc::clone(&self.inner.running)
+            .try_lock_owned()
+            .map_err(|_| UpdateError::Busy)?;
         let inner = Arc::clone(&self.inner);
         let runtime = tokio::runtime::Handle::current();
         // The task owns the guard even if the caller stops waiting. Blocking
         // hashes, file writes and fsyncs must not hold up the async runtime.
         let pin = tokio::task::spawn_blocking(move || {
             runtime.block_on(async move {
+                let _running = running;
                 let updater = &inner.updater;
                 let _lock = updater.lock()?;
                 let mut state = switching::read_state(updater)?;
@@ -263,6 +267,9 @@ impl UpdateService {
     pub async fn roll_back(&self) -> Result<SwitchHandle, SwitchError> {
         let switcher = self.switcher()?;
         let updater = self.inner.updater.clone();
+        // The supervisor validates --version before Accepted. Allow the
+        // updater's full version-probe budget plus transport time.
+        let acceptance = updater.limits.version_timeout + Duration::from_secs(3);
         let runtime = tokio::runtime::Handle::current();
         let target = tokio::task::spawn_blocking(move || {
             runtime.block_on(async move {
@@ -275,7 +282,7 @@ impl UpdateService {
         .await
         .map_err(|_| SwitchError::Protocol("preparing the rollback stopped".into()))??;
         switcher
-            .rollback(&target, std::time::Instant::now() + Duration::from_secs(3))
+            .rollback(&target, std::time::Instant::now() + acceptance)
             .await
     }
 
