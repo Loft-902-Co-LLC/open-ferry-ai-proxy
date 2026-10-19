@@ -769,14 +769,10 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
         self.prune_automatic_cooldowns();
         if let Some(ended) = unfinished_at(record) {
             let now = self.clock.now();
-            // Anchor a skewed stamp once. Clamping it anew on every admission
-            // would keep extending the cooldown until the wall clock caught up.
+            // Anchor every outcome once, before a backward clock step can make
+            // its durable stamp look new again. Prune also clamps these anchors.
             let key = (record.to.clone(), record.id.clone(), ended);
-            let ended = if ended > now {
-                *self.cooldown_stamps.entry(key).or_insert(now)
-            } else {
-                self.cooldown_stamps.get(&key).copied().unwrap_or(ended)
-            };
+            let ended = *self.cooldown_stamps.entry(key).or_insert(ended.min(now));
             self.automatic_cooldowns
                 .entry(record.to.clone())
                 .and_modify(|last| *last = (*last).max(ended))
