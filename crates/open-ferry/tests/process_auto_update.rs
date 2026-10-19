@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use under_test::*;
@@ -137,41 +137,59 @@ type Responses = Vec<(u16, Option<String>)>;
 struct Requests {
     stop: Arc<AtomicBool>,
     new_seen: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<Responses>>,
+    ready: Arc<AtomicUsize>,
+    threads: Vec<std::thread::JoinHandle<Responses>>,
 }
 impl Requests {
     fn start(port: u16) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let done = stop.clone();
         let new_seen = Arc::new(AtomicBool::new(false));
-        let seen = new_seen.clone();
-        let thread = std::thread::spawn(move || {
-            let mut answers = Vec::new();
-            while !done.load(Ordering::SeqCst) {
-                let answer = complete_get(port);
-                if answer.1.as_deref() == Some("99.0.0") {
-                    seen.store(true, Ordering::SeqCst);
-                }
-                answers.push(answer);
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            answers
-        });
+        let ready = Arc::new(AtomicUsize::new(0));
+        let threads = (0..4)
+            .map(|_| {
+                let done = stop.clone();
+                let seen = new_seen.clone();
+                let ready = ready.clone();
+                std::thread::spawn(move || {
+                    let mut answers = Vec::new();
+                    while !done.load(Ordering::SeqCst) {
+                        let answer = complete_get(port);
+                        if answer.1.as_deref() == Some("99.0.0") {
+                            seen.store(true, Ordering::SeqCst);
+                        }
+                        answers.push(answer);
+                        if answers.len() == 1 {
+                            ready.fetch_add(1, Ordering::SeqCst);
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    answers
+                })
+            })
+            .collect();
         Self {
             stop,
             new_seen,
-            thread: Some(thread),
+            ready,
+            threads,
         }
     }
     fn finish(mut self) -> Responses {
         self.stop.store(true, Ordering::SeqCst);
-        self.thread.take().unwrap().join().unwrap()
+        self.threads
+            .drain(..)
+            .flat_map(|thread| {
+                let answers = thread.join().unwrap();
+                assert!(!answers.is_empty(), "each request loop made requests");
+                answers
+            })
+            .collect()
     }
 }
 impl Drop for Requests {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
+        for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
     }
@@ -237,6 +255,7 @@ async fn a_background_check_switches_the_real_supervised_worker_without_failed_r
     let (dir, server, _sup, port) = prepare().await;
     let root = dir.path();
     let requests = Requests::start(port);
+    until(root, || requests.ready.load(Ordering::SeqCst) == 4).await;
     until(root, || {
         root.join("data/.blue-green-test/auto.before_check.arrived")
             .exists()
@@ -276,13 +295,13 @@ async fn a_background_check_switches_the_real_supervised_worker_without_failed_r
     );
 }
 
-fn check_now(port: u16) -> (u16, String) {
+fn update_request(port: u16, method: &str, suffix: &str) -> (u16, String) {
     use std::io::{Read, Write};
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    write!(stream, "POST /open-ferry/api/v1/update/check HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer auto-test-password\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+    write!(stream, "{method} /open-ferry/api/v1/update{suffix} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer auto-test-password\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
     let mut text = String::new();
     stream.read_to_string(&mut text).unwrap();
     let status = text
@@ -307,6 +326,10 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
     let (dir, server, _sup, port) = prepare().await;
     let root = dir.path();
     let seams = root.join("data/.blue-green-test");
+    until(root, || seams.join("auto.before_check.arrived").exists()).await;
+    // Only the original worker needs an immediate check. New workers use
+    // their normal first-check delay, leaving the explicit check below alone.
+    std::fs::remove_file(seams.join("update-now")).unwrap();
     std::fs::write(seams.join("fault.exit-after"), "go@99.0.0").unwrap();
     std::fs::write(seams.join("auto.before_check.release"), []).unwrap();
     let data = data_dir::DataDir::at(root.join("data"));
@@ -323,24 +346,34 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
     })
     .await;
     until(root, || http_get(port, "/").is_some()).await;
-    let mut before = server.requests();
     until(root, || {
-        before = server.requests();
-        let (status, answer) = check_now(port);
-        assert_eq!(status, 202, "{answer}\n{}", dump(root));
-        assert!(
-            answer.contains("started") || answer.contains("running"),
-            "dashboard keeps its response shape: {answer}"
-        );
-        answer.contains("started")
+        let (status, answer) = update_request(port, "GET", "");
+        assert_eq!(status, 200, "{answer}");
+        let (_, body) = answer.split_once("\r\n\r\n").unwrap();
+        let status: serde_json::Value = serde_json::from_str(body).unwrap();
+        status["checking"] == false
     })
     .await;
+    // last_check has seconds precision. Leave the prior check's second so
+    // its unchanged result cannot satisfy the explicit check's completion.
+    let previous = open_ferry_update::state::State::load(&data.state_file()).last_check;
     until(root, || {
-        server.requests() >= before + 2
-            && open_ferry_update::state::State::load(&data.state_file())
-                .last_result
-                .as_deref()
-                == Some("skipped")
+        previous.as_deref()
+            != Some(&chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    })
+    .await;
+    let before = server.requests();
+    let (status, answer) = update_request(port, "POST", "/check");
+    assert_eq!(status, 202, "{answer}\n{}", dump(root));
+    assert!(
+        answer.contains("started"),
+        "dashboard starts the explicit check: {answer}"
+    );
+    until(root, || {
+        let state = open_ferry_update::state::State::load(&data.state_file());
+        state.last_check != previous
+            && server.requests() >= before + 2
+            && state.last_result.as_deref() == Some("skipped")
     })
     .await;
     let log = dump(root);

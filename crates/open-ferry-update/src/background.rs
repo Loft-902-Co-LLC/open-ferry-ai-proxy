@@ -548,7 +548,6 @@ async fn checked(
         report: Report::Staged { version },
         ..
     })) = &outcome
-        && version != &inner.updater.running
         && inner.snapshot.borrow().settings.mode == SelfUpdateMode::Auto
     {
         let service = UpdateService {
