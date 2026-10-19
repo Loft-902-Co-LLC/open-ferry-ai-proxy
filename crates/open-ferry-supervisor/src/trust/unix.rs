@@ -1530,7 +1530,16 @@ mod tests {
             "everyone allow read,readattr,readextattr,readsecurity",
         );
         macos_acl(&dir, "everyone deny write");
-        macos_acl(&dir, &format!("user:{} allow write,writesecurity", euid()));
+        let owner = std::process::Command::new("/usr/bin/id")
+            .arg("-un")
+            .output()
+            .expect("owner name");
+        assert!(owner.status.success());
+        let owner = String::from_utf8(owner.stdout).expect("owner name is UTF-8");
+        macos_acl(
+            &dir,
+            &format!("user:{} allow write,writesecurity", owner.trim()),
+        );
         macos_acl(&dir, "user:root allow write");
         check_dirs(&[&dir], &rules).expect("ACL only grants mutations to owner and root");
     }
