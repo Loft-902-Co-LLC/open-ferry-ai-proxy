@@ -721,6 +721,10 @@ async fn follow_switch(mut handle: SwitchHandle) {
             }
             Ok(Ok(None)) => return,
             Ok(Err(SwitchError::TimedOut)) => continue,
+            Ok(Err(SwitchError::Ended(reason))) => {
+                tracing::info!(operation = %handle.id, %reason, "automatic switch ended");
+                return;
+            }
             Ok(Err(_)) | Err(_) => break,
         }
     }
@@ -809,6 +813,36 @@ pub(crate) mod test_log;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EndedProgress;
+
+    impl crate::SwitchProgress for EndedProgress {
+        fn next(
+            &mut self,
+            _deadline: std::time::Instant,
+        ) -> crate::fetch::BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+            Box::pin(async { Err(SwitchError::Ended("the new version could not load".into())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_follower_logs_the_supervisors_ended_reason_once_at_info() {
+        use tracing::instrument::WithSubscriber;
+
+        let logs = test_log::Capture::default();
+        follow_switch(SwitchHandle::new("ended".into(), Box::new(EndedProgress)))
+            .with_subscriber(logs.clone())
+            .await;
+        let events = logs.0.lock().unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].starts_with("INFO "), "{events:?}");
+        assert!(events[0].contains("automatic switch ended"), "{events:?}");
+        assert!(
+            events[0].contains("the new version could not load"),
+            "{events:?}"
+        );
+        assert!(!events[0].contains("may still be running"), "{events:?}");
+    }
 
     #[test]
     fn automatic_warnings_are_path_free_and_repeat_only_when_the_reason_changes() {
