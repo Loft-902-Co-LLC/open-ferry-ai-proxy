@@ -512,6 +512,12 @@ impl State {
     /// Gives the state an outcome the journal carried: upserts its record
     /// and marks the version failed, if the outcome says so. Idempotent.
     pub fn apply_outcome(&mut self, record: &SwitchRecord, mark_failed: Option<&str>) {
+        if record.how == how::UPDATE
+            && record.result.as_deref() == Some(result::SWITCHED)
+            && self.rolled_back.as_deref() == Some(record.to.as_str())
+        {
+            self.rolled_back = None;
+        }
         if record.how == how::ROLLBACK
             && record.result.as_deref() == Some(result::ROLLED_BACK)
             && !record.from.is_empty()
@@ -801,6 +807,26 @@ mod tests {
             None,
         );
         assert_eq!(state.rolled_back.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn reaching_the_rolled_back_version_clears_its_exclusion_as_in_the_plain_form() {
+        for version in ["0.3.0", "0.4.0"] {
+            let mut state = State {
+                rolled_back: Some("0.3.0".into()),
+                ..Default::default()
+            };
+            state.apply_outcome(
+                &SwitchRecord::started("manual", how::UPDATE, "0.2.0", version, "now"),
+                None,
+            );
+            // A newer version leaves the old marker, which excludes only
+            // that exact release. The plain switch uses the same rule.
+            assert_eq!(
+                state.rolled_back.as_deref(),
+                (version != "0.3.0").then_some("0.3.0")
+            );
+        }
     }
 
     // Not upstream's: the failure constructors carry phase, blame and why.

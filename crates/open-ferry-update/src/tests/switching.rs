@@ -333,7 +333,7 @@ async fn rollback_uses_the_watch_from_or_previous_and_validates_before_unlocking
 }
 
 #[tokio::test]
-async fn failed_and_rolled_back_outcomes_are_skipped_by_checks_and_installs() {
+async fn pending_exclusions_apply_to_checks_and_auto_installs_but_manual_installs_retry() {
     for failed in [false, true] {
         let f = Fixture::new().await;
         f.release("0.2.0");
@@ -372,7 +372,7 @@ async fn failed_and_rolled_back_outcomes_are_skipped_by_checks_and_installs() {
             assert!(matches!(report, Report::SkippedRolledBack { .. }));
         }
         assert!(matches!(
-            service.install_now(false).await,
+            service.install_now(true).await,
             Err(SwitchError::Skipped(_))
         ));
         assert!(fake.calls.lock().unwrap().is_empty());
@@ -384,6 +384,33 @@ async fn failed_and_rolled_back_outcomes_are_skipped_by_checks_and_installs() {
             std::fs::read(f.data.root().join(crate::journal::JOURNAL_FILE)).unwrap(),
             pending_bytes
         );
+        service.install_now(false).await.unwrap();
+        assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), false)]);
+    }
+}
+
+#[tokio::test]
+async fn a_manual_install_reuses_a_staged_excluded_version_without_downloading_it_again() {
+    for failed in [false, true] {
+        let f = Fixture::new().await;
+        f.release("0.2.0");
+        let (service, fake) = service(&f, "auto");
+        service.check_once().await.unwrap().unwrap();
+        let mut state = f.updater.state();
+        if failed {
+            state.mark_failed("0.2.0");
+        } else {
+            state.rolled_back = Some("0.2.0".into());
+        }
+        f.updater.save(&state).unwrap();
+        let requests = f.server.requests();
+        assert!(matches!(
+            service.install_now(true).await,
+            Err(SwitchError::Skipped(_))
+        ));
+        service.install_now(false).await.unwrap();
+        assert_eq!(f.server.requests(), requests);
+        assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), false)]);
     }
 }
 
