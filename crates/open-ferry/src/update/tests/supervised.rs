@@ -307,6 +307,7 @@ async fn mutation_errors_keep_request_certainty_in_text_and_json() {
             for error in [
                 SwitchError::NotSupervised,
                 SwitchError::UpdatesOff,
+                SwitchError::Disabled("no private runtime directory".into()),
                 SwitchError::Update(UpdateError::Busy),
                 SwitchError::Skipped(open_ferry_update::Report::SkippedFailed {
                     version: "0.2.0".into(),

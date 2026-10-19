@@ -1232,6 +1232,7 @@ impl Outcome {
             SwitchError::Ended(_) => (error.to_string(), "error"),
             SwitchError::NotSupervised
             | SwitchError::UpdatesOff
+            | SwitchError::Disabled(_)
             | SwitchError::Update(_)
             | SwitchError::Skipped(_)
             | SwitchError::Unreachable(_)

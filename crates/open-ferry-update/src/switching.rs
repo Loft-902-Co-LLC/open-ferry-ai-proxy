@@ -19,7 +19,7 @@ use crate::{Report, UpdateError, Updater};
 /// Why preparing, asking for, or following a supervised switch failed.
 ///
 /// Request certainty for update, rollback and cancellation:
-/// - `NotSupervised`, `UpdatesOff`, `Update`, `Skipped`, `Unreachable` and
+/// - `NotSupervised`, `UpdatesOff`, `Disabled`, `Update`, `Skipped`, `Unreachable` and
 ///   `Untrusted`: the request was not sent.
 /// - `Refused`: the request was sent and the supervisor did not take it.
 /// - `TimedOut`, `Stopped` and `Protocol`: the request may have been taken.
@@ -36,6 +36,8 @@ use crate::{Report, UpdateError, Updater};
 pub enum SwitchError {
     NotSupervised,
     UpdatesOff,
+    /// Local endpoint policy disables switching; no request was sent.
+    Disabled(String),
     Update(UpdateError),
     /// A failed or rolled-back release is not retried.
     Skipped(Report),
@@ -57,6 +59,7 @@ impl fmt::Display for SwitchError {
         match self {
             Self::NotSupervised => f.write_str("this install is not supervised"),
             Self::UpdatesOff => f.write_str("automatic updates are off"),
+            Self::Disabled(why) => write!(f, "switching is disabled: {why}"),
             Self::Update(error) => error.fmt(f),
             Self::Skipped(Report::SkippedFailed { version }) => {
                 write!(f, "open-ferry {version} failed here and is skipped")
