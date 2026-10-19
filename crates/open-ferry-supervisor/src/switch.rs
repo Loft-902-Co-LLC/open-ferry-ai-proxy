@@ -18,9 +18,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
-use crate::core::{
-    AUTOMATIC_COOLDOWN, Core, Drain, Open, SwitchRequest, TICK, Tracked, Watch, unfinished_at,
-};
+use crate::core::{Core, Drain, Open, SwitchRequest, TICK, Tracked, Watch};
 use crate::disk::Disk;
 use crate::driver::{Driver, Event, ExitInfo, SpawnError, WorkerId};
 use crate::host::Host;
@@ -621,8 +619,8 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
         from: &Artifact,
     ) -> Result<Artifact, String> {
         self.prune_automatic_cooldowns();
-        let journal = self.rt.journal.as_ref().ok_or("there is no journal")?;
         if request.auto {
+            let journal = self.rt.journal.as_ref().ok_or("there is no journal")?;
             let state = open_ferry_update::state::State::load_strict(&self.cfg.data.state_file())
                 .map_err(|why| {
                 tracing::warn!("could not read automatic switch exclusions: {why}");
@@ -651,30 +649,31 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                     "that version was rolled back from; automatic switching skips it".to_owned(),
                 );
             }
-            let now = self.clock.now();
-            let cooling_down = self.automatic_cooldowns.contains_key(&request.to)
-                || state
-                    .history
-                    .iter()
-                    .chain(state.last_switch.iter())
-                    .chain(journal.outcomes.iter().map(|outcome| &outcome.record))
-                    .chain(
-                        self.rt
-                            .pending
-                            .iter()
-                            .map(|pending| &pending.outcome.record),
-                    )
-                    .any(|record| {
-                        record.to == request.to
-                            && unfinished_at(record)
-                                .is_some_and(|ended| now - ended < AUTOMATIC_COOLDOWN)
-                    });
-            if cooling_down {
+            let records: Vec<_> = state
+                .history
+                .iter()
+                .chain(state.last_switch.iter())
+                .chain(journal.outcomes.iter().map(|outcome| &outcome.record))
+                .chain(
+                    self.rt
+                        .pending
+                        .iter()
+                        .map(|pending| &pending.outcome.record),
+                )
+                .filter(|record| record.to == request.to)
+                .cloned()
+                .collect();
+            for record in records {
+                self.remember_outcome(&record);
+            }
+            self.prune_automatic_cooldowns();
+            if self.automatic_cooldowns.contains_key(&request.to) {
                 return Err(
                     "a recent switch to that version did not finish; trying again later".to_owned(),
                 );
             }
         }
+        let journal = self.rt.journal.as_ref().ok_or("there is no journal")?;
         match request.how {
             How::Update => {
                 self.disk

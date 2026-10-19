@@ -633,6 +633,8 @@ pub struct Core<'a, D: Driver, H: Host, S: Disk> {
     pub(crate) mode_gen: u64,
     /// Non-switched targets stay cooled down even when history evicts them.
     pub(crate) automatic_cooldowns: BTreeMap<String, chrono::DateTime<chrono::Utc>>,
+    /// First observations of future stamps, kept until their original age expires.
+    cooldown_stamps: BTreeMap<chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>>,
     /// The active worker, watched through the waits before its hand over.
     pub(crate) watch_a: Option<WorkerId>,
     /// Where A's ladder stood when A was removed during a switch, read before
@@ -718,6 +720,7 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
             mode_last: None,
             mode_gen: 0,
             automatic_cooldowns: BTreeMap::new(),
+            cooldown_stamps: BTreeMap::new(),
             watch_a: None,
             a_progress: None,
             deferred: Deferred::default(),
@@ -749,13 +752,27 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
 
     pub(crate) fn prune_automatic_cooldowns(&mut self) {
         let now = self.clock.now();
-        self.automatic_cooldowns
-            .retain(|_, ended| now - *ended < AUTOMATIC_COOLDOWN);
+        self.automatic_cooldowns.retain(|_, ended| {
+            *ended = (*ended).min(now);
+            now - *ended < AUTOMATIC_COOLDOWN
+        });
+        self.cooldown_stamps.retain(|original, observed| {
+            *observed = (*observed).min(now);
+            now - *original < AUTOMATIC_COOLDOWN
+        });
     }
 
-    fn remember_outcome(&mut self, record: &SwitchRecord) {
+    pub(crate) fn remember_outcome(&mut self, record: &SwitchRecord) {
         self.prune_automatic_cooldowns();
         if let Some(ended) = unfinished_at(record) {
+            let now = self.clock.now();
+            // Anchor a skewed stamp once. Clamping it anew on every admission
+            // would keep extending the cooldown until the wall clock caught up.
+            let ended = if ended > now {
+                *self.cooldown_stamps.entry(ended).or_insert(now)
+            } else {
+                self.cooldown_stamps.get(&ended).copied().unwrap_or(ended)
+            };
             self.automatic_cooldowns
                 .entry(record.to.clone())
                 .and_modify(|last| *last = (*last).max(ended))
