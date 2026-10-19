@@ -695,7 +695,7 @@ An acceptance timeout, an invalid reply, or a stream ending without a reply is a
 
 If the supervisor accepted the switch and then ended it with an error before the route returned, the answer is `202 {"failed": true, "reason": "..."}`. `switch_request.state` is `failed` and keeps that reason. This is a failed accepted operation, not a refusal.
 
-A refusal or preparation failure before the response returns `409 switch_refused` with the supervisor's or updater's reason in `message`. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
+A supervisor refusal before the response returns `409 switch_refused` with its reason unchanged in `message`. A local preparation failure (download, verification, missing staged release, I/O or journal error) returns `409 switch_failed` with a short reason; detailed diagnostics go to the server log. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
 
 ---
 
