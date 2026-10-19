@@ -166,6 +166,7 @@ pub(crate) enum AclState {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Extended,
     /// The ACL could not be read, or this system's ACLs are not understood.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Unreadable,
 }
 

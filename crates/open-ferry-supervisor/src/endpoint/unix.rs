@@ -774,6 +774,19 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_candidates_use_the_system_provided_temp_directory_and_var_run() {
+        // Not upstream's: exercise confstr and validate the actual user's endpoint ancestry.
+        let identity = Identity::current(ServiceKind::User).expect("identity");
+        let temp = darwin_user_temp_dir().expect("Darwin user temp directory");
+        let location = Location::resolve(&identity, Path::new("/unused")).expect("safe runtime root");
+        assert_eq!(location.root, temp);
+        assert_eq!(location.name, "open-ferry");
+        let system = candidates(&Identity::for_uid(ServiceKind::System, 0));
+        assert_eq!(system[0].to_record(), "/var/run/open-ferry/supervisor.sock");
+    }
+
     #[test]
     fn a_path_too_long_for_sun_path_skips_the_location() {
         // Not upstream's: the length is checked at start.
