@@ -69,9 +69,9 @@ struct Live {
     install: Option<Install>,
 }
 
-struct Inner {
+pub(crate) struct Inner {
     /// The updater, but for its downloader, which each check makes.
-    updater: Updater,
+    pub(crate) updater: Updater,
     make_fetch: MakeFetch,
     snapshot: watch::Sender<Snapshot>,
     live: Mutex<Live>,
@@ -84,7 +84,7 @@ struct Inner {
 /// The server's update check: cheap to clone, one loop for all clones.
 #[derive(Clone)]
 pub struct UpdateService {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl std::fmt::Debug for UpdateService {
@@ -169,7 +169,7 @@ impl UpdateService {
         self
     }
 
-    fn switcher(&self) -> Result<Arc<dyn Switcher>, SwitchError> {
+    pub(crate) fn switcher(&self) -> Result<Arc<dyn Switcher>, SwitchError> {
         self.inner
             .switcher
             .lock()

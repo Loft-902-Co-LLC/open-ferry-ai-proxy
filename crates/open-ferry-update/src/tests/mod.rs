@@ -5,6 +5,7 @@ mod background;
 mod blue_green;
 mod fetch;
 mod support;
+mod switch_view;
 mod switching;
 mod units;
 mod updater;

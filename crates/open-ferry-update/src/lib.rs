@@ -38,6 +38,7 @@ pub mod settings;
 pub mod staging;
 pub mod state;
 pub mod switch;
+pub mod switch_view;
 pub mod switching;
 #[doc(hidden)]
 pub mod test_seams;
@@ -57,6 +58,7 @@ pub use publication::sync_directory;
 pub use settings::{ModeSource, Settings};
 pub use state::State;
 pub use switch::{KeepPolicy, ReplaceOnDisk, Switch, SwitchPlan};
+pub use switch_view::{LastSwitch, SwitchView};
 pub use switching::{
     CancelOutcome, SwitchError, SwitchEvent, SwitchHandle, SwitchProgress, Switcher,
 };
