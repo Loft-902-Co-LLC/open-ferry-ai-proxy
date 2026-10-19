@@ -271,6 +271,12 @@ fn the_cli_updates_and_rolls_back_with_no_failed_or_refused_request() {
         );
         return;
     }
+    if open_ferry_update::install::detect_container(std::path::Path::exists, |name| {
+        std::env::var_os(name)
+    }) {
+        eprintln!("skip process_update: container installs do not update themselves");
+        return;
+    }
     let fx = Fx::new_for_this_user_layout();
     write_executable(&fx.installed(), &artifact_bytes(BEFORE));
     fs::write(fx.installed().with_file_name("test-marker"), "before").unwrap();
