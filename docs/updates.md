@@ -108,7 +108,7 @@ Automatic checks skip releases that failed here or were rolled back from. When a
 
 A timeout, a lost connection or an unreadable reply to a supervised update, rollback or cancellation leaves its outcome unknown. Run `open-ferry update -check` and do not resend the request. The command exits with 1; its JSON result is `outcome-unknown`.
 
-The supervisor switches only while its directories and version binaries are safe from other accounts: owned by you (or root) and writable by no one else. Otherwise it disables switching or refuses that version, and `open-ferry update -check` says why. On macOS this covers extended ACLs; on Linux, a user service also accepts a directory writable by your private group. [docs/cli.md](cli.md#what-it-installs) has the details.
+The supervisor switches only while its directories and version binaries are safe from other accounts: owned and writable only by you and the system's own accounts, root on Linux and macOS, and SYSTEM, Administrators and TrustedInstaller on Windows. Otherwise it disables switching or refuses that version, and `open-ferry update -check` says why. On macOS this covers extended ACLs; on Linux, a user service also accepts a directory writable by your private group. [docs/cli.md](cli.md#what-it-installs) has the details.
 
 In the plain form, it checks for the latest release, says what it would do, and asks. Then it downloads the release (or takes the copy the server staged), checks it as above, and puts it in place of the installed binary: it copies the new binary beside the old one and renames it over the old, so the path never holds half a binary. The old binary is kept in the data directory for a rollback. On Windows, which won't replace a running `.exe`, the old one is first renamed `open-ferry.exe.old`, removed at the next update. `-yes` installs without asking; without a terminal to ask in, and without `-yes`, it installs nothing. Its flags and exit codes are in [docs/cli.md](cli.md#open-ferry-update).
 
@@ -127,7 +127,7 @@ In the plain form, nothing is restarted: the running server goes on with the old
 open-ferry update -rollback
 ```
 
-It puts back the version before the last update, from its copy in the data directory, after running it with `--version`. Nothing is downloaded, and nothing is restarted. Automatic checks skip the version you rolled back from until a newer release; `open-ferry update` installs it again. The data directory keeps one version back. For an older one, install it with the install script's `--version` (`-Version`).
+While a supervisor runs, it switches the service back to the version the supervisor kept, on the same listener, as [an update does](#installing-an-update). In the plain form, it puts back the version before the last update, from its copy in the data directory, after running it with `--version`. Nothing is downloaded, and nothing is restarted. Automatic checks skip the version you rolled back from until a newer release; `open-ferry update` installs it again. The data directory keeps one version back. For an older one, install it with the install script's `--version` (`-Version`).
 
 ## Files
 

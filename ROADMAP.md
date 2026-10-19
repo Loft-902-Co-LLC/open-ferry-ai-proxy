@@ -74,6 +74,7 @@ Still to come:
   3. Done on Linux and Windows, and for macOS user LaunchAgents: supported services start open-ferry under the supervisor when they can update themselves, and installer reruns refuse to replace a running supervised install. macOS machine services are still refused.
   4. Done: `open-ferry update` and `-rollback` switch versions through the supervisor on the same listener, `-check` shows its live status and last outcome, and `-cancel` asks it to cancel. The dashboard's About page installs and rolls back the same way. In `auto` mode, a supervised service switches to each release it stages by itself.
   5. Done: `open-ferry migrate` installs the same supervised or plain service form as `service install`, the docs describe it, and CI tests blue-green switching on macOS 15 and native x86_64 musl in Alpine.
+  6. Next: before 0.1.0, two release candidates are tested end to end on Windows, Linux and macOS: `auto` switches from one to the other, then it rolls back and uninstalls.
 - **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
 - **A Homebrew tap.**
 - **Being findable:** once the first release is out, ask to be listed with the related projects in CLIProxyAPI's README.
