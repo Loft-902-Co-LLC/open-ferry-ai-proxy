@@ -624,25 +624,29 @@ impl Live {
 }
 
 async fn follow_switch(mut handle: SwitchHandle) {
+    // Sign-ins can wait five minutes and the watch lasts ten. Quiet intervals
+    // do not say whether the switch is still running.
+    let until = Instant::now() + Duration::from_secs(30 * 60);
     loop {
-        match handle
-            .next(std::time::Instant::now() + Duration::from_secs(120))
-            .await
-        {
-            Ok(Some(SwitchEvent::Progress { phase })) => {
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let deadline = std::time::Instant::now() + remaining.min(Duration::from_secs(120));
+        match tokio::time::timeout_at(until, handle.next(deadline)).await {
+            Ok(Ok(Some(SwitchEvent::Progress { phase }))) => {
                 tracing::debug!(operation = %handle.id, state = %phase, "automatic switch progress");
             }
-            Ok(Some(SwitchEvent::Done { result })) => {
+            Ok(Ok(Some(SwitchEvent::Done { result }))) => {
                 tracing::info!(operation = %handle.id, state = %result, "automatic switch finished");
                 return;
             }
-            Ok(None) => return,
-            Err(error) => {
-                tracing::info!(operation = %handle.id, "automatic switch progress ended: {error}; see supervisor status and update history");
-                return;
-            }
+            Ok(Ok(None)) => return,
+            Ok(Err(SwitchError::TimedOut)) => continue,
+            Ok(Err(_)) | Err(_) => break,
         }
     }
+    tracing::info!(operation = %handle.id, "automatic switch is no longer being followed; it may still be running; see supervisor status and update history");
 }
 
 fn assessed_install(inner: &Inner) -> Install {
@@ -759,5 +763,59 @@ mod tests {
         assert!(live.automatic_warning(Some(&first)).is_some());
         assert!(live.automatic_warning(Some(&second)).is_some());
         assert!(live.automatic_warning(Some(&second)).is_none());
+    }
+
+    struct QuietProgress {
+        done_at: Instant,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        done: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::SwitchProgress for QuietProgress {
+        fn next(
+            &mut self,
+            _deadline: std::time::Instant,
+        ) -> crate::fetch::BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+            Box::pin(async move {
+                use std::sync::atomic::Ordering;
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep_until(
+                    self.done_at.min(Instant::now() + Duration::from_secs(120)),
+                )
+                .await;
+                if Instant::now() < self.done_at {
+                    return Err(SwitchError::TimedOut);
+                }
+                self.done.store(true, Ordering::SeqCst);
+                Ok(SwitchEvent::Done {
+                    result: serde_json::json!({"result": "switched"}),
+                })
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_waits_through_signins_and_the_watch_but_has_an_overall_cap() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        for minutes in [16, 60] {
+            let start = Instant::now();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let done = Arc::new(AtomicBool::new(false));
+            let progress = QuietProgress {
+                done_at: start + Duration::from_secs(minutes * 60),
+                calls: calls.clone(),
+                done: done.clone(),
+            };
+            follow_switch(SwitchHandle::new("quiet".into(), Box::new(progress))).await;
+            assert!(
+                calls.load(Ordering::SeqCst) > 1,
+                "quiet timeouts were retried"
+            );
+            assert_eq!(done.load(Ordering::SeqCst), minutes == 16);
+            assert_eq!(
+                Instant::now() - start,
+                Duration::from_secs(minutes.min(30) * 60)
+            );
+        }
     }
 }
