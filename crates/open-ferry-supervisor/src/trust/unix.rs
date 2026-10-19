@@ -15,6 +15,10 @@ use std::sync::Arc;
 use super::TrustError;
 use crate::endpoint::ServiceKind;
 
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod macos;
+
 /// What a trust check tolerates. Build one with [`TrustRules::system`] or [`TrustRules::user`].
 #[derive(Clone, Debug)]
 pub struct TrustRules {
@@ -76,11 +80,9 @@ impl TrustRules {
 /// Checks each directory in `paths`, the directory itself and every ancestor up to `/`.
 /// A symlink anywhere in a chain is refused, so pass canonical paths.
 ///
-/// [UNVERIFIED / limitation] On macOS the extended ACL of a directory is not inspected, so an
-/// ACL entry that grants write to another account is invisible when the group bit is clear
-/// (for example mode 0755 with an ACL). That is acceptable only while switching stays disabled
-/// on macOS; inspecting ACLs there is a prerequisite for enabling it. Linux reads the POSIX
-/// access ACL.
+/// Linux reads the POSIX access ACL before allowing a private group to write. macOS reads
+/// each object's extended ACL, including when its mode bits show no group write, and refuses
+/// mutation grants to anyone other than the owner or root. ACL read errors fail closed.
 pub fn check_dirs(paths: &[&Path], rules: &TrustRules) -> Result<(), TrustError> {
     for path in paths {
         walk(rules, path, false).map_err(WalkError::into_trust)?;
@@ -118,8 +120,21 @@ pub fn check_file(path: &Path, rules: &TrustRules) -> Result<(), TrustError> {
     if file_type(&st) != libc::S_IFREG as u32 {
         return Err(TrustError::new(path, "it is not a regular file"));
     }
+    check_fd_acl(file.as_raw_fd(), st.st_uid as u32)
+        .map_err(|reason| TrustError::new(path, reason))?;
     check_dir_stat(rules, DirStat::of_fd(&st, file.as_raw_fd()), false)
         .map_err(|reason| TrustError::new(path, reason))
+}
+
+/// Darwin ACLs grant access independently of mode bits, including on a 0700 endpoint.
+pub(crate) fn check_fd_acl(fd: RawFd, owner: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return macos::check(fd, owner);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (fd, owner);
+        Ok(())
+    }
 }
 
 /// Why a walk stopped.
@@ -207,7 +222,14 @@ fn access_acl(fd: RawFd) -> AclState {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn access_acl(_fd: RawFd) -> AclState {
+    // Darwin's independent extended ACL was checked by check_fd_acl. A real macOS
+    // account lookup still fails closed for the private-group exception.
+    AclState::Plain
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn access_acl(_fd: RawFd) -> AclState {
     AclState::Unreadable
 }
@@ -354,6 +376,8 @@ fn check_component(
         return Ok(());
     }
     let st = fstat(fd.as_raw_fd()).map_err(|e| WalkError::Io(shown.to_path_buf(), e))?;
+    check_fd_acl(fd.as_raw_fd(), st.st_uid as u32)
+        .map_err(|reason| WalkError::Untrusted(shown.to_path_buf(), reason))?;
     let sticky_ok = sticky_ok && is_sticky_root(shown);
     check_dir_stat(rules, DirStat::of_fd(&st, fd.as_raw_fd()), sticky_ok)
         .map_err(|reason| WalkError::Untrusted(shown.to_path_buf(), reason))
@@ -1422,5 +1446,91 @@ mod tests {
         assert!(err.reason.contains("extended ACL"), "{err}");
         let err = check_file(&file, &user).unwrap_err();
         assert!(err.reason.contains("extended ACL"), "{err}");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_acl(path: &Path, text: &str) {
+        assert!(
+            std::process::Command::new("chmod")
+                .args(["+a", text])
+                .arg(path)
+                .status()
+                .expect("chmod +a")
+                .success()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_refuses_each_mutation_grant_without_a_group_write_bit() {
+        // Not upstream's: Darwin ACLs add rights independently of the mode, including
+        // permissions to replace a child or change who can write it later.
+        for permission in [
+            "add_file",
+            "add_subdirectory",
+            "delete_child",
+            "delete",
+            "writeattr",
+            "writeextattr",
+            "writesecurity",
+            "chown",
+        ] {
+            let tree = Tree::new();
+            let dir = tree.dir("acl-dir", 0o755);
+            let rules = tree.rules(ServiceKind::User, Fake::private_here());
+            check_dirs(&[&dir], &rules).expect("plain directory");
+            macos_acl(&dir, &format!("everyone allow {permission}"));
+            let error = check_dirs(&[&dir], &rules).unwrap_err();
+            assert!(
+                error.reason.contains("extended ACL"),
+                "{permission}: {error}"
+            );
+            let deep = tree.dir("acl-dir/child", 0o700);
+            assert_eq!(check_dirs(&[&deep], &rules).unwrap_err().path, dir);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_refuses_file_and_group_acl_grants_and_inherit_only_grants() {
+        // Not upstream's: files, groups and rights inherited by future children count too.
+        let tree = Tree::new();
+        let dir = tree.dir("acl-dir", 0o755);
+        let rules = tree.rules(ServiceKind::User, Fake::private_here());
+        let file = dir.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        macos_acl(&file, "everyone allow write");
+        assert!(
+            check_file(&file, &rules)
+                .unwrap_err()
+                .reason
+                .contains("extended ACL")
+        );
+        macos_acl(&dir, "group:staff allow add_file");
+        assert!(check_dirs(&[&dir], &rules).is_err());
+
+        let inherited = tree.dir("inherited", 0o700);
+        macos_acl(
+            &inherited,
+            "everyone allow file_inherit,directory_inherit,only_inherit,write",
+        );
+        assert!(check_dirs(&[&inherited], &rules).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_allows_read_grants_deny_entries_and_owner_or_root_mutation() {
+        // Not upstream's: common read-only and deny ACLs do not disable switching.
+        let tree = Tree::new();
+        let dir = tree.dir("acl-dir", 0o755);
+        let rules = tree.rules(ServiceKind::User, Fake::private_here());
+        macos_acl(
+            &dir,
+            "everyone allow read,readattr,readextattr,readsecurity",
+        );
+        macos_acl(&dir, "everyone deny write");
+        macos_acl(&dir, &format!("user:{} allow write,writesecurity", euid()));
+        macos_acl(&dir, "user:root allow write");
+        check_dirs(&[&dir], &rules).expect("ACL only grants mutations to owner and root");
     }
 }

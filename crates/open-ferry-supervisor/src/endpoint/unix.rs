@@ -13,7 +13,8 @@ use tokio::net::{UnixListener, UnixStream};
 use super::{EndpointError, Peer, ServiceKind};
 use crate::process::SupervisorLock;
 use crate::trust::unix::{
-    TrustRules, WalkError, cstring, file_type, fstat, fstatat_nofollow, open_dir_at, walk,
+    TrustRules, WalkError, check_fd_acl, cstring, file_type, fstat, fstatat_nofollow, open_dir_at,
+    walk,
 };
 
 /// The socket's file name inside the endpoint directory.
@@ -98,7 +99,6 @@ impl Location {
     /// The first location, in the design's order, whose path chain validates. The data
     /// directory plays no part on Unix.
     pub fn resolve(identity: &Identity, _data_dir: &Path) -> Result<Self, EndpointError> {
-        switching_supported()?;
         let mut skipped = Vec::new();
         for location in candidates(identity) {
             match open_endpoint_dir(&location, identity, false) {
@@ -142,15 +142,6 @@ impl Location {
     pub fn socket_path(&self) -> PathBuf {
         self.dir().join(SOCKET_FILE)
     }
-}
-
-fn switching_supported() -> Result<(), EndpointError> {
-    if cfg!(target_os = "macos") {
-        return Err(EndpointError::SwitchingDisabled(
-            "macOS directory ACLs aren't checked yet".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Locations in the order the design tries them.
@@ -322,6 +313,8 @@ fn open_endpoint_dir(
             shown.display()
         )));
     }
+    check_fd_acl(dir.as_raw_fd(), st.st_uid as u32)
+        .map_err(|why| Fail::Unsafe(format!("{}: {why}", shown.display())))?;
     Ok(Some(Opened { dir, socket }))
 }
 
@@ -551,7 +544,6 @@ impl Server {
         identity: &Identity,
         _lock: &SupervisorLock,
     ) -> Result<Self, EndpointError> {
-        switching_supported()?;
         let opened = open_endpoint_dir(location, identity, true)
             .map_err(Fail::for_server)?
             .ok_or_else(|| EndpointError::Io(io::Error::from(io::ErrorKind::NotFound)))?;
@@ -703,29 +695,31 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn macos_disables_switching_without_failing_the_service() {
-        // Not upstream's: both the default and a caller-chosen endpoint fail closed with
-        // SwitchingDisabled, which startup treats as a reason to run without switching.
+    async fn macos_refuses_an_acl_grant_even_on_a_0700_endpoint_directory() {
+        // Not upstream's: endpoint directories need the ACL check too, not only their root.
         let data = tempfile::tempdir().expect("data");
         let lock = SupervisorLock::try_acquire(data.path()).expect("lock");
         let identity = Identity::current(ServiceKind::User).expect("identity");
-        let location = Location::new("/tmp", "ofp-disabled").expect("location");
-        for error in [
-            Location::resolve(&identity, data.path()).unwrap_err(),
-            Server::bind(&location, &identity, &lock)
-                .err()
-                .expect("disabled"),
-        ] {
-            assert!(
-                matches!(
-                    error,
-                    EndpointError::SwitchingDisabled(ref why)
-                        if why == "macOS directory ACLs aren't checked yet"
-                ),
-                "{error}"
-            );
-        }
-        assert!(!location.dir().exists());
+        let location =
+            Location::new("/tmp", format!("ofp-acl-{}", std::process::id())).expect("location");
+        let server = Server::bind(&location, &identity, &lock).expect("safe endpoint");
+        drop(server);
+        assert!(
+            std::process::Command::new("chmod")
+                .args(["+a", "everyone allow add_file"])
+                .arg(location.dir())
+                .status()
+                .expect("chmod")
+                .success()
+        );
+        let error = Server::bind(&location, &identity, &lock)
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(error, EndpointError::Unsafe(ref why) if why.contains("extended ACL")),
+            "{error}"
+        );
+        std::fs::remove_dir_all(location.dir()).expect("cleanup");
     }
 
     #[test]
