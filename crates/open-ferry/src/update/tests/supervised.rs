@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::*;
 
-struct Events(VecDeque<Result<SwitchEvent, SwitchError>>);
+pub(super) struct Events(pub(super) VecDeque<Result<SwitchEvent, SwitchError>>);
 
 impl SwitchProgress for Events {
     fn next(&mut self, _: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
@@ -405,7 +405,7 @@ async fn stopping_the_follower_drops_its_handle_without_cancelling_the_switch() 
     assert!(fake.base.calls().is_empty());
 }
 
-struct QuietPhase(tokio::time::Instant);
+pub(super) struct QuietPhase(pub(super) tokio::time::Instant);
 impl SwitchProgress for QuietPhase {
     fn next(&mut self, deadline: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
         Box::pin(async move {

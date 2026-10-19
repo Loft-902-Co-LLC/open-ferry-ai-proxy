@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use super::*;
 
+mod backend;
 mod supervised;
 
 mod command_scope {

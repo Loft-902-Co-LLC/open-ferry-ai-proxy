@@ -39,6 +39,12 @@ pub struct TestKey {
     pair: minisign::KeyPair,
 }
 
+impl Default for TestKey {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestKey {
     pub fn new() -> Self {
         Self {

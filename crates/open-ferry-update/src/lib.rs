@@ -86,3 +86,8 @@ pub const MODE_ENV: &str = "OPEN_FERRY_SELF_UPDATE";
 
 /// The User-Agent of every update request.
 pub const USER_AGENT: &str = concat!("open-ferry/", env!("CARGO_PKG_VERSION"));
+
+/// Fake release server and installer for downstream updater tests.
+#[cfg(feature = "test-support")]
+#[path = "tests/support.rs"]
+pub mod test_support;
