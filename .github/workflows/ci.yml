@@ -328,6 +328,13 @@ jobs:
         if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
         run: cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-run
 
+      # Fail promptly on platform plumbing before the longer process matrix.
+      - name: Check macOS ACLs and worker descriptor passing
+        if: runner.os == 'macOS' && matrix.shard == 1 && github.event_name != 'push'
+        run: |
+          cargo nextest run --profile ci -p open-ferry-supervisor --locked --features blue-green-test --lib -E 'test(trust::unix::) | test(endpoint::unix::)'
+          cargo nextest run --profile ci -p open-ferry-supervisor --locked --features blue-green-test --test unix_process
+
       - name: This runner's share of the tests
         id: shard
         if: github.event_name != 'push'
