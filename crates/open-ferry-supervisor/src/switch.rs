@@ -618,6 +618,36 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
         from: &Artifact,
     ) -> Result<Artifact, String> {
         let journal = self.rt.journal.as_ref().ok_or("there is no journal")?;
+        if request.auto {
+            let state = open_ferry_update::state::State::load_strict(&self.cfg.data.state_file())
+                .map_err(|why| {
+                tracing::warn!("could not read automatic switch exclusions: {why}");
+                "automatic switch exclusions could not be read".to_owned()
+            })?;
+            let mut failed = state.has_failed(&request.to);
+            let mut rolled_back = state.rolled_back.as_deref() == Some(&request.to);
+            for outcome in journal
+                .outcomes
+                .iter()
+                .chain(self.rt.pending.iter().map(|pending| &pending.outcome))
+            {
+                failed |= outcome
+                    .mark_failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.version == request.to);
+                rolled_back |= outcome.record.how == "rollback"
+                    && outcome.record.result.as_deref() == Some("rolled-back")
+                    && outcome.record.from == request.to;
+            }
+            if failed {
+                return Err("that version failed here; automatic switching skips it".to_owned());
+            }
+            if rolled_back {
+                return Err(
+                    "that version was rolled back from; automatic switching skips it".to_owned(),
+                );
+            }
+        }
         match request.how {
             How::Update => {
                 self.disk
