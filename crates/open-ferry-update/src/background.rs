@@ -536,6 +536,9 @@ async fn checked(
                 Err(SwitchError::Ended(reason)) => {
                     tracing::info!(%version, %reason, "automatic switch ended");
                 }
+                Err(SwitchError::TimedOut | SwitchError::Stopped | SwitchError::Protocol(_)) => {
+                    tracing::info!(%version, state = "uncertain", "no answer from the supervisor; it may have taken the automatic switch; see its status");
+                }
                 Err(error) => tracing::debug!("automatic switch deferred: {error}"),
             }
         }
