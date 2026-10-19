@@ -626,41 +626,49 @@ impl SwitchProgress for LaterProgress {
 
 #[tokio::test]
 async fn a_switch_follower_logs_its_outcome_after_update_checks_stop() {
-    let f = Fixture::new().await;
-    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
-    let polled = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let logs = Capture::default();
-    *fake.progress.lock().unwrap() = Some(Box::new(LaterProgress {
-        polled: polled.clone(),
-        release: release.clone(),
-    }));
-    service
-        .check_once()
-        .with_subscriber(logs.clone())
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), polled.notified())
-        .await
-        .unwrap();
-    service.stop();
-    release.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if logs.0.lock().unwrap().iter().any(|line| {
-                line.starts_with("INFO")
-                    && line.contains("automatic switch finished")
-                    && line.contains("failed-to-load")
-            }) {
-                break;
-            }
-            tokio::task::yield_now().await;
+    for asynchronous in [false, true] {
+        let f = Fixture::new().await;
+        let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let logs = Capture::default();
+        *fake.progress.lock().unwrap() = Some(Box::new(LaterProgress {
+            polled: polled.clone(),
+            release: release.clone(),
+        }));
+        service
+            .check_once()
+            .with_subscriber(logs.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), polled.notified())
+            .await
+            .unwrap();
+        if asynchronous {
+            tokio::time::timeout(Duration::from_secs(1), service.stop_and_wait())
+                .await
+                .expect("stopping checks must not wait for the in-flight follower");
+        } else {
+            service.stop();
         }
-    })
-    .await
-    .unwrap();
-    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if logs.0.lock().unwrap().iter().any(|line| {
+                    line.starts_with("INFO")
+                        && line.contains("automatic switch finished")
+                        && line.contains("failed-to-load")
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    }
 }
 
 struct PollGate {
