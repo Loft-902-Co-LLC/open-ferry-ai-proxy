@@ -28,7 +28,7 @@ export function SwitchStatus({ status, onRetry, hidePhase = false }: { status: U
       <p className="break-words">{request.reason}</p>
       {request.state === "unknown" && <Button size="sm" onClick={onRetry}>Read status</Button>}
     </Alert>}
-    {!hidePhase && supervisor != null && supervisor.error === null && switchInProgress({ ...status, switch_request: null }) && <Alert tone="info" live title={`Switch: ${readable(supervisor.phase)}`}>
+    {!hidePhase && supervisor?.error === null && switchInProgress({ ...status, switch_request: null }) && <Alert tone="info" live title={`Switch: ${readable(supervisor.phase)}`}>
       {supervisor.switch != null && <p>{supervisor.switch.from} to {supervisor.switch.to}.</p>}
       {supervisor.watch_until !== null && <p>Watching until {formatDateTime(supervisor.watch_until)}.</p>}
     </Alert>}
