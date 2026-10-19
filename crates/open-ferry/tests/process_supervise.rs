@@ -40,7 +40,7 @@ fn free_port() -> u16 {
 /// (its `bin/`), with a config on `port` and self-update off, on a data
 /// directory and an endpoint of its own. The worker answers with the marker
 /// unique to this fixture.
-fn spawn(root: &std::path::Path, port: u16) -> Sup {
+fn prepare(root: &std::path::Path) -> std::path::PathBuf {
     // The binary runs from the scratch directory, where the data directory's
     // trust check accepts it, not from the target directory.
     let bin = root.join("bin");
@@ -62,11 +62,15 @@ fn spawn(root: &std::path::Path, port: u16) -> Sup {
         )
         .unwrap();
     }
+    exe
+}
+
+fn spawn(root: &std::path::Path, exe: &std::path::Path, port: u16) -> Sup {
     // Self-update is off: nothing here may switch or update.
     std::fs::write(root.join("config.yaml"), config_text(root, port, "off")).unwrap();
 
     let log = std::fs::File::create(root.join("supervisor.log")).unwrap();
-    let mut command = Command::new(&exe);
+    let mut command = Command::new(exe);
     command
         .arg("-supervise")
         .arg("-config")
@@ -100,6 +104,9 @@ fn launch_with_first_port(
     first_port: Option<u16>,
     budget: Duration,
 ) -> (Sup, u16) {
+    // A killed Windows worker may still map the executable. Bind retries
+    // change only the port; prepare the identical binary just once.
+    let exe = prepare(root);
     let until = Instant::now() + budget;
     for attempt in 0..8 {
         assert!(
@@ -111,7 +118,7 @@ fn launch_with_first_port(
         } else {
             free_port()
         };
-        let mut sup = spawn(root, port);
+        let mut sup = spawn(root, &exe, port);
         loop {
             let exit = sup.try_exit();
             let log = std::fs::read_to_string(root.join("supervisor.log")).unwrap_or_default();
