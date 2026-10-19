@@ -1315,19 +1315,21 @@ fn row_m_j6_the_install_is_done_and_the_next_start_finishes_the_record() {
     let fx = Fx::new();
     fx.stage(B, "B");
     let old = fx.seed_history();
-    // J8 (the outcome cleared) writes the whole journal after J6 and would
-    // save `installed = B` and clear `install_pending`; the retry and the
-    // workers write do the same. Every write after J6 fails, so the journal on
-    // disk is the one J6 left behind.
+    // Hold the successful replacement before the core writes J6. Only J6
+    // fails until then: a workers write or retry that failed before the
+    // install could leave the journal stale and correctly defer the install
+    // forever. Failed install attempts can still retry before this barrier.
+    fx.fail("journal.fail:J6");
+    fx.hold("install.after_replace");
+    // These writes carry the whole journal and would save installed = B and
+    // clear install_pending. Arm them while the install is held, so every
+    // write after the rename fails and recovery must use the file's hash.
     let points = [
         "journal.fail:J6",
         "journal.fail:J8",
         "journal.fail:J-retry",
         "journal.fail:J-workers",
     ];
-    for point in points {
-        fx.fail(point);
-    }
     let mut first = fx.start(&Tm {
         watch: 1_000,
         ..Tm::default()
@@ -1335,9 +1337,14 @@ fn row_m_j6_the_install_is_done_and_the_next_start_finishes_the_record() {
     let mut sw = fx.update(B);
     let id = sw.accepted();
     sw.done().expect("a done result");
+    fx.wait_arrived("install.after_replace");
     fx.wait_for("the file to be B's", || {
         (std::fs::read(fx.installed()).ok()? == artifact_bytes(B)).then_some(())
     });
+    for point in points {
+        fx.fail(point);
+    }
+    fx.release("install.after_replace");
     // The writes follow the rename, so they are waited for, not assumed: J6
     // used all its tries, and J8 (the last write of the flow) was tried.
     fx.wait_for("the J6 write to fail", || {
