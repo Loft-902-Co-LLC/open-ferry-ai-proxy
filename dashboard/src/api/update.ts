@@ -39,6 +39,8 @@ export interface SupervisorStatus {
 }
 
 export interface SwitchRequest {
+  /** Server-generated identity; null only in optimistic local state. */
+  request_id: string | null;
   action: "install" | "rollback";
   state: "preparing" | "accepted" | "refused" | "failed" | "unknown";
   id: string | null;

@@ -246,7 +246,7 @@ describe("supervised updates", () => {
   it.each(["preparing", "refused", "failed", "unknown"] as const)("shows a %s request", async (state) => {
     server(updateStatus({
       supervisor: supervisorStatus(),
-      switch_request: { action: "install", state, id: null, pending: state === "preparing", reason: state === "preparing" ? null : "sign-ins have not finished" },
+      switch_request: { request_id: "request-1", action: "install", state, id: null, pending: state === "preparing", reason: state === "preparing" ? null : "sign-ins have not finished" },
     }));
     const { card } = await openUpdates();
     expect(await within(card).findByText(state === "preparing" ? "Preparing the switch" : "sign-ins have not finished")).toBeVisible();
@@ -254,7 +254,7 @@ describe("supervised updates", () => {
 
   it("shows an accepted request before the supervisor publishes its phase", async () => {
     server(updateStatus({ supervisor: supervisorStatus(), switch_request: {
-      action: "install", state: "accepted", id: "install-1", reason: null, pending: true,
+      request_id: "request-1", action: "install", state: "accepted", id: "install-1", reason: null, pending: true,
     } }));
     const { card } = await openUpdates();
     expect(await within(card).findByText("Switch accepted")).toBeVisible();
@@ -357,7 +357,7 @@ describe("switch failures", () => {
     api.use(route("POST", UPDATE_INSTALL, () => {
       api.use(route("GET", UPDATE, { json: {
         ...status,
-        switch_request: { action: "install", state: "failed", id: null, reason: "the new worker exited", pending: false },
+        switch_request: { request_id: "request-1", action: "install", state: "failed", id: null, reason: "the new worker exited", pending: false },
       } }));
       return { status: 202, json: { failed: true, reason: "the new worker exited" } };
     }));
@@ -391,7 +391,7 @@ describe("uncertain switch observation", () => {
         reads += 1;
         return { json: updateStatus({
           supervisor: supervisorStatus(), staged_version: "0.2.0",
-          switch_request: { action: "install", state: "unknown", id: null, reason: "the outcome is unknown", pending: reads === 1 },
+          switch_request: { request_id: "request-1", action: "install", state: "unknown", id: null, reason: "the outcome is unknown", pending: reads === 1 },
         }) };
       }),
     );
@@ -438,7 +438,7 @@ describe("handover poll failures", () => {
 
 it("does not keep unknown or expired cached phases running", () => {
   expect(switchInProgress(updateStatus({ supervisor: supervisorStatus({ phase: "unknown" }) }))).toBe(false);
-  expect(switchInProgress(updateStatus({ switch_request: { action: "install", state: "unknown", pending: true, id: null, reason: "unknown" } }))).toBe(false);
+  expect(switchInProgress(updateStatus({ switch_request: { request_id: "request-1", action: "install", state: "unknown", pending: true, id: null, reason: "unknown" } }))).toBe(false);
   for (const stale of [{ failed_reads: 5, snapshot_age_seconds: 1 }, { failed_reads: 1, snapshot_age_seconds: 30 }]) {
     expect(switchInProgress(updateStatus({ supervisor: supervisorStatus({ phase: "handing-over", stale: true, ...stale }) }))).toBe(false);
   }
@@ -459,7 +459,7 @@ it.each(["request", "outcome"])("clears a POST error when status supplies a newe
   // Reading the same old status did not clear the POST error.
   api.use(route("GET", UPDATE, { json: {
     ...original,
-    switch_request: newer === "request" ? { action: "install", state: "failed", id: null, pending: false, reason: "preparation failed" } : null,
+    switch_request: newer === "request" ? { request_id: "request-1", action: "install", state: "failed", id: null, pending: false, reason: "preparation failed" } : null,
     supervisor: supervisorStatus({ last_switch: newer === "outcome" ? { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: null } : null }),
   } }));
   await user.click(within(card).getByRole("button", { name: "Check now" }));
@@ -512,7 +512,7 @@ it("keeps an unanswered POST unconfirmed until the server reports even identical
     route("GET", UPDATE, () => {
       if (!posted) return { json: original };
       if (++readsAfterPost === 1) throw new TypeError("handover");
-      return { json: { ...original, switch_request: { action: "install", state: "preparing", id: null, reason: null, pending: true } } };
+      return { json: { ...original, switch_request: { request_id: "request-1", action: "install", state: "preparing", id: null, reason: null, pending: true } } };
     }),
     route("POST", UPDATE_INSTALL, () => { posted = true; throw new TypeError("no reply"); }),
   );
@@ -534,7 +534,7 @@ it.each(["age", "failed reads"])("keeps polling preparation despite a supervisor
     route("GET", CHECK_PATH, { json: {} }),
     route("GET", UPDATE, () => {
       reads += 1;
-      return { json: updateStatus({ supervisor: supervisorStatus({ phase: "loading", stale: true, error: "the supervisor cannot be reached", snapshot_age_seconds: bound === "age" ? 60 : 1, failed_reads: bound === "age" ? 1 : 8 }), switch_request: { action: "install", state: "preparing", id: null, reason: null, pending: true } }) };
+      return { json: updateStatus({ supervisor: supervisorStatus({ phase: "loading", stale: true, error: "the supervisor cannot be reached", snapshot_age_seconds: bound === "age" ? 60 : 1, failed_reads: bound === "age" ? 1 : 8 }), switch_request: { request_id: "request-1", action: "install", state: "preparing", id: null, reason: null, pending: true } }) };
     }),
   );
   const { card } = await openUpdates();
@@ -565,4 +565,28 @@ it("blocks rollback on a cached watch while the dashboard poll fails", async () 
   await within(card).findByRole("button", { name: "Roll back" });
   await waitFor(() => { expect(reads).toBeGreaterThan(1); }, { timeout: 5_000 });
   await waitFor(() => { expect(within(card).queryByRole("button", { name: "Roll back" })).not.toBeInTheDocument(); });
+});
+
+
+it("keeps an unanswered POST alert when a fresh read reports only an old same-action request", async () => {
+  let reads = 0;
+  const original = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0",
+    switch_request: { request_id: "old-request", action: "install", state: "refused", id: null, reason: "sign-ins are pending", pending: false },
+  });
+  const api = mockApi(
+    route("GET", CHECK_PATH, { json: {} }),
+    route("GET", UPDATE, () => { reads += 1; return { json: original }; }),
+    route("POST", UPDATE_INSTALL, () => { throw new TypeError("not delivered"); }),
+    route("POST", UPDATE_CHECK, { status: 202, json: { check: "started" } }),
+  );
+  const { card, user } = await openUpdates();
+  await user.click(await within(card).findByRole("button", { name: "Install now" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+  await within(card).findByText("The switch could not be confirmed");
+  const before = reads;
+  await user.click(within(card).getByRole("button", { name: "Check now" }));
+  await waitFor(() => { expect(reads).toBeGreaterThan(before); });
+  expect(within(card).getByText("The switch could not be confirmed")).toBeVisible();
+  expect(within(card).getByText("sign-ins are pending")).toBeVisible();
+  expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
 });
