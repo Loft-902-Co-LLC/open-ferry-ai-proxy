@@ -16,7 +16,7 @@ What v1 still needs:
 
 | | Status |
 |---|---|
-| Updating with no downtime | **In progress:** 2 of its 5 steps are done, and half of the third (listed under "Still to come") |
+| Updating with no downtime | **In progress:** the supervisor, worker and services are done on Linux and Windows, and the command line switches versions. Automatic switching and dashboard controls follow separately (listed under "Still to come") |
 | The release signing key | Not started. It is made when the first release is near. |
 | The first release, 0.1.0 | Waits for the two items above and for testing in real use |
 | A Homebrew tap | Not started; comes after 0.1.0 |
@@ -71,8 +71,8 @@ Still to come:
 - **Updating with no downtime:** in `auto` mode, open-ferry switches to the release it got ready the way a blue-green deploy does: the new version starts beside the running one on the same port, takes over once it is ready, and the old one finishes the requests it has, so clients see no gap. If the new version fails to start, or stops soon after the switch, open-ferry goes back to the one before. The dashboard says what happened, and turning updates off cancels a switch not yet made. Where a package manager or Docker installed open-ferry, or it runs in a terminal, it only says that a release is out.
   1. Done: a supervisor that runs two versions side by side on one port and switches between them, tested with real processes.
   2. Done: open-ferry running under the supervisor, and the switch from one real version to another, tested end to end.
-  3. Half done: a user service (`open-ferry service install`) starts open-ferry under the supervisor when it can update itself, and neither the install scripts nor `open-ferry update` replace the files of one that is running. Next: the same for a service for the whole machine (`service install -system`).
-  4. Then: `open-ferry update` and `auto` mode switch versions through the supervisor, the dashboard gets an Install now button, the status shows the switch, and old versions are cleaned up.
+  3. Done on Linux and Windows: user and machine services start open-ferry under the supervisor when they can update themselves, and installer reruns refuse to replace a running supervised install.
+  4. Done for the command line: `open-ferry update` and `-rollback` switch versions through the supervisor on the same listener, `-check` shows its live status and last outcome, and `-cancel` asks it to cancel. Automatic switching and dashboard controls follow in separate changes.
   5. Last: `open-ferry migrate` and the docs catch up, and CI tests the switch on macOS and on the static musl builds too.
 - **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
 - **A Homebrew tap.**

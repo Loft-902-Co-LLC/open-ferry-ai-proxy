@@ -281,7 +281,7 @@ The flags come after the action, and an argument after them is an error. `-h`, a
 - a config that doesn't load;
 - a service that is already installed. To install it again, for a new config or a new binary, run `open-ferry service uninstall` first, adding `-system` if it is the machine's.
 
-The service runs the binary that ran `install`, by its full path. When the install can update itself, a Linux unit or Windows task runs the blue-green supervisor with its chosen data directory pinned; a system Linux unit or Windows service uses the machine data directory. Otherwise it runs the plain form, `open-ferry -config <config>` (through `service run` on Windows), and says why. macOS system-service installation is refused for now. If you move the installed binary, install the service again.
+The service runs the binary that ran `install`, by its full path. When the install can update itself, a Linux user unit, macOS LaunchAgent or Windows task runs the blue-green supervisor with its chosen data directory pinned; a system Linux unit or Windows service uses the machine data directory. Otherwise it runs the plain form, `open-ferry -config <config>` (through `service run` on Windows), and says why. macOS system-service installation is refused for now. If you move the installed binary, install the service again.
 
 ### What it installs
 
@@ -355,22 +355,26 @@ A service doesn't start from your shell, so it doesn't get your shell's environm
 open-ferry update [-config PATH] [-yes] [-json]
 open-ferry update -check [-config PATH] [-json]
 open-ferry update -rollback [-config PATH] [-yes] [-json]
+open-ferry update -cancel [-config PATH] [-json]
 open-ferry update -mode off|notify|auto [-config PATH] [-json]
 ```
 
-Installs the latest release of open-ferry in place of this one, rolls back, or sets whether updates are automatic. [docs/updates.md](updates.md) says how updates work, what they download, and every way to turn them off.
+Installs the latest release of open-ferry, rolls back, cancels a supervised switch, or sets whether updates are automatic. With a supervisor, updates and rollbacks switch workers on the same listener while existing requests finish. In the plain form they replace the installed binary, and say how to restart it. [docs/updates.md](updates.md) says how updates work, what they download, and every way to turn them off.
 
 | Flag | What it does |
 |---|---|
 | None of these | Look for the latest release, say what it would do, and ask. Then download it (or take the copy the server staged), check its signature and SHA-256, run it with `--version`, and put it in place of the installed binary, keeping that one for `-rollback` |
-| `-check` | Only say whether a newer release is out, and whether a restart is needed to run the installed version. It changes nothing, not even the update state |
+| `-check` | Say whether a newer release is out and whether a restart is needed. Also show the supervisor's phase, running version, rollback target, watch deadline, last outcome, and whether switching is disabled and why. It changes nothing, not even the update state |
 | `-rollback` | Put back the version before the last update, from the copy kept in the data directory. Nothing is downloaded |
+| `-cancel` | Ask the supervisor to cancel its switch. It says whether cancellation was accepted, it is too late, or nothing is switching. It does not ask for confirmation |
 | `-mode MODE` | Write `self-update.mode: MODE` into the config, as the management API writes it: the new file must load, its comments are kept, and the old one is kept as `<file name>.bak`. A running server that reads the config follows at once. `MODE` is `off`, `notify` or `auto` |
 | `-config PATH` | The config to read, and that `-mode` writes. By default `config.yaml` in the working directory, else the installed config, where `init` writes one. For an install for the whole machine, `-mode` without `-config` writes the machine's config, `/etc/open-ferry/config.yaml` or `C:\ProgramData\open-ferry\config.yaml`, and needs root or an administrator. With `-config`, `-mode` changes only that config and needs no privilege for the machine records; a privileged process still checks the file before reading or writing it |
 | `-yes` | Install or roll back without asking |
 | `-json` | Print one JSON object instead of lines of text. It asks nothing, so it installs or rolls back only with `-yes` |
 
-Only one of `-check`, `-rollback` and `-mode` at a time. `update` finds and checks its install records before loading the `.env` file in the working directory, as the proxy does at start, so an `OPEN_FERRY_SELF_UPDATE` there counts. Outside a recognized container, a privileged process refuses a `-config` path containing `.` or `..`; give a full path without those components. It never restarts anything: after an update or a rollback it says how to restart open-ferry for your system.
+Only one of `-cancel`, `-check`, `-rollback` and `-mode` at a time. `update` finds and checks its install records before loading the `.env` file in the working directory, as the proxy does at start, so an `OPEN_FERRY_SELF_UPDATE` there counts. Outside a recognized container, a privileged process refuses a `-config` path containing `.` or `..`; give a full path without those components. Updating, rolling back or cancelling an install for the whole machine needs root (`sudo`) or a terminal opened as administrator. A check does not require elevation.
+
+A supervised update reuses the latest known staged release, or checks and stages a signed release, pins it, and asks the supervisor to switch. It prints each progress phase until the outcome. Ctrl-C after acceptance stops following; the supervisor continues the switch. Use `-check` to see what happened, or `-cancel` to ask it to cancel before it takes over. Success can open a watch window: the installed file is confirmed later, and the supervisor can still return to the previous version if the new one fails. Rerunning an installer over a supervised install refuses and points to `open-ferry update`.
 
 ### What it prints
 
@@ -383,15 +387,15 @@ open-ferry 0.2.0 is out (0.1.0 is installed). Run `open-ferry update` to install
 
 An install that doesn't [update itself](updates.md#which-installs-update-themselves), such as a container or a package manager's copy, says that a release is out and why it can't install it. Without a terminal to ask in, and without `-yes`, nothing is installed or rolled back: it says what it would do and how to go on. An error goes to standard error, starting `update:`.
 
-With `-json`, it prints one JSON object and nothing else on standard output: `action` (`check`, `update`, `rollback` or `mode`), `result` (`up-to-date`, `update-available`, `cannot-update`, `needs-confirmation`, `declined`, `updated`, `rolled-back`, `mode-set` or `error`), `message` (the text it would have printed), `mode`, `mode_source` and `updates` as the [status route](dashboard-api.md#get-open-ferryapiv1update) gives them, and `notes`. When they apply, it adds `latest_version`, `installed_version`, `error`, `switch` (the update or rollback made, as `update-state.json`'s `last_switch` records it), `status` (with `-check`, the status route's object) and `config` (with `-mode`, the file written).
+With `-json`, it prints one JSON object and nothing else on standard output: `action` (`check`, `update`, `rollback`, `cancel` or `mode`), `result`, `message` (the text it would have printed), `mode`, `mode_source` and `updates` as the [status route](dashboard-api.md#get-open-ferryapiv1update) gives them, and `notes`. Existing results are `up-to-date`, `update-available`, `cannot-update`, `needs-confirmation`, `declined`, `updated`, `rolled-back`, `mode-set`, `supervised` (a refusal) and `error`; the added results are `cancelled`, `too-late`, `nothing-switching` and `following-stopped`. When they apply, it adds `latest_version`, `installed_version`, `error`, `switch` (the update or rollback record), `status` (with `-check`, the status route's object) and `config` (with `-mode`, the file written). Supervised commands add `operation_id`, `progress` and `supervisor_result`. A supervised check adds `switch_view`: `supervisor` is the live snapshot, `unreachable` says why it could not be read, `rollback_target` is a version or null, and `last` is the newest recorded outcome. Its `auto` is null when the records do not say whether the switch was automatic.
 
 ### Exit codes
 
 | Code | When |
 |---|---|
-| 0 | It is up to date, or it did what was asked: installed, rolled back or set the mode. Also for `-h` |
-| 1 | It failed or refused: a download or a check failed, there's no earlier version to roll back to, another update is running, the config doesn't load or can't be written, or a rollback wasn't confirmed. A message says why |
-| 2 | Bad usage: an unknown flag, an argument after the flags, a mode that isn't `off`, `notify` or `auto`, or more than one of `-check`, `-rollback` and `-mode`. The usage follows on standard error |
+| 0 | It is up to date, or it did what was asked: installed, rolled back, accepted a cancellation, found nothing switching or set the mode. Also for stopping the follower with Ctrl-C and for `-h` |
+| 1 | It failed or refused: a download or a check failed, there's no earlier version to roll back to, another update is running, cancellation was too late, the config doesn't load or can't be written, or a rollback wasn't confirmed. A message says why |
+| 2 | Bad usage: an unknown flag, an argument after the flags, a mode that isn't `off`, `notify` or `auto`, or more than one of `-cancel`, `-check`, `-rollback` and `-mode`. The usage follows on standard error |
 | 3 | A newer release is out and wasn't installed: with `-check`, on an install that doesn't update itself, when you answered no, or with no terminal and no `-yes` |
 
 So a script can run `open-ferry update -check` and act on 3.
