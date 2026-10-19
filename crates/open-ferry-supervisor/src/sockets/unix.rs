@@ -65,12 +65,7 @@ pub unsafe fn take_listeners(count: usize) -> io::Result<Vec<TcpListener>> {
                 "inherited socket is not TCP",
             ));
         }
-        if !is_listening(fd)? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "inherited fd is not a listening socket",
-            ));
-        }
+        check_listener(fd)?;
         let listener = TcpListener::from(descriptor);
         listener.set_nonblocking(true)?;
         result.push(listener);
@@ -78,8 +73,43 @@ pub unsafe fn take_listeners(count: usize) -> io::Result<Vec<TcpListener>> {
     Ok(result)
 }
 
-#[cfg(target_os = "macos")]
+fn check_listener(fd: RawFd) -> io::Result<()> {
+    // Preserve the inherited-fd API's InvalidInput error, including when the
+    // socket option query fails, rather than exposing a new Linux error kind.
+    if is_listening(fd).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited fd is not a listening socket",
+        ))
+    }
+}
+
 fn is_listening(fd: RawFd) -> io::Result<bool> {
+    let mut kind: libc::c_int = 0;
+    let mut size = std::mem::size_of_val(&kind) as libc::socklen_t;
+    // SAFETY: kind and size are valid writable storage for the live socket query.
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut kind as *mut libc::c_int).cast(),
+            &mut size,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if kind != libc::SOCK_STREAM {
+        return Ok(false);
+    }
+    tcp_is_listening(fd)
+}
+
+#[cfg(target_os = "macos")]
+fn tcp_is_listening(fd: RawFd) -> io::Result<bool> {
     // Darwin does not implement getsockopt(SO_ACCEPTCONN). Its TCP state query
     // establishes the same fact without accepting or changing the socket.
     const TCPS_LISTEN: u8 = 1;
@@ -103,7 +133,7 @@ fn is_listening(fd: RawFd) -> io::Result<bool> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn is_listening(fd: RawFd) -> io::Result<bool> {
+fn tcp_is_listening(fd: RawFd) -> io::Result<bool> {
     let mut listening: libc::c_int = 0;
     let mut size = std::mem::size_of_val(&listening) as libc::socklen_t;
     // SAFETY: initialized output and size point to valid storage.
@@ -196,6 +226,18 @@ pub(crate) fn sources(listeners: &[TcpListener], control: &UnixStream) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_and_a_failed_socket_query_are_not_listeners() {
+        // Not upstream's: an Internet address alone is not a TCP stream, and a
+        // failed getsockopt keeps the inherited-fd API's original error contract.
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for fd in [udp.as_raw_fd(), -1] {
+            let error = check_listener(fd).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(error.to_string(), "inherited fd is not a listening socket");
+        }
+    }
 
     #[test]
     fn a_listener_is_distinguished_from_connected_and_bound_streams() {
