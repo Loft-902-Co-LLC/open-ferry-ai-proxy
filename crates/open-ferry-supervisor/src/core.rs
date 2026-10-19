@@ -49,7 +49,9 @@ use crate::timings::Backoff;
 /// every second (5.3); everything else is as coarse.
 pub const TICK: Duration = Duration::from_secs(1);
 
-pub(crate) const AUTOMATIC_COOLDOWN: chrono::Duration = chrono::Duration::hours(6);
+// Default checks are six hours apart with 10% jitter (at least 5 h 24 m).
+// Five hours allows the next normal check while stopping ten-minute retry loops.
+pub(crate) const AUTOMATIC_COOLDOWN: chrono::Duration = chrono::Duration::hours(5);
 
 pub(crate) fn unfinished_at(record: &SwitchRecord) -> Option<chrono::DateTime<chrono::Utc>> {
     if record.to.is_empty()

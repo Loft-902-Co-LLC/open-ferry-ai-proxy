@@ -7224,13 +7224,13 @@ async fn automatic_admission_requires_auto_but_manual_admission_allows_notify() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn automatic_admission_cools_down_unfinished_targets_for_six_hours() {
+async fn automatic_admission_cools_down_unfinished_targets_for_five_hours() {
     use crate::clock::Clock;
     use open_ferry_update::state::{State, SwitchRecord};
 
     for source in ["history", "last", "journal", "pending"] {
         for auto in [false, true] {
-            for elapsed in [6 * 3600 - 1, 6 * 3600] {
+            for elapsed in [5 * 3600 - 1, 5 * 3600] {
                 let mut rig = Rig::new().await;
                 let root = tempfile::tempdir().unwrap();
                 rig.cfg.data = open_ferry_update::DataDir::at(root.path());
@@ -7278,7 +7278,7 @@ async fn automatic_admission_cools_down_unfinished_targets_for_six_hours() {
                 state.save(&rig.cfg.data.state_file()).unwrap();
                 rig.clock.advance(Duration::from_secs(elapsed));
                 let (_core, replies) = go!(rig, update(auto));
-                if auto && elapsed < 6 * 3600 {
+                if auto && elapsed < 5 * 3600 {
                     assert!(
                         matches!(&replies[..], [EndpointReply::Error { reason, .. }]
                         if reason == "a recent switch to that version did not finish; trying again later"),
@@ -7517,7 +7517,7 @@ async fn automatic_cooldown_survives_history_eviction_until_its_boundary() {
         assert!(core.rt.pending.is_empty());
         assert!(core.rt.journal.as_ref().unwrap().outcomes.is_empty());
         state.save(&rig.cfg.data.state_file()).unwrap();
-        rig.clock.advance(Duration::from_secs(6 * 3600 - 7));
+        rig.clock.advance(Duration::from_secs(5 * 3600 - 7));
         let (tx, mut rx) = unbounded_channel();
         core.handle_switch(update(auto), tx).await;
         let replies = drain(&mut rx);
