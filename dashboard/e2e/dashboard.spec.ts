@@ -11,6 +11,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { CONTENT_SECURITY_POLICY, SECURITY_HEADERS } from "../build/securityHeaders";
 import { E2E_KEY, mockServer, type MockOptions, type MockServer } from "./mockServer";
 import { APP_ORIGIN } from "./origin";
+import { supervisorStatus, updateStatus } from "../src/test/fixtures";
 
 /** Where to save a screenshot of each screen, when set. */
 const SHOTS_DIR = process.env.SHOTS_DIR ?? "";
@@ -77,6 +78,81 @@ async function signIn(page: Page) {
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
 }
+
+test("installs from About after confirmation and follows the handover", async ({ page }) => {
+  const staged = updateStatus({
+    supervisor: supervisorStatus(), latest_version: "0.2.0", staged_version: "0.2.0", update_available: true,
+  });
+  const watched = await watch(page, { updates: staged });
+  await signIn(page);
+  await page.goto("about");
+  const card = page.getByRole("region", { name: "Updates" });
+  await expect(card.getByRole("button", { name: "Install now" })).toBeVisible();
+  await shot(page, "updates-staged");
+  await card.getByRole("button", { name: "Install now" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Existing requests can finish");
+  await shot(page, "updates-confirm");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  expect(watched.server.switchRequests).toEqual([]);
+  await card.getByRole("button", { name: "Install now" }).click();
+  await dialog.getByRole("button", { name: "Install now" }).click();
+  await expect(card.getByText("Preparing the switch")).toBeVisible();
+  expect(watched.server.switchRequests).toEqual(["install"]);
+  await shot(page, "updates-preparing");
+  for (const phase of ["waiting-for-signins", "loading", "handing-over", "taking-over", "watching", "returning"]) {
+    watched.server.setUpdates(updateStatus({ supervisor: supervisorStatus({
+      phase, running_version: phase === "watching" ? "0.2.0" : "0.1.0",
+      rollback_target: "0.1.0", watch_until: phase === "watching" ? "2026-10-18T16:10:00Z" : null,
+      switch: { id: "e2e-install", how: "update", from: "0.1.0", to: "0.2.0" },
+    }) }));
+    await expect(card.getByText(`Switch: ${phase.replaceAll("-", " ")}`)).toBeVisible({ timeout: 6_000 });
+    await shot(page, `updates-${phase}`);
+  }
+  watched.server.setUpdates(updateStatus({ supervisor: supervisorStatus({
+    running_version: "0.2.0", rollback_target: "0.1.0",
+    last_switch: { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: "2026-10-18T16:00:00Z" },
+  }) }));
+  await expect(card.getByText("Switched to 0.2.0")).toBeVisible({ timeout: 6_000 });
+  await expect(card.getByRole("button", { name: "Roll back" })).toBeVisible();
+  await shot(page, "updates-switched");
+  expect(watched.server.switchRequests).toEqual(["install"]);
+  expectClean(watched);
+});
+
+test("shows update outcomes and unavailable switching under the policy", async ({ page }) => {
+  const watched = await watch(page);
+  await signIn(page);
+  const states = [
+    { name: "plain", status: updateStatus() },
+    { name: "available", status: updateStatus({ supervisor: supervisorStatus(), latest_version: "0.2.0", update_available: true }) },
+    { name: "disabled", status: updateStatus({ supervisor: supervisorStatus({ switching_disabled: "the journal is stale" }) }) },
+    { name: "refused", status: updateStatus({ supervisor: supervisorStatus(), switch_request: { action: "install" as const, state: "refused" as const, id: null, pending: false, reason: "sign-ins are pending" } }) },
+    { name: "rolled-back", status: updateStatus({ supervisor: supervisorStatus({ last_switch: { how: "rollback", auto: null, from: "0.2.0", to: "0.1.0", result: "rolled-back", reason: null, at: null } }) }) },
+    { name: "failed", status: updateStatus({ supervisor: supervisorStatus({ last_switch: { how: "update", auto: true, from: "0.1.0", to: "0.2.0", result: "failed-to-load", reason: "the new worker exited", at: null } }) }) },
+    { name: "accepted", status: updateStatus({ supervisor: supervisorStatus(), switch_request: { action: "install" as const, state: "accepted" as const, id: "e2e-install", pending: true, reason: null } }) },
+    { name: "unknown", status: updateStatus({ supervisor: supervisorStatus(), switch_request: { action: "install" as const, state: "unknown" as const, id: null, pending: false, reason: "the supervisor connection ended without an answer; read status before trying again" } }) },
+    { name: "retry-failed", status: updateStatus({ supervisor: supervisorStatus(), update_available: true, latest_version: "0.2.0", failed_versions: ["0.2.0"] }) },
+    { name: "retry-rolled-back", status: updateStatus({ supervisor: supervisorStatus(), update_available: true, latest_version: "0.2.0", rolled_back_version: "0.2.0" }) },
+  ];
+  for (const state of states) {
+    watched.server.setUpdates(state.status);
+    await page.goto("about");
+    await expect(page.getByRole("region", { name: "Updates" }).getByText("Running", { exact: true })).toBeVisible();
+    await shot(page, `updates-${state.name}`);
+    if (state.name.startsWith("retry-")) {
+      await page.getByRole("button", { name: "Install now" }).click();
+      await expect(page.getByRole("dialog")).toContainText("Install it again?");
+      await shot(page, `updates-${state.name}-confirm`);
+      await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+    }
+    if (state.name === "plain" || state.name === "disabled") {
+      await expect(page.getByRole("button", { name: "Install now" })).toHaveCount(0);
+    }
+    await page.goto("./");
+  }
+  expectClean(watched);
+});
 
 test("serves every page with the policy open-ferry sends", async ({ page }) => {
   await mockServer(page, APP_ORIGIN);

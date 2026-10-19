@@ -581,7 +581,7 @@ open-ferry's own updates, which [docs/updates.md](updates.md) describes. CLIProx
 
 ### `GET /open-ferry/api/v1/update`
 
-What updates are doing. It reads the update state on disk and makes no request.
+What updates are doing. It reads the update state on disk and, when supervised, asks the local supervisor for its status. It makes no release or provider request.
 
 ```json
 {
@@ -608,18 +608,54 @@ What updates are doing. It reads the update state on disk and makes no request.
   "why_not": null,
   "why_not_code": null,
   "trusts_release_key": true,
-  "notes": []
+  "notes": [],
+  "supervisor": null,
+  "switch_request": null
 }
 ```
 
 - **`mode`** is `auto`, `notify` or `off`, and **`updates`** says it as people do: `on`, `notify-only` or `off`. **`mode_source`** is what set it: `default`, `config` (`self-update.mode`) or `environment` (`OPEN_FERRY_SELF_UPDATE`, which can only lower the config's mode).
 - **`installed_version`** is the version a restart runs: after `open-ferry update` has switched the binary, it differs from **`running_version`**, and **`restart_needed`** is `true`.
-- **`latest_version`** and **`update_available`** are from the last check. **`staged_version`** is a release downloaded and checked, ready for `open-ferry update` to switch to; the server never switches by itself. **`previous_version`** is kept for `open-ferry update -rollback`.
+- **`latest_version`** and **`update_available`** are from the last check. **`staged_version`** is a release downloaded and checked, ready to switch to. **`previous_version`** is kept for `open-ferry update -rollback`. Supervised installs can switch without restarting the server.
 - **`failed_versions`** failed their check here and are skipped until a newer release; **`rolled_back_version`** was rolled back from and is skipped too. `open-ferry update` run by hand tries either again.
 - **`last_result`** is `up-to-date`, `update-available`, `cannot-update` (newer, but this install doesn't update itself), `staged`, `skipped` (a failed or rolled-back version) or `error`, with **`last_error`** saying what went wrong. **`next_check`** is `null` while updates are off; **`checking`** is whether a check runs now.
 - **`can_update_itself`** is whether this install replaces its own binary. When it doesn't (a container, a binary the install scripts didn't put there, or one in a folder it can't write), the server only says when a release is out, **`why_not`** says why, and **`why_not_code`** is one of `container`, `no-receipt`, `bad-receipt`, `unknown-binary`, `other-name`, `other-binary` or `read-only`.
 - **`trusts_release_key`** is `false` for a build with no release key, which checks nothing and never updates.
 - **`notes`** are problems with the settings, such as an `OPEN_FERRY_SELF_UPDATE` or `self-update.check-every` that couldn't be used.
+
+**`supervisor`** is `null` for a plain install. Update those from the command line with `open-ferry update` (or `open-ferry update -rollback`), then restart the server. A supervised install returns:
+
+```json
+{
+  "form": "supervised",
+  "phase": "watching",
+  "running_version": "0.1.1",
+  "rollback_target": "0.1.0",
+  "watch_until": "2026-10-18T16:10:00Z",
+  "switch": {"id": "7c1f", "how": "update", "from": "0.1.0", "to": "0.1.1"},
+  "last_switch": {
+    "how": "update", "auto": null, "from": "0.0.9", "to": "0.1.0",
+    "result": "switched", "reason": null, "at": "2026-10-17T16:00:00Z"
+  },
+  "switching_disabled": null,
+  "error": null
+}
+```
+
+- **`phase`** is the current switch status, such as `waiting-for-signins`, `loading`, `handing-over`, `taking-over`, `watching`, `returning` or `cancelled`. Without a switch it is the supervisor's state (`idle`, `degraded` or `stopping`); it is `unknown` before a live snapshot can be read.
+- **`running_version`** is the supervisor's active worker version; while the request is served by a draining worker it can differ from the top-level running version. **`rollback_target`** is the version a rollback would select now, or `null`. During a watch it is the switch's source version. **`watch_until`** is the watch deadline or `null`.
+- **`switch`** is the live supervisor switch snapshot, or `null`. It may include additional supervisor fields. **`last_switch`** is the newest finished switch from pending journal outcomes and state history, or `null`. Its `result` is an opaque kebab-case outcome; clients should display a readable fallback for unknown values. `reason`, `from` and `at` can be `null`. `auto` is `true` only when recorded as automatic, `false` when recorded as manual, and `null` when unknown.
+- **`switching_disabled`** is the reason switching is unavailable, or `null`. **`error`** says why the live supervisor could not be read. A failed read keeps the last snapshot available in this worker; it never changes a supervised install into a plain one. Durable rollback and outcome fields are read independently.
+
+**`switch_request`** describes the latest dashboard install or rollback request in this worker, or `null`:
+
+```json
+{"action": "install", "state": "preparing", "id": null, "reason": null, "pending": true}
+```
+
+`state` is `preparing`, `accepted`, `refused`, `failed` or `unknown` (the supervisor did not answer and may have accepted). `id` is set after acceptance; `reason` explains refusal, failure or uncertainty. `pending` means preparation or observation of the accepted switch is still pending. The request remains until a newer request replaces it. This in-memory request state ends when the worker exits; the supervisor's live switch and durable last outcome remain available across a handover.
+
+Poll every one or two seconds while preparing or switching; stop after it ends. Retry a failed status poll quietly during handover. Never resend a switch request after an ambiguous timeout; read status first.
 
 ### `POST /open-ferry/api/v1/update/check`
 
@@ -630,6 +666,32 @@ Starts a check now, in the background, as the server's own checks run: in `auto`
 ```
 
 `"running"` instead of `"started"` means a check was running already, and no other started. `GET /update` shows how it went once `checking` is `false` again. While updates are off nothing is checked and the answer is `409 updates_off`; `open-ferry update -check` still checks by hand.
+
+### `POST /open-ferry/api/v1/update/install` and `POST /open-ferry/api/v1/update/rollback`
+
+Ask the supervisor to install the latest known staged release (downloading and checking it first if needed), or to roll back to its current rollback target. No body. Both use the same management-key and address checks as the other update routes. Manual installs also work while automatic updates are off.
+
+Manual installs may retry a version that failed here or was rolled back from. The confirmation warns about that history and still allows installation. A background check holding the update lock returns `409 update_busy` with `busy, try again shortly`.
+
+The route waits about 900 ms for acceptance. If accepted, it returns `202`:
+
+```json
+{"accepted": true, "id": "7c1f"}
+```
+
+The supervisor owns the switch. The route does not wait for handover or watch confirmation, and disconnecting does not cancel it. If preparation or acceptance takes longer, the task continues in the background and the answer is `202`:
+
+```json
+{"preparing": true}
+```
+
+At most one preparation runs per dashboard state. A second request while one runs returns `409 already_preparing`, with the message `already preparing`. `GET /update` reports eventual acceptance or refusal, including a refusal after the `202 preparing` response.
+
+An acceptance timeout or a stream ending without a reply is ambiguous: the answer is `202 {"uncertain": true}` and `switch_request.state` is `unknown`. Nothing is resent automatically. Another switch request returns `409 switch_uncertain` until a fresh supervisor status read succeeds. The status then retains the reason with state `failed`; check the live switch and last outcome before deciding to retry.
+
+If the supervisor accepted the switch and then ended it with an error before the route returned, the answer is `202 {"failed": true, "reason": "..."}`. `switch_request.state` is `failed` and keeps that reason. This is a failed accepted operation, not a refusal.
+
+A refusal or preparation failure before the response returns `409 switch_refused` with the supervisor's or updater's reason in `message`. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
 
 ---
 

@@ -17,7 +17,7 @@ import type {
   UsageSummary,
 } from "../api/dashboard";
 import type { ServerLogPage } from "../api/management";
-import type { UpdateStatus } from "../api/update";
+import type { SupervisorStatus, UpdateStatus } from "../api/update";
 
 export function metrics(overrides: Partial<Metrics> = {}): Metrics {
   return {
@@ -400,6 +400,8 @@ export function v8Config({
  */
 export function updateStatus(overrides: Partial<UpdateStatus> = {}): UpdateStatus {
   return {
+    supervisor: null,
+    switch_request: null,
     mode: "auto",
     mode_source: "config",
     updates: "on",
@@ -424,6 +426,21 @@ export function updateStatus(overrides: Partial<UpdateStatus> = {}): UpdateStatu
     why_not_code: null,
     trusts_release_key: true,
     notes: [],
+    ...overrides,
+  };
+}
+
+export function supervisorStatus(overrides: Partial<SupervisorStatus> = {}): SupervisorStatus {
+  return {
+    form: "supervised",
+    phase: "idle",
+    running_version: "0.1.0",
+    rollback_target: null,
+    watch_until: null,
+    switch: null,
+    last_switch: null,
+    switching_disabled: null,
+    error: null,
     ...overrides,
   };
 }

@@ -10,6 +10,44 @@ import { DASHBOARD_API } from "./dashboard";
 export const UPDATE = `${DASHBOARD_API}/update`;
 /** `POST`: starts a check now, in the background. */
 export const UPDATE_CHECK = `${UPDATE}/check`;
+export const UPDATE_INSTALL = `${UPDATE}/install`;
+export const UPDATE_ROLLBACK = `${UPDATE}/rollback`;
+
+export interface LastSwitch {
+  how: string;
+  auto: boolean | null;
+  from: string | null;
+  to: string;
+  result: string;
+  reason: string | null;
+  at: string | null;
+}
+
+export interface SupervisorStatus {
+  form: "supervised";
+  phase: string;
+  running_version: string;
+  rollback_target: string | null;
+  watch_until: string | null;
+  switch: { id: string; how: string; from: string; to: string } | null;
+  last_switch: LastSwitch | null;
+  switching_disabled: string | null;
+  error: string | null;
+}
+
+export interface SwitchRequest {
+  action: "install" | "rollback";
+  state: "preparing" | "accepted" | "refused" | "failed" | "unknown";
+  id: string | null;
+  reason: string | null;
+  pending: boolean;
+}
+
+export type SwitchStarted =
+  | { accepted: true; id: string }
+  | { preparing: true }
+  | { uncertain: true }
+  | { failed: true; reason: string };
 
 /** `self-update.mode`: from the most an update does to the least. */
 export const UPDATE_MODES = ["auto", "notify", "off"] as const;
@@ -44,6 +82,8 @@ export type UpdateResult =
 
 /** An answer of `GET /update`. */
 export interface UpdateStatus {
+  supervisor: SupervisorStatus | null;
+  switch_request: SwitchRequest | null;
   mode: UpdateMode;
   mode_source: UpdateModeSource;
   /** The mode as people say it. */

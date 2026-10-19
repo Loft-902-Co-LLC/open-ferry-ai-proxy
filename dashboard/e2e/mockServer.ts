@@ -520,6 +520,7 @@ const BIND = {
 };
 
 export interface MockOptions {
+  updates?: UpdateStatus;
   /** Whether the server has credentials and keys; else it's a first run. Default true. */
   credentials?: boolean;
   /** Whether it can save config.yaml; else every write answers 503. Default true. */
@@ -532,6 +533,8 @@ export interface MockOptions {
 }
 
 export interface MockServer {
+  setUpdates: (status: UpdateStatus) => void;
+  switchRequests: string[];
   /** API calls the table doesn't answer, as "METHOD /path". */
   unhandled: string[];
   /** A log's bytes, exactly as its download sends them. */
@@ -554,6 +557,7 @@ export async function mockServer(
   options: MockOptions = {},
 ): Promise<MockServer> {
   const now = Date.now();
+  let updates = options.updates;
   const connected = options.credentials ?? true;
   const writable = options.writable ?? true;
   const separate = options.separateManagement ?? false;
@@ -576,6 +580,8 @@ export async function mockServer(
   let bound: { status: "wait" | "ok" | "error"; error?: string } = { status: "wait" };
   const logs = recentLogs(calls).map((entry) => ({ ...entry, size: logFile(entry).length }));
   const server: MockServer = {
+    setUpdates: (status) => { updates = status; },
+    switchRequests: [],
     unhandled: [],
     offOrigin: [],
     writes: [],
@@ -644,6 +650,9 @@ export async function mockServer(
           }),
         );
       case "GET /open-ferry/api/v1/update": {
+        if (updates !== undefined) {
+          return json(route, updates);
+        }
         // As the config sets it: none is set until the Settings tab saves one.
         const written = mappingAt(v8File, ["self-update"], false)?.mode;
         const mode = updateModeOf(written);
@@ -660,6 +669,16 @@ export async function mockServer(
             next_check: mode === "off" ? null : new Date(now + 5 * HOUR).toISOString(),
           }),
         );
+      }
+      case "POST /open-ferry/api/v1/update/install": {
+        server.switchRequests.push("install");
+        if (updates?.supervisor == null) {
+          return json(route, { error: "not_supervised", message: "run open-ferry update on the server's computer, then restart it" }, 409);
+        }
+        updates = { ...updates, switch_request: {
+          action: "install", state: "preparing", id: null, reason: null, pending: true,
+        } };
+        return json(route, { preparing: true }, 202);
       }
       case "GET /open-ferry/api/v1/usage/ledger":
         return json(route, ledger({ newest: calls[0]?.time ?? null }));

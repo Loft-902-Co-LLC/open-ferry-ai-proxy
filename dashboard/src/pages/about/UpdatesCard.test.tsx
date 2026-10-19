@@ -2,8 +2,8 @@ import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { CHECK_PATH } from "../../api/signIn";
-import { UPDATE, UPDATE_CHECK, type UpdateStatus } from "../../api/update";
-import { updateStatus } from "../../test/fixtures";
+import { UPDATE, UPDATE_CHECK, UPDATE_INSTALL, UPDATE_ROLLBACK, type UpdateStatus } from "../../api/update";
+import { supervisorStatus, updateStatus } from "../../test/fixtures";
 import { mockApi, route, type MockReply } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 
@@ -183,5 +183,158 @@ describe("the Updates card", () => {
     expect(within(card).getByRole("listitem")).toHaveTextContent(
       "OPEN_FERRY_SELF_UPDATE=sometimes isn't a mode",
     );
+  });
+});
+
+describe("supervised updates", () => {
+  it.each(["staged", "available"])("confirms an install when a release is %s", async (release) => {
+    const api = server(updateStatus({
+      supervisor: supervisorStatus(),
+      latest_version: "0.2.0", update_available: true,
+      staged_version: release === "staged" ? "0.2.0" : null,
+    }));
+    api.use(route("POST", UPDATE_INSTALL, () => {
+      api.use(route("GET", UPDATE, { json: updateStatus({
+        supervisor: supervisorStatus({ phase: "loading", switch: { id: "install-1", how: "update", from: "0.1.0", to: "0.2.0" } }),
+      }) }));
+      return { status: 202, json: { accepted: true, id: "install-1" } };
+    }));
+    const { card, user } = await openUpdates();
+    await user.click(await within(card).findByRole("button", { name: "Install now" }));
+    expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(0);
+    let dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(0);
+    await user.click(within(card).getByRole("button", { name: "Install now" }));
+    dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Install now" }));
+    expect(await within(card).findByText("Switch: loading")).toBeVisible();
+    expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+    expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
+    expect(api.unhandled).toEqual([]);
+  });
+
+  it("confirms a rollback to the supervisor's target during a watch", async () => {
+    const api = server(updateStatus({ supervisor: supervisorStatus({
+      phase: "watching", running_version: "0.2.0", rollback_target: "0.1.0",
+      watch_until: "2026-10-18T16:10:00Z",
+    }) }));
+    api.use(route("POST", UPDATE_ROLLBACK, () => {
+      api.use(route("GET", UPDATE, { json: updateStatus({ supervisor: supervisorStatus({
+        last_switch: { how: "rollback", auto: null, from: "0.2.0", to: "0.1.0", result: "rolled-back", reason: null, at: "2026-10-18T16:01:00Z" },
+      }) }) }));
+      return { status: 202, json: { accepted: true, id: "rollback-1" } };
+    }));
+    const { card, user } = await openUpdates();
+    await user.click(await within(card).findByRole("button", { name: "Roll back" }));
+    const dialog = screen.getByRole("dialog", { name: "Roll back to 0.1.0?" });
+    expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(0);
+    await user.click(within(dialog).getByRole("button", { name: "Roll back" }));
+    expect(await within(card).findByText("Rolled back to 0.1.0")).toBeVisible();
+    expect(api.callsTo("POST", UPDATE_ROLLBACK)).toHaveLength(1);
+    expect(card).not.toHaveTextContent("Automatic switch");
+  });
+
+  it.each(["waiting-for-signins", "loading", "handing-over", "taking-over", "watching", "returning"])("shows the %s phase", async (phase) => {
+    server(updateStatus({ supervisor: supervisorStatus({ phase }) }));
+    const { card } = await openUpdates();
+    expect(await within(card).findByText(`Switch: ${phase.replaceAll("-", " ")}`)).toBeVisible();
+    expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
+  });
+
+  it.each(["preparing", "refused", "failed", "unknown"] as const)("shows a %s request", async (state) => {
+    server(updateStatus({
+      supervisor: supervisorStatus(),
+      switch_request: { action: "install", state, id: null, pending: state === "preparing", reason: state === "preparing" ? null : "sign-ins have not finished" },
+    }));
+    const { card } = await openUpdates();
+    expect(await within(card).findByText(state === "preparing" ? "Preparing the switch" : "sign-ins have not finished")).toBeVisible();
+  });
+
+  it("shows an accepted request before the supervisor publishes its phase", async () => {
+    server(updateStatus({ supervisor: supervisorStatus(), switch_request: {
+      action: "install", state: "accepted", id: "install-1", reason: null, pending: true,
+    } }));
+    const { card } = await openUpdates();
+    expect(await within(card).findByText("Switch accepted")).toBeVisible();
+  });
+
+  it("shows why switching is disabled", async () => {
+    server(updateStatus({ update_available: true, supervisor: supervisorStatus({
+      rollback_target: "0.0.9", switching_disabled: "the journal is stale",
+    }) }));
+    const { card } = await openUpdates();
+    expect(await within(card).findByText("the journal is stale")).toBeVisible();
+    expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: "Roll back" })).not.toBeInTheDocument();
+  });
+
+  it.each([true, false, null])("labels a switch automatic only when recorded true (%s)", async (auto) => {
+    server(updateStatus({ supervisor: supervisorStatus({ last_switch: {
+      how: "update", auto, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: null,
+    } }) }));
+    const { card } = await openUpdates();
+    await within(card).findByText("Switched to 0.2.0");
+    expect(card.textContent.includes("Automatic switch")).toBe(auto === true);
+  });
+
+  it("shows an unfamiliar outcome and its reason", async () => {
+    server(updateStatus({ supervisor: supervisorStatus({ last_switch: {
+      how: "recovery", auto: null, from: null, to: "0.1.0", result: "returned-to-installed", reason: "the new worker exited", at: null,
+    } }) }));
+    const { card } = await openUpdates();
+    expect(await within(card).findByText("returned to installed: 0.1.0")).toBeVisible();
+    expect(card).toHaveTextContent("the new worker exited");
+  });
+
+  it("polls through handover failures quietly and stops after the switch", async () => {
+    let reads = 0;
+    const api = mockApi(
+      route("GET", CHECK_PATH, { json: {} }),
+      route("GET", UPDATE, () => {
+        reads += 1;
+        if (reads >= 2 && reads <= 4) { throw new TypeError("handover"); }
+        return { json: updateStatus({ supervisor: supervisorStatus({
+          phase: reads === 1 ? "handing-over" : "idle",
+          last_switch: reads === 1 ? null : { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: null },
+        }) }) };
+      }),
+    );
+    const { card } = await openUpdates();
+    await within(card).findByText("Switch: handing over");
+    expect(await within(card).findByText("Switched to 0.2.0", undefined, { timeout: 8_000 })).toBeVisible();
+    expect(within(card).queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    const finishedReads = api.callsTo("GET", UPDATE).length;
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    expect(api.callsTo("GET", UPDATE)).toHaveLength(finishedReads);
+  }, 12_000);
+});
+
+describe("manual install retries", () => {
+  it.each(["failed", "rolled back"])("warns before retrying a version that was %s", async (previous) => {
+    const api = server(updateStatus({
+      supervisor: supervisorStatus(), latest_version: "0.2.0", staged_version: "0.2.0", update_available: true,
+      failed_versions: previous === "failed" ? ["0.2.0"] : [],
+      rolled_back_version: previous === "rolled back" ? "0.2.0" : null,
+    }));
+    api.use(route("POST", UPDATE_INSTALL, { status: 409, json: { error: "update_busy", message: "busy, try again shortly" } }));
+    const { card, user } = await openUpdates();
+    await user.click(await within(card).findByRole("button", { name: "Install now" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(previous === "failed" ? "failed here before. Install it again?" : "was rolled back from. Install it again?");
+    await user.click(within(dialog).getByRole("button", { name: "Install now" }));
+    expect(await within(card).findByText("busy, try again shortly")).toBeVisible();
+    expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+  });
+
+  it("does not offer a staged version already running under the supervisor", async () => {
+    server(updateStatus({
+      installed_version: "0.1.0", latest_version: "0.2.0", staged_version: "0.2.0", update_available: true,
+      supervisor: supervisorStatus({ running_version: "0.2.0" }),
+    }));
+    const { card } = await openUpdates();
+    await within(card).findByText("Running", { selector: "dt" });
+    expect(within(card).queryByRole("button", { name: "Install now" })).not.toBeInTheDocument();
+    expect(card).not.toHaveTextContent("ready to install");
   });
 });
