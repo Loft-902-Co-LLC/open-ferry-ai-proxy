@@ -30,7 +30,7 @@ class PositiveControl(unittest.TestCase):
         b"events.log", b"test-marker", b"x-open-ferry-test-marker",
         b"handover.written", b"handover_failed", b"hold-load", b"load.before_loaded",
     )
-    FLAGS = (b"test-data-dir", b"test-endpoint")
+    FLAGS = (b"test-data-dir", b"test-endpoint", b"--update-test-version", b"auto.before_check", b"update-now")
     REQUIRED = (
         b"refresh.after_rotate", b"refresh.before_save", b"persist.before", b"state.fail:",
         b".blue-green-test", *WORKER, *FLAGS,

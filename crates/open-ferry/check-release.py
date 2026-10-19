@@ -20,6 +20,7 @@ FORBIDDEN = (
     b"journal.after:", b"journal.fail:", b"state.fail:", b"disk.commit.before_replace",
     b".blue-green-test", b"events.log", b"test-marker", b"x-open-ferry-test-marker",
     b"handover.written", b"handover_failed", b"test-data-dir", b"test-endpoint",
+    b"--update-test-version", b"auto.before_check", b"update-now",
 )
 
 # What a feature build must carry, or the scan above proves nothing: the core's
@@ -30,6 +31,7 @@ REQUIRED = (
     b"refresh.after_rotate", b"refresh.before_save", b"persist.before", b"state.fail:",
     b".blue-green-test", b"events.log", b"test-marker", b"x-open-ferry-test-marker",
     b"handover.written", b"handover_failed", b"test-data-dir", b"test-endpoint",
+    b"--update-test-version", b"auto.before_check", b"update-now",
 )
 
 
