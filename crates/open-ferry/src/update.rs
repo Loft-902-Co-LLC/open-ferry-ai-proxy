@@ -501,6 +501,13 @@ trait Updates {
         Ok(None)
     }
 
+    async fn live_supervisor(&self) -> Result<Option<serde_json::Value>, SwitchError> {
+        self.switch_view()
+            .await
+            .map(|view| view.and_then(|view| view.supervisor))
+            .map_err(SwitchError::from)
+    }
+
     fn record(&self, _id: &str) -> Option<SwitchRecord> {
         None
     }
@@ -801,6 +808,10 @@ impl Updates for Supervised {
             .await
             .map(Some)
             .map_err(switch_error)
+    }
+
+    async fn live_supervisor(&self) -> Result<Option<serde_json::Value>, SwitchError> {
+        self.service.supervisor().await.map(Some)
     }
 
     fn record(&self, id: &str) -> Option<SwitchRecord> {
@@ -1499,6 +1510,19 @@ async fn cancel<U: Updates>(
     }
 }
 
+// Cover preparation, hand-over and recovery budgets, but not the watch or drain.
+fn following_budget() -> Duration {
+    use open_ferry_supervisor::timings::*;
+    LOAD_TIMEOUT * 2
+        + ACTIVE_LOAD_TIMEOUT
+        + SIGNIN_WAIT
+        + HANDOVER_BUDGET * 2
+        + READY_TIMEOUT * 2
+        + RESUME_TIMEOUT * 2
+        + STOP_BUDGET * 2
+        + DETECT_TIMEOUT
+}
+
 async fn follow_until<U: Updates>(
     updates: &U,
     mut handle: SwitchHandle,
@@ -1510,7 +1534,12 @@ async fn follow_until<U: Updates>(
     outcome.operation_id = Some(handle.id.clone());
     console.say(format!("Switch {} accepted. Ctrl-C stops following; the supervisor continues the switch. Use `open-ferry update -cancel` to ask it to cancel.", handle.id));
     tokio::pin!(stop);
+    let until = tokio::time::Instant::now() + following_budget();
     loop {
+        let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return outcome.failed_switch(console, &SwitchError::TimedOut, true);
+        }
         let event = tokio::select! {
             biased;
             stopped = &mut stop => {
@@ -1518,7 +1547,7 @@ async fn follow_until<U: Updates>(
                 console.say("Stopped following. The supervisor continues the switch; it was not cancelled. Use `open-ferry update -check` to see its status.");
                 return outcome.with("following-stopped", 0);
             }
-            event = handle.next(Instant::now() + Duration::from_secs(30)) => event,
+            event = handle.next(Instant::now() + remaining.min(Duration::from_secs(30))) => event,
         };
         match event {
             Ok(Some(SwitchEvent::Progress { phase })) => {
@@ -1567,6 +1596,15 @@ async fn follow_until<U: Updates>(
                     .or_else(|| result["why"].as_str())
                     .unwrap_or(&word);
                 return outcome.failed(console, format!("the supervised switch ended: {reason}"));
+            }
+            Err(SwitchError::TimedOut) => {
+                let live = updates.live_supervisor().await;
+                if matches!(live, Ok(Some(ref snapshot))
+                    if snapshot["switch"]["id"].as_str() == Some(&handle.id))
+                {
+                    continue;
+                }
+                return outcome.failed_switch(console, &SwitchError::TimedOut, true);
             }
             Err(error) => return outcome.failed_switch(console, &error, true),
             Ok(None) => return outcome.failed_switch(console, &SwitchError::Stopped, true),
