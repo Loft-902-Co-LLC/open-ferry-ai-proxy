@@ -224,3 +224,17 @@ it.each(["timeout", "cancel"])("links both signals without AbortSignal.any (%s)"
     expect(isApiError(result.current.failureReason) && result.current.failureReason.status === 0).toBe(true);
   }
 });
+
+
+it("keeps worker preparation polling even when the supervisor stays degraded", async () => {
+  fakePollClock();
+  const api = mockApi(route("GET", UPDATE, { json: updateStatus({ supervisor: supervisorStatus({ phase: "degraded" }),
+    switch_request: { request_id: "preparing-request", action: "install", state: "preparing", pending: true, reason: null, id: null },
+  }) }));
+  const { result } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  await act(() => vi.advanceTimersByTimeAsync(14_001));
+  expect(api.callsTo("GET", UPDATE)).toHaveLength(8);
+  expect(result.current.recoveringSupervisor).toBe(false);
+  expect(result.current.polling).toBe(true);
+});

@@ -74,7 +74,7 @@ export function useUpdateStatus() {
         poll.dispose();
       }
       if (!signal.aborted) {
-        const restart = status.supervisor?.phase === "degraded" && status.supervisor.switch === null &&
+        const restart = status.switch_request?.state !== "preparing" && status.supervisor?.phase === "degraded" && status.supervisor.switch === null &&
           (recovering.current || switchInProgress(previousRead.current));
         recovering.current = restart;
         previousRead.current = status;
