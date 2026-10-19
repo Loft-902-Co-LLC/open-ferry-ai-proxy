@@ -30,12 +30,16 @@ on:
         type: choice
         options: [none, bad-signature]
         default: none
+      qualification_preflight_only:
+        description: 'Only probe Windows user-service prerequisites; skips all builds'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref }}${{ inputs.qualification_preflight_only && '-preflight' || '' }}
   cancel-in-progress: false
 
 env:
@@ -101,6 +105,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   dashboard:
+    if: ${{ !inputs.qualification_preflight_only }}
     name: Build the dashboard
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -144,6 +149,7 @@ jobs:
           if-no-files-found: error
 
   rust-licenses:
+    if: ${{ !inputs.qualification_preflight_only }}
     name: Write the Rust crates' licenses
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -177,7 +183,7 @@ jobs:
           if-no-files-found: error
 
   build:
-    if: github.event_name != 'workflow_dispatch' || !inputs.qualification_only
+    if: github.event_name != 'workflow_dispatch' || (!inputs.qualification_only && !inputs.qualification_preflight_only)
     name: build (${{ matrix.target }})
     needs: [meta, dashboard, rust-licenses]
     strategy:
@@ -709,10 +715,14 @@ jobs:
 
   qualification:
     name: Candidate qualification
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch'
+      && (inputs.qualification_preflight_only
+      || (needs.dashboard.result == 'success' && needs.rust-licenses.result == 'success'))
     needs: [dashboard, rust-licenses]
     uses: ./.github/workflows/qualify.yml
     with:
       fault: ${{ inputs.qualification_fault }}
+      preflight_only: ${{ inputs.qualification_preflight_only }}
     permissions:
       contents: read
