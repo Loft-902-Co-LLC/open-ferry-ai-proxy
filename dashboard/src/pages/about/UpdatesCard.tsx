@@ -229,8 +229,7 @@ export function UpdatesCard({ className }: { className?: string }) {
     onSettled: () => client.invalidateQueries({ queryKey: apiQueryKey(UPDATE) }),
   });
   const supervisor = data?.supervisor;
-  const preparing = switching.isPending || data?.switch_request?.pending === true ||
-    data?.switch_request?.state === "unknown";
+  const preparing = switching.isPending || data?.switch_request?.pending === true;
   const stagedVersion = data?.staged_version;
   const runningVersion = supervisor?.running_version ?? data?.running_version;
   const available = (stagedVersion != null && stagedVersion !== runningVersion) ||
