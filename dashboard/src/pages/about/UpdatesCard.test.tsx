@@ -491,3 +491,28 @@ it("labels a check recorded before the current worker version", async () => {
   expect(fact(card, "Last check")).toMatch(/checked before the running version changed$/);
   expect(fact(card, "Last check")).not.toContain("up to date");
 });
+
+
+it("keeps an unanswered POST unconfirmed until the server reports even identical preparation", async () => {
+  const original = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
+  let posted = false;
+  let readsAfterPost = 0;
+  const api = mockApi(
+    route("GET", CHECK_PATH, { json: {} }),
+    route("GET", UPDATE, () => {
+      if (!posted) return { json: original };
+      if (++readsAfterPost === 1) throw new TypeError("handover");
+      return { json: { ...original, switch_request: { action: "install", state: "preparing", id: null, reason: null, pending: true } } };
+    }),
+    route("POST", UPDATE_INSTALL, () => { posted = true; throw new TypeError("no reply"); }),
+  );
+  const { card, user } = await openUpdates();
+  await user.click(await within(card).findByRole("button", { name: "Install now" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+  await within(card).findByText("The switch could not be confirmed");
+  expect(card).not.toHaveTextContent("The switch request failed");
+  await waitFor(() => { expect(readsAfterPost).toBeGreaterThan(1); }, { timeout: 5_000 });
+  await waitFor(() => { expect(card).not.toHaveTextContent("The switch could not be confirmed"); });
+  expect(within(card).getByText("Preparing the switch")).toBeVisible();
+  expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+});
