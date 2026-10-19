@@ -699,14 +699,42 @@ it("asks for a status read after an unanswered POST exhausts polling", async () 
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
   await within(card).findByText(/Checking its status/);
   expect(within(card).queryByRole("button", { name: "Read status" })).not.toBeInTheDocument();
-  await waitFor(() => { expect(card).toHaveTextContent("Choose Read status to see whether it started."); }, { timeout: 15_000 });
+  await waitFor(() => { expect(card).toHaveTextContent("Choose Try again to see whether it started."); }, { timeout: 15_000 });
   expect(card).not.toHaveTextContent("Checking its status");
   expect(failedReads).toBe(5);
-  await user.click(within(card).getByRole("button", { name: "Read status" }));
+  expect(within(card).getAllByRole("button", { name: /^(Try again|Read status)$/ })).toHaveLength(1);
+  expect(within(card).queryByRole("button", { name: "Read status" })).not.toBeInTheDocument();
+  await user.click(within(card).getByRole("button", { name: "Try again" }));
   await waitFor(() => { expect(failedReads).toBe(6); });
   expect(api.callsTo("POST", UPDATE_CHECK)).toHaveLength(0);
   expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
 });
+
+it("offers one refetch after a lost POST exhausts supervisor recovery", async () => {
+  let readsAfterPost = 0;
+  let posted = false;
+  const live = { id: "old-switch", how: "update", from: "0.0.9", to: "0.1.0" };
+  const original = updateStatus({ staged_version: "0.2.0", supervisor: supervisorStatus({ switch: live }) });
+  const api = mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => {
+    if (!posted) return { json: original };
+    readsAfterPost += 1;
+    return { json: { ...original, supervisor: supervisorStatus({
+      phase: readsAfterPost === 1 ? "handing-over" : "degraded",
+      switch: readsAfterPost === 1 ? live : null,
+    }) } };
+  }), route("POST", UPDATE_INSTALL, () => { posted = true; throw new TypeError("no reply"); }));
+  const { card, user } = await openUpdates();
+  await user.click(await within(card).findByRole("button", { name: "Install now" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+  await within(card).findByText("The supervisor is recovering", undefined, { timeout: 5_000 });
+  await waitFor(() => { expect(card).toHaveTextContent("Choose Read status to see whether it started."); }, { timeout: 15_000 });
+  expect(within(card).getAllByRole("button", { name: /^(Try again|Read status)$/ })).toHaveLength(1);
+  const before = readsAfterPost;
+  await user.click(within(card).getByRole("button", { name: "Read status" }));
+  await waitFor(() => { expect(readsAfterPost).toBe(before + 1); });
+  expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+  expect(api.callsTo("POST", UPDATE_CHECK)).toHaveLength(0);
+}, 20_000);
 
 
 it.each(["request", "live switch"])("keeps an unanswered alert for an old %s after a cached remount", async (old) => {
