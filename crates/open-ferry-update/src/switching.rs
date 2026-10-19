@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::fetch::BoxFuture;
 use crate::journal::{Artifact, JournalView, Phase};
 use crate::pins::Pin;
-use crate::state::{State, how, result};
+use crate::state::State;
 use crate::{Report, UpdateError, Updater};
 
 /// Why preparing, asking for, or following a supervised switch failed.
@@ -156,9 +156,7 @@ pub trait Switcher: Send + Sync {
     fn cancel(&self, deadline: Instant) -> BoxFuture<'_, Result<CancelOutcome, SwitchError>>;
 }
 
-/// Refresh the retry exclusions from outcomes, including ones whose state
-/// write is pending. The supervisor records rollback history but does not
-/// set `State::rolled_back`; carry that history into the checker's exclusion.
+/// Refresh retry exclusions from outcomes whose state write is pending.
 /// The caller holds the update lock. Journal outcomes remain supervisor-owned.
 pub(crate) fn refresh_outcomes(updater: &Updater) -> Result<State, UpdateError> {
     let view = journal(updater)?;
@@ -178,18 +176,6 @@ pub(crate) fn refresh_outcomes(updater: &Updater) -> Result<State, UpdateError> 
                     .map(|failed| failed.version.as_str()),
             );
         }
-    }
-    if let Some(record) = state
-        .history
-        .iter()
-        .chain(state.last_switch.iter())
-        .find(|record| {
-            record.blue_green
-                && record.how == how::ROLLBACK
-                && record.result.as_deref() == Some(result::ROLLED_BACK)
-        })
-    {
-        state.rolled_back = Some(record.from.clone());
     }
     if state != before {
         updater.save(&state)?;

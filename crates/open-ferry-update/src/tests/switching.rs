@@ -249,6 +249,39 @@ fn write_journal(f: &Fixture, journal: &Journal) {
 }
 
 #[tokio::test]
+async fn an_old_supervised_rollback_does_not_replace_a_later_plain_exclusion() {
+    let f = Fixture::new().await;
+    let mut state = f.updater.state();
+    state.apply_outcome(
+        &SwitchRecord::started(
+            "supervised",
+            "rollback",
+            "0.3.0",
+            "0.2.0",
+            "2026-10-18T00:00:00Z",
+        ),
+        None,
+    );
+    assert_eq!(state.rolled_back.as_deref(), Some("0.3.0"));
+    // A subsequent plain update and rollback has its own, newer exclusion.
+    state.rolled_back = Some("0.4.0".into());
+    state.last_switch = Some(SwitchRecord {
+        from: "0.4.0".into(),
+        to: "0.2.0".into(),
+        how: "rollback".into(),
+        at: "2026-10-18T01:00:00Z".into(),
+        ..Default::default()
+    });
+    f.updater.save(&state).unwrap();
+    let state = f.updater.state();
+    write_journal(&f, &Journal::first_start(artifact("0.2.0"), None));
+    let _lock = f.updater.lock().unwrap();
+    let refreshed = crate::switching::refresh_outcomes(&f.updater).unwrap();
+    assert_eq!(refreshed.rolled_back.as_deref(), Some("0.4.0"));
+    assert_eq!(f.updater.state(), state);
+}
+
+#[tokio::test]
 async fn rollback_uses_the_watch_from_or_previous_and_validates_before_unlocking() {
     for watching in [false, true] {
         let f = Fixture::new().await;
