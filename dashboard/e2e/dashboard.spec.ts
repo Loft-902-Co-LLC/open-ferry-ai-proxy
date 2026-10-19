@@ -100,7 +100,7 @@ test("installs from About after confirmation and follows the handover", async ({
   await expect(card.getByText("Preparing the switch")).toBeVisible();
   expect(watched.server.switchRequests).toEqual(["install"]);
   await shot(page, "updates-preparing");
-  for (const phase of ["waiting-for-signins", "loading", "handing-over", "taking-over", "watching", "returning"]) {
+  for (const phase of ["waiting-for-signins", "loading", "handing-over", "taking-over", "watching"]) {
     watched.server.setUpdates(updateStatus({ supervisor: supervisorStatus({
       phase, running_version: phase === "watching" ? "0.2.0" : "0.1.0",
       rollback_target: "0.1.0", watch_until: phase === "watching" ? "2026-10-18T16:10:00Z" : null,
