@@ -79,6 +79,8 @@ pub(crate) struct Inner {
     live: Mutex<Live>,
     /// Held while a check runs, so two never do.
     running: Arc<tokio::sync::Mutex<()>>,
+    /// Held through switch preparation and the endpoint's admission reply.
+    requesting: Arc<tokio::sync::Mutex<()>>,
     task: Mutex<Option<JoinHandle<()>>>,
     switcher: Mutex<Option<Arc<dyn Switcher>>>,
     installed: Mutex<Option<PathBuf>>,
@@ -109,6 +111,7 @@ impl UpdateService {
                 snapshot,
                 live: Mutex::new(Live::default()),
                 running: Arc::new(tokio::sync::Mutex::new(())),
+                requesting: Arc::new(tokio::sync::Mutex::new(())),
                 task: Mutex::new(None),
                 switcher: Mutex::new(None),
                 installed: Mutex::new(None),
@@ -222,6 +225,9 @@ impl UpdateService {
     /// read status before retrying. Manual installs also work in `off` mode.
     pub async fn install_now(&self, auto: bool) -> Result<SwitchHandle, SwitchError> {
         let switcher = self.switcher()?;
+        let request = Arc::clone(&self.inner.requesting)
+            .try_lock_owned()
+            .map_err(|_| UpdateError::Busy)?;
         let snapshot = self.inner.snapshot.borrow().clone();
         if auto && snapshot.settings.mode == SelfUpdateMode::Off {
             return Err(SwitchError::UpdatesOff);
@@ -233,8 +239,8 @@ impl UpdateService {
         let runtime = tokio::runtime::Handle::current();
         // The task owns the guard even if the caller stops waiting. Blocking
         // hashes, file writes and fsyncs must not hold up the async runtime.
-        let pin = tokio::task::spawn_blocking(move || {
-            runtime.block_on(async move {
+        let (pin, _request) = tokio::task::spawn_blocking(move || {
+            let prepared = runtime.block_on(async move {
                 let _running = running;
                 let updater = &inner.updater;
                 let _lock = updater.lock()?;
@@ -293,7 +299,8 @@ impl UpdateService {
                     .as_deref()
                     .ok_or(UpdateError::NothingStaged)?;
                 Ok::<_, SwitchError>(updater.pin_staged(&version, sha256)?)
-            })
+            });
+            prepared.map(|pin| (pin, request))
         })
         .await
         .map_err(|error| UpdateError::Io {
@@ -317,14 +324,17 @@ impl UpdateService {
     /// the lock before requesting a rollback. No pin is sent.
     pub async fn roll_back(&self, expected: &str) -> Result<SwitchHandle, SwitchError> {
         let switcher = self.switcher()?;
+        let request = Arc::clone(&self.inner.requesting)
+            .try_lock_owned()
+            .map_err(|_| UpdateError::Busy)?;
         let updater = self.inner.updater.clone();
         // The supervisor validates --version before Accepted. Allow the
         // updater's full version-probe budget plus transport time.
         let acceptance = updater.limits.version_timeout + Duration::from_secs(3);
         let runtime = tokio::runtime::Handle::current();
         let expected = expected.to_owned();
-        let target = tokio::task::spawn_blocking(move || {
-            runtime.block_on(async move {
+        let (target, _request) = tokio::task::spawn_blocking(move || {
+            let prepared = runtime.block_on(async move {
                 let _lock = updater.lock()?;
                 let target = switching::rollback_target(&updater)?;
                 if target.version != expected {
@@ -335,7 +345,8 @@ impl UpdateService {
                 }
                 updater.validate_previous(&target).await?;
                 Ok::<_, SwitchError>(target)
-            })
+            });
+            prepared.map(|target| (target, request))
         })
         .await
         .map_err(|error| UpdateError::Io { what: "prepare the rollback", error: error.to_string() })??;

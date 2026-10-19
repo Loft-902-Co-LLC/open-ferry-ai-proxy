@@ -59,6 +59,7 @@ struct Fake {
     data: crate::DataDir,
     calls: Mutex<Vec<(String, bool)>>,
     refuse: bool,
+    gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl Switcher for Fake {
@@ -77,6 +78,11 @@ impl Switcher for Fake {
                 "endpoint called under the update lock"
             );
             self.calls.lock().unwrap().push((pin.version.clone(), auto));
+            let gate = self.gate.lock().unwrap().clone();
+            if let Some((arrived, release)) = gate {
+                arrived.notify_one();
+                release.notified().await;
+            }
             if self.refuse {
                 return Err(SwitchError::Refused("busy: watching".into()));
             }
@@ -126,6 +132,7 @@ fn service(
         data: f.data.clone(),
         calls: Mutex::new(Vec::new()),
         refuse,
+        gate: Mutex::new(None),
     });
     let make_fetch: crate::background::MakeFetch = {
         let fetch = fetch.clone();
@@ -150,6 +157,73 @@ async fn an_auto_check_stages_and_starts_one_switch() {
         3,
         "switching reuses the stage"
     );
+}
+
+#[tokio::test]
+async fn overlapping_automatic_checks_send_only_one_switch_request() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let (arrived, release) = hold_request(&fake);
+    let first = tokio::spawn({
+        let service = service.clone();
+        async move { service.check_once().await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        .await
+        .unwrap();
+    service.check_once().await.unwrap().unwrap();
+    assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), true)]);
+    release.notify_one();
+    first.await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_manual_install_during_an_automatic_request_is_busy() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let (arrived, release) = hold_request(&fake);
+    let first = tokio::spawn({
+        let service = service.clone();
+        async move { service.check_once().await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.install_now(false).await,
+        Err(SwitchError::Update(crate::UpdateError::Busy))
+    ));
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    release.notify_one();
+    first.await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_rollback_during_an_install_request_is_busy() {
+    let f = Fixture::new().await;
+    let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let (arrived, release) = hold_request(&fake);
+    let first = tokio::spawn({
+        let service = service.clone();
+        async move { service.install_now(false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.roll_back("0.1.0").await,
+        Err(SwitchError::Update(crate::UpdateError::Busy))
+    ));
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    release.notify_one();
+    first.await.unwrap().unwrap();
+}
+
+fn hold_request(fake: &Fake) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *fake.gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    (arrived, release)
 }
 
 #[tokio::test]
