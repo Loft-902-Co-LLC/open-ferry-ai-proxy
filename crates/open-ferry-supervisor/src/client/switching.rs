@@ -1,6 +1,12 @@
 //! Lock-free endpoint access for supervised workers and update callers.
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin as TaskPin;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use open_ferry_update::fetch::BoxFuture;
@@ -16,7 +22,37 @@ use crate::endpoint::{ClientStream, EndpointError, Identity, Location, connect};
 use crate::protocol::{Admission, Channel, EndpointReply, EndpointRequest, How, VERSION};
 use crate::snapshot::Snapshot;
 
-type EndpointChannel = Channel<ReadHalf<ClientStream>, WriteHalf<ClientStream>>;
+type EndpointChannel = Channel<ReadHalf<ClientStream>, CountingWriter<WriteHalf<ClientStream>>>;
+
+/// Count bytes the transport accepted, including a named pipe's own buffer.
+/// A pending or failed first write alone does not make a request uncertain.
+pub(super) struct CountingWriter<W> {
+    writer: W,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for CountingWriter<W> {
+    fn poll_write(
+        mut self: TaskPin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = TaskPin::new(&mut self.writer).poll_write(cx, bytes);
+        if let Poll::Ready(Ok(count)) = result {
+            self.accepted.fetch_add(count, Ordering::Relaxed);
+        }
+        result
+    }
+    fn poll_flush(mut self: TaskPin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        TaskPin::new(&mut self.writer).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: TaskPin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        TaskPin::new(&mut self.writer).poll_shutdown(cx)
+    }
+}
 
 /// A switch request. Admission is always stamped by the supervisor itself.
 #[derive(Clone, Debug)]
@@ -129,7 +165,7 @@ pub(super) async fn request<R, W, F>(
     request: EndpointRequest,
     deadline: Instant,
     dial: impl FnOnce(Location) -> F,
-) -> Result<Channel<R, W>, SwitchError>
+) -> Result<Channel<R, CountingWriter<W>>, SwitchError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -155,13 +191,31 @@ where
     if time_left(deadline).is_zero() {
         return Err(before_send_timeout());
     }
-    let mut channel = Channel::new(reader, writer);
-    tokio::time::timeout_at(
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let mut channel = Channel::new(
+        reader,
+        CountingWriter {
+            writer,
+            accepted: accepted.clone(),
+        },
+    );
+    let sent = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         send(&mut channel, &request),
     )
     .await
-    .map_err(|_| SwitchError::TimedOut)??;
+    .map_err(|_| SwitchError::TimedOut)
+    .and_then(|sent| sent);
+    if let Err(error) = sent {
+        return Err(if accepted.load(Ordering::Relaxed) == 0 {
+            match error {
+                SwitchError::TimedOut => before_send_timeout(),
+                _ => SwitchError::Unreachable("the connection failed before sending".into()),
+            }
+        } else {
+            error
+        });
+    }
     Ok(channel)
 }
 
@@ -329,6 +383,38 @@ pub(super) mod tests {
         }
     }
 
+    pub(in crate::client) enum Failure {
+        FirstWrite,
+        PendingWrite,
+        Flush,
+    }
+    pub(in crate::client) struct FailingWriter {
+        pub(in crate::client) failure: Failure,
+        pub(in crate::client) polls: Arc<AtomicUsize>,
+    }
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            match self.failure {
+                Failure::FirstWrite => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
+                Failure::PendingWrite => Poll::Pending,
+                Failure::Flush => Poll::Ready(Ok(bytes.len())),
+            }
+        }
+        fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::InvalidData)))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
     fn switch_request() -> EndpointRequest {
         EndpointRequest::Switch {
             v: VERSION,
