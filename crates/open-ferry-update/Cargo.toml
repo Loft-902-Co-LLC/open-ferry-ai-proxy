@@ -9,6 +9,7 @@ publish.workspace = true
 
 [features]
 blue-green-test = []
+test-support = ["dep:axum", "dep:minisign", "dep:tempfile"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
@@ -17,6 +18,9 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 libc = "0.2"
 
 [dependencies]
+axum = { version = "0.8.9", optional = true }
+minisign = { version = "0.10.0", optional = true }
+tempfile = { version = "3.27.0", optional = true }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 flate2 = "1.1.10"
 minisign-verify = "0.3.0"

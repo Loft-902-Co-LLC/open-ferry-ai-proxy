@@ -50,7 +50,7 @@ use open_ferry_update::state::SwitchRecord;
 use open_ferry_update::updater::Found;
 use open_ferry_update::{
     CancelOutcome, DataDir, Install, ModeSource, SelfUpdateMode, Settings, Status, SwitchError,
-    SwitchEvent, SwitchHandle, SwitchView, Switcher, UpdateError, UpdateService, Updater,
+    SwitchEvent, SwitchHandle, SwitchView, UpdateError, UpdateService, Updater,
 };
 use serde::Serialize;
 
@@ -437,9 +437,23 @@ fn manual(
                 )
                 .await
             }
-            Err(error) => Outcome::new(request.action(), &settings).failed_update(console, &error),
+            Err(error) => selection_failed(request, &settings, console, error),
         }
     })
+}
+
+fn selection_failed(
+    request: Request,
+    settings: &Settings,
+    console: &mut Console<'_>,
+    error: UpdateError,
+) -> Outcome {
+    let outcome = Outcome::new(request.action(), settings);
+    if request == Request::Check {
+        outcome.failed_update(console, &error)
+    } else {
+        outcome.failed_switch(console, &SwitchError::Update(error), true)
+    }
 }
 
 /// The updater for this binary, with the data directory found before `.env`
@@ -587,6 +601,39 @@ impl Real {
             self.0.data.root(),
             identity.clone(),
         ));
+        self.supervised_with(
+            request,
+            config,
+            switcher,
+            move |updater, binary| async move {
+                let runtime = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    // Advisory selection; replacement repeats this under its lock.
+                    runtime.block_on(client::detect(
+                        updater.data.root(),
+                        &identity,
+                        &binary,
+                        Instant::now() + DETECT_TIMEOUT,
+                    ))
+                })
+                .await
+                .map_err(preparation_stopped)
+            },
+        )
+        .await
+    }
+
+    async fn supervised_with<F, Fut>(
+        &self,
+        request: Request,
+        config: &Config,
+        switcher: Arc<dyn open_ferry_update::Switcher>,
+        detect: F,
+    ) -> Result<Option<Supervised>, UpdateError>
+    where
+        F: FnOnce(Updater, PathBuf) -> Fut,
+        Fut: std::future::Future<Output = Result<Detection, UpdateError>>,
+    {
         let service = UpdateService::new(self.0.clone(), http_fetch(), config)
             .with_switcher(switcher.clone());
         let root = self.0.data.root().to_owned();
@@ -609,20 +656,7 @@ impl Real {
                     })?,
                 Install::NotifyOnly(_) => return Ok(None),
             };
-            let updater = self.0.clone();
-            let runtime = tokio::runtime::Handle::current();
-            // Advisory selection only. A plain replacement repeats detect
-            // while locked; supervised preparation pins under its own lock.
-            let detection = tokio::task::spawn_blocking(move || {
-                Ok::<_, UpdateError>(runtime.block_on(client::detect(
-                    updater.data.root(),
-                    &identity,
-                    &binary,
-                    Instant::now() + DETECT_TIMEOUT,
-                )))
-            })
-            .await
-            .map_err(preparation_stopped)??;
+            let detection = detect(self.0.clone(), binary).await?;
             match detection {
                 Detection::Clear(_) => return Ok(None),
                 Detection::Supervised(_) => {}
@@ -642,6 +676,13 @@ impl Real {
         } else {
             service.switch_view().await.map_err(switch_error)?
         };
+        if matches!(request, Request::Update | Request::Rollback) && view.supervisor.is_none() {
+            return Err(UpdateError::Supervised(
+                view.unreachable
+                    .clone()
+                    .unwrap_or_else(|| "the supervisor cannot be reached".into()),
+            ));
+        }
         Ok(Some(Supervised {
             real: Real(self.0.clone(), self.1),
             service,
@@ -749,7 +790,7 @@ impl Updates for Real {
 struct Supervised {
     real: Real,
     service: UpdateService,
-    switcher: Arc<client::EndpointSwitcher>,
+    switcher: Arc<dyn open_ferry_update::Switcher>,
     view: SwitchView,
     check: bool,
 }
@@ -928,11 +969,21 @@ impl Updates for Supervised {
                 if let Some(found) = release.found {
                     updater.stage(&found, &mut state).await?;
                 }
-                let sha = state
-                    .staged_sha256
-                    .as_deref()
-                    .ok_or(UpdateError::NothingStaged)?;
-                updater.pin_staged(&version, sha)
+                let sha =
+                    state
+                        .staged_sha256
+                        .as_deref()
+                        .ok_or_else(|| UpdateError::StagedChanged {
+                            version: version.clone(),
+                        })?;
+                updater
+                    .pin_staged(&version, sha)
+                    .map_err(|error| match error {
+                        UpdateError::NothingStaged => UpdateError::StagedChanged {
+                            version: version.clone(),
+                        },
+                        other => other,
+                    })
             })
         })
         .await
