@@ -505,7 +505,7 @@ trait Updates {
         None
     }
 
-    async fn cancel(&self) -> Result<CancelOutcome, UpdateError> {
+    async fn cancel(&self) -> Result<CancelOutcome, SwitchError> {
         Ok(CancelOutcome::Nothing)
     }
 
@@ -516,10 +516,10 @@ trait Updates {
     fn rollback_plan(&self) -> Result<RollbackPlan, UpdateError>;
 
     /// Downloads, checks and stages `found`, then switches to it.
-    async fn update(&self, found: Self::Found) -> Result<Changed, UpdateError>;
+    async fn update(&self, found: Self::Found) -> Result<Changed, SwitchError>;
 
     /// Switches back to the version before the last switch.
-    async fn rollback(&self) -> Result<Changed, UpdateError>;
+    async fn rollback(&self) -> Result<Changed, SwitchError>;
 }
 
 enum Changed {
@@ -709,20 +709,27 @@ impl Updates for Real {
         })
     }
 
-    async fn update(&self, found: Found) -> Result<Changed, UpdateError> {
+    async fn update(&self, found: Found) -> Result<Changed, SwitchError> {
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
         state.latest = Some(found.release.version.clone());
         self.0.stage(&found, &mut state).await?;
-        self.0.switch_to_staged(&mut state).map(Changed::Replaced)
+        self.0
+            .switch_to_staged(&mut state)
+            .map(Changed::Replaced)
+            .map_err(SwitchError::from)
     }
 
-    async fn rollback(&self) -> Result<Changed, UpdateError> {
+    async fn rollback(&self) -> Result<Changed, SwitchError> {
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
-        self.0.rollback(&mut state).await.map(Changed::Replaced)
+        self.0
+            .rollback(&mut state)
+            .await
+            .map(Changed::Replaced)
+            .map_err(SwitchError::from)
     }
 }
 
@@ -821,8 +828,8 @@ impl Updates for Supervised {
         record
     }
 
-    async fn cancel(&self) -> Result<CancelOutcome, UpdateError> {
-        self.service.cancel_switch().await.map_err(switch_error)
+    async fn cancel(&self) -> Result<CancelOutcome, SwitchError> {
+        self.service.cancel_switch().await
     }
 
     async fn latest(&self) -> Result<Offer<SupervisedRelease>, UpdateError> {
@@ -885,7 +892,7 @@ impl Updates for Supervised {
         })
     }
 
-    async fn update(&self, release: SupervisedRelease) -> Result<Changed, UpdateError> {
+    async fn update(&self, release: SupervisedRelease) -> Result<Changed, SwitchError> {
         let binary = self.binary()?;
         let updater = self.real.0.clone();
         let version = release.version.clone();
@@ -913,19 +920,18 @@ impl Updates for Supervised {
         let handle = self
             .switcher
             .update(&pin, false, Instant::now() + Duration::from_secs(3))
-            .await
-            .map_err(switch_error)?;
+            .await?;
         Ok(self.changing(handle, release.version, "update", binary))
     }
 
-    async fn rollback(&self) -> Result<Changed, UpdateError> {
+    async fn rollback(&self) -> Result<Changed, SwitchError> {
         let binary = self.binary()?;
         let to = self
             .view
             .rollback_target
             .clone()
             .ok_or(UpdateError::NoPrevious)?;
-        let handle = self.service.roll_back().await.map_err(switch_error)?;
+        let handle = self.service.roll_back().await?;
         Ok(self.changing(handle, to, "rollback", binary))
     }
 }
@@ -1139,6 +1145,40 @@ impl Outcome {
             outcome.result = "supervised";
         }
         outcome
+    }
+
+    fn failed_switch(self, console: &mut Console, error: &SwitchError, supervised: bool) -> Self {
+        if !supervised && let SwitchError::Update(error) = error {
+            return self.failed_update(console, error);
+        }
+        let (message, result) = match error {
+            SwitchError::TimedOut | SwitchError::Stopped | SwitchError::Protocol(_) => (
+                format!(
+                    "{error}. Outcome unknown; run `open-ferry update -check`. Do not resend the request."
+                ),
+                "outcome-unknown",
+            ),
+            SwitchError::Refused(_) => (
+                format!("{error}. The supervisor did not take the request."),
+                "supervised",
+            ),
+            SwitchError::Ended(_) => (error.to_string(), "error"),
+            SwitchError::NotSupervised
+            | SwitchError::UpdatesOff
+            | SwitchError::Update(_)
+            | SwitchError::Skipped(_)
+            | SwitchError::Unreachable(_)
+            | SwitchError::Untrusted(_) => (
+                format!("{error}. The supervisor request was not sent."),
+                if matches!(error, SwitchError::Update(error) if !matches!(error, UpdateError::Supervised(_)))
+                {
+                    "error"
+                } else {
+                    "supervised"
+                },
+            ),
+        };
+        self.failed(console, message).with(result, 1)
     }
 }
 
@@ -1367,7 +1407,7 @@ async fn update<U: Updates>(
             outcome.switch = Some(record);
             outcome.with("updated", 0)
         }
-        Err(error) => outcome.failed_update(console, &error),
+        Err(error) => outcome.failed_switch(console, &error, updates.is_supervised()),
     }
 }
 
@@ -1450,7 +1490,7 @@ async fn cancel<U: Updates>(
             console.say("Nothing is switching.");
             outcome.with("nothing-switching", 0)
         }
-        Err(error) => outcome.failed_update(console, &error),
+        Err(error) => outcome.failed_switch(console, &error, updates.is_supervised()),
     }
 }
 
@@ -1483,23 +1523,48 @@ async fn follow_until<U: Updates>(
             Ok(Some(SwitchEvent::Done { result })) => {
                 let received = result["result"].as_str().unwrap_or("unknown").to_owned();
                 outcome.supervisor_result = Some(result.clone());
-                if let Some(current) = updates.record(&handle.id) { record = current; }
-                else { record.result = Some(received); }
+                if let Some(current) = updates.record(&handle.id) {
+                    record = current;
+                } else {
+                    record.result = Some(received);
+                }
                 let word = record.result.as_deref().unwrap_or("unknown").to_owned();
                 outcome.switch = Some(record.clone());
                 if matches!(word.as_str(), "switched" | "rolled-back") {
-                    console.say(format!("open-ferry {} is running (it was {}).", record.to, record.from));
-                    console.say(if record.confirmed { "The supervisor confirmed the version." } else { "The supervisor watches it before confirming the installed file." });
-                    console.say("Use `open-ferry update -check` for the watch deadline and last outcome.");
-                    if record.restart_needed { console.say("Restart the service when convenient to update its supervisor."); }
-                    return outcome.with(if word == "rolled-back" { "rolled-back" } else { "updated" }, 0);
+                    console.say(format!(
+                        "open-ferry {} is running (it was {}).",
+                        record.to, record.from
+                    ));
+                    console.say(if record.confirmed {
+                        "The supervisor confirmed the version."
+                    } else {
+                        "The supervisor watches it before confirming the installed file."
+                    });
+                    console.say(
+                        "Use `open-ferry update -check` for the watch deadline and last outcome.",
+                    );
+                    if record.restart_needed {
+                        console
+                            .say("Restart the service when convenient to update its supervisor.");
+                    }
+                    return outcome.with(
+                        if word == "rolled-back" {
+                            "rolled-back"
+                        } else {
+                            "updated"
+                        },
+                        0,
+                    );
                 }
-                let reason = record.why.as_deref().or_else(|| result["why"].as_str()).unwrap_or(&word);
+                let reason = record
+                    .why
+                    .as_deref()
+                    .or_else(|| result["why"].as_str())
+                    .unwrap_or(&word);
                 return outcome.failed(console, format!("the supervised switch ended: {reason}"));
             }
-            Err(SwitchError::TimedOut) => {}
-            Err(error) => return outcome.failed(console, format!("{error}. Use `open-ferry update -check` before trying again.")),
-            Ok(None) => return outcome.failed(console, "the switch stream ended without an outcome; use `open-ferry update -check` before trying again".into()),
+            Err(error) => return outcome.failed_switch(console, &error, true),
+            Ok(None) => return outcome.failed_switch(console, &SwitchError::Stopped, true),
         }
     }
 }
@@ -1567,7 +1632,7 @@ async fn rollback<U: Updates>(
             outcome.switch = Some(record);
             outcome.with("rolled-back", 0)
         }
-        Err(error) => outcome.failed_update(console, &error),
+        Err(error) => outcome.failed_switch(console, &error, updates.is_supervised()),
     }
 }
 

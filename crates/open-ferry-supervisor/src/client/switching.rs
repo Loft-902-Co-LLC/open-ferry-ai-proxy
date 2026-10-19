@@ -9,7 +9,7 @@ use open_ferry_update::pins::Pin;
 use open_ferry_update::{
     CancelOutcome, SwitchError, SwitchEvent, SwitchHandle, SwitchProgress, Switcher,
 };
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
 use super::{locate, time_left, within};
 use crate::endpoint::{ClientStream, EndpointError, Identity, connect};
@@ -117,7 +117,10 @@ async fn request(
         .map_err(SwitchError::Untrusted)?;
     bounded(deadline, async {
         let stream = connect(&location, identity).await.map_err(endpoint_error)?;
-        stream.writable().await.map_err(io_error)?;
+        stream
+            .writable()
+            .await
+            .map_err(|error| SwitchError::Unreachable(error.to_string()))?;
         #[cfg(test)]
         super::tests::after_writable();
         if time_left(deadline).is_zero() {
@@ -125,7 +128,7 @@ async fn request(
         }
         let (reader, writer) = tokio::io::split(stream);
         let mut channel = Channel::new(reader, writer);
-        channel.send(&request).await.map_err(io_error)?;
+        send(&mut channel, &request).await?;
         Ok(channel)
     })
     .await
@@ -153,16 +156,18 @@ async fn bounded<T>(
         .map_err(|_| SwitchError::TimedOut)?
 }
 
-fn io_error(error: std::io::Error) -> SwitchError {
-    if error.kind() == std::io::ErrorKind::InvalidData {
-        SwitchError::Protocol(error.to_string())
-    } else {
-        SwitchError::Unreachable(error.to_string())
-    }
+async fn send<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    channel: &mut Channel<R, W>,
+    request: &EndpointRequest,
+) -> Result<(), SwitchError> {
+    channel
+        .send(request)
+        .await
+        .map_err(|_| SwitchError::Stopped)
 }
 
-async fn receive(
-    channel: &mut EndpointChannel,
+async fn receive<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    channel: &mut Channel<R, W>,
     deadline: Instant,
 ) -> Result<EndpointReply, SwitchError> {
     let reply = bounded(deadline, async {
@@ -170,10 +175,8 @@ async fn receive(
             .receive::<EndpointReply>()
             .await
             .map_err(|error| match error.kind() {
-                std::io::ErrorKind::UnexpectedEof
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::BrokenPipe => SwitchError::Stopped,
-                _ => io_error(error),
+                std::io::ErrorKind::InvalidData => SwitchError::Protocol(error.to_string()),
+                _ => SwitchError::Stopped,
             })?
             .map(|frame| frame.message)
             .ok_or(SwitchError::Stopped)
@@ -242,7 +245,100 @@ impl SwitchProgress for Progress {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
     use super::*;
+
+    struct ReadError;
+
+    impl AsyncRead for ReadError {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::other("read failed")))
+        }
+    }
+
+    struct PartialWriteError(Arc<AtomicUsize>);
+
+    impl AsyncWrite for PartialWriteError {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Poll::Ready(Ok(1))
+            } else {
+                Poll::Ready(Err(io::Error::other("send failed")))
+            }
+        }
+
+        fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn switch_request() -> EndpointRequest {
+        EndpointRequest::Switch {
+            v: VERSION,
+            to: "2.0.0".into(),
+            sha256: "ab".repeat(32),
+            pin: "pin".into(),
+            how: How::Update,
+            auto: false,
+            admitted: Admission {
+                while_off: false,
+                mode_gen: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_send_error_after_a_partial_request_is_ambiguous() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mut channel = Channel::new(tokio::io::empty(), PartialWriteError(writes.clone()));
+        assert!(matches!(
+            send(&mut channel, &switch_request()).await,
+            Err(SwitchError::Stopped)
+        ));
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_read_error_after_sending_is_ambiguous() {
+        use tokio::io::AsyncReadExt;
+
+        let (writer, mut peer) = tokio::io::duplex(4096);
+        let mut channel = Channel::new(ReadError, writer);
+        send(&mut channel, &switch_request()).await.unwrap();
+        let mut bytes = [0; 4096];
+        let count = peer.read(&mut bytes).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes[..count]).unwrap()["type"],
+            "switch"
+        );
+        assert!(matches!(
+            receive(
+                &mut channel,
+                Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .await,
+            Err(SwitchError::Stopped)
+        ));
+    }
 
     #[test]
     fn disabled_switching_is_unavailable_and_keeps_the_policy_reason() {

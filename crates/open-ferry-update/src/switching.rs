@@ -17,6 +17,15 @@ use crate::state::{State, how, result};
 use crate::{Report, UpdateError, Updater};
 
 /// Why preparing, asking for, or following a supervised switch failed.
+///
+/// Request certainty for update, rollback and cancellation:
+/// - `NotSupervised`, `UpdatesOff`, `Update`, `Skipped`, `Unreachable` and
+///   `Untrusted`: the request was not sent.
+/// - `Refused`: the request was sent and the supervisor did not take it.
+/// - `TimedOut`, `Stopped` and `Protocol`: the request may have been taken.
+///   Read status; never resend the request.
+///
+/// `Ended` is a known terminal reply after acceptance, with its reason.
 #[derive(Debug)]
 pub enum SwitchError {
     NotSupervised,
@@ -24,7 +33,7 @@ pub enum SwitchError {
     Update(UpdateError),
     /// A failed or rolled-back release is not retried.
     Skipped(Report),
-    /// The request may have arrived. Read status before trying again.
+    /// The request may have arrived. Read status; never resend it.
     TimedOut,
     Unreachable(String),
     Untrusted(String),
@@ -33,7 +42,7 @@ pub enum SwitchError {
     Refused(String),
     /// The supervisor accepted the switch, then ended it with this reason.
     Ended(String),
-    /// The stream ended without a terminal reply.
+    /// Sending or reading failed, or the stream ended without a terminal reply.
     Stopped,
 }
 
@@ -50,15 +59,13 @@ impl fmt::Display for SwitchError {
                 write!(f, "open-ferry {version} was rolled back and is skipped")
             }
             Self::Skipped(report) => write!(f, "the release is skipped: {report:?}"),
-            Self::TimedOut => f.write_str(
-                "the supervisor did not answer in time; check its status before trying again",
-            ),
+            Self::TimedOut => f.write_str("the supervisor did not answer in time"),
             Self::Unreachable(why) => write!(f, "the supervisor cannot be reached: {why}"),
             Self::Untrusted(why) => write!(f, "the supervisor endpoint was refused: {why}"),
             Self::Protocol(why) => write!(f, "the supervisor reply was not understood: {why}"),
             Self::Refused(why) => write!(f, "the supervisor refused the request: {why}"),
             Self::Ended(why) => write!(f, "the supervisor ended the switch: {why}"),
-            Self::Stopped => f.write_str("the supervisor stopped before the switch finished"),
+            Self::Stopped => f.write_str("the supervisor connection ended without an outcome"),
         }
     }
 }
