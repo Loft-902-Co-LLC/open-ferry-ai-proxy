@@ -355,9 +355,10 @@ export function UpdatesCard({ className }: { className?: string }) {
         title={confirm === "rollback" ? `Roll back to ${supervisor?.rollback_target ?? "the previous version"}?` : "Install the newer release now?"}
         confirmLabel={confirm === "rollback" ? "Roll back" : "Install now"}
         tone="primary"
+        confirmDisabled={confirm === "rollback" ? !canRollback : !canInstall}
         onCancel={() => { setConfirm(null); }}
         onConfirm={() => {
-          if (confirm !== null) {
+          if (confirm !== null && (confirm === "rollback" ? canRollback : canInstall)) {
             switching.mutate(confirm);
             setConfirm(null);
           }
