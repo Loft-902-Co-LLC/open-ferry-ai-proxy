@@ -297,7 +297,13 @@ impl Host for SupervisedHost {
                 if state.complained.as_deref() != Some(message.as_str()) {
                     tracing::warn!(
                         "can't read the self-update mode from the config; keeping the last one ({}): {message}",
-                        if state.off { "off" } else { "on" }
+                        if state.off {
+                            "off"
+                        } else if state.auto {
+                            "auto"
+                        } else {
+                            "notify"
+                        }
                     );
                     state.complained = Some(message);
                 }
@@ -1306,6 +1312,50 @@ mod tests {
         assert!(!before.off && !before.auto);
         std::fs::remove_file(path).unwrap();
         assert_eq!(host.effective_mode(), before);
+    }
+
+    #[test]
+    fn unreadable_config_warning_names_the_retained_mode() {
+        struct Output(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for mode in ["off", "notify", "auto"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(dir.path(), &format!("self-update:\n  mode: \"{mode}\"\n"));
+            let host = mode_host(dir.path(), Arc::new(Mutex::new(None)));
+            let before = host.effective_mode();
+            std::fs::remove_file(path).unwrap();
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let output = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || Output(output.clone()))
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                assert_eq!(host.effective_mode(), before);
+                assert_eq!(host.effective_mode(), before);
+            });
+            let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+            assert!(
+                text.contains(&format!("keeping the last one ({mode})")),
+                "{mode}: {text}"
+            );
+            assert_eq!(
+                text.matches("can't read the self-update mode").count(),
+                1,
+                "an unchanged read error is logged once: {text}"
+            );
+        }
     }
 
     #[test]
