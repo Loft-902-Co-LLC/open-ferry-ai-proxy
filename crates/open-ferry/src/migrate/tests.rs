@@ -14,7 +14,7 @@ use super::machine::{Answer, Entry, EntryKind, Held, Launch, Machine, Parent, Pr
 use super::switch::backup_dir;
 use super::*;
 use crate::check::{Finding, Level};
-use crate::os_service::{Cmd, Context, Output, Owner, Platform, System};
+use crate::os_service::{Cmd, Context, Output, Owner, Platform, System, Updating};
 
 /// What the fake's binaries hold: open-ferry's, and CLIProxyAPI's.
 const OPEN_FERRY: &[u8] = b"open-ferry binary";
@@ -88,6 +88,9 @@ struct Fake {
     failing: BTreeSet<String>,
     /// The binary the install receipt names.
     installed: Option<String>,
+    /// The service install assessment; `None` is an install with no receipt.
+    updating: Option<Updating>,
+    supervisor_stop: Option<StopOutcome>,
     /// Whether open-ferry starts but never answers.
     broken: bool,
     next_pid: u32,
@@ -142,6 +145,8 @@ impl Fake {
             links: BTreeMap::new(),
             failing: BTreeSet::new(),
             installed: None,
+            updating: None,
+            supervisor_stop: None,
             broken: false,
             next_pid: 9001,
             events: Vec::new(),
@@ -276,9 +281,13 @@ impl Fake {
         self.manager_changed(line);
         if line.starts_with("schtasks.exe /create /tn open-ferry ") {
             self.answer("schtasks.exe /query /tn open-ferry", 0, "");
+            let xml = os_service::decode_output(self.data(TASK_XML));
+            self.answer("schtasks.exe /query /tn open-ferry /xml ONE", 0, &xml);
         }
         if line == "schtasks.exe /delete /tn open-ferry /f" {
             self.fail("schtasks.exe /query /tn open-ferry", 1, "ERROR");
+            self.answers
+                .remove("schtasks.exe /query /tn open-ferry /xml ONE");
         }
         if line.starts_with("sc.exe create open-ferry ") {
             self.answer(
@@ -642,7 +651,9 @@ impl System for Fake {
 
     fn write_atomic(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
         self.events.push(format!("write_atomic {path}"));
-        self.need_parent(path)?;
+        if let Some(parent) = self.platform.parent(path) {
+            self.dir(&parent);
+        }
         self.files.insert(path.to_owned(), data.to_vec());
         Ok(())
     }
@@ -663,7 +674,10 @@ impl System for Fake {
             "stop_supervisor {data_dir} {}s{system}",
             budget.as_secs()
         ));
-        StopOutcome::NotRunning
+        self.fire("stop_supervisor");
+        self.supervisor_stop
+            .clone()
+            .unwrap_or(StopOutcome::NotRunning)
     }
 
     fn trusted_dir(&self, _path: &str) -> Result<(), String> {
@@ -769,6 +783,17 @@ impl crate::scope::Probe for Fake {
 }
 
 impl Machine for Fake {
+    fn service_updating(&self, context: &Context, _system: bool) -> Updating {
+        self.updating.clone().unwrap_or_else(|| {
+            Updating::from_install(
+                os_service::data_dir(context),
+                &open_ferry_update::install::Install::NotifyOnly(
+                    open_ferry_update::install::NotSelfUpdating::NoReceipt,
+                ),
+            )
+        })
+    }
+
     fn create_machine_dir(&mut self, path: &str) -> io::Result<()> {
         crate::scope::Probe::create_machine_dir(&mut self.trust, path)?;
         self.dir(path);
@@ -1573,7 +1598,7 @@ fn a_dry_run_changes_nothing() {
     has(&ran.out, "Dry run: nothing was changed.");
     has(
         &ran.out,
-        "Install open-ferry as a systemd user service (/home/me/.config/systemd/user/open-ferry.service), running `/home/me/.local/bin/open-ferry -config /home/me/cpa/config.yaml` in /home/me/cpa, and start it: create /home/me/.config/systemd/user; write /home/me/.config/systemd/user/open-ferry.service; run `systemctl --user daemon-reload`; run `systemctl --user enable --now open-ferry.service`.",
+        "Install open-ferry as a systemd user service (/home/me/.config/systemd/user/open-ferry.service), with config /home/me/cpa/config.yaml, in /home/me/cpa, and start it: create /home/me/.config/systemd/user; write /home/me/.config/systemd/user/open-ferry.service; run `systemctl --user daemon-reload`; run `systemctl --user enable --now open-ferry.service`; write /home/me/.local/share/open-ferry/service.json.",
     );
     has(
         &ran.out,
@@ -8811,4 +8836,188 @@ fn r10b_plain_undo_plan_describes_backup_presence() {
             .iter()
             .any(|step| step == &expected)
     );
+}
+
+// Not upstream's: migration uses service install's form in every supported
+// scope, and undo uses that service's own data directory to stop it.
+fn service_install_cases() -> [(Fake, Context, os_service::Target); 5] {
+    let mut systemd = system_unit(linux_root(), false);
+    systemd.0.answer("id -u", 0, "0\n");
+    let mut task = binary_task(true);
+    task.1.env.insert(
+        "LOCALAPPDATA".to_owned(),
+        r"C:\Users\me\AppData\Local".to_owned(),
+    );
+    [
+        (systemd_user(), os_service::Target::SystemdUser),
+        (brew_services(), os_service::Target::LaunchAgent),
+        (task, os_service::Target::ScheduledTask),
+        (systemd, os_service::Target::SystemdSystem),
+        (
+            nssm_service(windows_program_files(), true),
+            os_service::Target::WindowsService,
+        ),
+    ]
+    .map(|((fake, context), target)| (fake, context, target))
+}
+
+fn service_data(fake: &Fake, context: &Context, target: os_service::Target) -> String {
+    if target.system() {
+        fake.machine_root(context.platform).unwrap().unwrap()
+    } else {
+        os_service::data_dir(context).unwrap()
+    }
+}
+
+fn installed_definition(fake: &Fake, context: &Context, target: os_service::Target) -> String {
+    match target {
+        os_service::Target::ScheduledTask => {
+            fake.answers["schtasks.exe /query /tn open-ferry /xml ONE"]
+                .stdout
+                .clone()
+        }
+        os_service::Target::WindowsService => fake.answers["sc.exe qc open-ferry"].stdout.clone(),
+        _ => String::from_utf8(fake.data(&target.location(context).unwrap()).to_vec()).unwrap(),
+    }
+}
+
+#[test]
+fn migrates_self_updating_installs_to_supervised_services_and_back() {
+    for (mut fake, context, target) in service_install_cases() {
+        let data = service_data(&fake, &context, target);
+        fake.updating = Some(Updating::from_install(
+            Ok(data.clone()),
+            &open_ferry_update::install::Install::SelfUpdating {
+                binary: context.exe.clone().into(),
+            },
+        ));
+        let files = fake.files.clone();
+        let preview = migrate(&mut fake, &context, &["-dry-run"]);
+        assert_eq!(preview.code, 0, "{target:?}: {}", preview.all());
+        has(&preview.out, "Installing the supervised form");
+        has(&preview.out, &data);
+        read_only(&fake);
+        assert_eq!(fake.files, files);
+
+        let ran = migrate(&mut fake, &context, &["-yes"]);
+        assert_eq!(ran.code, 0, "{target:?}: {}", ran.all());
+        has(&ran.out, "Installing the supervised form");
+        let definition = installed_definition(&fake, &context, target);
+        has(&definition, "-supervise");
+        has(&definition, "-data-dir");
+        has(&definition, &data);
+        let service_record = context.platform.join(&data, "service.json");
+        assert_eq!(saved(&fake, &service_record)["supervised"], true);
+        let record_path = record::path(&fake, &context).unwrap();
+        let record = saved(&fake, &record_path);
+        let config = record["cliproxyapi"]["config"].as_str().unwrap();
+        let cwd = record["cliproxyapi"]["working_dir"].as_str();
+        for process in fake
+            .procs
+            .values_mut()
+            .filter(|p| p.exe.as_deref() == Some(context.exe.as_str()))
+        {
+            process.args = strings(&["-supervise", "-config", config, "-data-dir", &data]);
+            process.cwd = cwd.map(str::to_owned);
+        }
+        fake.supervisor_stop = Some(StopOutcome::Stopped);
+        fake.on("stop_supervisor", Effect::Exit(context.exe.clone()));
+        let before = fake.events.len();
+        let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+        assert_eq!(undo.code, 0, "{target:?}: {}", undo.all());
+        assert_eq!(saved(&fake, &record_path)["status"], "undone");
+        assert!(!fake.exists(&service_record), "{target:?}");
+        if matches!(
+            target,
+            os_service::Target::SystemdUser
+                | os_service::Target::SystemdSystem
+                | os_service::Target::LaunchAgent
+        ) {
+            assert!(
+                !fake.exists(&target.location(&context).unwrap()),
+                "{target:?}"
+            );
+        }
+        if matches!(
+            target,
+            os_service::Target::ScheduledTask | os_service::Target::WindowsService
+        ) {
+            let suffix = if target.system() { " system" } else { "" };
+            let stop = format!("stop_supervisor {data} 50s{suffix}");
+            let remove = if target.system() {
+                "run sc.exe delete open-ferry"
+            } else {
+                "run schtasks.exe /delete /tn open-ferry /f"
+            };
+            in_order(&fake.events[before..], &[&stop, remove]);
+        }
+        // The upstream definition and shared config survive the switch back.
+        for (path, bytes) in &files {
+            assert_eq!(fake.files.get(path), Some(bytes), "{target:?}: {path}");
+        }
+    }
+}
+
+#[test]
+fn migration_keeps_plain_services_and_says_why_they_cannot_update() {
+    use open_ferry_update::install::{Install, NotSelfUpdating};
+    for (mut fake, context, target) in service_install_cases() {
+        let data = service_data(&fake, &context, target);
+        let why = NotSelfUpdating::NoReceipt;
+        fake.updating = Some(Updating::from_install(
+            Ok(data.clone()),
+            &Install::NotifyOnly(why.clone()),
+        ));
+        let ran = migrate(&mut fake, &context, &["-yes"]);
+        assert_eq!(ran.code, 0, "{target:?}: {}", ran.all());
+        has(
+            &ran.out,
+            "Installing the plain form, without the supervisor",
+        );
+        has(&ran.out, &why.to_string());
+        lacks(&installed_definition(&fake, &context, target), "-supervise");
+        let path = context.platform.join(&data, "service.json");
+        if target.system() {
+            assert!(!fake.exists(&path));
+        } else {
+            assert_eq!(saved(&fake, &path)["supervised"], false);
+        }
+    }
+}
+
+#[test]
+fn undo_of_a_migrated_supervised_task_waits_for_workers_and_fails_closed() {
+    let (mut fake, mut context) = binary_task(true);
+    context.env.insert(
+        "LOCALAPPDATA".to_owned(),
+        r"C:\Users\me\AppData\Local".to_owned(),
+    );
+    let data = os_service::data_dir(&context).unwrap();
+    fake.updating = Some(Updating::supervised(&data));
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let config = r"C:\Users\me\cpa\config.yaml";
+    fake.procs.get_mut(&9001).unwrap().args =
+        strings(&["-supervise", "-config", config, "-data-dir", &data]);
+    let mut worker = fake.procs[&9001].clone();
+    worker.pid = 9100;
+    worker.exe = Some(format!(r"{data}\versions\1.0.0\open-ferry.exe"));
+    worker.args = strings(&["-worker", "-config", config, "-worker-control", "3"]);
+    fake.procs.insert(9100, worker);
+    fake.on("stop_supervisor", Effect::End(9001));
+    fake.supervisor_stop = Some(StopOutcome::Stopped);
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "75 seconds after it was stopped");
+    has(&undo.all(), "process 9100 still runs");
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+    assert!(
+        !fake.events[before..]
+            .iter()
+            .any(|event| event == r"run schtasks.exe /run /tn \CLIProxyAPI")
+    );
+    fake.end(9100);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
 }

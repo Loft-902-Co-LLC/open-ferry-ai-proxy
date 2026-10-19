@@ -33,9 +33,10 @@
 //! unit on Linux (see [`systemd`]), a launchd agent on macOS (see
 //! [`launchd`]), and on Windows a scheduled task at the user's logon (see
 //! [`windows`]). With `-system` it is the machine's, started at boot as
-//! root: a systemd system unit, a launchd daemon, or a Windows service
-//! running as LocalSystem. As `~` would then be that account's home,
-//! `install -system` refuses a config whose auth directory is under `~`;
+//! root on Linux (a systemd system unit), or LocalSystem on Windows (a
+//! Windows service). macOS refuses `install -system` until it can check
+//! who may change the service's files. As `~` would then be that account's
+//! home, `install -system` refuses a config whose auth directory is under `~`;
 //! and as the service runs with root's rights, it refuses a binary or a
 //! config that anyone but root (on Windows, the administrators) can change.
 //! Installing or removing a system service needs root, or an administrator.
@@ -130,15 +131,7 @@ where
         Context::host,
         |context, request| {
             if request.action == Action::Install {
-                if request.system {
-                    Updating::assess_system(
-                        &scope::Host,
-                        &update_install::RealSystem::default(),
-                        context,
-                    )
-                } else {
-                    Updating::assess(context)
-                }
+                Updating::assess_service(context, request.system)
             } else {
                 Updating::plain(data_dir(context), "no install was requested")
             }
@@ -784,7 +777,7 @@ fn install_refusal(
     }
     if request.system {
         if platform == Platform::MacOs {
-            return Err("open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root. Install a user service with `open-ferry service install` without -system.".to_owned());
+            return Err(MACOS_SYSTEM_REFUSAL.to_owned());
         }
         return Ok(());
     }
@@ -1961,8 +1954,7 @@ pub(crate) struct Definition {
 }
 
 const NO_MACHINE_INSTALL: &str = "no machine-wide install of this binary: install it with install.sh --system / install.ps1 -System";
-const MACOS_SYSTEM_PLAIN: &str =
-    "machine-wide installs on macOS come later; install and update open-ferry as the user";
+const MACOS_SYSTEM_REFUSAL: &str = "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root. Install a user service with `open-ferry service install` without -system.";
 
 /// The data directory `open-ferry update` would use for the service's
 /// account, from the starting environment of `context` (before any `.env`),
@@ -1999,6 +1991,19 @@ pub(crate) struct Updating {
 }
 
 impl Updating {
+    /// The same install assessment for `service install` and `migrate`.
+    pub(crate) fn assess_service(context: &Context, system: bool) -> Updating {
+        if system {
+            Updating::assess_system(
+                &scope::Host,
+                &update_install::RealSystem::default(),
+                context,
+            )
+        } else {
+            Updating::assess(context)
+        }
+    }
+
     /// The plain run, for this reason.
     pub(crate) fn plain(data_dir: Result<String, String>, why: impl Into<String>) -> Updating {
         Updating {
@@ -2070,7 +2075,7 @@ impl Updating {
     ) -> Updating {
         let unavailable = |why: String| Updating::plain(Err(why.clone()), why);
         if context.platform == Platform::MacOs {
-            return unavailable(MACOS_SYSTEM_PLAIN.to_owned());
+            return unavailable(MACOS_SYSTEM_REFUSAL.to_owned());
         }
         let home = match scope::lookup(probe, &context.exe) {
             Ok(home) if home.scope == scope::Scope::Machine => home,
@@ -2157,7 +2162,8 @@ fn install(
         plan,
         definition,
         account,
-    } = prepare_install_with(
+        form,
+    } = prepare_install(
         system,
         context,
         target,
@@ -2166,15 +2172,6 @@ fn install(
         request.dry_run,
         updating,
     )?;
-    let form = if target.system() {
-        if target == Target::LaunchDaemon {
-            Updating::plain(updating.data_dir.clone(), MACOS_SYSTEM_PLAIN).form()
-        } else {
-            updating.system_form()
-        }
-    } else {
-        updating.form()
-    };
     say(out, format_args!("{form}"));
     if request.dry_run {
         describe(&plan, out);
@@ -2223,6 +2220,8 @@ pub(crate) struct Prepared {
     pub(crate) plan: Plan,
     pub(crate) definition: Definition,
     pub(crate) account: Account,
+    /// The chosen form and, for a plain run, why it cannot update itself.
+    pub(crate) form: String,
 }
 
 /// Checks that open-ferry can be installed as `target` with `config`, a
@@ -2230,27 +2229,9 @@ pub(crate) struct Prepared {
 /// service runs in `dir` when it is given (`open-ferry migrate` keeps
 /// CLIProxyAPI's working directory), else in the config's directory. With
 /// `dry_run`, a system service is planned without root or an
-/// administrator. The service runs plain: `open-ferry migrate` installs it
-/// so (see [`prepare_install_with`]).
+/// administrator. `updating` chooses the supervised or plain form, as for
+/// `service install`.
 pub(crate) fn prepare_install(
-    system: &mut dyn System,
-    context: &Context,
-    target: Target,
-    config: &str,
-    dir: Option<&str>,
-    dry_run: bool,
-) -> Result<Prepared, String> {
-    // No data directory, so no `service.json` either: this install is
-    // `open-ferry migrate`'s, which has no use for one.
-    let updating = Updating::plain(
-        Err("the install is the plain run".to_owned()),
-        "this install isn't supervised",
-    );
-    prepare_install_with(system, context, target, config, dir, dry_run, &updating)
-}
-
-/// [`prepare_install`], with the form `updating` chose for the service.
-pub(crate) fn prepare_install_with(
     system: &mut dyn System,
     context: &Context,
     target: Target,
@@ -2319,9 +2300,7 @@ pub(crate) fn prepare_install_with(
                 format!("Refusing the system service: {dotenv} failed the system trust check: {why}. As root or an administrator, make the file and its directories writable only by root or administrators, or remove it.")
             })?;
         }
-        if platform != Platform::MacOs {
-            definition.data_dir = updating.pinned().map(str::to_owned);
-        }
+        definition.data_dir = updating.pinned().map(str::to_owned);
         definition
     } else {
         Definition {
@@ -2380,6 +2359,11 @@ pub(crate) fn prepare_install_with(
         plan,
         definition,
         account,
+        form: if target.system() {
+            updating.system_form()
+        } else {
+            updating.form()
+        },
     })
 }
 
