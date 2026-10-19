@@ -7449,3 +7449,90 @@ async fn watch_failure_outcomes_do_not_record_private_paths() {
             .contains("/private/")
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_survives_history_eviction_until_its_boundary() {
+    use crate::core::Open;
+    use open_ferry_update::journal::{Artifact, Blame, How};
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    for auto in [false, true] {
+        let mut rig = Rig::new().await;
+        let root = tempfile::tempdir().unwrap();
+        rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+        let mut core = core_of!(rig);
+        let open = Open {
+            id: "environment-failure".into(),
+            how: How::Update,
+            from: core.rt.journal.as_ref().unwrap().active.clone(),
+            to: Artifact {
+                version: "2.0.0".into(),
+                sha256: crate::testkit::SHA_2.into(),
+                size: 1,
+            },
+            started: core.stamp(),
+            phase: Phase::HandingOver,
+            reached_ready: false,
+        };
+        core.end_failed(
+            &open,
+            Phase::HandingOver,
+            Blame::Environment,
+            "the old worker was lost",
+            false,
+            false,
+        );
+        let mut state = State::default();
+        let failed = rig.disk.record(&open.id).unwrap();
+        state.apply_outcome(&failed, None);
+        assert!(state.failed.is_empty());
+        for n in 0..6 {
+            rig.clock.advance(Duration::from_secs(1));
+            let mut record = SwitchRecord::failed_to_load(
+                &format!("other-{n}"),
+                "update",
+                "1.0.0",
+                &format!("3.0.{n}"),
+                &core.stamp(),
+                "loading",
+                "environment",
+                "interrupted",
+            );
+            record.ended_at = Some(core.stamp());
+            let outcome = Outcome {
+                record: record.clone(),
+                mark_failed: None,
+            };
+            core.write_state("S3", &outcome, false);
+            state.apply_outcome(&record, None);
+        }
+        assert_eq!(state.history.len(), 5);
+        assert!(
+            state
+                .history
+                .iter()
+                .chain(state.last_switch.iter())
+                .all(|record| record.to != "2.0.0")
+        );
+        assert!(core.rt.pending.is_empty());
+        assert!(core.rt.journal.as_ref().unwrap().outcomes.is_empty());
+        state.save(&rig.cfg.data.state_file()).unwrap();
+        rig.clock.advance(Duration::from_secs(6 * 3600 - 7));
+        let (tx, mut rx) = unbounded_channel();
+        core.handle_switch(update(auto), tx).await;
+        let replies = drain(&mut rx);
+        if auto {
+            assert!(
+                matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason.contains("trying again later"))
+            );
+            assert_eq!(rig.driver.places().len(), 1);
+            rig.clock.advance(Duration::from_secs(1));
+            let (tx, mut rx) = unbounded_channel();
+            core.handle_switch(update(true), tx).await;
+            assert_eq!(done_result(&drain(&mut rx))["result"], "switched");
+            assert!(!core.automatic_cooldowns.contains_key("2.0.0"));
+        } else {
+            assert_eq!(done_result(&replies)["result"], "switched");
+        }
+    }
+}

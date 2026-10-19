@@ -18,7 +18,9 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
-use crate::core::{Core, Drain, Open, SwitchRequest, TICK, Tracked, Watch};
+use crate::core::{
+    AUTOMATIC_COOLDOWN, Core, Drain, Open, SwitchRequest, TICK, Tracked, Watch, unfinished_at,
+};
 use crate::disk::Disk;
 use crate::driver::{Driver, Event, ExitInfo, SpawnError, WorkerId};
 use crate::host::Host;
@@ -614,10 +616,11 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
 
     /// Step 1's checks of `to`: a pin, a kept file, its hash.
     async fn validate_target(
-        &self,
+        &mut self,
         request: &SwitchRequest,
         from: &Artifact,
     ) -> Result<Artifact, String> {
+        self.prune_automatic_cooldowns();
         let journal = self.rt.journal.as_ref().ok_or("there is no journal")?;
         if request.auto {
             let state = open_ferry_update::state::State::load_strict(&self.cfg.data.state_file())
@@ -649,28 +652,23 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 );
             }
             let now = self.clock.now();
-            let cooling_down = state
-                .history
-                .iter()
-                .chain(state.last_switch.iter())
-                .chain(journal.outcomes.iter().map(|outcome| &outcome.record))
-                .chain(
-                    self.rt
-                        .pending
-                        .iter()
-                        .map(|pending| &pending.outcome.record),
-                )
-                .any(|record| {
-                    record.to == request.to
-                        && record
-                            .result
-                            .as_deref()
-                            .is_some_and(|result| result != "switched")
-                        && chrono::DateTime::parse_from_rfc3339(
-                            record.ended_at.as_deref().unwrap_or(&record.at),
-                        )
-                        .is_ok_and(|ended| now < ended + chrono::Duration::hours(6))
-                });
+            let cooling_down = self.automatic_cooldowns.contains_key(&request.to)
+                || state
+                    .history
+                    .iter()
+                    .chain(state.last_switch.iter())
+                    .chain(journal.outcomes.iter().map(|outcome| &outcome.record))
+                    .chain(
+                        self.rt
+                            .pending
+                            .iter()
+                            .map(|pending| &pending.outcome.record),
+                    )
+                    .any(|record| {
+                        record.to == request.to
+                            && unfinished_at(record)
+                                .is_some_and(|ended| now - ended < AUTOMATIC_COOLDOWN)
+                    });
             if cooling_down {
                 return Err(
                     "a recent switch to that version did not finish; trying again later".to_owned(),
