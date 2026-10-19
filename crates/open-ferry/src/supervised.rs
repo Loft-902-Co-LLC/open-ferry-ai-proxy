@@ -702,35 +702,42 @@ fn run_supervisor(
             return ExitCode::FAILURE;
         }
     };
-    // Keep the nested supervisor future off Windows' small main-thread stack.
-    let result = runtime.block_on(Box::pin(async {
-        let signals = match stops {
-            Some(stops) => stops,
-            None => match watch_signals() {
-                Ok(signals) => signals,
-                Err(error) => {
-                    tracing::error!("failed to watch for stop signals: {error}");
-                    return None;
-                }
-            },
-        };
-        let (command_tx, commands) = mpsc::unbounded_channel();
-        // A stop sent before the core runs waits in the channel.
-        tokio::spawn(forward_stops(signals, command_tx.clone()));
-        let driver = ProcessDriver::new(kind, cfg.timings.exit_poll);
-        Some(
-            Box::pin(open_ferry_supervisor::supervise::supervise(
-                &cfg,
-                &host,
-                &driver,
-                &open_ferry_supervisor::clock::SystemClock,
-                command_tx,
-                commands,
-                open_ferry_supervisor::supervise::default_limit(),
-            ))
-            .await,
-        )
-    }));
+    let result = match on_supervisor_thread(|| {
+        runtime.block_on(Box::pin(async move {
+            let signals = match stops {
+                Some(stops) => stops,
+                None => match watch_signals() {
+                    Ok(signals) => signals,
+                    Err(error) => {
+                        tracing::error!("failed to watch for stop signals: {error}");
+                        return None;
+                    }
+                },
+            };
+            let (command_tx, commands) = mpsc::unbounded_channel();
+            // A stop sent before the core runs waits in the channel.
+            tokio::spawn(forward_stops(signals, command_tx.clone()));
+            let driver = ProcessDriver::new(kind, cfg.timings.exit_poll);
+            Some(
+                open_ferry_supervisor::supervise::supervise(
+                    &cfg,
+                    &host,
+                    &driver,
+                    &open_ferry_supervisor::clock::SystemClock,
+                    command_tx,
+                    commands,
+                    open_ferry_supervisor::supervise::default_limit(),
+                )
+                .await,
+            )
+        }))
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!("failed to start the supervisor thread: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let Some(result) = result else {
         return ExitCode::FAILURE;
     };
@@ -740,6 +747,23 @@ fn run_supervisor(
         Err(error) => tracing::error!("the supervisor failed: {error}"),
     }
     ExitCode::from(exit_status(&result))
+}
+
+// The boxed future lives on the heap. Eight MiB leaves room for its poll
+// frames, synchronous disk/driver calls and debug/unwind overhead; real-process
+// tests exercise this budget with one runtime worker. The dedicated thread
+// keeps that synchronous work off the endpoint and signal tasks' pool.
+fn on_supervisor_thread<T: Send>(run: impl FnOnce() -> T + Send) -> std::io::Result<T> {
+    std::thread::scope(|scope| {
+        let supervisor = std::thread::Builder::new()
+            .name("supervisor".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, run)?;
+        match supervisor.join() {
+            Ok(result) => Ok(result),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
 }
 
 /// `-worker`: takes over the control channel and sockets `control` names,
@@ -855,6 +879,41 @@ fn attach_failure(error: &AttachError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisor_polling_leaves_a_single_runtime_worker_available() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let caller = std::thread::current().id();
+        on_supervisor_thread(|| {
+            runtime.block_on(async {
+                let poller = std::thread::current().id();
+                assert_ne!(poller, caller);
+                let (send, receive) = std::sync::mpsc::channel();
+                tokio::spawn(async move {
+                    send.send(std::thread::current().id()).unwrap();
+                });
+                // Synchronous core work must not block the only runtime worker.
+                let worker = receive
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                assert_ne!(poller, worker);
+            })
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_supervisor_thread_panic_resumes_on_the_calling_thread() {
+        let panic = std::panic::catch_unwind(|| {
+            on_supervisor_thread::<()>(|| std::panic::panic_any(73_u32))
+        })
+        .unwrap_err();
+        assert_eq!(panic.downcast_ref::<u32>(), Some(&73));
+    }
 
     struct GateProbe {
         platform: crate::os_service::Platform,
