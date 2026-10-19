@@ -115,20 +115,21 @@ fn a_user_launchagent_serves_and_uninstalls_within_its_exit_timeout() {
     let started = open_ferry_supervisor::process::unix::start_time(pid)
         .unwrap()
         .unwrap();
-    let workers: Vec<_> = fx
-        .events()
-        .into_iter()
-        .filter_map(|event| {
-            open_ferry_supervisor::process::unix::start_time(event.pid)
-                .ok()
-                .flatten()
-                .map(|started| (event.pid, started))
-        })
-        .collect();
-    assert!(
-        !workers.is_empty(),
-        "a supervised worker must have reported events"
-    );
+    // A worker serves before it logs that it is active, so its first event can
+    // trail the response above.
+    let workers = fx.wait_for("a supervised worker to report events", || {
+        let workers: Vec<_> = fx
+            .events()
+            .into_iter()
+            .filter_map(|event| {
+                open_ferry_supervisor::process::unix::start_time(event.pid)
+                    .ok()
+                    .flatten()
+                    .map(|started| (event.pid, started))
+            })
+            .collect();
+        (!workers.is_empty()).then_some(workers)
+    });
 
     let began = Instant::now();
     let removed = service(&fx, "uninstall");
