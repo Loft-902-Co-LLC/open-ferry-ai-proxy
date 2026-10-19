@@ -54,6 +54,7 @@ impl Host for FakeHost {
     fn effective_mode(&self) -> ModeSnapshot {
         ModeSnapshot {
             off: false,
+            auto: true,
             mode_gen: 0,
         }
     }

@@ -564,6 +564,7 @@ impl Default for FakeHost {
         Self {
             mode: Mutex::new(ModeSnapshot {
                 off: false,
+                auto: true,
                 mode_gen: 0,
             }),
             own_sha256: Mutex::new(None),
@@ -573,7 +574,11 @@ impl Default for FakeHost {
 
 impl FakeHost {
     pub fn set_mode(&self, off: bool, mode_gen: u64) {
-        *self.mode.lock().unwrap() = ModeSnapshot { off, mode_gen };
+        *self.mode.lock().unwrap() = ModeSnapshot {
+            off,
+            auto: !off,
+            mode_gen,
+        };
     }
 }
 

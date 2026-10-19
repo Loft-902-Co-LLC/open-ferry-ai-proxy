@@ -1242,7 +1242,7 @@ async fn an_automatic_request_is_refused_while_updates_are_off() {
     rig.host.set_mode(true, 1);
     let (core, replies) = go!(rig, update(true));
     assert!(
-        matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason == "updates are off")
+        matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason == "automatic updates are not on")
     );
     assert!(!core.rt.switching);
     assert!(rig.disk.order().is_empty());
@@ -7192,6 +7192,33 @@ async fn automatic_admission_refuses_unreadable_exclusions_but_manual_admission_
             );
         } else {
             assert_eq!(done_result(&replies)["result"], "switched");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_admission_requires_auto_but_manual_admission_allows_notify() {
+    for notify in [false, true] {
+        for auto in [false, true] {
+            let mut rig = Rig::new().await;
+            rig.host.mode.lock().unwrap().auto = !notify;
+            let mut core = core_of!(rig);
+            let first = core.eval_mode();
+            let generation = core.mode_gen;
+            rig.host.mode.lock().unwrap().auto = !first.auto;
+            core.eval_mode();
+            assert_eq!(core.mode_gen, generation, "auto/notify is admission-only");
+            rig.host.mode.lock().unwrap().auto = first.auto;
+            let (tx, mut rx) = unbounded_channel();
+            core.handle_switch(update(auto), tx).await;
+            let replies = drain(&mut rx);
+            if auto && notify {
+                assert!(matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+                    if reason == "automatic updates are not on"));
+                assert_eq!(rig.driver.places().len(), 1);
+            } else {
+                assert_eq!(done_result(&replies)["result"], "switched");
+            }
         }
     }
 }

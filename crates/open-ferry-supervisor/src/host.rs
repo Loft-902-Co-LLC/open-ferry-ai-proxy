@@ -14,9 +14,10 @@ use crate::protocol::ListenerTopology;
 pub struct ModeSnapshot {
     /// The effective mode is `off`.
     pub off: bool,
-    /// Changes whenever the effective mode value changes (a config edit, a
-    /// reload), so a checkpoint can tell "off now" from "off, then on, then
-    /// off again".
+    /// The effective mode is `auto`; only admission uses this bit.
+    pub auto: bool,
+    /// Changes whenever `off` flips, so a checkpoint can tell "off now"
+    /// from "off, then on, then off again". Auto/notify changes leave it alone.
     pub mode_gen: u64,
 }
 

@@ -318,7 +318,9 @@ impl Host for ChildHost {
     fn effective_mode(&self) -> ModeSnapshot {
         let text = std::fs::read_to_string(self.fixture.join("host-mode")).unwrap_or_default();
         let mut words = text.split_whitespace();
-        let off = words.next() == Some("off");
+        let mode = words.next();
+        let off = mode == Some("off");
+        let auto = !off && mode != Some("notify");
         let mode_gen = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         // The reading is logged so a test can wait until the supervisor has
         // seen a mode, rather than sleep and hope it has.
@@ -330,7 +332,11 @@ impl Host for ChildHost {
             use std::io::Write;
             let _ = writeln!(log, "{} {mode_gen}", if off { "off" } else { "on" });
         }
-        ModeSnapshot { off, mode_gen }
+        ModeSnapshot {
+            off,
+            auto,
+            mode_gen,
+        }
     }
     fn own_version(&self) -> String {
         A.to_owned()
