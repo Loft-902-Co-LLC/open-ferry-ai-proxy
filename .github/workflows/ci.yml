@@ -307,6 +307,19 @@ jobs:
             echo "$temp/nextest-$VERSION" >> "$GITHUB_PATH"
           fi
 
+      - name: Check the launchd GUI domain
+        id: launchd
+        if: runner.os == 'macOS' && matrix.shard == 1 && github.event_name != 'push'
+        shell: bash
+        run: |
+          if launchctl print "gui/$(id -u)" > /dev/null 2> "$RUNNER_TEMP/launchd-probe.log"; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::UNVERIFIED: this runner has no usable launchd GUI domain."
+            cat "$RUNNER_TEMP/launchd-probe.log"
+            echo "LaunchAgent run UNVERIFIED: no GUI domain." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Clippy with the blue-green test seams
         if: matrix.shard == 1 && (github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true')
         run: cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
@@ -336,6 +349,12 @@ jobs:
       - name: Doc tests with the blue-green test seams
         if: github.event_name != 'push' && steps.shard.outputs.doc == 'true'
         run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --doc
+
+      - name: Run and uninstall a real LaunchAgent
+        if: steps.launchd.outputs.available == 'true'
+        env:
+          OFP_TEST_LAUNCHD: "1"
+        run: cargo nextest run --profile ci -p open-ferry --locked --features blue-green-test --test process_launchd --run-ignored only -E 'test(=a_user_launchagent_serves_and_uninstalls_within_its_exit_timeout)'
 
       - name: Save the cache
         if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
