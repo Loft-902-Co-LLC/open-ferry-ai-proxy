@@ -282,12 +282,12 @@ impl Fake {
         if line.starts_with("schtasks.exe /create /tn open-ferry ") {
             self.answer("schtasks.exe /query /tn open-ferry", 0, "");
             let xml = os_service::decode_output(self.data(TASK_XML));
-            self.answer("schtasks.exe /query /tn open-ferry /xml ONE", 0, &xml);
+            self.answer("schtasks.exe /query /tn open-ferry /xml", 0, &xml);
         }
         if line == "schtasks.exe /delete /tn open-ferry /f" {
             self.fail("schtasks.exe /query /tn open-ferry", 1, "ERROR");
             self.answers
-                .remove("schtasks.exe /query /tn open-ferry /xml ONE");
+                .remove("schtasks.exe /query /tn open-ferry /xml");
         }
         if line.starts_with("sc.exe create open-ferry ") {
             self.answer(
@@ -1657,7 +1657,7 @@ fn json_says_what_was_found() {
     assert_eq!(json["backup_dir"], systemd_backup().as_str());
     assert_eq!(json["record"], LINUX_RECORD);
     assert_eq!(json["command"], "/home/me/.local/bin/open-ferry migrate");
-    assert!(json["plan"].as_array().is_some_and(|plan| plan.len() == 5));
+    assert!(json["plan"].as_array().is_some_and(|plan| plan.len() == 6));
     // install.sh reads the line as text: it starts with "found", and each
     // key it reads is there once.
     assert!(
@@ -8872,7 +8872,7 @@ fn service_data(fake: &Fake, context: &Context, target: os_service::Target) -> S
 fn installed_definition(fake: &Fake, context: &Context, target: os_service::Target) -> String {
     match target {
         os_service::Target::ScheduledTask => {
-            fake.answers["schtasks.exe /query /tn open-ferry /xml ONE"]
+            fake.answers["schtasks.exe /query /tn open-ferry /xml"]
                 .stdout
                 .clone()
         }
