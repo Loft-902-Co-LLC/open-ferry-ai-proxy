@@ -24,6 +24,13 @@ const CLIPROXYAPI: &[u8] = b"CLIProxyAPI binary";
 const NOW: &str = "2026-10-08T12:00:00Z";
 const STAMP: &str = "20261008T120000Z";
 
+/// service_runners excludes the real test process. Derive fixture IDs from
+/// nonzero offsets so no fake process can accidentally be excluded as this CLI.
+/// Starts use offsets 9001 onward; manually inserted workers start at 9100.
+fn fake_pid(offset: u32) -> u32 {
+    std::process::id().wrapping_add(offset)
+}
+
 /// What a command, or the end of a process, does to the fake's processes.
 #[derive(Clone)]
 enum Effect {
@@ -148,7 +155,7 @@ impl Fake {
             updating: None,
             supervisor_stop: None,
             broken: false,
-            next_pid: 9001,
+            next_pid: fake_pid(9001),
             events: Vec::new(),
             findings: Vec::new(),
             checked: Vec::new(),
@@ -2450,7 +2457,8 @@ fn drops_in_for_a_bare_process_and_back() {
     has(
         out,
         &format!(
-            "Started open-ferry (process 9001) with CLIProxyAPI's command line; its output goes to {}/open-ferry.log",
+            "Started open-ferry (process {}) with CLIProxyAPI's command line; its output goes to {}/open-ferry.log",
+            fake_pid(9001),
             opt_backup()
         ),
     );
@@ -2497,11 +2505,15 @@ fn drops_in_for_a_bare_process_and_back() {
         &undo.out,
         "Moved CLIProxyAPI's binary back to /opt/cpa/cli-proxy-api",
     );
-    has(&undo.out, "Stopped open-ferry (process 9001)");
+    has(
+        &undo.out,
+        &format!("Stopped open-ferry (process {})", fake_pid(9001)),
+    );
     has(
         &undo.out,
         &format!(
-            "Started CLIProxyAPI (process 9002) with the same command line; its output goes to {}/cliproxyapi.log",
+            "Started CLIProxyAPI (process {}) with the same command line; its output goes to {}/cliproxyapi.log",
+            fake_pid(9002),
             opt_backup()
         ),
     );
@@ -2558,11 +2570,15 @@ fn a_drop_in_rolls_back() {
         &ran.out,
         "open-ferry didn't answer: nothing answered on http://127.0.0.1:8317 within 30 seconds (connection refused). Undoing the switch.",
     );
-    has(&ran.out, "Stopped open-ferry (process 9001)");
+    has(
+        &ran.out,
+        &format!("Stopped open-ferry (process {})", fake_pid(9001)),
+    );
     has(
         &ran.out,
         &format!(
-            "Started CLIProxyAPI again (process 9002); its output goes to {}/cliproxyapi.log",
+            "Started CLIProxyAPI again (process {}); its output goes to {}/cliproxyapi.log",
+            fake_pid(9002),
             opt_backup()
         ),
     );
@@ -2958,7 +2974,8 @@ fn drops_in_for_a_launcher_task_now() {
     has(
         &ran.out,
         &format!(
-            r"Started open-ferry (process 9001) with CLIProxyAPI's command line; its output goes to {}\open-ferry.log",
+            r"Started open-ferry (process {}) with CLIProxyAPI's command line; its output goes to {}\open-ferry.log",
+            fake_pid(9001),
             task_backup()
         ),
     );
@@ -4866,7 +4883,10 @@ fn undo_of_a_drop_in_can_be_run_again() {
     assert!(!fake.exists(OPT_MOVED));
     has(
         &undo.out,
-        "Started CLIProxyAPI (process 9002) with the same command line",
+        &format!(
+            "Started CLIProxyAPI (process {}) with the same command line",
+            fake_pid(9002)
+        ),
     );
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
 
@@ -4874,10 +4894,13 @@ fn undo_of_a_drop_in_can_be_run_again() {
     // only what is left is done.
     let (mut fake, context) = bare_process();
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
-    fake.unstoppable.insert(9001);
+    fake.unstoppable.insert(fake_pid(9001));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.err, "failed to stop open-ferry (process 9001)");
+    has(
+        &undo.err,
+        &format!("failed to stop open-ferry (process {})", fake_pid(9001)),
+    );
     assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
     fake.unstoppable.clear();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
@@ -4888,7 +4911,10 @@ fn undo_of_a_drop_in_can_be_run_again() {
             "{OPT_MOVED} isn't there: taking {OPT_CPA} to be CLIProxyAPI's binary, as put back before; going on."
         ),
     );
-    has(&undo.out, "Stopped open-ferry (process 9001)");
+    has(
+        &undo.out,
+        &format!("Stopped open-ferry (process {})", fake_pid(9001)),
+    );
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
 }
 
@@ -6132,7 +6158,7 @@ fn undo_stops_only_the_process_started_through_the_drop_in() {
     assert!(fake.procs.contains_key(&6001));
     assert!(fake.procs.contains_key(&6002));
     assert!(!fake.procs.contains_key(&6003));
-    assert!(!fake.procs.contains_key(&9001));
+    assert!(!fake.procs.contains_key(&fake_pid(9001)));
 }
 
 // --- Round 4: one run at a time, who is stopped, and where things go ---
@@ -6226,12 +6252,15 @@ fn a_deleted_task_is_not_an_ended_one() {
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     // Ending the task does not end its process.
     fake.effects.remove("schtasks.exe /end /tn open-ferry");
-    fake.procs.get_mut(&9001).unwrap().args =
+    fake.procs.get_mut(&fake_pid(9001)).unwrap().args =
         strings(&["service", "run", "-config", r"C:\Users\me\cpa\config.yaml"]);
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "process 9001 still runs");
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9001)),
+    );
     assert!(!happened_since(
         &fake,
         events,
@@ -6240,7 +6269,7 @@ fn a_deleted_task_is_not_an_ended_one() {
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
 
     // Once the process has ended, the retry finishes.
-    fake.end(9001);
+    fake.end(fake_pid(9001));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert!(happened_since(
@@ -6251,25 +6280,28 @@ fn a_deleted_task_is_not_an_ended_one() {
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
 }
 
-/// Makes the task's process 9001 a supervisor that ends at `/end`, and gives
-/// it a server (process 9100) that lives on.
+/// Makes the task's first process a supervisor that ends at `/end`, and gives
+/// it a server that lives on.
 fn supervisor_with_a_server(fake: &mut Fake) {
     let config = r"C:\Users\me\cpa\config.yaml";
-    let supervisor = fake.procs.get_mut(&9001).unwrap();
+    let supervisor = fake.procs.get_mut(&fake_pid(9001)).unwrap();
     supervisor.args = strings(&["service", "run", "-config", config]);
     let child = Proc {
-        pid: 9100,
-        started: Some(12000),
+        pid: fake_pid(9100),
+        started: supervisor.started.map(|started| started + 1),
         args: strings(&["-config", config]),
         parent: Some(Parent {
-            pid: 9001,
+            pid: fake_pid(9001),
             name: Some(supervisor.name.clone()),
         }),
         ..supervisor.clone()
     };
-    fake.procs.insert(9100, child);
+    fake.procs.insert(fake_pid(9100), child);
     fake.effects.remove("schtasks.exe /end /tn open-ferry");
-    fake.on("schtasks.exe /end /tn open-ferry", Effect::End(9001));
+    fake.on(
+        "schtasks.exe /end /tn open-ferry",
+        Effect::End(fake_pid(9001)),
+    );
 }
 
 // Not upstream's: a task's supervisor ends at /end, but its server may live
@@ -6284,9 +6316,12 @@ fn undo_waits_for_the_server_of_a_task_supervisor() {
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "process 9100 still runs");
-    assert!(!fake.procs.contains_key(&9001));
-    assert!(fake.procs.contains_key(&9100));
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9100)),
+    );
+    assert!(!fake.procs.contains_key(&fake_pid(9001)));
+    assert!(fake.procs.contains_key(&fake_pid(9100)));
     assert!(!happened_since(
         &fake,
         events,
@@ -6298,7 +6333,10 @@ fn undo_waits_for_the_server_of_a_task_supervisor() {
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "process 9100 still runs");
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9100)),
+    );
     assert!(!happened_since(
         &fake,
         events,
@@ -6306,7 +6344,7 @@ fn undo_waits_for_the_server_of_a_task_supervisor() {
     ));
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
 
-    fake.end(9100);
+    fake.end(fake_pid(9100));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert!(happened_since(
@@ -6317,15 +6355,18 @@ fn undo_waits_for_the_server_of_a_task_supervisor() {
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
 }
 
-/// Makes the task's process 9001 a supervisor that ends at `/end`, and gives
+/// Makes the task's first process a supervisor that ends at `/end`, and gives
 /// it back.
 fn task_supervisor(fake: &mut Fake) -> Proc {
     let config = r"C:\Users\me\cpa\config.yaml";
-    let supervisor = fake.procs.get_mut(&9001).unwrap();
+    let supervisor = fake.procs.get_mut(&fake_pid(9001)).unwrap();
     supervisor.args = strings(&["service", "run", "-config", config]);
     let supervisor = supervisor.clone();
     fake.effects.remove("schtasks.exe /end /tn open-ferry");
-    fake.on("schtasks.exe /end /tn open-ferry", Effect::End(9001));
+    fake.on(
+        "schtasks.exe /end /tn open-ferry",
+        Effect::End(fake_pid(9001)),
+    );
     supervisor
 }
 
@@ -6339,11 +6380,11 @@ fn undo_waits_for_a_server_started_after_the_capture() {
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     let supervisor = task_supervisor(&mut fake);
     let server = Proc {
-        pid: 9100,
-        started: Some(12000),
+        pid: fake_pid(9100),
+        started: supervisor.started.map(|started| started + 1),
         args: strings(&["-config", r"C:\Users\me\cpa\config.yaml"]),
         parent: Some(Parent {
-            pid: 9001,
+            pid: fake_pid(9001),
             name: Some(supervisor.name.clone()),
         }),
         ..supervisor
@@ -6355,8 +6396,11 @@ fn undo_waits_for_a_server_started_after_the_capture() {
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "process 9100 still runs");
-    assert!(!fake.procs.contains_key(&9001));
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9100)),
+    );
+    assert!(!fake.procs.contains_key(&fake_pid(9001)));
     assert!(!happened_since(
         &fake,
         events,
@@ -6373,21 +6417,24 @@ fn undo_takes_a_server_found_only_through_its_supervisor() {
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     let supervisor = task_supervisor(&mut fake);
     let server = Proc {
-        pid: 9100,
-        started: Some(12000),
+        pid: fake_pid(9100),
+        started: supervisor.started.map(|started| started + 1),
         exe: Some(r"C:\Downloads\open-ferry.exe".to_owned()),
         args: strings(&["-serve"]),
         parent: Some(Parent {
-            pid: 9001,
+            pid: fake_pid(9001),
             name: Some(supervisor.name.clone()),
         }),
         ..supervisor
     };
-    fake.procs.insert(9100, server);
+    fake.procs.insert(fake_pid(9100), server);
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "process 9100 still runs");
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9100)),
+    );
     assert!(!happened_since(
         &fake,
         events,
@@ -6395,7 +6442,7 @@ fn undo_takes_a_server_found_only_through_its_supervisor() {
     ));
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
 
-    fake.end(9100);
+    fake.end(fake_pid(9100));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
@@ -6415,7 +6462,8 @@ fn undo_from_another_binary_finds_the_orphan_server_of_the_installed_one() {
     );
     // The server outlives the task's end.
     fake.effects.remove("schtasks.exe /end /tn open-ferry");
-    fake.procs.get_mut(&9001).unwrap().args = strings(&["-config", r"C:\Users\me\cpa\config.yaml"]);
+    fake.procs.get_mut(&fake_pid(9001)).unwrap().args =
+        strings(&["-config", r"C:\Users\me\cpa\config.yaml"]);
     let mut other = context.clone();
     other.exe = r"C:\Users\me\Downloads\open-ferry-new.exe".to_owned();
     fake.file(&other.exe, OPEN_FERRY);
@@ -6423,7 +6471,10 @@ fn undo_from_another_binary_finds_the_orphan_server_of_the_installed_one() {
     let events = fake.events.len();
     let undo = migrate(&mut fake, &other, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "process 9001 still runs");
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9001)),
+    );
     assert!(!happened_since(
         &fake,
         events,
@@ -6431,7 +6482,7 @@ fn undo_from_another_binary_finds_the_orphan_server_of_the_installed_one() {
     ));
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
 
-    fake.end(9001);
+    fake.end(fake_pid(9001));
     let undo = migrate(&mut fake, &other, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
@@ -6464,9 +6515,9 @@ fn undo_finds_the_orphan_server_of_a_linked_open_ferry() {
     );
     // A server of CLIProxyAPI's config that the agent's bootout leaves.
     fake.procs.insert(
-        9300,
+        fake_pid(9300),
         Proc {
-            pid: 9300,
+            pid: fake_pid(9300),
             started: Some(13000),
             name: "open-ferry".to_owned(),
             exe: Some(REAL.to_owned()),
@@ -6479,7 +6530,10 @@ fn undo_finds_the_orphan_server_of_a_linked_open_ferry() {
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "process 9300 still runs");
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9300)),
+    );
     assert!(!happened_since(
         &fake,
         events,
@@ -6487,7 +6541,7 @@ fn undo_finds_the_orphan_server_of_a_linked_open_ferry() {
     ));
     assert_eq!(saved(&fake, RECORD)["status"], "switched");
 
-    fake.end(9300);
+    fake.end(fake_pid(9300));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert!(happened_since(
@@ -6504,15 +6558,18 @@ fn undo_finds_the_orphan_server_of_a_linked_open_ferry() {
 fn undo_blocks_on_an_open_ferry_process_it_cannot_read() {
     let (mut fake, context) = binary_task(true);
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
-    let mut unread = fake.procs.get(&9001).unwrap().clone();
-    unread.pid = 9200;
+    let mut unread = fake.procs.get(&fake_pid(9001)).unwrap().clone();
+    unread.pid = fake_pid(9200);
     unread.args = Vec::new();
     unread.parent = None;
-    fake.procs.insert(9200, unread);
+    fake.procs.insert(fake_pid(9200), unread);
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "(process 9200) can't be read");
+    has(
+        &undo.all(),
+        &format!("(process {}) can't be read", fake_pid(9200)),
+    );
     has(&undo.all(), "Nothing was changed");
     assert!(!happened_since(
         &fake,
@@ -6568,15 +6625,18 @@ fn undo_stops_the_open_ferry_whose_path_now_reads_as_cliproxyapis() {
     assert_eq!(migrate(&mut fake, &context, &[]).code, 0);
     let aside = format!("{TASK_CPA}.open-ferry");
 
-    fake.unstoppable.insert(9001);
+    fake.unstoppable.insert(fake_pid(9001));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
-    has(&undo.all(), "failed to stop open-ferry (process 9001)");
+    has(
+        &undo.all(),
+        &format!("failed to stop open-ferry (process {})", fake_pid(9001)),
+    );
     let record = saved(&fake, WINDOWS_RECORD);
     assert_eq!(record["status"], "switched");
     assert_eq!(
         record["switch"]["identities"],
-        serde_json::json!([{ "pid": 9001, "started": 11001 }])
+        serde_json::json!([{ "pid": fake_pid(9001), "started": 2000 + u64::from(fake_pid(9001)) }])
     );
     assert_eq!(record["switch"]["aside"], aside);
     assert_eq!(fake.data(TASK_CPA), CLIPROXYAPI);
@@ -6584,11 +6644,17 @@ fn undo_stops_the_open_ferry_whose_path_now_reads_as_cliproxyapis() {
     // The retry stops that process, whatever its path now says, and removes
     // the copy it set aside. The task then starts CLIProxyAPI.
     fake.unstoppable.clear();
-    fake.on("stop 9001", Effect::Launch(TASK_CPA.to_owned()));
+    fake.on(
+        &format!("stop {}", fake_pid(9001)),
+        Effect::Launch(TASK_CPA.to_owned()),
+    );
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
-    has(&undo.out, "Stopped open-ferry (process 9001)");
-    assert!(!fake.procs.contains_key(&9001));
+    has(
+        &undo.out,
+        &format!("Stopped open-ferry (process {})", fake_pid(9001)),
+    );
+    assert!(!fake.procs.contains_key(&fake_pid(9001)));
     assert!(!fake.exists(&aside));
     assert_eq!(fake.data(TASK_CPA), CLIPROXYAPI);
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
@@ -6607,7 +6673,7 @@ fn the_aside_is_where_nothing_is_and_a_retry_finds_it() {
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     assert_eq!(fake.data(OPT_CPA), OPEN_FERRY);
 
-    fake.unstoppable.insert(9001);
+    fake.unstoppable.insert(fake_pid(9001));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
     assert_eq!(saved(&fake, LINUX_RECORD)["switch"]["aside"], stamped);
@@ -6933,13 +6999,13 @@ fn a_supervisor_and_its_workers_in_version_directories_are_runners() {
     let mut fake = with_processes(
         &context,
         vec![
-            of_supervisor(100, LINUX_OF_CONFIG),
-            of_worker(101, "1.0.0", LINUX_OF_CONFIG),
+            of_supervisor(fake_pid(100), LINUX_OF_CONFIG),
+            of_worker(fake_pid(101), "1.0.0", LINUX_OF_CONFIG),
         ],
     );
     assert_eq!(
         runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
-        [100, 101]
+        [fake_pid(100), fake_pid(101)]
     );
 }
 
@@ -6973,28 +7039,31 @@ fn system_supervisors_and_their_workers_are_runners_on_linux_and_windows() {
             "-data-dir",
             data,
         ]);
-        let supervisor = of_process(100, name, binary, &args);
+        let supervisor = of_process(fake_pid(100), name, binary, &args);
         let version = context
             .platform
             .join(data, &format!("versions/1.0.0/{name}"));
         let worker = of_process(
-            101,
+            fake_pid(101),
             name,
             &version,
             &["-worker", "-config", config, "-worker-control", "3"],
         );
         let other = of_process(
-            102,
+            fake_pid(102),
             name,
             &version,
             &["-worker", "-config", "other.yaml", "-worker-control", "3"],
         );
         let mut fake = with_processes(&context, vec![supervisor, worker, other]);
-        assert_eq!(runner_pids(&mut fake, &context, binary, config), [100, 101]);
-        fake.procs.remove(&100);
         assert_eq!(
             runner_pids(&mut fake, &context, binary, config),
-            [101],
+            [fake_pid(100), fake_pid(101)]
+        );
+        fake.procs.remove(&fake_pid(100));
+        assert_eq!(
+            runner_pids(&mut fake, &context, binary, config),
+            [fake_pid(101)],
             "an orphan system worker remains discoverable"
         );
     }
@@ -7006,39 +7075,39 @@ fn standby_and_draining_workers_are_runners() {
     let mut fake = with_processes(
         &context,
         vec![
-            of_supervisor(100, LINUX_OF_CONFIG),
-            of_worker(101, "1.0.0", LINUX_OF_CONFIG),
-            of_worker(102, "1.1.0", LINUX_OF_CONFIG),
-            of_worker(103, "1.2.0", LINUX_OF_CONFIG),
+            of_supervisor(fake_pid(100), LINUX_OF_CONFIG),
+            of_worker(fake_pid(101), "1.0.0", LINUX_OF_CONFIG),
+            of_worker(fake_pid(102), "1.1.0", LINUX_OF_CONFIG),
+            of_worker(fake_pid(103), "1.2.0", LINUX_OF_CONFIG),
         ],
     );
     assert_eq!(
         runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
-        [100, 101, 102, 103]
+        [fake_pid(100), fake_pid(101), fake_pid(102), fake_pid(103)]
     );
 }
 
 #[test]
 fn a_worker_whose_supervisor_died_is_still_a_runner() {
     let context = linux();
-    let mut orphan = of_worker(101, "1.0.0", LINUX_OF_CONFIG);
+    let mut orphan = of_worker(fake_pid(101), "1.0.0", LINUX_OF_CONFIG);
     orphan.parent = Some(Parent { pid: 1, name: None });
     let mut fake = with_processes(&context, vec![orphan]);
     assert_eq!(
         runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
-        [101]
+        [fake_pid(101)]
     );
 }
 
 #[test]
 fn a_worker_without_a_config_or_with_another_is_not_a_runner() {
     let context = linux();
-    let mut bare = of_worker(101, "1.0.0", LINUX_OF_CONFIG);
+    let mut bare = of_worker(fake_pid(101), "1.0.0", LINUX_OF_CONFIG);
     bare.args = strings(&["-worker", "-worker-control", "3"]);
     // Even the installed binary's own path doesn't make it one.
-    let mut installed = of_worker(102, "1.0.0", "/home/me/other/config.yaml");
+    let mut installed = of_worker(fake_pid(102), "1.0.0", "/home/me/other/config.yaml");
     installed.exe = Some(context.exe.clone());
-    let other = of_worker(103, "1.0.0", "/home/me/other/config.yaml");
+    let other = of_worker(fake_pid(103), "1.0.0", "/home/me/other/config.yaml");
     let mut fake = with_processes(&context, vec![bare, installed, other]);
     assert!(runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG).is_empty());
 }
@@ -7051,7 +7120,7 @@ fn a_worker_flag_in_a_process_of_another_name_keeps_the_older_rules() {
     let mut context = linux();
     context.exe = "/home/me/.local/bin/ofp".to_owned();
     let alias_worker = of_process(
-        101,
+        fake_pid(101),
         "ofp",
         &format!("{LINUX_OF_DATA}/versions/1.0.0/ofp"),
         &[
@@ -7063,7 +7132,7 @@ fn a_worker_flag_in_a_process_of_another_name_keeps_the_older_rules() {
         ],
     );
     let alias_installed = of_process(
-        102,
+        fake_pid(102),
         "ofp",
         "/home/me/.local/bin/ofp",
         &["-supervise", "-config", LINUX_OF_CONFIG],
@@ -7071,7 +7140,7 @@ fn a_worker_flag_in_a_process_of_another_name_keeps_the_older_rules() {
     let mut fake = with_processes(&context, vec![alias_worker, alias_installed]);
     assert_eq!(
         runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
-        [102]
+        [fake_pid(102)]
     );
 }
 
@@ -7081,13 +7150,13 @@ fn a_supervisor_with_another_config_is_not_a_runner() {
     let mut fake = with_processes(
         &context,
         vec![
-            of_supervisor(100, "/home/me/other/config.yaml"),
-            of_supervisor(104, LINUX_OF_CONFIG),
+            of_supervisor(fake_pid(100), "/home/me/other/config.yaml"),
+            of_supervisor(fake_pid(104), LINUX_OF_CONFIG),
         ],
     );
     assert_eq!(
         runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG),
-        [104]
+        [fake_pid(104)]
     );
 }
 
@@ -7106,21 +7175,29 @@ fn a_wrapper_with_another_config_is_not_a_runner_and_neither_is_its_child() {
         )
     };
     // The child of the other service's wrapper names no config at all.
-    let mut child = of_process(201, "open-ferry.exe", exe, &["-serve"]);
+    let mut child = of_process(fake_pid(201), "open-ferry.exe", exe, &["-serve"]);
     child.parent = Some(Parent {
-        pid: 200,
+        pid: fake_pid(200),
         name: Some("open-ferry.exe".to_owned()),
     });
-    let mut ours = of_process(301, "open-ferry.exe", exe, &["-serve"]);
+    let mut ours = of_process(fake_pid(301), "open-ferry.exe", exe, &["-serve"]);
     ours.parent = Some(Parent {
-        pid: 300,
+        pid: fake_pid(300),
         name: Some("open-ferry.exe".to_owned()),
     });
     let mut fake = with_processes(
         &context,
-        vec![wrapper(200, other), child, wrapper(300, config), ours],
+        vec![
+            wrapper(fake_pid(200), other),
+            child,
+            wrapper(fake_pid(300), config),
+            ours,
+        ],
     );
-    assert_eq!(runner_pids(&mut fake, &context, exe, config), [300, 301]);
+    assert_eq!(
+        runner_pids(&mut fake, &context, exe, config),
+        [fake_pid(300), fake_pid(301)]
+    );
 }
 
 #[test]
@@ -7130,20 +7207,20 @@ fn a_wrapper_and_its_workers_are_runners_on_windows() {
     let config = r"C:\Users\me\AppData\Roaming\open-ferry\config.yaml";
     let versions = r"C:\Users\me\AppData\Local\open-ferry\versions\1.0.0\open-ferry.exe";
     let wrapper = of_process(
-        200,
+        fake_pid(200),
         "open-ferry.exe",
         exe,
         &["service", "run", "-supervise", "-config", config],
     );
     let supervisor = of_process(
-        201,
+        fake_pid(201),
         "open-ferry.exe",
         exe,
         &["-supervise", "-config", config],
     );
     // Windows names a process after its file, in any case.
     let worker = of_process(
-        202,
+        fake_pid(202),
         "Open-Ferry.EXE",
         versions,
         &[
@@ -7154,7 +7231,7 @@ fn a_wrapper_and_its_workers_are_runners_on_windows() {
     let mut fake = with_processes(&context, vec![wrapper, supervisor, worker]);
     assert_eq!(
         runner_pids(&mut fake, &context, exe, config),
-        [200, 201, 202]
+        [fake_pid(200), fake_pid(201), fake_pid(202)]
     );
 }
 
@@ -7164,7 +7241,7 @@ fn on_linux_the_canonical_name_is_case_sensitive() {
     // Not named `open-ferry`: it is decided by the older rules, and its
     // version directory isn't the installed path.
     let worker = of_process(
-        101,
+        fake_pid(101),
         "Open-Ferry",
         &format!("{LINUX_OF_DATA}/versions/1.0.0/open-ferry"),
         &[
@@ -7193,26 +7270,31 @@ fn an_aliased_recorded_executable_and_cli_still_find_the_canonical_workers() {
     // A kernel names the process after the path it was started with and
     // reports the file it leads to.
     let supervisor = of_process(
-        100,
+        fake_pid(100),
         "ofp",
         REAL,
         &["-supervise", "-config", LINUX_OF_CONFIG],
     );
-    let worker = of_worker(101, "1.0.0", LINUX_OF_CONFIG);
+    let worker = of_worker(fake_pid(101), "1.0.0", LINUX_OF_CONFIG);
     let mut fake = with_processes(&context, vec![supervisor, worker]);
     fake.file(REAL, OPEN_FERRY);
     fake.links.insert(ALIAS.to_owned(), REAL.to_owned());
     fake.links.insert(CLI.to_owned(), REAL.to_owned());
     assert_eq!(
         runner_pids(&mut fake, &context, ALIAS, LINUX_OF_CONFIG),
-        [100, 101]
+        [fake_pid(100), fake_pid(101)]
     );
 }
 
 #[test]
 fn a_process_of_another_service_is_left_alone() {
     let context = linux();
-    let mut unrelated = of_process(100, "open-ferry", "/opt/other/open-ferry", &["-serve"]);
+    let mut unrelated = of_process(
+        fake_pid(100),
+        "open-ferry",
+        "/opt/other/open-ferry",
+        &["-serve"],
+    );
     unrelated.parent = Some(Parent { pid: 1, name: None });
     let mut fake = with_processes(&context, vec![unrelated]);
     assert!(runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG).is_empty());
@@ -7221,14 +7303,17 @@ fn a_process_of_another_service_is_left_alone() {
 #[test]
 fn a_process_whose_arguments_cant_be_read_stops_the_undo_as_before() {
     let context = linux();
-    let mut blind = of_supervisor(100, LINUX_OF_CONFIG);
+    let mut blind = of_supervisor(fake_pid(100), LINUX_OF_CONFIG);
     blind.args.clear();
     let mut fake = with_processes(&context, vec![blind]);
     let error =
         switch::service_runners(&mut fake, &context, &context.exe, LINUX_OF_CONFIG).unwrap_err();
     has(
         &error,
-        "the arguments of open-ferry (process 100) can't be read",
+        &format!(
+            "the arguments of open-ferry (process {}) can't be read",
+            fake_pid(100)
+        ),
     );
 }
 
@@ -7238,11 +7323,9 @@ fn a_process_whose_arguments_cant_be_read_stops_the_undo_as_before() {
 #[test]
 fn undo_names_and_waits_for_a_supervisor_and_its_workers() {
     let (mut fake, context) = binary_task(true);
-    // service_runners excludes this process. Synthetic pids must not happen
-    // to name it (Windows can assign the old worker pid, 9100, to the test).
-    let supervisor_pid = std::process::id().wrapping_add(1);
-    let worker_pid = std::process::id().wrapping_add(2);
-    fake.next_pid = supervisor_pid;
+    let supervisor_pid = fake.next_pid;
+    // Leave room for further fake starts before the manually inserted worker.
+    let worker_pid = fake_pid(9100);
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     let config = r"C:\Users\me\cpa\config.yaml";
     let versions = r"C:\Users\me\AppData\Local\open-ferry\versions\1.0.0\open-ferry.exe";
@@ -7285,9 +7368,9 @@ fn undo_names_and_waits_for_a_supervisor_and_its_workers() {
 fn taken_with_config(context: &Context, config: &str, given: &str) -> bool {
     let exe = &context.exe;
     let name = file_name(context.platform, exe);
-    let supervisor = of_process(100, &name, exe, &["-supervise", "-config", given]);
+    let supervisor = of_process(fake_pid(100), &name, exe, &["-supervise", "-config", given]);
     let worker = of_process(
-        101,
+        fake_pid(101),
         &name,
         &format!("{exe}.versions/open-ferry"),
         &[
@@ -7299,7 +7382,10 @@ fn taken_with_config(context: &Context, config: &str, given: &str) -> bool {
     );
     let mut fake = with_processes(context, vec![supervisor, worker]);
     let pids = runner_pids(&mut fake, context, exe, config);
-    assert!(pids.is_empty() || pids == [100, 101], "{given}: {pids:?}");
+    assert!(
+        pids.is_empty() || pids == [fake_pid(100), fake_pid(101)],
+        "{given}: {pids:?}"
+    );
     !pids.is_empty()
 }
 
@@ -7372,7 +7458,7 @@ fn the_installed_binary_with_a_relative_config_is_taken_by_its_directory() {
     let context = linux();
     let run = |cwd: Option<&str>| {
         let mut process = of_process(
-            100,
+            fake_pid(100),
             "open-ferry",
             &context.exe,
             &["-serve", "-config", "config.yaml"],
@@ -7381,7 +7467,7 @@ fn the_installed_binary_with_a_relative_config_is_taken_by_its_directory() {
         let mut fake = with_processes(&context, vec![process]);
         runner_pids(&mut fake, &context, &context.exe, LINUX_OF_CONFIG)
     };
-    assert_eq!(run(Some("/home/me/.config/open-ferry")), [100]);
+    assert_eq!(run(Some("/home/me/.config/open-ferry")), [fake_pid(100)]);
     assert!(run(Some("/tmp")).is_empty());
     assert!(run(None).is_empty());
 }
@@ -7392,10 +7478,10 @@ fn the_installed_binary_with_a_relative_config_is_taken_by_its_directory() {
 fn argument_only_taken(context: &Context, config: &str, given: &str, cwd: Option<&str>) -> bool {
     let exe = &context.exe;
     let name = file_name(context.platform, exe);
-    let mut supervisor = of_process(100, &name, exe, &["-supervise", "-config", given]);
+    let mut supervisor = of_process(fake_pid(100), &name, exe, &["-supervise", "-config", given]);
     supervisor.cwd = cwd.map(str::to_owned);
     let mut worker = of_process(
-        101,
+        fake_pid(101),
         &name,
         &format!("{exe}.versions/open-ferry"),
         &["-worker", "-config", given, "-worker-control", "3"],
@@ -7410,7 +7496,7 @@ fn argument_only_taken(context: &Context, config: &str, given: &str, cwd: Option
 fn installed_taken(context: &Context, config: &str, given: &str, cwd: Option<&str>) -> bool {
     let exe = &context.exe;
     let name = file_name(context.platform, exe);
-    let mut process = of_process(100, &name, exe, &["-serve", "-config", given]);
+    let mut process = of_process(fake_pid(100), &name, exe, &["-serve", "-config", given]);
     process.cwd = cwd.map(str::to_owned);
     let mut fake = with_processes(context, vec![process]);
     !runner_pids(&mut fake, context, exe, config).is_empty()
@@ -9006,27 +9092,30 @@ fn undo_of_a_migrated_supervised_task_waits_for_workers_and_fails_closed() {
     fake.updating = Some(Updating::supervised(&data));
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     let config = r"C:\Users\me\cpa\config.yaml";
-    fake.procs.get_mut(&9001).unwrap().args =
+    fake.procs.get_mut(&fake_pid(9001)).unwrap().args =
         strings(&["-supervise", "-config", config, "-data-dir", &data]);
-    let mut worker = fake.procs[&9001].clone();
-    worker.pid = 9100;
+    let mut worker = fake.procs[&fake_pid(9001)].clone();
+    worker.pid = fake_pid(9100);
     worker.exe = Some(format!(r"{data}\versions\1.0.0\open-ferry.exe"));
     worker.args = strings(&["-worker", "-config", config, "-worker-control", "3"]);
-    fake.procs.insert(9100, worker);
-    fake.on("stop_supervisor", Effect::End(9001));
+    fake.procs.insert(fake_pid(9100), worker);
+    fake.on("stop_supervisor", Effect::End(fake_pid(9001)));
     fake.supervisor_stop = Some(StopOutcome::Stopped);
     let before = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 1, "{}", undo.all());
     has(&undo.all(), "75 seconds after it was stopped");
-    has(&undo.all(), "process 9100 still runs");
+    has(
+        &undo.all(),
+        &format!("process {} still runs", fake_pid(9100)),
+    );
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
     assert!(
         !fake.events[before..]
             .iter()
             .any(|event| event == r"run schtasks.exe /run /tn \CLIProxyAPI")
     );
-    fake.end(9100);
+    fake.end(fake_pid(9100));
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
