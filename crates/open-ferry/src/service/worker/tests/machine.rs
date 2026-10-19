@@ -1611,6 +1611,10 @@ mod prepared {
                     lease,
                     &Timing {
                         fail_listener_when_sync_queued: true,
+                        // Force resume_accept to settle before the server's
+                        // first poll; the queued-write injection must survive
+                        // until the listeners have actually started.
+                        hold_server: Some(Arc::new(tokio::sync::Notify::new())),
                         activation_stop_budget: Duration::from_millis(200),
                         ..Timing::default()
                     },
