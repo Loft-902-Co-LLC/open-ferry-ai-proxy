@@ -687,6 +687,7 @@ mod real_survivor {
         real: ProcessDriver,
         /// The real driver has returned its error for the probe's spawn.
         real_failed: AtomicBool,
+        real_error: std::sync::Mutex<Option<String>>,
     }
 
     impl Driver for Mixed {
@@ -697,7 +698,8 @@ mod real_survivor {
         ) -> Result<WorkerPort, SpawnError> {
             if request.version == "2.0.0" {
                 let spawned = self.real.spawn(request, events).await;
-                if spawned.is_err() {
+                if let Err(error) = &spawned {
+                    *self.real_error.lock().unwrap() = Some(format!("{error:?}: {error}"));
                     self.real_failed.store(true, Ordering::SeqCst);
                 }
                 spawned
@@ -714,6 +716,34 @@ mod real_survivor {
         Timeout,
         /// The probe demands a newer supervisor protocol.
         Incompatible,
+    }
+
+    async fn probe_start_failure(
+        why: &str,
+        driver: &Mixed,
+        replies: &[EndpointReply],
+        own: Option<Location>,
+        data: &Path,
+        expected_sha: &str,
+    ) -> ! {
+        // Diagnostics must not hide the original failure if the endpoint
+        // itself is broken. A task also captures status()'s assertion panic.
+        let root = data.to_path_buf();
+        let mut status = tokio::spawn(async move { super::status(own, &root).await });
+        let shown = match tokio::time::timeout(Duration::from_secs(2), &mut status).await {
+            Ok(result) => format!("{result:?}"),
+            Err(_) => {
+                status.abort();
+                "status request timed out after 2s".to_owned()
+            }
+        };
+        let journal = open_ferry_update::journal::JournalStore::new(data).load();
+        let kept = DataDir::at(data.to_path_buf()).binary("2.0.0", NAME);
+        let kept_hash = hash_file(&kept);
+        panic!(
+            "probe PID absent: {why}; driver error: {:?}; replies: {replies:?}; supervisor status: {shown}; journal: {journal:?}; expected probe hash: {expected_sha}; kept probe hash now: {kept_hash:?}",
+            driver.real_error.lock().unwrap(),
+        );
     }
 
     async fn run(how: How2) {
@@ -736,10 +766,22 @@ mod real_survivor {
             rig.cfg.timings.load = Duration::from_secs(5);
         }
         let data = rig.cfg.data.root().to_path_buf();
+        // Prepare and pin B before the supervisor can prune kept versions.
+        // Hash the private copy: another Cargo invocation may replace the
+        // shared CARGO_BIN_EXE path between hashing it and copying it.
+        let probe = Path::new(env!("CARGO_BIN_EXE_worker_probe"));
+        let kept = rig.cfg.data.binary("2.0.0", NAME);
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::copy(probe, &kept).unwrap();
+        let sha = hash_file(&kept).unwrap();
+        let pin = open_ferry_update::pins::PinStore::new(&rig.cfg.data.versions())
+            .create("2.0.0", &sha, chrono::Utc::now())
+            .unwrap();
         let driver = Mixed {
             fake: FakeDriver::default(),
             real: ProcessDriver::new(ServiceKind::User, Duration::from_millis(20)),
             real_failed: AtomicBool::new(false),
+            real_error: std::sync::Mutex::new(None),
         };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (replies_tx, mut replies) = tokio::sync::mpsc::unbounded_channel();
@@ -747,15 +789,6 @@ mod real_survivor {
         let finished = AtomicBool::new(false);
         let script = async {
             until("A", || driver.fake.spawned.load(Ordering::SeqCst) == 1).await;
-            // B's kept binary is the probe itself, with a live pin for it.
-            let probe = Path::new(env!("CARGO_BIN_EXE_worker_probe"));
-            let sha = hash_file(probe).unwrap();
-            let kept = rig.cfg.data.binary("2.0.0", NAME);
-            std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
-            std::fs::copy(probe, &kept).unwrap();
-            let pin = open_ferry_update::pins::PinStore::new(&rig.cfg.data.versions())
-                .create("2.0.0", &sha, chrono::Utc::now())
-                .unwrap();
             let gate_dir = data.join(".blue-green-test");
             std::fs::create_dir_all(&gate_dir).unwrap();
             let gate = gate_dir.join("termination-timeout.hold");
@@ -777,21 +810,56 @@ mod real_survivor {
                 replies: replies_tx.clone(),
             })
             .unwrap();
+            let mut early = Vec::new();
             if matches!(how, How2::Incompatible | How2::Stop) {
                 // Incompatible: the probe answers at once. Stop: it stalls.
                 // This precondition includes the real driver's trust/hash
                 // checks and process startup. The generic 30 s fixture wait
                 // can expire while the supervisor still permits a healthy
-                // load (60 s here); use that load budget for this event too.
+                // load (60 s here); use that load budget for this event too,
+                // but stop waiting as soon as startup has actually failed.
                 // Unlike a timeout-only test, this one needs a real child to
                 // prove that its exit is awaited, so an absent pid must fail.
-                tokio::time::timeout(rig.cfg.timings.load, async {
-                    while !config.join("pid").exists() {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                let due = tokio::time::Instant::now() + rig.cfg.timings.load;
+                while !config.join("pid").exists() {
+                    while let Ok(reply) = replies.try_recv() {
+                        early.push(reply);
                     }
-                })
-                .await
-                .expect("the probe starts within the supervisor's load budget");
+                    let failure = if driver.real_failed.load(Ordering::SeqCst) {
+                        Some("the real driver failed")
+                    } else if early.iter().any(|reply| {
+                        matches!(
+                            reply,
+                            EndpointReply::Done { .. } | EndpointReply::Error { .. }
+                        )
+                    }) {
+                        Some("the switch answered before the probe started")
+                    } else if tokio::time::Instant::now() >= due {
+                        Some("the supervisor's load budget expired")
+                    } else {
+                        None
+                    };
+                    if let Some(why) = failure {
+                        // The PID can appear between the loop condition and
+                        // the driver's incompatible-handshake error.
+                        if config.join("pid").exists() {
+                            break;
+                        }
+                        probe_start_failure(
+                            why,
+                            &driver,
+                            &early,
+                            rig.cfg.test_endpoint_location.clone(),
+                            &data,
+                            &sha,
+                        )
+                        .await;
+                    }
+                    tokio::time::sleep_until(
+                        due.min(tokio::time::Instant::now() + Duration::from_millis(50)),
+                    )
+                    .await;
+                }
             }
             if matches!(how, How2::Stop) {
                 tx.send(Command::Stop).unwrap();
@@ -825,8 +893,7 @@ mod real_survivor {
                 "the supervisor ended while the child lived"
             );
             // No terminal reply of any kind yet, `Error` included.
-            let early: Vec<EndpointReply> =
-                std::iter::from_fn(|| replies.try_recv().ok()).collect();
+            early.extend(std::iter::from_fn(|| replies.try_recv().ok()));
             assert!(
                 !early.iter().any(|reply| matches!(
                     reply,
