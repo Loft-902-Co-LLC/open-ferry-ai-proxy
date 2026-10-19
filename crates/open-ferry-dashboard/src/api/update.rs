@@ -596,6 +596,7 @@ mod tests {
         for detail in [
             "first diagnostic wording",
             "a differently worded diagnostic",
+            "rollback target changed: expected 0.1.0, now 0.2.0; run `open-ferry update -check`",
         ] {
             let changed =
                 SwitchRequest::preparing("rollback").finish(Err(UpdateError::RollbackChanged {
@@ -608,6 +609,16 @@ mod tests {
                 .finish(Err(UpdateError::Supervised(detail.into()).into()));
             assert_eq!(supervised.code, "switch_failed");
         }
+    }
+
+    #[test]
+    fn a_rollback_refusal_keeps_its_state_code_and_reason() {
+        let reason = "rollback target changed: refused";
+        let request =
+            SwitchRequest::preparing("rollback").finish(Err(SwitchError::Refused(reason.into())));
+        assert_eq!(request.state, "refused");
+        assert_eq!(request.code, "switch_refused");
+        assert_eq!(request.reason.as_deref(), Some(reason));
     }
 
     #[test]
