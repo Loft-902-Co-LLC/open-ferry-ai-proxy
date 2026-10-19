@@ -369,6 +369,9 @@ pub fn listener_from_info(info: &str) -> io::Result<TcpListener> {
 /// duplicate is created, before publishing it or spawning a child. Winsock
 /// can ignore `WSA_FLAG_NO_HANDLE_INHERIT` when rebuilding protocol info,
 /// including in std and socket2's `try_clone` (rust-lang/rust#70719).
+/// This narrows the exposure but doesn't close it: a child spawned on
+/// another thread between the duplicate's creation and this call still
+/// inherits it, and stable std can't limit what a child inherits.
 /// On failure the caller must drop the duplicate rather than use it.
 pub fn set_no_inherit(socket: &impl AsRawSocket) -> io::Result<()> {
     // SAFETY: the borrowed socket stays open for the call.
