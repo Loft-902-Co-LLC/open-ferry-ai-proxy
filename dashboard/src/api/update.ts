@@ -48,11 +48,12 @@ export interface SwitchRequest {
   pending: boolean;
 }
 
-export type SwitchStarted =
+export type SwitchStarted = { request_id: string } & (
   | { accepted: true; id: string }
   | { preparing: true }
   | { uncertain: true }
-  | { failed: true; reason: string };
+  | { failed: true; reason: string }
+);
 
 /** `self-update.mode`: from the most an update does to the least. */
 export const UPDATE_MODES = ["auto", "notify", "off"] as const;

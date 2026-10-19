@@ -384,12 +384,12 @@ async fn accepted_switches_answer_with_the_id_without_following_progress() {
     for path in [INSTALL, ROLLBACK] {
         let fake = Switcher::new(Duration::ZERO, None);
         let (dash, _scratch) = supervised(fake.clone());
-        assert_eq!(
-            dash.call(Method::POST, path, "")
-                .await
-                .json(StatusCode::ACCEPTED),
-            serde_json::json!({"accepted": true, "id": "switch-1"})
-        );
+        let reply = dash
+            .call(Method::POST, path, "")
+            .await
+            .json(StatusCode::ACCEPTED);
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(reply["id"], "switch-1");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         let status = dash.get(STATUS).await.json(StatusCode::OK);
         assert_eq!(status["supervisor"]["form"], "supervised");
@@ -398,6 +398,7 @@ async fn accepted_switches_answer_with_the_id_without_following_progress() {
         assert_eq!(status["supervisor"]["rollback_target"], "0.0.9");
         assert_eq!(status["switch_request"]["state"], "accepted");
         assert_eq!(status["switch_request"]["id"], "switch-1");
+        assert_eq!(reply["request_id"], status["switch_request"]["request_id"]);
     }
 }
 
@@ -427,12 +428,11 @@ async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
             let fake = Switcher::new(Duration::from_secs(5), refusal);
             let (dash, _scratch) = supervised(fake.clone());
             let start = tokio::time::Instant::now();
-            assert_eq!(
-                dash.call(Method::POST, path, "")
-                    .await
-                    .json(StatusCode::ACCEPTED),
-                serde_json::json!({"preparing": true})
-            );
+            let reply = dash
+                .call(Method::POST, path, "")
+                .await
+                .json(StatusCode::ACCEPTED);
+            assert_eq!(reply["preparing"], true);
             assert!(start.elapsed() < Duration::from_secs(1));
             dash.call(Method::POST, path, "")
                 .await
@@ -441,6 +441,7 @@ async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
             assert_eq!(preparing["switch_request"]["state"], "preparing");
             let request_id = preparing["switch_request"]["request_id"].as_str().unwrap();
             assert_eq!(request_id.len(), 32);
+            assert_eq!(reply["request_id"], request_id);
             tokio::time::advance(Duration::from_secs(5)).await;
             tokio::task::yield_now().await;
             let body = dash.get(STATUS).await.json(StatusCode::OK);
@@ -468,18 +469,18 @@ async fn an_ambiguous_request_is_never_resent_and_requires_a_status_read_before_
         let fake = Switcher::new(Duration::ZERO, None);
         *fake.error.lock().unwrap() = Some(error);
         let (dash, _scratch) = supervised(fake.clone());
-        assert_eq!(
-            dash.call(Method::POST, INSTALL, "")
-                .await
-                .json(StatusCode::ACCEPTED),
-            serde_json::json!({"uncertain": true})
-        );
+        let reply = dash
+            .call(Method::POST, INSTALL, "")
+            .await
+            .json(StatusCode::ACCEPTED);
+        assert_eq!(reply["uncertain"], true);
         dash.call(Method::POST, INSTALL, "")
             .await
             .error(StatusCode::CONFLICT, "switch_uncertain");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         let body = dash.get(STATUS).await.json(StatusCode::OK);
         assert_eq!(body["switch_request"]["state"], "unknown");
+        assert_eq!(reply["request_id"], body["switch_request"]["request_id"]);
         assert_eq!(body["switch_request"]["pending"], false);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         dash.call(Method::POST, INSTALL, "")
@@ -630,17 +631,16 @@ async fn defensive_ended_mapping_reports_failure_rather_than_refusal() {
             .await
             .json(StatusCode::ACCEPTED);
         if delay.is_zero() {
-            assert_eq!(
-                body,
-                serde_json::json!({"failed": true, "reason": "the new worker exited"})
-            );
+            assert_eq!(body["failed"], true);
+            assert_eq!(body["reason"], "the new worker exited");
         } else {
-            assert_eq!(body, serde_json::json!({"preparing": true}));
+            assert_eq!(body["preparing"], true);
             tokio::time::advance(Duration::from_secs(5)).await;
             tokio::task::yield_now().await;
         }
         let status = dash.get(STATUS).await.json(StatusCode::OK);
         assert_eq!(status["switch_request"]["state"], "failed");
+        assert_eq!(body["request_id"], status["switch_request"]["request_id"]);
         assert_eq!(status["switch_request"]["reason"], "the new worker exited");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
     }
