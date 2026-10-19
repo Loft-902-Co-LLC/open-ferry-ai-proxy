@@ -367,6 +367,19 @@ async fn the_real_backend_uses_live_status_to_follow_a_quiet_phase() {
 #[tokio::test]
 async fn check_reuses_its_view_and_a_missing_record_says_no_supervisor_is_running() {
     let f = Fixture::new().await;
+    let journal = Journal::first_start(
+        Artifact {
+            version: "0.1.0".into(),
+            sha256: "a".repeat(64),
+            size: 1,
+        },
+        None,
+    );
+    std::fs::write(
+        f.data.root().join(open_ferry_update::journal::JOURNAL_FILE),
+        serde_json::to_vec(&journal).unwrap(),
+    )
+    .unwrap();
     let endpoint = Endpoint::new(&f, Some("untrusted"));
     let real = backend(&f, endpoint.clone(), Request::Check).await;
     assert_eq!(
@@ -391,4 +404,45 @@ async fn check_reuses_its_view_and_a_missing_record_says_no_supervisor_is_runnin
         1,
         "check must reuse its initial view"
     );
+}
+
+#[tokio::test]
+async fn plain_checks_ignore_held_and_unopenable_install_locks_without_creating_files() {
+    for unopenable in [false, true] {
+        let f = Fixture::new().await;
+        f.release("0.1.0");
+        let lock_path = InstallLock::path_for(&f.installed).unwrap();
+        let _held = if unopenable {
+            std::fs::create_dir(&lock_path).unwrap();
+            None
+        } else {
+            Some(InstallLock::try_acquire(&f.installed).unwrap())
+        };
+        assert!(InstallLock::try_acquire(&f.installed).is_err());
+        let before = snapshot(f.temp.path());
+        let real = Real(f.updater.clone(), ServiceKind::User);
+        let endpoint = Endpoint::new(&f, None);
+        let selected = real
+            .supervised_with(
+                Request::Check,
+                &Config::default(),
+                endpoint.clone(),
+                |_, _| async { panic!("a plain check must not try detection or the install lock") },
+            )
+            .await
+            .unwrap();
+        assert!(selected.is_none());
+        let ran = go(
+            Request::Check,
+            &real,
+            &settings("auto", None),
+            false,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!((ran.code, ran.result), (0, "up-to-date"));
+        assert_eq!(endpoint.statuses.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot(f.temp.path()), before);
+    }
 }
