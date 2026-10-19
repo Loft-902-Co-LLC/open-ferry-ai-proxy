@@ -7536,3 +7536,84 @@ async fn automatic_cooldown_survives_history_eviction_until_its_boundary() {
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_bounds_future_stamps_without_extending_them_on_each_check() {
+    use crate::clock::Clock;
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    for source in ["history", "last", "journal", "pending", "memory"] {
+        for has_end in [false, true] {
+            let mut rig = Rig::new().await;
+            let root = tempfile::tempdir().unwrap();
+            rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+            let future = rig.clock.now() + chrono::Duration::days(3);
+            let mut record = SwitchRecord::failed_to_load(
+                "skewed",
+                "update",
+                "1.0.0",
+                "2.0.0",
+                &future.to_rfc3339(),
+                "handing-over",
+                "environment",
+                "interrupted",
+            );
+            if has_end {
+                record.ended_at = Some(future.to_rfc3339());
+            }
+            let mut state = State::default();
+            let outcome = Outcome {
+                record: record.clone(),
+                mark_failed: None,
+            };
+            match source {
+                "history" => state.history.push(record),
+                "last" => state.last_switch = Some(record),
+                "journal" => rig
+                    .rt
+                    .as_mut()
+                    .unwrap()
+                    .journal
+                    .as_mut()
+                    .unwrap()
+                    .push_outcome(outcome),
+                "pending" => rig
+                    .rt
+                    .as_mut()
+                    .unwrap()
+                    .pending
+                    .push(crate::core::PendingState {
+                        name: "S3",
+                        outcome,
+                        attempts: 1,
+                        due: tokio::time::Instant::now(),
+                        in_journal: false,
+                    }),
+                "memory" => {}
+                _ => unreachable!(),
+            }
+            state.save(&rig.cfg.data.state_file()).unwrap();
+            let mut core = core_of!(rig);
+            if source == "memory" {
+                // A wall-clock step back leaves an existing map entry in the future.
+                core.automatic_cooldowns.insert("2.0.0".into(), future);
+            }
+            for elapsed in [0, 5 * 3600 - 1, 1] {
+                rig.clock.advance(Duration::from_secs(elapsed));
+                let (tx, mut rx) = unbounded_channel();
+                core.handle_switch(update(true), tx).await;
+                let replies = drain(&mut rx);
+                if elapsed == 1 {
+                    assert_eq!(done_result(&replies)["result"], "switched", "{source}");
+                } else {
+                    assert!(
+                        matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+                        if reason.contains("trying again later")),
+                        "{source}: {replies:?}"
+                    );
+                    assert_eq!(rig.driver.places().len(), 1);
+                }
+            }
+        }
+    }
+}
