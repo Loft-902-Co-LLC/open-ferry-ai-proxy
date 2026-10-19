@@ -689,3 +689,74 @@ async fn a_status_read_started_before_acceptance_does_not_clear_pending() {
     let fresh_read = dash.get(STATUS).await.json(StatusCode::OK);
     assert_eq!(fresh_read["switch_request"]["pending"], false);
 }
+
+#[tokio::test]
+async fn a_live_supervisor_resets_stale_reads_and_the_next_failure_starts_at_one() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    *fake.snapshot.lock().unwrap() = serde_json::json!({"state": "switching", "switch": {"status": "loading"}, "switching_disabled": null});
+    let (dash, _scratch) = supervised(fake.clone());
+    let fresh = dash.get(STATUS).await.json(StatusCode::OK);
+    *fake.snapshot.lock().unwrap() = serde_json::Value::Null;
+    for count in 1..=3 {
+        let stale = dash.get(STATUS).await.json(StatusCode::OK);
+        let supervisor = &stale["supervisor"];
+        assert_eq!(supervisor["phase"], "loading");
+        assert_eq!(supervisor["stale"], true);
+        assert_eq!(supervisor["failed_reads"], count);
+        let age = supervisor["snapshot_age_seconds"].as_f64().unwrap();
+        assert!(
+            (0.0..30.0).contains(&age),
+            "cached snapshot is within the age bound"
+        );
+    }
+    *fake.snapshot.lock().unwrap() =
+        serde_json::json!({"state": "idle", "switch": null, "switching_disabled": null});
+    let recovered = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(recovered["supervisor"]["stale"], false);
+    assert_eq!(recovered["supervisor"]["failed_reads"], 0);
+    assert_eq!(
+        recovered["supervisor"]["error"],
+        fresh["supervisor"]["error"]
+    );
+    assert_eq!(recovered["supervisor"]["phase"], "idle");
+    *fake.snapshot.lock().unwrap() = serde_json::Value::Null;
+    let stale = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(stale["supervisor"]["failed_reads"], 1);
+}
+
+#[tokio::test]
+async fn get_recovers_a_preparation_task_that_ended_without_a_result() {
+    let (dash, _scratch) = supervised(Switcher::new(Duration::ZERO, None));
+    dash.state
+        .update_requests
+        .ended_preparation_for_test("install")
+        .await;
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(body["switch_request"]["state"], "failed");
+    assert_eq!(body["switch_request"]["pending"], false);
+    assert_eq!(
+        body["switch_request"]["reason"],
+        "preparing the switch stopped"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn post_recovers_a_dead_preparation_before_admitting_a_new_request() {
+    for (path, action) in [(INSTALL, "install"), (ROLLBACK, "rollback")] {
+        let fake = Switcher::new(Duration::ZERO, None);
+        let (dash, _scratch) = supervised(fake.clone());
+        dash.state
+            .update_requests
+            .ended_preparation_for_test(action)
+            .await;
+        let reply = dash
+            .call(Method::POST, path, "")
+            .await
+            .json(StatusCode::ACCEPTED);
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(body["switch_request"]["state"], "accepted");
+        assert!(body["switch_request"]["reason"].is_null());
+    }
+}

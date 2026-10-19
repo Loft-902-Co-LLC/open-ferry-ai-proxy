@@ -284,6 +284,17 @@ impl SwitchRequest {
 }
 
 impl Requests {
+    #[cfg(test)]
+    pub(crate) async fn ended_preparation_for_test(&self, action: &'static str) {
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut live = self.0.lock().unwrap();
+        live.request = Some(SwitchRequest::preparing(action));
+        live.task = Some(task);
+    }
+
     async fn start(
         &self,
         updates: UpdateService,
