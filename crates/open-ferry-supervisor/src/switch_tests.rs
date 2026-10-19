@@ -7753,3 +7753,50 @@ async fn automatic_cooldown_anchors_distinguish_targets_with_the_same_id_and_sta
 async fn automatic_cooldown_anchors_give_a_fresh_failure_five_hours_when_the_clock_catches_up() {
     distinct_cooldown_anchor("clock-caught-up").await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn automatic_cooldown_does_not_restart_from_history_after_a_backward_clock_step() {
+    use crate::clock::{Clock, ManualClock};
+    use open_ferry_update::state::{State, SwitchRecord};
+
+    let mut rig = Rig::new().await;
+    let root = tempfile::tempdir().unwrap();
+    rig.cfg.data = open_ferry_update::DataDir::at(root.path());
+    let original = rig.clock.now();
+    let stepped = ManualClock::new(original - chrono::Duration::days(3));
+    let mut record = SwitchRecord::failed_to_load(
+        "before-clock-step",
+        "update",
+        "1.0.0",
+        "2.0.0",
+        &original.to_rfc3339(),
+        "handing-over",
+        "environment",
+        "interrupted",
+    );
+    record.ended_at = Some(original.to_rfc3339());
+    State {
+        history: vec![record.clone()],
+        ..Default::default()
+    }
+    .save(&rig.cfg.data.state_file())
+    .unwrap();
+    let mut core = core_of!(rig);
+    core.remember_outcome(&record);
+    assert!(core.automatic_cooldowns.contains_key("2.0.0"));
+
+    // Prune sees the backward step before another admission reads history.
+    core.clock = &stepped;
+    core.prune_automatic_cooldowns();
+    assert!(core.automatic_cooldowns.contains_key("2.0.0"));
+    stepped.advance(Duration::from_secs(6 * 3600));
+    core.prune_automatic_cooldowns();
+    assert!(!core.automatic_cooldowns.contains_key("2.0.0"));
+    assert_eq!(
+        State::load(&rig.cfg.data.state_file()).history[0].id,
+        record.id
+    );
+    let (tx, mut rx) = unbounded_channel();
+    core.handle_switch(update(true), tx).await;
+    assert_eq!(done_result(&drain(&mut rx))["result"], "switched");
+}
