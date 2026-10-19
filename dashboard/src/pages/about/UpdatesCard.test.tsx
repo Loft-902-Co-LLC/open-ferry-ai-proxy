@@ -516,3 +516,18 @@ it("keeps an unanswered POST unconfirmed until the server reports even identical
   expect(within(card).getByText("Preparing the switch")).toBeVisible();
   expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
 });
+
+
+it.each(["age", "failed reads"])("keeps polling preparation despite a supervisor outside the %s bound", async (bound) => {
+  let reads = 0;
+  mockApi(
+    route("GET", CHECK_PATH, { json: {} }),
+    route("GET", UPDATE, () => {
+      reads += 1;
+      return { json: updateStatus({ supervisor: supervisorStatus({ phase: "loading", stale: true, error: "the supervisor cannot be reached", snapshot_age_seconds: bound === "age" ? 60 : 1, failed_reads: bound === "age" ? 1 : 8 }), switch_request: { action: "install", state: "preparing", id: null, reason: null, pending: true } }) };
+    }),
+  );
+  const { card } = await openUpdates();
+  await within(card).findByText("Preparing the switch");
+  await waitFor(() => { expect(reads).toBeGreaterThan(1); }, { timeout: 5_000 });
+});
