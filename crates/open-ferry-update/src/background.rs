@@ -263,18 +263,26 @@ impl UpdateService {
     }
 
     /// Validate the journal's `switch.from` during a watch, else `previous`,
-    /// under the lock; drop it before requesting a rollback. No pin is sent.
-    pub async fn roll_back(&self) -> Result<SwitchHandle, SwitchError> {
+    /// under the lock; require the target the caller confirmed, then drop
+    /// the lock before requesting a rollback. No pin is sent.
+    pub async fn roll_back(&self, expected: &str) -> Result<SwitchHandle, SwitchError> {
         let switcher = self.switcher()?;
         let updater = self.inner.updater.clone();
         // The supervisor validates --version before Accepted. Allow the
         // updater's full version-probe budget plus transport time.
         let acceptance = updater.limits.version_timeout + Duration::from_secs(3);
         let runtime = tokio::runtime::Handle::current();
+        let expected = expected.to_owned();
         let target = tokio::task::spawn_blocking(move || {
             runtime.block_on(async move {
                 let _lock = updater.lock()?;
                 let target = switching::rollback_target(&updater)?;
+                if target.version != expected {
+                    return Err(UpdateError::Supervised(format!(
+                        "rollback target changed: expected {expected}, now {}; run `open-ferry update -check`",
+                        target.version
+                    )).into());
+                }
                 updater.validate_previous(&target).await?;
                 Ok::<_, SwitchError>(target)
             })

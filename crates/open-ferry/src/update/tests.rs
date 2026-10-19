@@ -419,7 +419,7 @@ impl Updates for Fake {
         }))
     }
 
-    async fn rollback(&self) -> Result<Changed, SwitchError> {
+    async fn rollback(&self, _expected: &str) -> Result<Changed, SwitchError> {
         self.calls.borrow_mut().push("rollback");
         if self.supervised {
             return Err(UpdateError::Supervised("a supervisor runs".to_owned()).into());

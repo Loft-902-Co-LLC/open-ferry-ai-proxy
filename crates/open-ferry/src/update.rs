@@ -519,7 +519,7 @@ trait Updates {
     async fn update(&self, found: Self::Found) -> Result<Changed, SwitchError>;
 
     /// Switches back to the version before the last switch.
-    async fn rollback(&self) -> Result<Changed, SwitchError>;
+    async fn rollback(&self, expected: &str) -> Result<Changed, SwitchError>;
 }
 
 enum Changed {
@@ -721,7 +721,7 @@ impl Updates for Real {
             .map_err(SwitchError::from)
     }
 
-    async fn rollback(&self) -> Result<Changed, SwitchError> {
+    async fn rollback(&self, _expected: &str) -> Result<Changed, SwitchError> {
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
@@ -924,14 +924,10 @@ impl Updates for Supervised {
         Ok(self.changing(handle, release.version, "update", binary))
     }
 
-    async fn rollback(&self) -> Result<Changed, SwitchError> {
+    async fn rollback(&self, expected: &str) -> Result<Changed, SwitchError> {
         let binary = self.binary()?;
-        let to = self
-            .view
-            .rollback_target
-            .clone()
-            .ok_or(UpdateError::NoPrevious)?;
-        let handle = self.service.roll_back().await?;
+        let to = expected.to_owned();
+        let handle = self.service.roll_back(expected).await?;
         Ok(self.changing(handle, to, "rollback", binary))
     }
 }
@@ -1611,7 +1607,7 @@ async fn rollback<U: Updates>(
         // Not an update left out, so not 3.
         return outcome.with(declined, 1);
     }
-    match updates.rollback().await {
+    match updates.rollback(&plan.previous).await {
         Ok(Changed::Supervised { handle, record }) => {
             follow_until(
                 updates,
