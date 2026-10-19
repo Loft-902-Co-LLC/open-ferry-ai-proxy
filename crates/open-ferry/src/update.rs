@@ -604,8 +604,9 @@ impl Real {
             };
             let updater = self.0.clone();
             let runtime = tokio::runtime::Handle::current();
+            // Advisory selection only. A plain replacement repeats detect
+            // while locked; supervised preparation pins under its own lock.
             let detection = tokio::task::spawn_blocking(move || {
-                let _lock = updater.lock()?;
                 Ok::<_, UpdateError>(runtime.block_on(client::detect(
                     updater.data.root(),
                     &identity,
@@ -623,7 +624,17 @@ impl Real {
                 }
             }
         }
-        let view = service.switch_view().await.map_err(switch_error)?;
+        let view = if request == Request::Cancel {
+            SwitchView {
+                supervisor: None,
+                unreachable: None,
+                rollback_target: None,
+                last: None,
+                notes: Vec::new(),
+            }
+        } else {
+            service.switch_view().await.map_err(switch_error)?
+        };
         Ok(Some(Supervised {
             real: Real(self.0.clone(), self.1),
             service,
