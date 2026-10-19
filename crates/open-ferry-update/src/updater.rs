@@ -571,6 +571,46 @@ impl Updater {
         }
     }
 
+    /// Hashing and decompression must not occupy the serving runtime. Only
+    /// owned bytes cross this boundary: if the check is cancelled and drops
+    /// its update lock, the blocking task cannot publish files or state.
+    async fn unpack(
+        &self,
+        found: &Found,
+        archive: Vec<u8>,
+    ) -> Result<(Vec<u8>, String), UpdateError> {
+        let release = found.release.clone();
+        let target = self.target.clone();
+        let limit = self.limits.archive;
+        #[cfg(feature = "blue-green-test")]
+        let root = self.data.root().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "blue-green-test")]
+            crate::test_seams::hit(&root, "stage.before_unpack")
+                .map_err(io_error("wait before unpacking the archive"))?;
+            if release::sha256_hex(&archive) != release.sha256 {
+                return Err(UpdateError::Checksum {
+                    archive: release.archive,
+                });
+            }
+            let binary = archive::extract_binary(
+                &archive,
+                ArchiveKind::of(&target),
+                &format!("open-ferry-{}-{target}", release.version),
+                release::binary_name(&target),
+                limit,
+            )?;
+            drop(archive);
+            let sha256 = release::sha256_hex(&binary);
+            Ok((binary, sha256))
+        })
+        .await
+        .map_err(|error| UpdateError::Io {
+            what: "unpack the release archive",
+            error: error.to_string(),
+        })?
+    }
+
     /// Downloads, checks and stages `found`'s release, recording it in
     /// `state`, unless it is staged already. The caller holds the lock.
     pub async fn stage(&self, found: &Found, state: &mut State) -> Result<PathBuf, UpdateError> {
@@ -593,21 +633,7 @@ impl Updater {
                 what: "the archive",
                 error,
             })?;
-        if release::sha256_hex(&archive) != release.sha256 {
-            return Err(UpdateError::Checksum {
-                archive: release.archive.clone(),
-            });
-        }
-        let binary = archive::extract_binary(
-            &archive,
-            ArchiveKind::of(&self.target),
-            &format!("open-ferry-{version}-{}", self.target),
-            self.binary_name(),
-            self.limits.archive,
-        )?;
-        drop(archive);
-
-        let sha256 = release::sha256_hex(&binary);
+        let (binary, sha256) = self.unpack(found, archive).await?;
         let fresh = self.state();
         if fresh.staged.as_deref() == Some(version) {
             if fresh.staged_sha256.as_deref() == Some(sha256.as_str())

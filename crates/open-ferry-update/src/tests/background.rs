@@ -21,6 +21,59 @@ fn service(f: &Fixture, mode: &str) -> UpdateService {
     UpdateService::new(f.updater.clone(), http_fetch(), &config(mode))
 }
 
+// Hold archive processing until an HTTP response has completed on the same
+// single-thread runtime. The observer releases the seam even on an I/O error,
+// so putting unpacking back on the runtime fails instead of deadlocking.
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
+async fn archive_processing_does_not_stall_http_serving() {
+    use std::io::{Read, Write};
+    use std::time::Instant;
+
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    f.server
+        .reply("/serving", Reply::Body(b"still serving".to_vec()));
+    let seams = f.data.root().join(".blue-green-test");
+    std::fs::create_dir_all(&seams).unwrap();
+    std::fs::write(seams.join("stage.before_unpack.hold"), []).unwrap();
+    let address = f.server.address;
+    assert_ne!(address.port(), 8317);
+    let request = std::thread::spawn(move || {
+        let response = (|| -> std::io::Result<String> {
+            let due = Instant::now() + Duration::from_secs(10);
+            while !seams.join("stage.before_unpack.arrived").exists() {
+                if Instant::now() >= due {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "archive processing never reached its barrier",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let wait = Duration::from_secs(5);
+            let mut stream = std::net::TcpStream::connect_timeout(&address, wait)?;
+            stream.set_read_timeout(Some(wait))?;
+            stream.set_write_timeout(Some(wait))?;
+            stream
+                .write_all(b"GET /serving HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            Ok(response)
+        })();
+        std::fs::write(seams.join("stage.before_unpack.release"), []).unwrap();
+        response
+    });
+    let result = service(&f, "auto").check_once().await;
+    let response = request
+        .join()
+        .unwrap()
+        .expect("HTTP must complete while archive processing is held");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("still serving"), "{response}");
+    assert!(matches!(result, Some(Ok(result)) if matches!(result.report, Report::Staged { .. })));
+}
+
 /// Waits up to five seconds for `done`.
 async fn until(mut done: impl FnMut() -> bool) {
     for _ in 0..500 {
