@@ -415,11 +415,17 @@ fn prepare_update_checks(
     config: &Config,
     installation: Option<(&Path, &Path)>,
 ) -> Option<UpdateService> {
+    let unavailable = |why: &str| {
+        if installation.is_some() {
+            tracing::info!("automatic switching is unavailable here: {why}");
+        }
+    };
     let data_dir = installation.map(|(data_dir, _)| data_dir);
     let data = match update_check_data(probe, data_dir) {
         Ok(data) => data,
         Err(error) => {
             tracing::warn!("update checks don't run: {error}");
+            unavailable("the supervised update data could not be authorized");
             return None;
         }
     };
@@ -431,6 +437,7 @@ fn prepare_update_checks(
         Ok(fetch) => fetch,
         Err(error) => {
             tracing::warn!("update checks don't run: {error}");
+            unavailable("the update downloader could not be initialized");
             return None;
         }
     };
@@ -462,7 +469,7 @@ fn prepare_update_checks(
                 match worker_update_switcher(probe, data_dir) {
                     Ok(switcher) => Some(updates.with_switcher(Arc::new(switcher))),
                     Err(error) => {
-                        tracing::warn!("supervised update requests are unavailable: {error}");
+                        unavailable(error);
                         Some(updates)
                     }
                 }
@@ -472,6 +479,7 @@ fn prepare_update_checks(
         }
         Err(error) => {
             tracing::warn!("update checks don't run: {error}");
+            unavailable("the update service could not be initialized");
             None
         }
     }
@@ -482,10 +490,12 @@ fn prepare_update_checks(
 fn worker_update_switcher(
     probe: &dyn crate::scope::Probe,
     data_dir: &Path,
-) -> Result<open_ferry_supervisor::client::EndpointSwitcher, String> {
+) -> Result<open_ferry_supervisor::client::EndpointSwitcher, &'static str> {
     use open_ferry_supervisor::endpoint::Identity;
-    let identity = Identity::current(worker_update_kind(probe, data_dir)?)
-        .map_err(|error| error.to_string())?;
+    let kind = worker_update_kind(probe, data_dir)
+        .map_err(|_| "the supervisor identity could not be determined")?;
+    let identity =
+        Identity::current(kind).map_err(|_| "the worker's endpoint identity could not be read")?;
     Ok(open_ferry_supervisor::client::EndpointSwitcher::new(
         data_dir, identity,
     ))
@@ -530,10 +540,22 @@ fn update_check_data(
 
 #[cfg(test)]
 mod update_check_scope_tests {
-    use super::{update_check_data, worker_update_kind};
+    use super::{update_check_data, worker_update_kind, worker_update_switcher};
     use crate::os_service::Platform;
     use crate::update::scope_probe::Fake;
     use std::path::Path;
+
+    #[test]
+    fn an_unknown_machine_home_refuses_switching_without_disclosing_paths() {
+        let mut probe = Fake::new(Platform::Windows, false);
+        probe.program_data = Err("cannot read a private machine path".into());
+        let account = probe.account.clone().unwrap();
+        assert!(worker_update_kind(&probe, Path::new(&account)).is_err());
+        assert_eq!(
+            worker_update_switcher(&probe, Path::new(&account)).err(),
+            Some("the supervisor identity could not be determined")
+        );
+    }
 
     #[test]
     fn workers_expect_the_machine_owner_only_for_the_machine_home() {
