@@ -1,12 +1,13 @@
 //! Local supervisor clients: detection and stopping for installers, and
 //! status, switches and cancellation for supervised updates.
 //!
-//! [`detect`] decides whether the installed binary may be replaced. It runs
-//! only under the caller's update lock, and answers [`Detection::Clear`] only
-//! with the binary's install lock taken: a supervisor holds that lock for its
-//! whole life, whichever data directory it uses, so one taken shows that none
-//! runs from the binary. Never from a failure. [`stop`] takes no lock. Each
-//! takes one deadline that bounds all it does, its file reads included.
+//! [`detect`] is advisory when selecting an update backend. A check that
+//! authorizes replacement is repeated under the caller's update lock and
+//! returns [`Detection::Clear`] only with the binary's install lock taken.
+//! A supervisor holds that lock for its whole life, whichever data directory
+//! it uses, so taking it shows none runs from that binary. A failure never
+//! authorizes replacement. [`stop`] takes no lock. Each call has one deadline
+//! that bounds all it does, its file reads included.
 
 use std::fs::File;
 use std::io::{self, Read};
