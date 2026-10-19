@@ -493,13 +493,25 @@ fn the_installed_rung_runs_from_the_installed_path(without_the_record: bool) {
     fx.wait_dead(2);
     fx.wait_dead(3);
     fx.fault("exit-after", "welcome@0.0.0");
+    fx.hold("journal.after:J-R1");
     fx.release("journal.before:J-R1");
     drop(second);
-    fx.wait_journal("the return on the installed rung", |j| {
-        j["switch"]["return"]["installed"] == true
-    });
+    // Stop at each choice before its spawn. Even an exit at welcome can follow
+    // a successful handshake, whose J-R2 clears the return before a poll sees it.
+    loop {
+        fx.wait_arrived("journal.after:J-R1");
+        if fx.journal().expect("a journal")["switch"]["return"]["installed"] == true {
+            break;
+        }
+        fx.rehold("journal.before:J-R1");
+        fx.release("journal.after:J-R1");
+        fx.wait_arrived("journal.before:J-R1");
+        fx.rehold("journal.after:J-R1");
+        fx.release("journal.before:J-R1");
+    }
     // By its handle: nothing of its own runs afterwards.
     sup.kill();
+    fx.release("journal.after:J-R1");
     let spawned = fx.driver_log().iter().filter(|v| v["k"] == "spawn").count();
     for n in 1..=spawned {
         fx.wait_dead(n);
