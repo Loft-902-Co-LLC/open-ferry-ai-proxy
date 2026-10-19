@@ -1681,10 +1681,10 @@ mod prepared {
                     .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset),
             "{read:?}"
         );
-        // close_sync gives the handler SyncError::Stopped (503). Cutting
-        // the server may close the connection before that response is sent.
+        // control.cut() does close the socket before close_sync resolves the
+        // handler with SyncError::Stopped (503); no response can be sent.
         assert!(
-            answer.is_empty() || answer.starts_with("HTTP/1.1 503"),
+            answer.is_empty(),
             "failed activation answered the upload with {answer:?}"
         );
         // Uploads persist before queuing runtime synchronization. Refusing
@@ -1693,6 +1693,8 @@ mod prepared {
             std::fs::read_to_string(dir.path().join("auth/test.json")).unwrap(),
             body
         );
+        // Only this runtime check guards against publishing the credential;
+        // the closed connection cannot distinguish refusal from application.
         assert!(
             manager.list().is_empty(),
             "failed activation applied the queued credential"
