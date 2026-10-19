@@ -220,8 +220,8 @@ class Qualification:
                 and not supervisor.get("switching_disabled")
                 and not supervisor.get("watch_until")
                 and (how is None or (last.get("how") == how and last.get("to") == version
-                     and last.get("result") == ("switched" if how == "update" else "rolled-back")
-                     and (how != "update" or last.get("auto") is True))))
+                     and last.get("from") == (self.a if how == "update" else self.b)
+                     and last.get("result") == ("switched" if how == "update" else "rolled-back"))))
 
     def prerequisites(self):
         if self.os == "Linux":
@@ -354,6 +354,14 @@ class Qualification:
             require(self.api("/check", "POST").get("check") in ("started", "running"),
                     "check-now was not accepted")
             self.until("automatic B after watch", lambda value: self.stable(value, self.b, "update"), seconds=900)
+            # Durable outcomes currently report auto:null. The production worker's
+            # explicit acceptance log proves this used its automatic switch path.
+            self.logs()
+            log = (OUT / "supervisor-worker.log").read_text(encoding="utf-8")
+            require(any("automatic switch accepted" in line and self.b in line for line in log.splitlines()),
+                    "B switched without the worker's automatic-switch acceptance evidence")
+            require(command([self.exe, "--version"]).stdout.strip() == f"open-ferry {self.b}",
+                    "automatic switch did not commit the installed B binary")
             self.load.set_phase("rollback")
             command([self.exe, "update", "-rollback", "-yes", "-config", self.config],
                     env=self.env, timeout=900)
