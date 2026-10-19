@@ -58,7 +58,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
     let supervisor = match view {
         Err(SwitchError::NotSupervised) => Value::Null,
         view => {
-            let (snapshot, error, rollback_target, last, notes) = match view {
+            let (snapshot, mut error, rollback_target, last, notes) = match view {
                 Ok(view) => {
                     if let Some(snapshot) = &view.supervisor {
                         live.supervisor = Some(snapshot.clone());
@@ -95,6 +95,11 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                     )
                 }
             };
+            let policy_disabled = error.as_deref() == Some("switching is disabled");
+            if policy_disabled {
+                error = None;
+                live.failed_reads = 0;
+            }
             let stale = error.is_some();
             if stale {
                 live.failed_reads = live.failed_reads.saturating_add(1);
@@ -106,7 +111,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> Result<Respon
                 .filter(|s| !s.is_empty())
                 .or_else(|| switching["phase"].as_str())
                 .unwrap_or_else(|| snapshot["state"].as_str().unwrap_or("unknown"));
-            let switching_disabled = if error.as_deref() == Some("switching is disabled") {
+            let switching_disabled = if policy_disabled {
                 value!("switching is disabled")
             } else {
                 snapshot["switching_disabled"].clone()
