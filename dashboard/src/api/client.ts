@@ -80,7 +80,15 @@ export function apiUrl(path: string, query?: ApiRequest["query"]): string {
 
 /** Reads an answer's body: JSON when it says so and parses, else text. */
 async function readBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new ApiError(0, null, null, null);
+    }
+    throw error;
+  }
   const type = response.headers.get("content-type") ?? "";
   if (type.includes("json")) {
     if (text === "") {
