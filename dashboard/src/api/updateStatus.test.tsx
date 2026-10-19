@@ -199,20 +199,32 @@ it("does not start observing an initially degraded supervisor", async () => {
 });
 
 
-it.each(["timeout", "cancel"])("links both signals without AbortSignal.any (%s)", async (end) => {
+it.each(["success", "timeout", "cancel"])("links and disposes both signals without AbortSignal.any (%s)", async (end) => {
   fakePollClock();
+  const added = vi.spyOn(AbortSignal.prototype, "addEventListener");
+  const removed = vi.spyOn(AbortSignal.prototype, "removeEventListener");
   const timeout = AbortSignal.timeout.bind(AbortSignal);
   vi.stubGlobal("AbortSignal", { timeout });
   let combined: AbortSignal | undefined;
-  vi.stubGlobal("fetch", (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+  vi.stubGlobal("fetch", (_input: RequestInfo | URL, init?: RequestInit) => {
     combined = init?.signal ?? undefined;
-    combined?.addEventListener("abort", () => { reject(combined?.reason as Error); }, { once: true });
-  }));
+    if (end === "success") return Promise.resolve(Response.json(updateStatus()));
+    return new Promise<Response>((_resolve, reject) => {
+      combined?.addEventListener("abort", () => { reject(combined?.reason as Error); }, { once: true });
+    });
+  });
   const { result, unmount } = observeStatus();
   await act(() => vi.advanceTimersByTimeAsync(0));
   expect(combined?.aborted).toBe(false);
-  if (end === "cancel") {
+  const sources = added.mock.calls.flatMap(([type, listener], index) => {
+    const signal = added.mock.contexts[index];
+    return type === "abort" && signal !== combined ? [{ signal, listener }] : [];
+  });
+  expect(sources).toHaveLength(2);
+  if (end === "success") expect(result.current.isSuccess).toBe(true);
+  else if (end === "cancel") {
     unmount();
+    await act(() => vi.advanceTimersByTimeAsync(0));
     expect(combined?.aborted).toBe(true);
     expect((combined?.reason as DOMException).name).toBe("AbortError");
   } else {
@@ -222,6 +234,10 @@ it.each(["timeout", "cancel"])("links both signals without AbortSignal.any (%s)"
     await act(() => vi.advanceTimersByTimeAsync(1));
     // An initial read follows the shared retry policy; its first failure is a status-0 ApiError.
     expect(isApiError(result.current.failureReason) && result.current.failureReason.status === 0).toBe(true);
+  }
+  for (const { signal, listener } of sources) {
+    expect(removed.mock.calls.some(([type, callback], index) =>
+      type === "abort" && callback === listener && removed.mock.contexts[index] === signal)).toBe(true);
   }
 });
 

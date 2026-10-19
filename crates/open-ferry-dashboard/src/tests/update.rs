@@ -728,12 +728,14 @@ async fn a_live_supervisor_resets_stale_reads_and_the_next_failure_starts_at_one
 #[tokio::test]
 async fn get_recovers_a_preparation_task_that_ended_without_a_result() {
     let (dash, _scratch) = supervised(Switcher::new(Duration::ZERO, None));
-    dash.state
+    let request_id = dash
+        .state
         .update_requests
         .ended_preparation_for_test("install")
         .await;
     let body = dash.get(STATUS).await.json(StatusCode::OK);
     assert_eq!(body["switch_request"]["state"], "failed");
+    assert_eq!(body["switch_request"]["request_id"], request_id);
     assert_eq!(body["switch_request"]["pending"], false);
     assert_eq!(
         body["switch_request"]["reason"],

@@ -296,7 +296,7 @@ impl SwitchRequest {
 
 impl Requests {
     #[cfg(test)]
-    pub(crate) async fn ended_preparation_for_test(&self, action: &'static str) {
+    pub(crate) async fn ended_preparation_for_test(&self, action: &'static str) -> String {
         let task = tokio::spawn(async {});
         while !task.is_finished() {
             tokio::task::yield_now().await;
@@ -304,6 +304,7 @@ impl Requests {
         let mut live = self.0.lock().unwrap();
         live.request = Some(SwitchRequest::preparing(action));
         live.task = Some(task);
+        live.request.as_ref().unwrap().request_id.clone()
     }
 
     async fn start(

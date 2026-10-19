@@ -158,9 +158,14 @@ test("keeps an old request unconfirmed and confirms a live switch after handover
   await page.goto("about");
   const card = page.getByRole("region", { name: "Updates" });
   await card.getByRole("button", { name: "Install now" }).click();
+  const afterPostRead = page.waitForResponse((response) => posts === 1 && response.request().method() === "GET" &&
+    new URL(response.url()).pathname === "/open-ferry/api/v1/update");
   await page.getByRole("dialog").getByRole("button", { name: "Install now" }).click();
+  const read = await afterPostRead;
+  expect((await read.json() as { switch_request: { request_id: string } }).switch_request.request_id).toBe("old-request");
   await expect(card.getByText("The switch could not be confirmed")).toBeVisible();
   await expect(card.getByText("Switch refused")).toBeVisible();
+  await expect(card.getByRole("button", { name: "Install now" })).toBeEnabled();
   await shot(page, "updates-unconfirmed-old-request");
   watched.server.setUpdates({ ...original, switch_request: null, supervisor: supervisorStatus({ phase: "handing-over",
     switch: { id: "new-worker-switch", how: "update", from: "0.1.0", to: "0.2.0" },
@@ -200,6 +205,31 @@ test("asks for a new status read when an unanswered switch exhausts polling", as
   expect(failedPolls).toBe(5);
   expect(watched.consoleErrors).toEqual(Array.from({ length: 6 }, () => expect.stringContaining("net::ERR_CONNECTION_RESET")));
   watched.consoleErrors.length = 0;
+  expectClean(watched);
+});
+
+test("offers a recovery read after bounded automatic observation", async ({ page }) => {
+  const staged = updateStatus({ latest_version: "0.2.0", staged_version: "0.2.0", last_result: "staged", update_available: true,
+    supervisor: supervisorStatus({ phase: "handing-over", switch: { id: "recovering-switch", how: "update", from: "0.1.0", to: "0.2.0" } }),
+  });
+  const watched = await watch(page, { updates: staged });
+  await signIn(page);
+  await page.goto("about");
+  const card = page.getByRole("region", { name: "Updates" });
+  await expect(card.getByText("Switch: handing over")).toBeVisible();
+  watched.server.setUpdates({ ...staged, supervisor: supervisorStatus({ phase: "degraded", switch: null }) });
+  await expect(card.getByText("The supervisor is recovering")).toBeVisible();
+  await expect(card.getByRole("button", { name: "Read status" })).toHaveCount(0);
+  await shot(page, "updates-recovering-polling");
+  await expect(card.getByRole("button", { name: "Read status" })).toBeVisible({ timeout: 15_000 });
+  await shot(page, "updates-recovering");
+  watched.server.setUpdates(updateStatus({ running_version: "0.2.0", installed_version: "0.2.0", latest_version: "0.2.0", supervisor: supervisorStatus({ running_version: "0.2.0",
+    last_switch: { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", at: null, reason: null },
+  }) }));
+  await card.getByRole("button", { name: "Read status" }).click();
+  await expect(card.getByText("Switched to 0.2.0")).toBeVisible();
+  await expect(card.getByText("The supervisor is recovering")).toHaveCount(0);
+  expect(watched.server.switchRequests).toEqual([]);
   expectClean(watched);
 });
 
