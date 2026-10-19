@@ -696,6 +696,8 @@ export async function mockServer(
           }),
         );
       }
+      case "POST /open-ferry/api/v1/update/check":
+        return json(route, { check: "started" }, 202);
       case "POST /open-ferry/api/v1/update/install": {
         server.switchRequests.push("install");
         if (updates?.supervisor == null) {
