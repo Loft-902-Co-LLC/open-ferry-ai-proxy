@@ -36,6 +36,8 @@ export interface SupervisorStatus {
   stale: boolean;
   snapshot_age_seconds: number | null;
   failed_reads: number;
+  /** Optional record warnings; the live snapshot remains usable. */
+  notes?: string[];
 }
 
 export interface SwitchRequest {

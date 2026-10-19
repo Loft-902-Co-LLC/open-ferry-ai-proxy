@@ -753,7 +753,7 @@ async fn defensive_ended_mapping_reports_failure_rather_than_refusal() {
 }
 
 #[tokio::test]
-async fn unreadable_switch_records_return_a_fixed_reason() {
+async fn unreadable_optional_history_keeps_live_status_and_returns_a_fixed_note() {
     let (dash, scratch) = supervised(Switcher::new(Duration::ZERO, None));
     std::fs::write(
         DataDir::at(scratch.path()).state_file(),
@@ -762,9 +762,13 @@ async fn unreadable_switch_records_return_a_fixed_reason() {
     .unwrap();
     let body = dash.get(STATUS).await.json(StatusCode::OK);
     assert_eq!(
-        body["supervisor"]["error"],
-        "the update records could not be read"
+        body["supervisor"]["notes"],
+        serde_json::json!(["the update state could not be read; its history is unavailable"])
     );
+    assert!(body["supervisor"]["error"].is_null());
+    assert_eq!(body["supervisor"]["stale"], false);
+    assert_eq!(body["supervisor"]["phase"], "idle");
+    assert_eq!(body["supervisor"]["rollback_target"], "0.0.9");
     assert!(body["supervisor"]["switching_disabled"].is_null());
     assert!(
         !body
