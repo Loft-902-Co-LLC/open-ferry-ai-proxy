@@ -401,12 +401,12 @@ jobs:
                 -o /tmp/nextest.tar.gz "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/$name"
               echo "b64617e8640624e8f9ba99819e37d7971154e97836d7ae4774fed4715501a6aa  /tmp/nextest.tar.gz" | sha256sum -c -
               tar -xzf /tmp/nextest.tar.gz -C /usr/local/cargo/bin
-              cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
+              cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --target x86_64-unknown-linux-musl --all-targets --locked --features blue-green-test -- -D warnings
               if [ "$EVENT" = push ]; then
-                cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-run
+                cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --target x86_64-unknown-linux-musl --locked --features blue-green-test --no-run
               else
-                cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test
-                cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --doc
+                cargo nextest run --profile ci -p open-ferry -p open-ferry-supervisor -p open-ferry-update --target x86_64-unknown-linux-musl --locked --features blue-green-test
+                cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --target x86_64-unknown-linux-musl --locked --features blue-green-test --doc
               fi
             '
 
