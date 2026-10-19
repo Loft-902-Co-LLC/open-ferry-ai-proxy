@@ -634,3 +634,20 @@ it.each(["install", "rollback"] as const)("clears an unanswered %s when a new wo
     else await waitFor(() => { expect(card).not.toHaveTextContent("The switch could not be confirmed"); });
   }
 });
+
+
+it("asks for a status read after an unanswered POST exhausts polling", async () => {
+  let posted = false;
+  let failedReads = 0;
+  mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => {
+    if (posted) { failedReads += 1; throw new TypeError("offline"); }
+    return { json: updateStatus({ staged_version: "0.2.0", supervisor: supervisorStatus() }) };
+  }), route("POST", UPDATE_INSTALL, () => { posted = true; throw new TypeError("no reply"); }));
+  const { card, user } = await openUpdates();
+  await user.click(await within(card).findByRole("button", { name: "Install now" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+  await within(card).findByText(/Checking its status/);
+  await waitFor(() => { expect(card).toHaveTextContent("Read the status again to see whether it started."); }, { timeout: 15_000 });
+  expect(card).not.toHaveTextContent("Checking its status");
+  expect(failedReads).toBe(5);
+});
