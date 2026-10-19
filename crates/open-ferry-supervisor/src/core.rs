@@ -2109,8 +2109,13 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
         let mut open = watch.open;
         open.reached_ready = true;
         open.phase = Phase::Watching;
-        self.begin_return(open, Blame::NewVersion, why.to_owned(), None)
-            .await;
+        self.begin_return(
+            open,
+            Blame::NewVersion,
+            "the new version failed during its watch".to_owned(),
+            None,
+        )
+        .await;
     }
 
     /// J-R1 (the no-oscillation decision), then the fresh `from`.
@@ -2437,12 +2442,13 @@ impl<'a, D: Driver, H: Host, S: Disk> Core<'a, D, H, S> {
     /// fault. Switching is off, no ladder starts that version again, and no
     /// version is marked failed.
     pub(crate) fn refuse_untrusted(&mut self, binary: &std::path::Path, version: &str, why: &str) {
+        tracing::warn!("{version} is not a trusted binary: {why}");
         if !self.is_untrusted(binary) {
             self.rt.untrusted.push(binary.to_path_buf());
         }
-        self.rt.disabled.get_or_insert_with(|| {
-            format!("switching is off: {version} is not a trusted binary ({why})")
-        });
+        self.rt
+            .disabled
+            .get_or_insert_with(|| "switching is off: a worker binary is not trusted".to_owned());
         self.publish();
     }
 
