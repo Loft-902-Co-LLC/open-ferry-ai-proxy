@@ -197,3 +197,29 @@ it("does not start observing an initially degraded supervisor", async () => {
   expect(api.callsTo("GET", UPDATE)).toHaveLength(1);
   expect(result.current.recoveringSupervisor).toBe(false);
 });
+
+
+it.each(["timeout", "cancel"])("links both signals without AbortSignal.any (%s)", async (end) => {
+  fakePollClock();
+  vi.stubGlobal("AbortSignal", { timeout: AbortSignal.timeout });
+  let combined: AbortSignal | undefined;
+  vi.stubGlobal("fetch", (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    combined = init?.signal ?? undefined;
+    combined?.addEventListener("abort", () => { reject(combined?.reason as Error); }, { once: true });
+  }));
+  const { result, unmount } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(combined?.aborted).toBe(false);
+  if (end === "cancel") {
+    unmount();
+    expect(combined?.aborted).toBe(true);
+    expect((combined?.reason as DOMException).name).toBe("AbortError");
+  } else {
+    await act(() => vi.advanceTimersByTimeAsync(STATUS_POLL_TIMEOUT_MS));
+    expect(combined?.aborted).toBe(true);
+    expect((combined?.reason as DOMException).name).toBe("TimeoutError");
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    // An initial read follows the shared retry policy; its first failure is a status-0 ApiError.
+    expect(isApiError(result.current.failureReason) && result.current.failureReason.status === 0).toBe(true);
+  }
+});

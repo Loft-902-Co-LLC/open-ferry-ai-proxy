@@ -29,6 +29,24 @@ export function pollFailuresExhausted(count: number, since: number | null, now =
   return count >= MAX_FAILED_POLLS || (since !== null && now - since >= MAX_POLL_ERROR_MS);
 }
 
+/** Combine cancellation and the poll deadline on browsers without AbortSignal.any. */
+function pollSignal(query: AbortSignal, timeout: AbortSignal) {
+  if (typeof AbortSignal.any === "function") {
+    return { signal: AbortSignal.any([query, timeout]), dispose: () => undefined };
+  }
+  const controller = new AbortController();
+  const cancel = () => { controller.abort(query.reason); };
+  const expire = () => { controller.abort(timeout.reason); };
+  query.addEventListener("abort", cancel, { once: true });
+  timeout.addEventListener("abort", expire, { once: true });
+  if (query.aborted) cancel();
+  else if (timeout.aborted) expire();
+  return { signal: controller.signal, dispose: () => {
+    query.removeEventListener("abort", cancel);
+    timeout.removeEventListener("abort", expire);
+  } };
+}
+
 /** Read again while a check, preparation or supervised switch runs. */
 export function useUpdateStatus() {
   const call = useApiCall();
@@ -48,7 +66,13 @@ export function useUpdateStatus() {
   const query = useQuery<UpdateStatus>({
     queryKey: apiQueryKey(UPDATE),
     queryFn: async ({ signal }) => {
-      const status = await call<UpdateStatus>(UPDATE, { signal: AbortSignal.any([signal, AbortSignal.timeout(STATUS_POLL_TIMEOUT_MS)]) });
+      const poll = pollSignal(signal, AbortSignal.timeout(STATUS_POLL_TIMEOUT_MS));
+      let status: UpdateStatus;
+      try {
+        status = await call<UpdateStatus>(UPDATE, { signal: poll.signal });
+      } finally {
+        poll.dispose();
+      }
       if (!signal.aborted) {
         const restart = status.supervisor?.phase === "degraded" && status.supervisor.switch === null &&
           (recovering.current || switchInProgress(previousRead.current));
