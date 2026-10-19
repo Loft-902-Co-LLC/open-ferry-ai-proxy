@@ -253,7 +253,7 @@ export function UpdatesCard({ className }: { className?: string }) {
   const runningVersion = supervisor?.running_version ?? data?.running_version;
   const available = (stagedVersion != null && stagedVersion !== runningVersion) ||
     (data?.update_available === true && data.latest_version !== runningVersion);
-  const enabled = supervisor?.switching_disabled === null && supervisor.error === null && !supervisor.stale && !preparing;
+  const enabled = !status.isError && supervisor?.switching_disabled === null && supervisor.error === null && !supervisor.stale && !preparing;
   const trustsReleaseKey = data?.trusts_release_key === true;
   const canInstall = enabled && supervisor.phase === "idle" && available && trustsReleaseKey;
   const canRollback = enabled && ["idle", "watching"].includes(supervisor.phase) && supervisor.rollback_target !== null;

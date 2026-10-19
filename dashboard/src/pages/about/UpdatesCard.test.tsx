@@ -543,3 +543,16 @@ it.each(["cancelled", "switching", "stopping"])("polls %s until the supervisor r
   await new Promise((resolve) => setTimeout(resolve, 2_100));
   expect(reads).toBe(ended);
 });
+
+
+it("blocks rollback on a cached watch while the dashboard poll fails", async () => {
+  let reads = 0;
+  mockApi(route("GET", CHECK_PATH, { json: {} }), route("GET", UPDATE, () => {
+    if (++reads > 1) throw new TypeError("handover");
+    return { json: updateStatus({ supervisor: supervisorStatus({ phase: "watching", rollback_target: "0.0.9" }) }) };
+  }));
+  const { card } = await openUpdates();
+  await within(card).findByRole("button", { name: "Roll back" });
+  await waitFor(() => { expect(reads).toBeGreaterThan(1); }, { timeout: 5_000 });
+  await waitFor(() => { expect(within(card).queryByRole("button", { name: "Roll back" })).not.toBeInTheDocument(); });
+});
