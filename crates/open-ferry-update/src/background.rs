@@ -200,7 +200,7 @@ impl UpdateService {
         let updater = &self.inner.updater;
         let pin = {
             let _lock = updater.lock()?;
-            let mut state = switching::refresh_outcomes(updater)?;
+            let mut state = switching::read_state(updater)?;
             let staged = state
                 .staged
                 .clone()
@@ -222,12 +222,12 @@ impl UpdateService {
                     if !found.is_newer() {
                         return Err(UpdateError::NothingStaged.into());
                     }
-                    switching::skipped(&state, &found.release.version)?;
+                    switching::skipped(&updater, &state, &found.release.version)?;
                     updater.stage(&found, &mut state).await?;
                     found.release.version
                 }
             };
-            switching::skipped(&state, &version)?;
+            switching::skipped(updater, &state, &version)?;
             let sha256 = state
                 .staged_sha256
                 .as_deref()
@@ -433,22 +433,20 @@ async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, Update
         fetch,
         ..inner.updater.clone()
     };
-    if inner
+    let supervised = inner
         .switcher
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .is_some()
-    {
-        let _lock = updater.lock()?;
-        switching::refresh_outcomes(&updater)?;
-    }
+        .is_some();
     let install = updater.install();
     inner
         .live
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .install = Some(install);
-    updater.check(snapshot.settings.mode).await
+    updater
+        .check_with_pending(snapshot.settings.mode, supervised)
+        .await
 }
 
 /// Resolves once the mode is `off`.

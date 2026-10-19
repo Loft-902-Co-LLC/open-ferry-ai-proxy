@@ -685,9 +685,24 @@ impl Updater {
     /// latest release and, in `auto` on an install that updates itself,
     /// stages it. It records the outcome in the state, holding the lock.
     pub async fn check(&self, mode: SelfUpdateMode) -> Result<CheckResult, UpdateError> {
+        self.check_with_pending(mode, false).await
+    }
+
+    /// Supervised checks include pending retry exclusions, read-only. Ordinary
+    /// check reporting still updates only its own fields in fresh state.
+    pub(crate) async fn check_with_pending(
+        &self,
+        mode: SelfUpdateMode,
+        supervised: bool,
+    ) -> Result<CheckResult, UpdateError> {
         let _lock = self.lock()?;
         let mut state = self.state();
-        let outcome = self.check_locked(mode, &mut state).await;
+        let pending = if supervised {
+            crate::switching::pending_exclusions(self)?
+        } else {
+            Default::default()
+        };
+        let outcome = self.check_locked(mode, &mut state, &pending).await;
         state.last_check = Some(now());
         match &outcome {
             Ok(result) => {
@@ -713,16 +728,15 @@ impl Updater {
         &self,
         mode: SelfUpdateMode,
         state: &mut State,
+        pending: &crate::switching::Exclusions,
     ) -> Result<CheckResult, UpdateError> {
         let found = self.latest(state).await?;
         let version = found.release.version.clone();
         state.latest = Some(version.clone());
         let report = if !found.is_newer() {
             Report::UpToDate { latest: version }
-        } else if state.has_failed(&version) {
-            Report::SkippedFailed { version }
-        } else if state.rolled_back.as_deref() == Some(version.as_str()) {
-            Report::SkippedRolledBack { version }
+        } else if let Some(report) = pending.report(state, &version) {
+            report
         } else {
             match (mode, self.install()) {
                 (SelfUpdateMode::Auto, Install::SelfUpdating { .. }) => {

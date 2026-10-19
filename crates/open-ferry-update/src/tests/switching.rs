@@ -276,7 +276,7 @@ async fn an_old_supervised_rollback_does_not_replace_a_later_plain_exclusion() {
     let state = f.updater.state();
     write_journal(&f, &Journal::first_start(artifact("0.2.0"), None));
     let _lock = f.updater.lock().unwrap();
-    let refreshed = crate::switching::refresh_outcomes(&f.updater).unwrap();
+    let refreshed = crate::switching::read_state(&f.updater).unwrap();
     assert_eq!(refreshed.rolled_back.as_deref(), Some("0.4.0"));
     assert_eq!(f.updater.state(), state);
 }
@@ -358,6 +358,8 @@ async fn failed_and_rolled_back_outcomes_are_skipped_by_checks_and_installs() {
             mark_failed,
         });
         write_journal(&f, &journal);
+        let pending_bytes =
+            std::fs::read(f.data.root().join(crate::journal::JOURNAL_FILE)).unwrap();
         let report = service.check_once().await.unwrap().unwrap().report;
         if failed {
             assert!(matches!(report, Report::SkippedFailed { .. }));
@@ -370,5 +372,57 @@ async fn failed_and_rolled_back_outcomes_are_skipped_by_checks_and_installs() {
         ));
         assert!(fake.calls.lock().unwrap().is_empty());
         assert!(!f.data.version_dir("0.2.0").exists());
+        let state = f.updater.state();
+        assert!(state.failed.is_empty() && state.rolled_back.is_none());
+        assert!(state.last_switch.is_none() && state.history.is_empty());
+        assert_eq!(
+            std::fs::read(f.data.root().join(crate::journal::JOURNAL_FILE)).unwrap(),
+            pending_bytes
+        );
     }
+}
+
+#[tokio::test]
+async fn an_unacknowledged_install_failure_cannot_regress_a_successful_retry() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    let (service, _) = service(&f, "notify");
+    let mut record = SwitchRecord::started(
+        "install",
+        "update",
+        "0.1.0",
+        "0.2.0",
+        "2026-10-18T00:00:00Z",
+    );
+    record.confirm();
+    record.installed_binary = Some(crate::state::installed_binary::REPLACED.into());
+    let mut state = f.updater.state();
+    state.upsert_record(record.clone());
+    state.rolled_back = Some("0.4.0".into());
+    f.updater.save(&state).unwrap();
+    let mut journal = Journal::first_start(artifact("0.2.0"), None);
+    journal.outcomes.push(Outcome {
+        record: SwitchRecord {
+            id: "install".into(),
+            installed_binary: Some("failed: directory sync".into()),
+            ..Default::default()
+        },
+        mark_failed: None,
+    });
+    journal.outcomes.push(Outcome {
+        record: SwitchRecord::started(
+            "old-rollback",
+            "rollback",
+            "0.3.0",
+            "0.2.0",
+            "2026-10-17T00:00:00Z",
+        ),
+        mark_failed: None,
+    });
+    write_journal(&f, &journal);
+    service.check_once().await.unwrap().unwrap();
+    let checked = f.updater.state();
+    assert_eq!(checked.last_switch.as_ref(), Some(&record));
+    assert_eq!(checked.history, [record]);
+    assert_eq!(checked.rolled_back.as_deref(), Some("0.4.0"));
 }
