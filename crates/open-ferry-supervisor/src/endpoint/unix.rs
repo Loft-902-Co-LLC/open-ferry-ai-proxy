@@ -98,6 +98,7 @@ impl Location {
     /// The first location, in the design's order, whose path chain validates. The data
     /// directory plays no part on Unix.
     pub fn resolve(identity: &Identity, _data_dir: &Path) -> Result<Self, EndpointError> {
+        switching_supported()?;
         let mut skipped = Vec::new();
         for location in candidates(identity) {
             match open_endpoint_dir(&location, identity, false) {
@@ -141,6 +142,15 @@ impl Location {
     pub fn socket_path(&self) -> PathBuf {
         self.dir().join(SOCKET_FILE)
     }
+}
+
+fn switching_supported() -> Result<(), EndpointError> {
+    if cfg!(target_os = "macos") {
+        return Err(EndpointError::SwitchingDisabled(
+            "macOS directory ACLs aren't checked yet".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Locations in the order the design tries them.
@@ -541,6 +551,7 @@ impl Server {
         identity: &Identity,
         _lock: &SupervisorLock,
     ) -> Result<Self, EndpointError> {
+        switching_supported()?;
         let opened = open_endpoint_dir(location, identity, true)
             .map_err(Fail::for_server)?
             .ok_or_else(|| EndpointError::Io(io::Error::from(io::ErrorKind::NotFound)))?;
@@ -689,6 +700,33 @@ pub async fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_disables_switching_without_failing_the_service() {
+        // Not upstream's: both the default and a caller-chosen endpoint fail closed with
+        // SwitchingDisabled, which startup treats as a reason to run without switching.
+        let data = tempfile::tempdir().expect("data");
+        let lock = SupervisorLock::try_acquire(data.path()).expect("lock");
+        let identity = Identity::current(ServiceKind::User).expect("identity");
+        let location = Location::new("/tmp", "ofp-disabled").expect("location");
+        for error in [
+            Location::resolve(&identity, data.path()).unwrap_err(),
+            Server::bind(&location, &identity, &lock)
+                .err()
+                .expect("disabled"),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    EndpointError::SwitchingDisabled(ref why)
+                        if why == "macOS directory ACLs aren't checked yet"
+                ),
+                "{error}"
+            );
+        }
+        assert!(!location.dir().exists());
+    }
 
     #[test]
     fn a_location_needs_an_absolute_root_and_one_name() {
