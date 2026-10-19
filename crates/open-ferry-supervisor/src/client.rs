@@ -192,7 +192,13 @@ pub async fn stop(data_dir: &Path, identity: &Identity, deadline: Instant) -> St
         };
         last = asked;
         match lock_is_free(data_dir, deadline).await {
-            None => return StopOutcome::TimedOut(last),
+            None => {
+                // No lock result arrived, so ownership is unknown. Retain
+                // the endpoint result without claiming the lock is held.
+                return StopOutcome::TimedOut(format!(
+                    "could not determine whether a supervisor holds the lock: {last}"
+                ));
+            }
             Some(Ok(true)) => return StopOutcome::NotRunning,
             Some(Ok(false)) => {
                 last = format!(
@@ -1215,7 +1221,17 @@ mod tests {
         let outcome = stop(dirs.data(), &identity(), began + Duration::from_millis(300)).await;
         assert!(began.elapsed() < Duration::from_millis(300) + MARGIN);
         assert!(stall.entered(), "the lock check was never reached");
-        assert!(matches!(outcome, StopOutcome::TimedOut(_)), "{outcome:?}");
+        let StopOutcome::TimedOut(seen) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(
+            seen.starts_with("could not determine whether a supervisor holds the lock: "),
+            "{seen}"
+        );
+        assert!(
+            seen.contains("endpoint"),
+            "the endpoint result was lost: {seen}"
+        );
         // The abandoned check takes the lock after its stall and lets it go
         // at once: nothing is held once it has ended.
         stall.wait_finished().await;
