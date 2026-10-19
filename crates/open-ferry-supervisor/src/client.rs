@@ -222,7 +222,8 @@ async fn wait_for_the_lock(data_dir: &Path, deadline: Instant) -> StopOutcome {
         match lock_is_free(data_dir, deadline).await {
             None => {
                 return StopOutcome::TimedOut(
-                    "the supervisor said it was stopping, but still holds its lock".to_owned(),
+                    "the supervisor said it was stopping; whether it still holds its lock could not be determined"
+                        .to_owned(),
                 );
             }
             Some(Ok(true)) => return StopOutcome::Stopped,
@@ -1026,6 +1027,49 @@ mod tests {
         let outcome = stop(dirs.data(), &identity(), soon(10)).await;
         assert_eq!(outcome, StopOutcome::Stopped);
         assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stopping_supervisor_with_a_stalled_lock_check_has_unknown_lock_ownership() {
+        let dirs = Dirs::new();
+        let lock = SupervisorLock::try_acquire(dirs.data()).unwrap();
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(lock)));
+        let hook = slot.clone();
+        let endpoint = serve(location_for(dirs.data()), move |_, mut stream| {
+            let hook = hook.clone();
+            async move {
+                reply(&mut stream, r#"{"type":"stopping","v":1}"#).await;
+                // The supervisor releases its lifetime lock after replying.
+                // The stalled check cannot report that it is now free.
+                drop(hook.lock().unwrap().take());
+            }
+        });
+        write_record(dirs.data(), &endpoint.location, 1);
+        let stall = Stalled::new(&LOCK_STALLS, dirs.data(), STALL);
+        let began = Instant::now();
+        let deadline = began + Duration::from_secs(3);
+        let outcome = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline + MARGIN),
+            stop(dirs.data(), &identity(), deadline),
+        )
+        .await
+        .expect("stop ignored its deadline");
+        let returned = Instant::now();
+        assert_eq!(
+            outcome,
+            StopOutcome::TimedOut(
+                "the supervisor said it was stopping; whether it still holds its lock could not be determined"
+                    .to_owned()
+            )
+        );
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "the supervisor did not exit"
+        );
+        assert!(stall.entered(), "the lock check was never reached");
+        assert!(returned >= deadline && returned < deadline + MARGIN);
+        stall.wait_finished().await;
+        drop(SupervisorLock::try_acquire(dirs.data()).unwrap());
     }
 
     #[tokio::test]
