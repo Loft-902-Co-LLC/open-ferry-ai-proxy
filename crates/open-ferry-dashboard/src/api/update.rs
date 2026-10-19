@@ -8,7 +8,10 @@
 //!   server's own checks run; `GET /update` shows how it went. While
 //!   updates are off nothing is checked, and the answer says so.
 //!
-//! Both answer `updates_unavailable` when the server runs no update checks,
+//! - `POST /update/install` and `POST /update/rollback`: prepare in a shared
+//!   background task and answer at acceptance, or after about 900 ms.
+//!
+//! All answer `updates_unavailable` when the server runs no update checks,
 //! as a TUI's own server doesn't.
 
 use std::panic::AssertUnwindSafe;
@@ -194,6 +197,8 @@ impl SwitchRequest {
                     "not_supervised"
                 } else if matches!(error, SwitchError::Update(UpdateError::Busy)) {
                     "update_busy"
+                } else if matches!(error, SwitchError::Ended(_)) {
+                    "switch_ended"
                 } else {
                     "switch_refused"
                 };
@@ -202,6 +207,7 @@ impl SwitchRequest {
                     SwitchError::TimedOut => "the supervisor did not answer in time; the request may have been accepted; read update status before trying again".to_owned(),
                     SwitchError::Stopped => "the supervisor connection ended without an answer; the outcome is unknown; read update status before trying again".to_owned(),
                     SwitchError::Update(UpdateError::Busy) => "busy, try again shortly".to_owned(),
+                    SwitchError::Ended(reason) => reason,
                     error => error.to_string(),
                 });
             }
@@ -217,6 +223,10 @@ impl SwitchRequest {
                 &value!({"accepted": true, "id": self.id}),
             )),
             "unknown" => Ok(json(StatusCode::ACCEPTED, &value!({"uncertain": true}))),
+            "failed" if self.code == "switch_ended" => Ok(json(
+                StatusCode::ACCEPTED,
+                &value!({"failed": true, "reason": self.reason}),
+            )),
             _ => Err(ApiError::new(
                 StatusCode::CONFLICT,
                 self.code,
