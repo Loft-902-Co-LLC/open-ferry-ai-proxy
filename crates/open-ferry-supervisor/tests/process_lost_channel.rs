@@ -367,10 +367,19 @@ fn a_lost_b_in_taking_over_gets_the_budget_then_its_handle_then_a_resumes() {
 
 /// Row f after a lost B in `watching`, with `change` run while the decision
 /// to return is held at J-R1 (B is gone by then, so is A).
-fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Sup {
+fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Watching {
     let cause = arm(fx, "watching@B");
     fx.hold("journal.before:J-R1");
     let sup = fx.start(&tm(60_000));
+    // A exits well before B's lost-channel budget ends. Keep its process
+    // object until the caller finishes asserting: reopening its numeric pid
+    // later can find another process, making `gone: &[1]` report a live A.
+    #[cfg(windows)]
+    let original = open_ferry_supervisor::process::windows::ProcessHandle::open_pid(
+        fx.pid_of(1).expect("the original worker was started"),
+    )
+    .expect("open the original worker")
+    .expect("the original worker still runs");
     budgeted(fx, 2, cause, || {
         let mut sw = fx.update(B);
         sw.accepted();
@@ -383,7 +392,17 @@ fn lost_b_watching(fx: &Fx, change: impl FnOnce()) -> Sup {
         fx.release("journal.before:J-R1");
         sw.done().expect("a done result");
     });
-    sup
+    Watching {
+        _supervisor: sup,
+        #[cfg(windows)]
+        _original: original,
+    }
+}
+
+struct Watching {
+    _supervisor: Sup,
+    #[cfg(windows)]
+    _original: open_ferry_supervisor::process::windows::ProcessHandle,
 }
 
 #[test]
