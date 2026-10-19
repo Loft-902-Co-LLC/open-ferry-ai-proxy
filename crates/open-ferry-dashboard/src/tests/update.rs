@@ -595,7 +595,7 @@ async fn a_busy_update_lock_answers_promptly_without_calling_the_supervisor() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_accepted_switch_that_ends_with_an_error_is_failed_rather_than_refused() {
+async fn defensive_ended_mapping_reports_failure_rather_than_refusal() {
     for delay in [Duration::ZERO, Duration::from_secs(5)] {
         let fake = Switcher::new(delay, None);
         *fake.error.lock().unwrap() = Some(open_ferry_update::SwitchError::Ended(
