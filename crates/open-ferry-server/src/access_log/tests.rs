@@ -129,6 +129,7 @@ fn logged(router: Router) -> Router {
 /// Sends `request` to `app` and reads its whole answer, capturing what is
 /// logged meanwhile.
 async fn send(app: &Router, request: Request) -> (StatusCode, Vec<Logged>) {
+    crate::test_tracing::keep_every_callsite_open();
     let capture = Capture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     let _guard = tracing::subscriber::set_default(subscriber);

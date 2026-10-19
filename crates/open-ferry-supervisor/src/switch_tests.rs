@@ -4944,6 +4944,7 @@ pub(crate) fn capture_logs() -> (
     tracing::subscriber::DefaultGuard,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) {
+    crate::test_tracing::keep_every_callsite_open();
     use tracing::field::{Field, Visit};
     struct Message(String);
     impl Visit for Message {

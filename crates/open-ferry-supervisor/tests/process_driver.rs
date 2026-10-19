@@ -13,6 +13,10 @@ use open_ferry_supervisor::endpoint::ServiceKind;
 use open_ferry_supervisor::protocol::{Installation, ListenerTopology, Message, Role};
 use open_ferry_supervisor::timings::Timings;
 
+#[cfg(all(test, windows, feature = "blue-green-test"))]
+#[path = "../src/test_tracing.rs"]
+mod test_tracing;
+
 const LONG: Duration = Duration::from_secs(30);
 
 fn probe() -> &'static Path {
@@ -524,6 +528,7 @@ async fn connect_and_hello_share_one_load_deadline() {
     std::fs::create_dir_all(&seams).unwrap();
     std::fs::write(seams.join("driver.accepted.hold"), []).unwrap();
     std::fs::write(seams.join("driver.accepted.release"), []).unwrap();
+    test_tracing::keep_every_callsite_open();
     let logged = Logged::default();
     let arrived = seams.join("driver.accepted.arrived");
     let spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

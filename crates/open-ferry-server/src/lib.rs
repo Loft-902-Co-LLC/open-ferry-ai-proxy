@@ -55,6 +55,8 @@ mod state;
 mod status;
 mod stream;
 #[cfg(test)]
+mod test_tracing;
+#[cfg(test)]
 mod testing;
 #[cfg(test)]
 mod tests;
