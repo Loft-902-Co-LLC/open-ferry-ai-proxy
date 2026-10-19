@@ -6,7 +6,7 @@ on:
       fault:
         type: string
         default: none
-        description: 'Qualification control: none or bad-signature'
+        description: 'Qualification control: none, untrusted-key or bad-signature'
       preflight_only:
         type: boolean
         default: false
@@ -35,6 +35,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_TERM_COLOR: always
       OPEN_FERRY_REQUIRE_DASHBOARD: '1'
+      # Windows lifecycle unexercised since 962f661f: no hosted unelevated interactive logon.
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
       MACOSX_DEPLOYMENT_TARGET: '11.0'
       COPYFILE_DISABLE: '1'

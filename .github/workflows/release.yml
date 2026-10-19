@@ -27,9 +27,9 @@ on:
         type: boolean
         default: false
       qualification_fault:
-        description: 'Negative control; bad-signature passes only after verifying the exact signature rejection'
+        description: 'Negative control; each fault passes only after verifying its exact signature rejection'
         type: choice
-        options: [none, bad-signature]
+        options: [none, untrusted-key, bad-signature]
         default: none
       qualification_preflight_only:
         description: 'Only probe Windows user-service prerequisites; skips all builds'
