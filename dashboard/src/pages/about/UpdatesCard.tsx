@@ -246,7 +246,7 @@ export function UpdatesCard({ className }: { className?: string }) {
     if ((lastSwitch != null && JSON.stringify(lastSwitch) !== switchContext.lastSwitch) ||
       (latestRequest?.action === switching.variables &&
         latestRequest.request_id !== switchContext.previousRead?.switch_request?.request_id) ||
-      (liveSwitch != null && liveSwitch.how === (switching.variables === "install" ? "update" : "rollback") &&
+      (liveSwitch?.how === (switching.variables === "install" ? "update" : "rollback") &&
         liveSwitch.id !== switchContext.previousRead?.supervisor?.switch?.id)) {
       resetSwitch();
     }

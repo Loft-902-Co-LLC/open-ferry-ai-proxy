@@ -201,7 +201,8 @@ it("does not start observing an initially degraded supervisor", async () => {
 
 it.each(["timeout", "cancel"])("links both signals without AbortSignal.any (%s)", async (end) => {
   fakePollClock();
-  vi.stubGlobal("AbortSignal", { timeout: AbortSignal.timeout });
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  vi.stubGlobal("AbortSignal", { timeout });
   let combined: AbortSignal | undefined;
   vi.stubGlobal("fetch", (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
     combined = init?.signal ?? undefined;
