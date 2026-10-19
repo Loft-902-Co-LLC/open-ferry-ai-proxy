@@ -222,6 +222,7 @@ struct Switcher {
     error: std::sync::Mutex<Option<open_ferry_update::SwitchError>>,
     calls: AtomicUsize,
     snapshot: std::sync::Mutex<serde_json::Value>,
+    disabled: std::sync::atomic::AtomicBool,
 }
 
 impl Switcher {
@@ -233,6 +234,7 @@ impl Switcher {
                 refusal.map(|reason| open_ferry_update::SwitchError::Refused(reason.into())),
             ),
             calls: AtomicUsize::new(0),
+            disabled: std::sync::atomic::AtomicBool::new(false),
             snapshot: std::sync::Mutex::new(serde_json::json!({
                 "state": "idle", "active_version": "0.1.0", "switch": null, "switching_disabled": null,
             })),
@@ -260,6 +262,11 @@ impl open_ferry_update::Switcher for Switcher {
         _deadline: std::time::Instant,
     ) -> BoxFuture<'_, Result<serde_json::Value, open_ferry_update::SwitchError>> {
         Box::pin(async move {
+            if self.disabled.load(Ordering::SeqCst) {
+                return Err(open_ferry_update::SwitchError::Disabled(
+                    "private policy path".into(),
+                ));
+            }
             let snapshot = self.snapshot.lock().unwrap().clone();
             let gate = self.status_gate.lock().unwrap().take();
             if let Some((started, release)) = gate {
@@ -358,6 +365,27 @@ fn supervised(fake: Arc<Switcher>) -> (Dash, tempfile::TempDir) {
 
 const INSTALL: &str = "/open-ferry/api/v1/update/install";
 const ROLLBACK: &str = "/open-ferry/api/v1/update/rollback";
+
+#[tokio::test(start_paused = true)]
+async fn disabled_status_and_post_agree_without_exposing_policy_details() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    fake.disabled.store(true, Ordering::SeqCst);
+    *fake.error.lock().unwrap() = Some(open_ferry_update::SwitchError::Disabled(
+        "private policy path".into(),
+    ));
+    let (dash, _scratch) = supervised(fake);
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(
+        body["supervisor"]["switching_disabled"],
+        "switching is disabled"
+    );
+    assert_eq!(body["supervisor"]["error"], "switching is disabled");
+    let reason = dash
+        .call(Method::POST, INSTALL, "")
+        .await
+        .error(StatusCode::CONFLICT, "switching_disabled");
+    assert_eq!(reason, "switching is disabled");
+}
 
 #[tokio::test]
 async fn unsupervised_switches_explain_how_to_update_and_status_has_no_supervisor() {
