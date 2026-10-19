@@ -48,6 +48,7 @@ fn launch(root: &Path, port: u16, base: &str) -> Sup {
     }
     command
         .env("OPEN_FERRY_UPDATE_BASE_URL", base)
+        .env("TOKIO_WORKER_THREADS", "1")
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap())
