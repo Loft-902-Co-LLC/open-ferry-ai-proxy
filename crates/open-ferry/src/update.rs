@@ -844,11 +844,7 @@ impl Updates for Supervised {
     }
 
     async fn switch_view(&self) -> Result<Option<SwitchView>, UpdateError> {
-        self.service
-            .switch_view()
-            .await
-            .map(Some)
-            .map_err(switch_error)
+        Ok(Some(self.view.clone()))
     }
 
     async fn live_supervisor(&self) -> Result<Option<serde_json::Value>, SwitchError> {
@@ -1123,11 +1119,12 @@ fn source(source: ModeSource, path: &Path, config: bool) -> String {
 /// What happened, for `-json` and the exit code.
 #[derive(Debug, Serialize)]
 struct Outcome {
-    /// `check`, `update`, `rollback` or `mode`.
+    /// `check`, `update`, `rollback`, `cancel` or `mode`.
     action: &'static str,
     /// `up-to-date`, `update-available`, `cannot-update`,
     /// `needs-confirmation`, `declined`, `updated`, `rolled-back`,
-    /// `mode-set`, `supervised` or `error`.
+    /// `mode-set`, `supervised`, `error`, `cancelled`, `too-late`,
+    /// `nothing-switching`, `following-stopped` or `outcome-unknown`.
     result: &'static str,
     /// What the text output says.
     message: String,

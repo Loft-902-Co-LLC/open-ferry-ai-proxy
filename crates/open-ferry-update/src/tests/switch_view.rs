@@ -280,3 +280,21 @@ async fn corrupt_state_keeps_live_status_and_the_journal_without_repairing_state
         "{truncated"
     );
 }
+
+#[tokio::test]
+async fn records_with_no_result_stay_unknown_for_updates_and_rollbacks() {
+    for how in ["update", "rollback"] {
+        let f = Fixture::new().await;
+        let mut state = f.updater.state();
+        let mut record =
+            SwitchRecord::started("legacy", how, "0.1.0", "0.2.0", "2026-10-19T01:00:00Z");
+        record.result = None;
+        state.upsert_record(record);
+        f.updater.save(&state).unwrap();
+        let view = service(&f, Some(json!({"state":"idle"})))
+            .switch_view()
+            .await
+            .unwrap();
+        assert_eq!(view.last.unwrap().result, "unknown");
+    }
+}

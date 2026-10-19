@@ -49,14 +49,27 @@ impl UpdateService {
             ),
             tokio::time::timeout(Duration::from_secs(1), records),
         );
-        let (rollback_target, last, notes) = match records {
+        let (rollback_target, last, notes, missing_endpoint) = match records {
             Ok(Ok(records)) => records,
-            Ok(Err(_)) => (None, None, vec!["reading switch records stopped".into()]),
-            Err(_) => (None, None, vec!["reading switch records timed out".into()]),
+            Ok(Err(_)) => (
+                None,
+                None,
+                vec!["reading switch records stopped".into()],
+                false,
+            ),
+            Err(_) => (
+                None,
+                None,
+                vec!["reading switch records timed out".into()],
+                false,
+            ),
         };
         let (supervisor, unreachable) = match live.unwrap_or(Err(SwitchError::TimedOut)) {
             Ok(snapshot) => (Some(snapshot), None),
-            Err(error) => (None, Some(unreachable_reason(&error).into())),
+            Err(error) => (
+                None,
+                Some(unreachable_reason(&error, missing_endpoint).into()),
+            ),
         };
         let last = last.map(|record| last_switch(record, supervisor.as_ref()));
         Ok(SwitchView {
@@ -69,9 +82,10 @@ impl UpdateService {
     }
 }
 
-fn unreachable_reason(error: &SwitchError) -> &'static str {
+fn unreachable_reason(error: &SwitchError, missing_endpoint: bool) -> &'static str {
     match error {
         SwitchError::TimedOut => "the supervisor did not answer in time",
+        SwitchError::Untrusted(_) if cfg!(unix) && missing_endpoint => "no supervisor is running",
         SwitchError::Untrusted(_) => "the supervisor endpoint was not trusted",
         SwitchError::Protocol(_) => "the supervisor reply was not understood",
         SwitchError::Refused(_) => "the supervisor refused the status request",
@@ -80,7 +94,9 @@ fn unreachable_reason(error: &SwitchError) -> &'static str {
     }
 }
 
-fn records(updater: &Updater) -> (Option<String>, Option<SwitchRecord>, Vec<String>) {
+fn records(updater: &Updater) -> (Option<String>, Option<SwitchRecord>, Vec<String>, bool) {
+    let missing_endpoint = std::fs::symlink_metadata(updater.data.root().join("supervisor.json"))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
     let journal = crate::switching::pending_journal(updater);
     let mut notes = Vec::new();
     let state = State::load_strict(&updater.data.state_file()).unwrap_or_else(|_| {
@@ -112,7 +128,7 @@ fn records(updater: &Updater) -> (Option<String>, Option<SwitchRecord>, Vec<Stri
             merged.upsert_record(outcome.record.clone());
         }
     }
-    (rollback_target, merged.last_switch, notes)
+    (rollback_target, merged.last_switch, notes, missing_endpoint)
 }
 
 fn last_switch(record: SwitchRecord, snapshot: Option<&Value>) -> LastSwitch {
@@ -125,11 +141,7 @@ fn last_switch(record: SwitchRecord, snapshot: Option<&Value>) -> LastSwitch {
             .to_rfc3339_opts(SecondsFormat::AutoSi, true)
     });
     LastSwitch {
-        result: record.result.unwrap_or_else(|| match record.how.as_str() {
-            "update" => "switched".into(),
-            "rollback" => "rolled-back".into(),
-            _ => "unknown".into(),
-        }),
+        result: record.result.unwrap_or_else(|| "unknown".into()),
         how: record.how,
         auto,
         from: (!record.from.is_empty()).then_some(record.from),
