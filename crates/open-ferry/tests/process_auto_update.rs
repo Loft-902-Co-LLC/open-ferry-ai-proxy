@@ -69,11 +69,52 @@ fn dump(root: &Path) -> String {
         .join("\n")
 }
 
-async fn until(root: &Path, mut condition: impl FnMut() -> bool) {
-    let due = Instant::now() + LONG;
-    while !condition() {
-        assert!(Instant::now() < due, "timed out\n{}", dump(root));
-        tokio::time::sleep(POLL).await;
+struct Waits<'a> {
+    root: &'a Path,
+    port: u16,
+    server: &'a releases::ReleaseServer,
+}
+
+impl Waits<'_> {
+    fn observed(&self) -> serde_json::Value {
+        let data = data_dir::DataDir::at(self.root.join("data"));
+        let state = open_ferry_update::state::State::load(&data.state_file());
+        let view = journal(self.root);
+        let dashboard = match try_update_request(self.port, "GET", "") {
+            Ok((status, answer)) => serde_json::json!({
+                "status": status,
+                "body": answer.split_once("\r\n\r\n").map(|(_, body)| body),
+            }),
+            Err(error) => serde_json::json!({"error": error.to_string()}),
+        };
+        serde_json::json!({
+            "state": {
+                "has_failed(99.0.0)": state.has_failed("99.0.0"),
+                "last_check": state.last_check,
+                "last_result": state.last_result,
+                "history": state.history,
+            },
+            "journal": {
+                "active": view["active"],
+                "switch": view["switch"],
+                "outcomes": view["outcomes"],
+            },
+            "dashboard": dashboard,
+            "server.requests()": self.server.requests(),
+        })
+    }
+
+    async fn until(&self, name: &str, mut condition: impl FnMut() -> bool) {
+        let due = Instant::now() + LONG;
+        while !condition() {
+            assert!(
+                Instant::now() < due,
+                "timed out waiting for {name}\n{:#}\n{}",
+                self.observed(),
+                dump(self.root)
+            );
+            tokio::time::sleep(POLL).await;
+        }
     }
 }
 
@@ -218,7 +259,16 @@ async fn prepare() -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
         .unwrap()
         .port();
     let sup = launch(root, port, server.base.as_str());
-    until(root, || http_get(port, "/").is_some()).await;
+    let waits = Waits {
+        root,
+        port,
+        server: &server,
+    };
+    waits
+        .until("the original worker to serve HTTP", || {
+            http_get(port, "/").is_some()
+        })
+        .await;
     let identity = open_ferry_supervisor::endpoint::Identity::current(
         open_ferry_supervisor::endpoint::ServiceKind::User,
     )
@@ -231,17 +281,25 @@ async fn prepare() -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
             Instant::now() + Duration::from_millis(750),
         )
         .await;
-        if status.is_ok_and(|snapshot| snapshot.state == "idle") {
+        if status
+            .as_ref()
+            .is_ok_and(|snapshot| snapshot.state == "idle")
+        {
             break;
         }
         assert!(
             Instant::now() < due,
-            "the supervisor never became idle\n{}",
+            "the supervisor never became idle: {status:?}\n{:#}\n{}",
+            waits.observed(),
             dump(root)
         );
         tokio::time::sleep(POLL).await;
     }
-    until(root, || data.try_lock().unwrap().is_some()).await;
+    waits
+        .until("the update lock to be released", || {
+            data.try_lock().unwrap().is_some()
+        })
+        .await;
     (dir, server, sup, port)
 }
 
@@ -267,20 +325,38 @@ async fn a_background_check_switches_the_real_supervised_worker_without_failed_r
     let _permit = Permit::take();
     let (dir, server, _sup, port) = prepare().await;
     let root = dir.path();
+    let waits = Waits {
+        root,
+        port,
+        server: &server,
+    };
     let requests = Requests::start(port);
-    until(root, || requests.ready.load(Ordering::SeqCst) == 4).await;
-    until(root, || {
-        root.join("data/.blue-green-test/auto.before_check.arrived")
-            .exists()
-    })
-    .await;
+    waits
+        .until("all four request loops to start", || {
+            requests.ready.load(Ordering::SeqCst) == 4
+        })
+        .await;
+    waits
+        .until("the automatic check to reach its barrier", || {
+            root.join("data/.blue-green-test/auto.before_check.arrived")
+                .exists()
+        })
+        .await;
     std::fs::write(
         root.join("data/.blue-green-test/auto.before_check.release"),
         [],
     )
     .unwrap();
-    until(root, || journal(root)["active"]["version"] == "99.0.0").await;
-    until(root, || requests.new_seen.load(Ordering::SeqCst)).await;
+    waits
+        .until("99.0.0 to become active", || {
+            journal(root)["active"]["version"] == "99.0.0"
+        })
+        .await;
+    waits
+        .until("a request to reach 99.0.0", || {
+            requests.new_seen.load(Ordering::SeqCst)
+        })
+        .await;
     let answers = requests.finish();
     assert!(answers.len() > 1);
     assert!(
@@ -309,24 +385,31 @@ async fn a_background_check_switches_the_real_supervised_worker_without_failed_r
 }
 
 fn update_request(port: u16, method: &str, suffix: &str) -> (u16, String) {
+    try_update_request(port, method, suffix).unwrap()
+}
+
+fn try_update_request(port: u16, method: &str, suffix: &str) -> std::io::Result<(u16, String)> {
     use std::io::{Read, Write};
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    write!(stream, "{method} /open-ferry/api/v1/update{suffix} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer auto-test-password\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+    let wait = Duration::from_secs(10);
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&address, wait)?;
+    stream.set_read_timeout(Some(wait))?;
+    stream.set_write_timeout(Some(wait))?;
+    write!(
+        stream,
+        "{method} /open-ferry/api/v1/update{suffix} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer auto-test-password\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )?;
     let mut text = String::new();
-    stream.read_to_string(&mut text).unwrap();
+    stream.read_to_string(&mut text)?;
     let status = text
         .lines()
         .next()
-        .unwrap()
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
-    (status, text)
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "HTTP status missing")
+        })?;
+    Ok((status, text))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -338,42 +421,60 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
     let (dir, server, _sup, port) = prepare().await;
     let root = dir.path();
     let seams = root.join("data/.blue-green-test");
-    until(root, || seams.join("auto.before_check.arrived").exists()).await;
+    let waits = Waits {
+        root,
+        port,
+        server: &server,
+    };
+    waits
+        .until("the automatic check to reach its barrier", || {
+            seams.join("auto.before_check.arrived").exists()
+        })
+        .await;
     // Only the original worker needs an immediate check. New workers use
     // their normal first-check delay, leaving the explicit check below alone.
     std::fs::remove_file(seams.join("update-now")).unwrap();
     std::fs::write(seams.join("fault.exit-after"), "go@99.0.0").unwrap();
     std::fs::write(seams.join("auto.before_check.release"), []).unwrap();
     let data = data_dir::DataDir::at(root.join("data"));
-    until(root, || {
-        let state = open_ferry_update::state::State::load(&data.state_file());
-        let view = journal(root);
-        let failed = state.has_failed("99.0.0")
-            || view["outcomes"].as_array().is_some_and(|outcomes| {
-                outcomes
-                    .iter()
-                    .any(|outcome| outcome["mark_failed"]["version"] == "99.0.0")
-            });
-        failed && view["active"]["version"] == env!("CARGO_PKG_VERSION") && view["switch"].is_null()
-    })
-    .await;
-    until(root, || http_get(port, "/").is_some()).await;
-    until(root, || {
-        let (status, answer) = update_request(port, "GET", "");
-        assert_eq!(status, 200, "{answer}");
-        let (_, body) = answer.split_once("\r\n\r\n").unwrap();
-        let status: serde_json::Value = serde_json::from_str(body).unwrap();
-        status["checking"] == false
-    })
-    .await;
+    waits
+        .until("the watch failure and completed rollback", || {
+            let state = open_ferry_update::state::State::load(&data.state_file());
+            let view = journal(root);
+            let failed = state.has_failed("99.0.0")
+                || view["outcomes"].as_array().is_some_and(|outcomes| {
+                    outcomes
+                        .iter()
+                        .any(|outcome| outcome["mark_failed"]["version"] == "99.0.0")
+                });
+            failed
+                && view["active"]["version"] == env!("CARGO_PKG_VERSION")
+                && view["switch"].is_null()
+        })
+        .await;
+    waits
+        .until("the returned worker to serve HTTP", || {
+            http_get(port, "/").is_some()
+        })
+        .await;
+    waits
+        .until("the dashboard to report checking=false", || {
+            let (status, answer) = update_request(port, "GET", "");
+            assert_eq!(status, 200, "{answer}");
+            let (_, body) = answer.split_once("\r\n\r\n").unwrap();
+            let status: serde_json::Value = serde_json::from_str(body).unwrap();
+            status["checking"] == false
+        })
+        .await;
     // last_check has seconds precision. Leave the prior check's second so
     // its unchanged result cannot satisfy the explicit check's completion.
     let previous = open_ferry_update::state::State::load(&data.state_file()).last_check;
-    until(root, || {
-        previous.as_deref()
-            != Some(&chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-    })
-    .await;
+    waits
+        .until("the prior last_check second to end", || {
+            previous.as_deref()
+                != Some(&chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        })
+        .await;
     let before = server.requests();
     let (status, answer) = update_request(port, "POST", "/check");
     assert_eq!(status, 202, "{answer}\n{}", dump(root));
@@ -381,13 +482,14 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
         answer.contains("started"),
         "dashboard starts the explicit check: {answer}"
     );
-    until(root, || {
-        let state = open_ferry_update::state::State::load(&data.state_file());
-        state.last_check != previous
-            && server.requests() >= before + 2
-            && state.last_result.as_deref() == Some("skipped")
-    })
-    .await;
+    waits
+        .until("the explicit check to skip the failed release", || {
+            let state = open_ferry_update::state::State::load(&data.state_file());
+            state.last_check != previous
+                && server.requests() >= before + 2
+                && state.last_result.as_deref() == Some("skipped")
+        })
+        .await;
     let log = dump(root);
     assert_eq!(log.matches("automatic switch accepted").count(), 1, "{log}");
     let state = open_ferry_update::state::State::load(&data.state_file());
