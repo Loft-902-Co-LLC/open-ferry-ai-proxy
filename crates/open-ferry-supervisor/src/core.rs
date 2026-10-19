@@ -54,6 +54,7 @@ pub const TICK: Duration = Duration::from_secs(1);
 pub(crate) const AUTOMATIC_COOLDOWN: chrono::Duration = chrono::Duration::hours(5);
 
 pub(crate) fn unfinished_at(record: &SwitchRecord) -> Option<chrono::DateTime<chrono::Utc>> {
+    // Rolled-back outcomes also cool down; auto only targets newer, non-excluded versions.
     if record.to.is_empty()
         || !record
             .result
