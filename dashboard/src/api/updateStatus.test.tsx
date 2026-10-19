@@ -168,3 +168,32 @@ it("counts a checking poll once after its retry attempts finish", async () => {
   await act(() => vi.advanceTimersByTimeAsync(4_010));
   expect(reads).toBe(16);
 });
+
+
+it.each([true, false])("observes a degraded supervisor after a switch within the poll bound (recovers=%s)", async (recovers) => {
+  fakePollClock();
+  let reads = 0;
+  mockApi(route("GET", UPDATE, () => ({ json: updateStatus({ supervisor: supervisorStatus({
+    phase: ++reads === 1 ? "handing-over" : recovers && reads >= 3 ? "idle" : "degraded",
+    switch: null,
+  }) }) })));
+  const { result } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  await act(() => vi.advanceTimersByTimeAsync(2_001));
+  expect(result.current.recoveringSupervisor).toBe(true);
+  await act(() => vi.advanceTimersByTimeAsync(10_001));
+  expect(reads).toBe(recovers ? 3 : 6);
+  expect(result.current.recoveringSupervisor).toBe(!recovers);
+  const stopped = reads;
+  await act(() => vi.advanceTimersByTimeAsync(4_001));
+  expect(reads).toBe(stopped);
+});
+
+it("does not start observing an initially degraded supervisor", async () => {
+  fakePollClock();
+  const api = mockApi(route("GET", UPDATE, { json: updateStatus({ supervisor: supervisorStatus({ phase: "degraded" }) }) }));
+  const { result } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(10_001));
+  expect(api.callsTo("GET", UPDATE)).toHaveLength(1);
+  expect(result.current.recoveringSupervisor).toBe(false);
+});
