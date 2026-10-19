@@ -3,7 +3,7 @@
 // reaches React.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { shouldRetry } from "../app/QueryProvider";
 import { apiQueryKey, useApiCall } from "./hooks";
@@ -34,6 +34,9 @@ export function useUpdateStatus() {
   const call = useApiCall();
   const client = useQueryClient();
   const [lastRead, setLastRead] = useState<UpdateStatus>();
+  const previousRead = useRef<UpdateStatus>(undefined);
+  const recovering = useRef(false);
+  const [recoveringSupervisor, setRecoveringSupervisor] = useState(false);
   const [failures, setFailures] = useState({ count: 0, since: null as number | null });
   const [, refreshDeadline] = useState(0);
   useEffect(() => {
@@ -47,21 +50,27 @@ export function useUpdateStatus() {
     queryFn: async ({ signal }) => {
       const status = await call<UpdateStatus>(UPDATE, { signal: AbortSignal.any([signal, AbortSignal.timeout(STATUS_POLL_TIMEOUT_MS)]) });
       if (!signal.aborted) {
+        const restart = status.supervisor?.phase === "degraded" && status.supervisor.switch === null &&
+          (recovering.current || switchInProgress(previousRead.current));
+        recovering.current = restart;
+        previousRead.current = status;
+        setRecoveringSupervisor(restart);
         setLastRead(status);
-        setFailures({ count: 0, since: null });
+        if (restart) setFailures((old) => ({ count: old.count + 1, since: old.since ?? Date.now() }));
+        else setFailures({ count: 0, since: null });
       }
       return status;
     },
     // Count a poll only after the shared retry policy has finished its attempts.
     // During a switch, the next interval is the retry.
     retry: (count, error) => {
-      const retry = !switchInProgress(client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE))) && shouldRetry(count, error);
+      const retry = !recovering.current && !switchInProgress(client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE))) && shouldRetry(count, error);
       if (!retry) setFailures((old) => ({ count: old.count + 1, since: old.since ?? Date.now() }));
       return retry;
     },
     refetchInterval: (query) => !exhausted &&
-      (query.state.data?.checking === true || switchInProgress(query.state.data))
+      (query.state.data?.checking === true || recoveringSupervisor || switchInProgress(query.state.data))
         ? CHECKING_POLL_MS : false,
   });
-  return { ...query, lastRead, hidePollError: switchInProgress(query.data) && !exhausted };
+  return { ...query, lastRead, recoveringSupervisor, hidePollError: (switchInProgress(query.data) || recoveringSupervisor) && !exhausted };
 }

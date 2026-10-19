@@ -9,7 +9,7 @@ function readable(word: string): string {
 }
 
 /** The supervisor's current work and its durable last outcome. */
-export function SwitchStatus({ status, onRetry, hidePhase = false }: { status: UpdateStatus; onRetry: () => void; hidePhase?: boolean }) {
+export function SwitchStatus({ status, onRetry, hidePhase = false, recoveringSupervisor = false }: { status: UpdateStatus; onRetry: () => void; hidePhase?: boolean; recoveringSupervisor?: boolean }) {
   const supervisor = status.supervisor;
   const request = status.switch_request;
   const last = supervisor?.last_switch;
@@ -31,6 +31,10 @@ export function SwitchStatus({ status, onRetry, hidePhase = false }: { status: U
     {!hidePhase && supervisor?.error === null && switchInProgress({ ...status, switch_request: null }) && <Alert tone="info" live title={`Switch: ${readable(supervisor.phase)}`}>
       {supervisor.switch != null && <p>{supervisor.switch.from} to {supervisor.switch.to}.</p>}
       {supervisor.watch_until !== null && <p>Watching until {formatDateTime(supervisor.watch_until)}.</p>}
+    </Alert>}
+    {!hidePhase && recoveringSupervisor && supervisor?.error === null && <Alert tone="warn" live title="The supervisor is restarting">
+      <p>Read its status again if it does not recover.</p>
+      <Button size="sm" onClick={onRetry}>Read status</Button>
     </Alert>}
     {supervisor?.error != null && <Alert tone="warn" live title="The supervisor status could not be read">
       <p>{supervisor.error}</p>
