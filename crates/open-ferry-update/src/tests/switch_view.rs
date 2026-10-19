@@ -228,3 +228,31 @@ async fn plain_never_reads_the_endpoint_or_creates_records() {
     assert!(!f.data.root().join(crate::journal::JOURNAL_FILE).exists());
     assert_eq!(f.server.requests(), 0);
 }
+
+#[tokio::test]
+async fn an_unreadable_or_future_journal_keeps_live_status_and_state_history_available() {
+    for bytes in ["{partly written", r#"{"format":999}"#] {
+        let f = Fixture::new().await;
+        let mut state = f.updater.state();
+        state.upsert_record(SwitchRecord::started(
+            "done",
+            "rollback",
+            "0.2.0",
+            "0.1.0",
+            "2026-10-18T01:00:00Z",
+        ));
+        f.updater.save(&state).unwrap();
+        let state_bytes = std::fs::read(f.data.state_file()).unwrap();
+        let journal = f.data.root().join(crate::journal::JOURNAL_FILE);
+        std::fs::write(&journal, bytes).unwrap();
+        let view = service(&f, Some(json!({"state":"idle"})))
+            .switch_view()
+            .await
+            .unwrap();
+        assert_eq!(view.supervisor.unwrap()["state"], "idle");
+        assert_eq!(view.last.unwrap().result, "rolled-back");
+        assert!(view.rollback_target.is_none());
+        assert_eq!(std::fs::read(f.data.state_file()).unwrap(), state_bytes);
+        assert_eq!(std::fs::read_to_string(journal).unwrap(), bytes);
+    }
+}

@@ -698,7 +698,7 @@ impl Updater {
         let _lock = self.lock()?;
         let mut state = self.state();
         let pending = if supervised {
-            crate::switching::pending_exclusions(self)?
+            crate::switching::pending_exclusions(self)
         } else {
             Default::default()
         };

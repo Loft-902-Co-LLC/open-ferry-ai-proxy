@@ -459,6 +459,53 @@ async fn an_unacknowledged_install_failure_cannot_regress_a_successful_retry() {
     assert_eq!(checked.rolled_back.as_deref(), Some("0.4.0"));
 }
 
+#[tokio::test]
+async fn unavailable_pending_outcomes_fall_back_to_state_without_writing_records() {
+    for journal in [None, Some("{partly written"), Some(r#"{"format":999}"#)] {
+        let f = Fixture::new().await;
+        f.release("0.2.0");
+        let path = f.data.root().join(crate::journal::JOURNAL_FILE);
+        if let Some(journal) = journal {
+            std::fs::write(&path, journal).unwrap();
+        }
+        let mut state = f.updater.state();
+        state.mark_failed("0.2.0");
+        f.updater.save(&state).unwrap();
+        let state = f.updater.state();
+        for mode in ["off", "notify", "auto"] {
+            let (service, fake) = service(&f, mode);
+            for _ in 0..2 {
+                let exclusions = crate::switching::pending_exclusions(&f.updater);
+                assert!(matches!(
+                    exclusions.report(&state, "0.2.0"),
+                    Some(Report::SkippedFailed { .. })
+                ));
+                assert_eq!(f.updater.state(), state);
+            }
+            if mode == "off" {
+                assert!(service.check_once().await.is_none());
+                assert_eq!(f.updater.state(), state);
+            } else {
+                assert!(matches!(
+                    service.check_once().await.unwrap().unwrap().report,
+                    Report::SkippedFailed { .. }
+                ));
+                assert!(matches!(
+                    service.install_now(true).await,
+                    Err(SwitchError::Skipped(_))
+                ));
+                // Ordinary check reporting is allowed; outcome reconciliation
+                // never writes history or exclusions.
+                assert_eq!(f.updater.state().failed, state.failed);
+                assert_eq!(f.updater.state().history, state.history);
+                f.updater.save(&state).unwrap();
+            }
+            assert!(fake.calls.lock().unwrap().is_empty());
+            assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), journal);
+        }
+    }
+}
+
 struct HeldRunner {
     entered: AtomicBool,
     released: Mutex<bool>,

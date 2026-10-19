@@ -2,7 +2,10 @@
 //! lock; calling a switcher never does. The supervisor owns an accepted
 //! switch, including after its caller drops the progress handle.
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -193,10 +196,35 @@ impl Exclusions {
     }
 }
 
-pub(crate) fn pending_exclusions(updater: &Updater) -> Result<Exclusions, UpdateError> {
-    let view = journal(updater)?;
+/// Optional outcome information must not turn a readable state file into a
+/// failed check. Mutating stage/pin retention checks still fail closed.
+pub(crate) fn pending_journal(updater: &Updater) -> Option<JournalView> {
+    match journal(updater) {
+        Ok(view) if view.journal().is_some() => Some(view),
+        other => {
+            static WARNED: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+            if WARNED
+                .get_or_init(Mutex::default)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(updater.data.root().to_owned())
+            {
+                let reason = match other {
+                    Err(error) => error.to_string(),
+                    Ok(_) => "the switch journal is missing".into(),
+                };
+                tracing::warn!(%reason, "pending switch outcomes could not be read; using the update state's retry exclusions");
+            }
+            None
+        }
+    }
+}
+
+pub(crate) fn pending_exclusions(updater: &Updater) -> Exclusions {
     let mut exclusions = Exclusions::default();
-    if let Some(journal) = view.journal() {
+    if let Some(view) = pending_journal(updater)
+        && let Some(journal) = view.journal()
+    {
         for outcome in &journal.outcomes {
             if let Some(failed) = &outcome.mark_failed {
                 exclusions.failed.push(failed.version.clone());
@@ -210,7 +238,7 @@ pub(crate) fn pending_exclusions(updater: &Updater) -> Result<Exclusions, Update
             }
         }
     }
-    Ok(exclusions)
+    exclusions
 }
 
 pub(crate) fn journal(updater: &Updater) -> Result<JournalView, UpdateError> {
@@ -222,7 +250,7 @@ pub(crate) fn journal(updater: &Updater) -> Result<JournalView, UpdateError> {
 }
 
 pub(crate) fn skipped(updater: &Updater, state: &State, version: &str) -> Result<(), SwitchError> {
-    if let Some(report) = pending_exclusions(updater)?.report(state, version) {
+    if let Some(report) = pending_exclusions(updater).report(state, version) {
         return Err(SwitchError::Skipped(report));
     }
     Ok(())
