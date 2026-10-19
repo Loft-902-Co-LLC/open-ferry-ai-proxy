@@ -22,9 +22,9 @@
 //! there is one. `.env` in the working directory is loaded first, as the
 //! server loads it.
 //!
-//! `update` and `-rollback` change nothing while a supervisor runs from the
-//! installed binary (or while that can't be told): they say so, with result
-//! `supervised`, and how to stop the service and try again.
+//! A supervised install switches workers on the same listener. Ctrl-C stops
+//! following an accepted switch, without cancelling it; `-cancel` asks the
+//! supervisor to cancel while it still can.
 //!
 //! Exit codes: 0 when it is up to date, or did what was asked; 1 when it
 //! failed or refused; 2 for bad usage; 3 when a newer release is out and
@@ -36,6 +36,8 @@ use std::fmt::Write as _;
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use open_ferry_core::config::Config;
 use open_ferry_core::config::save::update_nested_scalar;
@@ -47,7 +49,8 @@ use open_ferry_update::install_lock::InstallLock;
 use open_ferry_update::state::SwitchRecord;
 use open_ferry_update::updater::Found;
 use open_ferry_update::{
-    DataDir, Install, ModeSource, SelfUpdateMode, Settings, Status, UpdateError, Updater,
+    CancelOutcome, DataDir, Install, ModeSource, SelfUpdateMode, Settings, Status, SwitchError,
+    SwitchEvent, SwitchHandle, SwitchView, Switcher, UpdateError, UpdateService, Updater,
 };
 use serde::Serialize;
 
@@ -69,6 +72,7 @@ const NOT_INSTALLED: u8 = 3;
 /// What the command line asks for.
 #[derive(Default)]
 struct Options {
+    cancel: bool,
     check: bool,
     config: String,
     json: bool,
@@ -78,7 +82,12 @@ struct Options {
 }
 
 /// The flags, sorted by name.
-const DEFINITIONS: [Definition<Options>; 6] = [
+const DEFINITIONS: [Definition<Options>; 7] = [
+    Definition {
+        name: "cancel",
+        usage: "Cancel a supervised switch if it has not taken over yet",
+        kind: Kind::Bool(|options, value| options.cancel = value),
+    },
     Definition {
         name: "check",
         usage: "Only say whether a newer release is out; change nothing",
@@ -117,7 +126,8 @@ fn usage(program: &str) -> String {
         "Usage: {program} {NAME} [flags]\n\n\
          Installs the latest release of open-ferry in place of this one, after checking\n\
          its signature and SHA-256 and running it, and keeps this one for -rollback.\n\
-         It restarts nothing. It works while automatic updates are off.\n\n\
+         A supervisor switches versions on the same port; otherwise restart it yourself.\n\
+         It works while automatic updates are off.\n\n\
          Turn automatic updates off: open-ferry {NAME} -mode off\n\n\
          Exit codes: 0 when up to date or done, 1 when it failed or refused, 2 for\n\
          bad usage, 3 when a newer release is out and wasn't installed.\n\nFlags:\n"
@@ -129,6 +139,7 @@ fn usage(program: &str) -> String {
 /// What is asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Request {
+    Cancel,
     Check,
     Update,
     Rollback,
@@ -138,6 +149,7 @@ enum Request {
 impl Request {
     fn action(self) -> &'static str {
         match self {
+            Self::Cancel => "cancel",
             Self::Check => "check",
             Self::Update => "update",
             Self::Rollback => "rollback",
@@ -148,12 +160,17 @@ impl Request {
 
 /// The request `options` make, or why they make none.
 fn request(options: &Options) -> Result<Request, String> {
-    let asked = [options.check, options.rollback, options.mode.is_some()]
-        .iter()
-        .filter(|asked| **asked)
-        .count();
+    let asked = [
+        options.cancel,
+        options.check,
+        options.rollback,
+        options.mode.is_some(),
+    ]
+    .iter()
+    .filter(|asked| **asked)
+    .count();
     if asked > 1 {
-        return Err("use only one of -check, -rollback and -mode".to_owned());
+        return Err("use only one of -cancel, -check, -rollback and -mode".to_owned());
     }
     if let Some(mode) = &options.mode {
         if mode.trim().is_empty() {
@@ -163,7 +180,9 @@ fn request(options: &Options) -> Result<Request, String> {
             .map(Request::Mode)
             .ok_or_else(|| format!("-mode is {mode:?}; use off, notify or auto"));
     }
-    Ok(if options.check {
+    Ok(if options.cancel {
+        Request::Cancel
+    } else if options.check {
         Request::Check
     } else if options.rollback {
         Request::Rollback
@@ -372,8 +391,9 @@ fn manual(
             .unwrap_or_default(),
     );
     console.mode_line(request, &settings, path, config.is_some());
-    let proxy_url = config.map(|config| config.proxy_url).unwrap_or_default();
-    let updater = match real_updater(home.data, &proxy_url, request == Request::Check) {
+    let config = config.unwrap_or_default();
+    let proxy_url = &config.proxy_url;
+    let updater = match real_updater(home.data, proxy_url, request == Request::Check) {
         Ok(updater) => updater,
         Err(error) => {
             return Outcome::new(request.action(), &settings).failed(console, error.to_string());
@@ -393,14 +413,33 @@ fn manual(
     };
     let updates = Real(updater, home.kind);
     let mut terminal = Terminal;
-    runtime.block_on(run(
-        request,
-        &updates,
-        &settings,
-        options.yes,
-        &mut terminal,
-        console,
-    ))
+    runtime.block_on(async {
+        match updates.supervised(request, &config).await {
+            Ok(Some(supervised)) => {
+                run(
+                    request,
+                    &supervised,
+                    &settings,
+                    options.yes,
+                    &mut terminal,
+                    console,
+                )
+                .await
+            }
+            Ok(None) => {
+                run(
+                    request,
+                    &updates,
+                    &settings,
+                    options.yes,
+                    &mut terminal,
+                    console,
+                )
+                .await
+            }
+            Err(error) => Outcome::new(request.action(), &settings).failed_update(console, &error),
+        }
+    })
 }
 
 /// The updater for this binary, with the data directory found before `.env`
@@ -454,6 +493,22 @@ trait Updates {
     /// The status, for `settings`.
     fn status(&self, settings: &Settings) -> Status;
 
+    fn is_supervised(&self) -> bool {
+        false
+    }
+
+    async fn switch_view(&self) -> Result<Option<SwitchView>, UpdateError> {
+        Ok(None)
+    }
+
+    fn record(&self, _id: &str) -> Option<SwitchRecord> {
+        None
+    }
+
+    async fn cancel(&self) -> Result<CancelOutcome, UpdateError> {
+        Ok(CancelOutcome::Nothing)
+    }
+
     /// The latest release, checked; it changes nothing.
     async fn latest(&self) -> Result<Offer<Self::Found>, UpdateError>;
 
@@ -461,10 +516,18 @@ trait Updates {
     fn rollback_plan(&self) -> Result<RollbackPlan, UpdateError>;
 
     /// Downloads, checks and stages `found`, then switches to it.
-    async fn update(&self, found: Self::Found) -> Result<SwitchRecord, UpdateError>;
+    async fn update(&self, found: Self::Found) -> Result<Changed, UpdateError>;
 
     /// Switches back to the version before the last switch.
-    async fn rollback(&self) -> Result<SwitchRecord, UpdateError>;
+    async fn rollback(&self) -> Result<Changed, UpdateError>;
+}
+
+enum Changed {
+    Replaced(SwitchRecord),
+    Supervised {
+        handle: SwitchHandle,
+        record: SwitchRecord,
+    },
 }
 
 /// The latest release, as a check found it.
@@ -504,6 +567,89 @@ impl Real {
     /// change nothing: [`UpdateError::Supervised`].
     async fn clear_to_replace(&self) -> Result<InstallLock, UpdateError> {
         clear_to_replace_for(self.0.install(), self.0.data.root(), self.1).await
+    }
+
+    async fn supervised(
+        &self,
+        request: Request,
+        config: &Config,
+    ) -> Result<Option<Supervised>, UpdateError> {
+        let identity = Identity::current(self.1)
+            .map_err(|error| UpdateError::Supervised(error.to_string()))?;
+        let switcher = Arc::new(client::EndpointSwitcher::new(
+            self.0.data.root(),
+            identity.clone(),
+        ));
+        let service = UpdateService::new(self.0.clone(), http_fetch(), config)
+            .with_switcher(switcher.clone());
+        if request != Request::Check {
+            let binary = match self.0.install() {
+                Install::SelfUpdating { binary } => binary,
+                Install::NotifyOnly(_) if request == Request::Cancel => self
+                    .0
+                    .system
+                    .current_exe()
+                    .map_err(|error| UpdateError::Io {
+                        what: "find this command's binary",
+                        error: error.to_string(),
+                    })?,
+                Install::NotifyOnly(_) => return Ok(None),
+            };
+            let updater = self.0.clone();
+            let runtime = tokio::runtime::Handle::current();
+            let detection = tokio::task::spawn_blocking(move || {
+                let _lock = updater.lock()?;
+                Ok::<_, UpdateError>(runtime.block_on(client::detect(
+                    updater.data.root(),
+                    &identity,
+                    &binary,
+                    Instant::now() + DETECT_TIMEOUT,
+                )))
+            })
+            .await
+            .map_err(preparation_stopped)??;
+            match detection {
+                Detection::Clear(_) => return Ok(None),
+                Detection::Supervised(_) => {}
+                Detection::Busy(why) | Detection::Refuse(why) => {
+                    return Err(UpdateError::Supervised(why));
+                }
+            }
+        }
+        let view = service.switch_view().await.map_err(switch_error)?;
+        if request == Request::Check && view.supervisor.is_none() {
+            let root = self.0.data.root().to_owned();
+            let known = tokio::task::spawn_blocking(move || {
+                root.join("supervisor.json").exists()
+                    || root.join(open_ferry_update::journal::JOURNAL_FILE).exists()
+            })
+            .await
+            .map_err(preparation_stopped)?;
+            if !known {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Supervised {
+            real: Real(self.0.clone(), self.1),
+            service,
+            switcher,
+            view,
+            check: request == Request::Check,
+        }))
+    }
+}
+
+fn switch_error(error: SwitchError) -> UpdateError {
+    match error {
+        SwitchError::Update(error) => error,
+        other => UpdateError::Supervised(other.to_string()),
+    }
+}
+
+fn preparation_stopped(error: tokio::task::JoinError) -> UpdateError {
+    UpdateError::Io {
+        what: "prepare the supervised command",
+        error: error.to_string(),
     }
 }
 
@@ -563,20 +709,224 @@ impl Updates for Real {
         })
     }
 
-    async fn update(&self, found: Found) -> Result<SwitchRecord, UpdateError> {
+    async fn update(&self, found: Found) -> Result<Changed, UpdateError> {
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
         state.latest = Some(found.release.version.clone());
         self.0.stage(&found, &mut state).await?;
-        self.0.switch_to_staged(&mut state)
+        self.0.switch_to_staged(&mut state).map(Changed::Replaced)
     }
 
-    async fn rollback(&self) -> Result<SwitchRecord, UpdateError> {
+    async fn rollback(&self) -> Result<Changed, UpdateError> {
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
-        self.0.rollback(&mut state).await
+        self.0.rollback(&mut state).await.map(Changed::Replaced)
+    }
+}
+
+struct Supervised {
+    real: Real,
+    service: UpdateService,
+    switcher: Arc<client::EndpointSwitcher>,
+    view: SwitchView,
+    check: bool,
+}
+
+struct SupervisedRelease {
+    version: String,
+    found: Option<Found>,
+}
+
+impl Supervised {
+    fn running(&self) -> &str {
+        self.view
+            .supervisor
+            .as_ref()
+            .and_then(|snapshot| snapshot["active_version"].as_str())
+            .unwrap_or(&self.real.0.running)
+    }
+
+    fn binary(&self) -> Result<PathBuf, UpdateError> {
+        match self.real.0.install() {
+            Install::SelfUpdating { binary } => Ok(binary),
+            Install::NotifyOnly(why) => Err(UpdateError::NotSelfUpdating(why)),
+        }
+    }
+
+    fn changing(&self, handle: SwitchHandle, to: String, how: &str, binary: PathBuf) -> Changed {
+        let record = SwitchRecord {
+            id: handle.id.clone(),
+            from: self.running().into(),
+            to,
+            how: how.into(),
+            binary: binary.display().to_string(),
+            blue_green: true,
+            ..Default::default()
+        };
+        Changed::Supervised { handle, record }
+    }
+}
+
+impl Updates for Supervised {
+    type Found = SupervisedRelease;
+
+    fn status(&self, settings: &Settings) -> Status {
+        let mut status = self.real.status(settings);
+        supervisor_status(&mut status, &self.view);
+        status
+    }
+
+    fn is_supervised(&self) -> bool {
+        true
+    }
+
+    async fn switch_view(&self) -> Result<Option<SwitchView>, UpdateError> {
+        self.service
+            .switch_view()
+            .await
+            .map(Some)
+            .map_err(switch_error)
+    }
+
+    fn record(&self, id: &str) -> Option<SwitchRecord> {
+        let state = self.real.0.state();
+        let mut record = state
+            .last_switch
+            .into_iter()
+            .chain(state.history)
+            .find(|record| record.id == id);
+        if let Ok(view) = open_ferry_update::journal::JournalView::load(
+            &self
+                .real
+                .0
+                .data
+                .root()
+                .join(open_ferry_update::journal::JOURNAL_FILE),
+        ) && let Some(journal) = view.journal()
+        {
+            for outcome in journal
+                .outcomes
+                .iter()
+                .filter(|outcome| outcome.record.id == id)
+            {
+                if let Some(record) = &mut record {
+                    record.merge(&outcome.record);
+                } else {
+                    record = Some(outcome.record.clone());
+                }
+            }
+        }
+        record
+    }
+
+    async fn cancel(&self) -> Result<CancelOutcome, UpdateError> {
+        self.service.cancel_switch().await.map_err(switch_error)
+    }
+
+    async fn latest(&self) -> Result<Offer<SupervisedRelease>, UpdateError> {
+        let state = self.real.0.state();
+        let installed = self.running().to_owned();
+        // A staged release was already signature- and version-checked. Reuse
+        // the latest known stage; pinning rechecks its pointer and bytes.
+        if !self.check
+            && let Some(version) = state.staged.as_ref().filter(|version| {
+                state
+                    .latest
+                    .as_ref()
+                    .is_none_or(|latest| latest == *version)
+                    && open_ferry_update::release::valid_version(version)
+            })
+        {
+            let newer = version.parse().is_ok_and(|latest| {
+                open_ferry_update::release::compare(&installed, &latest)
+                    == open_ferry_update::release::Verdict::Newer
+            });
+            return Ok(Offer {
+                latest: version.clone(),
+                installed,
+                newer,
+                failed_here: state.has_failed(version),
+                rolled_back: state.rolled_back.as_ref() == Some(version),
+                install: self.real.0.install(),
+                found: SupervisedRelease {
+                    version: version.clone(),
+                    found: None,
+                },
+            });
+        }
+        let found = self.real.0.latest(&state).await?;
+        let version = found.release.version.clone();
+        Ok(Offer {
+            newer: open_ferry_update::release::compare(&installed, &found.release.semver)
+                == open_ferry_update::release::Verdict::Newer,
+            failed_here: state.has_failed(&version),
+            rolled_back: state.rolled_back.as_ref() == Some(&version),
+            latest: version.clone(),
+            installed,
+            install: self.real.0.install(),
+            found: SupervisedRelease {
+                version,
+                found: Some(found),
+            },
+        })
+    }
+
+    fn rollback_plan(&self) -> Result<RollbackPlan, UpdateError> {
+        Ok(RollbackPlan {
+            previous: self
+                .view
+                .rollback_target
+                .clone()
+                .ok_or(UpdateError::NoPrevious)?,
+            installed: self.running().into(),
+            binary: self.binary()?,
+        })
+    }
+
+    async fn update(&self, release: SupervisedRelease) -> Result<Changed, UpdateError> {
+        let binary = self.binary()?;
+        let updater = self.real.0.clone();
+        let version = release.version.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let pin = tokio::task::spawn_blocking(move || {
+            runtime.block_on(async move {
+                let _lock = updater.lock()?;
+                let mut state = open_ferry_update::State::load_strict(&updater.data.state_file())
+                    .map_err(|error| UpdateError::Io {
+                    what: "read the update state",
+                    error: error.to_string(),
+                })?;
+                if let Some(found) = release.found {
+                    updater.stage(&found, &mut state).await?;
+                }
+                let sha = state
+                    .staged_sha256
+                    .as_deref()
+                    .ok_or(UpdateError::NothingStaged)?;
+                updater.pin_staged(&version, sha)
+            })
+        })
+        .await
+        .map_err(preparation_stopped)??;
+        let handle = self
+            .switcher
+            .update(&pin, false, Instant::now() + Duration::from_secs(3))
+            .await
+            .map_err(switch_error)?;
+        Ok(self.changing(handle, release.version, "update", binary))
+    }
+
+    async fn rollback(&self) -> Result<Changed, UpdateError> {
+        let binary = self.binary()?;
+        let to = self
+            .view
+            .rollback_target
+            .clone()
+            .ok_or(UpdateError::NoPrevious)?;
+        let handle = self.service.roll_back().await.map_err(switch_error)?;
+        Ok(self.changing(handle, to, "rollback", binary))
     }
 }
 
@@ -659,7 +1009,7 @@ impl<'a> Console<'a> {
             match request {
                 Request::Check => line.push_str(" Checking because you asked."),
                 Request::Update => line.push_str(" Updating because you asked."),
-                Request::Rollback | Request::Mode(_) => {}
+                Request::Cancel | Request::Rollback | Request::Mode(_) => {}
             }
         }
         let _ = writeln!(self.out, "{line}");
@@ -731,6 +1081,14 @@ struct Outcome {
     /// For `-mode`: the config written.
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    switch_view: Option<SwitchView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    progress: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_result: Option<serde_json::Value>,
     #[serde(skip)]
     code: u8,
 }
@@ -751,6 +1109,10 @@ impl Outcome {
             error: None,
             status: None,
             config: None,
+            switch_view: None,
+            operation_id: None,
+            progress: Vec::new(),
+            supervisor_result: None,
             code: 1,
         }
     }
@@ -791,6 +1153,7 @@ async fn run<U: Updates>(
     console: &mut Console<'_>,
 ) -> Outcome {
     match request {
+        Request::Cancel => cancel(updates, settings, console).await,
         Request::Check => check(updates, settings, console).await,
         Request::Update => update(updates, settings, yes, prompt, console).await,
         Request::Rollback => rollback(updates, settings, yes, prompt, console).await,
@@ -801,8 +1164,19 @@ async fn run<U: Updates>(
 
 /// `-check`.
 async fn check<U: Updates>(updates: &U, settings: &Settings, console: &mut Console<'_>) -> Outcome {
-    let outcome = Outcome::new("check", settings);
+    let mut outcome = Outcome::new("check", settings);
+    match updates.switch_view().await {
+        Ok(Some(view)) => {
+            say_supervisor(&view, console);
+            outcome.switch_view = Some(view);
+        }
+        Ok(None) => {}
+        Err(error) => return outcome.failed(console, error.to_string()),
+    }
     let mut status = updates.status(settings);
+    if let Some(view) = &outcome.switch_view {
+        supervisor_status(&mut status, view);
+    }
     let offer = match updates.latest().await {
         Ok(offer) => offer,
         Err(error) => {
@@ -814,7 +1188,7 @@ async fn check<U: Updates>(updates: &U, settings: &Settings, console: &mut Conso
     status.latest_version = Some(offer.latest.clone());
     status.update_available = offer.newer;
     let mut outcome = if !offer.newer {
-        console.say(up_to_date(&offer));
+        say_up_to_date(updates, &offer, console);
         outcome.with("up-to-date", 0)
     } else if let Some(why) = offer.install.why_not() {
         console.say(format!(
@@ -823,21 +1197,34 @@ async fn check<U: Updates>(updates: &U, settings: &Settings, console: &mut Conso
         ));
         outcome.with("cannot-update", NOT_INSTALLED)
     } else {
+        let current = if updates.is_supervised() {
+            "running"
+        } else {
+            "installed"
+        };
         console.say(format!(
-            "open-ferry {} is out ({} is installed). Run `open-ferry update` to install it.",
-            offer.latest, offer.installed
+            "open-ferry {} is out ({} is {current}). Run `open-ferry update` to install it.",
+            offer.latest, offer.installed,
         ));
         say_skipped(&offer, console);
         outcome.with("update-available", NOT_INSTALLED)
     };
     if status.restart_needed {
-        console.say(format!(
-            "open-ferry {} is installed, but {} is running: restart open-ferry to run it.",
-            status.installed_version, status.running_version
-        ));
+        if updates.is_supervised() {
+            console.say("The supervisor needs a restart to support the new worker; restart the service when convenient.");
+        } else {
+            console.say(format!(
+                "open-ferry {} is installed, but {} is running: restart open-ferry to run it.",
+                status.installed_version, status.running_version
+            ));
+        }
     }
     outcome.latest_version = Some(offer.latest);
-    outcome.installed_version = Some(offer.installed);
+    outcome.installed_version = Some(if updates.is_supervised() {
+        status.installed_version.clone()
+    } else {
+        offer.installed
+    });
     outcome.status = Some(status);
     outcome
 }
@@ -854,6 +1241,17 @@ fn up_to_date<F>(offer: &Offer<F>) -> String {
             "open-ferry {} is installed; the latest release is {}, which isn't newer.",
             offer.installed, offer.latest
         )
+    }
+}
+
+fn say_up_to_date<U: Updates>(updates: &U, offer: &Offer<U::Found>, console: &mut Console<'_>) {
+    if updates.is_supervised() {
+        console.say(format!(
+            "open-ferry {} is running; the latest release is {}.",
+            offer.installed, offer.latest
+        ));
+    } else {
+        console.say(up_to_date(offer));
     }
 }
 
@@ -885,9 +1283,13 @@ async fn update<U: Updates>(
         Err(error) => return outcome.failed(console, error.to_string()),
     };
     outcome.latest_version = Some(offer.latest.clone());
-    outcome.installed_version = Some(offer.installed.clone());
+    outcome.installed_version = Some(if updates.is_supervised() {
+        updates.status(settings).installed_version
+    } else {
+        offer.installed.clone()
+    });
     if !offer.newer {
-        console.say(up_to_date(&offer));
+        say_up_to_date(updates, &offer, console);
         return outcome.with("up-to-date", 0);
     }
     let binary = match &offer.install {
@@ -900,23 +1302,37 @@ async fn update<U: Updates>(
             return outcome.with("cannot-update", NOT_INSTALLED);
         }
     };
-    console.say(format!(
-        "open-ferry {} is out ({} is installed at {}).",
-        offer.latest,
-        offer.installed,
-        binary.display()
-    ));
+    if updates.is_supervised() {
+        console.say(format!(
+            "open-ferry {} is out ({} is running).",
+            offer.latest, offer.installed
+        ));
+    } else {
+        console.say(format!(
+            "open-ferry {} is out ({} is installed at {}).",
+            offer.latest,
+            offer.installed,
+            binary.display()
+        ));
+    }
     if offer.failed_here {
         console.say("It didn't run on this machine before; trying it again because you asked.");
     }
     if offer.rolled_back {
         console.say("It was rolled back from; installing it again because you asked.");
     }
-    console.say(format!(
+    if updates.is_supervised() {
+        console.say(format!(
+            "This checks and stages the release, then asks the supervisor to switch versions on the same port. {} is kept for `open-ferry update -rollback`.",
+            offer.installed
+        ));
+    } else {
+        console.say(format!(
         "This downloads it, checks its signature and SHA-256, runs it with --version, and puts it in place of {}. {} is kept for `open-ferry update -rollback`. Nothing is restarted.",
         binary.display(),
         offer.installed
     ));
+    }
     if let Some(declined) = confirm(
         yes,
         "Install it?",
@@ -927,7 +1343,18 @@ async fn update<U: Updates>(
         return outcome.with(declined, NOT_INSTALLED);
     }
     match updates.update(offer.found).await {
-        Ok(record) => {
+        Ok(Changed::Supervised { handle, record }) => {
+            follow_until(
+                updates,
+                handle,
+                record,
+                outcome,
+                console,
+                tokio::signal::ctrl_c(),
+            )
+            .await
+        }
+        Ok(Changed::Replaced(record)) => {
             console.say(format!(
                 "open-ferry {} is installed at {} (it was {}).",
                 record.to, record.binary, record.from
@@ -944,6 +1371,139 @@ async fn update<U: Updates>(
     }
 }
 
+fn supervisor_status(status: &mut Status, view: &SwitchView) {
+    status.previous_version = view.rollback_target.clone();
+    if let Some(snapshot) = &view.supervisor {
+        if let Some(running) = snapshot["active_version"].as_str() {
+            status.running_version = running.into();
+        }
+        if let Some(installed) = snapshot["installed_version"].as_str() {
+            status.installed_version = installed.into();
+        }
+        status.restart_needed = snapshot["needs_restart"].as_bool().unwrap_or(false);
+        if let Some(why) = snapshot["switching_disabled"].as_str() {
+            status.can_update_itself = false;
+            status.why_not = Some(why.into());
+            status.why_not_code = Some("switching-disabled");
+        }
+    }
+}
+
+fn say_supervisor(view: &SwitchView, console: &mut Console<'_>) {
+    if let Some(snapshot) = &view.supervisor {
+        let phase = snapshot["switch"]["phase"]
+            .as_str()
+            .or_else(|| snapshot["state"].as_str())
+            .unwrap_or("unknown");
+        console.say(format!(
+            "Supervisor: {phase}; running open-ferry {}.",
+            snapshot["active_version"].as_str().unwrap_or("unknown")
+        ));
+        if let Some(until) = snapshot["switch"]["watch_until"].as_str() {
+            console.say(format!("Watch deadline: {until}."));
+        }
+        if let Some(why) = snapshot["switching_disabled"].as_str() {
+            console.say(format!("Switching is disabled: {why}"));
+        } else {
+            console.say("Switching is enabled.");
+        }
+    }
+    if let Some(why) = &view.unreachable {
+        console.say(format!("Supervisor unavailable: {why}."));
+    }
+    console.say(format!(
+        "Rollback target: {}.",
+        view.rollback_target.as_deref().unwrap_or("none")
+    ));
+    if let Some(last) = &view.last {
+        console.say(format!(
+            "Last switch: {} from {} to {}: {}.",
+            last.how,
+            last.from.as_deref().unwrap_or("unknown"),
+            last.to,
+            last.result
+        ));
+        if let Some(reason) = &last.reason {
+            console.say(reason);
+        }
+    } else {
+        console.say("Last switch: none.");
+    }
+}
+
+async fn cancel<U: Updates>(
+    updates: &U,
+    settings: &Settings,
+    console: &mut Console<'_>,
+) -> Outcome {
+    let outcome = Outcome::new("cancel", settings);
+    match updates.cancel().await {
+        Ok(CancelOutcome::Cancelled) => {
+            console.say("The supervisor accepted the cancellation.");
+            outcome.with("cancelled", 0)
+        }
+        Ok(CancelOutcome::TooLate) => {
+            console.say("It is too late to cancel: the switch has taken over. Use `open-ferry update -check` to see its status.");
+            outcome.with("too-late", 1)
+        }
+        Ok(CancelOutcome::Nothing) => {
+            console.say("Nothing is switching.");
+            outcome.with("nothing-switching", 0)
+        }
+        Err(error) => outcome.failed_update(console, &error),
+    }
+}
+
+async fn follow_until<U: Updates>(
+    updates: &U,
+    mut handle: SwitchHandle,
+    mut record: SwitchRecord,
+    mut outcome: Outcome,
+    console: &mut Console<'_>,
+    stop: impl std::future::Future<Output = io::Result<()>>,
+) -> Outcome {
+    outcome.operation_id = Some(handle.id.clone());
+    console.say(format!("Switch {} accepted. Ctrl-C stops following; the supervisor continues the switch. Use `open-ferry update -cancel` to ask it to cancel.", handle.id));
+    tokio::pin!(stop);
+    loop {
+        let event = tokio::select! {
+            biased;
+            stopped = &mut stop => {
+                if let Err(error) = stopped { return outcome.failed(console, format!("could not listen for Ctrl-C: {error}; the supervisor continues the switch")); }
+                console.say("Stopped following. The supervisor continues the switch; it was not cancelled. Use `open-ferry update -check` to see its status.");
+                return outcome.with("following-stopped", 0);
+            }
+            event = handle.next(Instant::now() + Duration::from_secs(30)) => event,
+        };
+        match event {
+            Ok(Some(SwitchEvent::Progress { phase })) => {
+                console.say(format!("Switch {}: {phase}.", handle.id));
+                outcome.progress.push(phase);
+            }
+            Ok(Some(SwitchEvent::Done { result })) => {
+                let received = result["result"].as_str().unwrap_or("unknown").to_owned();
+                outcome.supervisor_result = Some(result.clone());
+                if let Some(current) = updates.record(&handle.id) { record = current; }
+                else { record.result = Some(received); }
+                let word = record.result.as_deref().unwrap_or("unknown").to_owned();
+                outcome.switch = Some(record.clone());
+                if matches!(word.as_str(), "switched" | "rolled-back") {
+                    console.say(format!("open-ferry {} is running (it was {}).", record.to, record.from));
+                    console.say(if record.confirmed { "The supervisor confirmed the version." } else { "The supervisor watches it before confirming the installed file." });
+                    console.say("Use `open-ferry update -check` for the watch deadline and last outcome.");
+                    if record.restart_needed { console.say("Restart the service when convenient to update its supervisor."); }
+                    return outcome.with(if word == "rolled-back" { "rolled-back" } else { "updated" }, 0);
+                }
+                let reason = record.why.as_deref().or_else(|| result["why"].as_str()).unwrap_or(&word);
+                return outcome.failed(console, format!("the supervised switch ended: {reason}"));
+            }
+            Err(SwitchError::TimedOut) => {}
+            Err(error) => return outcome.failed(console, format!("{error}. Use `open-ferry update -check` before trying again.")),
+            Ok(None) => return outcome.failed(console, "the switch stream ended without an outcome; use `open-ferry update -check` before trying again".into()),
+        }
+    }
+}
+
 /// `-rollback`.
 async fn rollback<U: Updates>(
     updates: &U,
@@ -957,14 +1517,25 @@ async fn rollback<U: Updates>(
         Ok(plan) => plan,
         Err(error) => return outcome.failed(console, error.to_string()),
     };
-    outcome.installed_version = Some(plan.installed.clone());
-    console.say(format!(
+    outcome.installed_version = Some(if updates.is_supervised() {
+        updates.status(settings).installed_version
+    } else {
+        plan.installed.clone()
+    });
+    if updates.is_supervised() {
+        console.say(format!(
+            "This asks the supervisor to switch from open-ferry {} back to {} on the same port. Automatic updates skip the version you rolled back from.",
+            plan.installed, plan.previous
+        ));
+    } else {
+        console.say(format!(
         "This puts open-ferry {} back in place of {} at {}, and keeps {} so `open-ferry update` can install it again; automatic updates skip it until a newer release. Nothing is restarted.",
         plan.previous,
         plan.installed,
         plan.binary.display(),
         plan.installed
     ));
+    }
     if let Some(declined) = confirm(
         yes,
         "Roll back?",
@@ -976,7 +1547,18 @@ async fn rollback<U: Updates>(
         return outcome.with(declined, 1);
     }
     match updates.rollback().await {
-        Ok(record) => {
+        Ok(Changed::Supervised { handle, record }) => {
+            follow_until(
+                updates,
+                handle,
+                record,
+                outcome,
+                console,
+                tokio::signal::ctrl_c(),
+            )
+            .await
+        }
+        Ok(Changed::Replaced(record)) => {
             console.say(format!(
                 "open-ferry {} is back at {} (it was {}).",
                 record.to, record.binary, record.from
