@@ -101,11 +101,14 @@ fn row_a_b_never_greets_within_the_load_timeout() {
         ..Tm::default()
     };
     let _sup = fx.start(&tm);
+    // Start before sending: Accepted passes through the fixture's reader,
+    // which can lag behind the supervisor's load clock. This interval must
+    // contain the whole load budget, even when the reply is delivered late.
+    let requested = std::time::Instant::now();
     let mut sw = fx.update(B);
     sw.accepted();
-    let accepted = std::time::Instant::now();
     let result = sw.done().expect("a done result");
-    let elapsed = accepted.elapsed();
+    let elapsed = requested.elapsed();
     fx.wait_settled();
     assert!(
         [
