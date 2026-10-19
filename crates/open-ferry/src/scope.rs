@@ -477,8 +477,8 @@ pub(crate) fn provision(probe: &mut dyn Probe) -> Result<Home, Refusal> {
 /// directory. `root` must be a full path without `.` or `..`, and is used as
 /// it is: a link anywhere in it refuses. Every check walks from the top, so
 /// only root or the administrators could change anything between two of them.
-/// On macOS every privileged process is refused: the trust check doesn't
-/// read ACLs yet. Does nothing for an unprivileged process.
+/// On macOS every privileged process is refused: this version doesn't
+/// support running as root there. Does nothing for an unprivileged process.
 pub(crate) fn authorize(probe: &dyn Probe, root: &str) -> Result<(), Refusal> {
     let platform = probe.platform();
     let machine = machine_root(probe).ok().flatten();
@@ -668,9 +668,9 @@ fn names(probe: &dyn Probe, path: &str, binary: &str) -> Result<bool, ReceiptErr
 /// it, `Ok(false)` when nothing is there, so there is nothing to read. A
 /// privileged process reads only a file, named by a full path without `.` or
 /// `..`, that passes the trust check with every directory above it; on macOS
-/// it refuses any, since the check doesn't read ACLs yet. An unprivileged
-/// process, or one in a container ([`Probe::in_container`]), reads the file
-/// as it is.
+/// it refuses any, since this version doesn't support running as root there.
+/// An unprivileged process, or one in a container ([`Probe::in_container`]),
+/// reads the file as it is.
 pub(crate) fn authorize_file(probe: &dyn Probe, path: &Path) -> Result<bool, Refusal> {
     let platform = probe.platform();
     let refuse = |reason: String| Refusal {
@@ -1424,10 +1424,13 @@ fn known_machine_root(probe: &dyn Probe) -> Result<String, Refusal> {
     }
 }
 
+pub(crate) const MACOS_ROOT_REFUSAL: &str =
+    "open-ferry doesn't support running as root on macOS in this version";
+
 /// The refusal of every privileged process on macOS.
 fn macos_refusal() -> Refusal {
     Refusal {
-        reason: "open-ferry can't yet check who may change its files on macOS, so it doesn't use them as root".to_owned(),
+        reason: MACOS_ROOT_REFUSAL.to_owned(),
         remedy: Some(
             "Run it without sudo; installs for the whole machine come to macOS in a later version."
                 .to_owned(),
