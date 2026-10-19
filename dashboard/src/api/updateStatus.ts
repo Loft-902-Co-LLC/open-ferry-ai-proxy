@@ -2,9 +2,10 @@
 // update.ts so the e2e mock server, which imports the fixtures, never
 // reaches React.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
+import { shouldRetry } from "../app/QueryProvider";
 import { apiQueryKey, useApiCall } from "./hooks";
 import { UPDATE, type UpdateStatus } from "./update";
 
@@ -31,6 +32,7 @@ export function pollFailuresExhausted(count: number, since: number | null, now =
 /** Read again while a check, preparation or supervised switch runs. */
 export function useUpdateStatus() {
   const call = useApiCall();
+  const client = useQueryClient();
   const [lastRead, setLastRead] = useState<UpdateStatus>();
   const [failures, setFailures] = useState({ count: 0, since: null as number | null });
   const [, refreshDeadline] = useState(0);
@@ -55,8 +57,9 @@ export function useUpdateStatus() {
         throw error;
       }
     },
-    // Each interval is one failed poll; retries come from the polling interval.
-    retry: false,
+    // During a switch, the next interval is the retry. Other screens retain
+    // the shared policy, including initial reads before any status is known.
+    retry: (count, error) => !switchInProgress(client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE))) && shouldRetry(count, error),
     refetchInterval: (query) => !exhausted &&
       (query.state.data?.checking === true || switchInProgress(query.state.data))
         ? CHECKING_POLL_MS : false,

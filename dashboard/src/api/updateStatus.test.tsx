@@ -70,14 +70,16 @@ it("ignores an old deadline callback queued just as a successful read arrives", 
   const { result } = observeStatus();
   await act(() => vi.advanceTimersByTimeAsync(0));
   fail = true;
-  await act(async () => { await result.current.refetch(); });
+  act(() => { void result.current.refetch(); });
+  await act(() => vi.advanceTimersByTimeAsync(10));
   await act(() => vi.advanceTimersByTimeAsync(0));
   const callback = timers.mock.calls.find(([, delay]) => delay === MAX_POLL_ERROR_MS)?.[0];
   expect(typeof callback).toBe("function");
   await act(() => vi.advanceTimersByTimeAsync(MAX_POLL_ERROR_MS - 1));
   fail = false;
   active = true;
-  await act(async () => { await result.current.refetch(); });
+  act(() => { void result.current.refetch(); });
+  await act(() => vi.advanceTimersByTimeAsync(10));
   await act(() => vi.advanceTimersByTimeAsync(0));
   // Even a callback already queued before the success may still run.
   await act(async () => { if (typeof callback === "function") callback(); await Promise.resolve(); });
@@ -86,4 +88,34 @@ it("ignores an old deadline callback queued just as a successful read arrives", 
   const read = result.current.lastRead;
   await act(() => vi.advanceTimersByTimeAsync(2_001));
   expect(result.current.lastRead).not.toBe(read);
+});
+
+
+it.each([false, true])("preserves global retries outside switching (switching=%s)", async (switching) => {
+  fakePollClock();
+  let fail = false;
+  const api = mockApi(route("GET", UPDATE, () => {
+    if (fail) throw new TypeError("offline");
+    return { json: updateStatus({ supervisor: switching ? supervisorStatus({ phase: "watching" }) : null }) };
+  }));
+  const { result } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  fail = true;
+  act(() => { void result.current.refetch(); });
+  await act(() => vi.advanceTimersByTimeAsync(10));
+  expect(result.current.isError).toBe(true);
+  expect(api.callsTo("GET", UPDATE)).toHaveLength(switching ? 2 : 4);
+});
+
+it("retries an initial status read before a switch is known", async () => {
+  fakePollClock();
+  let reads = 0;
+  mockApi(route("GET", UPDATE, () => {
+    if (++reads < 3) throw new TypeError("offline");
+    return { json: updateStatus() };
+  }));
+  const { result } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(10));
+  expect(reads).toBe(3);
+  expect(result.current.isSuccess).toBe(true);
 });
