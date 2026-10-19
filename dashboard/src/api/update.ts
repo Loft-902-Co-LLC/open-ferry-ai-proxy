@@ -46,6 +46,8 @@ export interface SwitchRequest {
   id: string | null;
   reason: string | null;
   pending: boolean;
+  /** Present on a failed or refused server request. */
+  code?: string;
 }
 
 export type SwitchStarted = { request_id: string } & (

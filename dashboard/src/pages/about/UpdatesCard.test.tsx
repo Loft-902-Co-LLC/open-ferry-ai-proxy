@@ -351,6 +351,25 @@ describe("manual install retries", () => {
 });
 
 describe("switch failures", () => {
+  it.each([false, true])("shows already-latest as information with a recorded request: %s", async (recorded) => {
+    const original = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
+    const api = server(original);
+    api.use(route("POST", UPDATE_INSTALL, () => {
+      if (recorded) api.use(route("GET", UPDATE, { json: { ...original,
+        switch_request: { request_id: "latest-request", action: "install", state: "failed", id: null, reason: "already running the latest release or a newer version", pending: false, code: "already_latest" },
+      } }));
+      return { status: 409, json: { error: "already_latest", message: "already running the latest release or a newer version" } };
+    }));
+    const { card, user } = await openUpdates();
+    await user.click(await within(card).findByRole("button", { name: "Install now" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+    expect(await within(card).findByText("Already running the latest release")).toBeVisible();
+    if (recorded) await waitFor(() => { expect(api.callsTo("GET", UPDATE).length).toBeGreaterThan(1); });
+    expect(card).not.toHaveTextContent("Switch failed");
+    expect(card).not.toHaveTextContent("The switch request failed");
+    expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
+  });
+
   it("defensively shows a direct ended reply as failed", async () => {
     const status = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
     const api = server(status);
