@@ -245,10 +245,23 @@ async fn prepare() -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
     (dir, server, sup, port)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_background_check_switches_the_real_supervised_worker_without_failed_requests() {
+fn can_update_here() -> bool {
     if privilege::privileged() {
         eprintln!("skipped: real CLI requires unprivileged scratch");
+        return false;
+    }
+    if open_ferry_update::install::detect_container(std::path::Path::exists, |name| {
+        std::env::var_os(name)
+    }) {
+        eprintln!("skipped: container installs do not update themselves");
+        return false;
+    }
+    true
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_check_switches_the_real_supervised_worker_without_failed_requests() {
+    if !can_update_here() {
         return;
     }
     let _permit = Permit::take();
@@ -318,8 +331,7 @@ fn update_request(port: u16, method: &str, suffix: &str) -> (u16, String) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
-    if privilege::privileged() {
-        eprintln!("skipped: real CLI requires unprivileged scratch");
+    if !can_update_here() {
         return;
     }
     let _permit = Permit::take();
