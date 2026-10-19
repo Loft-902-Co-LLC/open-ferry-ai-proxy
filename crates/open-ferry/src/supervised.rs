@@ -702,7 +702,8 @@ fn run_supervisor(
             return ExitCode::FAILURE;
         }
     };
-    let result = runtime.block_on(async {
+    // Keep the nested supervisor future off Windows' small main-thread stack.
+    let result = runtime.block_on(Box::pin(async {
         let signals = match stops {
             Some(stops) => stops,
             None => match watch_signals() {
@@ -718,7 +719,7 @@ fn run_supervisor(
         tokio::spawn(forward_stops(signals, command_tx.clone()));
         let driver = ProcessDriver::new(kind, cfg.timings.exit_poll);
         Some(
-            open_ferry_supervisor::supervise::supervise(
+            Box::pin(open_ferry_supervisor::supervise::supervise(
                 &cfg,
                 &host,
                 &driver,
@@ -726,10 +727,10 @@ fn run_supervisor(
                 command_tx,
                 commands,
                 open_ferry_supervisor::supervise::default_limit(),
-            )
+            ))
             .await,
         )
-    });
+    }));
     let Some(result) = result else {
         return ExitCode::FAILURE;
     };
