@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use open_ferry_supervisor::protocol::{EndpointReply, EndpointRequest, VERSION};
-use open_ferry_update::{DataDir, State};
+use open_ferry_update::{DataDir, State, UpdateError};
 use serde_json::{Value, json};
 use under_test::*;
 
@@ -155,6 +155,27 @@ fn cli(fx: &Fx, label: &str, flags: &[&str]) -> (i32, Value) {
     let value = serde_json::from_str(&text)
         .unwrap_or_else(|error| panic!("{label}: {error}: {text}\n{errors}\n{}", log(fx)));
     (status.code().unwrap_or(-1), value)
+}
+
+/// Pruning and install bookkeeping also take the update lock. Seeing it free
+/// before spawning the CLI cannot reserve it for that child. Retry only the
+/// explicit pre-admission Busy refusal; every accepted or uncertain result
+/// returns immediately and is never sent again. Traffic keeps running.
+fn switch_cli(fx: &Fx, label: &str, flags: &[&str]) -> (i32, Value) {
+    let deadline = Instant::now() + LONG;
+    let busy = UpdateError::Busy.to_string();
+    loop {
+        let (code, value) = cli(fx, label, flags);
+        if code != 1 || value["result"] != "error" || value["error"] != busy {
+            return (code, value);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label} never acquired the update lock: {value}\n{}",
+            log(fx)
+        );
+        std::thread::sleep(POLL);
+    }
 }
 
 fn request(port: u16) -> Result<String, String> {
@@ -315,7 +336,7 @@ fn the_cli_updates_and_rolls_back_with_no_failed_or_refused_request() {
         (traffic.before.load(Ordering::SeqCst) >= 5).then_some(())
     });
 
-    let (code, update) = cli(&fx, "update", &["-yes"]);
+    let (code, update) = switch_cli(&fx, "update", &["-yes"]);
     assert_eq!(code, 0, "{update}\n{}", log(&fx));
     assert_eq!(update["result"], "updated");
     assert_eq!(update["switch"]["blue_green"], true);
@@ -326,7 +347,7 @@ fn the_cli_updates_and_rolls_back_with_no_failed_or_refused_request() {
     assert_eq!(status(&fx)["active_version"], AFTER);
 
     let before_rollback = traffic.before.load(Ordering::SeqCst);
-    let (code, rollback) = cli(&fx, "rollback", &["-rollback", "-yes"]);
+    let (code, rollback) = switch_cli(&fx, "rollback", &["-rollback", "-yes"]);
     assert_eq!(code, 0, "{rollback}\n{}", log(&fx));
     assert_eq!(rollback["result"], "rolled-back");
     assert_eq!(rollback["switch"]["to"], BEFORE);
