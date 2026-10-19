@@ -244,9 +244,13 @@ fn liveness(pid: u32) -> io::Result<bool> {
     {
         Ok(match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => {
-                stat.rsplit_once(')')
-                    .and_then(|(_, rest)| rest.trim_start().chars().next())
-                    != Some('Z')
+                // Reaping can change Z (zombie) to X (dead) before /proc
+                // disappears. Neither state may make an ended worker look live.
+                !matches!(
+                    stat.rsplit_once(')')
+                        .and_then(|(_, rest)| rest.trim_start().chars().next()),
+                    Some('Z' | 'X')
+                )
             }
             Err(_) => false,
         })
@@ -1093,7 +1097,7 @@ impl Drop for Sup {
                 let _ = child.kill();
                 let _ = child.wait();
                 let until = Instant::now() + Duration::from_secs(10);
-                let pids = events_pids(&self.root);
+                let pids = worker_pids(&self.root);
                 while pids.iter().any(|&pid| alive(pid)) && Instant::now() < until {
                     std::thread::sleep(POLL);
                 }
@@ -1107,15 +1111,28 @@ impl Drop for Sup {
     }
 }
 
-/// The pids of every worker that logged an event in the fixture at `root`.
+/// Every worker recorded by the driver or the workers in the fixture at `root`.
+/// A worker may not have written a complete event before the group is killed;
+/// the driver's spawn record must also keep it in the guard's bounded wait.
 #[cfg(unix)]
-fn events_pids(root: &Path) -> Vec<u32> {
+fn worker_pids(root: &Path) -> Vec<u32> {
     let text = std::fs::read_to_string(data_in(root).join(".blue-green-test").join("events.log"))
         .unwrap_or_default();
-    text.lines()
+    let mut pids: Vec<u32> = text
+        .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|v| v["pid"].as_u64().map(|p| p as u32))
-        .collect()
+        .filter_map(|v| v["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()))
+        .collect();
+    let text = std::fs::read_to_string(root.join("driver.log")).unwrap_or_default();
+    pids.extend(
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|v| v["k"] == "spawn")
+            .filter_map(|v| v["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())),
+    );
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 /// What a switch request answered, as it came.
