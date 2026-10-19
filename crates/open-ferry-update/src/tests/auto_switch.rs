@@ -313,17 +313,61 @@ async fn automatic_errors_keep_the_clients_request_certainty_and_never_resend() 
         ),
     ] {
         let f = Fixture::new().await;
-        let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+        let (service, fake, fetch) = service(&f, "auto", "0.2.0", false);
+        let uncertain = matches!(
+            &error,
+            SwitchError::TimedOut | SwitchError::Stopped | SwitchError::Protocol(_)
+        );
         fake.errors.lock().unwrap().push_back(error);
         let log = Capture::default();
         async {
             service.check_once().await.unwrap().unwrap();
-            tokio::time::advance(Duration::from_secs(5 * 60)).await;
+            let interval = Duration::from_secs(6 * 3600);
+            if uncertain {
+                service.start(interval);
+                let due = Instant::now() + Duration::from_secs(30);
+                while service.status().next_check.is_none() {
+                    assert!(Instant::now() < due, "the scheduled timer did not start");
+                    tokio::task::yield_now().await;
+                }
+                tokio::time::advance(interval - Duration::from_secs(1)).await;
+            } else {
+                tokio::time::advance(Duration::from_secs(5 * 60)).await;
+            }
             tokio::task::yield_now().await;
+            assert_eq!(
+                fake.calls.lock().unwrap().len(),
+                1,
+                "no resend before the next check"
+            );
+            if uncertain {
+                tokio::time::advance(Duration::from_secs(2)).await;
+                let due = Instant::now() + Duration::from_secs(30);
+                while fake.calls.lock().unwrap().len() < 2 {
+                    assert!(
+                        Instant::now() < due,
+                        "the scheduled check did not ask for a switch"
+                    );
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    *fake.calls.lock().unwrap(),
+                    [("0.2.0".into(), true), ("0.2.0".into(), true)]
+                );
+                assert_eq!(
+                    fetch.calls.load(Ordering::SeqCst),
+                    5,
+                    "the next request follows a fresh scheduled check"
+                );
+                service.stop_and_wait().await;
+            }
         }
         .with_subscriber(log.clone())
         .await;
-        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            fake.calls.lock().unwrap().len(),
+            if uncertain { 2 } else { 1 }
+        );
         let events = log.0.lock().unwrap();
         let notices: Vec<_> = events
             .iter()
