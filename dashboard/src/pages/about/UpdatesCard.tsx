@@ -1,30 +1,36 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, RotateCw } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import { callProblem } from "../../api/access";
+import { isApiError } from "../../api/client";
 import { apiQueryKey, useApiCall } from "../../api/hooks";
 import {
   UPDATE,
   UPDATE_CHECK,
+  UPDATE_INSTALL,
+  UPDATE_ROLLBACK,
   isUpdatesOff,
   isUpdatesUnavailable,
   type CheckStarted,
   type UpdateModeSource,
   type UpdateResult,
   type UpdateStatus,
+  type SwitchStarted,
 } from "../../api/update";
-import { useUpdateStatus } from "../../api/updateStatus";
+import { switchInProgress, useUpdateStatus } from "../../api/updateStatus";
 import { Alert } from "../../components/Alert";
 import { Badge, type BadgeTone } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Code } from "../../components/Code";
+import { ConfirmDialog } from "../../components/Dialog";
 import { ProblemNotice } from "../../components/ProblemNotice";
 import { Loading } from "../../components/QueryState";
 import { Spinner } from "../../components/Spinner";
 import { formatDateTime, formatSeconds } from "../../lib/format";
+import { SwitchStatus } from "./SwitchStatus";
 
 const UPDATES_DOC_URL =
   "https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/updates.md";
@@ -71,7 +77,7 @@ function Version({ children }: { children: string }) {
 /** What the server's state calls for: a restart, an install, a fix. */
 function Notices({ status }: { status: UpdateStatus }) {
   const staged =
-    status.staged_version !== null && status.staged_version !== status.installed_version
+    status.staged_version !== null && status.staged_version !== (status.supervisor?.running_version ?? status.installed_version)
       ? status.staged_version
       : null;
   return (
@@ -84,7 +90,7 @@ function Notices({ status }: { status: UpdateStatus }) {
           </p>
         </Alert>
       )}
-      {status.restart_needed && (
+      {status.restart_needed && status.supervisor === null && (
         <Alert tone="info" title={`Restart the server to run ${status.installed_version}`}>
           <p>
             {status.installed_version} is installed, and the server runs {status.running_version}{" "}
@@ -99,15 +105,18 @@ function Notices({ status }: { status: UpdateStatus }) {
       {staged !== null && (
         <Alert tone="info" title={`open-ferry ${staged} is ready to install`}>
           <p>
-            It was downloaded and its signature checked. To install it, run{" "}
+            It was downloaded and its signature checked. {status.supervisor !== null ?
+            "Install now switches the running server to it without a restart." : <>To install it, run{" "}
             <Code>open-ferry update</Code> on the server&apos;s computer, then restart the
-            server.
+            server.</>}
           </p>
         </Alert>
       )}
-      {staged === null && status.update_available && status.latest_version !== null && (
+      {staged === null && status.update_available && status.latest_version !== null && status.latest_version !== status.supervisor?.running_version && (
         <Alert tone="info" title={`open-ferry ${status.latest_version} is out`}>
-          {!status.can_update_itself ? (
+          {status.supervisor !== null ? (
+            <p>Install now downloads and checks the release, then switches the running server to it.</p>
+          ) : !status.can_update_itself ? (
             <p>
               {status.why_not ?? "This install doesn't update itself."} Update it the way you
               installed it.
@@ -141,6 +150,7 @@ function Notices({ status }: { status: UpdateStatus }) {
 
 function Facts({ status }: { status: UpdateStatus }) {
   const updates = UPDATES[status.updates];
+  const rollbackTarget = status.supervisor?.rollback_target ?? status.previous_version;
   const skipped = [
     ...status.failed_versions,
     ...(status.rolled_back_version === null ? [] : [status.rolled_back_version]),
@@ -151,7 +161,7 @@ function Facts({ status }: { status: UpdateStatus }) {
         <Badge tone={updates.tone}>{updates.label}</Badge> {SOURCES[status.mode_source]}
       </Fact>
       <Fact term="Running">
-        <Version>{status.running_version}</Version>
+        <Version>{status.supervisor?.running_version ?? status.running_version}</Version>
       </Fact>
       {status.installed_version !== status.running_version && (
         <Fact term="Installed">
@@ -165,9 +175,9 @@ function Facts({ status }: { status: UpdateStatus }) {
           <Version>{status.latest_version}</Version>
         )}
       </Fact>
-      {status.previous_version !== null && (
+      {rollbackTarget !== null && (
         <Fact term="Kept for rollback">
-          <Version>{status.previous_version}</Version>
+          <Version>{rollbackTarget}</Version>
         </Fact>
       )}
       {skipped.length > 0 && (
@@ -206,6 +216,32 @@ export function UpdatesCard({ className }: { className?: string }) {
     onSettled: () => client.invalidateQueries({ queryKey: apiQueryKey(UPDATE) }),
   });
   const data = status.data;
+  const [confirm, setConfirm] = useState<"install" | "rollback" | null>(null);
+  const switching = useMutation({
+    mutationFn: (action: "install" | "rollback") =>
+      call<SwitchStarted>(action === "install" ? UPDATE_INSTALL : UPDATE_ROLLBACK, { method: "POST" }),
+    onMutate: (action) => {
+      client.setQueryData<UpdateStatus>(apiQueryKey(UPDATE), (old) => old === undefined ? old : {
+        ...old,
+        switch_request: { action, state: "preparing", id: null, reason: null, pending: true },
+      });
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: apiQueryKey(UPDATE) }),
+  });
+  const supervisor = data?.supervisor;
+  const preparing = switching.isPending || data?.switch_request?.pending === true ||
+    data?.switch_request?.state === "unknown";
+  const stagedVersion = data?.staged_version;
+  const runningVersion = supervisor?.running_version ?? data?.running_version;
+  const available = (stagedVersion != null && stagedVersion !== runningVersion) ||
+    (data?.update_available === true && data.latest_version !== runningVersion);
+  const enabled = supervisor?.switching_disabled === null && !preparing;
+  const trustsReleaseKey = data?.trusts_release_key === true;
+  const canInstall = enabled && supervisor.phase === "idle" && available && trustsReleaseKey;
+  const canRollback = enabled && ["idle", "watching"].includes(supervisor.phase) && supervisor.rollback_target !== null;
+  const installVersion = data?.latest_version ?? stagedVersion;
+  const failedBefore = installVersion != null && data?.failed_versions.includes(installVersion);
+  const rolledBackBefore = installVersion != null && data?.rolled_back_version === installVersion;
   const checking = check.isPending || data?.checking === true;
   const canCheck = data !== undefined && data.mode !== "off" && data.trusts_release_key;
 
@@ -230,7 +266,7 @@ export function UpdatesCard({ className }: { className?: string }) {
       }
     >
       {status.isPending && <Loading>Asking the server…</Loading>}
-      {status.isError &&
+      {status.isError && !switchInProgress(data) &&
         (isUpdatesUnavailable(status.error) ? (
           <p className="text-muted">
             This server doesn&apos;t check for updates, as one the terminal dashboard (
@@ -255,7 +291,15 @@ export function UpdatesCard({ className }: { className?: string }) {
       {data !== undefined && (
         <>
           <Notices status={data} />
+          <SwitchStatus status={data} />
+          {(canInstall || canRollback) && <div className="flex flex-wrap gap-2">
+            {canInstall && <Button variant="primary" onClick={() => { setConfirm("install"); }}>Install now</Button>}
+            {canRollback && <Button onClick={() => { setConfirm("rollback"); }}>Roll back</Button>}
+          </div>}
           <Facts status={data} />
+          {data.supervisor === null && <p className="max-w-prose text-muted">
+            To update this server, run <Code>open-ferry update</Code> on its computer, then restart it.
+          </p>}
           {data.mode === "off" && (
             <p className="max-w-prose text-muted">
               Updates are off, so the server makes no update request. Turn them on in{" "}
@@ -282,6 +326,32 @@ export function UpdatesCard({ className }: { className?: string }) {
         ) : (
           <ProblemNotice problem={callProblem(check.error)} live />
         ))}
+      {switching.isError && <Alert tone="warn" live title="The switch request failed">
+        <p>{callProblem(switching.error).kind === "unreachable" ?
+          "The server did not answer. Checking its status; the request will not be sent again." :
+          isApiError(switching.error) ? switching.error.detail ?? switching.error.message : "The server refused the switch."}</p>
+      </Alert>}
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm === "rollback" ? `Roll back to ${supervisor?.rollback_target ?? "the previous version"}?` : "Install the newer release now?"}
+        confirmLabel={confirm === "rollback" ? "Roll back" : "Install now"}
+        tone="primary"
+        onCancel={() => { setConfirm(null); }}
+        onConfirm={() => {
+          if (confirm !== null) {
+            switching.mutate(confirm);
+            setConfirm(null);
+          }
+        }}
+      >
+        <p>The supervisor starts the {confirm === "rollback" ? "previous" : "new"} version and hands the running server over to it. Existing requests can finish.</p>
+        {confirm === "install" && failedBefore && <p>
+          Version {installVersion} failed here before. Install it again?
+        </p>}
+        {confirm === "install" && rolledBackBefore && <p>
+          Version {installVersion} was rolled back from. Install it again?
+        </p>}
+      </ConfirmDialog>
     </Card>
   );
 }
