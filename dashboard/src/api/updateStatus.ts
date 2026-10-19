@@ -45,21 +45,20 @@ export function useUpdateStatus() {
   const query = useQuery<UpdateStatus>({
     queryKey: apiQueryKey(UPDATE),
     queryFn: async ({ signal }) => {
-      try {
-        const status = await call<UpdateStatus>(UPDATE, { signal: AbortSignal.any([signal, AbortSignal.timeout(STATUS_POLL_TIMEOUT_MS)]) });
-        if (!signal.aborted) {
-          setLastRead(status);
-          setFailures({ count: 0, since: null });
-        }
-        return status;
-      } catch (error) {
-        if (!signal.aborted) setFailures((old) => ({ count: old.count + 1, since: old.since ?? Date.now() }));
-        throw error;
+      const status = await call<UpdateStatus>(UPDATE, { signal: AbortSignal.any([signal, AbortSignal.timeout(STATUS_POLL_TIMEOUT_MS)]) });
+      if (!signal.aborted) {
+        setLastRead(status);
+        setFailures({ count: 0, since: null });
       }
+      return status;
     },
-    // During a switch, the next interval is the retry. Other screens retain
-    // the shared policy, including initial reads before any status is known.
-    retry: (count, error) => !switchInProgress(client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE))) && shouldRetry(count, error),
+    // Count a poll only after the shared retry policy has finished its attempts.
+    // During a switch, the next interval is the retry.
+    retry: (count, error) => {
+      const retry = !switchInProgress(client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE))) && shouldRetry(count, error);
+      if (!retry) setFailures((old) => ({ count: old.count + 1, since: old.since ?? Date.now() }));
+      return retry;
+    },
     refetchInterval: (query) => !exhausted &&
       (query.state.data?.checking === true || switchInProgress(query.state.data))
         ? CHECKING_POLL_MS : false,

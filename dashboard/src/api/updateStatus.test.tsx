@@ -149,3 +149,22 @@ it("reveals one failed poll at the deadline while the tab stays unfocused", asyn
     focusManager.setFocused(undefined);
   }
 });
+
+
+it("counts a checking poll once after its retry attempts finish", async () => {
+  fakePollClock();
+  let reads = 0;
+  mockApi(route("GET", UPDATE, () => {
+    if (++reads > 1) throw new TypeError("offline");
+    return { json: updateStatus({ checking: true }) };
+  }));
+  const { result } = observeStatus();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  await act(() => vi.advanceTimersByTimeAsync(8_010));
+  expect(reads).toBe(13); // Four polls with three attempts each, plus the initial read.
+  expect(result.current.isError).toBe(true);
+  await act(() => vi.advanceTimersByTimeAsync(2_010));
+  expect(reads).toBe(16);
+  await act(() => vi.advanceTimersByTimeAsync(4_010));
+  expect(reads).toBe(16);
+});
