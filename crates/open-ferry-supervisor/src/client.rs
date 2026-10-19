@@ -1314,6 +1314,10 @@ mod tests {
         use open_ferry_update::SwitchError;
         for (first, last) in [
             (r#"{"type":"error","v":1,"reason":"busy"}"#, None),
+            (
+                r#"{"type":"unsupported","v":1,"message_type":"switch"}"#,
+                None,
+            ),
             (r#"{"type":"accepted","v":2,"id":"one"}"#, None),
             (r#"{"type":"accepted","v":1,"id":"one"}"#, None),
             (
@@ -1332,12 +1336,18 @@ mod tests {
             let outcome = switch(dirs.data(), &identity(), update_request(), soon(5)).await;
             if first.contains("busy") {
                 assert!(matches!(outcome, Err(SwitchError::Refused(_))));
+            } else if first.contains("unsupported") {
+                assert!(
+                    matches!(outcome, Err(SwitchError::Protocol(reason)) if reason.contains("does not support switch requests"))
+                );
             } else if first.contains("\"v\":2") {
-                assert!(matches!(outcome, Err(SwitchError::Protocol(_))));
+                assert!(
+                    matches!(outcome, Err(SwitchError::Protocol(reason)) if reason.contains("protocol version 2, expected 1"))
+                );
             } else {
                 let error = outcome.unwrap().next(soon(5)).await.unwrap_err();
                 if last.is_some() {
-                    assert!(matches!(error, SwitchError::Refused(_)));
+                    assert!(matches!(error, SwitchError::Ended(reason) if reason == "stopping"));
                 } else {
                     assert!(matches!(error, SwitchError::Stopped), "{error}");
                 }

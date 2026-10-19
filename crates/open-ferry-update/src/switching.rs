@@ -29,7 +29,10 @@ pub enum SwitchError {
     Unreachable(String),
     Untrusted(String),
     Protocol(String),
+    /// The supervisor declined the request before acceptance.
     Refused(String),
+    /// The supervisor accepted the switch, then ended it with this reason.
+    Ended(String),
     /// The stream ended without a terminal reply.
     Stopped,
 }
@@ -54,6 +57,7 @@ impl fmt::Display for SwitchError {
             Self::Untrusted(why) => write!(f, "the supervisor endpoint was refused: {why}"),
             Self::Protocol(why) => write!(f, "the supervisor reply was not understood: {why}"),
             Self::Refused(why) => write!(f, "the supervisor refused the request: {why}"),
+            Self::Ended(why) => write!(f, "the supervisor ended the switch: {why}"),
             Self::Stopped => f.write_str("the supervisor stopped before the switch finished"),
         }
     }

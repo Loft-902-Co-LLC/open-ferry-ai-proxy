@@ -116,12 +116,7 @@ async fn request(
         .ok_or(SwitchError::TimedOut)?
         .map_err(SwitchError::Untrusted)?;
     bounded(deadline, async {
-        let stream = connect(&location, identity)
-            .await
-            .map_err(|error| match error {
-                EndpointError::Io(error) => SwitchError::Unreachable(error.to_string()),
-                other => SwitchError::Untrusted(other.to_string()),
-            })?;
+        let stream = connect(&location, identity).await.map_err(endpoint_error)?;
         stream.writable().await.map_err(io_error)?;
         #[cfg(test)]
         super::tests::after_writable();
@@ -134,6 +129,16 @@ async fn request(
         Ok(channel)
     })
     .await
+}
+
+fn endpoint_error(error: EndpointError) -> SwitchError {
+    match error {
+        EndpointError::Io(error) => SwitchError::Unreachable(error.to_string()),
+        EndpointError::SwitchingDisabled(why) => {
+            SwitchError::Unreachable(format!("switching is disabled: {why}"))
+        }
+        other => SwitchError::Untrusted(other.to_string()),
+    }
 }
 
 async fn bounded<T>(
@@ -195,6 +200,11 @@ async fn receive(
     if let EndpointReply::Error { reason, .. } = reply {
         return Err(SwitchError::Refused(reason));
     }
+    if let EndpointReply::Unsupported { message_type, .. } = reply {
+        return Err(SwitchError::Protocol(format!(
+            "the supervisor does not support {message_type} requests"
+        )));
+    }
     Ok(reply)
 }
 
@@ -210,7 +220,14 @@ struct Progress {
 impl SwitchProgress for Progress {
     fn next(&mut self, deadline: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
         Box::pin(async move {
-            match receive(&mut self.channel, deadline).await? {
+            let reply =
+                receive(&mut self.channel, deadline)
+                    .await
+                    .map_err(|error| match error {
+                        SwitchError::Refused(reason) => SwitchError::Ended(reason),
+                        other => other,
+                    })?;
+            match reply {
                 EndpointReply::Progress { id, phase, .. } if id == self.id => {
                     Ok(SwitchEvent::Progress { phase })
                 }
@@ -220,6 +237,21 @@ impl SwitchProgress for Progress {
                 other => Err(unexpected(other)),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_switching_is_unavailable_and_keeps_the_policy_reason() {
+        let error = endpoint_error(EndpointError::SwitchingDisabled(
+            "no private runtime directory".into(),
+        ));
+        assert!(
+            matches!(&error, SwitchError::Unreachable(reason) if reason == "switching is disabled: no private runtime directory")
+        );
     }
 }
 
