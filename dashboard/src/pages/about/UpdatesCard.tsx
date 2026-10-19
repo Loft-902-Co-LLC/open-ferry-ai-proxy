@@ -313,7 +313,7 @@ export function UpdatesCard({ className }: { className?: string }) {
       {data !== undefined && (
         <>
           <Notices status={data} />
-          <SwitchStatus recoveringSupervisor={status.recoveringSupervisor} status={data} onRetry={() => { void status.refetch(); }} hidePhase={status.isError && !status.hidePollError} />
+          <SwitchStatus polling={status.polling} recoveringSupervisor={status.recoveringSupervisor} status={data} onRetry={() => { void status.refetch(); }} hidePhase={status.isError && !status.hidePollError} />
           {(canInstall || canRollback) && <div className="flex flex-wrap gap-2">
             {canInstall && <Button variant="primary" onClick={() => { setConfirm("install"); }}>Install now</Button>}
             {canRollback && <Button onClick={() => { setConfirm("rollback"); }}>Roll back</Button>}
