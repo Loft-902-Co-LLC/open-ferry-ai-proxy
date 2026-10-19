@@ -183,3 +183,386 @@ async fn the_update_routes_need_the_management_key() {
         .error(StatusCode::UNAUTHORIZED, "missing_management_key");
     assert_eq!(fetch.calls(), 0);
 }
+
+struct VersionRunner;
+impl open_ferry_update::runner::Runner for VersionRunner {
+    fn version<'a>(
+        &'a self,
+        binary: &'a Path,
+        _timeout: Duration,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let version = binary
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            Ok(format!("open-ferry {version}"))
+        })
+    }
+}
+
+struct Progress;
+impl open_ferry_update::SwitchProgress for Progress {
+    fn next(
+        &mut self,
+        _deadline: std::time::Instant,
+    ) -> BoxFuture<'_, Result<open_ferry_update::SwitchEvent, open_ferry_update::SwitchError>> {
+        panic!("the route must answer at acceptance without waiting for progress")
+    }
+}
+
+struct Switcher {
+    delay: Duration,
+    refusal: Option<&'static str>,
+    timed_out: bool,
+    calls: AtomicUsize,
+    snapshot: std::sync::Mutex<serde_json::Value>,
+}
+
+impl Switcher {
+    fn new(delay: Duration, refusal: Option<&'static str>) -> Arc<Self> {
+        Arc::new(Self {
+            delay,
+            refusal,
+            timed_out: false,
+            calls: AtomicUsize::new(0),
+            snapshot: std::sync::Mutex::new(serde_json::json!({
+                "state": "idle", "active_version": "0.1.0", "switch": null, "switching_disabled": null,
+            })),
+        })
+    }
+
+    async fn accept(
+        &self,
+    ) -> Result<open_ferry_update::SwitchHandle, open_ferry_update::SwitchError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        if self.timed_out {
+            return Err(open_ferry_update::SwitchError::TimedOut);
+        }
+        if let Some(reason) = self.refusal {
+            return Err(open_ferry_update::SwitchError::Refused(reason.into()));
+        }
+        Ok(open_ferry_update::SwitchHandle::new(
+            "switch-1".into(),
+            Box::new(Progress),
+        ))
+    }
+}
+
+impl open_ferry_update::Switcher for Switcher {
+    fn status(
+        &self,
+        _deadline: std::time::Instant,
+    ) -> BoxFuture<'_, Result<serde_json::Value, open_ferry_update::SwitchError>> {
+        Box::pin(async move {
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            if snapshot.is_null() {
+                Err(open_ferry_update::SwitchError::Unreachable(
+                    "fake endpoint".into(),
+                ))
+            } else {
+                Ok(snapshot)
+            }
+        })
+    }
+    fn update<'a>(
+        &'a self,
+        _pin: &'a open_ferry_update::pins::Pin,
+        auto: bool,
+        _deadline: std::time::Instant,
+    ) -> BoxFuture<'a, Result<open_ferry_update::SwitchHandle, open_ferry_update::SwitchError>>
+    {
+        assert!(
+            !auto,
+            "dashboard installs are manual, even while updates are off"
+        );
+        Box::pin(self.accept())
+    }
+    fn rollback<'a>(
+        &'a self,
+        target: &'a open_ferry_update::journal::Artifact,
+        _deadline: std::time::Instant,
+    ) -> BoxFuture<'a, Result<open_ferry_update::SwitchHandle, open_ferry_update::SwitchError>>
+    {
+        assert_eq!(target.version, "0.0.9");
+        Box::pin(self.accept())
+    }
+    fn cancel(
+        &self,
+        _deadline: std::time::Instant,
+    ) -> BoxFuture<'_, Result<open_ferry_update::CancelOutcome, open_ferry_update::SwitchError>>
+    {
+        panic!("no cancel route was requested")
+    }
+}
+
+fn supervised(fake: Arc<Switcher>) -> (Dash, tempfile::TempDir) {
+    use open_ferry_update::journal::{Artifact, Journal};
+    let scratch = tempfile::tempdir().unwrap();
+    let data = DataDir::at(scratch.path());
+    let bytes = b"fake release bytes";
+    let sha256 = open_ferry_update::release::sha256_hex(bytes);
+    for version in ["0.0.9", "0.1.0", "0.2.0"] {
+        std::fs::create_dir_all(data.version_dir(version)).unwrap();
+        let name = if cfg!(windows) {
+            "open-ferry.exe"
+        } else {
+            "open-ferry"
+        };
+        std::fs::write(data.binary(version, name), bytes).unwrap();
+    }
+    let artifact = |version: &str| Artifact {
+        version: version.into(),
+        sha256: sha256.clone(),
+        size: bytes.len() as u64,
+    };
+    let mut journal = Journal::first_start(artifact("0.1.0"), None);
+    journal.previous = Some(artifact("0.0.9"));
+    std::fs::write(
+        scratch
+            .path()
+            .join(open_ferry_update::journal::JOURNAL_FILE),
+        serde_json::to_vec(&journal).unwrap(),
+    )
+    .unwrap();
+    open_ferry_update::State {
+        staged: Some("0.2.0".into()),
+        staged_sha256: Some(sha256),
+        latest: Some("0.2.0".into()),
+        ..Default::default()
+    }
+    .save(&data.state_file())
+    .unwrap();
+    let config = config_in("off");
+    let fetch: Arc<dyn Fetch> = Arc::new(Counting::default());
+    let updater = Updater {
+        base: Url::parse("http://127.0.0.1:9/").unwrap(),
+        keys: ReleaseKeys::none(),
+        runner: Arc::new(VersionRunner),
+        ..Updater::for_this_binary(fetch.clone(), data).unwrap()
+    };
+    let updates = UpdateService::new(updater, Arc::new(move |_| Ok(fetch.clone())), &config)
+        .with_switcher(fake);
+    (Dash::with_updates(config, updates), scratch)
+}
+
+const INSTALL: &str = "/open-ferry/api/v1/update/install";
+const ROLLBACK: &str = "/open-ferry/api/v1/update/rollback";
+
+#[tokio::test]
+async fn unsupervised_switches_explain_how_to_update_and_status_has_no_supervisor() {
+    let data = tempfile::tempdir().unwrap();
+    let config = keyed_config();
+    let fetch = Arc::new(Counting::default());
+    let dash = Dash::with_updates(config.clone(), service(&config, &fetch, data.path()));
+    assert!(dash.get(STATUS).await.json(StatusCode::OK)["supervisor"].is_null());
+    for path in [INSTALL, ROLLBACK] {
+        let reason = dash
+            .call(Method::POST, path, "")
+            .await
+            .error(StatusCode::CONFLICT, "not_supervised");
+        assert!(reason.contains("open-ferry update"), "{reason}");
+        assert!(reason.contains("restart"), "{reason}");
+    }
+    assert_eq!(fetch.calls(), 0);
+}
+
+#[tokio::test]
+async fn accepted_switches_answer_with_the_id_without_following_progress() {
+    for path in [INSTALL, ROLLBACK] {
+        let fake = Switcher::new(Duration::ZERO, None);
+        let (dash, _scratch) = supervised(fake.clone());
+        assert_eq!(
+            dash.call(Method::POST, path, "")
+                .await
+                .json(StatusCode::ACCEPTED),
+            serde_json::json!({"accepted": true, "id": "switch-1"})
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        let status = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(status["supervisor"]["form"], "supervised");
+        assert_eq!(status["supervisor"]["phase"], "idle");
+        assert_eq!(status["supervisor"]["running_version"], "0.1.0");
+        assert_eq!(status["supervisor"]["rollback_target"], "0.0.9");
+        assert_eq!(status["switch_request"]["state"], "accepted");
+        assert_eq!(status["switch_request"]["id"], "switch-1");
+    }
+}
+
+#[tokio::test]
+async fn a_refused_switch_keeps_the_supervisors_reason() {
+    let fake = Switcher::new(Duration::ZERO, Some("sign-ins are pending"));
+    let (dash, _scratch) = supervised(fake);
+    let reason = dash
+        .call(Method::POST, INSTALL, "")
+        .await
+        .error(StatusCode::CONFLICT, "switch_refused");
+    assert!(reason.contains("sign-ins are pending"), "{reason}");
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(body["switch_request"]["state"], "refused");
+    assert!(
+        body["switch_request"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("sign-ins are pending")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_preparation_outlives_the_response_and_a_duplicate_is_refused() {
+    for path in [INSTALL, ROLLBACK] {
+        for refusal in [None, Some("a switch is already running")] {
+            let fake = Switcher::new(Duration::from_secs(5), refusal);
+            let (dash, _scratch) = supervised(fake.clone());
+            let start = tokio::time::Instant::now();
+            assert_eq!(
+                dash.call(Method::POST, path, "")
+                    .await
+                    .json(StatusCode::ACCEPTED),
+                serde_json::json!({"preparing": true})
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+            dash.call(Method::POST, path, "")
+                .await
+                .error(StatusCode::CONFLICT, "already_preparing");
+            assert_eq!(
+                dash.get(STATUS).await.json(StatusCode::OK)["switch_request"]["state"],
+                "preparing"
+            );
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            let body = dash.get(STATUS).await.json(StatusCode::OK);
+            assert_eq!(
+                body["switch_request"]["state"],
+                if refusal.is_some() {
+                    "refused"
+                } else {
+                    "accepted"
+                }
+            );
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_timeout_is_never_resent_and_requires_a_status_read_before_another_request() {
+    let mut fake = Switcher::new(Duration::ZERO, None);
+    Arc::get_mut(&mut fake).unwrap().timed_out = true;
+    let (dash, _scratch) = supervised(fake.clone());
+    assert_eq!(
+        dash.call(Method::POST, INSTALL, "")
+            .await
+            .json(StatusCode::ACCEPTED),
+        serde_json::json!({"uncertain": true})
+    );
+    dash.call(Method::POST, INSTALL, "")
+        .await
+        .error(StatusCode::CONFLICT, "switch_uncertain");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(body["switch_request"]["state"], "failed");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn switch_routes_have_the_same_auth_and_unavailable_errors() {
+    let dash = Dash::new();
+    for path in [INSTALL, ROLLBACK] {
+        dash.send(request(LOCAL, Method::POST, path, ""))
+            .await
+            .error(StatusCode::UNAUTHORIZED, "missing_management_key");
+        dash.call(Method::POST, path, "")
+            .await
+            .error(StatusCode::SERVICE_UNAVAILABLE, "updates_unavailable");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_the_http_request_does_not_drop_its_preparation() {
+    let fake = Switcher::new(Duration::from_secs(5), None);
+    let (dash, _scratch) = supervised(fake.clone());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            dash.call(Method::POST, INSTALL, "")
+        )
+        .await
+        .is_err()
+    );
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    let status = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(status["switch_request"]["state"], "accepted");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn status_keeps_the_switch_phase_through_an_unreachable_supervisor() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, _scratch) = supervised(fake.clone());
+    *fake.snapshot.lock().unwrap() = serde_json::json!({
+        "state": "switching", "active_version": "0.1.0",
+        "switch": { "id": "switch-1", "phase": "loading", "status": "waiting-for-signins", "watch_until": "2026-10-18T16:10:00Z" },
+        "switching_disabled": null,
+    });
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(body["supervisor"]["phase"], "waiting-for-signins");
+    assert_eq!(body["supervisor"]["watch_until"], "2026-10-18T16:10:00Z");
+    *fake.snapshot.lock().unwrap() = serde_json::Value::Null;
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(body["supervisor"]["form"], "supervised");
+    assert_eq!(body["supervisor"]["phase"], "waiting-for-signins");
+    assert_eq!(body["supervisor"]["rollback_target"], "0.0.9");
+    assert!(body["supervisor"]["error"].is_string());
+}
+
+#[tokio::test]
+async fn status_exposes_the_durable_outcome_without_artifact_paths() {
+    use open_ferry_update::journal::{JOURNAL_FILE, Journal, Outcome};
+    use open_ferry_update::state::SwitchRecord;
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, scratch) = supervised(fake);
+    let path = scratch.path().join(JOURNAL_FILE);
+    let mut journal: Journal = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut record = SwitchRecord::started(
+        "previous-switch",
+        "rollback",
+        "0.2.0",
+        "0.1.0",
+        "2026-10-18T16:00:00Z",
+    );
+    record.result = Some("rolled-back".into());
+    record.why = Some("the operator requested it".into());
+    record.binary = "a path the dashboard must not return".into();
+    journal.outcomes.push(Outcome {
+        record,
+        mark_failed: None,
+    });
+    std::fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    let last = &body["supervisor"]["last_switch"];
+    assert_eq!(last["result"], "rolled-back");
+    assert_eq!(last["to"], "0.1.0");
+    assert_eq!(last["reason"], "the operator requested it");
+    assert!(last["auto"].is_null());
+    assert!(last.get("binary").is_none());
+}
+
+#[tokio::test]
+async fn a_busy_update_lock_answers_promptly_without_calling_the_supervisor() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, scratch) = supervised(fake.clone());
+    let data = DataDir::at(scratch.path());
+    let _lock = data.try_lock().unwrap().unwrap();
+    let reason = dash
+        .call(Method::POST, INSTALL, "")
+        .await
+        .error(StatusCode::CONFLICT, "update_busy");
+    assert_eq!(reason, "busy, try again shortly");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
