@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, RotateCw } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import { callProblem } from "../../api/access";
@@ -221,13 +221,31 @@ export function UpdatesCard({ className }: { className?: string }) {
     mutationFn: (action: "install" | "rollback") =>
       call<SwitchStarted>(action === "install" ? UPDATE_INSTALL : UPDATE_ROLLBACK, { method: "POST" }),
     onMutate: (action) => {
+      const before = client.getQueryData<UpdateStatus>(apiQueryKey(UPDATE));
+      const optimistic = { action, state: "preparing" as const, id: null, reason: null, pending: true };
       client.setQueryData<UpdateStatus>(apiQueryKey(UPDATE), (old) => old === undefined ? old : {
         ...old,
-        switch_request: { action, state: "preparing", id: null, reason: null, pending: true },
+        switch_request: optimistic,
       });
+      return {
+        previousRequest: JSON.stringify(before?.switch_request),
+        optimisticRequest: JSON.stringify(optimistic),
+        lastSwitch: JSON.stringify(before?.supervisor?.last_switch),
+      };
     },
     onSettled: () => client.invalidateQueries({ queryKey: apiQueryKey(UPDATE) }),
   });
+  const { isError: switchError, reset: resetSwitch, context: switchContext } = switching;
+  const latestRequest = data?.switch_request;
+  const lastSwitch = data?.supervisor?.last_switch;
+  useEffect(() => {
+    if (!switchError || switchContext === undefined) return;
+    const request = JSON.stringify(latestRequest);
+    if ((lastSwitch != null && JSON.stringify(lastSwitch) !== switchContext.lastSwitch) ||
+      (latestRequest != null && request !== switchContext.previousRequest && request !== switchContext.optimisticRequest)) {
+      resetSwitch();
+    }
+  }, [switchError, switchContext, latestRequest, lastSwitch, resetSwitch]);
   const supervisor = data?.supervisor;
   const preparing = switching.isPending || data?.switch_request?.pending === true;
   const stagedVersion = data?.staged_version;

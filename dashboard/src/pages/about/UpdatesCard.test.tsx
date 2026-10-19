@@ -433,3 +433,26 @@ it("does not keep unknown or expired cached phases running", () => {
     expect(switchInProgress(updateStatus({ supervisor: supervisorStatus({ phase: "handing-over", stale: true, ...stale }) }))).toBe(false);
   }
 });
+
+
+it.each(["request", "outcome"])("clears a POST error when status supplies a newer %s", async (newer) => {
+  const original = updateStatus({ supervisor: supervisorStatus(), staged_version: "0.2.0" });
+  const api = server(original);
+  api.use(
+    route("POST", UPDATE_INSTALL, { status: 409, json: { error: "update_busy", message: "busy, try again shortly" } }),
+    route("POST", UPDATE_CHECK, { status: 202, json: { check: "started" } }),
+  );
+  const { card, user } = await openUpdates();
+  await user.click(await within(card).findByRole("button", { name: "Install now" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Install now" }));
+  expect(await within(card).findByText("The switch request failed")).toBeVisible();
+  // Reading the same old status did not clear the POST error.
+  api.use(route("GET", UPDATE, { json: {
+    ...original,
+    switch_request: newer === "request" ? { action: "install", state: "failed", id: null, pending: false, reason: "preparation failed" } : null,
+    supervisor: supervisorStatus({ last_switch: newer === "outcome" ? { how: "update", auto: null, from: "0.1.0", to: "0.2.0", result: "switched", reason: null, at: null } : null }),
+  } }));
+  await user.click(within(card).getByRole("button", { name: "Check now" }));
+  await within(card).findByText(newer === "request" ? "Switch failed" : "Switched to 0.2.0");
+  expect(within(card).queryByText("The switch request failed")).not.toBeInTheDocument();
+});
