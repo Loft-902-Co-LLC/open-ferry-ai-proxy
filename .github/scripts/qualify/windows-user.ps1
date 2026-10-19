@@ -75,6 +75,7 @@ if ($Child) {
         }
         exit 0
     }
+    # Unexercised since 962f661f: hosted runners lack an unelevated interactive logon.
     & $Python -I (Join-Path $PSScriptRoot 'run.py') $Work
     exit $LASTEXITCODE
 }
@@ -95,6 +96,14 @@ $qualificationCredential = [Management.Automation.PSCredential]::new(".\$account
 $created = $false
 $process = $null
 $started = Get-Date
+$firstError = $null
+$cleanupErrors = [Collections.Generic.List[object]]::new()
+$cleanup = @{
+    account_absent = $false
+    profile_absent = $false
+    task_absent = $false
+    password_disposed = $false
+}
 try {
     & wevtutil.exe sl Microsoft-Windows-TaskScheduler/Operational /e:true
     if ($LASTEXITCODE -ne 0) { throw 'Could not enable the Task Scheduler event log.' }
@@ -116,46 +125,86 @@ try {
     }
     Get-Content -LiteralPath (Join-Path $diagnostics 'launcher.stdout')
     Get-Content -LiteralPath (Join-Path $diagnostics 'launcher.stderr')
-    if ($process.ExitCode -ne 0) { throw "Standard-account qualification exited $($process.ExitCode)." }
+    if ($process.ExitCode -ne 0) {
+        if ($ProbeOnly) {
+            $refusal = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; StartTime = $started; Id = 332 } -ErrorAction SilentlyContinue |
+                Where-Object { $_.Message -like '*open-ferry-user-probe*' } | Select-Object -First 1
+            if ($refusal) { throw "Windows interactive task prerequisite failed (Task Scheduler event 332): $($refusal.Message)" }
+        }
+        throw "Standard-account qualification exited $($process.ExitCode)."
+    }
     if (-not $ProbeOnly) {
+        # Unexercised since 962f661f: hosted runners lack an unelevated interactive logon.
         $result = Get-Content -LiteralPath (Join-Path $diagnostics 'result.json') -Raw | ConvertFrom-Json
         if (-not $result.passed) { throw "User qualification failed: $($result.error)" }
     }
+} catch {
+    $firstError = $_
 } finally {
-    try {
-        if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-        Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; StartTime = $started } -ErrorAction SilentlyContinue |
-            Where-Object { $_.Message -like '*open-ferry-user-probe*' } |
-            ForEach-Object { @{ id = $_.Id; time = $_.TimeCreated.ToString('o'); message = $_.Message } } |
-            ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $diagnostics 'task-events.json')
-    } finally {
-        try {
-            if ($created) {
-                try {
-                    # Also remove the task if the watchdog stopped its owner
-                    # before the child's own finally block could run.
-                    Stop-ScheduledTask -TaskName 'open-ferry-user-probe' -ErrorAction SilentlyContinue
-                    Unregister-ScheduledTask -TaskName 'open-ferry-user-probe' -Confirm:$false -ErrorAction SilentlyContinue
-                } finally {
-                    try {
-                        Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$($account.SID.Value)'" |
-                            Remove-CimInstance
-                    } finally {
-                        Remove-LocalUser -Name $accountName
-                    }
-                }
-                $cleanup = @{
-                    account_absent = -not [bool](Get-LocalUser -Name $accountName -ErrorAction SilentlyContinue)
-                    profile_absent = -not [bool](Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$($account.SID.Value)'")
-                    task_absent = -not [bool](Get-ScheduledTask -TaskName 'open-ferry-user-probe' -ErrorAction SilentlyContinue)
-                }
-                $cleanup | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $diagnostics 'cleanup.json')
-                if (-not ($cleanup.account_absent -and $cleanup.profile_absent -and $cleanup.task_absent)) {
-                    throw 'Windows probe cleanup left an account, profile or task behind.'
-                }
+    # Each step runs independently; neither diagnostics nor a loaded profile
+    # may prevent task/account removal, password disposal or cleanup evidence.
+    $steps = [ordered]@{
+        'stop process' = {
+            if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        }
+        'export events' = {
+            Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; StartTime = $started } -ErrorAction SilentlyContinue |
+                Where-Object { $_.Message -like '*open-ferry-user-probe*' } |
+                ForEach-Object { @{ id = $_.Id; time = $_.TimeCreated.ToString('o'); message = $_.Message } } |
+                ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $diagnostics 'task-events.json')
+        }
+        'stop task' = {
+            if ($created -and (Get-ScheduledTask -TaskName 'open-ferry-user-probe' -ErrorAction SilentlyContinue)) {
+                Stop-ScheduledTask -TaskName 'open-ferry-user-probe'
             }
-        } finally {
+        }
+        'remove task' = {
+            if ($created -and (Get-ScheduledTask -TaskName 'open-ferry-user-probe' -ErrorAction SilentlyContinue)) {
+                Unregister-ScheduledTask -TaskName 'open-ferry-user-probe' -Confirm:$false
+            }
+        }
+        'remove profile' = {
+            if ($created) {
+                Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$($account.SID.Value)'" | Remove-CimInstance
+            }
+        }
+        'remove account' = { if ($created) { Remove-LocalUser -Name $accountName } }
+        'dispose password' = {
             $qualificationPassword.Dispose()
+            $cleanup.password_disposed = $true
+        }
+        'verify account' = {
+            $cleanup.account_absent = -not [bool](Get-LocalUser -Name $accountName -ErrorAction SilentlyContinue)
+        }
+        'verify profile' = {
+            $cleanup.profile_absent = -not $created -or -not [bool](Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$($account.SID.Value)'")
+        }
+        'verify task' = {
+            $cleanup.task_absent = -not [bool](Get-ScheduledTask -TaskName 'open-ferry-user-probe' -ErrorAction SilentlyContinue)
+        }
+        'assert cleanup' = {
+            if (-not ($cleanup.account_absent -and $cleanup.profile_absent -and $cleanup.task_absent)) {
+                throw 'Windows probe cleanup left an account, profile or task behind.'
+            }
         }
     }
+    foreach ($step in $steps.GetEnumerator()) {
+        try {
+            & $step.Value
+        } catch {
+            $cleanupErrors.Add(@{ phase = $step.Key; error = $_.Exception.Message })
+            if (-not $firstError) { $firstError = $_ }
+        }
+    }
+    # Always attempt the evidence write, even after cleanup failures. A failure
+    # to write it is still reported without replacing the original try error.
+    $cleanup.errors = @($cleanupErrors.ToArray())
+    $cleanup.first_error = if ($firstError) { $firstError.Exception.Message } else { $null }
+    try {
+        $cleanup | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $diagnostics 'cleanup.json')
+    } catch {
+        if (-not $firstError) { $firstError = $_ }
+        Write-Warning "Could not write cleanup.json: $($_.Exception.Message)"
+    }
 }
+if ($firstError) { throw $firstError }
