@@ -240,5 +240,97 @@ class CandidateSignatures(unittest.TestCase):
                         self.assertEqual(packet[2:10], key_id)
 
 
+class ReservedPort(unittest.TestCase):
+    def test_dynamic_selection_refuses_the_reserved_port(self):
+        with patch.object(qualification.socket, "socket") as socket:
+            socket.return_value.__enter__.return_value.getsockname.return_value = ("127.0.0.1", 8317)
+            with self.assertRaisesRegex(RuntimeError, "reserved development port"):
+                qualification.free_port()
+
+    def test_windows_load_never_repeats_a_source_address_or_relaxes_timeout(self):
+        load = object.__new__(qualification.Load)
+        load.port = 54321
+        load.lock = qualification.threading.Lock()
+        load.next_source = 2
+        with patch.object(qualification.platform, "system", return_value="Windows"), \
+                patch.object(qualification.http.client, "HTTPConnection") as connection:
+            for index in range(4):
+                load.connection()
+                connection.assert_called_with("127.0.0.1", 54321, timeout=5,
+                                              source_address=(f"127.0.0.{index + 2}", 0))
+            load.next_source = 255
+            load.connection()
+            connection.assert_called_with("127.0.0.1", 54321, timeout=5,
+                                          source_address=("127.0.0.255", 0))
+            load.connection()
+            connection.assert_called_with("127.0.0.1", 54321, timeout=5,
+                                          source_address=("127.0.1.0", 0))
+
+    def test_posix_load_connection_is_unchanged(self):
+        load = object.__new__(qualification.Load)
+        load.port = 54321
+        with patch.object(qualification.platform, "system", return_value="Linux"), \
+                patch.object(qualification.http.client, "HTTPConnection") as connection:
+            load.connection()
+            connection.assert_called_once_with("127.0.0.1", 54321, timeout=5)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows desktop snapshot and cleanup")
+class WindowsRestoration(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("windows_local", Path(__file__).with_name("windows-local.py"))
+        self.local = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.local)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        for name in ("DATA", "INSTALL", "CONFIG"):
+            setattr(self.local, name, self.root / name.lower())
+
+    def test_elevated_session_is_refused_before_snapshot(self):
+        local = self.local
+        with patch.object(local.ctypes.windll.shell32, "IsUserAnAdmin", return_value=True), \
+                patch.object(local, "snapshot") as snapshot:
+            with self.assertRaisesRegex(RuntimeError, "elevated token"):
+                local.preflight()
+            snapshot.assert_not_called()
+
+    def test_existing_install_is_refused_before_snapshot(self):
+        local = self.local
+        local.INSTALL.mkdir()
+        with patch.object(local.ctypes.windll.shell32, "IsUserAnAdmin", return_value=False), \
+                patch.object(local, "snapshot") as snapshot:
+            with self.assertRaisesRegex(RuntimeError, "existing open-ferry installation"):
+                local.preflight()
+            snapshot.assert_not_called()
+
+    def test_cleanup_preserves_existing_claude_cli_and_removes_only_new_data(self):
+        local = self.local
+        keep = local.DATA / "claude-cli/keep.txt"
+        keep.parent.mkdir(parents=True)
+        keep.write_text("unrelated user data", encoding="utf-8")
+        before = {"data": local.tree(local.DATA), "install": None, "config": None, "tasks": []}
+        (local.DATA / "versions").mkdir()
+        (local.DATA / "update-state.json").write_text("{}", encoding="utf-8")
+        local.INSTALL.mkdir()
+        with patch.object(local, "snapshot", return_value=before), patch.object(local, "installed_processes", return_value=[]):
+            local.restore(before, self.root / "evidence")
+        self.assertEqual(keep.read_text(encoding="utf-8"), "unrelated user data")
+        self.assertEqual(local.tree(local.DATA), before["data"])
+        self.assertFalse(local.INSTALL.exists())
+        result = json.loads((self.root / "evidence/restoration.json").read_text())
+        self.assertTrue(result["matches"])
+        self.assertFalse(any("claude-cli" in path for path in result["removed"]))
+
+    def test_running_installed_process_prevents_file_removal(self):
+        local = self.local
+        local.INSTALL.mkdir()
+        before = {"data": None, "install": None, "config": None, "tasks": []}
+        with patch.object(local, "snapshot", return_value=before), patch.object(local, "installed_processes", return_value=["owned.exe"]):
+            with self.assertRaisesRegex(RuntimeError, "left a process or task"):
+                local.restore(before, self.root / "evidence")
+        self.assertTrue(local.INSTALL.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

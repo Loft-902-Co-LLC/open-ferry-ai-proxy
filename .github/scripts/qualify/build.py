@@ -64,6 +64,18 @@ def candidate_signature(private, key_id, data, version, fault):
     return sign(signer, signer_id, data, version)
 
 
+def package_shell():
+    if os.name != "nt":
+        return os.environ.get("QUALIFY_BASH", "bash")
+    # PATH's bash.exe may be WSL. Resolve Git for Windows explicitly.
+    git = shutil.which("git.exe")
+    shell = Path(os.environ.get("QUALIFY_BASH", "") or
+                 (Path(git).resolve().parents[1] / "bin/bash.exe" if git else ""))
+    if not shell.is_absolute() or not shell.is_file():
+        raise RuntimeError("set QUALIFY_BASH to the full Git for Windows bin/bash.exe path")
+    return str(shell)
+
+
 def main():
     WORK.mkdir(parents=True, exist_ok=False)
     diagnostics = WORK / "diagnostics"
@@ -128,9 +140,7 @@ def main():
             # separate, including when this script runs outside GitHub Actions.
             with tempfile.TemporaryDirectory(prefix="open-ferry-package-") as scratch:
                 env["GITHUB_OUTPUT"] = str(Path(scratch) / "output")
-                # Windows lifecycle unexercised since 962f661f: no hosted
-                # unelevated interactive logon. Retain explicit Git Bash selection.
-                run([os.environ.get("QUALIFY_BASH", "bash"), ".github/scripts/package-release.sh"], env=env)
+                run([package_shell(), ".github/scripts/package-release.sh"], env=env)
             suffix = ".zip" if os.name == "nt" else ".tar.gz"
             archive = f"open-ferry-{version}-{target}{suffix}"
             destination = WORK / "mirror" / "download" / f"v{version}"
@@ -151,6 +161,20 @@ def main():
             "fault": os.environ.get("QUALIFY_FAULT", "none"),
             "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         }, indent=2) + "\n")
+        if "--controls" in sys.argv[2:]:
+            if os.environ.get("QUALIFY_FAULT", "none") != "none":
+                raise RuntimeError("--controls requires an unfaulted primary mirror")
+            # Reuse these exact binaries while the trusted signing key is still
+            # in memory; never persist it just to prepare the negative controls.
+            for fault in ("untrusted-key", "bad-signature"):
+                control = WORK / "controls" / fault
+                shutil.copytree(WORK / "mirror", control / "mirror")
+                destination = control / "mirror/download" / f"v{VERSIONS[1]}"
+                write(destination / "SHA256SUMS.minisig", candidate_signature(
+                    private, key_id, (destination / "SHA256SUMS").read_bytes(), VERSIONS[1], fault))
+                candidates = json.loads((WORK / "candidates.json").read_text(encoding="utf-8"))
+                candidates["fault"] = fault
+                write(control / "candidates.json", json.dumps(candidates, indent=2) + "\n")
     finally:
         # Restore even on a failed build. No changed keys or manifests survive the step.
         for name, data in originals.items():
