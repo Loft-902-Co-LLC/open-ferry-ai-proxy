@@ -222,13 +222,32 @@ pub struct UpdateLock {
     _file: File,
 }
 
-#[cfg(unix)]
 impl Drop for UpdateLock {
     fn drop(&mut self) {
         // flock follows the open file description. A concurrent fork can
         // inherit it until exec closes CLOEXEC descriptors, so closing just
         // our descriptor can leave a released update lock spuriously busy.
+        #[cfg(unix)]
         let _ = self._file.unlock();
+        #[cfg(windows)]
+        unlock_file(&self._file);
+    }
+}
+
+/// Release the exclusive range used by `File::try_lock` before closing its
+/// synchronous handle; Windows does not guarantee immediate unlock on close.
+#[cfg(windows)]
+pub(crate) fn unlock_file(file: &File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    // SAFETY: the file owns a live synchronous handle. The zeroed OVERLAPPED
+    // specifies offset zero and lives through the call; the range matches
+    // std's exclusive LockFileEx (u64::MAX bytes from offset zero).
+    unsafe {
+        let mut overlapped: OVERLAPPED = std::mem::zeroed();
+        let _ = UnlockFileEx(file.as_raw_handle(), 0, u32::MAX, u32::MAX, &mut overlapped);
     }
 }
 
@@ -236,7 +255,6 @@ impl Drop for UpdateLock {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn a_released_update_lock_is_not_retained_by_an_inherited_description() {
         let dir = tempfile::tempdir().unwrap();
