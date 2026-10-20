@@ -24,12 +24,9 @@ pub struct InstallLock {
 
 impl Drop for InstallLock {
     fn drop(&mut self) {
-        // Release even while a fork-inherited/duplicated description remains
-        // open. On Windows release explicitly before closing the handle.
-        #[cfg(unix)]
+        // A fork can retain a Unix description; Windows close may unlock late.
+        // Release explicitly before closing our own file.
         let _ = self._file.unlock();
-        #[cfg(windows)]
-        crate::data_dir::unlock_file(&self._file);
     }
 }
 
