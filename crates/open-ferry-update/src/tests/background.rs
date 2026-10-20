@@ -21,6 +21,93 @@ fn service(f: &Fixture, mode: &str) -> UpdateService {
     UpdateService::new(f.updater.clone(), http_fetch(), &config(mode))
 }
 
+/// An observer holds a blocking operation until a task on this current-thread
+/// runtime acknowledges it. The timeout releases the barrier even if a fault
+/// puts the operation back on the runtime, making that fault fail promptly.
+#[cfg(feature = "blue-green-test")]
+async fn responsive_at(f: &Fixture, name: &str) {
+    let (held, arrived) = crate::test_seams::held::Held::new(f.data.root(), name);
+    let (probe, receive) = tokio::sync::oneshot::channel();
+    let (acknowledge, ack) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        let result = (|| {
+            arrived
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            probe
+                .send(())
+                .map_err(|_| "runtime probe was dropped".to_owned())?;
+            ack.recv_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())
+        })();
+        drop(held);
+        result
+    });
+    let service = service(f, "auto");
+    let (result, ()) = tokio::join!(service.check_once(), async {
+        receive.await.expect("operation must reach its seam");
+        let _ = acknowledge.send(());
+    });
+    observer
+        .join()
+        .unwrap()
+        .expect("serving runtime stalled at the held operation");
+    assert!(matches!(result, Some(Ok(result)) if matches!(result.report, Report::Staged { .. })));
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_staging_write_and_sync_remain_responsive() {
+    for seam in ["stage.before_write", "stage.before_sync"] {
+        let f = Fixture::new().await;
+        f.release("0.2.0");
+        responsive_at(&f, seam).await;
+        assert_eq!(f.updater.state().staged.as_deref(), Some("0.2.0"));
+        assert_eq!(f.runner.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_cancelled_staging_cannot_publish_after_releasing_the_lock() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    let service = service(&f, "auto");
+    let (held, arrived) = crate::test_seams::held::Held::new(f.data.root(), "stage.before_sync");
+    let (notify, waiting) = tokio::sync::oneshot::channel();
+    let observer = std::thread::spawn(move || {
+        arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+        notify.send(()).unwrap();
+    });
+    assert_eq!(service.check_now(), CheckNow::Started);
+    waiting.await.unwrap();
+    observer.join().unwrap();
+    service.stop_and_wait().await;
+    let _lock = f.updater.lock().expect("cancelled check releases its lock");
+    assert!(f.updater.state().staged.is_none());
+    assert!(!f.data.version_dir("0.2.0").exists());
+    assert_eq!(f.runner.runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(held);
+    // The discarded blocking return value owns the private directory. Wait
+    // for its Drop without using a sleep as synchronization.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_dir(f.data.versions())
+                .unwrap()
+                .next()
+                .is_none()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("private staging directory is removed after cancellation");
+    assert!(f.updater.state().staged.is_none());
+    assert!(!f.data.version_dir("0.2.0").exists());
+}
+
 // Hold archive processing until an HTTP response has completed on the same
 // single-thread runtime. The observer releases the seam even on an I/O error,
 // so putting unpacking back on the runtime fails instead of deadlocking.
