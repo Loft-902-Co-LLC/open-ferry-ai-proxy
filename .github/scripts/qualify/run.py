@@ -6,9 +6,11 @@ Only diagnostics/ is safe to upload; config, init output and keys never are.
 
 import argparse
 import base64
+from datetime import datetime
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import functools
+import hashlib
 import http.client
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -63,14 +65,14 @@ def gh_release(endpoint, description):
         raise RuntimeError(f"published precondition: invalid {description} API response") from None
 
 
-def validate_release(release, version):
+def validate_release(release, version, installers=False):
     require(isinstance(release, dict) and type(release.get("id")) is int
             and release.get("tag_name") == f"v{version}"
             and release.get("draft") is False and release.get("prerelease") is False
             and bool(release.get("published_at")),
             f"published precondition: v{version} must be published, non-draft and non-prerelease")
     assets = {asset["name"]: asset for asset in release.get("assets", [])}
-    for name in ("SHA256SUMS", "SHA256SUMS.minisig"):
+    for name in ("SHA256SUMS", "SHA256SUMS.minisig", *(["install.sh", "install.ps1"] if installers else [])):
         require(name in assets and type(assets[name].get("id")) is int,
                 f"published precondition: v{version} is missing {name}")
     return assets
@@ -99,16 +101,32 @@ def verify_release_signature(directory, version, keys):
         raise RuntimeError(f"published precondition: v{version} has a malformed minisign signature") from None
     require(len(lines) == 4 and len(packet) == 74 and packet[:2] == b"ED",
             f"published precondition: v{version} signature must be prehashed minisign (ED)")
-    require(lines[2] == f"trusted comment: open-ferry {version} SHA256SUMS",
-            f"published precondition: v{version} signature trusted comment must be "
-            f"'open-ferry {version} SHA256SUMS'")
     for key in keys:
-        result = command(["minisign", "-Vm", directory / "SHA256SUMS", "-x", signature, "-P", key],
+        result = command(["minisign", "-V", "-H", "-Q", "-m", directory / "SHA256SUMS", "-x", signature, "-P", key],
                          check=False, sensitive=True)
         if result.returncode == 0:
+            require(result.stdout.removesuffix("\n") == f"open-ferry {version} SHA256SUMS",
+                    f"published precondition: v{version} signature trusted comment must be "
+                    f"'open-ferry {version} SHA256SUMS'")
             return
     raise RuntimeError(f"published precondition: v{version} SHA256SUMS signature does not verify "
                        "with release-keys.pub")
+
+
+def verify_release_installers(directory, version):
+    entries = {}
+    for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](.+)", line)
+        require(match is not None, f"published precondition: v{version} has malformed SHA256SUMS")
+        digest, name = match.groups()
+        require(name not in entries, f"published precondition: v{version} has duplicate checksum for {name}")
+        entries[name] = digest.lower()
+    for name in ("install.sh", "install.ps1"):
+        path = directory / name
+        require(path.is_file() and name in entries,
+                f"published precondition: v{version} is missing signed installer {name}")
+        require(hashlib.sha256(path.read_bytes()).hexdigest() == entries[name],
+                f"published precondition: v{version} {name} SHA-256 differs from signed SHA256SUMS")
 
 
 def prepare_published(value, fault="none", form="user", preflight_only=False):
@@ -116,7 +134,8 @@ def prepare_published(value, fault="none", form="user", preflight_only=False):
     require(shutil.which("gh"), "published precondition: install gh and sign in with GH_TOKEN")
     command(["gh", "auth", "status"], sensitive=True)
     releases = [gh_release(f"tags/v{v}", f"release v{v}") for v in versions]
-    assets = [validate_release(release, version) for release, version in zip(releases, versions)]
+    assets = [validate_release(release, version, installers=(index == 0))
+              for index, (release, version) in enumerate(zip(releases, versions))]
     latest = gh_release("latest", "latest release")
     require(latest.get("id") == releases[1].get("id")
             and latest.get("tag_name") == f"v{versions[1]}",
@@ -126,12 +145,14 @@ def prepare_published(value, fault="none", form="user", preflight_only=False):
     for version, release_assets in zip(versions, assets):
         directory = WORK / "published" / version
         directory.mkdir(parents=True, exist_ok=True)
-        for name in ("SHA256SUMS", "SHA256SUMS.minisig"):
+        for name in ("SHA256SUMS", "SHA256SUMS.minisig", *(["install.sh", "install.ps1"] if version == versions[0] else [])):
             with (directory / name).open("wb") as output:
                 subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",
                                 f"repos/{REPOSITORY}/releases/assets/{release_assets[name]['id']}"],
                                stdout=output, stderr=subprocess.PIPE, check=True, timeout=90)
         verify_release_signature(directory, version, keys)
+        if version == versions[0]:
+            verify_release_installers(directory, version)
     candidates = {"versions": versions, "fault": "none", "mode": "published", "form": form,
                   "repository": REPOSITORY,
                   "release_ids": [release["id"] for release in releases]}
@@ -395,6 +416,8 @@ class Qualification:
                 write(OUT / "status.json", json.dumps(last, indent=2) + "\n")
                 if last.get("last_error"):
                     raise UpdateFailure("update failed: " + str(last["last_error"]))
+                if self.published and getattr(self, "observing_published_update", False):
+                    self.verify_automatic_logs()
                 if predicate(last):
                     record("Verified " + name)
                     write(OUT / (name.replace(" ", "-") + ".json"), json.dumps(last, indent=2) + "\n")
@@ -418,6 +441,7 @@ class Qualification:
             if answer == "started":
                 if self.published:
                     self.check_timer_budget()
+                    self.await_published_acceptance()
                 record(f"Confirmed a check started after latest moved to B ({attempts} attempts)")
                 return
             # An existing check may have read A before the flip. Only 'started'
@@ -433,13 +457,59 @@ class Qualification:
 
     def before_published_check(self):
         elapsed = self.check_timer_budget()
+        observed, wall = time.monotonic(), time.time()
         status = self.api()
         require(self.stable(status, self.a) and not status.get("checking")
                 and not status.get("staged_version")
                 and not (status.get("supervisor") or {}).get("last_switch"),
                 "published A changed or started a check before the requested check-now")
+        scheduled = status.get("next_check")
+        require(isinstance(scheduled, str), "published A must expose its next scheduled check")
+        try:
+            next_check = datetime.fromisoformat(scheduled.replace("Z", "+00:00"))
+            require(next_check.tzinfo is not None, "published A next_check must include a timezone")
+            # One second covers the API's whole-second timestamp rounding.
+            self.timer_deadline = min(self.service_started + 300,
+                                      observed + next_check.timestamp() - wall - 1)
+        except ValueError:
+            raise RuntimeError("published A has an invalid next_check") from None
+        require(time.monotonic() < self.timer_deadline,
+                "published A's next scheduled check could already have run")
         write(OUT / "before-check-now.json", json.dumps({"elapsed_since_launch": elapsed,
                                                        "status": status}, indent=2) + "\n")
+
+    def verify_automatic_logs(self):
+        self.logs()
+        log = (OUT / "supervisor-worker.log").read_text(encoding="utf-8")
+        for message in ("automatic switch could not start", "automatic switch deferred",
+                        "no answer from the supervisor", "automatic switch ended"):
+            require(message not in log,
+                    "published check-now did not complete its automatic switch: " + message)
+        return log
+
+    def await_published_acceptance(self):
+        deadline = min(time.monotonic() + 45, self.timer_deadline, self.service_started + 300)
+        self.observing_published_update = True
+
+        def accepted(status):
+            supervisor = status.get("supervisor") or {}
+            switch = supervisor.get("switch") or {}
+            last = supervisor.get("last_switch") or {}
+            evidence = (supervisor.get("phase") in ("waiting-for-signins", "loading", "handing-over",
+                                                    "taking-over", "watching", "switching")
+                        or (switch.get("to") == self.b and switch.get("how") == "update")
+                        or (last.get("to") == self.b and last.get("how") == "update"))
+            # A status read or log capture begun in time may finish too late.
+            require(time.monotonic() < deadline,
+                    "published automatic switch acceptance missed the check-now deadline")
+            return (supervisor.get("form") == "supervised" and evidence
+                    and not supervisor.get("stale") and not supervisor.get("error")
+                    and not supervisor.get("switching_disabled"))
+
+        self.until("check-now switch accepted before timer", accepted,
+                   seconds=max(0, deadline - time.monotonic()))
+        require(time.monotonic() < deadline,
+                "published automatic switch acceptance missed the check-now deadline")
 
     def verify_signature_control(self, error):
         fault = self.candidates["fault"]
@@ -488,23 +558,6 @@ class Qualification:
                 require(not Path("/etc/systemd/system/open-ferry.service").exists(),
                         "refusing an existing system service")
                 command(["systemctl", "show-environment"], sensitive=True)
-                # install.sh intentionally scrubs GH_* and runs gh with env -i
-                # and root's real HOME. Authenticate that exact identity without
-                # passing a token in arguments, logs, service env or artifacts.
-                self.root_auth = None
-                root_home = Path(__import__("pwd").getpwuid(0).pw_dir)
-                auth = root_home / ".config/gh/hosts.yml"
-                require(not auth.exists(), "refusing to replace existing root gh credentials")
-                token = self.env.get("GH_TOKEN") or self.env.get("GITHUB_TOKEN")
-                require(token, "Linux machine attestation requires GH_TOKEN")
-                auth.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                auth.touch(mode=0o600, exist_ok=False)
-                self.root_auth = auth
-                auth.write_text(yaml.safe_dump({"github.com": {"oauth_token": token,
-                                                           "git_protocol": "https"}}),
-                                encoding="utf-8", newline="\n")
-                command(["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-                         f"HOME={root_home}", "gh", "auth", "status"], sensitive=True)
             else:
                 existing = command(["sc.exe", "query", "open-ferry"], check=False)
                 require(existing.returncode == 1060, "refusing an existing Windows system service")
@@ -528,26 +581,64 @@ class Qualification:
             command(["schtasks.exe", "/query", "/tn", "open-ferry"], check=False)
             record("Unelevated interactive account available; machine form omitted: elevated installer ignores the loopback mirror")
 
+    def prepare_root_auth(self):
+        # Root install.sh scrubs GH_* and runs gh with env -i and real HOME.
+        root_home = Path(__import__("pwd").getpwuid(0).pw_dir)
+        auth = root_home / ".config/gh/hosts.yml"
+        require(not auth.exists(), "refusing to replace existing root gh credentials")
+        token = self.env.get("GH_TOKEN") or self.env.get("GITHUB_TOKEN")
+        require(token, "Linux machine attestation requires GH_TOKEN")
+        self.root_auth_dirs = [path for path in (auth.parent.parent, auth.parent) if not path.exists()]
+        self.root_auth_config = None if (auth.parent / "config.yml").exists() else auth.parent / "config.yml"
+        auth.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        auth.touch(mode=0o600, exist_ok=False)
+        self.root_auth = auth
+        auth.write_text(yaml.safe_dump({"github.com": {"oauth_token": token,
+                                                   "git_protocol": "https"}}),
+                        encoding="utf-8", newline="\n")
+        command(["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                 f"HOME={root_home}", "gh", "auth", "status"], sensitive=True)
+
+    def remove_root_auth(self):
+        auth = getattr(self, "root_auth", None)
+        if auth is not None:
+            auth.unlink(missing_ok=True)
+            require(not auth.exists(), "temporary root gh credentials remain")
+        config = getattr(self, "root_auth_config", None)
+        if config is not None:
+            config.unlink(missing_ok=True)
+        for directory in reversed(getattr(self, "root_auth_dirs", [])):
+            if directory.exists():
+                directory.rmdir()  # Only an empty directory created by this harness.
+        self.root_auth = self.root_auth_config = None
+        self.root_auth_dirs = []
+
     def install(self, base):
         if not self.published:
             self.env["OPEN_FERRY_INSTALL_BASE_URL"] = base
             self.env["OPEN_FERRY_UPDATE_BASE_URL"] = base
         record("Installing candidate A with the release install script (init output withheld)")
+        installer_dir = WORK / "published" / self.a if self.published else Path.cwd()
         if self.os == "Windows":
             args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                    "-File", str(Path.cwd() / "install.ps1"), "-NoMigrate",
+                    "-File", str(installer_dir / "install.ps1"), "-NoMigrate",
                     "-InstallDir", str(self.exe.parent), "-ConfigPath", str(self.config)]
             args += (["-Version", self.a] if self.published else ["-NoAttestation"])
             if self.machine:
                 args += ["-System"]
         else:
-            args = ["sh", str(Path.cwd() / "install.sh"), "--no-migrate"]
+            args = ["sh", str(installer_dir / "install.sh"), "--no-migrate"]
             args += (["--version", self.a] if self.published else ["--no-attestation"])
             if self.machine:
                 args += ["--system"]
-        if self.published:
-            command(["gh", "auth", "status"], env=self.env, sensitive=True)
-        installed = command(args, env=self.env, sensitive=True, timeout=180)
+        try:
+            if self.published and self.machine and self.os == "Linux":
+                self.prepare_root_auth()
+            if self.published:
+                command(["gh", "auth", "status"], env=self.env, sensitive=True)
+            installed = command(args, env=self.env, sensitive=True, timeout=180)
+        finally:
+            self.remove_root_auth()
         if self.published:
             # The installers make provenance optional when gh is absent. Do
             # not let their successful exit silently weaken this qualification.
@@ -565,6 +656,9 @@ class Qualification:
         SECRETS.extend((self.management, *config["access"]["api-keys"]))
         config["server"].update(host="127.0.0.1", port=self.port)
         config["self-update"] = {"mode": "auto"}
+        if self.published:
+            # Deferrals are debug events; retain them for the check-now gate.
+            config.setdefault("observability", {}).setdefault("logs", {})["debug"] = True
         # Keep generated client/management keys, and use an empty local auth directory.
         auth = self.data / "auth" if self.machine else WORK / "auth"
         config["oauth"]["auth-dir"] = str(auth)
@@ -691,7 +785,7 @@ class Qualification:
             if not self.published:
                 with Mirror.lock:
                     Mirror.latest = self.b
-            # Only a check is requested: no install command or install API is used for A -> B.
+            # Published check-now must reach supervisor acceptance before A's timer.
             self.check_after_flip()
             try:
                 self.until("automatic B after watch", lambda value: self.stable(value, self.b, "update"), seconds=900)
@@ -705,8 +799,12 @@ class Qualification:
                 return
             # Durable outcomes currently report auto:null. The production worker's
             # explicit acceptance log proves this used its automatic switch path.
-            self.logs()
-            log = (OUT / "supervisor-worker.log").read_text(encoding="utf-8")
+            if self.published:
+                log = self.verify_automatic_logs()
+                self.observing_published_update = False
+            else:
+                self.logs()
+                log = (OUT / "supervisor-worker.log").read_text(encoding="utf-8")
             require(any("automatic switch accepted" in line and self.b in line for line in log.splitlines()),
                     "B switched without the worker's automatic-switch acceptance evidence")
             require(command([self.exe, "--version"]).stdout.strip() == f"open-ferry {self.b}",
@@ -760,15 +858,9 @@ class Qualification:
                                     for path, count in requests.items()),
                             f"{self.candidates['fault']} control requested a B asset before mirror shutdown")
 
-            def remove_root_auth():
-                auth = getattr(self, "root_auth", None)
-                if auth is not None:
-                    auth.unlink()
-                    require(not auth.exists(), "temporary root gh credentials remain")
-
-            for phase, cleanup in (("load cleanup", finish_load), ("diagnostics", self.logs),
-                                   ("service cleanup", remove_service), ("mirror cleanup", stop_mirror),
-                                   ("root authentication cleanup", remove_root_auth)):
+            for phase, cleanup in (("root authentication cleanup", self.remove_root_auth),
+                                   ("load cleanup", finish_load), ("diagnostics", self.logs),
+                                   ("service cleanup", remove_service), ("mirror cleanup", stop_mirror)):
                 try:
                     cleanup()
                 except Exception as error:
