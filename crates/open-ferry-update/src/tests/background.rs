@@ -26,6 +26,17 @@ fn service(f: &Fixture, mode: &str) -> UpdateService {
 /// puts the operation back on the runtime, making that fault fail promptly.
 #[cfg(feature = "blue-green-test")]
 async fn responsive_at(f: &Fixture, name: &str) {
+    let service = service(f, "auto");
+    let result = responsive_operation(f, name, service.check_once()).await;
+    assert!(matches!(result, Some(Ok(result)) if matches!(result.report, Report::Staged { .. })));
+}
+
+#[cfg(feature = "blue-green-test")]
+async fn responsive_operation<T>(
+    f: &Fixture,
+    name: &str,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
     let (held, arrived) = crate::test_seams::held::Held::new(f.data.root(), name);
     let (probe, receive) = tokio::sync::oneshot::channel();
     let (acknowledge, ack) = std::sync::mpsc::channel();
@@ -43,8 +54,7 @@ async fn responsive_at(f: &Fixture, name: &str) {
         drop(held);
         result
     });
-    let service = service(f, "auto");
-    let (result, ()) = tokio::join!(service.check_once(), async {
+    let (result, ()) = tokio::join!(operation, async {
         receive.await.expect("operation must reach its seam");
         let _ = acknowledge.send(());
     });
@@ -52,7 +62,55 @@ async fn responsive_at(f: &Fixture, name: &str) {
         .join()
         .unwrap()
         .expect("serving runtime stalled at the held operation");
-    assert!(matches!(result, Some(Ok(result)) if matches!(result.report, Report::Staged { .. })));
+    result
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_staged_rehash_remains_responsive_and_detects_changed_bytes() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    assert!(service(&f, "auto").check_once().await.unwrap().is_ok());
+    let downloads = f.server.requests();
+    responsive_at(&f, "stage.before_staged_hash").await;
+    assert_eq!(
+        f.server.requests(),
+        downloads + 2,
+        "only the signed release list is fetched again"
+    );
+    let path = f.data.binary("0.2.0", f.updater.binary_name());
+    std::fs::write(&path, good_binary("0.3.0")).unwrap();
+    assert!(service(&f, "auto").check_once().await.unwrap().is_ok());
+    assert_eq!(std::fs::read(&path).unwrap(), good_binary("0.2.0"));
+    assert_eq!(f.runner.runs.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_fresh_staged_rehash_remains_responsive() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    assert!(service(&f, "auto").check_once().await.unwrap().is_ok());
+    let _lock = f.updater.lock().unwrap();
+    let mut stale = crate::State::default();
+    let found = f.updater.latest(&stale).await.unwrap();
+    let path = responsive_operation(
+        &f,
+        "stage.before_staged_hash",
+        f.updater.stage(&found, &mut stale),
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), good_binary("0.2.0"));
+    assert_eq!(f.runner.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_retained_binary_hashes_remain_responsive() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    responsive_at(&f, "stage.before_cleanup_hash").await;
 }
 
 #[cfg(feature = "blue-green-test")]
