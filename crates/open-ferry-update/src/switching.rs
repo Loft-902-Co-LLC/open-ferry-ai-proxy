@@ -19,8 +19,10 @@ use crate::{Report, UpdateError, Updater};
 /// Why preparing, asking for, or following a supervised switch failed.
 ///
 /// Request certainty for update, rollback and cancellation:
-/// - `NotSupervised`, `UpdatesOff`, `Disabled`, `Update`, `Skipped`, `Unreachable` and
-///   `Untrusted`: the request was not sent.
+/// - `NotSupervised`, `UpdatesOff`, `Skipped`, `Unreachable` and `Untrusted`:
+///   the request was not sent.
+/// - `Disabled` and `Update`: local preparation/policy failed, or the supervisor
+///   declined with a typed refusal. The switch was not started.
 /// - `Refused`: the request was sent and the supervisor did not take it.
 /// - `TimedOut`, `Stopped` and `Protocol`: the request may have been taken.
 ///   Read status; never resend the request.
@@ -36,7 +38,7 @@ use crate::{Report, UpdateError, Updater};
 pub enum SwitchError {
     NotSupervised,
     UpdatesOff,
-    /// Local endpoint policy disables switching; no request was sent.
+    /// Local endpoint policy or the supervisor disables switching before acceptance.
     Disabled(String),
     Update(UpdateError),
     /// A failed or rolled-back release is not retried.

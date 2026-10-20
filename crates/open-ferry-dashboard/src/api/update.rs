@@ -546,14 +546,20 @@ mod tests {
         );
     }
     #[test]
-    fn disabled_is_not_sent_and_keeps_its_details_private() {
-        let request = SwitchRequest::preparing("install")
-            .finish(Err(SwitchError::Disabled("private policy path".into())));
-        assert_eq!(request.state, "failed");
-        assert!(!request.pending);
-        let error = request.response().unwrap_err();
-        assert_eq!(error.code, "switching_disabled");
-        assert_eq!(request.reason.as_deref(), Some("switching is disabled"));
+    fn disabled_before_acceptance_keeps_its_details_private() {
+        // Both local policy failures and the supervisor's typed disabled refusal.
+        for reason in [
+            "private policy path",
+            "switching is disabled; see the supervisor log",
+        ] {
+            let request = SwitchRequest::preparing("install")
+                .finish(Err(SwitchError::Disabled(reason.into())));
+            assert_eq!(request.state, "failed");
+            assert!(!request.pending);
+            let error = request.response().unwrap_err();
+            assert_eq!(error.code, "switching_disabled");
+            assert_eq!(request.reason.as_deref(), Some("switching is disabled"));
+        }
     }
     #[test]
     fn update_errors_are_failures_to_prepare() {

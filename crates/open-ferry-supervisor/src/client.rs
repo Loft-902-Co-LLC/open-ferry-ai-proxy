@@ -1495,6 +1495,10 @@ mod tests {
                 r#"{"type":"accepted","v":1,"id":"one"}"#,
                 Some(r#"{"type":"error","v":1,"reason":"stopping"}"#),
             ),
+            (
+                r#"{"type":"accepted","v":1,"id":"one"}"#,
+                Some(r#"{"type":"error","v":1,"code":"switching_disabled","reason":"stopping"}"#),
+            ),
         ] {
             let dirs = Dirs::new();
             let endpoint = serve(location_for(dirs.data()), move |_, mut stream| async move {
@@ -1563,6 +1567,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn switch_client_maps_refusal_codes_without_reading_the_diagnostic() {
+        use open_ferry_update::{SwitchError, UpdateError};
+        for code in [
+            "switching_disabled",
+            "no_previous",
+            "rollback_target_mismatch",
+            "future_code",
+            "nothing_to_cancel",
+            "missing",
+        ] {
+            for reason in ["diagnostic wording changed", "nothing is switching"] {
+                let dirs = Dirs::new();
+                let endpoint = serve(
+                    location_for(dirs.data()),
+                    move |request, mut stream| async move {
+                        assert!(matches!(
+                            serde_json::from_str::<EndpointRequest>(&request).unwrap(),
+                            EndpointRequest::Switch {
+                                how: crate::protocol::How::Rollback,
+                                ..
+                            }
+                        ));
+                        let mut json =
+                            serde_json::json!({"type": "error", "v": 1, "reason": reason});
+                        if code != "missing" {
+                            json["code"] = code.into();
+                        }
+                        reply(&mut stream, &json.to_string()).await;
+                    },
+                );
+                write_record(dirs.data(), &endpoint.location, 1);
+                let mut request = update_request();
+                request.how = crate::protocol::How::Rollback;
+                let error = switch(dirs.data(), &identity(), request, soon(5))
+                    .await
+                    .unwrap_err();
+                match code {
+                    "switching_disabled" => {
+                        assert!(matches!(error, SwitchError::Disabled(why) if why == reason))
+                    }
+                    "no_previous" => assert!(matches!(
+                        error,
+                        SwitchError::Update(UpdateError::NoPrevious)
+                    )),
+                    "rollback_target_mismatch" => assert!(
+                        matches!(error, SwitchError::Update(UpdateError::RollbackChanged { expected, actual: None }) if expected == "2.0.0")
+                    ),
+                    _ => assert!(matches!(error, SwitchError::Refused(why) if why == reason)),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_client_requires_the_nothing_to_cancel_code() {
+        use open_ferry_update::{CancelOutcome, SwitchError};
+        for code in [Some("nothing_to_cancel"), Some("future_code"), None] {
+            for reason in ["nothing is switching", "new cancellation diagnostic"] {
+                let dirs = Dirs::new();
+                let endpoint = serve(location_for(dirs.data()), move |_, mut stream| async move {
+                    let mut json = serde_json::json!({"type": "error", "v": 1, "reason": reason});
+                    if let Some(code) = code {
+                        json["code"] = code.into();
+                    }
+                    reply(&mut stream, &json.to_string()).await;
+                });
+                write_record(dirs.data(), &endpoint.location, 1);
+                let outcome = cancel(dirs.data(), &identity(), soon(5)).await;
+                if code == Some("nothing_to_cancel") {
+                    assert!(matches!(outcome, Ok(CancelOutcome::Nothing)));
+                } else {
+                    assert!(matches!(outcome, Err(SwitchError::Refused(why)) if why == reason));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn status_and_cancel_use_the_endpoint_without_touching_locks() {
         use open_ferry_update::CancelOutcome;
         for answer in ["cancelled", "too_late", "nothing"] {
@@ -1584,7 +1666,8 @@ mod tests {
                             "too_late" => EndpointReply::TooLate { v: VERSION },
                             _ => EndpointReply::Error {
                                 v: VERSION,
-                                reason: "nothing is switching".into(),
+                                code: Some(crate::protocol::EndpointErrorCode::NothingToCancel),
+                                reason: "wording may change".into(),
                             },
                         },
                         other => panic!("{other:?}"),

@@ -1797,6 +1797,7 @@ Host: test
                 Err(error) => {
                     let _ = tx.send(EndpointReply::Error {
                         v: VERSION,
+                        code: None,
                         reason: format!("connect: {error}"),
                     });
                     return;

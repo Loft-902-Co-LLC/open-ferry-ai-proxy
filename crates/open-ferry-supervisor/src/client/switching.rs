@@ -13,13 +13,15 @@ use open_ferry_update::fetch::BoxFuture;
 use open_ferry_update::journal::Artifact;
 use open_ferry_update::pins::Pin;
 use open_ferry_update::{
-    CancelOutcome, SwitchError, SwitchEvent, SwitchHandle, SwitchProgress, Switcher,
+    CancelOutcome, SwitchError, SwitchEvent, SwitchHandle, SwitchProgress, Switcher, UpdateError,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
 use super::{locate, time_left, within};
 use crate::endpoint::{ClientStream, EndpointError, Identity, Location, connect};
-use crate::protocol::{Admission, Channel, EndpointReply, EndpointRequest, How, VERSION};
+use crate::protocol::{
+    Admission, Channel, EndpointErrorCode, EndpointReply, EndpointRequest, How, VERSION,
+};
 use crate::snapshot::Snapshot;
 
 type EndpointChannel = Channel<ReadHalf<ClientStream>, CountingWriter<WriteHalf<ClientStream>>>;
@@ -95,6 +97,7 @@ pub async fn switch(
     request_switch: SwitchRequest,
     deadline: Instant,
 ) -> Result<SwitchHandle, SwitchError> {
+    let expected = request_switch.to.clone();
     let request_switch = EndpointRequest::Switch {
         v: VERSION,
         to: request_switch.to,
@@ -116,6 +119,7 @@ pub async fn switch(
             id.clone(),
             Box::new(Progress { id, channel }),
         )),
+        EndpointReply::Error { code, reason, .. } => Err(switch_refusal(code, reason, expected)),
         other => Err(unexpected(other)),
     }
 }
@@ -134,14 +138,14 @@ pub async fn cancel(
         |location| dial(location, identity),
     )
     .await?;
-    match receive(&mut channel, deadline).await {
-        Ok(EndpointReply::Cancelled { .. }) => Ok(CancelOutcome::Cancelled),
-        Ok(EndpointReply::TooLate { .. }) => Ok(CancelOutcome::TooLate),
-        Err(SwitchError::Refused(reason)) if reason == "nothing is switching" => {
-            Ok(CancelOutcome::Nothing)
-        }
-        Ok(other) => Err(unexpected(other)),
-        Err(error) => Err(error),
+    match receive(&mut channel, deadline).await? {
+        EndpointReply::Cancelled { .. } => Ok(CancelOutcome::Cancelled),
+        EndpointReply::TooLate { .. } => Ok(CancelOutcome::TooLate),
+        EndpointReply::Error {
+            code: Some(EndpointErrorCode::NothingToCancel),
+            ..
+        } => Ok(CancelOutcome::Nothing),
+        other => Err(unexpected(other)),
     }
 }
 
@@ -287,9 +291,6 @@ async fn receive<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             "protocol version {v}, expected {VERSION}"
         )));
     }
-    if let EndpointReply::Error { reason, .. } = reply {
-        return Err(SwitchError::Refused(reason));
-    }
     if let EndpointReply::Unsupported { message_type, .. } = reply {
         return Err(SwitchError::Protocol(format!(
             "the supervisor does not support {message_type} requests"
@@ -298,8 +299,28 @@ async fn receive<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(reply)
 }
 
+fn switch_refusal(
+    code: Option<EndpointErrorCode>,
+    reason: String,
+    expected: String,
+) -> SwitchError {
+    match code {
+        Some(EndpointErrorCode::SwitchingDisabled) => SwitchError::Disabled(reason),
+        Some(EndpointErrorCode::NoPrevious) => UpdateError::NoPrevious.into(),
+        Some(EndpointErrorCode::RollbackTargetMismatch) => UpdateError::RollbackChanged {
+            expected,
+            actual: None,
+        }
+        .into(),
+        _ => SwitchError::Refused(reason),
+    }
+}
+
 fn unexpected(reply: EndpointReply) -> SwitchError {
-    SwitchError::Protocol(format!("unexpected reply: {reply:?}"))
+    match reply {
+        EndpointReply::Error { reason, .. } => SwitchError::Refused(reason),
+        other => SwitchError::Protocol(format!("unexpected reply: {other:?}")),
+    }
 }
 
 struct Progress {
@@ -310,13 +331,7 @@ struct Progress {
 impl SwitchProgress for Progress {
     fn next(&mut self, deadline: Instant) -> BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
         Box::pin(async move {
-            let reply =
-                receive(&mut self.channel, deadline)
-                    .await
-                    .map_err(|error| match error {
-                        SwitchError::Refused(reason) => SwitchError::Ended(reason),
-                        other => other,
-                    })?;
+            let reply = receive(&mut self.channel, deadline).await?;
             match reply {
                 EndpointReply::Progress { id, phase, .. } if id == self.id => {
                     Ok(SwitchEvent::Progress { phase })
@@ -324,6 +339,7 @@ impl SwitchProgress for Progress {
                 EndpointReply::Done { id, result, .. } if id == self.id => {
                     Ok(SwitchEvent::Done { result })
                 }
+                EndpointReply::Error { reason, .. } => Err(SwitchError::Ended(reason)),
                 other => Err(unexpected(other)),
             }
         })

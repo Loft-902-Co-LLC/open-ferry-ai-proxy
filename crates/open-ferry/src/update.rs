@@ -1905,3 +1905,43 @@ fn set_mode(
     }
     outcome.with("mode-set", 0)
 }
+
+#[cfg(test)]
+mod typed_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn typed_supervisor_refusals_keep_the_cli_guidance() {
+        for (error, message, result) in [
+            (
+                SwitchError::Disabled("switching is disabled; see the supervisor log".into()),
+                "switching is disabled: switching is disabled; see the supervisor log",
+                "supervised",
+            ),
+            (
+                SwitchError::Update(UpdateError::NoPrevious),
+                "there is no earlier version to roll back to: a rollback needs a switch made by open-ferry update",
+                "error",
+            ),
+            (
+                SwitchError::Update(UpdateError::RollbackChanged {
+                    expected: "0.1.0".into(),
+                    actual: None,
+                }),
+                "rollback target changed: expected 0.1.0, now none; run `open-ferry update -check`",
+                "supervised",
+            ),
+        ] {
+            let settings = Settings::resolve(&open_ferry_core::config::SelfUpdate::default(), None);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let mut console = Console::new(false, &mut out, &mut err);
+            let outcome =
+                Outcome::new("rollback", &settings).failed_switch(&mut console, &error, true);
+            assert_eq!(outcome.code, 1);
+            assert_eq!(outcome.result, result);
+            assert!(outcome.error.unwrap().starts_with(message));
+            assert!(String::from_utf8(err).unwrap().contains(message));
+        }
+    }
+}

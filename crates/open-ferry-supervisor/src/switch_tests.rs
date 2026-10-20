@@ -1274,9 +1274,13 @@ async fn a_request_with_no_live_pin_or_a_wrong_hash_or_the_running_version_is_re
     );
     let mut rig = Rig::new().await;
     let (_c, replies) = go!(rig, rollback_to("0.9.0", crate::testkit::SHA_3));
-    assert!(
-        matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason.contains("previous"))
-    );
+    assert!(matches!(
+        &replies[..],
+        [EndpointReply::Error {
+            code: Some(crate::protocol::EndpointErrorCode::NoPrevious),
+            ..
+        }]
+    ));
     assert!(rig.disk.order().is_empty(), "nothing was written");
 }
 
