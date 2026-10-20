@@ -484,6 +484,26 @@ impl Updater {
         cleanup_stale_artifacts_in(&self.data, self.binary_name(), keep)
     }
 
+    async fn cleanup_stale_artifacts_async(
+        &self,
+        keep: &BTreeSet<String>,
+    ) -> Result<(), UpdateError> {
+        let data = self.data.clone();
+        let name = self.binary_name();
+        let keep = keep.clone();
+        let verified = tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "blue-green-test")]
+            crate::test_seams::hit(data.root(), "stage.before_cleanup_hash")
+                .map_err(io_error("wait before checking retained binaries"))?;
+            verified_stale_artifacts(&data, name, &keep)
+        })
+        .await
+        .map_err(blocking_error("check retained binaries"))??;
+        // Destructive cleanup stays with the lock-owning caller. The blocking
+        // preflight above can outlive cancellation but cannot delete anything.
+        cleanup_stale_artifacts_verified(&self.data, &verified)
+    }
+
     /// Whether this install updates itself.
     pub fn install(&self) -> Install {
         install::assess(
@@ -562,8 +582,28 @@ impl Updater {
             return None;
         }
         let path = self.data.binary(version, self.binary_name());
-        let data = fs::read(&path).ok()?;
-        (Some(release::sha256_hex(&data)) == state.staged_sha256).then_some(path)
+        (Some(hash_file(&path).ok()?) == state.staged_sha256).then_some(path)
+    }
+
+    async fn staged_binary_async(
+        &self,
+        state: &State,
+        version: &str,
+    ) -> Result<Option<PathBuf>, UpdateError> {
+        if state.staged.as_deref() != Some(version) {
+            return Ok(None);
+        }
+        let updater = self.clone();
+        let state = state.clone();
+        let version = version.to_owned();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "blue-green-test")]
+            crate::test_seams::hit(updater.data.root(), "stage.before_staged_hash")
+                .map_err(io_error("wait before checking the staged binary"))?;
+            Ok(updater.staged_binary(&state, &version))
+        })
+        .await
+        .map_err(blocking_error("check the staged binary"))?
     }
 
     /// Runs `binary --version` and checks it is `version`.
@@ -625,11 +665,11 @@ impl Updater {
     pub async fn stage(&self, found: &Found, state: &mut State) -> Result<PathBuf, UpdateError> {
         let release = &found.release;
         let version = release.version.as_str();
-        if let Some(path) = self.staged_binary(state, version) {
+        if let Some(path) = self.staged_binary_async(state, version).await? {
             return Ok(path);
         }
         let keep = self.retention_keep(state)?;
-        self.cleanup_stale_artifacts(&keep)?;
+        self.cleanup_stale_artifacts_async(&keep).await?;
         let archive = self
             .fetch
             .get(
@@ -646,7 +686,7 @@ impl Updater {
         let fresh = self.state();
         if fresh.staged.as_deref() == Some(version) {
             if fresh.staged_sha256.as_deref() == Some(sha256.as_str())
-                && let Some(path) = self.staged_binary(&fresh, version)
+                && let Some(path) = self.staged_binary_async(&fresh, version).await?
             {
                 *state = fresh;
                 return Ok(path);
@@ -716,7 +756,7 @@ impl Updater {
             fresh.staged_sha256 = Some(sha256);
         })?;
         *state = self.state();
-        if let Err(error) = self.prune(state) {
+        if let Err(error) = self.prune_async(state).await {
             tracing::warn!(%error, "the update committed, but version cleanup was refused");
         }
         Ok(path)
@@ -877,7 +917,10 @@ impl Updater {
     ) -> Result<PathBuf, UpdateError> {
         self.retention_keep(&self.state())?;
         let binary = self.data.binary(&artifact.version, self.binary_name());
-        if hash_file(&binary).ok().as_deref() != Some(artifact.sha256.as_str()) {
+        if !self
+            .hash_matches(binary.clone(), artifact.sha256.clone())
+            .await?
+        {
             return Err(UpdateError::StagedChanged {
                 version: artifact.version.clone(),
             });
@@ -1073,6 +1116,16 @@ impl Updater {
     pub fn prune(&self, state: &State) -> Result<(), UpdateError> {
         let keep = self.retention_keep(state)?;
         self.cleanup_stale_artifacts(&keep)?;
+        self.prune_versions(&keep)
+    }
+
+    async fn prune_async(&self, state: &State) -> Result<(), UpdateError> {
+        let keep = self.retention_keep(state)?;
+        self.cleanup_stale_artifacts_async(&keep).await?;
+        self.prune_versions(&keep)
+    }
+
+    fn prune_versions(&self, keep: &BTreeSet<String>) -> Result<(), UpdateError> {
         let on_disk = self.data.kept_versions();
         for version in on_disk {
             if !keep.contains(&version) {
@@ -1204,6 +1257,15 @@ fn cleanup_stale_artifacts_in(
     binary_name: &str,
     keep: &BTreeSet<String>,
 ) -> Result<(), UpdateError> {
+    let verified = verified_stale_artifacts(data, binary_name, keep)?;
+    cleanup_stale_artifacts_verified(data, &verified)
+}
+
+fn verified_stale_artifacts(
+    data: &DataDir,
+    binary_name: &str,
+    keep: &BTreeSet<String>,
+) -> Result<Vec<String>, UpdateError> {
     let view = JournalView::load(&data.root().join(crate::journal::JOURNAL_FILE))
         .map_err(|error| UpdateError::Journal(error.to_string()))?;
     view.ensure_supported()
@@ -1263,11 +1325,18 @@ fn cleanup_stale_artifacts_in(
             .then_some(hash)
         })
         .collect();
+    Ok(verified)
+}
+
+fn cleanup_stale_artifacts_verified(
+    data: &DataDir,
+    verified: &[String],
+) -> Result<(), UpdateError> {
     if let Err(error) = crate::staging::cleanup_stale_staging(&data.versions()) {
         tracing::warn!(%error, path = %data.versions().display(), "could not finish stale staging cleanup; continuing");
     }
     if let Ok(Some(receipt)) = Receipt::load(&data.receipt_file()) {
-        match crate::switch::cleanup_stale_prev(Path::new(&receipt.binary), &verified) {
+        match crate::switch::cleanup_stale_prev(Path::new(&receipt.binary), verified) {
             Ok(cleanup) => {
                 for path in cleanup.removed {
                     tracing::info!(path = %path.display(), "removed a stale installed link");
