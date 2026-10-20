@@ -71,13 +71,14 @@ struct Live {
     next_check: Option<chrono::DateTime<Utc>>,
     install: Option<Install>,
     automatic_error: Option<&'static str>,
-    busy_check: Option<BusyCheck>,
+    local_check: Option<Arc<LocalCheck>>,
 }
 
-/// A lock-busy attempt cannot write state. Any subsequent state publication
+/// A check can fail before writing state. Any subsequent state publication
 /// supersedes this process-local report, including a check in another process.
-struct BusyCheck {
+struct LocalCheck {
     at: String,
+    error: String,
     persisted: crate::state::State,
     modified: Option<std::time::SystemTime>,
 }
@@ -550,30 +551,46 @@ impl UpdateService {
     /// The status.
     pub fn status(&self) -> Status {
         let settings = self.settings();
-        let (checking, next_check, install) = {
+        let (checking, next_check, install, local_check) = {
             let live = self
                 .inner
                 .live
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            (live.checking, live.next_check, live.install.clone())
+            (
+                live.checking,
+                live.next_check,
+                live.install.clone(),
+                live.local_check.clone(),
+            )
         };
         let install = install.unwrap_or_else(|| assessed_install(&self.inner));
-        let mut status = self.inner.updater.status(&settings, &install);
-        let mut live = self
+        #[cfg(feature = "blue-green-test")]
+        let _ = crate::test_seams::hit(self.inner.updater.data.root(), "auto.before_status_state");
+        let state = self.inner.updater.state();
+        let mut status = self
             .inner
-            .live
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(busy) = &live.busy_check {
-            if busy.persisted == self.inner.updater.state()
-                && busy.modified == state_modified(&self.inner.updater)
-            {
-                status.last_check = Some(busy.at.clone());
+            .updater
+            .status_with_state(&settings, &install, &state);
+        if let Some(local) = local_check {
+            if local.persisted == state && local.modified == state_modified(&self.inner.updater) {
+                status.last_check = Some(local.at.clone());
                 status.last_result = Some("error".to_owned());
-                status.last_error = Some("another update is running; try again shortly".to_owned());
+                status.last_error = Some(local.error.clone());
             } else {
-                live.busy_check = None;
+                let mut live = self
+                    .inner
+                    .live
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                // The state read may race a newer process-local result.
+                if live
+                    .local_check
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &local))
+                {
+                    live.local_check = None;
+                }
             }
         }
         status.checking = checking;
@@ -678,11 +695,6 @@ async fn checked(
         return None;
     }
     set_checking(inner, true);
-    let busy_check = BusyCheck {
-        at: crate::updater::now(),
-        persisted: inner.updater.state(),
-        modified: state_modified(&inner.updater),
-    };
     let outcome = tokio::select! {
         outcome = async {
             let until = Instant::now() + Duration::from_secs(5);
@@ -705,7 +717,7 @@ async fn checked(
                 .live
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .busy_check = None;
+                .local_check = None;
             let message = match &result.report {
                 Report::Staged { version }
                     if inner.snapshot.borrow().settings.mode == SelfUpdateMode::Auto
@@ -730,17 +742,27 @@ async fn checked(
         }
         Some(Err(UpdateError::Busy)) => {
             if manual {
-                inner
-                    .live
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .busy_check = Some(busy_check);
+                record_local_check(
+                    inner,
+                    "another update is running; try again shortly".to_owned(),
+                );
             }
             // Scheduled checks wait for their next turn, but a lock held over
             // many intervals must remain visible at the normal log level.
-            tracing::warn!("update check deferred: another update is running; try again shortly");
+            if manual {
+                tracing::warn!(
+                    "update check deferred: another update is running; try again shortly"
+                );
+            } else {
+                tracing::warn!(
+                    "update check deferred: another update is running; trying again at the next interval"
+                );
+            }
         }
-        Some(Err(error)) => tracing::warn!("update check failed: {error}"),
+        Some(Err(error)) => {
+            record_local_check(inner, error.to_string());
+            tracing::warn!("update check failed: {error}");
+        }
         None => {}
     }
     set_checking(inner, false);
@@ -815,6 +837,22 @@ async fn checked(
         }
     }
     outcome
+}
+
+fn record_local_check(inner: &Inner, error: String) {
+    // Snapshot at completion: another lock holder may have published state
+    // while this attempt waited. Read before taking the live mutex.
+    let local = Arc::new(LocalCheck {
+        at: crate::updater::now(),
+        error,
+        persisted: inner.updater.state(),
+        modified: state_modified(&inner.updater),
+    });
+    inner
+        .live
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .local_check = Some(local);
 }
 
 /// Keep local errors out of logs: their detail can contain endpoint or file paths.
@@ -899,6 +937,10 @@ fn assessed_install(inner: &Inner) -> Install {
 }
 
 async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, UpdateError> {
+    // Busy retries need no client construction or install assessment. The
+    // real check still acquires its own lock, so a contender winning after
+    // this probe simply returns Busy and follows the same retry policy.
+    drop(inner.updater.lock()?);
     #[cfg(feature = "blue-green-test")]
     {
         let root = inner.updater.data.root().to_path_buf();

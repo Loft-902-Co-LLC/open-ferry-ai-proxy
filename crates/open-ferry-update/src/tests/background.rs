@@ -341,12 +341,17 @@ async fn runtime_busy_check_waits_and_reports_without_writing_state() {
         tokio::time::advance(Duration::from_millis(250)).await;
         tokio::task::yield_now().await;
     }
+    // The owner can publish while the manual request is waiting, then keep
+    // its lock beyond the deadline. The final busy result must still show.
+    let mut during_wait = f.updater.state();
+    during_wait.last_result = Some("up-to-date".into());
+    f.updater.save(&during_wait).unwrap();
+    let published = std::fs::read(f.data.state_file()).ok();
+    assert_ne!(published, before);
     assert!(service.status().checking);
     assert_eq!(service.check_now(), CheckNow::Running);
     tokio::time::advance(Duration::from_millis(250)).await;
-    // The feature-enabled check crosses a blocking test seam before trying
-    // the lock. Advancing the clock makes the deadline due; await completion
-    // too, so a loaded blocking pool does not turn one yield into a race.
+    // Await completion as well as advancing the retry clock.
     tokio::time::resume();
     tokio::time::timeout(Duration::from_secs(5), async {
         while service.status().checking {
@@ -363,7 +368,7 @@ async fn runtime_busy_check_waits_and_reports_without_writing_state() {
         status.last_error.as_deref(),
         Some("another update is running; try again shortly")
     );
-    assert_eq!(std::fs::read(f.data.state_file()).ok(), before);
+    assert_eq!(std::fs::read(f.data.state_file()).ok(), published);
     assert_eq!(f.server.requests(), 0);
     // A persisted result from a different process takes precedence.
     let mut state = f.updater.state();
@@ -375,11 +380,137 @@ async fn runtime_busy_check_waits_and_reports_without_writing_state() {
     drop(lock);
 }
 
+#[tokio::test]
+async fn runtime_nonbusy_failure_replaces_busy_and_is_superseded() {
+    for scheduled in [false, true] {
+        let f = Fixture::new().await;
+        let service = service(&f, "notify");
+        tokio::time::pause();
+        let lock = f.updater.lock().unwrap();
+        assert!(matches!(
+            service.check_once().await,
+            Some(Err(UpdateError::Busy))
+        ));
+        assert!(
+            service
+                .status()
+                .last_error
+                .unwrap()
+                .contains("another update")
+        );
+        drop(lock);
+        tokio::time::resume();
+        let before = std::fs::read(f.data.state_file()).ok();
+        let mut changed = config("notify");
+        changed.proxy_url = "socks5://user:secret@127.0.0.1:1080".into();
+        service.set_config(&changed);
+        if scheduled {
+            service.start(Duration::ZERO);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !service
+                    .status()
+                    .last_error
+                    .is_some_and(|error| error.contains("SOCKS"))
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("scheduled failure replaces the busy result");
+            service.stop_and_wait().await;
+        } else {
+            assert!(service.check_once().await.unwrap().is_err());
+        }
+        let status = service.status();
+        let error = status.last_error.unwrap();
+        assert!(error.contains("SOCKS"), "{error}");
+        assert!(
+            !error.contains("another update") && !error.contains("secret"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(f.data.state_file()).ok(), before);
+        let _lock = f.updater.lock().unwrap();
+        let mut state = f.updater.state();
+        state.last_result = Some("up-to-date".into());
+        f.updater.save(&state).unwrap();
+        assert_eq!(service.status().last_result, state.last_result);
+        assert!(service.status().last_error.is_none());
+    }
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_status_releases_live_mutex_and_preserves_a_newer_error() {
+    let f = Fixture::new().await;
+    let factory: crate::background::MakeFetch =
+        std::sync::Arc::new(|proxy| Err(FetchError::Proxy(proxy.to_owned())));
+    let mut changed = config("notify");
+    changed.proxy_url = "first failure".into();
+    let service = UpdateService::new(f.updater.clone(), factory, &changed);
+    assert!(service.check_once().await.unwrap().is_err());
+    {
+        let _lock = f.updater.lock().unwrap();
+        let mut state = f.updater.state();
+        state.last_result = Some("up-to-date".into());
+        f.updater.save(&state).unwrap();
+    }
+    let (held, arrived) =
+        crate::test_seams::held::Held::new(f.data.root(), "auto.before_status_state");
+    let reader = std::thread::spawn({
+        let service = service.clone();
+        move || service.status()
+    });
+    let (ready, receive) = tokio::sync::oneshot::channel();
+    let (done, finished) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        let result = (|| {
+            arrived
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            ready.send(()).map_err(|_| "runtime stopped".to_owned())?;
+            finished
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())
+        })();
+        drop(held);
+        result
+    });
+    receive.await.unwrap();
+    changed.proxy_url = "newer failure".into();
+    service.set_config(&changed);
+    assert!(service.check_once().await.unwrap().is_err());
+    let _ = done.send(());
+    observer
+        .join()
+        .unwrap()
+        .expect("status I/O must not hold the live mutex");
+    assert_eq!(
+        reader.join().unwrap().last_result.as_deref(),
+        Some("up-to-date")
+    );
+    assert!(
+        service
+            .status()
+            .last_error
+            .unwrap()
+            .contains("newer failure")
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn runtime_busy_check_retries_and_success_replaces_the_error() {
     let f = Fixture::new().await;
     f.release("0.2.0");
-    let service = service(&f, "notify");
+    let setups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let factory = {
+        let setups = setups.clone();
+        let http = http_fetch();
+        std::sync::Arc::new(move |proxy: &str| {
+            setups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            http(proxy)
+        }) as crate::background::MakeFetch
+    };
+    let service = UpdateService::new(f.updater.clone(), factory, &config("notify"));
     let lock = f.updater.lock().unwrap();
     let checking = tokio::spawn({
         let service = service.clone();
@@ -392,6 +523,7 @@ async fn runtime_busy_check_retries_and_success_replaces_the_error() {
         Some(Err(UpdateError::Busy))
     ));
     assert!(service.status().last_error.is_some());
+    assert_eq!(setups.load(std::sync::atomic::Ordering::SeqCst), 0);
     let checking = tokio::spawn({
         let service = service.clone();
         async move { service.check_once().await }
@@ -403,6 +535,7 @@ async fn runtime_busy_check_retries_and_success_replaces_the_error() {
     tokio::time::resume();
     assert!(checking.await.unwrap().unwrap().is_ok());
     assert_eq!(service.status().last_error, None);
+    assert_eq!(setups.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -420,6 +553,75 @@ async fn runtime_busy_check_stops_when_updates_turn_off() {
     assert!(checking.await.unwrap().is_none());
     assert!(!service.status().checking);
     assert_eq!(service.status().last_error, None);
+    assert_eq!(f.server.requests(), 0);
+}
+
+#[tokio::test]
+async fn runtime_scheduled_busy_check_reports_the_next_interval() {
+    let f = Fixture::new().await;
+    let service = service(&f, "notify");
+    let _lock = f.updater.lock().unwrap();
+    let logs = crate::background::test_log::Capture::default();
+    // This current-thread runtime also polls the timer task on this thread.
+    let _subscriber = tracing::subscriber::set_default(logs.clone());
+    service.start(Duration::ZERO);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !logs
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("update check deferred"))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    service.stop_and_wait().await;
+    let events = logs.0.lock().unwrap();
+    let event = events
+        .iter()
+        .find(|line| line.contains("update check deferred"))
+        .unwrap();
+    assert!(
+        event.contains("next interval") && !event.contains("shortly"),
+        "{event}"
+    );
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(start_paused = true)]
+async fn runtime_lock_retake_after_probe_returns_busy() {
+    let f = Fixture::new().await;
+    let service = service(&f, "notify");
+    let (held, arrived) = crate::test_seams::held::Held::new(f.data.root(), "auto.before_check");
+    let (ready, receive) = tokio::sync::oneshot::channel();
+    let observer = std::thread::spawn(move || {
+        arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+        ready.send(()).unwrap();
+    });
+    let checking = tokio::spawn({
+        let service = service.clone();
+        async move { service.check_once().await }
+    });
+    receive.await.unwrap();
+    observer.join().unwrap();
+    let _lock = f.updater.lock().unwrap();
+    drop(held);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::time::resume();
+    assert!(matches!(
+        checking.await.unwrap(),
+        Some(Err(UpdateError::Busy))
+    ));
+    assert!(
+        service
+            .status()
+            .last_error
+            .unwrap()
+            .contains("another update")
+    );
     assert_eq!(f.server.requests(), 0);
 }
 

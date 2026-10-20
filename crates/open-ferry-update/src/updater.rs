@@ -1142,7 +1142,16 @@ impl Updater {
     /// The status, for `settings`.
     pub fn status(&self, settings: &Settings, install: &Install) -> Status {
         let state = self.state();
-        let installed = self.installed_version(&state);
+        self.status_with_state(settings, install, &state)
+    }
+
+    pub(crate) fn status_with_state(
+        &self,
+        settings: &Settings,
+        install: &Install,
+        state: &State,
+    ) -> Status {
+        let installed = self.installed_version(state);
         let update_available = state.latest.as_deref().is_some_and(|latest| {
             semver::Version::parse(latest)
                 .is_ok_and(|latest| release::compare(&installed, &latest) == Verdict::Newer)
