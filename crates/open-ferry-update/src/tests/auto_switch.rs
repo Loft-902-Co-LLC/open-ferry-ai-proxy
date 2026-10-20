@@ -837,7 +837,7 @@ async fn a_switch_follower_logs_its_outcome_after_update_checks_stop() {
             loop {
                 if logs.0.lock().unwrap().iter().any(|line| {
                     line.starts_with("INFO")
-                        && line.contains("automatic switch finished")
+                        && line.contains("automatic switch reported a result")
                         && line.contains("failed-to-load")
                 }) {
                     break;
