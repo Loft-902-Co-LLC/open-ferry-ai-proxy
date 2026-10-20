@@ -313,6 +313,8 @@ class PublishedPreconditions(unittest.TestCase):
         with patch.object(qualification, "command", side_effect=[Mock(returncode=1), Mock(returncode=0)]) as run:
             qualification.verify_release_signature(self.work, "1.2.3", ["other-key", self.key])
         self.assertEqual(run.call_count, 2)
+        self.assertTrue(all(call.kwargs == {"check": False, "sensitive": True}
+                            for call in run.call_args_list), "public-key arguments must stay out of diagnostics")
         self.assertEqual(run.call_args.args[0], ["minisign", "-Vm", self.work / "SHA256SUMS", "-x",
                                                self.work / "SHA256SUMS.minisig", "-P", self.key])
         with patch.object(qualification, "command", return_value=Mock(returncode=1)), \
