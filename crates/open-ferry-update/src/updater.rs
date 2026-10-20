@@ -212,6 +212,13 @@ impl From<ArchiveError> for UpdateError {
     }
 }
 
+fn blocking_error(what: &'static str) -> impl FnOnce(tokio::task::JoinError) -> UpdateError {
+    move |error| UpdateError::Io {
+        what,
+        error: error.to_string(),
+    }
+}
+
 fn io_error(what: &'static str) -> impl FnOnce(io::Error) -> UpdateError {
     move |error| UpdateError::Io {
         what,
@@ -663,22 +670,12 @@ impl Updater {
         // are corrupt: only recovery may decide what is safe to run instead.
         if dir.exists()
             && keep.contains(version)
-            && hash_file(&path).ok().as_deref() != Some(sha256.as_str())
+            && !self.hash_matches(path.clone(), sha256.clone()).await?
         {
             return Err(UpdateError::VersionInUse(version.to_owned()));
         }
-        let staging = StagingDir::create(&self.data.versions())
-            .map_err(io_error("make the staging directory"))?;
+        let staging = self.write_staging(binary).await?;
         let staged = staging.0.join(self.binary_name());
-        let mut file = crate::staging::create_staged_file(&staged)
-            .map_err(io_error("write the staged binary"))?;
-        file.write_all(&binary)
-            .map_err(io_error("write the staged binary"))?;
-        make_executable(&staged).map_err(io_error("make the staged binary executable"))?;
-        file.sync_all()
-            .map_err(io_error("sync the staged binary"))?;
-        drop(file);
-        sync_directory(&staging.0).map_err(io_error("sync the staging directory"))?;
 
         if let Err(reason) = self.try_binary(&staged, version).await {
             self.mutate_state_locked("stage-failed", |fresh| {
@@ -695,7 +692,7 @@ impl Updater {
             });
         }
         if dir.exists() {
-            if hash_file(&path).ok().as_deref() != Some(sha256.as_str()) {
+            if !self.hash_matches(path.clone(), sha256.clone()).await? {
                 // Recompute under the caller's lock immediately before deletion.
                 if self.retention_keep(state)?.contains(version) {
                     return Err(UpdateError::VersionInUse(version.to_owned()));
@@ -708,7 +705,11 @@ impl Updater {
             rename_directory_exclusive(&staging.0, &dir)
                 .map_err(io_error("publish the staged binary"))?;
         }
-        sync_directory(&self.data.versions()).map_err(io_error("sync the versions directory"))?;
+        let versions = self.data.versions();
+        tokio::task::spawn_blocking(move || sync_directory(&versions))
+            .await
+            .map_err(blocking_error("sync the versions directory"))?
+            .map_err(io_error("sync the versions directory"))?;
         self.mutate_state_locked("stage", |fresh| {
             fresh.latest = Some(version.to_owned());
             fresh.staged = Some(version.to_owned());
@@ -719,6 +720,51 @@ impl Updater {
             tracing::warn!(%error, "the update committed, but version cleanup was refused");
         }
         Ok(path)
+    }
+
+    /// Own only a private, unpublished directory in the blocking task. On
+    /// cancellation the task (or its discarded return value) drops that guard
+    /// and removes its files. It cannot rename a version or write state after
+    /// the caller has released its update lock. Probe and publication remain
+    /// with the caller, after all writes and syncs have completed.
+    async fn write_staging(&self, binary: Vec<u8>) -> Result<StagingDir, UpdateError> {
+        let versions = self.data.versions();
+        let name = self.binary_name();
+        #[cfg(feature = "blue-green-test")]
+        let root = self.data.root().to_owned();
+        tokio::task::spawn_blocking(move || {
+            let staging =
+                StagingDir::create(&versions).map_err(io_error("make the staging directory"))?;
+            #[cfg(feature = "blue-green-test")]
+            crate::test_seams::hit(&root, "stage.before_write")
+                .map_err(io_error("wait before writing the staged binary"))?;
+            let staged = staging.0.join(name);
+            let mut file = crate::staging::create_staged_file(&staged)
+                .map_err(io_error("write the staged binary"))?;
+            file.write_all(&binary)
+                .map_err(io_error("write the staged binary"))?;
+            make_executable(&staged).map_err(io_error("make the staged binary executable"))?;
+            #[cfg(feature = "blue-green-test")]
+            crate::test_seams::hit(&root, "stage.before_sync")
+                .map_err(io_error("wait before syncing the staged binary"))?;
+            file.sync_all()
+                .map_err(io_error("sync the staged binary"))?;
+            drop(file);
+            sync_directory(&staging.0).map_err(io_error("sync the staging directory"))?;
+            Ok(staging)
+        })
+        .await
+        .map_err(blocking_error("write and sync the staged binary"))?
+    }
+
+    /// Read-only owned work is safe even if the check drops its lock while
+    /// the hash is in flight. Recheck every byte; metadata is not integrity.
+    async fn hash_matches(&self, path: PathBuf, expected: String) -> Result<bool, UpdateError> {
+        tokio::task::spawn_blocking(move || {
+            hash_file(&path).ok().as_deref() == Some(expected.as_str())
+        })
+        .await
+        .map_err(blocking_error("hash the staged binary"))
     }
 
     /// The automatic check, in `mode` (`auto` or `notify`): finds the
