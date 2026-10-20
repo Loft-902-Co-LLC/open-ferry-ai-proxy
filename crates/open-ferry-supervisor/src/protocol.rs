@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{io, net::SocketAddr, path::PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
+// Optional reply fields are additive and do not change the negotiated version.
 pub const VERSION: u32 = 1;
 /// Capabilities every worker must advertise before receiving welcome.
 pub const REQUIRED_CAPS: &[&str] = &[];
@@ -168,6 +169,18 @@ pub enum EndpointRequest {
     Unknown,
 }
 
+/// Optional endpoint refusal kinds. Unknown future codes keep the human reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointErrorCode {
+    NothingToCancel,
+    SwitchingDisabled,
+    NoPrevious,
+    RollbackTargetMismatch,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EndpointReply {
@@ -204,6 +217,8 @@ pub enum EndpointReply {
     },
     Error {
         v: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<EndpointErrorCode>,
         reason: String,
     },
     Unsupported {
@@ -366,6 +381,68 @@ mod tests {
         );
         assert!(negotiate(0, 1, 1).is_err());
     }
+    #[test]
+    fn endpoint_refusal_codes_round_trip() {
+        for (code, wire) in [
+            (EndpointErrorCode::NothingToCancel, "nothing_to_cancel"),
+            (EndpointErrorCode::SwitchingDisabled, "switching_disabled"),
+            (EndpointErrorCode::NoPrevious, "no_previous"),
+            (
+                EndpointErrorCode::RollbackTargetMismatch,
+                "rollback_target_mismatch",
+            ),
+        ] {
+            let reply = EndpointReply::Error {
+                v: VERSION,
+                code: Some(code),
+                reason: "human diagnostic".into(),
+            };
+            let json = serde_json::json!({
+                "type": "error", "v": 1, "code": wire, "reason": "human diagnostic",
+            });
+            assert_eq!(serde_json::to_value(&reply).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<EndpointReply>(json).unwrap(),
+                reply
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_refusals_without_codes_keep_the_old_wire_shape() {
+        let json = serde_json::json!({"type": "error", "v": 1, "reason": "busy"});
+        let reply = EndpointReply::Error {
+            v: VERSION,
+            code: None,
+            reason: "busy".into(),
+        };
+        assert_eq!(
+            serde_json::from_value::<EndpointReply>(json.clone()).unwrap(),
+            reply
+        );
+        assert_eq!(serde_json::to_value(reply).unwrap(), json);
+    }
+
+    #[test]
+    fn future_endpoint_refusal_codes_preserve_the_reason() {
+        let reply = serde_json::from_value::<EndpointReply>(serde_json::json!({
+            "type": "error", "v": 1, "code": "future_code", "reason": "future diagnostic",
+        }))
+        .unwrap();
+        assert_eq!(
+            reply,
+            EndpointReply::Error {
+                v: VERSION,
+                code: Some(EndpointErrorCode::Unknown),
+                reason: "future diagnostic".into(),
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<EndpointReply>(serde_json::to_value(&reply).unwrap()).unwrap(),
+            reply
+        );
+    }
+
     // Not upstream's: additive fields and unknown types retain transport compatibility.
     #[tokio::test]
     async fn frames() {

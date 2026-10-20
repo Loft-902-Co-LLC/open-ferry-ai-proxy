@@ -65,8 +65,8 @@ Every error is a status and a body:
 | 409 | `switch_failed` | Preparation failed without a more specific code, the endpoint was untrusted or unreachable before sending, automatic updates were off, or the release was skipped. |
 | 409 | `not_supervised` | This install has no supervisor; `message` gives command-line update and restart instructions. |
 | 409 | `update_busy` | An update check or mutation holds the update lock; try again shortly. |
-| 409 | `switching_disabled` | Switching is disabled; the request was not sent. The reason is fixed and omits policy paths. |
-| 409 | `rollback_target_changed` | The confirmed rollback target changed or disappeared; read status and confirm again. Nothing was sent. |
+| 409 | `switching_disabled` | Switching is disabled locally or refused by the supervisor before acceptance. The reason is fixed and omits policy paths. |
+| 409 | `rollback_target_changed` | The confirmed rollback target changed or disappeared; read status and confirm again. The switch was not started. |
 | 409 | `already_latest` | The latest release is already running, or the running version is newer. Nothing was sent; show this as information. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
@@ -716,9 +716,9 @@ An acceptance timeout, a protocol error after sending the switch request, or a s
 
 The client returns at acceptance. Later switch failures are observed through `supervisor.last_switch`, including its reason. As a defensive fallback for a client returning `Ended` directly, the route maps it to `202 {"failed": true, "reason": "...", "request_id": "..."}` and a failed `switch_request`; this is not expected from the current install or rollback path.
 
-A supervisor refusal before the response returns `409 switch_refused` with its reason unchanged in `message`. A local preparation failure (download, verification, missing staged release, I/O or journal error) returns `409 switch_failed` with a short reason; detailed diagnostics go to the server log. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
+A supervisor refusal without a recognized specific code before the response returns `409 switch_refused` with its reason unchanged in `message`. A local preparation failure (download, verification, missing staged release, I/O or journal error) returns `409 switch_failed` with a short reason; detailed diagnostics go to the server log. A plain install returns `409 not_supervised` with command-line update and restart instructions. A server without update checks returns `503 updates_unavailable`, as for the existing routes.
 
-Policy-disabled switching returns `409 switching_disabled`; a changed or removed rollback target returns `409 rollback_target_changed`; an already-running latest release returns `409 already_latest`. These are not sent. A pre-send timeout or a failed write before any byte is accepted is `Unreachable`, also not sent. Client preparation task failures are `Update` errors and not sent. `TimedOut`, `Stopped` and `Protocol` remain uncertain; read status rather than resending.
+Policy-disabled switching returns `409 switching_disabled`; a changed or removed rollback target returns `409 rollback_target_changed`; an already-running latest release returns `409 already_latest`. Disabled switching and rollback target changes may be found locally before sending or returned as typed refusals by the supervisor before acceptance; neither starts a switch. An already-running latest release is not sent. A pre-send timeout or a failed write before any byte is accepted is `Unreachable`, also not sent. Client preparation task failures are `Update` errors and not sent. `TimedOut`, `Stopped` and `Protocol` remain uncertain; read status rather than resending.
 
 ---
 

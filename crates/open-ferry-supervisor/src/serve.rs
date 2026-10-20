@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::core::{Command, SwitchRequest};
 use crate::endpoint::Server;
-use crate::protocol::{Channel, EndpointReply, EndpointRequest, Frame, VERSION};
+use crate::protocol::{Channel, EndpointErrorCode, EndpointReply, EndpointRequest, Frame, VERSION};
 use crate::snapshot::{CancelAnswer, Shared};
 
 /// How long a client has to send its request line.
@@ -37,8 +37,13 @@ impl Serve {
 }
 
 fn error(reason: &str) -> EndpointReply {
+    refusal(None, reason)
+}
+
+fn refusal(code: Option<EndpointErrorCode>, reason: &str) -> EndpointReply {
     EndpointReply::Error {
         v: VERSION,
+        code,
         reason: reason.to_owned(),
     }
 }
@@ -112,7 +117,10 @@ where
             let reply = match serve.shared.request_cancel() {
                 CancelAnswer::Cancelled => EndpointReply::Cancelled { v: VERSION },
                 CancelAnswer::TooLate => EndpointReply::TooLate { v: VERSION },
-                CancelAnswer::Nothing => error("nothing is switching"),
+                CancelAnswer::Nothing => refusal(
+                    Some(EndpointErrorCode::NothingToCancel),
+                    "nothing is switching",
+                ),
             };
             let _ = channel.send(&reply).await;
         }
@@ -133,7 +141,10 @@ where
                 // Answered from the snapshot, without the core (v3 3.8).
                 tracing::debug!("switching is disabled: {why}");
                 let _ = channel
-                    .send(&error("switching is disabled; see the supervisor log"))
+                    .send(&refusal(
+                        Some(EndpointErrorCode::SwitchingDisabled),
+                        "switching is disabled; see the supervisor log",
+                    ))
                     .await;
                 return;
             }
@@ -274,9 +285,13 @@ mod tests {
     async fn cancel_is_answered_from_the_snapshot() {
         let (serve, _rx) = serve();
         let replies = ask(&serve, serde_json::json!({"type": "cancel", "v": 1})).await;
-        assert!(
-            matches!(&replies[..], [EndpointReply::Error { reason, .. }] if reason.contains("nothing"))
-        );
+        assert!(matches!(
+            &replies[..],
+            [EndpointReply::Error {
+                code: Some(EndpointErrorCode::NothingToCancel),
+                ..
+            }]
+        ));
         let mut snapshot = crate::snapshot::Snapshot::default();
         snapshot.switch = Some(crate::snapshot::SwitchView {
             id: "sw".to_owned(),
@@ -388,11 +403,95 @@ mod tests {
         });
         let replies = ask(&serve, request).await;
         assert!(
-            matches!(&replies[..], [EndpointReply::Error { reason, .. }]
+            matches!(&replies[..], [EndpointReply::Error { code: Some(EndpointErrorCode::SwitchingDisabled), reason, .. }]
                 if reason == "switching is disabled; see the supervisor log"),
             "{replies:?}"
         );
         assert!(rx.try_recv().is_err(), "the core was never asked");
+    }
+
+    // Exercise the actual core validator through the endpoint, with no worker spawn.
+    async fn rollback_refusal(
+        previous: Option<open_ferry_update::journal::Artifact>,
+        to: &str,
+        sha256: &str,
+    ) {
+        let mut rig = crate::testkit::Rig::new().await;
+        rig.rt.as_mut().unwrap().journal.as_mut().unwrap().previous = previous.clone();
+        let serve = Serve::new(rig.command_tx.clone(), rig.shared.clone());
+        let request = serde_json::json!({
+            "type": "switch", "v": 1, "to": to, "sha256": sha256, "pin": "",
+            "how": "rollback", "auto": false,
+            "admitted": {"while_off": false, "mode_gen": 0},
+        });
+        let mut core = crate::testkit::core_of!(rig);
+        let run_core = async {
+            let Some(Command::Switch { request, replies }) = core.commands.recv().await else {
+                panic!("no switch command");
+            };
+            core.handle_switch(request, replies).await;
+        };
+        let (replies, ()) = tokio::join!(ask(&serve, request), run_core);
+        let (code, reason) = if previous.is_none() {
+            (
+                EndpointErrorCode::NoPrevious,
+                "there is no previous version to roll back to",
+            )
+        } else {
+            (
+                EndpointErrorCode::RollbackTargetMismatch,
+                "that is not the version to roll back to",
+            )
+        };
+        assert_eq!(
+            replies,
+            [EndpointReply::Error {
+                v: VERSION,
+                code: Some(code),
+                reason: reason.into()
+            }]
+        );
+        assert!(!core.rt.switching);
+        assert!(rig.disk.order().is_empty());
+        assert!(!rig.driver.log().iter().any(|line| line.contains("standby")));
+    }
+
+    #[tokio::test]
+    async fn a_rollback_without_a_previous_version_has_a_typed_refusal() {
+        rollback_refusal(None, "0.9.0", crate::testkit::SHA_3).await;
+    }
+
+    #[tokio::test]
+    async fn a_rollback_with_a_different_version_or_hash_has_a_typed_refusal() {
+        rollback_refusal(
+            Some(crate::testkit::artifact("0.9.0")),
+            "2.0.0",
+            crate::testkit::SHA_2,
+        )
+        .await;
+        rollback_refusal(
+            Some(crate::testkit::artifact("0.9.0")),
+            "0.9.0",
+            crate::testkit::SHA_2,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_core_also_codes_a_switch_disabled_after_the_snapshot_was_read() {
+        let mut rig = crate::testkit::Rig::new().await;
+        rig.rt.as_mut().unwrap().disabled = Some("private journal path".into());
+        let mut core = crate::testkit::core_of!(rig);
+        let (tx, mut rx) = unbounded_channel();
+        core.handle_switch(crate::testkit::update(false), tx).await;
+        assert_eq!(
+            crate::testkit::drain(&mut rx),
+            [EndpointReply::Error {
+                v: VERSION,
+                code: Some(EndpointErrorCode::SwitchingDisabled),
+                reason: "switching is disabled; see the supervisor log".into(),
+            }]
+        );
     }
 
     #[tokio::test]

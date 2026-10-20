@@ -22,7 +22,7 @@ use crate::core::{Core, Drain, Open, SwitchRequest, TICK, Tracked, Watch};
 use crate::disk::Disk;
 use crate::driver::{Driver, Event, ExitInfo, SpawnError, WorkerId};
 use crate::host::Host;
-use crate::protocol::{Admission, EndpointReply, Message, Role, VERSION};
+use crate::protocol::{Admission, EndpointErrorCode, EndpointReply, Message, Role, VERSION};
 use crate::snapshot::SwitchView;
 use crate::startup::Run;
 
@@ -67,6 +67,33 @@ enum Shaken {
 pub(crate) enum Ended {
     Result(Value),
     Stopped,
+}
+
+/// Admission failures keep their kind from validation through the endpoint reply.
+struct Refusal {
+    code: Option<EndpointErrorCode>,
+    reason: String,
+}
+
+impl Refusal {
+    fn coded(code: EndpointErrorCode, reason: &str) -> Self {
+        Self {
+            code: Some(code),
+            reason: reason.to_owned(),
+        }
+    }
+}
+
+impl From<String> for Refusal {
+    fn from(reason: String) -> Self {
+        Self { code: None, reason }
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(reason: &str) -> Self {
+        reason.to_owned().into()
+    }
 }
 
 type Replies = UnboundedSender<EndpointReply>;
@@ -210,6 +237,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                     Some(crate::core::Command::Switch { replies, .. }) => {
                         say(&replies, EndpointReply::Error {
                             v: VERSION,
+                            code: None,
                             reason: "busy: switching".to_owned(),
                         });
                     }
@@ -471,17 +499,24 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
 
     /// The public entry point: one `switch` request (5.1 step 0).
     pub(crate) async fn handle_switch(&mut self, request: SwitchRequest, replies: Replies) {
-        let refuse = |reason: String| {
-            say(&replies, EndpointReply::Error { v: VERSION, reason });
+        let refuse = |refusal: Refusal| {
+            say(
+                &replies,
+                EndpointReply::Error {
+                    v: VERSION,
+                    code: refusal.code,
+                    reason: refusal.reason,
+                },
+            );
         };
         if self.rt.stop_requested {
-            return refuse("the supervisor is stopping".to_owned());
+            return refuse("the supervisor is stopping".into());
         }
         if self.rt.switching {
-            return refuse("busy: switching".to_owned());
+            return refuse("busy: switching".into());
         }
         if self.rt.returning.is_some() {
-            return refuse("busy: recovering from a failed switch".to_owned());
+            return refuse("busy: recovering from a failed switch".into());
         }
         // An install that fell due while an earlier switch's handler ran goes
         // first: back-to-back switches can't starve it.
@@ -490,14 +525,17 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             self.try_install().await;
         }
         if self.rt.watch.is_some() && request.how == How::Update {
-            return refuse("busy: watching".to_owned());
+            return refuse("busy: watching".into());
         }
         if let Some(why) = &self.rt.disabled {
             tracing::debug!("switching is disabled: {why}");
-            return refuse("switching is disabled; see the supervisor log".to_owned());
+            return refuse(Refusal::coded(
+                EndpointErrorCode::SwitchingDisabled,
+                "switching is disabled; see the supervisor log",
+            ));
         }
         if self.rt.journal.is_none() {
-            return refuse("there is no journal".to_owned());
+            return refuse("there is no journal".into());
         }
         // The last switch's cleanup waits for a durable journal (its hand over
         // file, its pin). A new switch would write its own file under it, so
@@ -506,7 +544,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
         if self.cleanup_pending() {
             let _ = self.write_journal("J-retry");
             if self.cleanup_pending() {
-                return refuse("busy: finishing the last switch's cleanup".to_owned());
+                return refuse("busy: finishing the last switch's cleanup".into());
             }
         }
         let Some((active, from)) = self
@@ -516,7 +554,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             .filter(|(_, w)| !w.lost)
             .map(|(id, w)| (id, w.artifact.clone()))
         else {
-            return refuse("there is no active worker".to_owned());
+            return refuse("there is no active worker".into());
         };
         // 5.3: the supervisor stamps the admission from its own reading; what
         // the client sent is not trusted.
@@ -532,7 +570,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             );
         }
         if request.auto && !reading.auto {
-            return refuse("automatic updates are not on".to_owned());
+            return refuse("automatic updates are not on".into());
         }
         let to = match self.validate_target(&request, &from).await {
             Ok(to) => to,
@@ -606,6 +644,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 &replies,
                 EndpointReply::Error {
                     v: VERSION,
+                    code: None,
                     reason: "the supervisor is stopping".to_owned(),
                 },
             ),
@@ -617,7 +656,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
         &mut self,
         request: &SwitchRequest,
         from: &Artifact,
-    ) -> Result<Artifact, String> {
+    ) -> Result<Artifact, Refusal> {
         self.prune_automatic_cooldowns();
         if request.auto {
             let journal = self.rt.journal.as_ref().ok_or("there is no journal")?;
@@ -642,11 +681,11 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                     && outcome.record.from == request.to;
             }
             if failed {
-                return Err("that version failed here; automatic switching skips it".to_owned());
+                return Err("that version failed here; automatic switching skips it".into());
             }
             if rolled_back {
                 return Err(
-                    "that version was rolled back from; automatic switching skips it".to_owned(),
+                    "that version was rolled back from; automatic switching skips it".into(),
                 );
             }
             let records: Vec<_> = state
@@ -669,7 +708,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
             self.prune_automatic_cooldowns();
             if self.automatic_cooldowns.contains_key(&request.to) {
                 return Err(
-                    "a recent switch to that version did not finish; trying again later".to_owned(),
+                    "a recent switch to that version did not finish; trying again later".into(),
                 );
             }
         }
@@ -683,7 +722,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                         "the pin was refused".to_owned()
                     })?;
                 if request.sha256.eq_ignore_ascii_case(&from.sha256) {
-                    return Err("that version is already running".to_owned());
+                    return Err("that version is already running".into());
                 }
             }
             How::Rollback => {
@@ -697,12 +736,18 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                     None => journal.previous.clone(),
                 };
                 let Some(expected) = expected else {
-                    return Err("there is no previous version to roll back to".to_owned());
+                    return Err(Refusal::coded(
+                        EndpointErrorCode::NoPrevious,
+                        "there is no previous version to roll back to",
+                    ));
                 };
                 if expected.version != request.to
                     || !expected.sha256.eq_ignore_ascii_case(&request.sha256)
                 {
-                    return Err("that is not the version to roll back to".to_owned());
+                    return Err(Refusal::coded(
+                        EndpointErrorCode::RollbackTargetMismatch,
+                        "that is not the version to roll back to",
+                    ));
                 }
             }
         }
@@ -729,12 +774,12 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                 Ok(text) => {
                     tracing::warn!("the rollback target's --version printed {text:?}");
                     return Err(
-                        "the rollback target's --version printed a different version".to_owned(),
+                        "the rollback target's --version printed a different version".into(),
                     );
                 }
                 Err(why) => {
                     tracing::warn!("the rollback target's --version failed: {why}");
-                    return Err("the rollback target's --version failed".to_owned());
+                    return Err("the rollback target's --version failed".into());
                 }
             }
         }
@@ -1173,6 +1218,7 @@ impl<D: Driver, H: Host, S: Disk> Core<'_, D, H, S> {
                     Some(crate::core::Command::Switch { replies, .. }) => {
                         say(&replies, EndpointReply::Error {
                             v: VERSION,
+                            code: None,
                             reason: "busy: switching".to_owned(),
                         });
                     }

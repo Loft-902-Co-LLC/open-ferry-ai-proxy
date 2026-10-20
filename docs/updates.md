@@ -190,6 +190,29 @@ minisign prints `Signature and comment signature verified` and the trusted comme
 - **The dashboard's About page** shows the status: the mode and what set it, the versions, the last and next check and what the last one found, and what to do next, such as a restart or `open-ferry update`. It has a Check now while updates aren't off. For a supervised install it also has Install now, for a newer release, and Roll back, to the version the supervisor kept. Each asks for confirmation, and the Updates card follows preparation, handover and the watch window. A plain install shows the command to run on the server instead.
 - **The dashboard API** has the status, `GET /open-ferry/api/v1/update`, a check now, `POST /open-ferry/api/v1/update/check`, and, for a supervised install, `POST /open-ferry/api/v1/update/install` and `POST /open-ferry/api/v1/update/rollback` ([docs/dashboard-api.md](dashboard-api.md#updates)).
 
+## Supervisor endpoint refusal codes
+
+The local supervisor endpoint uses version 1 newline-delimited JSON. Refusals keep
+`reason` as human text and may add an optional `code`, for example:
+
+```json
+{"type":"error","v":1,"code":"switching_disabled","reason":"switching is disabled; see the supervisor log"}
+```
+
+The codes callers distinguish are `nothing_to_cancel`, `switching_disabled`,
+`no_previous` and `rollback_target_mismatch`. Cancellation maps `nothing_to_cancel`
+to no switch in progress. Switching-disabled refusals use the same typed error as
+local disabled policy. The two rollback refusals use the same typed errors as a
+locally missing or changed rollback target, so the dashboard returns
+`rollback_target_changed` and asks for fresh confirmation. A mismatch keeps the
+requested version as `expected`; no current target is disclosed (`actual` is absent).
+
+This optional field is additive, so the protocol version stays 1. Missing and
+unknown codes remain generic refusals with the human reason. No released older
+supervisor needs a text-matching fallback; callers never use `reason` to identify
+these cases. Errors after acceptance remain terminal switch errors, regardless of
+code.
+
 ## CLIProxyAPI
 
 CLIProxyAPI doesn't update its own binary; it downloads its management panel's web page, and keeps that up to date unless `remote-management.disable-auto-update-panel` is on. open-ferry downloads no panel: its dashboard is built in. CLIProxyAPI's loader ignores the `self-update` section. Its management API's v0 writes to a config in the v8 layout comment the section out, and its v8 writes refuse a file that has it ([UPSTREAM.md](../UPSTREAM.md#added-in-open-ferry-updates)).

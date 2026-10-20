@@ -455,6 +455,54 @@ async fn rollback_does_not_send_when_the_confirmed_target_changes_or_disappears(
     }
 }
 
+// Local preparation succeeds; these errors come back from the switcher after sending.
+#[tokio::test(start_paused = true)]
+async fn typed_supervisor_refusals_reach_the_http_api_after_preparation() {
+    use open_ferry_update::{SwitchError, UpdateError};
+    for (error, path, code, reason) in [
+        (
+            SwitchError::Disabled("switching is disabled; see the supervisor log".into()),
+            INSTALL,
+            "switching_disabled",
+            "switching is disabled",
+        ),
+        (
+            SwitchError::Update(UpdateError::NoPrevious),
+            ROLLBACK,
+            "rollback_target_changed",
+            "the rollback target changed; read status and confirm again",
+        ),
+        (
+            SwitchError::Update(UpdateError::RollbackChanged {
+                expected: "0.0.9".into(),
+                actual: None,
+            }),
+            ROLLBACK,
+            "rollback_target_changed",
+            "the rollback target changed; read status and confirm again",
+        ),
+    ] {
+        let fake = Switcher::new(Duration::ZERO, None);
+        *fake.error.lock().unwrap() = Some(error);
+        let (dash, _scratch) = supervised(fake.clone());
+        assert_eq!(
+            dash.call(Method::POST, path, switch_body(path))
+                .await
+                .error(StatusCode::CONFLICT, code),
+            reason
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "local checks passed and the supervisor was asked"
+        );
+        let body = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(body["switch_request"]["state"], "failed");
+        assert_eq!(body["switch_request"]["pending"], false);
+        assert_eq!(body["switch_request"]["reason"], reason);
+    }
+}
+
 #[tokio::test]
 async fn rollback_requires_the_confirmed_target() {
     let fake = Switcher::new(Duration::ZERO, None);
