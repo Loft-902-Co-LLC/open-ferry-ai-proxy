@@ -115,6 +115,26 @@ async fn runtime_retained_binary_hashes_remain_responsive() {
 
 #[cfg(feature = "blue-green-test")]
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_hash_matches_remains_responsive() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    // An existing unrecorded path exercises the before-delete integrity
+    // comparison, through the same helper used for rollback validation.
+    std::fs::create_dir_all(f.data.version_dir("0.2.0")).unwrap();
+    std::fs::write(
+        f.data.binary("0.2.0", f.updater.binary_name()),
+        b"untrusted",
+    )
+    .unwrap();
+    responsive_at(&f, "stage.before_hash_match").await;
+    assert_eq!(
+        std::fs::read(f.data.binary("0.2.0", f.updater.binary_name())).unwrap(),
+        good_binary("0.2.0")
+    );
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
 async fn runtime_staging_write_and_sync_remain_responsive() {
     for seam in ["stage.before_write", "stage.before_sync"] {
         let f = Fixture::new().await;

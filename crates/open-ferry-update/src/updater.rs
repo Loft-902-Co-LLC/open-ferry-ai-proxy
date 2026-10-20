@@ -800,7 +800,11 @@ impl Updater {
     /// Read-only owned work is safe even if the check drops its lock while
     /// the hash is in flight. Recheck every byte; metadata is not integrity.
     async fn hash_matches(&self, path: PathBuf, expected: String) -> Result<bool, UpdateError> {
+        #[cfg(feature = "blue-green-test")]
+        let root = self.data.root().to_path_buf();
         tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "blue-green-test")]
+            let _ = crate::test_seams::hit(&root, "stage.before_hash_match");
             hash_file(&path).ok().as_deref() == Some(expected.as_str())
         })
         .await
