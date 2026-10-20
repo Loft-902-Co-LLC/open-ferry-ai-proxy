@@ -613,6 +613,22 @@ class Qualification:
         self.root_auth = self.root_auth_config = None
         self.root_auth_dirs = []
 
+    def show_failed_install(self):
+        # init prints its keys only once the config is written: with no
+        # config the output holds none, and with one its keys are redacted.
+        failure = WORK / "private-command-failure.txt"
+        if not failure.is_file():
+            return
+        if self.config.exists():
+            try:
+                config = yaml.safe_load(self.config.read_text(encoding="utf-8"))
+                keys = [config["management"]["secret-key"], *config["access"]["api-keys"]]
+            except Exception:
+                record("Installer output withheld: its config exists but its keys couldn't be read")
+                return
+            SECRETS.extend(key for key in keys if key)
+        record("Installer output:\n" + failure.read_text(encoding="utf-8"))
+
     def install(self, base):
         if not self.published:
             self.env["OPEN_FERRY_INSTALL_BASE_URL"] = base
@@ -636,7 +652,11 @@ class Qualification:
                 self.prepare_root_auth()
             if self.published:
                 command(["gh", "auth", "status"], env=self.env, sensitive=True)
-            installed = command(args, env=self.env, sensitive=True, timeout=180)
+            try:
+                installed = command(args, env=self.env, sensitive=True, timeout=180)
+            except RuntimeError:
+                self.show_failed_install()
+                raise
         finally:
             self.remove_root_auth()
         if self.published:
