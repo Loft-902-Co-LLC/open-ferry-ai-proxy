@@ -140,6 +140,7 @@ pub enum UpdateError {
     /// The rollback target changed after the caller confirmed it.
     RollbackChanged {
         expected: String,
+        /// The current version, when known; absent or undisclosed otherwise.
         actual: Option<String>,
     },
     /// There is no earlier version to roll back to.
@@ -178,9 +179,10 @@ impl fmt::Display for UpdateError {
             Self::NotNewer { running, latest } if running == latest => write!(f, "already running the latest release, open-ferry {running}"),
             Self::NotNewer { running, latest } => write!(f, "open-ferry {running} is already running; the latest release is {latest}, which is not newer"),
             Self::NothingStaged => f.write_str("no version is staged"),
-            Self::RollbackChanged { expected, actual } => write!(f,
-                "rollback target changed: expected {expected}, now {}; run `open-ferry update -check`",
-                actual.as_deref().unwrap_or("none")),
+            Self::RollbackChanged { expected, actual: Some(actual) } => write!(f,
+                "rollback target changed: expected {expected}, now {actual}; run `open-ferry update -check`"),
+            Self::RollbackChanged { expected, actual: None } => write!(f,
+                "rollback target changed: the confirmed target {expected} no longer matches; run `open-ferry update -check`"),
             Self::NoPrevious => f.write_str(
                 "there is no earlier version to roll back to: a rollback needs a switch made by open-ferry update",
             ),

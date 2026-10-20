@@ -1928,7 +1928,7 @@ mod typed_refusal_tests {
                     expected: "0.1.0".into(),
                     actual: None,
                 }),
-                "rollback target changed: expected 0.1.0, now none; run `open-ferry update -check`",
+                "rollback target changed: the confirmed target 0.1.0 no longer matches; run `open-ferry update -check`",
                 "supervised",
             ),
         ] {

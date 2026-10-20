@@ -471,8 +471,11 @@ async fn plain_rollback_refuses_a_changed_or_removed_confirmed_target() {
         assert!(
             matches!(&error, SwitchError::Update(UpdateError::RollbackChanged { expected, actual: current }) if expected == "0.0.9" && current.as_deref() == actual)
         );
-        assert!(error.to_string().contains("expected 0.0.9"));
-        assert!(error.to_string().contains(actual.unwrap_or("none")));
+        let message = match actual {
+            Some(actual) => format!("rollback target changed: expected 0.0.9, now {actual}; run `open-ferry update -check`"),
+            None => "rollback target changed: the confirmed target 0.0.9 no longer matches; run `open-ferry update -check`".into(),
+        };
+        assert_eq!(error.to_string(), message);
         assert_eq!(snapshot(f.temp.path()), before);
     }
 }
