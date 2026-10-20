@@ -183,6 +183,91 @@ async fn check_now_starts_a_check_and_returns() {
     assert_eq!(f.installed_text(), "open-ferry 0.1.0");
 }
 
+#[tokio::test(start_paused = true)]
+async fn runtime_busy_check_waits_and_reports_without_writing_state() {
+    let f = Fixture::new().await;
+    let service = service(&f, "notify");
+    let lock = f.updater.lock().unwrap();
+    let before = std::fs::read(f.data.state_file()).ok();
+    assert_eq!(service.check_now(), CheckNow::Started);
+    // Let the explicit task poll once before advancing its retry clock.
+    tokio::task::yield_now().await;
+    for _ in 0..19 {
+        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(service.status().checking);
+    assert_eq!(service.check_now(), CheckNow::Running);
+    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::task::yield_now().await;
+    let status = service.status();
+    assert!(!status.checking);
+    assert!(status.last_check.is_some());
+    assert_eq!(status.last_result.as_deref(), Some("error"));
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("another update is running; try again shortly")
+    );
+    assert_eq!(std::fs::read(f.data.state_file()).ok(), before);
+    assert_eq!(f.server.requests(), 0);
+    // A persisted result from a different process takes precedence.
+    let mut state = f.updater.state();
+    state.last_check = Some("2026-10-19T12:00:00Z".into());
+    state.last_result = Some("up-to-date".into());
+    f.updater.save(&state).unwrap();
+    assert_eq!(service.status().last_result, state.last_result);
+    assert_eq!(service.status().last_error, None);
+    drop(lock);
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_busy_check_retries_and_success_replaces_the_error() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    let service = service(&f, "notify");
+    let lock = f.updater.lock().unwrap();
+    let checking = tokio::spawn({
+        let service = service.clone();
+        async move { service.check_once().await }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert!(matches!(
+        checking.await.unwrap(),
+        Some(Err(UpdateError::Busy))
+    ));
+    assert!(service.status().last_error.is_some());
+    let checking = tokio::spawn({
+        let service = service.clone();
+        async move { service.check_once().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!checking.is_finished());
+    drop(lock);
+    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::time::resume();
+    assert!(checking.await.unwrap().unwrap().is_ok());
+    assert_eq!(service.status().last_error, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_busy_check_stops_when_updates_turn_off() {
+    let f = Fixture::new().await;
+    let service = service(&f, "notify");
+    let _lock = f.updater.lock().unwrap();
+    let checking = tokio::spawn({
+        let service = service.clone();
+        async move { service.check_once().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(service.status().checking);
+    service.set_config(&config("off"));
+    assert!(checking.await.unwrap().is_none());
+    assert!(!service.status().checking);
+    assert_eq!(service.status().last_error, None);
+    assert_eq!(f.server.requests(), 0);
+}
+
 #[tokio::test]
 async fn a_failed_check_is_recorded_and_the_next_one_runs() {
     let f = Fixture::new().await;

@@ -71,6 +71,22 @@ struct Live {
     next_check: Option<chrono::DateTime<Utc>>,
     install: Option<Install>,
     automatic_error: Option<&'static str>,
+    busy_check: Option<BusyCheck>,
+}
+
+/// A lock-busy attempt cannot write state. Any subsequent state publication
+/// supersedes this process-local report, including a check in another process.
+struct BusyCheck {
+    at: String,
+    persisted: crate::state::State,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn state_modified(updater: &Updater) -> Option<std::time::SystemTime> {
+    std::fs::metadata(updater.data.state_file())
+        .ok()?
+        .modified()
+        .ok()
 }
 
 #[derive(Default)]
@@ -536,6 +552,22 @@ impl UpdateService {
         };
         let install = install.unwrap_or_else(|| assessed_install(&self.inner));
         let mut status = self.inner.updater.status(&settings, &install);
+        let mut live = self
+            .inner
+            .live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(busy) = &live.busy_check {
+            if busy.persisted == self.inner.updater.state()
+                && busy.modified == state_modified(&self.inner.updater)
+            {
+                status.last_check = Some(busy.at.clone());
+                status.last_result = Some("error".to_owned());
+                status.last_error = Some("another update is running; try again shortly".to_owned());
+            } else {
+                live.busy_check = None;
+            }
+        }
         status.checking = checking;
         status.next_check = next_check
             .filter(|_| settings.mode != SelfUpdateMode::Off)
@@ -558,7 +590,7 @@ impl UpdateService {
         };
         let inner = Arc::clone(&self.inner);
         tasks.spawn(async move {
-            checked(&inner, guard).await;
+            checked(&inner, guard, true).await;
         });
         CheckNow::Started
     }
@@ -567,7 +599,7 @@ impl UpdateService {
     /// updates are off, or turn off while it runs.
     pub async fn check_once(&self) -> Option<Result<CheckResult, UpdateError>> {
         let guard = Arc::clone(&self.inner.running).lock_owned().await;
-        checked(&self.inner, guard).await
+        checked(&self.inner, guard, true).await
     }
 }
 
@@ -606,7 +638,7 @@ async fn run(inner: Arc<Inner>, first_check: Duration) {
         }
         {
             let guard = Arc::clone(&inner.running).lock_owned().await;
-            checked(&inner, guard).await;
+            checked(&inner, guard, false).await;
         }
         due = Instant::now() + settings::jittered(changes.borrow().settings.check_every);
     }
@@ -630,6 +662,7 @@ fn set_next_check(inner: &Inner, due: Option<Instant>) {
 async fn checked(
     inner: &Arc<Inner>,
     guard: tokio::sync::OwnedMutexGuard<()>,
+    manual: bool,
 ) -> Option<Result<CheckResult, UpdateError>> {
     let mut changes = inner.snapshot.subscribe();
     let snapshot = changes.borrow_and_update().clone();
@@ -637,8 +670,22 @@ async fn checked(
         return None;
     }
     set_checking(inner, true);
+    let busy_check = BusyCheck {
+        at: crate::updater::now(),
+        persisted: inner.updater.state(),
+        modified: state_modified(&inner.updater),
+    };
     let outcome = tokio::select! {
-        outcome = check(inner, &snapshot) => Some(outcome),
+        outcome = async {
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                let outcome = check(inner, &snapshot).await;
+                if !manual || !matches!(outcome, Err(UpdateError::Busy)) || Instant::now() >= until {
+                    break outcome;
+                }
+                tokio::time::sleep_until(until.min(Instant::now() + Duration::from_millis(250))).await;
+            }
+        } => Some(outcome),
         () = turned_off(&mut changes) => {
             tracing::info!("automatic updates were turned off; the update check in progress stopped");
             None
@@ -646,6 +693,11 @@ async fn checked(
     };
     match &outcome {
         Some(Ok(result)) => {
+            inner
+                .live
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .busy_check = None;
             let message = match &result.report {
                 Report::Staged { version }
                     if inner.snapshot.borrow().settings.mode == SelfUpdateMode::Auto
@@ -669,7 +721,16 @@ async fn checked(
             }
         }
         Some(Err(UpdateError::Busy)) => {
-            tracing::debug!("update check skipped: another update is running");
+            if manual {
+                inner
+                    .live
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .busy_check = Some(busy_check);
+            }
+            // Scheduled checks wait for their next turn, but a lock held over
+            // many intervals must remain visible at the normal log level.
+            tracing::warn!("update check deferred: another update is running; try again shortly");
         }
         Some(Err(error)) => tracing::warn!("update check failed: {error}"),
         None => {}
