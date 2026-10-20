@@ -883,6 +883,8 @@ impl Live {
 }
 
 async fn follow_switch(mut handle: SwitchHandle, version: String) {
+    // Only automatic Updates are followed today. A rollback caller must pass
+    // its rollback target as `version`, rather than the staged update version.
     // Sign-ins can wait five minutes and the watch lasts ten. Quiet intervals
     // do not say whether the switch is still running.
     let until = Instant::now() + Duration::from_secs(30 * 60);
@@ -901,10 +903,10 @@ async fn follow_switch(mut handle: SwitchHandle, version: String) {
                 let phase = result["phase"].as_str().unwrap_or("unspecified");
                 let gap_ms = result["gap_ms"].as_u64();
                 if phase == "watching" && matches!(outcome, "switched" | "rolled-back") {
-                    tracing::info!(operation = %handle.id, result = outcome, %version, phase, ?gap_ms,
+                    tracing::info!(operation = %handle.id, result = outcome, %version, phase, gap_ms,
                         "automatic switch: open-ferry {version} took over; watching it before the switch is final");
                 } else {
-                    tracing::info!(operation = %handle.id, result = outcome, %version, phase, ?gap_ms,
+                    tracing::info!(operation = %handle.id, result = outcome, %version, phase, gap_ms,
                         "automatic switch reported a result");
                 }
                 return;

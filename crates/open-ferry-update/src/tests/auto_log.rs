@@ -119,41 +119,54 @@ async fn runtime_follower_reports_takeover_without_claiming_the_watch_finished()
     }
     for outcome in ["switched", "rolled-back"] {
         for watching in [false, true] {
-            let mut result =
-                serde_json::json!({"result": outcome, "gap_ms": 143, "reason": "/private/detail"});
-            if watching {
-                result["phase"] = "watching".into();
-            }
-            let logs = Capture::default();
-            super::follow_switch(
-                SwitchHandle::new("takeover".into(), Box::new(ResultProgress(result))),
-                "0.2.0".into(),
-            )
-            .with_subscriber(logs.clone())
-            .await;
-            let events = logs.0.lock().unwrap();
-            assert_eq!(events.len(), 1, "{events:?}");
-            let event = &events[0];
-            assert!(event.starts_with("INFO "), "{event}");
-            assert!(event.contains("version=0.2.0"), "{event}");
-            assert!(event.contains(outcome) && event.contains("143"), "{event}");
-            assert!(
-                !event.contains("unknown")
-                    && !event.contains("finished")
-                    && !event.contains("/private/"),
-                "{event}"
-            );
-            if watching {
+            for gap in [None, Some(143)] {
+                let mut result =
+                    serde_json::json!({"result": outcome, "reason": "/private/detail"});
+                if let Some(gap) = gap {
+                    result["gap_ms"] = gap.into();
+                }
+                if watching {
+                    result["phase"] = "watching".into();
+                }
+                let logs = Capture::default();
+                super::follow_switch(
+                    SwitchHandle::new("takeover".into(), Box::new(ResultProgress(result))),
+                    "0.2.0".into(),
+                )
+                .with_subscriber(logs.clone())
+                .await;
+                let events = logs.0.lock().unwrap();
+                assert_eq!(events.len(), 1, "{events:?}");
+                let event = &events[0];
+                assert!(event.starts_with("INFO "), "{event}");
+                assert!(event.contains("version=0.2.0"), "{event}");
+                assert!(event.contains(outcome), "{event}");
+                if gap.is_some() {
+                    assert!(
+                        event.contains("gap_ms=143") && !event.contains("Some("),
+                        "{event}"
+                    );
+                } else {
+                    assert!(!event.contains("gap_ms="), "{event}");
+                }
                 assert!(
-                    event.contains("took over; watching it before the switch is final")
-                        && event.contains("phase=\"watching\""),
+                    !event.contains("unknown")
+                        && !event.contains("finished")
+                        && !event.contains("/private/"),
                     "{event}"
                 );
-            } else {
-                assert!(
-                    event.contains("reported a result") && !event.contains("took over"),
-                    "{event}"
-                );
+                if watching {
+                    assert!(
+                        event.contains("took over; watching it before the switch is final")
+                            && event.contains("phase=\"watching\""),
+                        "{event}"
+                    );
+                } else {
+                    assert!(
+                        event.contains("reported a result") && !event.contains("took over"),
+                        "{event}"
+                    );
+                }
             }
         }
     }
