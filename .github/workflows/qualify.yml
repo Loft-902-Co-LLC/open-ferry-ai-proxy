@@ -1,8 +1,12 @@
-name: Qualify two candidate builds
+name: Qualify two releases
 
 on:
   workflow_call:
     inputs:
+      published:
+        type: string
+        default: ''
+        description: 'Published stable A,B; B must be latest (empty builds throwaway candidates)'
       fault:
         type: string
         default: none
@@ -14,17 +18,18 @@ on:
 
 permissions:
   contents: read
+  attestations: read
 
 jobs:
   qualify:
-    name: ${{ inputs.preflight_only && 'preflight' || 'qualify' }} (${{ matrix.os }}, user)
+    name: ${{ inputs.preflight_only && inputs.published == '' && 'preflight' || 'qualify' }} (${{ matrix.os }}, ${{ matrix.form }})
     strategy:
       fail-fast: false
       matrix:
         # Hosted Windows has only an elevated console user. A genuine standard
         # account's InteractiveToken task is refused (Task Scheduler event 332).
         # Keep its explicit prerequisite probe; never count it as qualification.
-        os: ${{ fromJSON(inputs.preflight_only && '["windows-2025"]' || '["ubuntu-24.04", "macos-15"]') }}
+        include: ${{ fromJSON(inputs.published != '' && '[{"os":"ubuntu-24.04","form":"user"},{"os":"macos-15","form":"user"},{"os":"ubuntu-24.04","form":"machine"},{"os":"windows-2025","form":"machine"}]' || (inputs.preflight_only && '[{"os":"windows-2025","form":"user"}]' || '[{"os":"ubuntu-24.04","form":"user"},{"os":"macos-15","form":"user"}]')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -40,18 +45,22 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
       COPYFILE_DISABLE: '1'
       QUALIFY_FAULT: ${{ inputs.fault }}
+      QUALIFY_PUBLISHED: ${{ inputs.published }}
+      QUALIFY_PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: State hosted qualification coverage
-        if: ${{ !inputs.preflight_only }}
+        if: ${{ !inputs.preflight_only || inputs.published != '' }}
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           Qualifies real Linux systemd user and macOS GUI LaunchAgent services.
           Hosted Windows user qualification remains blocked: its console is elevated,
           and a standard account's InteractiveToken task is refused (scheduler event 332).
+          Published mode also covers Linux system and Windows LocalSystem services.
           Machine installers cannot use the throwaway loopback mirror.
           See RELEASING.md for desktop qualification and the remaining release gates.
           EOF
@@ -61,57 +70,105 @@ jobs:
           python-version: '3.12'
 
       - name: Probe the real Windows standard account and interactive task
-        if: inputs.preflight_only && runner.os == 'Windows'
+        if: inputs.preflight_only && inputs.published == '' && runner.os == 'Windows'
         shell: pwsh
         run: |
           & .github/scripts/qualify/windows-user.ps1 -ProbeOnly -Python (Get-Command python).Source -Work (Join-Path $env:RUNNER_TEMP 'open-ferry-user-preflight')
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: ${{ !inputs.preflight_only }}
+        if: ${{ !inputs.preflight_only && inputs.published == '' }}
         with:
           name: dashboard-dist
           path: dashboard/dist
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: ${{ !inputs.preflight_only }}
+        if: ${{ !inputs.preflight_only && inputs.published == '' }}
         with:
           name: rust-licenses
           path: rust-licenses
 
-      - name: Prepare native builds
-        if: ${{ !inputs.preflight_only }}
+      - name: Prepare pinned Python environment
+        if: ${{ !inputs.preflight_only || inputs.published != '' }}
         run: |
-          rustup toolchain install --profile minimal
-          python -I -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r .github/scripts/qualify/requirements.txt
+          python -I -m venv "$RUNNER_TEMP/qualify-venv"
+          python_path="$RUNNER_TEMP/qualify-venv/bin/python"
+          if [ "$RUNNER_OS" = Windows ]; then python_path="$RUNNER_TEMP/qualify-venv/Scripts/python.exe"; fi
+          "$python_path" -I -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r .github/scripts/qualify/requirements.txt
+          echo "QUALIFY_PYTHON=$python_path" >> "$GITHUB_ENV"
+
+      # Reference minisign installation methods: github.com/jedisct1/minisign.
+      - name: Install minisign (Linux, as in release signing)
+        if: inputs.published != '' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends minisign
+          minisign -v
+
+      - name: Install minisign (macOS)
+        if: inputs.published != '' && runner.os == 'macOS'
+        run: |
+          brew install minisign
+          minisign -v
+
+      - name: Install minisign (Windows)
+        if: inputs.published != '' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install minisign --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install minisign.' }
+          minisign -v
+          if ($LASTEXITCODE -ne 0) { throw 'minisign is unavailable.' }
+
+      - name: Published preconditions (before any installation or service setup)
+        if: inputs.published != ''
+        env:
+          FORM: ${{ matrix.form }}
+        run: |
+          extra=()
+          if [ "$QUALIFY_PREFLIGHT_ONLY" = true ]; then extra+=(--preflight-only); fi
+          "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --published "$QUALIFY_PUBLISHED" --form "$FORM" --preconditions-only "${extra[@]}"
 
       - name: Check qualification failure controls
-        if: ${{ !inputs.preflight_only }}
-        run: python -I .github/scripts/qualify/test_run.py
+        if: ${{ !inputs.preflight_only || inputs.published != '' }}
+        run: '"$QUALIFY_PYTHON" -I .github/scripts/qualify/test_run.py'
+
+      - name: Prepare native builds
+        if: ${{ !inputs.preflight_only && inputs.published == '' }}
+        run: rustup toolchain install --profile minimal
 
       - name: Build and package A and B with one throwaway key
-        if: ${{ !inputs.preflight_only }}
-        run: python -I .github/scripts/qualify/build.py "$RUNNER_TEMP/open-ferry-qualification"
+        if: ${{ !inputs.preflight_only && inputs.published == '' }}
+        run: '"$QUALIFY_PYTHON" -I .github/scripts/qualify/build.py "$RUNNER_TEMP/open-ferry-qualification"'
 
       - name: Verify candidate build inputs were restored
-        if: ${{ always() && !inputs.preflight_only }}
+        if: ${{ always() && (!inputs.preflight_only || inputs.published != '') }}
         run: git diff --exit-code -- Cargo.toml Cargo.lock release-keys.pub
 
-      - name: Qualify the user service
-        if: ${{ !inputs.preflight_only }}
-        run: python -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification"
+      - name: Qualify the service
+        if: ${{ !inputs.preflight_only || inputs.published != '' }}
+        env:
+          FORM: ${{ matrix.form }}
+        run: |
+          extra=()
+          if [ -n "$QUALIFY_PUBLISHED" ]; then extra+=(--published "$QUALIFY_PUBLISHED"); fi
+          if [ "$RUNNER_OS" = Linux ] && [ "$FORM" = machine ]; then
+            sudo -H --preserve-env=GH_TOKEN "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
+          else
+            "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
+          fi
 
       # Explicit allowlist: never the mirror, checkout, init output, config or keys.
       - name: Keep qualification evidence (also on failure)
-        if: always() && !inputs.preflight_only
+        if: always() && (!inputs.preflight_only || inputs.published != '')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: qualification-${{ matrix.os }}-user
+          name: qualification-${{ matrix.os }}-${{ matrix.form }}
           path: ${{ runner.temp }}/open-ferry-qualification/diagnostics
           if-no-files-found: warn
           retention-days: 7
 
       - name: Keep Windows prerequisite evidence
-        if: always() && inputs.preflight_only && runner.os == 'Windows'
+        if: always() && inputs.preflight_only && inputs.published == '' && runner.os == 'Windows'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qualification-windows-2025-user-preflight

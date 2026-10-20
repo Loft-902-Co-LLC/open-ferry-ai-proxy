@@ -26,6 +26,10 @@ on:
         description: 'Run qualification without the release archives and image (default is the full dry run)'
         type: boolean
         default: false
+      qualification_published:
+        description: 'Qualify two published stable releases A,B only; B must already be latest'
+        type: string
+        default: ''
       qualification_fault:
         description: 'Negative control; each fault passes only after verifying its exact signature rejection'
         type: choice
@@ -53,6 +57,7 @@ defaults:
 
 jobs:
   meta:
+    if: github.event_name != 'workflow_dispatch' || inputs.qualification_published == ''
     name: Read the version
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -106,7 +111,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   dashboard:
-    if: github.event_name != 'workflow_dispatch' || !inputs.qualification_preflight_only
+    if: github.event_name != 'workflow_dispatch' || (!inputs.qualification_preflight_only && inputs.qualification_published == '')
     name: Build the dashboard
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -150,7 +155,7 @@ jobs:
           if-no-files-found: error
 
   rust-licenses:
-    if: github.event_name != 'workflow_dispatch' || !inputs.qualification_preflight_only
+    if: github.event_name != 'workflow_dispatch' || (!inputs.qualification_preflight_only && inputs.qualification_published == '')
     name: Write the Rust crates' licenses
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -184,7 +189,7 @@ jobs:
           if-no-files-found: error
 
   build:
-    if: github.event_name != 'workflow_dispatch' || (!inputs.qualification_only && !inputs.qualification_preflight_only)
+    if: github.event_name != 'workflow_dispatch' || (!inputs.qualification_only && !inputs.qualification_preflight_only && inputs.qualification_published == '')
     name: build (${{ matrix.target }})
     needs: [meta, dashboard, rust-licenses]
     strategy:
@@ -718,12 +723,14 @@ jobs:
     name: Candidate qualification
     if: >-
       !cancelled() && github.event_name == 'workflow_dispatch'
-      && (inputs.qualification_preflight_only
+      && (inputs.qualification_published != '' || inputs.qualification_preflight_only
       || (needs.dashboard.result == 'success' && needs.rust-licenses.result == 'success'))
     needs: [dashboard, rust-licenses]
     uses: ./.github/workflows/qualify.yml
     with:
+      published: ${{ inputs.qualification_published }}
       fault: ${{ inputs.qualification_fault }}
       preflight_only: ${{ inputs.qualification_preflight_only }}
     permissions:
       contents: read
+      attestations: read
