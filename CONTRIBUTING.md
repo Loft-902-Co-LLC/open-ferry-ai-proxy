@@ -73,6 +73,8 @@ npm run build
 npx playwright test
 ```
 
+The dashboard follows Microsoft's [side-by-side TypeScript setup](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60): `@typescript/native` is an exact alias for TypeScript 7.0.2, while `typescript` aliases `@typescript/typescript6` 6.0.2 so ESLint's project service retains the TypeScript 6 compiler API. Keep both alias versions pinned. The build and typecheck scripts call TypeScript 7's entry point directly because the compatibility package's TypeScript 6 dependency also provides a `tsc` executable; the bare `tsc` command can resolve to either version after installation. To check the versions, run `node node_modules/@typescript/native/bin/tsc --version` and `node -p "require('typescript').version"` in `dashboard/`.
+
 `npx playwright test` runs the app under `vite preview` against a mocked API (install its browser once with `npx playwright install chromium`). A change to how the dashboard saves the config should also pass the real-save check, which CI doesn't run, as it needs a build of open-ferry with the app in it. Build the app, then a debug build of open-ferry, then run the check. It starts that binary on 127.0.0.1 over a config in a temporary directory, with dummy keys:
 
 ```sh
