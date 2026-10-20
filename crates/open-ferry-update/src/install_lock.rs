@@ -22,6 +22,17 @@ pub struct InstallLock {
     path: PathBuf,
 }
 
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        // Release even while a fork-inherited/duplicated description remains
+        // open. On Windows release explicitly before closing the handle.
+        #[cfg(unix)]
+        let _ = self._file.unlock();
+        #[cfg(windows)]
+        crate::data_dir::unlock_file(&self._file);
+    }
+}
+
 impl InstallLock {
     /// The lock file of the installed binary `installed`: `.<file name>.lock`
     /// in its directory, resolved: from the file itself when it exists, so a
@@ -141,18 +152,25 @@ mod tests {
         let error = InstallLock::try_acquire(&installed).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         drop(held);
-        // A parallel child's fork-to-exec window can briefly retain our flock fd.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match InstallLock::try_acquire(&installed) {
-                Ok(_) => break,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    assert!(std::time::Instant::now() < deadline, "lock stayed held");
-                    std::thread::yield_now();
-                }
-                Err(error) => panic!("lock after release: {error}"),
-            }
-        }
+        InstallLock::try_acquire(&installed).expect("Drop releases the lock immediately");
+    }
+
+    #[test]
+    fn a_released_install_lock_is_not_retained_by_an_inherited_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("open-ferry");
+        let held = InstallLock::try_acquire(&installed).unwrap();
+        let inherited = held._file.try_clone().unwrap();
+        drop(held);
+        let next = InstallLock::try_acquire(&installed)
+            .expect("Drop releases the lock before the inherited description closes");
+        drop(inherited);
+        assert_eq!(
+            InstallLock::try_acquire(&installed).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(next);
+        InstallLock::try_acquire(&installed).unwrap();
     }
 
     #[test]
