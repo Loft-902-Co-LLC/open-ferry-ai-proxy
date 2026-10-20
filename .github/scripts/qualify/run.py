@@ -104,7 +104,7 @@ def verify_release_signature(directory, version, keys):
             f"'open-ferry {version} SHA256SUMS'")
     for key in keys:
         result = command(["minisign", "-Vm", directory / "SHA256SUMS", "-x", signature, "-P", key],
-                         check=False)
+                         check=False, sensitive=True)
         if result.returncode == 0:
             return
     raise RuntimeError(f"published precondition: v{version} SHA256SUMS signature does not verify "
