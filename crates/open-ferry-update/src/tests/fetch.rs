@@ -63,7 +63,10 @@ async fn a_body_is_downloaded_with_the_user_agent() {
     server.reply("/releases/a", Reply::Body(b"hello".to_vec()));
     assert_eq!(get(&server, "releases/a").await.unwrap(), b"hello");
     assert_eq!(server.user_agents(), [crate::USER_AGENT]);
-    assert_eq!(crate::USER_AGENT, "open-ferry/0.0.0");
+    assert_eq!(
+        crate::USER_AGENT,
+        format!("open-ferry/{}", crate::CURRENT_VERSION)
+    );
 }
 
 #[tokio::test]

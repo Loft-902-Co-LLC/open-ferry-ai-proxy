@@ -456,9 +456,10 @@ fn a_fallback_and_an_installed_file_that_both_fail_after_a_crash_are_degraded() 
 /// the return stands on the installed rung (`return.installed` in the
 /// journal). Recovery then chooses the installed rung by hash, and every start
 /// of the second supervisor must be from the installed path: the first fails
-/// (`exit-after welcome@0.0.0`, which only the installed file's marker
-/// matches) and is charged to the installed rung, so the next try is that rung
-/// again, not a new cycle at the kept copy.
+/// (`exit-after welcome@<version>`, with the build's own version, which only
+/// the installed file's marker matches) and is charged to the installed
+/// rung, so the next try is that rung again, not a new cycle at the kept
+/// copy.
 ///
 /// `without_the_record` takes the ladder record out of the journal before the
 /// second start, as a journal written before ladder records has none. With it
@@ -498,7 +499,10 @@ fn the_installed_rung_runs_from_the_installed_path(without_the_record: bool) {
     fx.release("watch.before_confirm");
     fx.wait_dead(2);
     fx.wait_dead(3);
-    fx.fault("exit-after", "welcome@0.0.0");
+    fx.fault(
+        "exit-after",
+        &format!("welcome@{}", env!("CARGO_PKG_VERSION")),
+    );
     fx.hold("journal.after:J-R1");
     fx.release("journal.before:J-R1");
     drop(second);
