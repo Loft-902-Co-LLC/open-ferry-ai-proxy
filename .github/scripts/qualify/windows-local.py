@@ -169,7 +169,14 @@ def prepare_node(work, env):
     return node_dir
 
 
-def prepare(work, env):
+def prepare(work, env, published=False):
+    if published:
+        python = work / "venv/Scripts/python.exe"
+        invoke([sys.executable, "-I", "-m", "venv", work / "venv"])
+        invoke([python, "-I", "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes",
+                "--only-binary=:all:", "-r", SCRIPTS / "requirements.txt"], env=env)
+        invoke([python, "-I", SCRIPTS / "test_run.py"], env=env)
+        return python
     node_dir = prepare_node(work, env)
     about = subprocess.check_output(["cargo", "about", "--version"], text=True).strip()
     require(about == "cargo-about 0.9.2", "install cargo-about 0.9.2 with --locked --features cli")
@@ -229,7 +236,11 @@ def restore(before, work):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reuse", type=Path, help="reuse candidates from a prior local attempt after fixing a harness bug")
+    parser.add_argument("--published", default="", help="qualify official stable releases A,B; B must be latest")
     args = parser.parse_args()
+    require(not (args.published and args.reuse), "published mode refuses --reuse throwaway candidates")
+    require(not args.published or os.environ.get("QUALIFY_FAULT", "none") == "none",
+            "published mode refuses qualification fault controls")
     before = preflight()
     work = ROOT / "target/qualification" / time.strftime("local-%Y%m%d-%H%M%S")
     work.mkdir(parents=True)
@@ -243,8 +254,11 @@ def main():
     candidates = work / "candidates"
     result = {"passed": False, "errors": []}
     try:
-        python = prepare(work, env)
-        if args.reuse:
+        python = prepare(work, env, published=bool(args.published))
+        if args.published:
+            invoke([python, "-I", SCRIPTS / "run.py", candidates, "--published", args.published,
+                    "--preconditions-only"], env=env)
+        elif args.reuse:
             source = args.reuse.resolve()
             require(source.is_relative_to(ROOT / "target"), "reuse must stay inside this worktree's target")
             # Keep the first attempt's diagnostics and config untouched. Copy
@@ -258,14 +272,16 @@ def main():
                 invoke([python, "-I", SCRIPTS / "build.py", candidates, "--controls"], env=env)
             finally:
                 invoke(["git", "diff", "--exit-code", "--", "Cargo.toml", "Cargo.lock", "release-keys.pub"])
-        runs = [candidates, *(candidates / "controls" / fault for fault in ("untrusted-key", "bad-signature"))]
+        runs = ([candidates] if args.published else
+                [candidates, *(candidates / "controls" / fault for fault in ("untrusted-key", "bad-signature"))])
         for number, candidate in enumerate(runs, 1):
             run_evidence = work / f"run-{number}"
             run_evidence.mkdir()
             write(run_evidence / "before.json", before)
             try:
                 fault = json.loads((candidate / "candidates.json").read_text(encoding="utf-8"))["fault"]
-                invoke([python, "-I", SCRIPTS / "run.py", candidate], env=dict(env, QUALIFY_FAULT=fault))
+                extra = ["--published", args.published] if args.published else []
+                invoke([python, "-I", SCRIPTS / "run.py", candidate, *extra], env=dict(env, QUALIFY_FAULT=fault))
             finally:
                 restore(before, run_evidence)
         result["passed"] = True
@@ -287,7 +303,8 @@ def main():
             result["errors"].append(f"restoration: {type(error).__name__}: {error}")
         write(work / "local-result.json", result)
     require(result["passed"], "; ".join(result["errors"]))
-    print("PASS: lifecycle, both signature rejections, and matching pre-run snapshot", flush=True)
+    print("PASS: lifecycle, matching pre-run snapshot"
+          + (" (published releases)" if args.published else ", both signature rejections"), flush=True)
 
 
 if __name__ == "__main__":

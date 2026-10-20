@@ -125,7 +125,46 @@ For deliberate negative controls, add either `-f qualification_fault=untrusted-k
 
 Each job uploads `qualification-<runner>-user`, on success or failure. Start with `result.json` and `qualification.log`; `result.json` preserves the first error and lists any later cleanup errors separately. `requests.json` gives per-phase counts and first failures. `status.json` is the last observed update status, named status snapshots mark completed milestones, and `supervisor-worker.log`, `update-state.json`, `switch-journal.json` and `mirror-requests.json` explain signing, staging, service startup and switching failures. Build JSON records are scanned by the existing release seam checker. Configs, init output, keys, candidate binaries and the mirror are never uploaded. Generated client and management keys are redacted from collected logs. A failure is a failed qualification; service startup is never silently skipped. Product failures must be fixed in product code separately, not bypassed in the qualification.
 
-**When the real key exists:** repeat this lifecycle against two real published, signed candidates instead of building versions and a key in the job or serving a mirror. Install A explicitly with `--version` / `-Version`, keep attestation verification enabled, use the normal official update base, and make the later stable candidate B latest. The updater ignores prerelease versions, so prerelease tags alone cannot exercise `auto`. Machine installs can then use their official download path. The Windows user form will still require a genuine unelevated interactive logon; published assets alone do not remove that hosted-runner limitation. That published-candidate run is still required before 0.1.0; this workflow currently implements only the throwaway qualification.
+### Published release qualification
+
+**When the real key exists:** publish two real stable releases A and B, signed with that key, with B set as the repository's latest release. Both must include their normal build provenance attestations and native archives. Then run the same lifecycle against those releases. No release has been published for this qualification yet; a passing throwaway run or a deliberately failing precondition run does not satisfy this release gate.
+
+From this implementation branch, the exact dispatch is below. Replace `A,B` with the actual chosen `MAJOR.MINOR.PATCH` numbers separated by a comma; an optional `v` prefix is accepted. After merging, use `--ref main`.
+
+```sh
+gh workflow run release.yml --repo Loft-902-Co-LLC/open-ferry-ai-proxy --ref bg9-published-qualify -f qualification_published=A,B
+```
+
+A nonempty `qualification_published` selects qualification alone, without the dashboard, Rust-license, release build, checksum, signing, publishing or image jobs. The reusable workflow's corresponding input is `published`. Empty inputs preserve the throwaway qualification and normal dispatch behavior. Published mode refuses either signature fault control and refuses `qualification_preflight_only`; it cannot count a negative control or prerequisite probe as qualification.
+
+Before any installer or service-manager setup, **each form independently requires**:
+
+- Exactly two stable `MAJOR.MINOR.PATCH` versions, with A strictly less than B by numeric semver ordering. Prerelease and build-metadata suffixes are refused (the product's release tags use plain versions).
+- Authenticated `gh api` responses from `Loft-902-Co-LLC/open-ferry-ai-proxy` showing that both `vA` and `vB` exist, are published, are not drafts or prereleases, and that `/releases/latest` identifies B.
+- `SHA256SUMS` and `SHA256SUMS.minisig` assets on each release, downloaded through authenticated `gh api`. Each signature must be prehashed minisign (`ED`), verify with one of the one or two public keys in the checked-out `release-keys.pub` via `minisign -Vm ... -P <key>`, and authenticate exactly the trusted comment `open-ferry <version> SHA256SUMS`.
+
+A missing release fails explicitly at the **Published preconditions (before any installation or service setup)** step, identifying its version and the authentication requirement. Missing assets, wrong latest, empty or malformed keys, bad signatures and wrong trusted comments also fail before installation. CI supplies `GH_TOKEN` with `contents: read` and `attestations: read`; it installs minisign with Ubuntu apt as in the sign job, Homebrew on macOS, or Chocolatey on Windows ([minisign installation methods](https://github.com/jedisct1/minisign)). The token permissions allow the attestation API reads ([GitHub documentation](https://docs.github.com/en/rest/repos/attestations)). No signing secret or environment is used.
+
+The hosted published matrix covers:
+
+- `ubuntu-24.04`, user: the same systemd user unit, with linger and the real user manager.
+- `macos-15`, user: the same GUI-domain LaunchAgent.
+- `ubuntu-24.04`, machine: run the harness as root; `install.sh --system --version A` writes `/usr/local/bin/open-ferry`, `/etc/open-ferry/config.yaml`, and the machine install receipt in `/var/lib/open-ferry`. Then `open-ferry service install -system -config /etc/open-ferry/config.yaml` installs and starts the real systemd system unit as root. The harness requires its definition to contain `-supervise` and `-data-dir`, and requires supervised status. The root installer intentionally clears `GH_*`; the harness temporarily stores the job token in root's normal gh authentication file (mode 0600), validates that identity with an empty environment, and removes the file even after lifecycle failure. It refuses to replace existing root credentials.
+- `windows-2025`, machine: the hosted console is already elevated. `install.ps1 -System -Version A` writes the protected Program Files binary and ProgramData config, auth directory and machine receipt. Then `open-ferry service install -system -config <machine-config>` installs and starts the real Windows service as LocalSystem. Its SCM definition must name LocalSystem, `-supervise` and `-data-dir`, and the API must report supervision. The installer uses the trusted Program Files GitHub CLI with the job token.
+
+Both machine forms are supported by the current product's machine receipt and service commands; no installer or product changes are needed. An older published A lacking machine supervision fails the definition/status assertions and does not qualify that form. macOS machine services remain unsupported by the product and are not included. Windows user service coverage still requires a genuine unelevated desktop session, run later on the maintainer's PC:
+
+```powershell
+py -3.12 -I .github/scripts/qualify/windows-local.py --published A,B
+```
+
+For this local published command, install Python 3.12, GitHub CLI and minisign beforehand, sign gh in with access to release contents and attestations, and use the same clean disposable worktree and desktop prerequisites described above. It creates the pinned Python venv and runs the harness tests, but needs no Rust, Node or cargo-about builds and runs no throwaway fault controls. It refuses `--reuse` and fault controls in published mode. It preserves the same before/after desktop snapshots, cleanup assertions and private local evidence. Do not upload the whole local evidence tree.
+
+Published mode starts no mirror, creates no throwaway key, and supplies neither `OPEN_FERRY_INSTALL_BASE_URL` nor `OPEN_FERRY_UPDATE_BASE_URL`, in the installer environment or a service `.env`. It uses the checked-out real install script with `--version A` / `-Version A`, keeps attestation checking on, requires gh authentication, and verifies that the successful installer actually performed its gh attestation check. B is already latest. Four load workers establish a nonempty baseline before **check now**; only that check requests A's automatic update to B. All existing supervision, automatic-acceptance log, running/installed version, production ten-minute watch, rollback-to-A, per-phase nonempty zero-failure load and uninstall/process/port/record checks remain enforced. Machine cleanup uses `service uninstall -system` and checks the system manager's definition is gone.
+
+**Background-timer race:** the harness records monotonic time immediately before `service install`, before that command can start A. Baseline completion uses a request event, and the pre-check API snapshot must still show stable A, no check in progress, no staged version and no prior switch. Both before check-now and after its `started` response, elapsed time must be strictly less than 240 seconds from launch. A's production first background check cannot run before 300 seconds from worker startup, which is later than the recorded launch time; the enforced budget leaves at least 60 seconds of margin and fails if startup/check-now runs too slowly. No product timer is changed. `before-check-now.json` records the elapsed time and A's status.
+
+Each hosted form uploads only its key-redacted `diagnostics/` allowlist under `qualification-<runner>-<form>`. The precondition metadata and attestation success marker supplement the same lifecycle diagnostics; no release metadata downloads, configs, init output, authentication files, keys or binaries are uploaded. The published path has no mirror-request artifact. After publishing A and B, require all four hosted lifecycles and the separate local Windows user lifecycle to pass before counting this gate complete.
 
 ## The release key
 

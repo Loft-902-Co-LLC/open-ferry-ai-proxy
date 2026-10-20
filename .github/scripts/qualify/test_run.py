@@ -80,7 +80,8 @@ class QualificationControls(unittest.TestCase):
                 "supervisor": {"form": "supervised", "running_version": self.q.a, "phase": "idle"}}
 
     def run_main(self):
-        with patch.object(qualification, "Qualification", return_value=self.q):
+        with patch.object(qualification, "Qualification", return_value=self.q), \
+                patch.object(sys, "argv", [__file__, str(self.work)]):
             code = qualification.main()
         return code, json.loads((self.out / "result.json").read_text(encoding="utf-8"))
 
@@ -210,6 +211,185 @@ class QualificationControls(unittest.TestCase):
 
 class UntrustedKeyControls(QualificationControls):
     fault = "untrusted-key"
+
+
+class PublishedPreconditions(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+        (self.work / "diagnostics").mkdir()
+        self.private = Ed25519PrivateKey.generate()
+        self.key_id = b"12345678"
+        self.key = base64.b64encode(b"Ed" + self.key_id + self.private.public_key().public_bytes_raw()).decode()
+        for name, value in (("WORK", self.work), ("OUT", self.work / "diagnostics"), ("record", Mock())):
+            patcher = patch.object(qualification, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def release(version="1.2.3", **changes):
+        return {"id": 1, "tag_name": "v" + version, "draft": False, "prerelease": False,
+                "published_at": "2026-10-20T00:00:00Z",
+                "assets": [{"id": 2, "name": "SHA256SUMS"},
+                           {"id": 3, "name": "SHA256SUMS.minisig"}], **changes}
+
+    def test_stable_versions_are_normalized_and_compared_numerically(self):
+        self.assertEqual(qualification.published_versions(" v1.9.9, 1.10.0 "), ("1.9.9", "1.10.0"))
+        self.assertEqual(qualification.published_versions("9.9.9,10.0.0"), ("9.9.9", "10.0.0"))
+        for value in ("1.2.3", "1.2.3,1.2.4,1.2.5", "1.2.3,1.2.3", "1.10.0,1.9.9",
+                      "1.2.3-rc.1,1.2.4", "1.2.3,2.0.0+build", "01.2.3,2.0.0", "-1.2.3,2.0.0"):
+            with self.subTest(value=value), self.assertRaisesRegex(RuntimeError, "published"):
+                qualification.published_versions(value)
+
+    def test_fault_and_preflight_combinations_are_refused_before_api_or_install(self):
+        with patch.object(qualification, "gh_release") as api, \
+                patch.object(qualification, "Qualification") as lifecycle:
+            for fault in qualification.SIGNATURE_ERRORS:
+                with self.subTest(fault=fault), self.assertRaisesRegex(RuntimeError, "refuses.*fault"):
+                    qualification.prepare_published("1.2.3,1.2.4", fault)
+            with self.assertRaisesRegex(RuntimeError, "refuses preflight_only"):
+                qualification.prepare_published("1.2.3,1.2.4", preflight_only=True)
+            api.assert_not_called()
+            lifecycle.assert_not_called()
+
+    def test_release_metadata_must_be_published_and_stable(self):
+        qualification.validate_release(self.release(), "1.2.3")
+        for changes in ({"draft": True}, {"prerelease": True}, {"published_at": None},
+                        {"tag_name": "v1.2.4"}, {"draft": None}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, "must be published"):
+                qualification.validate_release(self.release(**changes), "1.2.3")
+        for missing in ("SHA256SUMS", "SHA256SUMS.minisig"):
+            release = self.release()
+            release["assets"] = [a for a in release["assets"] if a["name"] != missing]
+            with self.assertRaisesRegex(RuntimeError, "missing " + missing):
+                qualification.validate_release(release, "1.2.3")
+
+    def test_missing_release_is_clear_and_never_constructs_a_lifecycle(self):
+        with patch.object(qualification, "command", return_value=Mock(returncode=1)), \
+                self.assertRaisesRegex(RuntimeError, "release v9.9.8 unavailable.*release must exist"):
+            qualification.gh_release("tags/v9.9.8", "release v9.9.8")
+        with patch.object(qualification.shutil, "which", return_value="tool"), \
+                patch.object(qualification, "command"), \
+                patch.object(qualification, "gh_release", side_effect=RuntimeError("release v9.9.8 unavailable")), \
+                patch.object(qualification, "Qualification") as lifecycle, \
+                patch.object(sys, "argv", [__file__, str(self.work), "--published", "9.9.8,9.9.9",
+                                           "--preconditions-only"]):
+            self.assertEqual(qualification.main(), 1)
+            lifecycle.assert_not_called()
+        result = json.loads((self.work / "diagnostics/result.json").read_text())
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["phase"], "preconditions")
+        self.assertFalse((self.work / "candidates.json").exists())
+
+    def test_b_must_be_repository_latest(self):
+        for latest in (self.release(), self.release("1.2.4", id=77)):
+            with self.subTest(latest=latest), \
+                    patch.object(qualification.shutil, "which", return_value="tool"), \
+                    patch.object(qualification, "command"), \
+                    patch.object(qualification, "gh_release", side_effect=[self.release(),
+                                 self.release("1.2.4", id=4), latest]), \
+                    self.assertRaisesRegex(RuntimeError, "latest must be B"):
+                qualification.prepare_published("1.2.3,1.2.4")
+
+    def test_checked_out_keys_are_required_and_limited(self):
+        path = self.work / "keys.pub"
+        path.write_text("# heading\nuntrusted comment: key\n\n  " + self.key + " \n", newline="\n")
+        self.assertEqual(qualification.release_keys(path), [self.key])
+        for value in ("# none\n", "invalid", (self.key + "\n") * 3):
+            path.write_text(value, newline="\n")
+            with self.assertRaisesRegex(RuntimeError, "release-keys.pub|public key"):
+                qualification.release_keys(path)
+
+    def signature(self, version="1.2.3"):
+        data = b"checksum fixture\n"
+        (self.work / "SHA256SUMS").write_bytes(data)
+        signature = candidate_build.sign(self.private, self.key_id, data, version)
+        (self.work / "SHA256SUMS.minisig").write_text(signature, newline="\n")
+        return signature
+
+    def test_signature_uses_minisign_and_each_checkout_key(self):
+        self.signature()
+        with patch.object(qualification, "command", side_effect=[Mock(returncode=1), Mock(returncode=0)]) as run:
+            qualification.verify_release_signature(self.work, "1.2.3", ["other-key", self.key])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.args[0], ["minisign", "-Vm", self.work / "SHA256SUMS", "-x",
+                                               self.work / "SHA256SUMS.minisig", "-P", self.key])
+        with patch.object(qualification, "command", return_value=Mock(returncode=1)), \
+                self.assertRaisesRegex(RuntimeError, "signature does not verify"):
+            qualification.verify_release_signature(self.work, "1.2.3", [self.key])
+
+    def test_wrong_signed_comment_and_legacy_signature_are_refused(self):
+        self.signature("1.2.4")
+        with patch.object(qualification, "command") as run, \
+                self.assertRaisesRegex(RuntimeError, "trusted comment"):
+            qualification.verify_release_signature(self.work, "1.2.3", [self.key])
+        run.assert_not_called()
+        text = self.signature().splitlines()
+        text[1] = base64.b64encode(b"Ed" + base64.b64decode(text[1])[2:]).decode()
+        (self.work / "SHA256SUMS.minisig").write_text("\n".join(text), newline="\n")
+        with self.assertRaisesRegex(RuntimeError, "prehashed"):
+            qualification.verify_release_signature(self.work, "1.2.3", [self.key])
+
+    def test_all_preconditions_must_pass_before_manifest_is_written(self):
+        a, b = self.release(), self.release("1.2.4", id=4)
+        with patch.object(qualification.shutil, "which", return_value="tool"), \
+                patch.object(qualification, "command"), \
+                patch.object(qualification, "gh_release", side_effect=[a, b, b]), \
+                patch.object(qualification, "release_keys", return_value=[self.key]), \
+                patch.object(qualification.subprocess, "run") as download, \
+                patch.object(qualification, "verify_release_signature") as verify:
+            result = qualification.prepare_published("1.2.3,1.2.4", form="machine")
+        self.assertEqual(result["mode"], "published")
+        self.assertEqual(result["form"], "machine")
+        self.assertEqual(download.call_count, 4)
+        self.assertEqual(verify.call_count, 2)
+        self.assertTrue((self.work / "candidates.json").exists())
+
+    def test_timer_deadline_and_unrequested_switch_are_red(self):
+        q = object.__new__(qualification.Qualification)
+        q.a, q.b, q.service_started = "1.2.3", "1.2.4", 10
+        q.candidates = {"mode": "published"}
+        q.api = Mock()
+        with patch.object(qualification.time, "monotonic", return_value=250), \
+                self.assertRaisesRegex(RuntimeError, "exceeded 240s"):
+            q.before_published_check()
+        q.api.assert_not_called()
+        q.api.return_value = {"running_version": q.b}
+        with patch.object(qualification.time, "monotonic", return_value=20), \
+                self.assertRaisesRegex(RuntimeError, "before the requested check-now"):
+            q.before_published_check()
+
+    def test_published_lifecycle_uses_no_mirror_and_keeps_all_load_phases(self):
+        q = object.__new__(qualification.Qualification)
+        q.a, q.b, q.os = "1.2.3", "1.2.4", "Linux"
+        q.candidates = {"mode": "published", "form": "machine", "fault": "none"}
+        q.port, q.client = 12345, "unused-client"
+        q.exe, q.config, q.data = self.work / "exe", self.work / "config.yaml", self.work / "data"
+        q.env, q.load, q.installed_service, q.fault_confirmed = {}, None, False, False
+        q.prerequisites, q.install, q.check_after_flip, q.until = Mock(), Mock(), Mock(), Mock()
+        q.logs = lambda: qualification.write(qualification.OUT / "supervisor-worker.log",
+                                              "automatic switch accepted: 1.2.4\n")
+        def uninstall():
+            if q.load:
+                q.load.finish()
+                q.load = None
+        q.uninstall = Mock(side_effect=uninstall)
+        with patch.object(qualification, "ThreadingHTTPServer") as mirror, \
+                patch.object(qualification, "Load") as load, \
+                patch.object(qualification, "command", side_effect=[Mock(stdout="open-ferry 1.2.4"),
+                             Mock(stdout="rollback complete"), Mock(stdout="open-ferry 1.2.3")]):
+            load.return_value.snapshot.return_value = {"counts": {"baseline.requests": 4,
+                                                       "auto.requests": 4, "rollback.requests": 4}}
+            q.run()
+            mirror.assert_not_called()
+            q.install.assert_called_once_with(None)
+            q.check_after_flip.assert_called_once()
+            load.return_value.baseline_ready.wait.assert_called_once_with(timeout=30)
+            self.assertEqual([call.args[0] for call in load.return_value.set_phase.call_args_list],
+                             ["auto", "rollback"])
+            load.return_value.finish.assert_called_once()
+        self.assertEqual(q.service_args("uninstall"), [q.exe, "service", "uninstall", "-system"])
 
 
 class CandidateSignatures(unittest.TestCase):
