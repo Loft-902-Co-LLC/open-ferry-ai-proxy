@@ -1,5 +1,5 @@
 # CPython 3.12 wheels for ubuntu-24.04 x86_64, macos-15 arm64, and Windows x86_64.
-# Windows hashes retain candidate packaging support; its prerequisite probe installs no packages.
+# Windows desktop qualification uses these wheels; the hosted probe installs no packages.
 # SHA256 values verified against https://pypi.org/pypi/<package>/<version>/json.
 # Pin all dependencies; install with --require-hashes --only-binary=:all:.
 

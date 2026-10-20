@@ -70,6 +70,10 @@ def command(args, *, check=True, timeout=90, sensitive=False, **kwargs):
     if not sensitive:
         record("$ " + subprocess.list2cmdline([str(arg) for arg in args]) + "\n" + result.stdout)
     if check and result.returncode:
+        if sensitive:
+            # May contain init keys: retain privately in WORK, outside the
+            # diagnostics allowlist, and never echo it into logs or errors.
+            write(WORK / "private-command-failure.txt", result.stdout)
         raise RuntimeError(f"{Path(args[0]).name} failed with exit {result.returncode}"
                            + (" (installer output withheld: init may print keys)" if sensitive else ""))
     return result
@@ -114,14 +118,33 @@ class Load:
         self.counts = Counter()
         self.errors = []
         self.phase = "baseline"
+        self.phase_started = time.monotonic()
+        self.phase_seconds = Counter()
+        self.next_source = 2
         self.pool = ThreadPoolExecutor(max_workers=4)
         self.futures = [self.pool.submit(self.loop) for _ in range(4)]
+
+    def connection(self):
+        options = {}
+        if platform.system() == "Windows":
+            # Winsock can choose a source port whose previous identical TCP
+            # tuple is still in TIME_WAIT, then fail connect with 10048. Use a
+            # new address in the existing 127/8 loopback range per connection:
+            # the tuple cannot repeat. No OS settings, retries, connection
+            # reuse, abortive closes, rate or timeout changes are involved.
+            with self.lock:
+                number = self.next_source
+                self.next_source += 1
+            require(number < 0xFFFFFF, "Windows loopback source-address space exhausted")
+            source = f"127.{number >> 16}.{(number >> 8) & 255}.{number & 255}"
+            options["source_address"] = (source, 0)
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5, **options)
 
     def loop(self):
         while not self.stop.is_set():
             with self.lock:
                 phase = self.phase
-            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            connection = self.connection()
             error = None
             try:
                 # New connections deliberately cover listener handovers, too.
@@ -145,7 +168,9 @@ class Load:
 
     def snapshot(self):
         with self.lock:
-            result = {"counts": dict(self.counts), "errors": list(self.errors)}
+            timings = dict(self.phase_seconds)
+            timings[self.phase] = timings.get(self.phase, 0) + time.monotonic() - self.phase_started
+            result = {"counts": dict(self.counts), "errors": list(self.errors), "phase_seconds": timings}
         write(OUT / "requests.json", json.dumps(result, indent=2) + "\n")
         return result
 
@@ -157,6 +182,9 @@ class Load:
     def set_phase(self, phase):
         self.healthy()
         with self.lock:
+            now = time.monotonic()
+            self.phase_seconds[self.phase] += now - self.phase_started
+            self.phase_started = now
             self.phase = phase
 
     def finish(self):
@@ -184,15 +212,22 @@ class Qualification:
             import ctypes
             require(not ctypes.windll.shell32.IsUserAnAdmin(),
                     "the user qualification needs an unelevated token; the limited task did not provide one")
-            self.config = Path(os.environ["APPDATA"]) / "open-ferry/config.yaml"
+            self.config = WORK / "config/config.yaml"
             self.exe = Path(os.environ["LOCALAPPDATA"]) / "Programs/open-ferry/open-ferry.exe"
             self.data = Path(os.environ["LOCALAPPDATA"]) / "open-ferry"
         else:
             self.config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "open-ferry/config.yaml"
             self.exe = Path.home() / ".local/bin/open-ferry"
             self.data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "open-ferry"
-        require(not self.config.exists() and not self.exe.exists() and not self.data.exists(),
-                "qualification requires a fresh hosted account with no existing open-ferry install")
+        # claude-cli is unrelated user data. Never move, delete or write in it.
+        data_clear = (not self.data.exists() or (self.os == "Windows" and self.data.is_dir()
+                      and all(entry.name == "claude-cli" and entry.is_dir()
+                              and not entry.is_symlink() for entry in self.data.iterdir())))
+        require(not self.config.exists() and not self.exe.exists() and data_clear,
+                "qualification requires no existing open-ferry install or update records")
+        if self.os == "Windows":
+            require(not (Path(os.environ["APPDATA"]) / "open-ferry").exists(),
+                    "qualification refuses an existing user config directory")
 
     def api(self, suffix="", method="GET"):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -259,7 +294,6 @@ class Qualification:
         counts = self.load.snapshot()["counts"]
         for phase in ("baseline", "auto"):
             require(counts.get(f"{phase}.requests", 0) > 0, f"no requests covered {phase}")
-        # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
         suffix = ".zip" if self.os == "Windows" else ".tar.gz"
         archive = f"/download/v{self.b}/open-ferry-{self.b}-{self.candidates['target']}{suffix}"
         with Mirror.lock:
@@ -299,7 +333,6 @@ class Qualification:
             command(["launchctl", "print", f"gui/{os.getuid()}"], sensitive=True)
             record("GUI launchd domain available; machine form is refused by the product")
         else:
-            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             command(["schtasks.exe", "/query", "/tn", "open-ferry"], check=False)
             record("Unelevated interactive account available; machine form omitted: elevated installer ignores the loopback mirror")
 
@@ -310,7 +343,8 @@ class Qualification:
         if self.os == "Windows":
             # Unexercised since 962f661f: no hosted unelevated interactive logon.
             args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                    "-File", str(Path.cwd() / "install.ps1"), "-NoAttestation", "-NoMigrate"]
+                    "-File", str(Path.cwd() / "install.ps1"), "-NoAttestation", "-NoMigrate",
+                    "-InstallDir", str(self.exe.parent), "-ConfigPath", str(self.config)]
         else:
             args = ["sh", str(Path.cwd() / "install.sh"), "--no-attestation", "--no-migrate"]
         command(args, env=self.env, sensitive=True, timeout=180)
@@ -344,7 +378,6 @@ class Qualification:
         elif self.os == "Darwin":
             definition = (Path.home() / f"Library/LaunchAgents/{LABEL}.plist").read_text(encoding="utf-8")
         else:
-            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             definition = command(["schtasks.exe", "/query", "/tn", "open-ferry", "/xml"]).stdout
         require("-supervise" in definition and "-data-dir" in definition,
                 "service manager definition is not the supervised form")
@@ -355,9 +388,13 @@ class Qualification:
 
     def processes(self):
         if self.os == "Windows":
-            # Unexercised since 962f661f: no hosted unelevated interactive logon.
-            result = command(["tasklist.exe", "/fi", "IMAGENAME eq open-ferry.exe", "/fo", "csv", "/nh"])
-            return '"open-ferry.exe"' in result.stdout.lower()
+            # Shared desktops may have unrelated source-tree tests running.
+            result = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                              "Get-CimInstance Win32_Process -Filter \"Name='open-ferry.exe'\" | "
+                              "Select-Object -ExpandProperty ExecutablePath"])
+            return any(Path(path.strip()).is_relative_to(root)
+                       for path in result.stdout.splitlines() if path.strip()
+                       for root in (self.exe.parent, self.data))
         result = command(["pgrep", "-x", "open-ferry"], check=False)
         require(result.returncode in (0, 1), "could not query remaining processes")
         return result.returncode == 0
@@ -374,7 +411,6 @@ class Qualification:
             require(time.monotonic() < deadline, "uninstall left an open-ferry process running")
             time.sleep(1)
         with socket.socket() as listener:
-            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             if self.os != "Windows":
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", self.port))
@@ -389,7 +425,6 @@ class Qualification:
             require(result.returncode != 0 and not (Path.home() / f"Library/LaunchAgents/{LABEL}.plist").exists(),
                     "LaunchAgent still exists")
         else:
-            # Windows unexercised since 962f661f: no hosted unelevated interactive logon.
             result = command(["schtasks.exe", "/query", "/tn", "open-ferry"], check=False)
             require(result.returncode != 0, "scheduled task still exists")
         record("Verified uninstall: no open-ferry processes, port free, service and service record gone")
@@ -400,7 +435,6 @@ class Qualification:
                              env=self.env, check=False, sensitive=True)
             write(OUT / "supervisor-worker.log", result.stdout)
         else:
-            # Windows log path unexercised since 962f661f: no hosted unelevated interactive logon.
             source = (Path.home() / "Library/Logs/open-ferry.log" if self.os == "Darwin"
                       else self.config.parent / "service.log")
             if source.exists():
@@ -415,6 +449,7 @@ class Qualification:
         Mirror.latest = self.a
         server = ThreadingHTTPServer(("127.0.0.1", 0),
                                      functools.partial(Mirror, directory=str(WORK / "mirror")))
+        require(server.server_port != 8317, "refusing the reserved development port for the mirror")
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         failures = []
@@ -460,6 +495,15 @@ class Qualification:
             # Preserve the first error before cleanup can raise another one.
             failures.append(("lifecycle", error))
             record(f"Lifecycle failed: {type(error).__name__}: {error}")
+            if self.os == "Windows":
+                try:
+                    load = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                                    "Get-CimInstance Win32_Processor | "
+                                    "Select-Object Name,LoadPercentage,NumberOfLogicalProcessors | ConvertTo-Json"],
+                                   sensitive=True)
+                    write(OUT / "system-load.json", load.stdout)
+                except Exception as load_error:
+                    record(f"Could not capture system load: {type(load_error).__name__}: {load_error}")
         finally:
             def finish_load():
                 if self.load:
