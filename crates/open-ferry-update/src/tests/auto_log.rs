@@ -98,3 +98,63 @@ fn captures_a_callsite_first_reached_without_a_scoped_subscriber() {
     let lines = capture.0.lock().unwrap();
     assert_eq!(lines.len(), 1, "{lines:?}");
 }
+
+#[tokio::test]
+async fn runtime_follower_reports_takeover_without_claiming_the_watch_finished() {
+    use crate::{SwitchError, SwitchEvent, SwitchHandle, SwitchProgress};
+    use tracing::instrument::WithSubscriber;
+
+    struct ResultProgress(serde_json::Value);
+    impl SwitchProgress for ResultProgress {
+        fn next(
+            &mut self,
+            _: std::time::Instant,
+        ) -> crate::fetch::BoxFuture<'_, Result<SwitchEvent, SwitchError>> {
+            Box::pin(async {
+                Ok(SwitchEvent::Done {
+                    result: self.0.clone(),
+                })
+            })
+        }
+    }
+    for outcome in ["switched", "rolled-back"] {
+        for watching in [false, true] {
+            let mut result =
+                serde_json::json!({"result": outcome, "gap_ms": 143, "reason": "/private/detail"});
+            if watching {
+                result["phase"] = "watching".into();
+            }
+            let logs = Capture::default();
+            super::follow_switch(
+                SwitchHandle::new("takeover".into(), Box::new(ResultProgress(result))),
+                "0.2.0".into(),
+            )
+            .with_subscriber(logs.clone())
+            .await;
+            let events = logs.0.lock().unwrap();
+            assert_eq!(events.len(), 1, "{events:?}");
+            let event = &events[0];
+            assert!(event.starts_with("INFO "), "{event}");
+            assert!(event.contains("version=0.2.0"), "{event}");
+            assert!(event.contains(outcome) && event.contains("143"), "{event}");
+            assert!(
+                !event.contains("unknown")
+                    && !event.contains("finished")
+                    && !event.contains("/private/"),
+                "{event}"
+            );
+            if watching {
+                assert!(
+                    event.contains("took over; watching it before the switch is final")
+                        && event.contains("phase=\"watching\""),
+                    "{event}"
+                );
+            } else {
+                assert!(
+                    event.contains("reported a result") && !event.contains("took over"),
+                    "{event}"
+                );
+            }
+        }
+    }
+}

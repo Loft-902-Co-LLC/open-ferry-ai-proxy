@@ -105,10 +105,10 @@ impl Tasks {
         }
     }
 
-    fn follow(&mut self, handle: SwitchHandle) {
+    fn follow(&mut self, handle: SwitchHandle, version: String) {
         self.followers.retain(|task| !task.is_finished());
         self.followers.push(tokio::spawn(
-            follow_switch(handle).with_current_subscriber(),
+            follow_switch(handle, version).with_current_subscriber(),
         ));
     }
 
@@ -373,6 +373,12 @@ impl UpdateService {
     /// prepare it in a background task. A timeout may have sent the request:
     /// read status before retrying. Manual installs also work in `off` mode.
     pub async fn install_now(&self, auto: bool) -> Result<SwitchHandle, SwitchError> {
+        self.install_with_target(auto)
+            .await
+            .map(|(handle, _)| handle)
+    }
+
+    async fn install_with_target(&self, auto: bool) -> Result<(SwitchHandle, String), SwitchError> {
         let switcher = self.switcher()?;
         let request = Arc::clone(&self.inner.requesting)
             .try_lock_owned()
@@ -459,13 +465,15 @@ impl UpdateService {
         if auto && self.settings().mode != SelfUpdateMode::Auto {
             return Err(SwitchError::UpdatesOff);
         }
-        switcher
+        let version = pin.version.clone();
+        let handle = switcher
             .update(
                 &pin,
                 auto,
                 std::time::Instant::now() + Duration::from_secs(3),
             )
-            .await
+            .await?;
+        Ok((handle, version))
     }
 
     /// Validate the journal's `switch.from` during a watch, else `previous`,
@@ -748,8 +756,8 @@ async fn checked(
             _owner: None,
         };
         if service.switcher().is_ok() {
-            match service.install_now(true).await {
-                Ok(handle) => {
+            match service.install_with_target(true).await {
+                Ok((handle, target)) => {
                     inner
                         .live
                         .lock()
@@ -760,7 +768,7 @@ async fn checked(
                         .tasks
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .follow(handle);
+                        .follow(handle, target);
                 }
                 Err(error) => {
                     let warning = inner
@@ -836,7 +844,7 @@ impl Live {
     }
 }
 
-async fn follow_switch(mut handle: SwitchHandle) {
+async fn follow_switch(mut handle: SwitchHandle, version: String) {
     // Sign-ins can wait five minutes and the watch lasts ten. Quiet intervals
     // do not say whether the switch is still running.
     let until = Instant::now() + Duration::from_secs(30 * 60);
@@ -852,8 +860,15 @@ async fn follow_switch(mut handle: SwitchHandle) {
             }
             Ok(Ok(Some(SwitchEvent::Done { result }))) => {
                 let outcome = result["result"].as_str().unwrap_or("unknown");
-                let version = result["to"].as_str().unwrap_or("unknown");
-                tracing::info!(operation = %handle.id, result = outcome, version, "automatic switch finished");
+                let phase = result["phase"].as_str().unwrap_or("unspecified");
+                let gap_ms = result["gap_ms"].as_u64();
+                if phase == "watching" && matches!(outcome, "switched" | "rolled-back") {
+                    tracing::info!(operation = %handle.id, result = outcome, %version, phase, ?gap_ms,
+                        "automatic switch: open-ferry {version} took over; watching it before the switch is final");
+                } else {
+                    tracing::info!(operation = %handle.id, result = outcome, %version, phase, ?gap_ms,
+                        "automatic switch reported a result");
+                }
                 return;
             }
             Ok(Ok(None)) => return,
@@ -973,18 +988,18 @@ mod tests {
     async fn a_follower_logs_only_the_finished_result_and_target() {
         use tracing::instrument::WithSubscriber;
         let logs = test_log::Capture::default();
-        follow_switch(SwitchHandle::new(
-            "finished".into(),
-            Box::new(FinishedProgress),
-        ))
+        follow_switch(
+            SwitchHandle::new("finished".into(), Box::new(FinishedProgress)),
+            "0.2.0".into(),
+        )
         .with_subscriber(logs.clone())
         .await;
         let events = logs.0.lock().unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
         assert!(events[0].starts_with("INFO "), "{events:?}");
-        assert!(events[0].contains("automatic switch finished"));
+        assert!(events[0].contains("automatic switch reported a result"));
         assert!(events[0].contains("result=\"switched\""), "{events:?}");
-        assert!(events[0].contains("version=\"0.2.0\""), "{events:?}");
+        assert!(events[0].contains("version=0.2.0"), "{events:?}");
         assert!(
             !events[0].contains("/private/")
                 && !events[0].contains("from=")
@@ -1009,9 +1024,12 @@ mod tests {
         use tracing::instrument::WithSubscriber;
 
         let logs = test_log::Capture::default();
-        follow_switch(SwitchHandle::new("ended".into(), Box::new(EndedProgress)))
-            .with_subscriber(logs.clone())
-            .await;
+        follow_switch(
+            SwitchHandle::new("ended".into(), Box::new(EndedProgress)),
+            "0.2.0".into(),
+        )
+        .with_subscriber(logs.clone())
+        .await;
         let events = logs.0.lock().unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
         assert!(events[0].starts_with("INFO "), "{events:?}");
@@ -1112,7 +1130,11 @@ mod tests {
                 calls: calls.clone(),
                 done: done.clone(),
             };
-            follow_switch(SwitchHandle::new("quiet".into(), Box::new(progress))).await;
+            follow_switch(
+                SwitchHandle::new("quiet".into(), Box::new(progress)),
+                "0.2.0".into(),
+            )
+            .await;
             assert!(
                 calls.load(Ordering::SeqCst) > 1,
                 "quiet timeouts were retried"
