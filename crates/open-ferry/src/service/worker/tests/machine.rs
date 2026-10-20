@@ -1145,10 +1145,9 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
     let read = tokio::time::timeout(WAIT, stuck.read_to_end(&mut rest)).await;
     // Always release the test's blocked thread, including after a failure.
     drop(release);
-    assert_eq!(
-        read.expect("wedged stop left the connection open").unwrap(),
-        0
-    );
+    // A cut with the request's unread bytes still queued may arrive as a reset.
+    let read = read.expect("wedged stop left the connection open");
+    assert!(read.is_ok() || read.unwrap_err().kind() == std::io::ErrorKind::ConnectionReset);
     assert!(rest.is_empty());
 }
 
