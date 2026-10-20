@@ -3,6 +3,12 @@
 use std::io;
 use std::path::Path;
 
+/// Holds the read-only `.prev` preflight before either installed or link hashes.
+#[cfg(feature = "blue-green-test")]
+pub(crate) fn before_prev_hash(root: &Path) -> io::Result<()> {
+    hit(root, "stage.before_prev_hash")
+}
+
 /// At a named barrier, publish arrival and wait for its release file.
 /// A named failure file injects an IO error. All files live in the supplied
 /// test directory's `.blue-green-test` child; there is no environment hook.

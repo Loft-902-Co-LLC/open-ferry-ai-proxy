@@ -115,6 +115,27 @@ async fn runtime_retained_binary_hashes_remain_responsive() {
 
 #[cfg(feature = "blue-green-test")]
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_prev_cleanup_hashes_remain_responsive() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    let known = f.installed.with_file_name("open-ferry.prev.1");
+    let unknown = f.installed.with_file_name("open-ferry.prev.2");
+    std::fs::hard_link(&f.installed, &known).unwrap();
+    std::fs::write(&unknown, b"the only copy of an old binary").unwrap();
+    responsive_at(&f, "stage.before_prev_hash").await;
+    assert!(!known.exists());
+    assert_eq!(
+        std::fs::read(&unknown).unwrap(),
+        b"the only copy of an old binary"
+    );
+    // A kept link is hashed again on the next cleanup, also off the runtime.
+    f.release("0.3.0");
+    responsive_at(&f, "stage.before_prev_hash").await;
+    assert!(unknown.exists());
+}
+
+#[cfg(feature = "blue-green-test")]
+#[tokio::test(flavor = "current_thread")]
 async fn runtime_hash_matches_remains_responsive() {
     let f = Fixture::new().await;
     f.release("0.2.0");
