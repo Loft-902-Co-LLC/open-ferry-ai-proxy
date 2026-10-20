@@ -17,6 +17,12 @@ use crate::{
 };
 use tracing::instrument::WithSubscriber;
 
+// These waits only detect a hung fixture or task. Reaching the fake includes
+// staging, syncing files and preparing the install on blocking workers; loaded
+// Windows CI has taken over eight seconds. Keep behavioral deadlines (the
+// short negative waits and stop responsiveness checks) separate below.
+const TEST_WAIT: Duration = Duration::from_secs(30);
+
 struct MemoryFetch {
     bodies: HashMap<String, Vec<u8>>,
     calls: AtomicUsize,
@@ -94,11 +100,9 @@ impl Switcher for Fake {
                 {
                     let (released, _) = gate
                         .wake
-                        .wait_timeout_while(
-                            gate.released.lock().unwrap(),
-                            Duration::from_secs(30),
-                            |released| !*released,
-                        )
+                        .wait_timeout_while(gate.released.lock().unwrap(), TEST_WAIT, |released| {
+                            !*released
+                        })
                         .unwrap();
                     assert!(*released, "the test must release the in-progress poll");
                 }
@@ -388,7 +392,7 @@ async fn overlapping_automatic_checks_send_only_one_switch_request() {
         let service = service.clone();
         async move { service.check_once().await }
     });
-    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+    tokio::time::timeout(TEST_WAIT, arrived.notified())
         .await
         .unwrap();
     service.check_once().await.unwrap().unwrap();
@@ -406,9 +410,9 @@ async fn a_manual_install_during_an_automatic_request_is_busy() {
         let service = service.clone();
         async move { service.check_once().await }
     });
-    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+    tokio::time::timeout(TEST_WAIT, arrived.notified())
         .await
-        .unwrap();
+        .expect("the automatic check reaches the held switch request");
     assert!(matches!(
         service.install_now(false).await,
         Err(SwitchError::Update(crate::UpdateError::Busy))
@@ -427,7 +431,7 @@ async fn a_rollback_during_an_install_request_is_busy() {
         let service = service.clone();
         async move { service.install_now(false).await }
     });
-    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+    tokio::time::timeout(TEST_WAIT, arrived.notified())
         .await
         .unwrap();
     assert!(matches!(
@@ -450,15 +454,14 @@ fn hold_request(fake: &Fake) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Noti
 async fn check_now_uses_the_same_automatic_switch_path() {
     let f = Fixture::new().await;
     let (service, fake, _) = service(&f, "auto", "0.2.0", false);
+    let (arrived, release) = hold_request(&fake);
     assert_eq!(service.check_now(), CheckNow::Started);
-    for _ in 0..500 {
-        if !fake.calls.lock().unwrap().is_empty() && !service.status().checking {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(TEST_WAIT, arrived.notified())
+        .await
+        .expect("the explicit check reaches the automatic switch");
     assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), true)]);
     assert!(!service.status().checking);
+    release.notify_one();
 }
 
 #[tokio::test]
@@ -469,11 +472,11 @@ async fn stopping_a_check_now_during_staging_prevents_its_switch_request() {
     let release = Arc::new(tokio::sync::Notify::new());
     *fetch.gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
     assert_eq!(service.check_now(), CheckNow::Started);
-    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+    tokio::time::timeout(TEST_WAIT, arrived.notified())
         .await
         .unwrap();
     service.stop();
-    tokio::time::timeout(Duration::from_secs(5), fetch.download_ended.notified())
+    tokio::time::timeout(TEST_WAIT, fetch.download_ended.notified())
         .await
         .unwrap();
     release.notify_one();
@@ -513,7 +516,7 @@ async fn dropping_the_service_closes_an_accepted_switch_progress_stream() {
         }));
         service.start(Duration::from_secs(3600));
         service.check_once().await.unwrap().unwrap();
-        tokio::time::timeout(Duration::from_secs(5), polled.notified())
+        tokio::time::timeout(TEST_WAIT, polled.notified())
             .await
             .unwrap();
         if stop_first {
@@ -530,7 +533,7 @@ async fn dropping_the_service_closes_an_accepted_switch_progress_stream() {
             "another service clone owns the follower"
         );
         drop(other);
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(TEST_WAIT, async {
             while !dropped.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
             }
@@ -753,7 +756,7 @@ async fn lowering_the_mode_while_staging_never_starts_a_switch() {
             let service = service.clone();
             async move { service.check_once().await }
         });
-        tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        tokio::time::timeout(TEST_WAIT, arrived.notified())
             .await
             .unwrap();
         service.set_config(&config(mode));
@@ -775,7 +778,7 @@ async fn lowering_the_mode_during_install_preparation_never_sends_an_automatic_r
             let service = service.clone();
             async move { service.install_now(true).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        tokio::time::timeout(TEST_WAIT, arrived.notified())
             .await
             .unwrap();
         service.set_config(&config(mode));
@@ -822,7 +825,7 @@ async fn a_switch_follower_logs_its_outcome_after_update_checks_stop() {
             .await
             .unwrap()
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), polled.notified())
+        tokio::time::timeout(TEST_WAIT, polled.notified())
             .await
             .unwrap();
         if asynchronous {
@@ -833,7 +836,7 @@ async fn a_switch_follower_logs_its_outcome_after_update_checks_stop() {
             service.stop();
         }
         release.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(TEST_WAIT, async {
             loop {
                 if logs.0.lock().unwrap().iter().any(|line| {
                     line.starts_with("INFO")
@@ -873,7 +876,7 @@ async fn async_stop_waits_for_a_running_poll_before_returning_without_a_send() {
         } else {
             assert_eq!(service.check_now(), CheckNow::Started);
         }
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        tokio::time::timeout(TEST_WAIT, gate.entered.notified())
             .await
             .unwrap();
         match earlier {
@@ -891,9 +894,7 @@ async fn async_stop_waits_for_a_running_poll_before_returning_without_a_send() {
         );
         *gate.released.lock().unwrap() = true;
         gate.wake.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), &mut stopped)
-            .await
-            .unwrap();
+        tokio::time::timeout(TEST_WAIT, &mut stopped).await.unwrap();
         assert!(
             fake.calls.lock().unwrap().is_empty(),
             "the abort wins before the send: {earlier}"
@@ -913,9 +914,9 @@ impl HeldPoll {
         }));
         *fake.poll_gate.lock().unwrap() = Some(held.0.clone());
         assert_eq!(service.check_now(), CheckNow::Started);
-        tokio::time::timeout(Duration::from_secs(5), held.0.entered.notified())
+        tokio::time::timeout(TEST_WAIT, held.0.entered.notified())
             .await
-            .unwrap();
+            .expect("the automatic check reaches the held switch poll");
         held
     }
 
@@ -951,9 +952,7 @@ async fn a_cancelled_async_stop_keeps_the_poll_for_the_next_stop() {
         "cancelling a stop must put the held poll back"
     );
     held.release();
-    tokio::time::timeout(Duration::from_secs(5), second)
-        .await
-        .unwrap();
+    tokio::time::timeout(TEST_WAIT, second).await.unwrap();
     assert!(fake.calls.lock().unwrap().is_empty());
 }
 
@@ -977,9 +976,7 @@ async fn a_timed_out_async_stop_keeps_the_poll_for_the_next_stop() {
         "the five-second escape must put the held poll back"
     );
     held.release();
-    tokio::time::timeout(Duration::from_secs(5), second)
-        .await
-        .unwrap();
+    tokio::time::timeout(TEST_WAIT, second).await.unwrap();
     assert!(fake.calls.lock().unwrap().is_empty());
     assert!(logs.0.lock().unwrap().iter().any(|line| {
         line.contains("update checks have not stopped after five seconds; continuing")
@@ -1012,9 +1009,7 @@ async fn a_queued_async_stop_aborts_checks_before_it_can_take_the_gate() {
     );
     drop(second);
     held.release();
-    tokio::time::timeout(Duration::from_secs(5), first)
-        .await
-        .unwrap();
+    tokio::time::timeout(TEST_WAIT, first).await.unwrap();
     assert!(fake.calls.lock().unwrap().is_empty());
 }
 

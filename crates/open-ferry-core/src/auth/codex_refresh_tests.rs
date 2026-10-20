@@ -891,12 +891,18 @@ async fn async_persistence_wait_does_not_stop_runtime_progress() {
     let guard = crate::auth::credential_lock::acquire_credential_lock(&path)
         .await
         .unwrap();
+    let runtime_thread = std::thread::current().id();
     let (waiting, mut waiting_rx) = tokio::sync::mpsc::unbounded_channel();
     crate::auth::credential_lock::set_test_hook(
         &path,
         Some(Arc::new(move |event| {
             if event == "waiting" {
                 let _ = waiting.send(());
+                assert_ne!(
+                    std::thread::current().id(),
+                    runtime_thread,
+                    "credential lock wait blocked the runtime thread"
+                );
             }
         })),
     );
@@ -904,20 +910,16 @@ async fn async_persistence_wait_does_not_stop_runtime_progress() {
         let patch = CredentialRefreshPatch::new(&before.metadata, &before.metadata, true, false);
         store.apply_codex_refresh(before, patch).await.unwrap();
     });
-    let (release, release_rx) = std::sync::mpsc::channel();
-    let holder = std::thread::spawn(move || {
-        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(2));
-        drop(guard);
-    });
-    let start = std::time::Instant::now();
-    waiting_rx.recv().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), waiting_rx.recv())
+        .await
+        .expect("the save reaches the held credential lock")
+        .unwrap();
+    // The hook proves the waiter runs off this current-thread runtime. Keep
+    // the lock held until this task resumes, rather than timing a watchdog.
     tokio::task::yield_now().await;
-    let progressed = start.elapsed() < std::time::Duration::from_secs(1);
-    let _ = release.send(());
+    drop(guard);
     worker.await.unwrap();
-    holder.join().unwrap();
     crate::auth::credential_lock::set_test_hook(&path, None);
-    assert!(progressed, "runtime could not progress during lock wait");
 }
 
 #[test]
@@ -973,11 +975,21 @@ fn held_guard_saves_without_reacquiring_and_rejects_wrong_guard() {
     let mut after = before.clone();
     rotate(&mut after, true, false);
     let patch = CredentialRefreshPatch::new(&before.metadata, &after.metadata, true, false);
-    let start = std::time::Instant::now();
+    // A reacquisition must fail at its first lock event, before it can wait
+    // out the credential lock timeout. File I/O has no wall-clock budget.
+    crate::auth::credential_lock::set_test_hook(
+        &path,
+        Some(Arc::new(|event| {
+            assert!(
+                !matches!(event, "waiting" | "acquired"),
+                "the held-guard save tried to reacquire its credential lock: {event}"
+            );
+        })),
+    );
     let persisted = store
         .apply_codex_refresh_locked(&after, &patch, &guard)
         .unwrap();
-    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    crate::auth::credential_lock::set_test_hook(&path, None);
     assert_eq!(persisted.auth.metadata["refresh_token"], "outer-ref-new");
     let mut other = fixture();
     other.file_name = "other.json".into();
