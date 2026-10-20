@@ -19,7 +19,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 Coming from CLIProxyAPI? Install open-ferry, then run `open-ferry migrate`, which switches your setup over on its config and credentials, and `open-ferry migrate -undo` switches back. The install scripts offer to run it when they find CLIProxyAPI. The [migration guide](docs/migrating-from-cliproxyapi.md) covers what carries over and what doesn't.
 
-No release has been published yet. Until the first one, [build from source](#build-from-source): the install scripts, the container image and the archives below all come from a release.
+The first release, 0.1.0, isn't out yet. The releases before it are candidates for it, published to test updating from one signed release to the next. They install and update like any release, or you can [build from source](#build-from-source).
 
 ### Install script
 
