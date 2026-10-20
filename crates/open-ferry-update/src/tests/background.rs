@@ -344,7 +344,17 @@ async fn runtime_busy_check_waits_and_reports_without_writing_state() {
     assert!(service.status().checking);
     assert_eq!(service.check_now(), CheckNow::Running);
     tokio::time::advance(Duration::from_millis(250)).await;
-    tokio::task::yield_now().await;
+    // The feature-enabled check crosses a blocking test seam before trying
+    // the lock. Advancing the clock makes the deadline due; await completion
+    // too, so a loaded blocking pool does not turn one yield into a race.
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service.status().checking {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the busy check finishes at its retry deadline");
     let status = service.status();
     assert!(!status.checking);
     assert!(status.last_check.is_some());
