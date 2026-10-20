@@ -1200,13 +1200,103 @@ pub fn cleanup_stale_prev_with(
     installed: &Path,
     verified_sha256: &[String],
 ) -> io::Result<PrevCleanup> {
-    let mut done = PrevCleanup::default();
-    let links = prev_links_beside(installed);
-    if links.is_empty() {
-        return Ok(done);
+    remove_stale_prev_with(
+        ops,
+        installed,
+        stale_prev_candidates(installed, verified_sha256)
+            .map(|(path, candidate)| (path, candidate.map(|_| ()))),
+    )
+}
+
+/// A read-only plan; dropping it (including after cancellation) deletes nothing.
+pub(crate) struct PrevCleanupPlan {
+    installed: PathBuf,
+    links: Vec<(PathBuf, Result<PrevIdentity, String>)>,
+}
+
+/// Captured only for a no-follow regular file, before its bytes are hashed.
+#[derive(PartialEq, Eq)]
+struct PrevIdentity {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl PrevIdentity {
+    fn of(metadata: &fs::Metadata) -> io::Result<Self> {
+        if !metadata.is_file() {
+            return Err(io::Error::other("it is not a regular file"));
+        }
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified()?,
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+        })
     }
-    let installed_hash = crate::installed_file::hash_installed(installed)
-        .ok()
+}
+
+/// Whole-file reads belong on a blocking worker. The update lock must be held
+/// from planning through application, unless the plan is discarded.
+pub(crate) fn plan_stale_prev(installed: &Path, verified_sha256: &[String]) -> PrevCleanupPlan {
+    PrevCleanupPlan {
+        installed: installed.to_owned(),
+        links: stale_prev_candidates(installed, verified_sha256)
+            .map(|(path, candidate)| {
+                let identity = candidate.and_then(|metadata| {
+                    PrevIdentity::of(&metadata)
+                        .map_err(|error| format!("its identity could not be recorded: {error}"))
+                });
+                (path, identity)
+            })
+            .collect(),
+    }
+}
+
+/// No hashes or whole-file reads: only no-follow metadata is rechecked here.
+/// Every `.prev` writer holds the update lock, which the caller still owns.
+/// Revalidation also keeps an unexpected replacement whose identity differs;
+/// it cannot protect against a writer bypassing the lock and preserving all
+/// recorded metadata, or racing the metadata check and unlink.
+pub(crate) fn apply_stale_prev(plan: PrevCleanupPlan) -> io::Result<PrevCleanup> {
+    apply_stale_prev_with(&RealFileOps, plan)
+}
+
+fn apply_stale_prev_with(ops: &dyn FileOps, plan: PrevCleanupPlan) -> io::Result<PrevCleanup> {
+    let candidates = plan.links.into_iter().map(|(path, candidate)| {
+        let checked = candidate.and_then(|identity| {
+            fs::symlink_metadata(&path)
+                .and_then(|metadata| PrevIdentity::of(&metadata))
+                .ok()
+                .filter(|now| *now == identity)
+                .map(|_| ())
+                .ok_or_else(|| "its identity changed after cleanup was planned".to_owned())
+        });
+        (path, checked)
+    });
+    remove_stale_prev_with(ops, &plan.installed, candidates)
+}
+
+/// Shared classification, evaluated lazily so sync cleanup retains its
+/// hash-then-remove order. This iterator never deletes or warns.
+fn stale_prev_candidates<'a>(
+    installed: &Path,
+    verified_sha256: &'a [String],
+) -> impl Iterator<Item = (PathBuf, Result<fs::Metadata, String>)> + use<'a> {
+    let links = prev_links_beside(installed);
+    let installed_hash = (!links.is_empty())
+        .then(|| {
+            crate::installed_file::hash_installed(installed)
+                .ok()
+                .flatten()
+        })
         .flatten();
     // Where the installed path really leads: it may be a symlink to a `.prev`
     // file, whose bytes the installed hash then counts, and which is the only
@@ -1218,34 +1308,50 @@ pub fn cleanup_stale_prev_with(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(None),
         Err(_) => None,
     };
-    for link in links {
-        // Only a regular file: never follow or remove a link to elsewhere.
-        if !fs::symlink_metadata(&link).is_ok_and(|metadata| metadata.is_file()) {
-            warn_once(&link, "it is not a regular file");
-            done.kept.push(link);
-            continue;
-        }
-        let is_installed_target = match (&installed_target, fs::canonicalize(&link)) {
-            (Some(Some(target)), Ok(path)) => *target == path,
-            (Some(None), Ok(_)) => false,
-            _ => true,
-        };
-        if is_installed_target {
-            warn_once(
-                &link,
-                "the installed path leads to it, or that could not be told",
-            );
-            done.kept.push(link);
-            continue;
-        }
-        let known = |hash: &str| {
-            installed_hash
-                .as_deref()
-                .is_some_and(|h| h.eq_ignore_ascii_case(hash))
-                || verified_sha256.iter().any(|v| v.eq_ignore_ascii_case(hash))
-        };
-        match crate::staging::hash_file(&link) {
-            Ok(hash) if known(&hash) => match fs::remove_file(&link) {
+    links.into_iter().map(move |link| {
+        let candidate = (|| {
+            // Only a regular file: never follow or remove a link to elsewhere.
+            let metadata = fs::symlink_metadata(&link)
+                .ok()
+                .filter(|metadata| metadata.is_file())
+                .ok_or_else(|| "it is not a regular file".to_owned())?;
+            let is_installed_target = match (&installed_target, fs::canonicalize(&link)) {
+                (Some(Some(target)), Ok(path)) => *target == path,
+                (Some(None), Ok(_)) => false,
+                _ => true,
+            };
+            if is_installed_target {
+                return Err("the installed path leads to it, or that could not be told".to_owned());
+            }
+            let known = |hash: &str| {
+                installed_hash
+                    .as_deref()
+                    .is_some_and(|h| h.eq_ignore_ascii_case(hash))
+                    || verified_sha256.iter().any(|v| v.eq_ignore_ascii_case(hash))
+            };
+            match crate::staging::hash_file(&link) {
+                Ok(hash) if known(&hash) => Ok(metadata),
+                Ok(_) => Err(
+                    "its bytes match neither the installed binary nor a verified kept copy, \
+                 so it may be the only copy of an old binary"
+                        .to_owned(),
+                ),
+                Err(error) => Err(format!("it could not be read: {error}")),
+            }
+        })();
+        (link, candidate)
+    })
+}
+
+fn remove_stale_prev_with(
+    ops: &dyn FileOps,
+    installed: &Path,
+    candidates: impl IntoIterator<Item = (PathBuf, Result<(), String>)>,
+) -> io::Result<PrevCleanup> {
+    let mut done = PrevCleanup::default();
+    for (link, candidate) in candidates {
+        match candidate {
+            Ok(()) => match fs::remove_file(&link) {
                 Ok(()) => {
                     tracing::info!("removed {}, a stale copy of a known binary", link.display());
                     done.removed.push(link);
@@ -1255,16 +1361,8 @@ pub fn cleanup_stale_prev_with(
                     done.kept.push(link);
                 }
             },
-            Ok(_) => {
-                warn_once(
-                    &link,
-                    "its bytes match neither the installed binary nor a verified kept copy, \
-                     so it may be the only copy of an old binary",
-                );
-                done.kept.push(link);
-            }
-            Err(error) => {
-                warn_once(&link, &format!("it could not be read: {error}"));
+            Err(why) => {
+                warn_once(&link, &why);
                 done.kept.push(link);
             }
         }
@@ -2294,6 +2392,113 @@ mod tests {
         let verified = [hash(&link)];
         let done = cleanup_stale_prev_with(&Ops::default(), &d.installed, &verified).unwrap();
         assert_eq!(done.removed.as_slice(), std::slice::from_ref(&link));
+    }
+
+    // No sleeps: length, timestamp and file type changes are forced directly.
+    #[test]
+    fn prev_cleanup_plan_keeps_changed_links() {
+        for change in ["length", "modified", "directory", "missing"] {
+            let d = dir();
+            let link = d.installed.with_file_name("open-ferry.prev.1");
+            fs::write(&link, "old").unwrap();
+            let plan = plan_stale_prev(&d.installed, &[]);
+            assert!(
+                plan.links[0].1.is_ok(),
+                "{change}: must be removable initially"
+            );
+            let modified = fs::metadata(&link).unwrap().modified().unwrap();
+            match change {
+                "length" => {
+                    fs::write(&link, "foreign contents").unwrap();
+                    fs::File::options()
+                        .write(true)
+                        .open(&link)
+                        .unwrap()
+                        .set_modified(modified)
+                        .unwrap();
+                }
+                "modified" => {
+                    fs::write(&link, "new").unwrap();
+                    fs::File::options()
+                        .write(true)
+                        .open(&link)
+                        .unwrap()
+                        .set_modified(modified + Duration::from_secs(60))
+                        .unwrap();
+                }
+                "directory" => {
+                    fs::remove_file(&link).unwrap();
+                    fs::create_dir(&link).unwrap();
+                }
+                "missing" => fs::remove_file(&link).unwrap(),
+                _ => unreachable!(),
+            }
+            let ops = Ops::default();
+            let done = apply_stale_prev_with(&ops, plan).unwrap();
+            assert!(done.removed.is_empty(), "{change}");
+            assert_eq!(
+                done.kept.as_slice(),
+                std::slice::from_ref(&link),
+                "{change}"
+            );
+            assert!(
+                ops.operations.lock().unwrap().is_empty(),
+                "no directory sync: {change}"
+            );
+            match change {
+                "length" => assert_eq!(read(&link), "foreign contents"),
+                "modified" => assert_eq!(read(&link), "new"),
+                "directory" => assert!(link.is_dir()),
+                "missing" => assert!(!link.exists()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prev_cleanup_plan_keeps_a_replaced_inode_with_matching_size_and_time() {
+        let d = dir();
+        let link = d.installed.with_file_name("open-ferry.prev.1");
+        fs::write(&link, "old").unwrap();
+        let modified = fs::metadata(&link).unwrap().modified().unwrap();
+        let plan = plan_stale_prev(&d.installed, &[]);
+        // Retain the old inode so the replacement cannot reuse it.
+        fs::rename(&link, link.with_extension("saved")).unwrap();
+        fs::write(&link, "new").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&link)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let done = apply_stale_prev(plan).unwrap();
+        assert!(done.removed.is_empty());
+        assert_eq!(done.kept.as_slice(), std::slice::from_ref(&link));
+        assert_eq!(read(&link), "new");
+    }
+
+    #[test]
+    fn prev_cleanup_plan_preserves_safety_and_sync_errors() {
+        let d = dir();
+        let link = d.installed.with_file_name("open-ferry.prev.1");
+        let unknown = d.installed.with_file_name("open-ferry.prev.2");
+        let directory = d.installed.with_file_name("open-ferry.prev.3");
+        fs::hard_link(&d.installed, &link).unwrap();
+        fs::write(&unknown, "only copy").unwrap();
+        fs::create_dir(&directory).unwrap();
+        let plan = plan_stale_prev(&d.installed, &[]);
+        assert!(link.exists(), "planning must not delete");
+        let ops = Ops::default();
+        *ops.fail_sync.lock().unwrap() = Some(d.installed.clone());
+        let error = apply_stale_prev_with(&ops, plan).unwrap_err();
+        assert!(error.to_string().contains("injected sync failure"));
+        assert!(!link.exists(), "the completed unlink is not undone");
+        assert_eq!(read(&unknown), "only copy");
+        assert!(directory.is_dir());
+        let done = apply_stale_prev_with(&ops, plan_stale_prev(&d.installed, &[])).unwrap();
+        assert!(done.removed.is_empty(), "kept files alone do not sync");
+        assert_eq!(done.kept, [unknown, directory]);
     }
 
     // Not upstream's (O3, aside path): what is moved aside is hashed, and a

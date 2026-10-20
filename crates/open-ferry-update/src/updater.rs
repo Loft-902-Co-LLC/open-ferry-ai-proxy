@@ -491,17 +491,31 @@ impl Updater {
         let data = self.data.clone();
         let name = self.binary_name();
         let keep = keep.clone();
-        let verified = tokio::task::spawn_blocking(move || {
+        let planned = tokio::task::spawn_blocking(move || {
             #[cfg(feature = "blue-green-test")]
             crate::test_seams::hit(data.root(), "stage.before_cleanup_hash")
                 .map_err(io_error("wait before checking retained binaries"))?;
-            verified_stale_artifacts(&data, name, &keep)
+            let verified = verified_stale_artifacts(&data, name, &keep)?;
+            let planned = if let Ok(Some(receipt)) = Receipt::load(&data.receipt_file()) {
+                #[cfg(feature = "blue-green-test")]
+                crate::test_seams::before_prev_hash(data.root())
+                    .map_err(io_error("wait before checking stale installed links"))?;
+                let plan = crate::switch::plan_stale_prev(Path::new(&receipt.binary), &verified);
+                Some((receipt.binary, plan))
+            } else {
+                None
+            };
+            Ok::<_, UpdateError>(planned)
         })
         .await
         .map_err(blocking_error("check retained binaries"))??;
         // Destructive cleanup stays with the lock-owning caller. The blocking
         // preflight above can outlive cancellation but cannot delete anything.
-        cleanup_stale_artifacts_verified(&self.data, &verified)
+        cleanup_stale_staging_in(&self.data);
+        if let Some((installed, plan)) = planned {
+            log_stale_prev_cleanup(&installed, crate::switch::apply_stale_prev(plan));
+        }
+        Ok(())
     }
 
     /// Whether this install updates itself.
@@ -1345,22 +1359,33 @@ fn cleanup_stale_artifacts_verified(
     data: &DataDir,
     verified: &[String],
 ) -> Result<(), UpdateError> {
+    cleanup_stale_staging_in(data);
+    if let Ok(Some(receipt)) = Receipt::load(&data.receipt_file()) {
+        log_stale_prev_cleanup(
+            &receipt.binary,
+            crate::switch::cleanup_stale_prev(Path::new(&receipt.binary), verified),
+        );
+    }
+    Ok(())
+}
+
+fn cleanup_stale_staging_in(data: &DataDir) {
     if let Err(error) = crate::staging::cleanup_stale_staging(&data.versions()) {
         tracing::warn!(%error, path = %data.versions().display(), "could not finish stale staging cleanup; continuing");
     }
-    if let Ok(Some(receipt)) = Receipt::load(&data.receipt_file()) {
-        match crate::switch::cleanup_stale_prev(Path::new(&receipt.binary), verified) {
-            Ok(cleanup) => {
-                for path in cleanup.removed {
-                    tracing::info!(path = %path.display(), "removed a stale installed link");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, path = %receipt.binary, "could not finish stale installed-link cleanup; continuing");
+}
+
+fn log_stale_prev_cleanup(installed: &str, result: io::Result<crate::switch::PrevCleanup>) {
+    match result {
+        Ok(cleanup) => {
+            for path in cleanup.removed {
+                tracing::info!(path = %path.display(), "removed a stale installed link");
             }
         }
+        Err(error) => {
+            tracing::warn!(%error, path = %installed, "could not finish stale installed-link cleanup; continuing");
+        }
     }
-    Ok(())
 }
 
 /// What the supervisor's prune removed.
