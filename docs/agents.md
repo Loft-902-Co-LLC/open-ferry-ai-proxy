@@ -4,7 +4,7 @@ What an agent needs to install open-ferry, set it up, change its setup, and poin
 
 **To look at a setup or change it, use open-ferry's own commands (`open-ferry status`, `config`, `keys`, `credentials` and `clients`) or its MCP server (`open-ferry mcp`)**, not hand edits of the YAML or curl with the management key: they check each change, keep secrets out of what they print and out of the command line, and ask for a yes before anything risky. See [Look at it and change it](#look-at-it-and-change-it-the-commands-and-the-mcp-server).
 
-open-ferry is a local proxy, a Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). On one port (8317 by default) it serves OpenAI Chat Completions and Responses, Claude Messages and the Gemini API, and passes each request on to an account or API key from its config: Codex and Claude sign-ins, your own Claude Code (`claude-cli`), Gemini, Vertex AI, xAI, and any OpenAI-compatible upstream. It is pre-alpha; no release has been published yet.
+open-ferry is a local proxy, a Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). On one port (8317 by default) it serves OpenAI Chat Completions and Responses, Claude Messages and the Gemini API, and passes each request on to an account or API key from its config: Codex and Claude sign-ins, your own Claude Code (`claude-cli`), Gemini, Vertex AI, xAI, and any OpenAI-compatible upstream. It is pre-alpha: the first release, 0.1.0, isn't out yet, and the releases before it are candidates for it.
 
 ## Install
 
