@@ -87,9 +87,14 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   - **Translation fixes**: Claude document blocks for Gemini, Gemini's camelCase `systemInstruction`, refusal finish reasons and signed visible text for Claude clients, object types in Gemini schemas, a Codex web search's sources for Claude clients, encrypted reasoning of an unknown format kept in Codex compat mode, and a Responses stream that ends cleanly after its finish reason completed without `[DONE]`.
   - **Usage**: an answer whose `apply_patch` call fails keeps the usage it read, and a Vertex AI stream that ends after its last chunk counts as a success.
 
+## [0.0.2] - 2026-10-20
+
+The second candidate for the first release, 0.1.0, published so that 0.0.1 has a signed release to update to. It has what the [changelog](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/v0.0.2/CHANGELOG.md) lists under Unreleased on this date.
+
 ## [0.0.1] - 2026-10-20
 
 A candidate for the first release, 0.1.0, published to test updating from one signed release to the next. It has what the [changelog](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/v0.0.1/CHANGELOG.md) lists under Unreleased on this date.
 
-[Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/compare/v0.0.2...HEAD
+[0.0.2]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/tag/v0.0.2
 [0.0.1]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/tag/v0.0.1
