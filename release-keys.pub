@@ -9,6 +9,6 @@
 # these keys when it updates itself; the release workflow reads it to check
 # the signature it makes. See RELEASING.md for making a key and rotating it,
 # and docs/updates.md for how open-ferry uses it.
-#
-# There is no key yet: a build from this file trusts no release key, so it
-# refuses to update itself.
+
+# The current key, made on 2026-10-20.
+RWSS+/HOpgM+KazX1xhYXraRTe+9Cqq53aAdjy1vBglCMs4ZMw+ye5z0
