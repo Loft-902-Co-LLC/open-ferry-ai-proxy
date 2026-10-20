@@ -615,7 +615,8 @@ async fn runtime_scheduled_busy_check_reports_the_next_interval() {
 async fn runtime_lock_retake_after_probe_returns_busy() {
     let f = Fixture::new().await;
     let service = service(&f, "notify");
-    let (held, arrived) = crate::test_seams::held::Held::new(f.data.root(), "auto.before_check");
+    let (held, arrived) =
+        crate::test_seams::held::Held::new(f.data.root(), "auto.after_lock_probe");
     let (ready, receive) = tokio::sync::oneshot::channel();
     let observer = std::thread::spawn(move || {
         arrived.recv_timeout(Duration::from_secs(5)).unwrap();

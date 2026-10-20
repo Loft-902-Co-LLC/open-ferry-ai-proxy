@@ -939,24 +939,14 @@ fn assessed_install(inner: &Inner) -> Install {
 }
 
 async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, UpdateError> {
+    #[cfg(feature = "blue-green-test")]
+    check_barrier(inner, "auto.before_check").await?;
     // Busy retries need no client construction or install assessment. The
     // real check still acquires its own lock, so a contender winning after
     // this probe simply returns Busy and follows the same retry policy.
     drop(inner.updater.lock()?);
-    #[cfg(feature = "blue-green-test")]
-    {
-        let root = inner.updater.data.root().to_path_buf();
-        tokio::task::spawn_blocking(move || crate::test_seams::hit(&root, "auto.before_check"))
-            .await
-            .map_err(|error| UpdateError::Io {
-                what: "wait at the test check barrier",
-                error: error.to_string(),
-            })?
-            .map_err(|error| UpdateError::Io {
-                what: "wait at the test check barrier",
-                error: error.to_string(),
-            })?;
-    }
+    #[cfg(all(test, feature = "blue-green-test"))]
+    check_barrier(inner, "auto.after_lock_probe").await?;
     let fetch = (inner.make_fetch)(&snapshot.proxy_url).map_err(|error| UpdateError::Fetch {
         what: "the release list",
         error,
@@ -979,6 +969,21 @@ async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, Update
     updater
         .check_with_pending(snapshot.settings.mode, supervised, &install)
         .await
+}
+
+#[cfg(feature = "blue-green-test")]
+async fn check_barrier(inner: &Inner, name: &'static str) -> Result<(), UpdateError> {
+    let root = inner.updater.data.root().to_path_buf();
+    tokio::task::spawn_blocking(move || crate::test_seams::hit(&root, name))
+        .await
+        .map_err(|error| UpdateError::Io {
+            what: "wait at the test check barrier",
+            error: error.to_string(),
+        })?
+        .map_err(|error| UpdateError::Io {
+            what: "wait at the test check barrier",
+            error: error.to_string(),
+        })
 }
 
 /// Resolves once the mode is `off`.
