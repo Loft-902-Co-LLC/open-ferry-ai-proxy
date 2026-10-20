@@ -222,9 +222,42 @@ pub struct UpdateLock {
     _file: File,
 }
 
+#[cfg(unix)]
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        // flock follows the open file description. A concurrent fork can
+        // inherit it until exec closes CLOEXEC descriptors, so closing just
+        // our descriptor can leave a released update lock spuriously busy.
+        let _ = self._file.unlock();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_released_update_lock_is_not_retained_by_an_inherited_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::at(dir.path());
+        let lock = data.try_lock().unwrap().unwrap();
+        // A dup shares the description exactly as a descriptor inherited
+        // across fork does, without racing another test's process creation.
+        let inherited = lock._file.try_clone().unwrap();
+        drop(lock);
+        let next = data
+            .try_lock()
+            .unwrap()
+            .expect("Drop releases the update lock even before the inherited descriptor closes");
+        drop(inherited);
+        assert!(
+            data.try_lock().unwrap().is_none(),
+            "closing the inherited descriptor must not release the next owner's lock"
+        );
+        drop(next);
+        assert!(data.try_lock().unwrap().is_some());
+    }
 
     #[cfg(unix)]
     #[test]
