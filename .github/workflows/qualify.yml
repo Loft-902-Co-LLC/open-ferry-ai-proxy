@@ -47,7 +47,6 @@ jobs:
       QUALIFY_FAULT: ${{ inputs.fault }}
       QUALIFY_PUBLISHED: ${{ inputs.published }}
       QUALIFY_PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,29 +106,44 @@ jobs:
       - name: Install minisign (macOS)
         if: inputs.published != '' && runner.os == 'macOS'
         run: |
+          # Homebrew has no versioned minisign formula; extract needs a custom
+          # tap and its own dependency maintenance. Use the supported formula.
           brew install minisign
           minisign -v
 
-      - name: Install minisign (Windows)
+      # Chocolatey's only version is 0.8.0, which lacks -W for the real-key test.
+      - name: Install pinned minisign (Windows)
         if: inputs.published != '' && runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install minisign --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { throw 'Could not install minisign.' }
-          minisign -v
+          $archive = Join-Path $env:RUNNER_TEMP 'minisign-0.12-win64.zip'
+          Invoke-WebRequest 'https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479') { throw 'minisign archive SHA-256 differs.' }
+          $destination = Join-Path $env:RUNNER_TEMP 'minisign-0.12'
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $bin = Join-Path $destination 'minisign-win64/x86_64'
+          $bin >> $env:GITHUB_PATH
+          & (Join-Path $bin 'minisign.exe') -v
           if ($LASTEXITCODE -ne 0) { throw 'minisign is unavailable.' }
+
+      - name: Check published qualification controls with real minisign
+        if: inputs.published != ''
+        env:
+          QUALIFY_REQUIRE_MINISIGN: '1'
+        run: '"$QUALIFY_PYTHON" -I .github/scripts/qualify/test_run.py -v'
 
       - name: Published preconditions (before any installation or service setup)
         if: inputs.published != ''
         env:
           FORM: ${{ matrix.form }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           extra=()
           if [ "$QUALIFY_PREFLIGHT_ONLY" = true ]; then extra+=(--preflight-only); fi
           "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --published "$QUALIFY_PUBLISHED" --form "$FORM" --preconditions-only "${extra[@]}"
 
       - name: Check qualification failure controls
-        if: ${{ !inputs.preflight_only || inputs.published != '' }}
+        if: ${{ !inputs.preflight_only && inputs.published == '' }}
         run: '"$QUALIFY_PYTHON" -I .github/scripts/qualify/test_run.py'
 
       - name: Prepare native builds
@@ -145,14 +159,19 @@ jobs:
         run: git diff --exit-code -- Cargo.toml Cargo.lock release-keys.pub
 
       - name: Qualify the service
-        if: ${{ !inputs.preflight_only || inputs.published != '' }}
+        if: ${{ !inputs.preflight_only && inputs.published == '' }}
+        run: '"$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification"'
+
+      - name: Qualify the published service
+        if: inputs.published != ''
         env:
           FORM: ${{ matrix.form }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           extra=()
           if [ -n "$QUALIFY_PUBLISHED" ]; then extra+=(--published "$QUALIFY_PUBLISHED"); fi
           if [ "$RUNNER_OS" = Linux ] && [ "$FORM" = machine ]; then
-            sudo -H --preserve-env=GH_TOKEN "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
+            sudo -H --preserve-env=GH_TOKEN,QUALIFY_FAULT "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
           else
             "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
           fi

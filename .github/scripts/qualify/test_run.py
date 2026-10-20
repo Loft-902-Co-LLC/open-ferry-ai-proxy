@@ -9,11 +9,14 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -232,7 +235,9 @@ class PublishedPreconditions(unittest.TestCase):
         return {"id": 1, "tag_name": "v" + version, "draft": False, "prerelease": False,
                 "published_at": "2026-10-20T00:00:00Z",
                 "assets": [{"id": 2, "name": "SHA256SUMS"},
-                           {"id": 3, "name": "SHA256SUMS.minisig"}], **changes}
+                           {"id": 3, "name": "SHA256SUMS.minisig"},
+                           {"id": 5, "name": "install.sh"},
+                           {"id": 6, "name": "install.ps1"}], **changes}
 
     def test_stable_versions_are_normalized_and_compared_numerically(self):
         self.assertEqual(qualification.published_versions(" v1.9.9, 1.10.0 "), ("1.9.9", "1.10.0"))
@@ -310,12 +315,13 @@ class PublishedPreconditions(unittest.TestCase):
 
     def test_signature_uses_minisign_and_each_checkout_key(self):
         self.signature()
-        with patch.object(qualification, "command", side_effect=[Mock(returncode=1), Mock(returncode=0)]) as run:
+        with patch.object(qualification, "command", side_effect=[Mock(returncode=1),
+                          Mock(returncode=0, stdout="open-ferry 1.2.3 SHA256SUMS\n")]) as run:
             qualification.verify_release_signature(self.work, "1.2.3", ["other-key", self.key])
         self.assertEqual(run.call_count, 2)
         self.assertTrue(all(call.kwargs == {"check": False, "sensitive": True}
                             for call in run.call_args_list), "public-key arguments must stay out of diagnostics")
-        self.assertEqual(run.call_args.args[0], ["minisign", "-Vm", self.work / "SHA256SUMS", "-x",
+        self.assertEqual(run.call_args.args[0], ["minisign", "-V", "-H", "-Q", "-m", self.work / "SHA256SUMS", "-x",
                                                self.work / "SHA256SUMS.minisig", "-P", self.key])
         with patch.object(qualification, "command", return_value=Mock(returncode=1)), \
                 self.assertRaisesRegex(RuntimeError, "signature does not verify"):
@@ -323,10 +329,11 @@ class PublishedPreconditions(unittest.TestCase):
 
     def test_wrong_signed_comment_and_legacy_signature_are_refused(self):
         self.signature("1.2.4")
-        with patch.object(qualification, "command") as run, \
+        with patch.object(qualification, "command", return_value=Mock(
+                returncode=0, stdout="open-ferry 1.2.4 SHA256SUMS\n")) as run, \
                 self.assertRaisesRegex(RuntimeError, "trusted comment"):
             qualification.verify_release_signature(self.work, "1.2.3", [self.key])
-        run.assert_not_called()
+        run.assert_called_once()
         text = self.signature().splitlines()
         text[1] = base64.b64encode(b"Ed" + base64.b64decode(text[1])[2:]).decode()
         (self.work / "SHA256SUMS.minisig").write_text("\n".join(text), newline="\n")
@@ -335,18 +342,96 @@ class PublishedPreconditions(unittest.TestCase):
 
     def test_all_preconditions_must_pass_before_manifest_is_written(self):
         a, b = self.release(), self.release("1.2.4", id=4)
+        script = b"released installer fixture\n"
+        sums = "".join(f"{hashlib.sha256(script).hexdigest()}  {name}\n"
+                       for name in ("install.sh", "install.ps1")).encode()
+        def download_asset(args, **kwargs):
+            name = next(asset["name"] for asset in a["assets"] if str(asset["id"]) == args[-1].split("/")[-1])
+            kwargs["stdout"].write(sums if name == "SHA256SUMS" else script)
         with patch.object(qualification.shutil, "which", return_value="tool"), \
                 patch.object(qualification, "command"), \
                 patch.object(qualification, "gh_release", side_effect=[a, b, b]), \
                 patch.object(qualification, "release_keys", return_value=[self.key]), \
-                patch.object(qualification.subprocess, "run") as download, \
-                patch.object(qualification, "verify_release_signature") as verify:
+                patch.object(qualification.subprocess, "run", side_effect=download_asset) as download, \
+                patch.object(qualification, "verify_release_signature") as verify, \
+                patch.object(qualification, "verify_release_installers", wraps=qualification.verify_release_installers) as installers:
             result = qualification.prepare_published("1.2.3,1.2.4", form="machine")
         self.assertEqual(result["mode"], "published")
         self.assertEqual(result["form"], "machine")
-        self.assertEqual(download.call_count, 4)
+        self.assertEqual(download.call_count, 6)
         self.assertEqual(verify.call_count, 2)
+        installers.assert_called_once_with(self.work / "published/1.2.3", "1.2.3")
         self.assertTrue((self.work / "candidates.json").exists())
+
+    def test_both_released_installers_must_exist_and_match_signed_checksums(self):
+        scripts = {"install.sh": b"shell installer\n", "install.ps1": b"powershell installer\n"}
+        sums = "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in scripts.items())
+        (self.work / "SHA256SUMS").write_text(sums, newline="\n")
+        for name, data in scripts.items():
+            (self.work / name).write_bytes(data)
+        qualification.verify_release_installers(self.work, "1.2.3")
+        for name, data in scripts.items():
+            with self.subTest(name=name):
+                release = self.release()
+                release["assets"] = [a for a in release["assets"] if a["name"] != name]
+                with self.assertRaisesRegex(RuntimeError, "missing " + qualification.re.escape(name)):
+                    qualification.validate_release(release, "1.2.3", installers=True)
+                (self.work / name).unlink()
+                with self.assertRaisesRegex(RuntimeError, "missing signed installer"):
+                    qualification.verify_release_installers(self.work, "1.2.3")
+                (self.work / name).write_bytes(data + b"tampered")
+                with self.assertRaisesRegex(RuntimeError, "SHA-256 differs"):
+                    qualification.verify_release_installers(self.work, "1.2.3")
+                (self.work / name).write_bytes(data)
+                (self.work / "SHA256SUMS").write_text("\n".join(line for line in sums.splitlines()
+                                                         if not line.endswith(name)) + "\n", newline="\n")
+                with self.assertRaisesRegex(RuntimeError, "missing signed installer"):
+                    qualification.verify_release_installers(self.work, "1.2.3")
+                (self.work / "SHA256SUMS").write_text(sums, newline="\n")
+
+    def test_real_minisign_verifies_comment_key_and_file(self):
+        if not shutil.which("minisign"):
+            if os.environ.get("QUALIFY_REQUIRE_MINISIGN") == "1":
+                self.fail("QUALIFY_REQUIRE_MINISIGN=1 but minisign is not installed")
+            self.skipTest("minisign is not installed")
+        for name in ("fixture", "other"):
+            subprocess.run(["minisign", "-G", "-W", "-p", str(self.work / (name + ".pub")),
+                            "-s", str(self.work / (name + ".key"))], check=True,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        keys = qualification.release_keys(self.work / "fixture.pub")
+        (self.work / "SHA256SUMS").write_bytes(b"test checksum fixture\n")
+        def sign(comment):
+            subprocess.run(["minisign", "-S", "-s", str(self.work / "fixture.key"),
+                            "-m", str(self.work / "SHA256SUMS"), "-t", comment],
+                           check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=30)
+        sign("open-ferry 1.2.3 SHA256SUMS")
+        qualification.verify_release_signature(self.work, "1.2.3", keys)
+        with self.assertRaisesRegex(RuntimeError, "signature does not verify"):
+            qualification.verify_release_signature(self.work, "1.2.3", qualification.release_keys(self.work / "other.pub"))
+        sign("open-ferry 1.2.4 SHA256SUMS")
+        with self.assertRaisesRegex(RuntimeError, "trusted comment"):
+            qualification.verify_release_signature(self.work, "1.2.3", keys)
+        sign("open-ferry 1.2.3 SHA256SUMS")
+        (self.work / "SHA256SUMS").write_bytes(b"tampered\n")
+        with self.assertRaisesRegex(RuntimeError, "signature does not verify"):
+            qualification.verify_release_signature(self.work, "1.2.3", keys)
+
+    def test_ci_scopes_token_and_requires_real_minisign_before_preconditions(self):
+        workflow = Path(__file__).resolve().parents[3] / ".github/workflows/qualify.yml"
+        job = qualification.yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["qualify"]
+        self.assertNotIn("GH_TOKEN", job["env"])
+        steps = job["steps"]
+        token_steps = [step for step in steps if "GH_TOKEN" in step.get("env", {})]
+        self.assertEqual(len(token_steps), 2)
+        self.assertTrue(all(step["if"] == "inputs.published != ''" for step in token_steps))
+        real_test = next(i for i, step in enumerate(steps)
+                         if step.get("env", {}).get("QUALIFY_REQUIRE_MINISIGN") == "1")
+        preconditions = next(i for i, step in enumerate(steps) if step.get("name", "").startswith("Published preconditions"))
+        self.assertLess(real_test, preconditions)
+        self.assertIn("test_run.py", steps[real_test]["run"])
+        published = next(step for step in steps if step.get("name") == "Qualify the published service")
+        self.assertIn("--preserve-env=GH_TOKEN,QUALIFY_FAULT", published["run"])
 
     def test_timer_deadline_and_unrequested_switch_are_red(self):
         q = object.__new__(qualification.Qualification)
@@ -361,6 +446,238 @@ class PublishedPreconditions(unittest.TestCase):
         with patch.object(qualification.time, "monotonic", return_value=20), \
                 self.assertRaisesRegex(RuntimeError, "before the requested check-now"):
             q.before_published_check()
+
+    def published_check(self):
+        q = object.__new__(qualification.Qualification)
+        q.a, q.b, q.service_started = "1.2.3", "1.2.4", 0
+        q.candidates = {"mode": "published", "fault": "none"}
+        q.load = Mock()
+        q.logs = Mock(side_effect=lambda: qualification.write(self.work / "diagnostics/supervisor-worker.log", ""))
+        status = {"running_version": q.a, "installed_version": q.a,
+                  "next_check": "1970-01-01T00:04:10Z",
+                  "supervisor": {"form": "supervised", "running_version": q.a, "phase": "idle"}}
+        return q, status
+
+    def test_check_started_must_still_meet_240_second_budget(self):
+        q, status = self.published_check()
+        clock = [200]
+        def api(suffix="", method="GET"):
+            if suffix == "/check":
+                clock[0] = 241
+                return {"check": "started"}
+            return status
+        q.api = Mock(side_effect=api)
+        q.await_published_acceptance = Mock()
+        with patch.object(qualification.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(qualification.time, "time", return_value=200), \
+                self.assertRaisesRegex(RuntimeError, "exceeded 240s"):
+            q.check_after_flip()
+        q.await_published_acceptance.assert_not_called()
+
+    def test_on_time_check_now_acceptance_passes_and_records_next_check(self):
+        q, status = self.published_check()
+        accepted = {"supervisor": {"form": "supervised", "phase": "loading",
+                                   "switch": {"how": "update", "to": q.b}}}
+        q.api = Mock(side_effect=[status, {"check": "started"}, accepted])
+        with patch.object(qualification.time, "monotonic", return_value=200), \
+                patch.object(qualification.time, "time", return_value=200):
+            q.check_after_flip()
+        self.assertEqual(q.timer_deadline, 249)
+        snapshot = json.loads((self.work / "diagnostics/before-check-now.json").read_text())
+        self.assertEqual(snapshot["status"]["next_check"], status["next_check"])
+        self.assertTrue((self.work / "diagnostics/check-now-switch-accepted-before-timer.json").exists())
+        q.api.assert_any_call("/check", "POST")
+
+    def test_late_acceptance_fails_each_deadline_even_if_poll_began_in_time(self):
+        for deadline in (230, 245, 300):
+            with self.subTest(deadline=deadline):
+                q, _ = self.published_check()
+                q.timer_deadline = deadline if deadline != 300 else 999
+                clock = [200 if deadline == 245 else deadline - 10]
+                def api():
+                    clock[0] = deadline
+                    return {"supervisor": {"form": "supervised", "phase": "loading"}}
+                q.api = Mock(side_effect=api)
+                with patch.object(qualification.time, "monotonic", side_effect=lambda: clock[0]), \
+                        self.assertRaisesRegex(RuntimeError, "acceptance missed"):
+                    q.await_published_acceptance()
+
+    def test_refused_deferred_uncertain_or_ended_automatic_switch_is_red(self):
+        messages = ("automatic switch could not start", "automatic switch deferred: another update is running",
+                    "automatic switch deferred: no newer version is staged", "automatic switch deferred: error",
+                    "no answer from the supervisor; it may have taken the automatic switch; see its status",
+                    "automatic switch ended")
+        for message in messages:
+            with self.subTest(message=message):
+                q, _ = self.published_check()
+                q.timer_deadline = 249
+                q.api = Mock(return_value={"supervisor": {"form": "supervised", "phase": "loading"}})
+                q.logs.side_effect = lambda: qualification.write(self.work / "diagnostics/supervisor-worker.log",
+                                                                 message + "\nautomatic switch accepted: 1.2.4\n")
+                with patch.object(qualification.time, "monotonic", return_value=200), \
+                        self.assertRaisesRegex(RuntimeError, "did not complete its automatic switch"):
+                    q.await_published_acceptance()
+
+    def test_staged_b_and_stale_or_idle_status_do_not_prove_acceptance(self):
+        for supervisor in ({"phase": "idle"}, {"phase": "unknown"}, {"phase": "loading", "stale": True},
+                           {"phase": "degraded"}, {"phase": "stopping"}, {"phase": "loading", "error": "unreachable"}):
+            q, _ = self.published_check()
+            q.timer_deadline = 249
+            q.api = Mock(return_value={"staged_version": q.b,
+                                      "supervisor": {"form": "supervised", **supervisor}})
+            clock = [200]
+            with self.subTest(supervisor=supervisor), \
+                    patch.object(qualification.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(qualification.time, "sleep", side_effect=lambda _: clock.__setitem__(0, 246)), \
+                    self.assertRaisesRegex(RuntimeError, "timed out"):
+                q.await_published_acceptance()
+
+    def install_fixture(self, system="Linux", form="user"):
+        q = object.__new__(qualification.Qualification)
+        q.a, q.b, q.os = "1.2.3", "1.2.4", system
+        q.candidates = {"mode": "published", "form": form, "fault": "none"}
+        q.env, q.port = {"GH_TOKEN": "fixture-token"}, 12345
+        q.config, q.exe, q.data = self.work / "config.yaml", self.work / "exe", self.work / "data"
+        q.data.mkdir(exist_ok=True)
+        q.config.write_text("management: {secret-key: fixture-management}\naccess: {api-keys: [fixture-client]}\n"
+                            "server: {}\noauth: {}\n", newline="\n")
+        (q.data / "install-receipt.json").write_text(json.dumps({"version": q.a, "binary": str(q.exe)}), newline="\n")
+        q.until = Mock(return_value={"trusts_release_key": True, "can_update_itself": True, "mode": "auto"})
+        return q
+
+    def test_published_constructor_strips_install_and_update_overrides(self):
+        (self.work / "candidates.json").write_text(json.dumps({"mode": "published", "fault": "none",
+                                                              "versions": ["1.2.3", "1.2.4"]}), newline="\n")
+        overrides = {name: "injected" for name in ("OPEN_FERRY_INSTALL_BASE_URL", "OPEN_FERRY_UPDATE_BASE_URL",
+                     "OPEN_FERRY_INSTALL_GH", "OPEN_FERRY_INSTALL_SYSTEM", "OPEN_FERRY_SELF_UPDATE")}
+        with patch.dict(os.environ, overrides, clear=True), \
+                patch.object(qualification.platform, "system", return_value="Linux"), \
+                patch.object(qualification.Path, "home", return_value=self.work), \
+                patch.object(qualification, "free_port", return_value=12345):
+            q = qualification.Qualification()
+        self.assertFalse(set(overrides) & set(q.env))
+
+    def test_install_uses_as_published_script_explicit_version_and_attestation(self):
+        for system in ("Linux", "Windows"):
+            with self.subTest(system=system):
+                q = self.install_fixture(system, "machine")
+                q.prepare_root_auth, q.remove_root_auth = Mock(), Mock()
+                def run(args, **kwargs):
+                    if args[0] in ("sh", "powershell.exe"):
+                        installer = self.work / "published" / q.a / ("install.ps1" if system == "Windows" else "install.sh")
+                        self.assertIn(str(installer), args)
+                        flag = "-Version" if system == "Windows" else "--version"
+                        self.assertEqual(args[args.index(flag) + 1], q.a)
+                        self.assertIn("-System" if system == "Windows" else "--system", args)
+                        self.assertNotIn("-NoAttestation", args)
+                        self.assertNotIn("--no-attestation", args)
+                        self.assertNotIn("OPEN_FERRY_INSTALL_BASE_URL", kwargs["env"])
+                        self.assertNotIn("OPEN_FERRY_UPDATE_BASE_URL", kwargs["env"])
+                        return Mock(stdout="Checking the build provenance attestation with gh", returncode=0)
+                    return Mock(stdout=f"open-ferry {q.a}" if args[-1] == "--version"
+                                else "LocalSystem -supervise -data-dir", returncode=0)
+                with patch.object(qualification, "command", side_effect=run):
+                    q.install(None)
+                self.assertFalse((q.config.parent / ".env").exists())
+                self.assertTrue(json.loads((self.work / "diagnostics/attestation.json").read_text())["verified"])
+                self.assertTrue(qualification.yaml.safe_load(q.config.read_text())["observability"]["logs"]["debug"])
+
+    def test_successful_installer_without_attestation_is_red_before_service_start(self):
+        for output in ("installed successfully", "Checking the build provenance attestation with gh; wasn't checked"):
+            q = self.install_fixture()
+            with self.subTest(output=output), patch.object(qualification, "command", return_value=Mock(stdout=output)), \
+                    self.assertRaisesRegex(RuntimeError, "did not perform its required gh attestation"):
+                q.install(None)
+            q.until.assert_not_called()
+
+    def test_root_credentials_removed_after_install_before_service_and_preserve_existing_config(self):
+        for existing in ("new", "directory", "config"):
+            with self.subTest(existing=existing):
+                root = self.work / existing
+                root.mkdir()
+                auth = root / ".config/gh/hosts.yml"
+                config = auth.parent / "config.yml"
+                if existing != "new":
+                    config.parent.mkdir(parents=True)
+                if existing == "config":
+                    config.write_text("original config\n", newline="\n")
+                q = self.install_fixture(form="machine")
+                events = []
+                remove = q.remove_root_auth
+                def removed():
+                    remove()
+                    events.append("removed")
+                    self.assertFalse(auth.exists())
+                q.remove_root_auth = removed
+                def run(args, **kwargs):
+                    if args[0] == "/usr/bin/env":
+                        self.assertEqual(qualification.yaml.safe_load(auth.read_text())["github.com"]["oauth_token"], "fixture-token")
+                        events.append("written")
+                    if args[0] == "sh":
+                        self.assertTrue(auth.exists())
+                        events.append("install")
+                        if existing != "config":
+                            config.write_text("gh generated config\n", newline="\n")
+                        return Mock(stdout="Checking the build provenance attestation with gh")
+                    if "service" in args and "install" in args:
+                        events.append("lifecycle")
+                        self.assertFalse(auth.exists())
+                    return Mock(stdout=f"open-ferry {q.a}" if args[-1] == "--version" else "-supervise -data-dir")
+                with patch.dict(sys.modules, {"pwd": SimpleNamespace(getpwuid=lambda _: SimpleNamespace(pw_dir=str(root)))}), \
+                        patch.object(qualification, "command", side_effect=run):
+                    q.install(None)
+                self.assertEqual(events, ["written", "install", "removed", "lifecycle"])
+                q.remove_root_auth()  # The final cleanup backstop is idempotent.
+                if existing == "config":
+                    self.assertEqual(config.read_text(), "original config\n")
+                elif existing == "directory":
+                    self.assertTrue(auth.parent.is_dir())
+                    self.assertFalse(config.exists())
+                else:
+                    self.assertFalse(auth.parent.exists())
+                    self.assertFalse((root / ".config").exists())
+
+    def test_failed_root_installer_removes_credentials_immediately(self):
+        q = self.install_fixture(form="machine")
+        root = self.work / "root"
+        root.mkdir()
+        auth = root / ".config/gh/hosts.yml"
+        def run(args, **kwargs):
+            if args[0] == "sh":
+                self.assertTrue(auth.exists())
+                raise RuntimeError("installer failed")
+            return Mock(stdout="authenticated")
+        with patch.dict(sys.modules, {"pwd": SimpleNamespace(getpwuid=lambda _: SimpleNamespace(pw_dir=str(root)))}), \
+                patch.object(qualification, "command", side_effect=run), \
+                self.assertRaisesRegex(RuntimeError, "installer failed"):
+            q.install(None)
+        self.assertFalse(auth.exists())
+        self.assertFalse(auth.parent.exists())
+        q.until.assert_not_called()
+
+    def test_existing_root_credentials_are_never_replaced_or_removed(self):
+        q = self.install_fixture(form="machine")
+        auth = self.work / "root/.config/gh/hosts.yml"
+        auth.parent.mkdir(parents=True)
+        auth.write_text("original credentials\n", newline="\n")
+        with patch.dict(sys.modules, {"pwd": SimpleNamespace(getpwuid=lambda _: SimpleNamespace(pw_dir=str(self.work / "root")))}), \
+                self.assertRaisesRegex(RuntimeError, "refusing to replace"):
+            q.prepare_root_auth()
+        q.remove_root_auth()
+        self.assertEqual(auth.read_text(), "original credentials\n")
+
+    def test_root_cleanup_backstop_runs_before_other_lifecycle_cleanup(self):
+        q, _ = self.published_check()
+        q.os, q.data, q.installed_service = "Linux", self.work / "data", True
+        events = []
+        q.prerequisites = Mock(side_effect=RuntimeError("prerequisite failure"))
+        q.remove_root_auth = Mock(side_effect=lambda: events.append("credentials"))
+        q.logs = Mock(side_effect=lambda: events.append("logs"))
+        q.uninstall = Mock(side_effect=lambda: events.append("uninstall"))
+        q.load.finish.side_effect = lambda: events.append("load")
+        with self.assertRaises(qualification.QualificationFailure):
+            q.run()
+        self.assertEqual(events, ["credentials", "load", "logs", "uninstall"])
 
     def test_published_lifecycle_uses_no_mirror_and_keeps_all_load_phases(self):
         q = object.__new__(qualification.Qualification)
