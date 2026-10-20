@@ -656,6 +656,28 @@ async fn preparation_longer_than_the_acceptance_window_still_leaves_a_full_windo
     assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), false)]);
 }
 
+#[test]
+fn rollback_changed_only_names_the_current_target_when_known() {
+    for (actual, message) in [
+        (
+            Some("0.2.0".into()),
+            "rollback target changed: expected 0.1.0, now 0.2.0; run `open-ferry update -check`",
+        ),
+        // None can mean a removed target or an undisclosed version/hash mismatch.
+        // The message must not claim that no target remains.
+        (
+            None,
+            "rollback target changed: the confirmed target 0.1.0 no longer matches; run `open-ferry update -check`",
+        ),
+    ] {
+        let error = UpdateError::RollbackChanged {
+            expected: "0.1.0".into(),
+            actual,
+        };
+        assert_eq!(error.to_string(), message);
+    }
+}
+
 #[tokio::test]
 async fn rollback_refuses_a_target_changed_since_confirmation_without_sending() {
     let f = Fixture::new().await;
