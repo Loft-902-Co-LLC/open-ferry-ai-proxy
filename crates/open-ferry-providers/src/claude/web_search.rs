@@ -21,6 +21,62 @@ use sha2::{Digest, Sha256};
 use crate::codex::replay::session_key;
 use crate::json::str_at;
 
+const RESULT_MARKER: &[u8] = br#""web_search_tool_result""#;
+
+fn contains_marker(data: &[u8]) -> bool {
+    data.windows(RESULT_MARKER.len())
+        .any(|part| part == RESULT_MARKER)
+}
+
+/// The request is already a Value. Search its serialized bytes without
+/// allocating another body, stopping at the first marker before taking the
+/// cache lock or walking messages for restoration.
+fn value_contains_marker(value: &Value) -> bool {
+    use std::io::{self, Write};
+    #[derive(Default)]
+    struct Marker {
+        matched: usize,
+        found: bool,
+    }
+    impl Write for Marker {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            if self.found {
+                return Err(io::Error::other("marker found"));
+            }
+            for byte in data {
+                if *byte == RESULT_MARKER[self.matched] {
+                    self.matched += 1;
+                    if self.matched == RESULT_MARKER.len() {
+                        self.found = true;
+                        return Err(io::Error::other("marker found"));
+                    }
+                } else {
+                    // Only the leading/trailing quote can overlap a prefix.
+                    self.matched = usize::from(*byte == RESULT_MARKER[0]);
+                }
+            }
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut marker = Marker::default();
+    let _ = serde_json::to_writer(&mut marker, value);
+    marker.found
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECORD_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn parse_record(data: &[u8]) -> Result<Value, serde_json::Error> {
+    #[cfg(test)]
+    RECORD_PARSES.with(|count| count.set(count.get() + 1));
+    serde_json::from_slice(data)
+}
+
 #[derive(Clone)]
 pub(crate) struct Scope {
     key: String,
@@ -169,7 +225,10 @@ impl Scope {
         }
     }
     pub(crate) fn record(&self, data: &[u8]) {
-        if let Ok(root) = serde_json::from_slice::<Value>(data)
+        if !contains_marker(data) {
+            return;
+        }
+        if let Ok(root) = parse_record(data)
             && let Some(content) = root.get("content").and_then(Value::as_array)
         {
             for block in content {
@@ -180,7 +239,7 @@ impl Scope {
         for line in data.split(|b| *b == b'\n') {
             let line = line.trim_ascii();
             if let Some(data) = line.strip_prefix(b"data:")
-                && let Ok(event) = serde_json::from_slice::<Value>(data.trim_ascii())
+                && let Ok(event) = parse_record(data.trim_ascii())
                 && str_at(&event, "type") == "content_block_start"
                 && let Some(block) = event.get("content_block")
             {
@@ -189,9 +248,14 @@ impl Scope {
         }
     }
     pub(crate) fn restore(&self, body: &mut Value) {
+        if !value_contains_marker(body) {
+            return;
+        }
         let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
             return;
         };
+        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
         for message in messages {
             if str_at(message, "role") != "assistant" {
                 continue;
@@ -204,11 +268,7 @@ impl Scope {
                 {
                     continue;
                 }
-                let cached = cache().lock().unwrap_or_else(|e| e.into_inner()).get(
-                    self,
-                    &str_at(block, "tool_use_id"),
-                    Instant::now(),
-                );
+                let cached = cache.get(self, &str_at(block, "tool_use_id"), now);
                 if let Some(content) = cached {
                     block["content"] = content;
                 }
@@ -226,8 +286,29 @@ mod tests {
         Scope {
             key: key.to_owned(),
             ttl: Duration::from_secs(1800),
-            limit: 4,
+            limit: 1024,
         }
+    }
+
+    #[test]
+    fn marker_free_stream_skips_json_parsing_and_recording() {
+        let scope = scope_key("marker-free-stream");
+        RECORD_PARSES.with(|count| count.set(0));
+        for _ in 0..1000 {
+            scope.record(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n");
+        }
+        scope.record(b"not even JSON");
+        let key = Cache::key(&scope, "no-search").unwrap();
+        assert!(!cache().lock().unwrap().entries.contains_key(&key));
+        RECORD_PARSES.with(|count| assert_eq!(count.get(), 0));
+        let mut body =
+            json!({"messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]});
+        let before = body.clone();
+        scope.restore(&mut body);
+        assert_eq!(body, before);
+        scope.record(br#"{"content":[{"type":"web_search_tool_result","tool_use_id":"no-search","content":[1]}]}"#);
+        RECORD_PARSES.with(|count| assert!(count.get() > 0));
+        assert!(cache().lock().unwrap().entries.contains_key(&key));
     }
 
     #[test]
