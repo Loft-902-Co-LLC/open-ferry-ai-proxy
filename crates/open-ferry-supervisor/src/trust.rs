@@ -26,7 +26,10 @@ pub(crate) mod windows;
 #[cfg(unix)]
 pub use unix::{TrustRules, check_dirs, check_file, create_private_dir};
 #[cfg(windows)]
-pub use windows::{TrustRules, check_dirs, check_file, create_private_dir, create_system_data_dir};
+pub use windows::{
+    TrustRules, check_dirs, check_file, create_private_dir, create_system_data_dir,
+    initialize_admin_owner,
+};
 
 /// A path that failed a trust check, and why. The reason names the component at fault.
 #[derive(Debug, Clone, PartialEq, Eq)]

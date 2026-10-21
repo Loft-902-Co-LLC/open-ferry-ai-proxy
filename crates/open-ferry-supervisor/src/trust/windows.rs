@@ -8,7 +8,7 @@
 use std::ffi::{OsStr, c_void};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr;
 
@@ -22,7 +22,9 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetTokenInformation,
-    OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SetTokenInformation,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ELEVATION, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenElevation,
+    TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -46,6 +48,78 @@ const SID_CREATOR_OWNER: &str = "S-1-3-0";
 /// The protected DACL of a system service's data directory: full control for SYSTEM and
 /// Administrators, inherited by what is created inside.
 const SYSTEM_DATA_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
+/// Makes objects created by an elevated administrator belong to Administrators,
+/// including when the token defaults to the account itself (for example RID 500).
+/// Call at process startup, before creating files or starting threads/children.
+/// SYSTEM and unelevated tokens are left unchanged. This changes creation defaults,
+/// never the trust rules or the owner of an existing object.
+pub fn initialize_admin_owner() -> io::Result<()> {
+    if current_user_sid()? == SID_SYSTEM {
+        return Ok(());
+    }
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: the process pseudo-handle and the out-pointer are valid.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the freshly opened handle has no other owner.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut needed = 0;
+    // SAFETY: the output buffer has the size passed and remains live.
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if elevation.TokenIsElevated == 0 {
+        return Ok(());
+    }
+    let mut writable: HANDLE = ptr::null_mut();
+    // Request adjustment only after proving elevation; user installs need no such access.
+    // SAFETY: the process pseudo-handle and the out-pointer are valid.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &mut writable) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the freshly opened handle has no other owner.
+    let writable = unsafe { OwnedHandle::from_raw_handle(writable) };
+    let descriptor = SecurityDescriptor::from_sddl("O:BA")?;
+    set_default_owner(writable.as_raw_handle(), &descriptor)
+}
+
+fn set_default_owner(token: HANDLE, descriptor: &SecurityDescriptor) -> io::Result<()> {
+    use windows_sys::Win32::Security::GetSecurityDescriptorOwner;
+
+    let mut owner: PSID = ptr::null_mut();
+    let mut defaulted = 0;
+    // SAFETY: the descriptor is live and both out-pointers are valid.
+    if unsafe { GetSecurityDescriptorOwner(descriptor.as_ptr(), &mut owner, &mut defaulted) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let value = TOKEN_OWNER { Owner: owner };
+    // SAFETY: `value` and its SID remain live for the call. Windows validates that
+    // this SID is eligible to own objects created by the token (SE_GROUP_OWNER).
+    if unsafe {
+        SetTokenInformation(
+            token,
+            TokenOwner,
+            (&raw const value).cast(),
+            size_of::<TOKEN_OWNER>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 const FILE_WRITE_DATA: u32 = 0x2;
 const FILE_APPEND_DATA: u32 = 0x4;
@@ -621,6 +695,165 @@ pub(crate) fn user_sid_of_pid(pid: u32) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_owner_setup_and_children_create_trusted_machine_objects() {
+        // Changing a primary token affects every thread: isolate this test from
+        // the rest of the harness, including when cargo runs tests in parallel.
+        const CHILD: &str = "OFP_ADMIN_OWNER_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "trust::windows::tests::admin_owner_setup_and_children_create_trusted_machine_objects",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let mut token: HANDLE = ptr::null_mut();
+        // SAFETY: the pseudo-handle and the out-pointer are valid.
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+            0
+        );
+        // SAFETY: the freshly opened handle has no other owner.
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let default_owner = || {
+            let mut needed = 0;
+            // SAFETY: a null buffer asks for the required size.
+            unsafe {
+                GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenOwner,
+                    ptr::null_mut(),
+                    0,
+                    &mut needed,
+                )
+            };
+            assert!(needed > 0);
+            let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+            // SAFETY: the aligned buffer has at least `needed` bytes.
+            assert_ne!(
+                unsafe {
+                    GetTokenInformation(
+                        token.as_raw_handle(),
+                        TokenOwner,
+                        buffer.as_mut_ptr().cast(),
+                        needed,
+                        &mut needed,
+                    )
+                },
+                0
+            );
+            // SAFETY: the successful query returned a TOKEN_OWNER and its live SID.
+            let owner: TOKEN_OWNER = unsafe { ptr::read(buffer.as_ptr().cast()) };
+            sid_to_string(owner.Owner).unwrap()
+        };
+        let before = default_owner();
+        initialize_admin_owner().unwrap();
+        let me = current_user_sid().unwrap();
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut needed = 0;
+        // SAFETY: the output buffer has the size passed and remains live.
+        assert_ne!(
+            unsafe {
+                GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenElevation,
+                    (&raw mut elevation).cast(),
+                    size_of::<TOKEN_ELEVATION>() as u32,
+                    &mut needed,
+                )
+            },
+            0
+        );
+        if me == SID_SYSTEM || elevation.TokenIsElevated == 0 {
+            assert_eq!(default_owner(), before);
+            eprintln!(
+                "owner creation assertions skipped: requires an elevated non-SYSTEM token; default owner unchanged"
+            );
+            return;
+        }
+        // Reproduce the object-creator policy even on hosts whose elevated
+        // token already defaults to Administrators.
+        let mut writable: HANDLE = ptr::null_mut();
+        // SAFETY: the pseudo-handle and out-pointer are valid.
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &mut writable) },
+            0
+        );
+        // SAFETY: the freshly opened handle has no other owner.
+        let writable = unsafe { OwnedHandle::from_raw_handle(writable) };
+        set_default_owner(
+            writable.as_raw_handle(),
+            &SecurityDescriptor::from_sddl(&format!("O:{me}")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(default_owner(), me);
+        initialize_admin_owner().unwrap();
+        assert_eq!(default_owner(), SID_ADMINISTRATORS);
+
+        let base = tempfile::tempdir().unwrap();
+        let directory = base.path().join("machine");
+        create_system_data_dir(&directory).unwrap();
+        let file = directory.join("parent.txt");
+        std::fs::write(&file, b"parent").unwrap();
+        // cmd has no owner-normalization code: these prove that the primary
+        // token's changed default owner actually survives process creation.
+        let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/cmd.exe");
+        let status = std::process::Command::new(cmd)
+            .args(["/d", "/c", "mkdir child && echo child>child\\child.txt"])
+            .current_dir(&directory)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for path in [
+            &directory,
+            &file,
+            &directory.join("child"),
+            &directory.join("child/child.txt"),
+        ] {
+            // Ignore only the host-owned temp ancestors, as other trust tests do.
+            check_one(path, &TrustRules::system(), Tier::Full).unwrap();
+            let name = wide(path.as_os_str());
+            // SAFETY: the path is NUL-terminated; remaining arguments are constants/null.
+            let handle = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    READ_CONTROL,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    ptr::null_mut(),
+                )
+            };
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            // SAFETY: the freshly opened handle has no other owner.
+            let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+            assert_eq!(
+                read_descriptor(handle.as_raw_handle())
+                    .unwrap()
+                    .owner
+                    .as_deref(),
+                Some(SID_ADMINISTRATORS),
+                "{}",
+                path.display()
+            );
+        }
+        check_chain(
+            &directory.join("child"),
+            &TrustRules::system(),
+            Some(base.path()),
+        )
+        .unwrap();
+    }
 
     fn descriptor(sddl: &str) -> Descriptor {
         SecurityDescriptor::from_sddl(sddl)
