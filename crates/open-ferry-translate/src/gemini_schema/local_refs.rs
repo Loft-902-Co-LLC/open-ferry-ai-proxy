@@ -258,7 +258,7 @@ impl<'a> Resolver<'a, '_> {
             if let Some(remaining) = self
                 .remaining
                 .checked_sub(cost)
-                .filter(|_| 1 + target_depth <= self.max_depth)
+                .filter(|_| target_depth < self.max_depth)
                 .filter(|_| self.spend_inline(cost, nodes))
             {
                 self.remaining = remaining;
