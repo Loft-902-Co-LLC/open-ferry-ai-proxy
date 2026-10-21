@@ -353,7 +353,7 @@ mod truncation_tests {
             (
                 "event: error\ndata: {\"error\":\ndata: {\"message\":\"failed\"}}",
                 true,
-                0,
+                1,
                 "\n\n",
             ),
             ("event: error\n", false, 1, ""),

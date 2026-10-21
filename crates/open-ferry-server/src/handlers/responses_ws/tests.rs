@@ -1320,9 +1320,17 @@ async fn forward_filters_subscription_usage_before_bookkeeping() {
     let socket = FakeSocket::default();
     let private = r#"{"type":"response.subscription_usage","subscription":{"remaining":100}}"#;
     let done = r#"{"type":"response.completed","response":{"id":"r","output":[]}}"#;
-    let (result, error) = forward_items(&socket, "subscription-filter", vec![
-        Ok(Bytes::from(sse(private))), Ok(Bytes::from(sse(done))), Ok(Bytes::from(sse(private)))
-    ], false).await;
+    let (result, error) = forward_items(
+        &socket,
+        "subscription-filter",
+        vec![
+            Ok(Bytes::from(sse(private))),
+            Ok(Bytes::from(sse(done))),
+            Ok(Bytes::from(sse(private))),
+        ],
+        false,
+    )
+    .await;
     assert!(error.is_none());
     assert_eq!(completed(result).1, "r");
     let sent = socket.sent();

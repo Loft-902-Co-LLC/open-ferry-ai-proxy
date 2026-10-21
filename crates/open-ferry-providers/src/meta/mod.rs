@@ -334,9 +334,9 @@ impl MetaExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        Self::credentials(auth)?;
         let (request, options) = crate::claude::compaction::expand_for(request, options, "meta")?;
         let (request, options) = (&request, &options);
+        Self::credentials(auth)?;
         let prepared = prepare(
             self.config.as_deref(),
             self.models.as_deref(),

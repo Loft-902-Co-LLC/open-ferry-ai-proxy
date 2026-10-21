@@ -166,6 +166,7 @@ struct State {
     event: Vec<u8>,
     completed: bool,
     observation: Vec<u8>,
+    observation_overflow: bool,
     stream_error: Option<String>,
     pending: VecDeque<Result<Bytes, ExecError>>,
     finished: bool,
@@ -179,6 +180,7 @@ pub(crate) fn forward(response: reqwest::Response, setup: StreamSetup) -> ChunkS
         event: Vec::new(),
         completed: false,
         observation: Vec::new(),
+        observation_overflow: false,
         stream_error: None,
         pending: VecDeque::new(),
         finished: false,
@@ -206,9 +208,11 @@ impl State {
             None => return self.end(None),
         };
         let line = self.redact(line);
-        if self.observation.len() + line.len() < MAX_LINE {
+        if !self.observation_overflow && self.observation.len() + line.len() < MAX_LINE {
             self.observation.extend_from_slice(&line);
             self.observation.push(b'\n');
+        } else {
+            self.observation_overflow = true;
         }
         if trim_space(&line).is_empty() {
             self.observe_event();
@@ -225,6 +229,9 @@ impl State {
 
     fn observe_event(&mut self) {
         let raw = std::mem::take(&mut self.observation);
+        if std::mem::take(&mut self.observation_overflow) {
+            return;
+        }
         let data: Vec<_> = raw
             .split(|b| *b == b'\n')
             .filter_map(|line| trim_space(line).strip_prefix(b"data:"))

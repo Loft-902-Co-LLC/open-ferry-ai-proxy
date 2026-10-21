@@ -451,6 +451,7 @@ mod tests {
         for (status, want) in [
             (400, "invalid_request_error"),
             (408, "timeout_error"),
+            (409, "conflict_error"),
             (429, "rate_limit_error"),
             (500, "api_error"),
             (504, "timeout_error"),

@@ -344,8 +344,16 @@ async fn subscription_telemetry_is_filtered_for_all_clients() {
         ] {
             let input = format!("{CREATED}{private}{COMPLETED}");
             for split in 0..=input.len() {
-                let body = run(Framer::new(codex), vec![ok(&input[..split]), ok(&input[split..])]).await;
-                assert_eq!(body, format!("{CREATED}{COMPLETED}\n"), "{private} split {split}");
+                let body = run(
+                    Framer::new(codex),
+                    vec![ok(&input[..split]), ok(&input[split..])],
+                )
+                .await;
+                assert_eq!(
+                    body,
+                    format!("{CREATED}{COMPLETED}\n"),
+                    "{private} split {split}"
+                );
             }
         }
     }

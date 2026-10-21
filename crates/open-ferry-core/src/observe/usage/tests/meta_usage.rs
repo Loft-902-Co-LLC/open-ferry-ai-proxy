@@ -67,24 +67,32 @@ fn a_stream_is_counted_from_its_completed_event() {
 // TestMetaExecutor TTFT when completed reasoning is the first output.
 #[test]
 fn completed_reasoning_sets_meta_first_token_before_terminal_event() {
-    let harness = Harness::new();
-    let driver = ClientCall::new("muse-spark").stream().tap(&harness);
-    driver.attempt(
-        AttemptKind::Stream,
-        "meta",
-        "muse-spark",
-        &auth("meta-1", "0", "meta"),
-    );
-    driver.head(200, &[("content-type", "text/event-stream")]);
-    harness.advance_ms(20);
-    driver.chunk(&format!("{CREATED}\n\n"));
-    harness.advance_ms(80);
-    driver.chunk("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"summary\":[{\"text\":\"thinking\"}]}}\n\n");
-    harness.advance_ms(1000);
-    driver.chunk(&format!("{COMPLETED}\n\n"));
-    driver.finish(Outcome::Completed);
-    let record = harness.record();
-    assert_eq!(int_at(&record, "/ttft_ms"), 100);
+    for format in [
+        crate::exec::Format::OPENAI_RESPONSE,
+        crate::exec::Format::CLAUDE,
+    ] {
+        let harness = Harness::new();
+        let mut call = ClientCall::new("muse-spark").stream();
+        call.options.source_format = format.clone();
+        call.options.response_format = format;
+        let driver = call.tap(&harness);
+        driver.attempt(
+            AttemptKind::Stream,
+            "meta",
+            "muse-spark",
+            &auth("meta-1", "0", "meta"),
+        );
+        driver.head(200, &[("content-type", "text/event-stream")]);
+        harness.advance_ms(20);
+        driver.chunk(&format!("{CREATED}\n\n"));
+        harness.advance_ms(80);
+        driver.chunk("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"summary\":[{\"text\":\"thinking\"}]}}\n\n");
+        harness.advance_ms(1000);
+        driver.chunk(&format!("{COMPLETED}\n\n"));
+        driver.finish(Outcome::Completed);
+        let record = harness.record();
+        assert_eq!(int_at(&record, "/ttft_ms"), 100);
+    }
 }
 
 #[test]
