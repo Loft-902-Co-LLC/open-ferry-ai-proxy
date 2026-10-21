@@ -394,7 +394,7 @@ impl Store {
         for entry in inner.sessions.values_mut().filter(|e| {
             e.bind_target
                 .as_ref()
-                .is_some_and(|bound| bound.matches(target))
+                .is_some_and(|bound| bound.current().matches(target))
                 && e.session.is_pending()
                 && !e.committing
         }) {

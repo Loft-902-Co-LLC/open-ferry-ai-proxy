@@ -2,8 +2,9 @@
 // (sameSIWCMutationPath) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Snapshot a mutation destination before replacement, without retaining a
-//! file handle that could interfere with atomic replacement on Windows.
+//! Snapshot a mutation destination before replacement. Compare it with the
+//! bound path's identity at mutation time, as upstream stats both paths.
+//! No handle is retained that could interfere with replacement on Windows.
 
 use open_ferry_core::auth::file_store::{FileId, file_id};
 use std::fs::{self, OpenOptions};
@@ -21,6 +22,10 @@ impl BindMutationPath {
             path,
             identity: Some(identity),
         }
+    }
+
+    pub(super) fn current(&self) -> Self {
+        Self::capture(self.path.clone())
     }
 
     pub(crate) fn capture(path: PathBuf) -> Self {

@@ -6,6 +6,7 @@ use super::*;
 use open_ferry_core::auth::AuthStore as _;
 
 mod admission;
+mod mutation_identity;
 
 const START: &str =
     "/v8/management/oauth/auth-url?provider=codex&mode=siwc-bind&name=codex-bind.json";
