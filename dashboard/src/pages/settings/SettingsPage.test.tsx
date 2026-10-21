@@ -4,8 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { readStoredKey } from "../../api/keyStorage";
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "../../api/management";
+import { CLIENT_SETUP } from "../../api/dashboard";
 import { UPDATE, type UpdateStatus } from "../../api/update";
-import { quotaRouting, updateStatus, v8Config } from "../../test/fixtures";
+import { clientSetup, quotaRouting, updateStatus, v8Config } from "../../test/fixtures";
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, v8ConfigRoutes, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
@@ -1754,5 +1755,52 @@ describe("YAML save completion", () => {
     state.yamlReadFailed(false);
     await user.click(within(notice).getByRole("button", { name: "Reload" }));
     expect(await screen.findByRole("textbox", { name: "config.yaml" })).toHaveValue(`${YAML}# saved comment\n`);
+  });
+});
+
+describe("versioned client-key operations", () => {
+  it("saves a queued Settings deletion after Overview makes a different key", async () => {
+    const state = versionedServer();
+    const { user, container } = await openSettings();
+    const settings = within(container);
+    await user.click(settings.getByRole("button", { name: /^Delete the client key.*0001/ }));
+    state.api.use(route("GET", CLIENT_SETUP, { json: clientSetup() }));
+    const overview = renderApp("/?safe-mode=configure");
+    await overview.user.click(await within(overview.container).findByRole("button", { name: "Make a new key" }));
+    await waitFor(() => { expect(state.tree.access["api-keys"]).toHaveLength(3); });
+    const made = state.tree.access["api-keys"][2];
+    overview.unmount();
+    await user.click(settings.getByRole("button", { name: "Review and save" }));
+    const dialog = await settings.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 change" }));
+    await settings.findByText("Saved 1 change. The server uses it from now on.");
+    expect(state.tree.access["api-keys"]).toEqual([KEY_B, made]);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/access/api-keys`)[1]?.headers.get("if-match")).toBe('"2"');
+  });
+  it("rebases a deletion when a different key was removed", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    await user.click(screen.getByRole("button", { name: /^Delete the client key.*0001/ }));
+    state.tree.access["api-keys"] = [KEY_A];
+    state.external(false);
+    await refetchOnFocus();
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 change" }));
+    await screen.findByText("Saved 1 change. The server uses it from now on.");
+    expect(state.tree.access["api-keys"]).toEqual([]);
+  });
+  it.each(["removed", "changed"])("refuses a drafted deletion whose target was %s, even after a refetch", async (change) => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    await user.click(screen.getByRole("button", { name: /^Delete the client key.*0001/ }));
+    state.tree.access["api-keys"] = change === "removed" ? [KEY_B] : ["unit-replaced", KEY_B];
+    state.external(false);
+    await refetchOnFocus();
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    expect(await screen.findByText("The config changed since this page loaded")).toBeVisible();
+    expect(screen.getByText(/Changed fields: Client API keys/)).toBeVisible();
+    expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 });

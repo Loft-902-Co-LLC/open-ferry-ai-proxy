@@ -110,7 +110,10 @@ function SettingsEditor({
   const settingsShown = config.data !== undefined && !settingsUnsupported && factsRead;
   const settings = useSettingsForm(settingsShown ? config.data : undefined, facts.data);
   const savedKeys = keysIn(keys.data);
-  const pendingKeys = keys.data === undefined ? [] : effectiveKeyChanges(savedKeys, keyChanges);
+  const pendingKeys = keys.data === undefined ? [] : editor.editor.versioned
+    ? [...effectiveKeyChanges(savedKeys, keyChanges).filter((change) => change.kind === "add"),
+      ...keyChanges.filter((change) => change.kind === "delete")]
+    : effectiveKeyChanges(savedKeys, keyChanges);
   const unsaved = (settingsShown ? settings.unsaved.length : 0) + pendingKeys.length;
   const [review, setReview] = useState<Review | null>(null);
   const [outcome, setOutcome] = useState<Outcome>(null);
@@ -167,7 +170,6 @@ function SettingsEditor({
       await editor.checkChanges([
         ...(edited === null ? [] : SETTING_IDS.filter((id) => edited[id] !== base[id])
           .map((id) => saveCall(id, edited[id]).path)),
-        ...(changes.length > 0 ? [API_KEYS] : []),
       ]);
       let fresh: SettingValues | null = null;
       let restart: string | null = null;
@@ -192,6 +194,7 @@ function SettingsEditor({
         const answer = await call<unknown>(API_KEYS);
         client.setQueryData([API_KEYS, "config-editor", editor.scope], answer);
         freshKeys = keysIn(answer);
+        editor.editor.checkKeyTargets(changes, freshKeys);
       }
       return { edited, base, changes, fresh, freshKeys, restart, addressProblem };
     },
@@ -240,8 +243,9 @@ function SettingsEditor({
     mutationFn: async (toSave: readonly PendingChange[]) => {
       // Review can stay open while another writer changes the file. Check
       // every field again before starting the batch, then guard each write.
-      await editor.checkChanges(toSave.map((pending) => pending.kind === "key"
-        ? API_KEYS : saveCall(pending.change.id, pending.change.after).path));
+      await editor.checkChanges(toSave.flatMap((pending) => pending.kind === "key"
+        ? [] : [saveCall(pending.change.id, pending.change.after).path]));
+      await editor.editor.checkKeyChanges(toSave.flatMap((pending) => pending.kind === "key" ? [pending.change] : []));
       const saved: PendingChange[] = [];
       for (const pending of toSave) {
         try {
@@ -310,7 +314,7 @@ function SettingsEditor({
           keys={keys}
           changes={keyChanges}
           onChanges={(next) => {
-            setKeyChanges(effectiveKeyChanges(savedKeys, next));
+            setKeyChanges(editor.editor.versioned ? next : effectiveKeyChanges(savedKeys, next));
           }}
           readOnly={keysReadOnly}
         />
