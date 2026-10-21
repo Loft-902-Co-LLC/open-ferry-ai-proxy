@@ -232,6 +232,42 @@ describe("a form's config version", () => {
     }
   });
 
+  it.each([
+    { shared: {}, joins: true },
+    { shared: { prefix: "team" }, joins: false },
+    { shared: { headers: { "X-Team": "unit-team" } }, joins: false },
+  ])("joins an added provider key only without unrequested shared fields ($shared)", async ({ shared, joins }) => {
+    const base = "http://127.0.0.1:9";
+    const group = { "base-url": base, ...shared, keys: [{ "api-key": "unit-first" }] };
+    const path = `${MANAGEMENT}/gemini-api-key`;
+    const target = `${V8_CONFIG}/api-keys/gemini`;
+    const api = mockApi(
+      route("GET", V8_CONFIG, { json: { "api-keys": { gemini: [group] } }, headers: { ETag: '"base"' } }),
+      route("PUT", target, { json: {}, headers: { ETag: '"saved"' } }),
+    );
+    const form = editor();
+    const entries = (await form.call<{ "gemini-api-key": unknown[] }>(path))["gemini-api-key"];
+    await form.call(path, { method: "PUT", json: [...entries, { "base-url": base, "api-key": "unit-new" }] });
+    expect(api.callsTo("PUT", target)[0]?.json()).toEqual(joins
+      ? [{ ...group, keys: [...group.keys, { "api-key": "unit-new" }] }]
+      : [group, { "base-url": base, keys: [{ "api-key": "unit-new" }] }]);
+  });
+
+  it("removes a named provider group when its last key is deleted", async () => {
+    const keep = { "base-url": "http://127.0.0.1:9", keys: [{ "api-key": "unit-keep" }] };
+    const target = `${V8_CONFIG}/api-keys/gemini`;
+    const api = mockApi(
+      route("GET", V8_CONFIG, { json: { "api-keys": { gemini: [
+        { name: "removed", prefix: "team", headers: { "X-Team": "unit" }, keys: [{ "api-key": "unit-delete" }] }, keep,
+      ] } }, headers: { ETag: '"base"' } }),
+      route("PUT", target, { json: {} }),
+    );
+    await editor().call(`${MANAGEMENT}/gemini-api-key`, {
+      method: "DELETE", query: { index: 0 }, configTarget: { key: "unit-delete" },
+    });
+    expect(api.callsTo("PUT", target)[0]?.json()).toEqual([keep]);
+  });
+
   it("refuses an index delete which now names another client key", async () => {
     const api = mockApi(route("GET", V8_CONFIG, { json: { access: { "api-keys": ["unit-other"] } }, headers: { ETag: '"base"' } }));
     await expect(editor().call(API_KEYS, { method: "DELETE", query: { index: 0 }, configTarget: { key: "unit-intended" } }))
