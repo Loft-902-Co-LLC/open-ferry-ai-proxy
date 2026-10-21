@@ -848,7 +848,7 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
     {
         cases.push(
             Case::new(
-                &format!(
+                format!(
                     "plugin-value-preserved-{}",
                     fixture["case"].as_str().unwrap()
                 ),
