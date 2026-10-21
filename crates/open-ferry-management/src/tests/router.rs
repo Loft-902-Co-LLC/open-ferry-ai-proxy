@@ -32,6 +32,30 @@ fn error(message: &str) -> String {
 }
 
 #[tokio::test]
+async fn a_wrong_management_key_never_reads_or_reserves_an_upload() {
+    use axum::body::Body;
+    use open_ferry_server::config::IngressConfig;
+    use open_ferry_server::ingress::Ingress;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+    let api = Api::new();
+    let ingress = Ingress::new(IngressConfig::default(), 64 << 20);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let count = polls.clone();
+    let mut request = request_from(LOCAL, Method::POST, LIST, "");
+    request.headers_mut().insert(header::AUTHORIZATION, "Bearer wrong-key".parse().unwrap());
+    request.headers_mut().insert(header::CONTENT_LENGTH, "67108864".parse().unwrap());
+    *request.body_mut() = Body::from_stream(futures_util::stream::once(async move {
+        count.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(bytes::Bytes::new())
+    }));
+    let response = ingress.install(api.router.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 401);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert_eq!(ingress.reserved_body_bytes(), 0);
+}
+
+#[tokio::test]
 async fn unported_paths_answer_an_empty_404() {
     let api = Api::new();
     for (method, path) in [

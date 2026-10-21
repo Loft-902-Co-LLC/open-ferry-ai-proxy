@@ -319,7 +319,9 @@ fn guard(
             state.clone(),
             access::authenticate,
         )),
-        Access::Availability | Access::Open => handler,
+        Access::Availability | Access::Open => handler.route_layer(middleware::from_fn(
+            open_ferry_server::ingress::public_request,
+        )),
     };
     match access {
         Access::Key | Access::Availability => handler.route_layer(middleware::from_fn_with_state(

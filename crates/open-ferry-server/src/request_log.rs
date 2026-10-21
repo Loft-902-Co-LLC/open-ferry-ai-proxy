@@ -66,7 +66,6 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use bytes::Bytes;
-use futures_util::{StreamExt, stream};
 use http::{HeaderMap, HeaderValue, Method, header};
 use http_body::{Frame, SizeHint};
 use open_ferry_core::exec::ErrorKind;
@@ -112,37 +111,15 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
     let (parts, body) = request.into_parts();
     let content_length = http_body::Body::size_hint(&body).exact();
     let plan = capture_plan(mode, &parts.headers, content_length);
-    let buffered = parts.extensions.get::<crate::ingress::BufferedRequest>();
-    let (body, kept) = match (buffered, plan) {
-        (Some(buffered), Capture::Eager | Capture::Deferred) => {
-            let limit = if plan == Capture::Deferred {
-                open_ferry_core::observe::request_log::CAPTURE_LIMIT
-            } else {
-                crate::ingress::body_limit(state.settings().config.body_limit)
-            };
-            let len = buffered.0.len().min(limit);
-            (
-                body,
-                RequestBody::Captured {
-                    raw: buffered.0.slice(..len),
-                    truncated: len < buffered.0.len(),
-                },
-            )
-        }
-        (_, Capture::Eager) => {
-            let limit = crate::ingress::body_limit(state.settings().config.body_limit);
-            let (raw, truncated, body) = read_ahead(body, limit).await;
-            (body, RequestBody::Captured { raw, truncated })
-        }
-        (_, Capture::Deferred) => {
+    // Authentication runs inside this layer. Capture lazily so a refused
+    // request is never polled by logging, including in Full mode.
+    let (body, kept) = match plan {
+        Capture::Eager | Capture::Deferred => {
             let capture = DeferredCapture::new(content_length);
-            let body = Body::new(TeeBody {
-                inner: body,
-                capture: capture.clone(),
-            });
+            let body = Body::new(TeeBody { inner: body, capture: capture.clone() });
             (body, RequestBody::Deferred(capture))
         }
-        (_, Capture::None) => (body, RequestBody::None),
+        Capture::None => (body, RequestBody::None),
     };
     let downstream = Downstream {
         url: Downstream::url(parts.uri.path(), parts.uri.query()),
@@ -233,53 +210,6 @@ pub(crate) fn capture_plan(
             }
         }
     }
-}
-
-/// Reads `body` up to `limit` bytes (upstream's `captureRequestInfo`):
-/// what was read, cut at the limit, whether the body went past it or
-/// failed, and the body for the handler, the same bytes from the start.
-async fn read_ahead(body: Body, limit: usize) -> (Bytes, bool, Body) {
-    if http_body::Body::is_end_stream(&body) {
-        return (Bytes::new(), false, body);
-    }
-    let mut data = body.into_data_stream();
-    let mut chunks: Vec<Bytes> = Vec::new();
-    let mut len = 0usize;
-    let mut failed = None;
-    let mut ended = false;
-    while len <= limit {
-        match data.next().await {
-            Some(Ok(chunk)) => {
-                len = len.saturating_add(chunk.len());
-                chunks.push(chunk);
-            }
-            Some(Err(error)) => {
-                failed = Some(error);
-                break;
-            }
-            None => {
-                ended = true;
-                break;
-            }
-        }
-    }
-
-    let mut raw = Vec::with_capacity(len.min(limit));
-    for chunk in &chunks {
-        let room = limit.saturating_sub(raw.len());
-        raw.extend_from_slice(chunk.get(..room.min(chunk.len())).unwrap_or_default());
-    }
-    let raw = Bytes::from(raw);
-    let truncated = !ended;
-    if ended && len <= limit {
-        return (raw.clone(), false, Body::from(raw));
-    }
-    let read = stream::iter(chunks.into_iter().map(Ok::<_, axum::Error>));
-    let body = match failed {
-        Some(error) => Body::from_stream(read.chain(stream::once(async move { Err(error) }))),
-        None => Body::from_stream(read.chain(data)),
-    };
-    (raw, truncated, body)
 }
 
 /// Records `error`, as a handler gave it to the client, for the log's

@@ -1917,6 +1917,7 @@ dependencies = [
  "libc",
  "open-ferry-core",
  "open-ferry-providers",
+ "open-ferry-server",
  "open-ferry-translate",
  "open-ferry-update",
  "reqwest",
