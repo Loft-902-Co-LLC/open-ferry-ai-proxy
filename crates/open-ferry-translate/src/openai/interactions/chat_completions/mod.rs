@@ -20,9 +20,11 @@
 //!   tool calls and results both ways, and the generation settings dropped
 //!   for such a model in favour of `agent_config.max_total_tokens`. A model
 //!   whose name holds `antigravity` is translated like any other.
-//! - A request, response or stream payload that isn't valid JSON, such as a
-//!   stream frame with more than one `data:` line of JSON, is read as having
-//!   no fields. gjson reads what it can.
+//! - A stream payload that isn't valid JSON, such as a frame with more than
+//!   one `data:` line of JSON, is read as having no fields. gjson reads what
+//!   it can. Whole responses through the registry accept the first complete
+//!   JSON value, including when trailing data follows it; incomplete or
+//!   internally malformed values are read as having no fields.
 //! - Where upstream copies a value's JSON text, into the output or into a
 //!   string (a tool call's arguments, a tool result, a non-string value read
 //!   as text), we write the same JSON compactly.

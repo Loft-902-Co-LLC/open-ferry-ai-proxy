@@ -217,6 +217,31 @@ mod tests {
         );
     }
 
+    // Seed 8's Interactions passthrough input is also sent through this
+    // registry pair. gjson reads the complete object before the trailing text.
+    #[test]
+    fn whole_response_prefix_survives_trailing_data() {
+        let registry = Registry::builtin();
+        let original = json!({});
+        let ctx = context(&original);
+        let body = br#"{"id":"interaction_40","model":"gemini-2.5-flash","object":"interaction","status":"failed","finish_reason":"stop","steps":[{"type":"function_call","id":"call_660","name":"\u540d\u524d","arguments":{"city":"x-anthropic-billing-header: cc_version=2.1.0; cc_entrypoint=cli","count":0}},{"type":"model_output","content":[{"type":"text","text":"[1,2]"}]}]} trailing"#;
+        let out = registry
+            .translate_non_stream(&Format::INTERACTIONS, &Format::OPENAI, &ctx, body.to_vec())
+            .expect("a response");
+        let out: Value = serde_json::from_slice(&out).expect("JSON");
+        assert_eq!(out["id"], "interaction_40");
+        assert_eq!(out["model"], "gemini-2.5-flash");
+        assert_eq!(out["choices"][0]["message"]["content"], Value::Null);
+        assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            out["choices"][0]["message"]["tool_calls"],
+            json!([{"id":"call_660","type":"function","function":{
+                "name":"名前",
+                "arguments":r#"{"city":"x-anthropic-billing-header: cc_version=2.1.0; cc_entrypoint=cli","count":0}"#
+            }}])
+        );
+    }
+
     // Not upstream's: a whole response's tool call arguments keep each
     // number as written, as upstream copies them (checked with Go).
     #[test]
@@ -227,7 +252,7 @@ mod tests {
         let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
 
         let body = format!(
-            r#"{{"id":"i1","steps":[{{"type":"function_call","id":"c1","name":"f","arguments":{spelled}}}]}}"#
+            r#"{{"id":"i1","steps":[{{"type":"function_call","id":"c1","name":"f","arguments":{spelled}}}]}} trailing"#
         );
         let out = registry
             .translate_non_stream(&Format::INTERACTIONS, &Format::OPENAI, &ctx, body.into())
@@ -239,7 +264,7 @@ mod tests {
         );
 
         let body = format!(
-            r#"{{"id":"c1","choices":[{{"message":{{"role":"assistant","tool_calls":[{{"id":"t1","type":"function","function":{{"name":"f","arguments":{spelled}}}}}]}},"finish_reason":"tool_calls"}}]}}"#
+            r#"{{"id":"c1","choices":[{{"message":{{"role":"assistant","tool_calls":[{{"id":"t1","type":"function","function":{{"name":"f","arguments":{spelled}}}}}]}},"finish_reason":"tool_calls"}}]}} trailing"#
         );
         let out = registry
             .translate_non_stream(&Format::OPENAI, &Format::INTERACTIONS, &ctx, body.into())

@@ -23,8 +23,11 @@ pub(super) fn register(registry: &Registry) {
     gemini::register(registry);
 }
 
-/// A whole response's body as JSON, or `null` if it isn't, with each
-/// number's text kept for the translators that copy it as upstream does.
+/// The first whole response value, ignoring trailing data as gjson does,
+/// or `null` if no complete value is readable. Keep each number's text for
+/// the translators that copy it as upstream does.
 fn parse(body: &[u8]) -> Value {
-    exact::from_slice(body).unwrap_or(Value::Null)
+    exact::first(body)
+        .and_then(Result::ok)
+        .unwrap_or(Value::Null)
 }

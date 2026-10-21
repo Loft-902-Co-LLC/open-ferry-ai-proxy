@@ -154,7 +154,7 @@ data: {\"interaction_id\":\"resp_1\",\"status\":\"in_progress\",\"event_type\":\
         let request = json!({});
         let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
         let body = format!(
-            r#"{{"type":"response.completed","response":{{"id":"r1","output":[{{"type":"function_call","call_id":"c1","name":"f","arguments":{spelled}}}]}}}}"#
+            r#"{{"type":"response.completed","response":{{"id":"r1","output":[{{"type":"function_call","call_id":"c1","name":"f","arguments":{spelled}}}]}}}} trailing"#
         );
         let out = registry
             .translate_non_stream(
