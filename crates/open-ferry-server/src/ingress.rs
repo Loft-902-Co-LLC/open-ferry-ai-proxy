@@ -396,6 +396,8 @@ async fn buffer(
                 rejected(503, "request body buffer budget exhausted")
             })?;
         }
+        // The entire allocation is already charged, including parser copies.
+        buffer.bytes = Vec::with_capacity(length as usize);
     }
     if body.is_end_stream() {
         return Ok((buffer.finish(), parser));
@@ -543,7 +545,7 @@ impl BudgetBuffer {
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<(), ()> {
         self.reservation
             .grow_to(self.bytes.len().checked_add(bytes.len()).ok_or(())?)?;
-        self.bytes.reserve_exact(bytes.len());
+        self.bytes.reserve(bytes.len());
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
