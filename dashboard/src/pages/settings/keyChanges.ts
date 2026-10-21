@@ -70,14 +70,14 @@ export function effectiveKeyChanges(
 export interface KeyRow {
   key: string;
   /** On the server; added here and not saved yet; or to be deleted on saving. */
-  state: "saved" | "added" | "deleted";
+  state: "saved" | "added" | "deleted" | "missing";
 }
 
 /** The server's keys, then the new ones, each marked with what saving does to it. */
 export function keyRows(saved: readonly string[], changes: readonly KeyChange[]): KeyRow[] {
   const effective = effectiveKeyChanges(saved, changes);
   const deleting = new Map<string, number>();
-  for (const change of effective) {
+  for (const change of changes) {
     if (change.kind === "delete") {
       deleting.set(change.key, (deleting.get(change.key) ?? 0) + 1);
     }
@@ -90,6 +90,9 @@ export function keyRows(saved: readonly string[], changes: readonly KeyChange[])
     deleting.set(key, left - 1);
     return { key, state: "deleted" };
   });
+  for (const [key, count] of deleting) {
+    for (let i = 0; i < count; i++) rows.push({ key, state: "missing" });
+  }
   for (const change of effective) {
     if (change.kind === "add") {
       rows.push({ key: change.key, state: "added" });
