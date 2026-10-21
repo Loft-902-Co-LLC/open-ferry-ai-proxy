@@ -1968,3 +1968,24 @@ fn stream_echo_keeps_negative_zero() {
         assert!(completed.contains(want), "{want} in {completed}");
     }
 }
+
+#[test]
+fn tool_search_events_preserve_uppercase_exponent() {
+    let request = json!({"tools":[{"type":"tool_search","execution":"client"}]});
+    let body = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_search","id":"c","args":{"n":1E+2}}}]},"finishReason":"STOP"}],"responseId":"r"}"#;
+    let mut stream = GeminiToOpenAIResponsesStream::new("m", &request, &request);
+    let output = stream.translate_line(body);
+    let done = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| crate::json::exact::from_str(line).ok())
+        .find(|event| {
+            event["type"] == "response.output_item.done"
+                && event["item"]["type"] == "tool_search_call"
+        })
+        .unwrap();
+    assert_eq!(done["item"]["arguments"].to_string(), r#"{"n":1E+2}"#);
+    let whole =
+        convert_gemini_response_to_openai_responses_non_stream(&request, &request, body).unwrap();
+    assert_eq!(whole["output"][0]["arguments"].to_string(), r#"{"n":1E+2}"#);
+}

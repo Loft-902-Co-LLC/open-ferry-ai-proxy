@@ -2486,3 +2486,38 @@ fn completed_echo_keeps_negative_zero() {
         assert!(completed.contains(want), "{want} in {completed}");
     }
 }
+
+#[test]
+fn tool_search_events_preserve_uppercase_exponent() {
+    let request = json!({"tools":[{"type":"tool_search","execution":"client"}]});
+    let lines = [
+        r#"data: {"type":"message_start","message":{"id":"m"}}"#,
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"tool_search","input":{}}}"#,
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"n\":1E+2}"}}"#,
+        r#"data: {"type":"content_block_stop","index":0}"#,
+        r#"data: {"type":"message_stop"}"#,
+    ];
+    let mut stream = ClaudeToOpenAIResponsesStream::with_tool_search("m", &request, &request, true);
+    let output: String = lines
+        .iter()
+        .map(|line| stream.translate_line(line.as_bytes()))
+        .collect();
+    let done = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| crate::json::exact::from_str(line).ok())
+        .find(|event| {
+            event["type"] == "response.output_item.done"
+                && event["item"]["type"] == "tool_search_call"
+        })
+        .unwrap();
+    assert_eq!(done["item"]["arguments"].to_string(), r#"{"n":1E+2}"#);
+    let whole = convert_claude_response_to_openai_responses_non_stream_with_tool_search(
+        &request,
+        &request,
+        lines.join("\n").as_bytes(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(whole["output"][0]["arguments"].to_string(), r#"{"n":1E+2}"#);
+}

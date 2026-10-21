@@ -1046,13 +1046,11 @@ impl ClaudeToOpenAIResponsesStream {
             call.item_status = status;
             let item = tool_search::call_item(&call.call_id, status, &args);
             let seq = self.next_seq();
-            push_event(
-                out,
-                "response.output_item.done",
-                &json!({
+            let mut event = json!({
                 "type":"response.output_item.done","sequence_number":seq,
-                "output_index":output_index,"item":item}),
-            );
+                "output_index":output_index});
+            event["item"] = item;
+            push_event(out, "response.output_item.done", &event);
             self.in_func_block = false;
             return;
         }
