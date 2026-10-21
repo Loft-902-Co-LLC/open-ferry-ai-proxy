@@ -329,8 +329,9 @@ async fn another_h2_stream_cannot_renew_a_deferred_stall_deadline() {
     let mut queued_b = Delivery::new(Bytes::from(vec![b'b'; 65534 + 20]), b.clone());
     let started = Instant::now();
     // A has exhausted its own one-byte window. B used the remaining connection
-    // credit. Drive the observed frames directly: no watcher can run between a
-    // WINDOW_UPDATE and the DATA that consumes it in the same connection poll.
+    // credit. Drive the observed frames directly, so the watcher never runs
+    // between a WINDOW_UPDATE and the DATA that consumes it. In production it
+    // can; A's deadline is then earlier, so the bound holds either way.
     traffic.received(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 1]);
     queued_a.advance(1);
     traffic.written(&[0, 0, 1, 0, 0, 0, 0, 0, 1, b'a']);
