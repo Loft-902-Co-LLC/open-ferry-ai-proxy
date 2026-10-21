@@ -112,8 +112,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "dynamic_allowed": true,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -141,8 +141,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "dynamic_allowed": true,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -231,8 +231,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "dynamic_allowed": true,
         "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -260,8 +260,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "dynamic_allowed": true,
         "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -324,9 +324,9 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "disable_type": "between_tools",
         "zero_allowed": true,
         "dynamic_allowed": true,
+        "disable_type": "between_tools",
         "levels": [
           "low",
           "medium",
