@@ -128,7 +128,12 @@ fn integer_parameters_are_coerced_as_gjson_does() {
     assert_eq!(max_tokens("false"), "0");
     assert_eq!(max_tokens("null"), "0");
     assert_eq!(max_tokens("[16]"), "0");
-    assert_eq!(max_tokens("1e30"), i64::MAX.to_string());
+    let positive_overflow = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+        i64::MIN
+    } else {
+        i64::MAX
+    };
+    assert_eq!(max_tokens("1e30"), positive_overflow.to_string());
     assert_eq!(max_tokens("-1e30"), i64::MIN.to_string());
     assert_eq!(
         request_field(r#"{"top_logprobs":"5"}"#, "top_logprobs").unwrap(),
@@ -315,8 +320,13 @@ fn response_fields_are_coerced_as_gjson_does() {
         .iter()
         .map(|choice| choice["index"].to_string())
         .collect();
-    let max = i64::MAX.to_string();
-    assert_eq!(indexes, ["2", "1", "-1", max.as_str()]);
+    let positive_overflow = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+        i64::MIN
+    } else {
+        i64::MAX
+    };
+    let overflow = positive_overflow.to_string();
+    assert_eq!(indexes, ["2", "1", "-1", overflow.as_str()]);
     let out = parse(&response(r#"{"created":null}"#));
     assert_eq!(out["created"].to_string(), "0");
 }

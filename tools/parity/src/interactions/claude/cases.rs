@@ -656,6 +656,20 @@ pub fn interactions_requests() -> Vec<Case> {
 /// Interactions event streams, for the stream translator to Claude.
 pub fn interactions_streams() -> Vec<Case> {
     vec![
+        // Seed 7's cache-count overflow changes filtering and subtraction,
+        // so comparing only the final integer cannot recognize the mismatch.
+        response(
+            "overflowing-cached-tokens-stream",
+            "",
+            &[
+                r#"{"event_type":"interaction.created","interaction":{"id":"interaction_424","model":"gemini-2.5-flash"}}"#,
+                r#"{"event_type":"step.start","index":0,"step":{"type":"model_output"}}"#,
+                r#"data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"X-Anthropic-Billing-Header: wrong case"}}"#,
+                r#"{"event_type":"step.stop","index":0}"#,
+                r#"{"event_type":"interaction.completed","interaction":{"id":"interaction_424","status":"completed","finish_reason":"length","usage":{"total_input_tokens":3905,"total_output_tokens":3700,"total_cached_tokens":1e+30}}}"#,
+                r#"{"event_type":"done"}"#,
+            ],
+        ),
         response(
             "response-to-claude-stream",
             "gemini-3.1-flash-lite",
@@ -832,6 +846,13 @@ pub fn interactions_streams() -> Vec<Case> {
 /// Whole interactions, for the non-streaming translator to Claude.
 pub fn interactions_finals() -> Vec<Case> {
     let mut cases = vec![
+        response(
+            "overflowing-cached-tokens-final",
+            "",
+            &[
+                r#"{"interaction":{"id":"interaction_424","model":"gemini-2.5-flash","object":"interaction","status":"completed","finish_reason":"length","steps":[{"type":"model_output","content":[{"type":"text","text":"X-Anthropic-Billing-Header: wrong case"}]}],"usage":{"total_input_tokens":3905,"total_output_tokens":3700,"total_cached_tokens":1e+30}}}"#,
+            ],
+        ),
         response(
             "response-to-claude-non-stream",
             "gemini-3.1-flash-lite",

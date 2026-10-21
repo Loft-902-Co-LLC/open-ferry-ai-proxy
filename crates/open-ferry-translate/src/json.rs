@@ -95,8 +95,9 @@ pub(crate) fn delete_path(value: &mut Value, path: &str) -> bool {
         .is_some_and(|object| object.shift_remove(key).is_some())
 }
 
-/// gjson `Int()`. A float out of `i64`'s range saturates, where Go's result
-/// depends on the CPU (amd64 gives the minimum `i64`).
+/// gjson `Int()`, including the target CPU's floating-point overflow rule:
+/// x86 returns the minimum `i64`, while arm64 saturates. Integer text still
+/// goes through gjson's wrapping decimal parser before that fallback.
 pub(crate) fn int_of(value: &Value) -> i64 {
     match value {
         Value::Bool(true) => 1,
@@ -108,7 +109,15 @@ pub(crate) fn int_of(value: &Value) -> i64 {
             if f.abs() <= 9_007_199_254_740_991.0 {
                 f as i64
             } else {
-                parse_int(&text).unwrap_or(f as i64)
+                parse_int(&text).unwrap_or({
+                    if cfg!(any(target_arch = "x86", target_arch = "x86_64"))
+                        && f >= 9_223_372_036_854_775_808.0
+                    {
+                        i64::MIN
+                    } else {
+                        f as i64
+                    }
+                })
             }
         }
         _ => 0,
@@ -345,10 +354,21 @@ mod tests {
         assert_eq!(int_of(&json!(true)), 1);
         assert_eq!(int_of(&json!(null)), 0);
         let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap();
-        assert_eq!(int_of(&parse("1e30")), i64::MAX);
-        assert_eq!(int_of(&parse("1e400")), i64::MAX);
+        let positive_overflow = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+            i64::MIN
+        } else {
+            i64::MAX
+        };
+        for text in ["1e30", "1e400", "9223372036854775808.0"] {
+            assert_eq!(int_of(&parse(text)), positive_overflow, "{text}");
+        }
         assert_eq!(int_of(&parse("-1e400")), i64::MIN);
         assert_eq!(int_of(&parse("9223372036854775808")), i64::MIN);
+        assert_eq!(int_of(&parse("9223372036854775807")), i64::MAX);
+        assert_eq!(
+            int_of(&parse("9223372036854774784.0")),
+            9_223_372_036_854_774_784
+        );
     }
 
     #[test]

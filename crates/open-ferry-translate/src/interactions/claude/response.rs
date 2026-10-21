@@ -21,8 +21,6 @@
 //!   name, ID or signature that is an object or an array, or a function
 //!   call's `arguments` streamed in `partial_json`), we write the same JSON
 //!   compactly.
-//! - A token count beyond `i64` saturates; Go's conversion depends on the
-//!   CPU.
 
 use std::borrow::Cow;
 use std::collections::HashMap;

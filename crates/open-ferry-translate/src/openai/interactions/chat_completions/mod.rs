@@ -26,8 +26,6 @@
 //! - Where upstream copies a value's JSON text, into the output or into a
 //!   string (a tool call's arguments, a tool result, a non-string value read
 //!   as text), we write the same JSON compactly.
-//! - A count or index too large for `i64`, such as `1e30`, saturates. Go's
-//!   result depends on the CPU; amd64 gives the minimum `i64`.
 //! - When a key is repeated, the last one counts; gjson reads the first.
 
 mod common;
