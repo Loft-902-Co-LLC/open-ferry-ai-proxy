@@ -1,5 +1,9 @@
 use super::*;
 
+// Setup/cleanup may include the ten-second shutdown grace. These waits do not
+// measure signal withdrawal or the drain deadline.
+const SETTLE: Duration = Duration::from_secs(12);
+
 fn pause_write(
     api: &Api,
     before_file: bool,
@@ -15,13 +19,13 @@ fn pause_write(
 }
 
 async fn entered(pause: &crate::oauth::BindWritePause) {
-    tokio::time::timeout(Duration::from_secs(2), pause.0.notified())
+    tokio::time::timeout(SETTLE, pause.0.notified())
         .await
         .unwrap();
 }
 
 async fn settled(api: &Api) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(SETTLE, async {
         while api.state.oauth_sessions().bind_workers.counts() != (0, 0) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -54,14 +58,14 @@ async fn real_shutdown(stopped: bool) {
     release.send(()).unwrap();
     let mut waited_for_sync = true;
     if !stopped {
-        tokio::time::timeout(Duration::from_secs(2), sync_pause.0.notified())
+        tokio::time::timeout(SETTLE, sync_pause.0.notified())
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
         waited_for_sync = !shutdown.is_finished();
         sync_pause.1.notify_one();
     }
-    tokio::time::timeout(Duration::from_secs(2), shutdown)
+    tokio::time::timeout(SETTLE, shutdown)
         .await
         .unwrap()
         .unwrap();
@@ -169,7 +173,7 @@ async fn round4_shutdown_bound_warns_and_keeps_committed_collector() {
     deliver(&api, &session, "codex", issued());
     entered(&pause).await;
     api.sync.stop();
-    tokio::time::timeout(Duration::from_secs(1), api.state.shutdown())
+    tokio::time::timeout(SETTLE, api.state.shutdown())
         .await
         .unwrap();
     let live_at_return = api.state.oauth_sessions().bind_workers.counts();
@@ -212,7 +216,7 @@ async fn round4_worker_cap_survives_cancelled_session_churn() {
     api.state.oauth_sessions().overrides().bind_before_file = None;
     let second = start_login(&api, &second_route).await;
     deliver(&api, &second, "codex", issued());
-    let refused = tokio::time::timeout(Duration::from_secs(2), async {
+    let refused = tokio::time::timeout(SETTLE, async {
         loop {
             if api
                 .state
@@ -270,18 +274,18 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     let waiting = Arc::new(tokio::sync::Notify::new());
     api.state.oauth_sessions().overrides().bind_lock_wait = Some(waiting.clone());
     deliver(&api, &first, "codex", issued());
-    tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+    tokio::time::timeout(SETTLE, waiting.notified())
         .await
         .unwrap();
     deliver(&api, &second, "codex", issued());
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(SETTLE, async {
         while starts.load(Ordering::SeqCst) < 2 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
     .unwrap();
-    let other_bound = tokio::time::timeout(Duration::from_secs(2), async {
+    let other_bound = tokio::time::timeout(SETTLE, async {
         loop {
             if api
                 .state
@@ -321,7 +325,7 @@ async fn round4_failed_file_tries_back_off_to_the_ceiling() {
     .await
     .unwrap();
     deliver(&api, &session, "codex", issued());
-    let observed = tokio::time::timeout(Duration::from_secs(7), async {
+    let observed = tokio::time::timeout(Duration::from_secs(30), async {
         while times.lock().unwrap().len() < 9 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

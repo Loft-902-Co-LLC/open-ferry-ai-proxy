@@ -1239,7 +1239,7 @@ fn watch_admission(api: &Api) -> Arc<tokio::sync::Notify> {
 }
 
 async fn wait_for_bind_task(api: &Api) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(12), async {
         while api.state.oauth_sessions().running() != 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

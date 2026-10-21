@@ -229,7 +229,7 @@ pub(super) async fn save(
                         .1
                         .lock()
                         .unwrap()
-                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .recv_timeout(std::time::Duration::from_secs(30))
                         .unwrap();
                 }
                 let Some(guard) = try_acquire_credential_lock(&target.path)? else {
@@ -280,7 +280,7 @@ pub(super) async fn save(
                                         .1
                                         .lock()
                                         .unwrap()
-                                        .recv_timeout(std::time::Duration::from_secs(5))
+                                        .recv_timeout(std::time::Duration::from_secs(30))
                                         .unwrap();
                                 }
                             }

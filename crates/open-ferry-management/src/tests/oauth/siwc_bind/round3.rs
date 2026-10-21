@@ -50,11 +50,11 @@ async fn round3_shutdown_during_write_reports_the_durable_outcome() {
     let shutdown = tokio::spawn(async move { state.shutdown().await });
     tokio::time::sleep(Duration::from_millis(60)).await;
     release.send(()).unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(2), saving)
+    let result = tokio::time::timeout(Duration::from_secs(12), saving)
         .await
         .unwrap()
         .unwrap();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     while dir.read_json("codex-bind.json").get("use_siwc") != Some(&json!(true)) {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(5)).await;

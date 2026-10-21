@@ -2,9 +2,12 @@
 //! edits and runtimes whose workers or blocking pool are occupied.
 
 use super::*;
+use futures_util::{FutureExt, future::FusedFuture};
 use std::sync::atomic::AtomicBool;
 
 const BOUND: Duration = Duration::from_millis(800);
+// Completion includes the one-second retry backoff. Withdrawal still uses BOUND.
+const PAIR_BOUND: Duration = Duration::from_secs(3);
 
 pub(super) struct Pause {
     armed: Arc<AtomicBool>,
@@ -32,7 +35,7 @@ impl Pause {
                     released
                         .lock()
                         .unwrap()
-                        .recv_timeout(Duration::from_secs(10))
+                        .recv_timeout(Duration::from_secs(30))
                         .unwrap();
                 }
             },
@@ -153,7 +156,7 @@ async fn patch_pair(fields: bool, patch_first: bool) {
         } else {
             r#"{"name":"edited.json","disabled":true}"#
         };
-        let mut patch = Box::pin(api.call(Method::PATCH, route, body));
+        let mut patch = Box::pin(api.call(Method::PATCH, route, body).fuse());
         tokio::select! {
             () = edit_pause.entered.notified() => {},
             _ = &mut patch => panic!("PATCH did not reach before_edit"),
@@ -168,7 +171,7 @@ async fn patch_pair(fields: bool, patch_first: bool) {
         holder_pause.resume();
         let joining = tokio::task::spawn_blocking(move || active.join().unwrap());
         edit_pause.resume();
-        let result = tokio::time::timeout(BOUND, async {
+        let result = tokio::time::timeout(PAIR_BOUND, async {
             let (response, (), joined) =
                 tokio::join!(&mut patch, completed(&api, &session), joining);
             joined.unwrap();
@@ -177,10 +180,12 @@ async fn patch_pair(fields: bool, patch_first: bool) {
         .await;
         if result.is_err() {
             api.state.oauth_sessions().store().cancel(&session);
-            tokio::time::timeout(Duration::from_secs(2), &mut patch)
-                .await
-                .unwrap()
-                .expect(StatusCode::OK);
+            if !patch.is_terminated() {
+                tokio::time::timeout(Duration::from_secs(12), &mut patch)
+                    .await
+                    .unwrap()
+                    .expect(StatusCode::OK);
+            }
         }
         assert!(
             result.is_ok(),
@@ -318,31 +323,34 @@ fn cancellation_with_free_worker(stop: &str) {
         let active = shared_holder_for(&api, &pause, "codex-bind.json").await;
         let waiting = watch_admission(&api);
         let finished = Arc::new(tokio::sync::Notify::new());
-        api.state.oauth_sessions().overrides().bind_drain_budget = Some(Duration::from_secs(2));
+        api.state.oauth_sessions().overrides().bind_drain_budget = Some(Duration::from_secs(30));
         api.state.oauth_sessions().overrides().bind_worker_finished = Some(finished.clone());
         let state = api.state.clone();
         let saving = tokio::spawn(async move {
             crate::oauth::siwc_bind::save_for_test(&state, "round3-signal").await
         });
-        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+        tokio::time::timeout(Duration::from_secs(12), waiting.notified())
             .await
             .unwrap();
         // Give the running worker time to enter its timed drain wait. The
         // enlarged test budget separates signal withdrawal from the deadline.
         tokio::time::sleep(Duration::from_millis(40)).await;
-        match stop {
-            "expiry" => api
-                .state
-                .oauth_sessions()
-                .store()
-                .expire_bind_for_test("round3-signal"),
-            "cancel" => assert!(api.state.oauth_sessions().store().cancel("round3-signal")),
-            "disconnect" => saving.abort(),
-            _ => api.state.oauth_sessions().shutdown().await,
-        }
-        let withdrew = tokio::time::timeout(BOUND, finished.notified())
-            .await
-            .is_ok();
+        assert_eq!(api.state.oauth_sessions().bind_workers.counts().0, 1);
+        let withdrew = tokio::time::timeout(BOUND, async {
+            match stop {
+                "expiry" => api
+                    .state
+                    .oauth_sessions()
+                    .store()
+                    .expire_bind_for_test("round3-signal"),
+                "cancel" => assert!(api.state.oauth_sessions().store().cancel("round3-signal")),
+                "disconnect" => saving.abort(),
+                _ => api.state.oauth_sessions().shutdown().await,
+            }
+            finished.notified().await;
+        })
+        .await
+        .is_ok();
         // Release the shared holder before the final assertions. A signal
         // must prevent the later write too, not just delay it behind the holder.
         pause.resume();
@@ -350,7 +358,7 @@ fn cancellation_with_free_worker(stop: &str) {
             .await
             .unwrap();
         if !withdrew {
-            tokio::time::timeout(Duration::from_secs(3), finished.notified())
+            tokio::time::timeout(Duration::from_secs(12), finished.notified())
                 .await
                 .unwrap();
         }
