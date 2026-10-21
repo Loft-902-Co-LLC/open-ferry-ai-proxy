@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_response_test.go
-// (v8.0.36, MIT), and its v8.0.36 tests (v8.0.36, MIT).
+// (v8.0.38, MIT), and its v8.0.38 tests (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All tests are ported. The tests without an upstream name are new; their
@@ -1246,4 +1246,37 @@ fn non_stream_tool_use_ids_are_unique_across_turns_and_streams() {
     assert_ne!(ids[0], ids[1]);
     assert_ne!(ids[0], ids[2]);
     assert_ne!(ids[1], ids[2]);
+}
+
+#[test]
+fn cached_tool_names_resolve_multiple_calls_in_both_response_modes() {
+    let request = json!({"tools":[{"name":"Read"},{"name":"read"},
+        {"name":"Write"},{"name":"Write"},{"function":{"name":"__Nested"}},
+        {"name":"odd name","input_schema":{"type":"object","properties":{}}}]});
+    let response = json!({"candidates":[{"content":{"parts":[
+        {"functionCall":{"name":"READ","args":{}}},
+        {"functionCall":{"name":"Read","args":{}}},
+        {"functionCall":{"name":"write","args":{}}},
+        {"functionCall":{"name":"NESTED","args":{}}},
+        {"functionCall":{"name":"odd_name","args":{"_":""}}}
+    ]},"finishReason":"STOP"}]});
+    let expected = ["READ", "Read", "Write", "__Nested", "odd name"];
+    let out = convert_gemini_response_to_claude_non_stream(&request, &response);
+    let names: Vec<_> = out["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, expected);
+    assert_eq!(out["content"][4]["input"], json!({}));
+    let mut translator = GeminiToClaudeStream::new(&request);
+    let events = translator.translate(response.to_string().as_bytes());
+    let names: Vec<String> = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|event| event["content_block"]["name"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(names, expected);
 }

@@ -1,7 +1,7 @@
-// Ported from CLIProxyAPI internal/util/translator.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/util/translator.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Restores Claude tool names and removes schema-normalization placeholders.
+//! Removes schema-normalization placeholders from Claude tool arguments.
 //!
 //! Closed objects use the upstream re-clean decision on every route, without
 //! running an Antigravity request cleaner. Arguments use compact JSON values.
@@ -27,7 +27,9 @@ fn tool_name(tool: &Value) -> String {
     }
 }
 
-pub(super) fn client_name(request: &Value, name: &str) -> String {
+// The old resolver remains only as an oracle for the cached name policy.
+#[cfg(test)]
+fn legacy_client_name(request: &Value, name: &str) -> String {
     // Upstream's name map has no entry for an empty canonical name, so a
     // name such as `_` is never restored.
     if canonical_tool_name(name).is_empty() {

@@ -1187,7 +1187,7 @@ The OpenAI translators share helpers with upstream's other translators, ported a
 - `common::openai_tools` from `internal/translator/common/openai_tools.go`: moving Chat Completions tool results to right after the assistant message that called them.
 - `common::responses` from `internal/translator/common/responses.go`: pairing a Responses request's tool outputs with their calls (also used by the Claude translators); and, from the Responses response translators for Claude and Chat Completions upstreams, which request a response reads and the fields it repeats from it.
 - `common::gemini_response` from `GeminiTokenCountJSON` in `internal/translator/common/bytes.go`: the `countTokens` response the translators from Gemini clients give.
-- `common::tool_names` from `internal/util/translator.go`: repairing tool call arguments written with single quotes, and giving a Claude client back a tool's name as it declared it when Chat Completions returns it in another case or spacing.
+- `common::tool_names` from `internal/util/translator.go`: repairing tool call arguments written with single quotes, and giving a Claude client back a tool's name as it declared it when Chat Completions or Gemini returns it in another case or spacing. Gemini responses precompute the canonical-name collision policy once per response, including an empty map; schema lookup and argument cleaning still use the request's tool schemas.
 
 The Claude translators use more of upstream's shared code:
 

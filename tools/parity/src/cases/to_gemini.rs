@@ -960,6 +960,31 @@ pub fn gemini_finals() -> Vec<Case> {
     cases
 }
 
+/// Multiple calls share the cached collision policy, including nested names.
+fn claude_collision_case(stream: bool) -> Case {
+    let request = json!({"tools":[{"name":"Read"},{"name":"read"},{"name":"_Read"},
+        {"name":"Write"},{"name":"Write"},{"name":" ","function":{"name":"__Nested"}},
+        {"name":"odd name"}]})
+    .to_string();
+    let response = last(
+        vec![
+            function_call("READ", json!({})),
+            function_call("Read", json!({})),
+            function_call("__read", json!({})),
+            function_call("write", json!({})),
+            function_call("NESTED", json!({})),
+            function_call("odd_name", json!({})),
+        ],
+        "STOP",
+        usage(1, 1, 0, 0),
+    );
+    let mut chunks = vec![response.to_string()];
+    if stream {
+        chunks.push("[DONE]".into());
+    }
+    Case::response("cached-collision-policy", request, chunks)
+}
+
 /// Gemini streams as the Gemini executor passes them to the Claude
 /// translator, each chunk's JSON then `[DONE]`, and one as Vertex AI's
 /// passes them, each line as it came.
@@ -976,6 +1001,7 @@ pub fn claude_streams() -> Vec<Case> {
             bare_lines(&chunks),
         ));
     }
+    cases.push(claude_collision_case(true));
     cases.extend([
         Case::response("done-only", &request, vec!["[DONE]".to_owned()]),
         Case::response("empty-stream", &request, Vec::new()),
@@ -1030,6 +1056,7 @@ pub fn claude_streams() -> Vec<Case> {
 /// Whole Gemini responses, for the Claude non-streaming translator.
 pub fn claude_finals() -> Vec<Case> {
     let mut cases = bodies(&original_request(false));
+    cases.push(claude_collision_case(false));
     cases.push(Case::response(
         "zero-usage",
         original_request(false),

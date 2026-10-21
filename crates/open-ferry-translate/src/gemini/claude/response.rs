@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_response.go
 // (ConvertGeminiResponseToClaude, ConvertGeminiResponseToClaudeNonStream and
-// ClaudeTokenCount), internal/util/translator.go (v8.0.36, MIT).
+// ClaudeTokenCount), internal/util/translator.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini responses → Claude Messages responses.
@@ -30,10 +30,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 
-use super::tool_arguments::{clean_arguments, client_name, parameterless};
+use super::tool_arguments::{clean_arguments, parameterless};
 use crate::common::claude::sanitize_tool_id;
 use crate::common::gemini::{
     SanitizedToolNames, restore_sanitized_tool_name, sanitized_tool_name_map,
+};
+use crate::common::tool_names::{
+    ToolNameMap, map_tool_name, unambiguous_tool_name_map_from_claude_request,
 };
 use crate::gemini_schema::get;
 use crate::json::{bool_of, int_of, path, str_of};
@@ -79,6 +82,8 @@ pub struct GeminiToClaudeStream {
     current_input_emitted: bool,
     /// Sanitized function names → the names the client declared.
     sanitized_names: Option<SanitizedToolNames>,
+    /// Canonical names and their collision policy, pinned even when empty.
+    tool_names: Option<ToolNameMap>,
     has_first_response: bool,
     block: Block,
     block_index: usize,
@@ -104,6 +109,7 @@ impl GeminiToClaudeStream {
             current_parameterless: false,
             current_input_emitted: false,
             sanitized_names: sanitized_tool_name_map(original_request),
+            tool_names: unambiguous_tool_name_map_from_claude_request(original_request),
             has_first_response: false,
             block: Block::None,
             block_index: 0,
@@ -316,7 +322,7 @@ impl GeminiToClaudeStream {
                 self.sanitized_names.as_ref(),
                 &str_of(call.get("name")),
             );
-            let client_name = client_name(&self.original_request, &upstream_name);
+            let client_name = map_tool_name(self.tool_names.as_ref(), &upstream_name);
             let args = call.get("args");
 
             // A call without a name continues the open one: Gemini can split
@@ -487,6 +493,7 @@ pub fn convert_gemini_response_to_claude_non_stream_with_translated(
     response: &Value,
 ) -> Value {
     let sanitized_names = sanitized_tool_name_map(original_request);
+    let tool_names = unambiguous_tool_name_map_from_claude_request(original_request);
 
     let count = |path_: &str| path(response, path_).map_or(0, int_of);
     let cached = count("usageMetadata.cachedContentTokenCount");
@@ -549,7 +556,7 @@ pub fn convert_gemini_response_to_claude_non_stream_with_translated(
                     sanitized_names.as_ref(),
                     &str_of(call.get("name")),
                 );
-                let client_name = client_name(original_request, &upstream_name);
+                let client_name = map_tool_name(tool_names.as_ref(), &upstream_name);
                 let tool_id = TOOL_USE_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
                 let input = match call.get("args") {
                     Some(args @ Value::Object(_)) => {
