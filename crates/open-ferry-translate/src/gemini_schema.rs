@@ -35,7 +35,7 @@
 //!
 //! Upstream's other cleaners are not ported: `CleanJSONSchemaForAntigravity`
 //! with its tool and response variants, and the legacy
-//! `CleanJSONSchemaForGemini`. Neither are the passes only they run (local
+//! `CleanJSONSchemaForGemini`. Neither are the passes only they run (
 //! constraint and `not` hints, the empty-schema placeholder).
 //! Antigravity is out of scope, and nothing here calls the legacy cleaner.
 //!
@@ -435,7 +435,7 @@ impl<'a> CopyTarget<'a> {
 /// Keywords Gemini rejects, removed wherever they are a keyword rather than a
 /// name. Upstream's list also has `additionalProperties`, which this cleaner
 /// keeps.
-const UNSUPPORTED_KEYWORDS: [&str; 32] = [
+const UNSUPPORTED_KEYWORDS: [&str; 34] = [
     "$schema",
     "$defs",
     "definitions",
@@ -462,6 +462,8 @@ const UNSUPPORTED_KEYWORDS: [&str; 32] = [
     "deprecated",
     "encrypted",
     "discriminator",
+    "readOnly",
+    "writeOnly",
     "additionalItems",
     "unevaluatedProperties",
     "unevaluatedItems",

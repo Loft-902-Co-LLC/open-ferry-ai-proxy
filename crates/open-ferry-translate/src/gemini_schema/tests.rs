@@ -1,4 +1,4 @@
-//! Ports internal/util/gemini_schema_test.go (v8.0.32).
+//! Ports internal/util/gemini_schema_test.go (v8.0.36).
 //!
 //! Upstream runs most of these tests against several of its cleaners. Only
 //! `CleanJSONSchemaForGeminiJSONSchema` is ported, so they run against it. A
@@ -18,8 +18,6 @@
 //! - TestCleanJSONSchemaStripsPropertyNamesUnderPropertyNamedProperties: the
 //!   assertion that `additionalProperties` is removed is dropped, since this
 //!   cleaner keeps it (upstream's own Issue5959 test checks it is kept).
-//! - TestCleanJSONSchema_RemovesDraft04IdAndSchemaIdentifierKeywords: the `$ref`
-//!   half is dropped. It tests Antigravity's local `$ref` inlining.
 //! - TestCleanJSONSchema_PreservesLargeNumberPrecision ran Antigravity's
 //!   response cleaner, which moves `minimum` into the description. Here
 //!   `minimum` stays, and the test checks its digits survive the re-encoding.
@@ -2603,4 +2601,40 @@ fn removes_content_annotations_but_keeps_same_named_properties_issue6699() {
     for name in ["contentMediaType", "contentEncoding"] {
         assert_eq!(out["properties"][name]["type"], "string");
     }
+}
+
+#[test]
+fn removes_access_annotations_but_keeps_names_and_literal_values_issue6778() {
+    let field = json!({"type":"string","description":"Database resource name","readOnly":true,"writeOnly":false});
+    let literal = json!({"readOnly":true,"writeOnly":false,"contentMediaType":"text/plain","contentEncoding":"base64"});
+    let out = clean_schema(&json!({"type":"object","readOnly":false,"writeOnly":false,
+        "properties":{"database":{"type":"object","properties":{"name":field,"uid":field,"etag":field}},
+            "itemsList":{"type":"array","items":field},
+            "unionField":{"anyOf":[field,{"type":"integer","writeOnly":true}]},
+            "readOnly":{"type":"boolean","readOnly":true},"writeOnly":{"type":"boolean","writeOnly":true},
+            "literal":{"type":"object","default":literal,"example":literal,"examples":[literal]}}}));
+    for node in [
+        &out,
+        &out["properties"]["database"]["properties"]["name"],
+        &out["properties"]["database"]["properties"]["uid"],
+        &out["properties"]["database"]["properties"]["etag"],
+        &out["properties"]["itemsList"]["items"],
+        &out["properties"]["unionField"]["anyOf"][0],
+        &out["properties"]["unionField"]["anyOf"][1],
+        &out["properties"]["readOnly"],
+        &out["properties"]["writeOnly"],
+    ] {
+        assert!(node.get("readOnly").is_none(), "{out}");
+        assert!(node.get("writeOnly").is_none(), "{out}");
+    }
+    for name in ["readOnly", "writeOnly"] {
+        assert_eq!(out["properties"][name]["type"], "boolean");
+    }
+    assert_eq!(
+        out["properties"]["database"]["properties"]["name"]["description"],
+        "Database resource name"
+    );
+    assert_eq!(out["properties"]["literal"]["default"], literal);
+    assert_eq!(out["properties"]["literal"]["example"], literal);
+    assert_eq!(out["properties"]["literal"]["examples"], json!([literal]));
 }

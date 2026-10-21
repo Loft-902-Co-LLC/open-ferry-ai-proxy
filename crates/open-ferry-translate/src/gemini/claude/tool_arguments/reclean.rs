@@ -37,7 +37,7 @@ const NAME_MAPS: [&str; 6] = [
     "definitions",
 ];
 const REPAIR_CONTAINERS: &str = "properties patternProperties additionalProperties items prefixItems $defs definitions dependentSchemas dependentRequired dependencies if then else not contains propertyNames unevaluatedProperties unevaluatedItems contentSchema additionalItems default const example examples discriminator xml externalDocs enumDescriptions enumTitles";
-const REMOVED: &str = "minLength maxLength exclusiveMinimum exclusiveMaximum pattern minItems maxItems uniqueItems contains format default examples minimum maximum multipleOf $schema $defs definitions const $ref $id id additionalProperties $anchor $vocabulary $dynamicRef $dynamicAnchor propertyNames patternProperties dependentRequired dependentSchemas dependencies if then else $comment enumDescriptions enumTitles prefill deprecated encrypted discriminator additionalItems unevaluatedProperties unevaluatedItems contentSchema contentMediaType contentEncoding not";
+const REMOVED: &str = "minLength maxLength exclusiveMinimum exclusiveMaximum pattern minItems maxItems uniqueItems contains format default examples minimum maximum multipleOf $schema $defs definitions const $ref $id id additionalProperties $anchor $vocabulary $dynamicRef $dynamicAnchor propertyNames patternProperties dependentRequired dependentSchemas dependencies if then else $comment enumDescriptions enumTitles prefill deprecated encrypted discriminator readOnly writeOnly additionalItems unevaluatedProperties unevaluatedItems contentSchema contentMediaType contentEncoding not";
 
 fn string_required(schema: &Value) -> Vec<String> {
     array(schema, "required")
@@ -265,7 +265,10 @@ fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
     phase(value, name_map);
 }
 fn reference_hint(value: &mut Value, name_map: bool) {
-    if !name_map && let Some(map) = value.as_object_mut() && map.shift_remove("$ref").is_some() {
+    if !name_map
+        && let Some(map) = value.as_object_mut()
+        && map.shift_remove("$ref").is_some()
+    {
         map.insert("description".into(), json!("reference hint"));
     }
 }

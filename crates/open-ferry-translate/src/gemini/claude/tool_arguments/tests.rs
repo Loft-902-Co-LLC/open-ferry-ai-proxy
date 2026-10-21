@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/sanitize_test.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/util/sanitize_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;
@@ -879,7 +879,7 @@ fn reclean_projection_matches_upstream_edges() {
   ["anyOf [{}, [{\"type\": \"null\"}]]",{"anyOf":[{"type":"null"}]},false,false],
   ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"type":"null"}]},true,false],
   ["anyOf [{}, \"bad\"]",{"anyOf":"bad"},false,false],
-  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":"bad"},false,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":"bad"},true,false],
   ["anyOf [{}, {\"properties\": {\"reason\": {}}}]",{"anyOf":{"properties":{"reason":{}}}},true,false],
   ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"properties\": {\"reason\": {}}}]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":{"properties":{"reason":{}}}},true,false],
   ["oneOf [{}, []]",{"oneOf":[]},false,false],
@@ -899,7 +899,7 @@ fn reclean_projection_matches_upstream_edges() {
   ["oneOf [{}, [{\"type\": \"null\"}]]",{"oneOf":[{"type":"null"}]},false,false],
   ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[{"type":"null"}]},true,false],
   ["oneOf [{}, \"bad\"]",{"oneOf":"bad"},false,false],
-  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":"bad"},false,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":"bad"},true,false],
   ["oneOf [{}, {\"properties\": {\"reason\": {}}}]",{"oneOf":{"properties":{"reason":{}}}},true,false],
   ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"properties\": {\"reason\": {}}}]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":{"properties":{"reason":{}}}},true,false],
   ["structural {\"allOf\": [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}]}",{"allOf":[{"type":"object","properties":{"flag":{"type":"string"}}}]},true,false],
@@ -1087,8 +1087,8 @@ fn cached_schema_text_keeps_first_seen_order() {
     assert!(std::ptr::eq(schemas[1], &reordered));
 }
 
-// Not upstream's: a shallow two-ref chain must exhaust the node budget, not
-// allocate its exponentially expanded tree. No wall-clock assertion is needed.
+// Not upstream's: a large literal must exhaust the projection node budget
+// even when reference inlining does not expand anything.
 #[test]
 fn reclean_node_budget_preserves_arguments() {
     let schema = json!({"type":"object","properties":{"p":{"type":"string"}},
