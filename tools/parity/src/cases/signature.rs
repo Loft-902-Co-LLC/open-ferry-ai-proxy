@@ -17,6 +17,7 @@ const GEMINI_BYPASS: &str = "skip_thought_signature_validator";
 /// other.
 pub fn inspect() -> Vec<Case> {
     let caqs = antigravity_caqs();
+    let meta = format!("Q-PaDgE{}", "A".repeat(1419));
     let signatures = [
         ("claude", "claude-sonnet-4-6", CLAUDE.to_owned()),
         ("claude-r", "claude-sonnet-4-6", base64_again(CLAUDE)),
@@ -46,13 +47,26 @@ pub fn inspect() -> Vec<Case> {
             format!(" OpenAI # {GPT}"),
         ),
         ("grok", "grok-4.5", GROK.to_owned()),
+        ("gpt-router", "gpt-5", format!("{GPT}.Router123")),
+        ("grok-router", "grok-4.5", format!("{GROK}.Router123")),
+        ("meta", "muse-spark", meta.clone()),
+        (
+            "meta-router",
+            "openai-compatible/muse_spark",
+            format!("{meta}.Router123"),
+        ),
+        (
+            "meta-malformed-router",
+            "meta-muse-1",
+            format!("{meta}.bad_suffix"),
+        ),
         ("swe", "swe-1.5", "sealed.v1.abc".to_owned()),
         ("empty", "claude-sonnet-4-6", String::new()),
     ];
     let mut cases: Vec<Case> = signatures
         .into_iter()
         .flat_map(|(name, model, signature)| {
-            ["unknown", "claude", "gemini", "gpt"].map(|target| {
+            ["unknown", "claude", "gemini", "gpt", "meta", "grok"].map(|target| {
                 Case::new(format!("{name}-for-{target}"), model, signature.clone())
                     .with_options(json!({ "target": target }))
             })

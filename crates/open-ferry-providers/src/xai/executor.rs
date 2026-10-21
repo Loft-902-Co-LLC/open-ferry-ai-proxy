@@ -2,7 +2,7 @@
 // (XAIExecutor, Identifier), xai_executor_execute.go (Execute,
 // executeCompact, executeCompactRequest, executeCompactionTriggerStream),
 // xai_executor_stream.go (ExecuteStream) and xai_executor_tokens.go
-// (CountTokens) (v8.0.32, MIT). The image calls are in the `images` module,
+// (CountTokens) (v8.0.36, MIT). The image calls are in the `images` module,
 // the video calls in the `videos` module and the speech calls in the
 // `speech` module.
 // https://github.com/router-for-me/CLIProxyAPI
@@ -243,6 +243,11 @@ impl XaiExecutor {
         )?;
         compact::shape_body(&mut prepared.body, &request.payload);
         prepared.finalize(self.context(auth).config, request, options);
+        // Upstream sanitizes before finalizePayload; sanitize after rules so overrides cannot bypass destination checks.
+        crate::xai::reasoning::sanitize_input_encrypted_content_for_base_url(
+            &mut prepared.body,
+            crate::xai::request::base_url(auth),
+        );
         // Standard API headers: a compact call is never the chat proxy's.
         let headers = build_headers(auth, &options.headers, false, &prepared.session_id)?;
         let url = endpoint(auth, true);
@@ -355,6 +360,10 @@ impl XaiExecutor {
         }
         let mut prepared = prepare(self.context(auth), request, options, true, Format::CODEX)?;
         prepared.finalize(self.context(auth).config, request, options);
+        crate::xai::reasoning::sanitize_input_encrypted_content_for_base_url(
+            &mut prepared.body,
+            crate::xai::request::base_url(auth),
+        );
         let headers = build_headers(auth, &options.headers, true, &prepared.session_id)?;
         let url = endpoint(auth, false);
         let (response, secrets) = self
@@ -474,6 +483,10 @@ impl XaiExecutor {
         }
         let mut prepared = prepare(self.context(auth), &request, &options, true, Format::CODEX)?;
         prepared.finalize(self.context(auth).config, &request, &options);
+        crate::xai::reasoning::sanitize_input_encrypted_content_for_base_url(
+            &mut prepared.body,
+            crate::xai::request::base_url(auth),
+        );
         let headers = build_headers(auth, &options.headers, true, &prepared.session_id)?;
         let url = endpoint(auth, false);
         let (response, secrets) = self
@@ -540,6 +553,10 @@ impl XaiExecutor {
     ) -> Result<Response, ExecError> {
         let mut prepared = prepare(self.context(auth), request, options, false, Format::CODEX)?;
         prepared.finalize(self.context(auth).config, request, options);
+        crate::xai::reasoning::sanitize_input_encrypted_content_for_base_url(
+            &mut prepared.body,
+            crate::xai::request::base_url(auth),
+        );
         let Prepared {
             body,
             to,

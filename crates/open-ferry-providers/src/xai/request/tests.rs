@@ -1489,3 +1489,23 @@ fn drops_invalid_compaction_item() {
     assert_eq!(input[0]["role"], "user", "{body}");
     assert_eq!(input.len(), 1, "{body}");
 }
+
+#[test]
+fn real_user_agents_survive_and_custom_identity_cannot_override_them() {
+    let mut auth = Auth::default();
+    auth.attributes
+        .insert("header:User-Agent".into(), "pretend-client".into());
+    let mut client = HeaderMap::new();
+    client.insert("user-agent", HeaderValue::from_static("real-client/1"));
+    for stream in [false, true] {
+        let headers = build_headers(&auth, &client, stream, "").unwrap();
+        assert_eq!(headers["user-agent"], "real-client/1");
+    }
+    let mut outgoing = HeaderMap::new();
+    outgoing.insert("user-agent", HeaderValue::from_static("outgoing-client/2"));
+    ensure_user_agent(&mut outgoing, &client);
+    assert_eq!(outgoing["user-agent"], "real-client/1");
+    outgoing.insert("user-agent", HeaderValue::from_static(" "));
+    ensure_user_agent(&mut outgoing, &HeaderMap::new());
+    assert_eq!(outgoing["user-agent"], USER_AGENT);
+}

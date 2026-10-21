@@ -204,23 +204,23 @@ fn stream_text_and_reasoning_chunks() {
             &json!([{"thought": true, "text": "a"}]),
             &json!([{"thought": true, "text": "b"}]),
             &json!([{"text": "c"}]),
+            &json!([{"functionCall": {"name": "f", "args": {}}}]),
             &json!([]),
             &json!([]),
             &json!([]),
-            // The tool call in the chunk with text was ignored too.
             &json!([]),
         ]
     );
     assert_eq!(out[0]["model"], "m");
-    // The finish reason in the chunk with text was ignored.
     assert!(!finishes(&out[..3]));
+    assert_eq!(out[3]["candidates"][0]["finishReason"], "STOP");
     assert_eq!(
-        out[3]["usageMetadata"],
+        out[4]["usageMetadata"],
         json!({"promptTokenCount": 2, "totalTokenCount": 2})
     );
-    assert!(out[4].get("usageMetadata").is_none());
     assert!(out[5].get("usageMetadata").is_none());
-    assert_eq!(out[6]["candidates"][0]["finishReason"], "STOP");
+    assert!(out[6].get("usageMetadata").is_none());
+    assert_eq!(out[7]["candidates"][0]["finishReason"], "STOP");
 }
 
 #[test]

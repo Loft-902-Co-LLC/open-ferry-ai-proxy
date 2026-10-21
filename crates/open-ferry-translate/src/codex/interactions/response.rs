@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions/interactions_codex_response.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex (OpenAI Responses) response → Gemini Interactions response, streamed
@@ -29,6 +29,8 @@
 //! - Where a key is repeated in an object, the last one counts. gjson reads
 //!   the first.
 
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
@@ -57,8 +59,11 @@ pub struct CodexToInteractionsStream {
     model: String,
     created_at: i64,
     has_output_text: bool,
+    has_thought_summary: bool,
+    streamed_summary_items: HashSet<String>,
     function_call_name: String,
     function_call_id: String,
+    seen_reasoning: HashSet<[u8; 32]>,
 }
 
 impl CodexToInteractionsStream {
@@ -76,8 +81,11 @@ impl CodexToInteractionsStream {
             model: model.to_owned(),
             created_at: 0,
             has_output_text: false,
+            has_thought_summary: false,
+            streamed_summary_items: HashSet::new(),
             function_call_name: String::new(),
             function_call_id: String::new(),
+            seen_reasoning: HashSet::new(),
         }
     }
 
@@ -128,6 +136,10 @@ impl CodexToInteractionsStream {
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 self.start(&mut out, event.get("response"));
                 self.ensure_step(&mut out, THOUGHT, None);
+                let id = str_of(event.get("item_id")).trim().to_owned();
+                if !id.is_empty() {
+                    self.streamed_summary_items.insert(id);
+                }
                 self.thought_delta(&mut out, &str_of(event.get("delta")));
             }
             "response.function_call_arguments.delta" => {
@@ -262,10 +274,38 @@ impl CodexToInteractionsStream {
                 self.step_stop(out);
             }
             "reasoning" => {
+                let sig = str_of(field("encrypted_content")).trim().to_owned();
+                let key: [u8; 32] =
+                    Sha256::digest(format!("{}\0{sig}", str_of(field("id"))).as_bytes()).into();
+                if !sig.is_empty() && self.seen_reasoning.contains(&key) {
+                    self.step_stop(out);
+                    return;
+                }
                 let text = item.map(reasoning_text).unwrap_or_default();
-                if !text.is_empty() {
+                let id = str_of(field("id")).trim().to_owned();
+                let had_summary = if !id.is_empty() && !self.streamed_summary_items.is_empty() {
+                    self.streamed_summary_items.contains(&id)
+                } else {
+                    self.has_thought_summary
+                };
+                if !text.is_empty() && !had_summary {
                     self.ensure_step(out, THOUGHT, item);
                     self.thought_delta(out, &text);
+                }
+                let sig = str_of(field("encrypted_content")).trim().to_owned();
+                if !sig.is_empty() {
+                    let key: [u8; 32] =
+                        Sha256::digest(format!("{}\0{sig}", str_of(field("id"))).as_bytes()).into();
+                    if self.seen_reasoning.insert(key) {
+                        self.ensure_step(out, THOUGHT, item);
+                        self.delta(
+                            out,
+                            object([
+                                ("signature", sig.into()),
+                                ("type", "thought_signature".into()),
+                            ]),
+                        );
+                    }
                 }
                 self.step_stop(out);
             }
@@ -314,6 +354,9 @@ impl CodexToInteractionsStream {
         self.step_index = self.next_step_index;
         self.next_step_index += 1;
         self.step = Some(kind);
+        if kind == THOUGHT {
+            self.has_thought_summary = false;
+        }
         let mut step = Map::new();
         step.insert("type".into(), kind.into());
         if kind == FUNCTION_CALL {
@@ -346,8 +389,12 @@ impl CodexToInteractionsStream {
 
     /// `appendCodexInteractionsStepStop`: closes the open step, if any.
     fn step_stop(&mut self, out: &mut String) {
+        let was_thought = self.step == Some(THOUGHT);
         if self.step.take().is_none() {
             return;
+        }
+        if was_thought {
+            self.has_thought_summary = false;
         }
         push_event(
             out,
@@ -366,7 +413,8 @@ impl CodexToInteractionsStream {
         );
     }
 
-    fn thought_delta(&self, out: &mut String, text: &str) {
+    fn thought_delta(&mut self, out: &mut String, text: &str) {
+        self.has_thought_summary = true;
         let content = object([("text", text.into()), ("type", "text".into())]);
         self.delta(
             out,
@@ -465,14 +513,18 @@ fn message_step(item: &Value) -> Option<Value> {
 /// `buildCodexReasoningItemToInteractions`.
 fn reasoning_step(item: &Value) -> Option<Value> {
     let text = reasoning_text(item);
-    if text.is_empty() {
+    let sig = str_of(item.get("encrypted_content")).trim().to_owned();
+    if text.is_empty() && sig.is_empty() {
         return None;
     }
-    let content = object([("type", "text".into()), ("text", text.into())]);
-    Some(object([
-        ("type", THOUGHT.into()),
-        ("content", Value::Array(vec![content])),
-    ]))
+    let mut step = object([("type", THOUGHT.into())]);
+    if !sig.is_empty() {
+        step["signature"] = sig.into();
+    }
+    if !text.is_empty() {
+        step["content"] = serde_json::json!([{"type":"text","text":text}]);
+    }
+    Some(step)
 }
 
 /// `buildCodexFunctionCallItemToInteractions`.
@@ -659,4 +711,23 @@ fn unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod signature_carriage_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn signatures_survive_without_summary_and_stream_once() {
+        let item = json!({"type":"reasoning","id":"r","encrypted_content":"opaque"});
+        let step = reasoning_step(&item).unwrap();
+        assert_eq!(step["signature"], "opaque");
+        assert!(step.get("content").is_none());
+        let mut stream = CodexToInteractionsStream::new("muse-spark");
+        let event = json!({"type":"response.output_item.done","item":item}).to_string();
+        let first = stream.translate_line(event.as_bytes());
+        assert_eq!(first.matches("thought_signature").count(), 1);
+        let duplicate = stream.translate_line(event.as_bytes());
+        assert!(!duplicate.contains("thought_signature"));
+    }
 }

@@ -3,11 +3,11 @@
 // applyXAIDefaultHeaders, applyXAICustomHeaders, xaiExecutionSessionID,
 // normalizeXAIImageRefs, preserveXAIResponsesOutputControls) and the
 // image/video routing of xai_executor_execute.go and xai_executor_media.go
-// (v8.0.32, MIT), with the translation errors.
+// (v8.0.36, MIT), with the translation errors.
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // Also ported from CLIProxyAPI internal/runtime/executor/helps/payload_finalizer.go
-// (NewPayloadFinalizer, for xAI) (v8.0.32, MIT).
+// (NewPayloadFinalizer, for xAI) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body, headers and URL of an xAI request.
@@ -329,12 +329,35 @@ pub(crate) fn prepare(
         options.original_request.clone()
     };
     let original = parse_object(&original_payload);
-    let (mut original_translated, _) =
-        translate(config, options, &to, &base, original.clone(), stream);
+    let target =
+        crate::codex::reasoning::resolve_target_model(&base, &options.metadata.requested_model);
+    let signature_target = if open_ferry_translate::signature::Provider::from_model_name(target)
+        == open_ferry_translate::signature::Provider::Grok
+    {
+        target
+    } else {
+        "grok"
+    };
+    let (mut original_translated, _) = translate(
+        config,
+        options,
+        &to,
+        signature_target,
+        original.clone(),
+        stream,
+    );
+    set_string_if_different(&mut original_translated, "model", &base);
     preserve_output_controls(&mut original_translated, &original, from);
     let payload = parse_object(&request.payload);
     // Only the body is sent, so only its translation can refuse the request.
-    let (mut body, refusal) = translate(config, options, &to, &base, payload.clone(), stream);
+    let (mut body, refusal) = translate(
+        config,
+        options,
+        &to,
+        signature_target,
+        payload.clone(),
+        stream,
+    );
     if let Some(refusal) = refusal {
         return Err(refusal.into());
     }
@@ -410,7 +433,10 @@ pub(crate) fn prepare(
         tools::alias_client_web_search_input(&mut body, &web_search_alias, &namespace_tools);
     }
     reasoning::normalize_input_reasoning_items(&mut body);
-    reasoning::sanitize_input_encrypted_content(&mut body);
+    reasoning::sanitize_input_encrypted_content_for_base_url(
+        &mut body,
+        context.auth.map(base_url).unwrap_or_default(),
+    );
 
     normalize_instructions(&mut body, false);
     // Chat Completions takes `stop`; xAI's Responses API doesn't.
@@ -537,7 +563,7 @@ pub(crate) fn build_headers(
     custom_headers::apply(&mut headers, &auth.attributes, client, PROVIDER);
     strip_forbidden_headers(&mut headers);
     set_session_header(&mut headers, session_id)?;
-    headers.insert(header::USER_AGENT, HeaderValue::from_static(USER_AGENT));
+    ensure_user_agent(&mut headers, client);
     Ok(headers)
 }
 
@@ -574,6 +600,27 @@ fn set_session_header(headers: &mut HeaderMap, session_id: &str) -> Result<(), E
         headers.insert(HeaderName::from_static(CONV_ID_HEADER), session);
     }
     Ok(())
+}
+
+/// Preserve the real caller's identity, falling back to open-ferry's own agent.
+pub(crate) fn ensure_user_agent(headers: &mut HeaderMap, client: &HeaderMap) {
+    if let Some(value) = client
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| HeaderValue::from_str(v).ok())
+    {
+        headers.insert(header::USER_AGENT, value);
+        return;
+    }
+    if headers
+        .get(header::USER_AGENT)
+        .is_some_and(|v| !v.as_bytes().iter().all(u8::is_ascii_whitespace))
+    {
+        return;
+    }
+    headers.insert(header::USER_AGENT, HeaderValue::from_static(USER_AGENT));
 }
 
 #[cfg(test)]

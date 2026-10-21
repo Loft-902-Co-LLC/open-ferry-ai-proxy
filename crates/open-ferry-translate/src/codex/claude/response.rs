@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_response.go and
-// codex_claude_response_web_search.go (v8.0.32, MIT).
+// codex_claude_response_web_search.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex (OpenAI Responses) events → Claude Messages responses.
@@ -169,10 +169,11 @@ impl CodexToClaudeStream {
                 }
                 self.thinking_summary_seen = true;
             }
-            "response.reasoning_summary_text.delta" => {
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 self.stop_text(out);
                 self.start_thinking(out);
                 self.thinking_delta(&str_of(event.get("delta")), out);
+                self.thinking_summary_seen = true;
             }
             "response.content_part.added" => {
                 self.finalize_thinking(out);
@@ -277,6 +278,17 @@ impl CodexToClaudeStream {
                 let signature = str_of(item.get("encrypted_content"));
                 if !signature.is_empty() {
                     self.thinking_signature = signature.into_owned();
+                }
+                if !self.thinking_summary_seen {
+                    let mut text = joined_text(item.get("summary"));
+                    if text.is_empty() {
+                        text = joined_text(item.get("content"));
+                    }
+                    if !text.is_empty() {
+                        self.start_thinking(out);
+                        self.thinking_delta(&text, out);
+                        self.thinking_summary_seen = true;
+                    }
                 }
                 if self.thinking_summary_seen {
                     self.finalize_thinking(out);

@@ -1506,3 +1506,51 @@ async fn other_executors_normalize_root_union_schemas_after_translation() {
         "{body}"
     );
 }
+
+#[test]
+fn count_tokens_uses_base_model_instead_of_alias_signature_family() {
+    let signature = format!("Q-PaDgE{}", "A".repeat(1419));
+    let payload = json!({"model":"deployment","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":signature},{"type":"text","text":"answer"}]}]});
+    let request = request("deployment(high)", &payload.to_string());
+    let auth = auth("https://upstream.example/v1");
+    for is_compat in [false, true] {
+        let config = config(
+            false,
+            vec![codex_key(
+                "https://upstream.example/v1",
+                &[("deployment", "muse-spark", is_compat)],
+            )],
+        );
+        let mut options = options("claude", &[]);
+        options.metadata.requested_model = "muse-spark".into();
+        for kind in [Kind::CountTokens, Kind::Execute] {
+            let body = translate(
+                kind,
+                context(&config, &auth),
+                &request,
+                &options,
+                &Format::CODEX,
+                false,
+                payload.clone(),
+            );
+            assert_eq!(
+                body["model"],
+                if kind == Kind::CountTokens {
+                    "deployment"
+                } else {
+                    "muse-spark"
+                }
+            );
+            let reasoning: Vec<_> = body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "reasoning")
+                .collect();
+            assert_eq!(reasoning.len(), usize::from(kind != Kind::CountTokens));
+            if let Some(item) = reasoning.first() {
+                assert_eq!(item["encrypted_content"], signature);
+            }
+        }
+    }
+}

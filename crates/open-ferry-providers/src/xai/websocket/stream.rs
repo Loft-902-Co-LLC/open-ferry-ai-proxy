@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
 // (ExecuteStream, prepareResponsesWebsocketRequest, applyXAIWebsocketHeaders,
 // ensureUpstreamConn, logXAIWebsocketRequest, logXAIWebsocketWarmupCompleted,
-// logXAIWebsocketTerminalResponse) (v8.0.32, MIT).
+// logXAIWebsocketTerminalResponse) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The streaming call over the WebSocket.
@@ -200,6 +200,10 @@ pub(in crate::xai) async fn execute_stream(
         mapper.upstream_request(&mut prepared.body);
     }
 
+    crate::xai::reasoning::sanitize_input_encrypted_content_for_base_url(
+        &mut prepared.body,
+        crate::xai::request::base_url(auth),
+    );
     let mut headers = build_headers(auth, &options.headers, false, &prepared.session_id)?;
     headers.remove(header::ACCEPT);
     let message = request_message(&prepared.body, |message| {
@@ -207,6 +211,10 @@ pub(in crate::xai) async fn execute_stream(
         prepared
             .finalizer
             .apply(config, &request, &options, message);
+        crate::xai::reasoning::sanitize_input_encrypted_content_for_base_url(
+            message,
+            crate::xai::request::base_url(auth),
+        );
     });
     let request_type = str_at(&client, "type");
     let transcript_reset = str_at(&message, "previous_response_id").trim().is_empty()

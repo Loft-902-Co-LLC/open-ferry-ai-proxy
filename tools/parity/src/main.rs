@@ -563,6 +563,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let mut all_match = true;
     let mut results = Vec::with_capacity(suites.len());
     for (translator, mut cases, random) in suites {
+        cases.extend(crate::cases::signature_relay::for_suite(translator.key()));
         let hand_written = cases.len();
         let generated = random.len();
         cases.extend(random);

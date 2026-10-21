@@ -3,7 +3,7 @@
 // applyMetaAPIHeaders) and meta_test.go (TestMetaExecutor_MetaCredsResolution,
 // TestMetaExecutor_PreservesPreviousResponseID, and the
 // ClientIdHeader_Issue6117 tests, inverted), with the translation errors
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a Meta call is made of: the credential's token and base URL, the
@@ -16,7 +16,7 @@
 //! `client_metadata`. `previous_response_id` is kept, unlike for Codex. A
 //! custom `apply_patch` tool is declared as a function (see
 //! [`crate::apply_patch_responses`]), `instructions` is filled in, and
-//! reasoning items (keeping foreign encrypted content), `web_search` tools
+//! reasoning items (keeping only compatible Meta envelopes), `web_search` tools
 //! and a Codex client's tool parameter types are made fit for Meta. The
 //! payload rules apply last, to the body
 //! as it is sent, so a field a rule writes is sent even if it is one of
@@ -55,7 +55,7 @@ use super::tools::sanitize_web_search_tools;
 use crate::apply_patch_responses;
 use crate::codex::client::USER_AGENT;
 use crate::codex::compat;
-use crate::codex::reasoning::sanitize_reasoning_keep_foreign;
+use crate::codex::reasoning::sanitize_reasoning_for_meta_base_url;
 use crate::codex::request::{
     base_model, ensure_header, normalize_instructions, parse_object, response_format,
     set_bool_if_different, set_string_if_different,
@@ -271,12 +271,24 @@ fn translate(
 
 /// Translates and adjusts the payload of a call, which asks for a stream if
 /// `stream` is set (`prepareResponsesRequest`).
+#[cfg(test)]
 pub(super) fn prepare(
     config: Option<&Config>,
     models: Option<&dyn ModelCatalog>,
     request: &Request,
     options: &Options,
     stream: bool,
+) -> Result<Prepared, ExecError> {
+    prepare_for_base_url(config, models, request, options, stream, "")
+}
+
+pub(super) fn prepare_for_base_url(
+    config: Option<&Config>,
+    models: Option<&dyn ModelCatalog>,
+    request: &Request,
+    options: &Options,
+    stream: bool,
+    base_url: &str,
 ) -> Result<Prepared, ExecError> {
     let base = base_model(&request.model);
     let original_bytes = if options.original_request.is_empty() {
@@ -285,12 +297,23 @@ pub(super) fn prepare(
         options.original_request.clone()
     };
     let original = parse_object(&original_bytes);
+    let resolved =
+        crate::codex::reasoning::resolve_target_model(base, &options.metadata.requested_model);
+    let target = if open_ferry_translate::signature::Provider::from_model_name(resolved)
+        == open_ferry_translate::signature::Provider::Meta
+    {
+        resolved.to_owned()
+    } else {
+        format!("muse-{base}")
+    };
     // Only the body is sent, so only its translation can refuse the request.
-    let (original_translated, _) = translate(config, options, base, original.clone(), stream);
+    let (mut original_translated, _) =
+        translate(config, options, &target, original.clone(), stream);
+    set_string_if_different(&mut original_translated, "model", base);
     let (mut body, refusal) = translate(
         config,
         options,
-        base,
+        &target,
         parse_object(&request.payload),
         stream,
     );
@@ -324,7 +347,7 @@ pub(super) fn prepare(
     apply_patch_responses::normalize_request(&mut body, Some(&original))
         .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
     normalize_instructions(&mut body, false);
-    sanitize_reasoning_keep_foreign(&mut body);
+    sanitize_reasoning_for_meta_base_url(&mut body, base_url);
     sanitize_web_search_tools(&mut body);
     let user_agent = header_value(
         options
@@ -694,8 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn prepare_preserves_foreign_reasoning_without_enabling_compat() {
-        let foreign = "opaque-encrypted-reasoning-token-xyz";
+    fn prepare_keeps_only_meta_reasoning_without_enabling_compat() {
+        let foreign = format!("Q-PaDgE{}", "A".repeat(1419));
         let claude = crate::gemini::testing::CLAUDE_SIGNATURE;
         let payload = json!({"store":false,"input":[
             {"type":"reasoning","id":"rs_foreign","encrypted_content":foreign,"content":[{"type":"reasoning_text","text":"thinking"}],"summary":[]},

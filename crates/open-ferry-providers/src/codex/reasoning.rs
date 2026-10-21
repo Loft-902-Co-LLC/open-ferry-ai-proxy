@@ -1,16 +1,13 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_responses_signature.go
-// (v8.0.32, MIT), with its compat replay of an unknown-format
+// (v8.0.36, MIT), with its compat replay of an unknown-format
 // encrypted_content.
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Cleans the `reasoning` items of a Responses `input` before it goes to
-//! Codex: cleartext `content` moves into an empty `summary` (Codex allows no
-//! reasoning content), an `encrypted_content` that isn't a valid GPT
-//! reasoning signature is dropped (in compatibility mode, unless it is of a
-//! format no known provider uses, which the third-party model replays; Meta
-//! also keeps these foreign formats). With `store` off, a reasoning item's
-//! `id` goes when it has no usable `encrypted_content`, since Codex would
-//! look the ID up and fail.
+//! Cleans Responses reasoning before replay. Compatible target-family envelopes
+//! survive; unknown blobs survive only in compatibility mode. Meta is fail-closed.
+//! Router suffixes are private to OpenRouter, and native Meta rejects them.
+//! Cleartext content becomes a summary outside compatibility mode, and orphan IDs
+//! are removed when storage is disabled.
 //!
 //! Deviations from upstream:
 //! - Edits a parsed body in place and reports whether anything changed,
@@ -19,6 +16,7 @@
 
 use open_ferry_translate::signature::{
     Provider, detect_signature_provider, inspect_gpt_reasoning_signature,
+    inspect_meta_reasoning_signature,
 };
 use serde_json::{Map, Value, json};
 
@@ -28,98 +26,204 @@ use crate::json::{bool_of, get, str_at, str_of};
 /// (`sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat`). With
 /// `is_compat`, a third-party Responses model's cleartext reasoning and IDs
 /// are kept. Returns whether anything changed.
+#[cfg(test)]
 pub(crate) fn sanitize_reasoning(body: &mut Value, is_compat: bool) -> bool {
-    sanitize_reasoning_with_options(body, is_compat, is_compat)
+    let target = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    sanitize_reasoning_for_target(body, is_compat, &target)
 }
 
-/// Keeps foreign-format encrypted reasoning for Meta, while applying the
-/// usual Responses content and orphan-ID rules.
-pub(crate) fn sanitize_reasoning_keep_foreign(body: &mut Value) -> bool {
-    sanitize_reasoning_with_options(body, false, true)
+pub(crate) fn resolve_target_model<'a>(base: &'a str, requested: &'a str) -> &'a str {
+    if Provider::from_model_name(base) != Provider::Unknown {
+        base
+    } else {
+        let requested = super::request::base_model(requested);
+        if matches!(
+            Provider::from_model_name(requested),
+            Provider::Meta | Provider::Grok | Provider::Gpt
+        ) {
+            requested
+        } else {
+            base
+        }
+    }
 }
 
-fn sanitize_reasoning_with_options(body: &mut Value, is_compat: bool, keep_foreign: bool) -> bool {
-    // Codex doesn't persist items with store off, so a reasoning ID without
-    // usable encrypted content would be looked up and fail.
+#[cfg(test)]
+pub(crate) fn sanitize_reasoning_for_target(
+    body: &mut Value,
+    is_compat: bool,
+    target: &str,
+) -> bool {
+    sanitize_reasoning_for_destination(body, is_compat, target, "")
+}
+
+#[cfg(test)]
+pub(crate) fn sanitize_reasoning_for_meta(body: &mut Value) -> bool {
+    sanitize_reasoning_for_meta_base_url(body, "")
+}
+
+pub(crate) fn sanitize_reasoning_for_meta_base_url(body: &mut Value, base: &str) -> bool {
+    sanitize(
+        body,
+        ReplayPolicy {
+            is_compat: false,
+            keep_foreign: true,
+            target: Provider::Meta,
+            meta_native: native_meta_url(base),
+            allow_suffix: is_openrouter_url(base),
+        },
+    )
+}
+
+pub(crate) fn sanitize_reasoning_for_destination(
+    body: &mut Value,
+    is_compat: bool,
+    target: &str,
+    base: &str,
+) -> bool {
+    sanitize(
+        body,
+        ReplayPolicy {
+            is_compat,
+            keep_foreign: is_compat,
+            target: Provider::from_model_name(target),
+            meta_native: !base.trim().is_empty() && native_meta_url(base),
+            allow_suffix: is_openrouter_url(base),
+        },
+    )
+}
+
+fn native_meta_url(base: &str) -> bool {
+    url::Url::parse(base.trim())
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .is_none_or(|host| {
+            let host = host.strip_suffix('.').unwrap_or(&host);
+            host.is_empty() || host == "api.meta.ai" || host.ends_with(".meta.ai")
+        })
+}
+
+pub(crate) fn is_openrouter_url(base: &str) -> bool {
+    url::Url::parse(base.trim())
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            let host = host.strip_suffix('.').unwrap_or(&host);
+            host == "openrouter.ai" || host.ends_with(".openrouter.ai")
+        })
+}
+
+pub(crate) fn canonical_signature(raw: &str) -> &str {
+    use open_ferry_translate::signature::{
+        inspect_grok_encrypted_content, signature_payload_without_provider_prefix,
+    };
+    let raw = signature_payload_without_provider_prefix(raw.trim());
+    let has_suffix = inspect_gpt_reasoning_signature(raw)
+        .is_ok_and(|i| !i.router_suffix.is_empty())
+        || inspect_meta_reasoning_signature(raw).is_ok_and(|i| !i.router_suffix.is_empty())
+        || inspect_grok_encrypted_content(raw).is_ok_and(|i| !i.router_suffix.is_empty());
+    if has_suffix {
+        raw.split_once('.').map_or(raw, |(head, _)| head)
+    } else {
+        raw
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReplayPolicy {
+    is_compat: bool,
+    keep_foreign: bool,
+    target: Provider,
+    meta_native: bool,
+    allow_suffix: bool,
+}
+
+impl ReplayPolicy {
+    fn normalized(self, raw: &str) -> Option<String> {
+        use open_ferry_translate::signature::{
+            compatible_signature_for_provider, inspect_grok_encrypted_content,
+            split_signature_provider_prefix,
+        };
+        if raw != raw.trim() || raw.is_empty() {
+            return None;
+        }
+        let accepted = match self.target {
+            Provider::Meta => {
+                let info = inspect_meta_reasoning_signature(raw).ok()?;
+                if self.meta_native && !info.router_suffix.is_empty() {
+                    return None;
+                }
+                Some(raw.to_owned())
+            }
+            Provider::Unknown | Provider::Gpt => {
+                let candidate = match split_signature_provider_prefix(raw) {
+                    Some((Provider::Gpt, payload)) => payload,
+                    _ => raw,
+                };
+                inspect_gpt_reasoning_signature(candidate)
+                    .ok()
+                    .map(|_| candidate.to_owned())
+            }
+            Provider::Grok => inspect_grok_encrypted_content(raw)
+                .ok()
+                .map(|_| raw.to_owned()),
+            target => compatible_signature_for_provider(target, raw),
+        };
+        if let Some(accepted) = accepted {
+            return Some(if self.allow_suffix {
+                accepted
+            } else {
+                canonical_signature(&accepted).to_owned()
+            });
+        }
+        (self.keep_foreign && detect_signature_provider(raw) == Provider::Unknown)
+            .then(|| raw.to_owned())
+    }
+}
+
+fn sanitize(body: &mut Value, policy: ReplayPolicy) -> bool {
     let strip_ids = !bool_of(get(body, "store"));
     let Some(Value::Array(items)) = body.get_mut("input") else {
         return false;
     };
     let mut changed = false;
-    for (index, item) in items.iter_mut().enumerate() {
+    for item in items {
         if str_at(item, "type").trim() != "reasoning" {
             continue;
         }
         let Value::Object(item) = item else {
             continue;
         };
-        changed |= sanitize_item(item, index, strip_ids, is_compat, keep_foreign);
+        let has_content =
+            matches!(item.get("content"), Some(Value::Array(parts)) if !parts.is_empty());
+        if !policy.is_compat && has_content {
+            if summary_is_empty(item.get("summary")) {
+                promote_reasoning_text(item);
+            }
+            item.insert("content".to_owned(), json!([]));
+            changed = true;
+        }
+        let normalized = item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .and_then(|raw| policy.normalized(raw));
+        if let Some(normalized) = normalized {
+            if item.get("encrypted_content").and_then(Value::as_str) != Some(&normalized) {
+                item.insert("encrypted_content".into(), normalized.into());
+                changed = true;
+            }
+        } else {
+            changed |= item.shift_remove("encrypted_content").is_some();
+            if !policy.is_compat && strip_ids {
+                changed |= item.shift_remove("id").is_some();
+            }
+        }
     }
     changed
-}
-
-fn sanitize_item(
-    item: &mut Map<String, Value>,
-    index: usize,
-    strip_ids: bool,
-    is_compat: bool,
-    keep_foreign: bool,
-) -> bool {
-    let mut changed = false;
-    let has_content = matches!(item.get("content"), Some(Value::Array(parts)) if !parts.is_empty());
-    if !is_compat && has_content {
-        if summary_is_empty(item.get("summary")) {
-            promote_reasoning_text(item);
-        }
-        item.insert("content".to_owned(), json!([]));
-        changed = true;
-        tracing::debug!("codex: cleared reasoning content at input[{index}]");
-    }
-
-    let drop_id = !is_compat && strip_ids && item.contains_key("id");
-    let Some(encrypted) = item.get("encrypted_content") else {
-        if drop_id {
-            item.shift_remove("id");
-            changed = true;
-            tracing::debug!(
-                "codex: dropped orphan reasoning id at input[{index}] reason=missing encrypted_content with store disabled"
-            );
-        }
-        return changed;
-    };
-
-    let reason = match encrypted {
-        Value::String(raw) if raw.as_str() != raw.trim() => {
-            Some("encrypted_content has leading or trailing whitespace".to_owned())
-        }
-        // With foreign replay enabled a third-party Responses model (such as
-        // Muse) expects its own encrypted content of an unknown format back;
-        // an empty one and a known provider's still go.
-        Value::String(raw) => inspect_gpt_reasoning_signature(raw)
-            .err()
-            .filter(|_| {
-                !keep_foreign
-                    || raw.is_empty()
-                    || detect_signature_provider(raw) != Provider::Unknown
-            })
-            .map(|error| error.to_string()),
-        Value::Null => Some("encrypted_content is null".to_owned()),
-        other => Some(format!(
-            "encrypted_content must be a string, got {}",
-            go_type_name(other)
-        )),
-    };
-    let Some(reason) = reason else {
-        return changed;
-    };
-    item.shift_remove("encrypted_content");
-    if drop_id {
-        item.shift_remove("id");
-    }
-    tracing::debug!(
-        "codex: dropped invalid reasoning encrypted_content at input[{index}] reason={reason}"
-    );
-    true
 }
 
 /// Whether a reasoning item's summary is missing, null or an empty array
@@ -151,18 +255,6 @@ fn promote_reasoning_text(item: &mut Map<String, Value>) {
     }
 }
 
-/// gjson's name for a value's type.
-fn go_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "Null",
-        Value::Bool(false) => "False",
-        Value::Bool(true) => "True",
-        Value::Number(_) => "Number",
-        Value::String(_) => "String",
-        Value::Array(_) | Value::Object(_) => "JSON",
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -177,6 +269,31 @@ pub(crate) mod tests {
             *byte = i as u8;
         }
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    }
+
+    #[test]
+    fn meta_replay_is_native_and_target_gated() {
+        let native = format!("Q-PaDgE{}", "A".repeat(1419));
+        for sig in [&native, &valid_signature(), "opaque"] {
+            for target in ["muse-spark", "gpt-5"] {
+                let mut body = json!({"model":target,"store":false,"input":[{"type":"reasoning","id":"r","encrypted_content":sig}]});
+                sanitize_reasoning(&mut body, true);
+                assert_eq!(
+                    body["input"][0].get("encrypted_content").is_some(),
+                    if target == "muse-spark" {
+                        sig == native
+                    } else {
+                        sig != native
+                    }
+                );
+            }
+            let mut body = json!({"store":false,"input":[{"type":"reasoning","id":"r","encrypted_content":sig}]});
+            sanitize_reasoning_for_meta(&mut body);
+            assert_eq!(
+                body["input"][0].get("encrypted_content").is_some(),
+                sig == native
+            );
+        }
     }
 
     fn sanitize(raw: &str) -> Value {
@@ -338,5 +455,188 @@ pub(crate) mod tests {
         assert!(get(&got, "input.1.encrypted_content").is_none(), "{got}");
         assert_eq!(str_at(&got, "input.0.id"), "a");
         assert_eq!(get(&got, "input.2"), Some(&json!("reasoning")));
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+    #[test]
+    fn router_suffixes_follow_real_destination_and_family() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+        let meta = format!("Q-PaDgE{}", "A".repeat(1419));
+        let gpt = tests::valid_signature();
+        let grok = STANDARD_NO_PAD.encode((0..255).collect::<Vec<u8>>());
+        for (model, native) in [("muse-spark", &meta), ("gpt-5", &gpt), ("grok-4", &grok)] {
+            for base in [
+                "https://openrouter.ai/api/v1",
+                "https://sub.openrouter.ai/v1",
+                "https://openrouter.ai./v1",
+                "https://api.openrouter.ai./v1",
+                "https://openrouter.ai@evil.com/v1",
+                "https://evilopenrouter.ai/v1",
+                "https://openrouter.ai.evil.com/v1",
+                "https://api.openai.com/v1",
+                "https://chatgpt.com/backend-api/codex",
+                "https://api.x.ai/v1",
+                "https://other.example/v1",
+                "https://openrouter.ai.evil.example/v1",
+            ] {
+                let routed = format!("{native}.Router123");
+                let mut body = json!({"input":[{"type":"reasoning","encrypted_content":routed}]});
+                sanitize_reasoning_for_destination(&mut body, false, model, base);
+                assert_eq!(
+                    body["input"][0]["encrypted_content"].as_str(),
+                    Some(if is_openrouter_url(base) {
+                        routed.as_str()
+                    } else {
+                        native.as_str()
+                    })
+                );
+                assert_eq!(canonical_signature(&routed), native);
+            }
+        }
+        for base in [
+            "",
+            "https://api.meta.ai/v1",
+            "https://a.meta.ai/v1",
+            "https://api.meta.ai./v1",
+        ] {
+            let mut body = json!({"input":[{"type":"reasoning","id":"orphan","encrypted_content":format!("{meta}.Router123")}]});
+            sanitize_reasoning_for_meta_base_url(&mut body, base);
+            assert!(body["input"][0].get("encrypted_content").is_none());
+            assert!(body["input"][0].get("id").is_none());
+        }
+        for (model, foreign) in [
+            ("grok-4", &meta),
+            ("muse-spark", &gpt),
+            ("claude-sonnet", &gpt),
+            ("gemini-3", &gpt),
+        ] {
+            let mut body = json!({"input":[{"type":"reasoning","encrypted_content":foreign}]});
+            sanitize_reasoning_for_destination(&mut body, true, model, "https://openrouter.ai");
+            assert!(body["input"][0].get("encrypted_content").is_none());
+        }
+    }
+
+    #[test]
+    fn trailing_dot_destinations_keep_native_and_router_policy() {
+        assert!(native_meta_url("https://api.meta.ai./v1"));
+        assert!(is_openrouter_url("https://openrouter.ai./v1"));
+        for base in [
+            "https://openrouter.ai@evil.com/v1",
+            "https://evilopenrouter.ai/v1",
+            "https://openrouter.ai.evil.com/v1",
+            "https://openrouter.ai../v1",
+        ] {
+            assert!(!is_openrouter_url(base), "{base}");
+        }
+        for base in [
+            "https://api.meta.ai@evil.com/v1",
+            "https://evilmeta.ai/v1",
+            "https://api.meta.ai.evil.com/v1",
+        ] {
+            assert!(!native_meta_url(base), "{base}");
+        }
+    }
+
+    #[test]
+    fn deployment_alias_fallback_is_limited_to_responses_families() {
+        for model in ["meta/muse", "grok-4", "gpt-5"] {
+            assert_eq!(resolve_target_model("deployment", model), model);
+        }
+        assert_eq!(
+            resolve_target_model("deployment", "claude-sonnet"),
+            "deployment"
+        );
+        assert_eq!(resolve_target_model("gpt-5", "meta/muse"), "gpt-5");
+    }
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    use crate::codex::request::{Context, Kind, prepare_body};
+    use open_ferry_core::exec::{Format, Options, Request};
+    #[test]
+    fn alias_family_is_selected_before_http_stream_and_compact_translation() {
+        let native = format!("Q-PaDgE{}", "A".repeat(1419));
+        let payload = json!({"model":"muse-spark","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":format!("{native}.Router123")},{"type":"text","text":"answer"}]},{"role":"user","content":"continue"}]});
+        let request = Request {
+            model: "deployment".into(),
+            payload: bytes::Bytes::from(payload.to_string()),
+        };
+        let mut options = Options::new(Format::CLAUDE);
+        options.metadata.requested_model = "muse-spark".into();
+        for kind in [Kind::Execute, Kind::Stream, Kind::Compact] {
+            // Compact is a native Responses endpoint, as upstream registers no
+            // Claude-to-Responses request translator for it.
+            let compact_request = Request {
+                model: "deployment".into(),
+                payload: bytes::Bytes::from(json!({"input":[{"type":"reasoning","encrypted_content":format!("{native}.Router123"),"summary":[]}]}).to_string()),
+            };
+            let mut compact_options = Options::new(Format::OPENAI_RESPONSE);
+            compact_options.metadata.requested_model = "muse-spark".into();
+            let (request, options) = if kind == Kind::Compact {
+                (&compact_request, &compact_options)
+            } else {
+                (&request, &options)
+            };
+            let prepared = prepare_body(kind, Context::default(), request, options).unwrap();
+            assert_eq!(prepared.body["model"], "deployment");
+            let reasoning = prepared.body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["type"] == "reasoning")
+                .expect("alias translation lost reasoning");
+            assert_eq!(reasoning["encrypted_content"], native);
+        }
+    }
+    #[test]
+    fn http_search_history_tool_precedes_image_generation() {
+        let request = Request {
+            model: "gpt-5".into(),
+            payload: bytes::Bytes::from(
+                json!({"input":[{"type":"web_search_call","id":"search"}]}).to_string(),
+            ),
+        };
+        for kind in [Kind::Execute, Kind::Stream] {
+            let prepared = prepare_body(
+                kind,
+                Context::default(),
+                &request,
+                &Options::new(Format::OPENAI_RESPONSE),
+            )
+            .unwrap();
+            let tools: Vec<_> = prepared.body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["type"].as_str().unwrap())
+                .collect();
+            assert_eq!(tools, ["web_search", "image_generation"]);
+        }
+    }
+
+    #[test]
+    fn search_history_is_reconciled_in_every_http_preparation_path() {
+        for kind in [Kind::Execute, Kind::Stream, Kind::Compact] {
+            let request = Request { model:"gpt-5".into(), payload: bytes::Bytes::from(json!({"input":[{"type":"web_search_call","id":"search"},{"role":"user","content":"next"}]}).to_string()) };
+            let prepared = prepare_body(
+                kind,
+                Context::default(),
+                &request,
+                &Options::new(Format::OPENAI_RESPONSE),
+            )
+            .unwrap();
+            assert!(
+                prepared.body["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["type"] == "web_search")
+            );
+        }
     }
 }
