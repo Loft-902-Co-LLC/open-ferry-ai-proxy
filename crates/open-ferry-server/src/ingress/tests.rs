@@ -338,7 +338,7 @@ async fn cancellation_after_admission_releases_regular_bodies_and_tracks_owned_u
 }
 
 #[tokio::test]
-async fn decoded_storage_stays_charged_when_the_handler_transforms_its_input() {
+async fn handler_storage_is_released_while_a_streamed_response_stays_open() {
     use std::io::Write;
     let ingress = Ingress::new(
         IngressConfig {
@@ -350,7 +350,6 @@ async fn decoded_storage_stays_charged_when_the_handler_transforms_its_input() {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(&[b'a'; 64]).unwrap();
     let compressed = encoder.finish().unwrap();
-    let charged = compressed.len() + 64;
     let router = ingress.wrap(Router::new().route(
         "/",
         post(|request: Request| async move {
@@ -376,7 +375,7 @@ async fn decoded_storage_stays_charged_when_the_handler_transforms_its_input() {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    assert_eq!(ingress.budget.used(), charged);
+    assert_eq!(ingress.budget.used(), 0);
     drop(response);
     assert_eq!(ingress.budget.used(), 0);
 }
