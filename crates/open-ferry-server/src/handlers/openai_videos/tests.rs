@@ -534,7 +534,7 @@ async fn refused_creates_say_why() {
     assert!(server.dispatcher.calls().is_empty());
 }
 
-// Upstream's configured body limit rejects both JSON and form creates.
+// The shared ingress guard rejects raw JSON and form creates before routing.
 #[tokio::test]
 async fn bodies_over_the_limit_get_413() {
     let config = ServerConfig {
@@ -556,17 +556,11 @@ async fn bodies_over_the_limit_get_413() {
         let uri = sent.uri().to_string();
         let (status, _, body) = send(&server.app, sent).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{uri}: {body}");
-        if uri == OPENAI_PATH {
-            // openai_videos_handlers.go:701-705: failed-video shape for a read error.
-            let video: Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(video["object"], "video");
-            assert_eq!(video["status"], "failed");
-            assert_eq!(video["model"], "grok-imagine-video");
-            assert_eq!(
-                video["error"]["message"],
-                "Invalid request: http: request body too large"
-            );
-        }
+        let error: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            error,
+            serde_json::json!({"error": "http: request body too large"})
+        );
     }
     assert!(server.dispatcher.calls().is_empty());
 }

@@ -902,8 +902,9 @@ mod tests {
 
     #[test]
     fn paths_table_matches_upstream_shape() {
-        // Upstream's, and open-ferry's management.separate-address.
-        assert_eq!(V8_PATHS.len(), 124 + 1);
+        // Upstream's, open-ferry's management.separate-address, and its
+        // eight ingress-limit fields.
+        assert_eq!(V8_PATHS.len(), 124 + 1 + 8);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();
