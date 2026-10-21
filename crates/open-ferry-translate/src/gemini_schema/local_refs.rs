@@ -3,7 +3,8 @@
 
 //! Local reference expansion for cleaners that discard definitions. Each schema
 //! has upstream's 256 KiB expansion allowance. Reference chains additionally stop
-//! at 64 links to bound the Rust stack; their remaining references become hints.
+//! at 64 links. Containers and reference hops share a 128-level output bound;
+//! the argument projection uses 64 levels. Over-depth targets become hints.
 
 use super::{NAME_MAP_KEYWORDS, is_literal_value_keyword, merge_hint, ref_name};
 use serde_json::{Map, Value};
@@ -11,13 +12,26 @@ use std::collections::{HashMap, HashSet};
 
 const COPY_BYTES: usize = 256 * 1024;
 const MAX_REFERENCE_DEPTH: usize = 64;
+pub(crate) const MAX_OUTPUT_DEPTH: usize = 128;
 const MAX_DESCRIPTION_BYTES: usize = 512;
 
 pub(crate) fn inline_for_clean(schema: &Value) -> Value {
+    inline_with_depth(schema, MAX_OUTPUT_DEPTH).0
+}
+
+pub(crate) fn inline_for_projection(schema: &Value) -> Option<Value> {
+    let (value, truncated) = inline_with_depth(schema, 64);
+    (!truncated).then_some(value)
+}
+
+fn inline_with_depth(schema: &Value, max_depth: usize) -> (Value, bool) {
+    if structural_depth(schema) > max_depth {
+        return (Value::Object(depth_hint(schema)), true);
+    }
     // Upstream skips this pass entirely unless its JSON contains the exact
     // $ref token. Without one, later passes still see definition containers.
     if !contains_ref_token(schema) {
-        return schema.clone();
+        return (schema.clone(), false);
     }
     // The projection cleans the same single-key carrier as upstream. References
     // within it are relative to the schema, rather than the carrier.
@@ -25,17 +39,83 @@ pub(crate) fn inline_for_clean(schema: &Value) -> Value {
         && map.len() == 1
         && let Some(inner @ Value::Object(_)) = map.get("schema")
     {
-        return Value::Object(Map::from_iter([("schema".into(), inline_for_clean(inner))]));
+        let (value, truncated) = inline_with_depth(inner, max_depth - 1);
+        return (
+            Value::Object(Map::from_iter([("schema".into(), value)])),
+            truncated,
+        );
     }
-    Resolver {
+    let mut resolver = Resolver {
         root: schema,
         remaining: COPY_BYTES,
+        max_depth,
+        depth_exhausted: false,
         active: HashSet::new(),
         targets: HashMap::new(),
         #[cfg(test)]
         target_size_scans: 0,
+    };
+    let value = resolver.root();
+    (value, resolver.depth_exhausted)
+}
+
+// Iterative preflight also covers literal subtrees, which are cloned verbatim.
+// Definition containers discarded by cleaning do not contribute to output depth.
+fn structural_depth(value: &Value) -> usize {
+    let mut maximum = 0;
+    let mut stack = vec![(value, 0, false, false)];
+    while let Some((value, depth, name_map, literal)) = stack.pop() {
+        match value {
+            Value::Object(map) => {
+                maximum = maximum.max(depth + 1);
+                if maximum > MAX_OUTPUT_DEPTH {
+                    return maximum;
+                }
+                for (key, value) in map {
+                    if !literal && !name_map && matches!(key.as_str(), "$defs" | "definitions") {
+                        continue;
+                    }
+                    stack.push((
+                        value,
+                        depth + 1,
+                        !literal && !name_map && NAME_MAP_KEYWORDS.contains(&key.as_str()),
+                        literal || (!name_map && is_literal_value_keyword(key)),
+                    ));
+                }
+            }
+            Value::Array(values) => {
+                maximum = maximum.max(depth + 1);
+                if maximum > MAX_OUTPUT_DEPTH {
+                    return maximum;
+                }
+                stack.extend(
+                    values
+                        .iter()
+                        .map(|value| (value, depth + 1, false, literal)),
+                );
+            }
+            _ => {}
+        }
     }
-    .root()
+    maximum
+}
+
+pub(super) fn fits_at_depth(value: &Value, ancestors: usize) -> bool {
+    ancestors.saturating_add(structural_depth(value)) <= MAX_OUTPUT_DEPTH
+}
+
+fn depth_hint(value: &Value) -> Map<String, Value> {
+    let mut out = Map::new();
+    for key in ["type", "nullable"] {
+        if let Some(value) = value
+            .get(key)
+            .filter(|value| !value.is_object() && !value.is_array())
+        {
+            out.insert(key.into(), value.clone());
+        }
+    }
+    out.insert("description".into(), Value::from("Schema nesting limit"));
+    out
 }
 
 fn contains_ref_token(value: &Value) -> bool {
@@ -52,8 +132,10 @@ fn contains_ref_token(value: &Value) -> bool {
 struct Resolver<'a> {
     root: &'a Value,
     remaining: usize,
+    max_depth: usize,
+    depth_exhausted: bool,
     active: HashSet<String>,
-    targets: HashMap<String, Option<(&'a Value, usize)>>,
+    targets: HashMap<String, Option<(&'a Value, usize, usize)>>,
     #[cfg(test)]
     target_size_scans: usize,
 }
@@ -62,7 +144,7 @@ impl<'a> Resolver<'a> {
     // Targets and their stored size are independent of the active reference
     // stack and remaining budget. Expanded results are not: caching those would
     // change cycle fallback and per-reference charging.
-    fn target(&mut self, reference: &str) -> Option<(&'a Value, usize)> {
+    fn target(&mut self, reference: &str) -> Option<(&'a Value, usize, usize)> {
         if let Some(target) = self.targets.get(reference) {
             return *target;
         }
@@ -71,7 +153,11 @@ impl<'a> Resolver<'a> {
             {
                 self.target_size_scans += 1;
             }
-            (target, expansion_size(target, false))
+            (
+                target,
+                expansion_size(target, false),
+                structural_depth(target),
+            )
         });
         self.targets.insert(reference.to_owned(), target);
         target
@@ -83,12 +169,17 @@ impl<'a> Resolver<'a> {
         };
         // Resolve body siblings first, so unused definitions never spend budget
         // ahead of the schema the caller actually sends.
-        let mut out = self.entries(map, 0);
+        let mut out = self.entries(map, 1);
         if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-            && let Some((target, cost)) = self.target(reference)
+            && let Some((target, cost, target_depth)) = self.target(reference)
         {
             out.shift_remove("$ref");
-            if let Some(remaining) = self.remaining.checked_sub(cost) {
+            self.depth_exhausted |= 1 + target_depth > self.max_depth;
+            if let Some(remaining) = self
+                .remaining
+                .checked_sub(cost)
+                .filter(|_| 1 + target_depth <= self.max_depth)
+            {
                 self.remaining = remaining;
                 self.active.insert(reference.to_owned());
                 let resolved = self.resolve(target, 1);
@@ -104,15 +195,21 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve(&mut self, value: &Value, depth: usize) -> Value {
+        if depth >= self.max_depth && (value.is_object() || value.is_array()) {
+            self.depth_exhausted = true;
+            return Value::Null;
+        }
         match value {
             Value::Array(values) => {
-                Value::Array(values.iter().map(|v| self.resolve(v, depth)).collect())
+                Value::Array(values.iter().map(|v| self.resolve(v, depth + 1)).collect())
             }
             Value::Object(map) => {
                 if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-                    && let Some((target, cost)) = self.target(reference)
+                    && let Some((target, cost, target_depth)) = self.target(reference)
                 {
-                    if depth >= MAX_REFERENCE_DEPTH
+                    self.depth_exhausted |= depth + 1 + target_depth > self.max_depth;
+                    if depth + 1 + target_depth > self.max_depth
+                        || self.active.len() >= MAX_REFERENCE_DEPTH
                         || self.active.contains(reference)
                         || cost > self.remaining
                     {
@@ -123,13 +220,13 @@ impl<'a> Resolver<'a> {
                     let resolved = self.resolve(target, depth + 1);
                     self.active.remove(reference);
                     if let Value::Object(mut out) = resolved {
-                        let mut siblings = self.entries(map, depth);
+                        let mut siblings = self.entries(map, depth + 1);
                         siblings.shift_remove("$ref");
                         out.extend(siblings);
                         return Value::Object(out);
                     }
                 }
-                Value::Object(self.entries(map, depth))
+                Value::Object(self.entries(map, depth + 1))
             }
             _ => value.clone(),
         }
@@ -162,7 +259,7 @@ impl<'a> Resolver<'a> {
             keys.sort();
             let mut out = Map::new();
             for name in keys {
-                out.insert(name.clone(), self.resolve(&map[name], depth));
+                out.insert(name.clone(), self.resolve(&map[name], depth + 1));
             }
             return Value::Object(
                 map.keys()
@@ -184,6 +281,10 @@ impl<'a> Resolver<'a> {
         if let Value::Object(target) = target {
             for key in ["type", "nullable", "description"] {
                 if let Some(value) = target.get(key) {
+                    if depth + 1 + structural_depth(value) > self.max_depth {
+                        self.depth_exhausted = true;
+                        continue;
+                    }
                     if key == "description"
                         && let Some(description) = value.as_str()
                     {
@@ -205,7 +306,7 @@ impl<'a> Resolver<'a> {
         // Sibling schemas still resolve even when this reference cannot expand.
         // Active references stay marked while their fallback siblings are read.
         let inserted = self.active.insert(reference.to_owned());
-        let mut siblings = self.entries(map, depth);
+        let mut siblings = self.entries(map, depth + 1);
         siblings.shift_remove("$ref");
         out.extend(siblings);
         if inserted {
@@ -291,4 +392,4 @@ fn literal_size(value: &Value) -> usize {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

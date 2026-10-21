@@ -562,7 +562,9 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
         return false;
     };
     let wrapped = json!({"schema":schema});
-    let inlined = crate::gemini_schema::local_refs::inline_for_clean(&wrapped);
+    let Some(inlined) = crate::gemini_schema::local_refs::inline_for_projection(&wrapped) else {
+        return false;
+    };
     let Some(mut projected) = copy_bounded(&inlined, 0, &mut 100_000) else {
         return false;
     };
@@ -584,4 +586,31 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
         .and_then(Value::as_object)
         .is_some_and(|properties| properties.contains_key(placeholder))
         && gjson_array(schema.get("required")).any(|v| str_of(Some(v)) == placeholder)
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+    use crate::gemini_schema::local_refs::tests::{NESTED_CHAINS, nested_reference_chain};
+
+    #[test]
+    fn nested_refs_projection_fits_two_mib_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                for (links, levels) in NESTED_CHAINS {
+                    let schema = nested_reference_chain(links, levels);
+                    assert!(!requires(&schema, "_"));
+                    assert!(!requires(&schema, "reason"));
+                    if let Some(out) =
+                        crate::gemini_schema::local_refs::inline_for_projection(&schema)
+                    {
+                        assert!(copy_bounded(&out, 0, &mut 100_000).is_some());
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

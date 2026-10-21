@@ -1339,6 +1339,10 @@ fn required_only_branch_cost(
             continue;
         }
         let property = get(parent_props, &escape_key(&name)).expect("checked required name");
+        // Unlike upward merges, materialization copies a property deeper.
+        if !local_refs::fits_at_depth(property, keys(&join_path(destination, &path)).len()) {
+            return BranchCopyCost::OverBudget;
+        }
         let property_cost = property_costs
             .entry(name.to_string())
             .or_insert_with(|| copy_cost(property));

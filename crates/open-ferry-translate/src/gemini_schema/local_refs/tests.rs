@@ -207,6 +207,8 @@ fn repeated_references_lookup_and_size_the_target_once_but_each_spends_budget() 
     let mut resolver = Resolver {
         root: &root,
         remaining: COPY_BYTES,
+        max_depth: MAX_OUTPUT_DEPTH,
+        depth_exhausted: false,
         active: HashSet::new(),
         targets: HashMap::new(),
         target_size_scans: 0,
@@ -231,4 +233,96 @@ fn no_ref_fast_path_retains_definitions_for_the_later_cleaning_passes() {
     let mut schema = schema;
     schema["example"] = json!("$ref");
     assert!(inline_for_clean(&schema).get("$defs").is_none());
+}
+
+pub(crate) fn nested_reference_chain(links: usize, levels: usize) -> Value {
+    let mut defs = Map::new();
+    for i in 0..links {
+        let mut value = if i + 1 == links {
+            json!({"type":"string"})
+        } else {
+            json!({"$ref":format!("#/$defs/N{}",i+1)})
+        };
+        for _ in 0..levels {
+            value = json!({"items":value});
+        }
+        defs.insert(format!("N{i}"), value);
+    }
+    json!({"$ref":"#/$defs/N0","$defs":defs})
+}
+
+pub(crate) const NESTED_CHAINS: [(usize, usize); 4] = [(12, 118), (16, 118), (64, 60), (1024, 100)];
+
+#[test]
+fn materialized_unions_cannot_deepen_inlined_output_past_the_cap() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            let mut property = json!({"type":"string"});
+            for _ in 0..119 {
+                property = json!({"items":property});
+            }
+            let target = json!({"type":"object","properties":{"p":property},
+            "anyOf":[{"required":["p"]},{"required":["p"]}]});
+            let mut body = json!({"$ref":"#/$defs/S"});
+            for _ in 0..5 {
+                body = json!({"items":body});
+            }
+            body["$defs"] = json!({"S":target});
+            let out = clean(&body);
+            assert!(structural_depth(&out) <= MAX_OUTPUT_DEPTH);
+            assert!(!out.to_string().contains("anyOf"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn nested_refs_claude_to_gemini_fit_two_mib_stack() {
+    std::thread::Builder::new().stack_size(2 << 20).spawn(|| {
+        for (links, levels) in NESTED_CHAINS {
+            let schema = nested_reference_chain(links, levels);
+            let request = json!({"model":"claude-test","messages":[{"role":"user","content":"hi"}],
+                "tools":[{"name":"T","input_schema":schema}]});
+            let request: Value = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+            let (out, error) = crate::gemini::claude::convert_claude_request_to_gemini(
+                "gemini-2.5-pro", &request, false, crate::models::ModelCatalog::embedded());
+            assert!(error.is_none());
+            let parameters = &out["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+            assert!(parameters.is_object(), "{out}");
+            assert!(structural_depth(parameters) <= MAX_OUTPUT_DEPTH);
+            assert!(!serde_json::to_vec(&out).unwrap().is_empty());
+        }
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn nested_refs_chat_to_gemini_fit_two_mib_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            for (links, levels) in NESTED_CHAINS {
+                let schema = nested_reference_chain(links, levels);
+                let request = json!({"messages":[{"role":"user","content":"hi"}],
+                "tools":[{"type":"function","function":{"name":"T","parameters":schema}}]});
+                let request: Value =
+                    serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+                let (out, error) =
+                    crate::gemini::openai::chat_completions::convert_openai_request_to_gemini(
+                        "gemini-2.5-pro",
+                        &request,
+                        false,
+                    );
+                assert!(error.is_none());
+                let parameters =
+                    &out["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+                assert!(parameters.is_object(), "{out}");
+                assert!(structural_depth(parameters) <= MAX_OUTPUT_DEPTH);
+                assert!(!serde_json::to_vec(&out).unwrap().is_empty());
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
