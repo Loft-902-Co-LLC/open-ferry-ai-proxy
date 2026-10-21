@@ -428,6 +428,7 @@ fn decode_deflate(body: &[u8], limit: usize) -> Result<(Vec<u8>, bool), String> 
 /// to at most `limit` bytes, saying whether there was more.
 fn decode_zstd(mut input: &[u8], limit: usize) -> Result<(Vec<u8>, bool), String> {
     let mut decoder = FrameDecoder::new();
+    decoder.set_max_window_size(8 << 20);
     let mut output = Vec::new();
     while !input.is_empty() {
         match decoder.init(&mut input) {
@@ -446,15 +447,16 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<(Vec<u8>, bool), String
         }
         loop {
             decoder
-                .decode_blocks(&mut input, BlockDecodingStrategy::UptoBytes(1 << 20))
+                .decode_blocks(&mut input, BlockDecodingStrategy::UptoBlocks(1))
                 .map_err(|error| error.to_string())?;
-            if let Some(chunk) = decoder.collect() {
+            while decoder.can_collect() != 0 {
                 let room = limit.saturating_sub(output.len());
-                if chunk.len() > room {
-                    output.extend_from_slice(chunk.get(..room).unwrap_or_default());
+                if decoder.can_collect() > room {
                     return Ok((output, true));
                 }
-                output.extend_from_slice(&chunk);
+                let mut chunk = [0; 16 << 10];
+                let read = decoder.read(&mut chunk).map_err(|error| error.to_string())?;
+                output.extend_from_slice(&chunk[..read]);
             }
             if decoder.is_finished() {
                 break;
