@@ -1,0 +1,87 @@
+name: Parity (scheduled)
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: 'Seed (empty uses the run number)'
+        type: string
+        default: ''
+      random:
+        description: 'Random cases per generator'
+        type: string
+        default: '5000'
+  # CI calls the same job with a smaller, deterministic input set.
+  workflow_call:
+    inputs:
+      seed:
+        type: string
+        default: ''
+      random:
+        type: string
+        default: '5000'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  # Keep Go on the tested 1.26 toolchain instead of auto-downloading another.
+  GOTOOLCHAIN: local
+
+jobs:
+  parity:
+    name: parity (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+          fetch-depth: 1
+
+      # v8.0.32's go.mod asks for Go 1.26.0; 1.26.4 is tested with the harness.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.4'
+          cache: false
+
+      # Use CI's dependency cache and its compiler/manifest/lockfile key.
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: tests
+
+      # The harness overrides GOCACHE, so setup-go's default build-cache path
+      # would miss it. Keep that cache and the module downloads explicitly.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            target/parity/go-build
+          key: parity-go-v1-${{ runner.os }}-1.26.4-${{ hashFiles('reference/cliproxyapi/go.sum', 'tools/parity/go/**') }}
+          restore-keys: parity-go-v1-${{ runner.os }}-1.26.4-
+
+      - name: Compare offline
+        env:
+          PARITY_SEED: ${{ inputs.seed || github.run_number }}
+          PARITY_RANDOM: ${{ inputs.random || '5000' }}
+        run: bash .github/scripts/run-parity.sh
+
+      - name: Keep failing synthetic cases
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: parity-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/parity/failures/
+            target/parity/ci-*.md
+            target/parity/ci.log
+          retention-days: 14
+          if-no-files-found: warn
+
