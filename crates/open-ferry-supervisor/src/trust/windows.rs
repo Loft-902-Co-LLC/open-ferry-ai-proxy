@@ -702,7 +702,8 @@ mod tests {
         // the rest of the harness, including when cargo runs tests in parallel.
         const CHILD: &str = "OFP_ADMIN_OWNER_TEST_CHILD";
         const WRITE_CHILD: &str = "OFP_ADMIN_OWNER_WRITE_CHILD";
-        const TEST: &str = "trust::windows::tests::admin_owner_setup_and_children_create_trusted_machine_objects";
+        const TEST: &str =
+            "trust::windows::tests::admin_owner_setup_and_children_create_trusted_machine_objects";
         // This child deliberately does no token setup, so its objects prove
         // inheritance of the parent's owner rather than another normalization.
         if let Some(root) = std::env::var_os(WRITE_CHILD) {
