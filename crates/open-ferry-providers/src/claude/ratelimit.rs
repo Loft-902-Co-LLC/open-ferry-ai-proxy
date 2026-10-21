@@ -22,6 +22,8 @@
 //! - HTTP dates don't have their weekday checked; Go checks only that it's a
 //!   weekday name.
 
+mod per_minute_body;
+
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -164,13 +166,7 @@ fn rate_limit_reset_for_error(
         "anthropic-ratelimit-unified-7d_oi-status",
         "anthropic-ratelimit-unified-overage-status",
     ];
-    let per_minute = serde_json::from_slice::<serde_json::Value>(body).ok().is_some_and(|body| {
-        str_at(&body, "error.type") == "rate_limit_error"
-            && matches!(lower_trim(&str_at(&body, "error.message")).as_str(),
-                "this request would exceed the requests per minute rate limit. please try again later."
-                | "this request would exceed the input tokens per minute rate limit. please try again later."
-                | "this request would exceed the output tokens per minute rate limit. please try again later.")
-    });
+    let per_minute = per_minute_body::is_explicit(body);
     let quota_status = STATUS_HEADERS.iter().any(|name| {
         headers
             .get_all(*name)
@@ -918,6 +914,45 @@ mod per_minute_tests {
         let now = DateTime::from_timestamp(now.timestamp(), 0).unwrap();
         assert_range(&h, &body(MESSAGE), now, 30);
     }
+    #[test]
+    fn per_minute_body_matches_go_case_insensitive_fields() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for value in [
+            json!({"error":{"Type":"rate_limit_error", "message":MESSAGE}}),
+            json!({"ERROR":{"tYpE":"rate_limit_error", "Meſſage":MESSAGE}}),
+        ] {
+            assert_range(&headers(now), &serde_json::to_vec(&value).unwrap(), now, 30);
+        }
+        for raw in [
+            format!(
+                r#"{{"Error":{{"type":"other","Type":"rate_limit_error","message":{0},"Message":null}},"error":null}}"#,
+                json!(MESSAGE)
+            ),
+            format!(
+                r#"{{"ERROR":{{"Type":"rate_limit_error"}},"error":{{"MESSAGE":{0}}}}}"#,
+                json!(MESSAGE)
+            ),
+        ] {
+            assert_range(&headers(now), raw.as_bytes(), now, 30);
+        }
+        for raw in [
+            format!(
+                r#"{{"error":{{"Type":"rate_limit_error","type":"other","message":{0}}}}}"#,
+                json!(MESSAGE)
+            ),
+            format!(
+                r#"{{"error":{{"type":false,"Type":"rate_limit_error","message":{0}}}}}"#,
+                json!(MESSAGE)
+            ),
+            format!(
+                r#"{{"error":{{"Type":"rate_limit_error","message":{0}}}}} {{}}"#,
+                json!(MESSAGE)
+            ),
+        ] {
+            assert_range(&headers(now), raw.as_bytes(), now, 4 * 3600);
+        }
+    }
+
     #[test]
     fn malformed_ambiguous_and_quota_inputs_keep_conservative_cooldown() {
         let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
