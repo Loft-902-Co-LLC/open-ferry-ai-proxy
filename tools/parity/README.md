@@ -125,6 +125,13 @@ are the `known_difference` markers in `src/cases.rs`, `src/cases/**` and
 `src/interactions/**/cases.rs`; the equivalence rules remain in `src/compare.rs`
 and [UPSTREAM.md](../../UPSTREAM.md).
 
+The fixed seed reproduces inputs. `settings-for-the-same-field` deliberately
+supplies aliases that overwrite the same generation setting. Upstream iterates
+a Go map, so its output can either match Rust's stable order or be a known
+difference on separate runs. The identical/known counts can therefore vary;
+the fixture's existing marker accepts either outcome. A tally regression test
+checks that neither outcome can become an unexpected difference.
+
 [Parity (scheduled)](../../.github/workflows/parity-scheduled.yml) runs daily at
 06:23 UTC with `--random 5000` and the Actions run number as its printed seed.
 This separate workflow fails visibly on a mismatch and is outside the required
