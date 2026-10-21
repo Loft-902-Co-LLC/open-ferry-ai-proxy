@@ -26,6 +26,8 @@ pub(crate) const LOSSY_PLUGIN_FIXTURES: &str = include_str!(concat!(
 /// string empty and appends its value to the next comment. Rust must retain
 /// the complete source plugin value, both source comments exactly once,
 /// and every other output byte. Comment-only losses are not accepted here.
+/// An identical whole-file write starts a new source; differences during
+/// that write itself are never accepted by this rule.
 pub fn repair_lossy_plugin_reencode(
     case: &Case,
     go: &mut Value,
@@ -34,13 +36,10 @@ pub fn repair_lossy_plugin_reencode(
     if go == rust {
         return None;
     }
-    let source = case.options["file"].as_str()?;
-    let original = plugin_values(source)?;
-    let source_range = configs_range(source)?;
-    let sources = [(source, vec![source_range])];
+    let mut source = case.options["file"].as_str()?;
     let steps = case.options["steps"].as_array()?;
     if !steps.iter().all(|step| match step["op"].as_str() {
-        Some("save") => true,
+        Some("save" | "write") => true,
         Some("nested") => step["keys"].as_array().is_some_and(|keys| {
             !keys.is_empty() && keys[0].as_str().is_some_and(|key| key != "plugins")
         }),
@@ -59,14 +58,22 @@ pub fn repair_lossy_plugin_reencode(
     let mut losses = 0;
     for (index, (go, rust)) in go_files.iter().zip(rust_files).enumerate() {
         let (go, rust) = (go.as_str()?, rust.as_str()?);
+        if steps[index]["op"] == "write" {
+            if go != rust {
+                return None;
+            }
+            source = steps[index]["body"].as_str()?;
+        }
+        let original = plugin_values(source)?;
         let rust_value = plugin_values(rust)?;
         if rust_value != original {
             return None;
         }
-        let expected = scalar_losses(&plugin_values(go)?, &rust_value)?;
         if go == rust {
             continue;
         }
+        let sources = [(source, vec![configs_range(source)?])];
+        let expected = scalar_losses(&plugin_values(go)?, &rust_value)?;
         let (go_range, rust_range) = (configs_range(go)?, configs_range(rust)?);
         let go_lines: Vec<&str> = go.split_inclusive('\n').collect();
         let rust_lines: Vec<&str> = rust.split_inclusive('\n').collect();
@@ -460,8 +467,14 @@ mod tests {
 
     #[test]
     fn upstream_lossy_plugin_reencode_requires_the_complete_saved_outputs() {
-        let fixtures: Vec<serde_json::Value> =
+        let mut fixtures: Vec<serde_json::Value> =
             serde_json::from_str(super::LOSSY_PLUGIN_FIXTURES).unwrap();
+        fixtures.push(
+            serde_json::from_str(include_str!(
+                "cases/testdata/config-save-plugin-loss-after-write.json"
+            ))
+            .unwrap(),
+        );
         for fixture in fixtures {
             let case = Case::new("lossy-plugin", "", "").with_options(fixture["options"].clone());
             let mut go = fixture["upstream_output"].clone();
@@ -539,6 +552,51 @@ mod tests {
         let mut comment_only = json!({"files":[rust.replace("# own\n", "")]});
         assert_eq!(
             super::repair_lossy_plugin_reencode(&case, &mut comment_only, &json!({"files":[rust]})),
+            None
+        );
+        let case = Case::new("lost-before-later-save", "", "")
+            .with_options(json!({"file":source,"steps":[{"op":"save"},{"op":"save"}]}));
+        assert_eq!(
+            super::repair_lossy_plugin_reencode(
+                &case,
+                &mut json!({"files":[go,go]}),
+                &json!({"files":[go,rust]})
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn upstream_lossy_plugin_reencode_tracks_only_identical_write_sources() {
+        let source = "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n";
+        let go = "plugins:\n  configs:\n    alpha:\n      tags:\n        - >- # moved\n# own a\n";
+        let rust =
+            "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\n";
+        let options = json!({"file":source.replace("          a", "          b"),"steps":[{"op":"write","body":source},{"op":"save"}]});
+        let case = Case::new("write-source", "", "").with_options(options.clone());
+        let mut output = json!({"files":[source,go]});
+        let expected = json!({"files":[source,rust]});
+        assert_eq!(
+            super::repair_lossy_plugin_reencode(&case, &mut output, &expected),
+            Some(Deviation::UpstreamLossyPluginReencode)
+        );
+        assert_eq!(output, expected);
+        let mut changed = options.clone();
+        changed["steps"][0]["body"] = source.replace("          a", "          b").into();
+        assert_eq!(
+            super::repair_lossy_plugin_reencode(
+                &Case::new("wrong-body", "", "").with_options(changed),
+                &mut json!({"files":[source,go]}),
+                &expected
+            ),
+            None
+        );
+        assert_eq!(
+            super::repair_lossy_plugin_reencode(
+                &case,
+                &mut json!({"files":[source.replace("# own", "# changed"),go]}),
+                &expected
+            ),
             None
         );
     }
