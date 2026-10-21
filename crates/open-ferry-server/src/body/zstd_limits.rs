@@ -14,14 +14,18 @@ const FIXED_SCRATCH: usize = 6 << 20;
 ///   decoding/block_decoder.rs:188-206). Sequence execution checks after each
 ///   repeat (decoding/sequence_execution.rs:12-53), but the largest ML is
 ///   131074, so its worst overshoot fits BLOCK + MAX_LITERALS too.
-/// - Fixed scratch includes 3 MiB for a 20-bit literals Vec plus realloc
-///   overlap; 2.25 MiB for up to 98047 twelve-byte sequences with geometric
-///   growth/overlap (blocks/sequence_section.rs:21-29,118-146;
-///   decoding/sequence_section_decoder.rs:69-70,168-169); 384 KiB for the
-///   128 KiB block-content Vec and overlap (decoding/block_decoder.rs:115-120);
-///   and 64 KiB for bounded Huffman/FSE tables and metadata
+/// - Fixed scratch covers retained capacity: <2 MiB for 20-bit literals;
+///   <2.25 MiB for up to 98047 twelve-byte sequences, whose reserve may
+///   double an arbitrary prior capacity (blocks/sequence_section.rs:21-29,
+///   118-146; decoding/sequence_section_decoder.rs:69-70,168-169); <256 KiB
+///   for 128 KiB block content (decoding/block_decoder.rs:115-120); and
+///   64 KiB for bounded Huffman/FSE tables and metadata, including their growth
 ///   (huff0/huff0_decoder.rs:229-255,288-345;
-///   fse/fse_decoder.rs:145-161). Their sum is below 6 MiB.
+///   fse/fse_decoder.rs:145-161). The three large Vec growth sites execute
+///   sequentially. At most one old allocation overlaps its replacement, and
+///   that old capacity was below the requested length: at most 98047 * 12
+///   bytes (<1.125 MiB). Retained storage plus this overlap is <5.6875 MiB,
+///   below the 6 MiB allowance; summing separate realloc peaks is unnecessary.
 ///   `validate_block` bounds FSE probability counts *before* ruzstd's unchecked
 ///   zero-run resize at fse/fse_decoder.rs:269-280. Without that validation the
 ///   fixed table allowance would not cover malformed input.
