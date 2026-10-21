@@ -21,6 +21,12 @@ use tokio::time::{Instant, Sleep};
 use crate::config::IngressConfig;
 use crate::errors::{JSON_UTF8, error_response};
 
+const MANAGEMENT_BODY_LIMIT: usize = 32 << 20;
+const MANAGEMENT_RESERVE: usize = 3 * MANAGEMENT_BODY_LIMIT;
+fn budget_floor(body_limit: usize) -> usize {
+    body_limit.saturating_mul(3).saturating_add(MANAGEMENT_RESERVE)
+}
+
 tokio::task_local! {
     static REQUEST_INGRESS: RequestScope;
 }
@@ -104,7 +110,7 @@ impl Ingress {
     pub fn new(limits: IngressConfig, body_limit: usize) -> Self {
         let limit = limits
             .buffered_body_bytes
-            .map(|limit| limit.max(body_limit.saturating_mul(3)));
+            .map(|limit| limit.max(budget_floor(body_limit)));
         Self {
             settings: watch::channel(Snapshot { limits, body_limit }).0,
             budget: BodyBudget::new(limit),
@@ -118,7 +124,7 @@ impl Ingress {
         self.budget.set_limit(
             limits
                 .buffered_body_bytes
-                .map(|limit| limit.max(body_limit.saturating_mul(3))),
+                .map(|limit| limit.max(budget_floor(body_limit))),
         );
         self.settings.send_replace(Snapshot { limits, body_limit });
     }
@@ -176,7 +182,22 @@ async fn install(State(ingress): State<Ingress>, mut request: Request, next: Nex
 /// Called only after the route's own authentication has succeeded.
 pub async fn after_auth(request: Request, next: Next) -> Response {
     match request.extensions().get::<Ingress>().cloned() {
-        Some(ingress) => layer(State(ingress), request, next).await,
+        Some(mut ingress) => {
+            ingress.budget.1 = Pool::Proxy;
+            layer(State(ingress), request, next).await
+        },
+        None => next.run(request).await,
+    }
+}
+
+/// Management uses its own handler bounds and reserved headroom in the same
+/// aggregate accounting pool, on either listener.
+pub async fn after_management_auth(request: Request, next: Next) -> Response {
+    match request.extensions().get::<Ingress>().cloned() {
+        Some(mut ingress) => {
+            ingress.budget.1 = Pool::Management;
+            layer(State(ingress), request, next).await
+        },
         None => next.run(request).await,
     }
 }
@@ -254,7 +275,8 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
     {
         return next.run(request).await;
     }
-    let snapshot = ingress.settings.borrow().clone();
+    let mut snapshot = ingress.settings.borrow().clone();
+    if ingress.budget.1 == Pool::Management { snapshot.body_limit = MANAGEMENT_BODY_LIMIT; }
     let (parts, body) = request.into_parts();
     let (raw, parser, oversized) = match buffer(&ingress, &snapshot, &parts.headers, body).await {
         Ok(buffered) => buffered,
@@ -461,12 +483,17 @@ async fn buffer(
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct BodyBudget(Arc<Mutex<Accounting>>);
+pub(crate) struct BodyBudget(Arc<Mutex<Accounting>>, Pool);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pool { Shared, Proxy, Management }
 
 #[derive(Debug, Default)]
 struct Accounting {
     limit: Option<usize>,
     used: usize,
+    proxy_used: usize,
+    management_reserve: usize,
     #[cfg(test)]
     peak: usize,
 }
@@ -475,12 +502,15 @@ impl BodyBudget {
     fn new(limit: Option<usize>) -> Self {
         Self(Arc::new(Mutex::new(Accounting {
             limit,
+            management_reserve: MANAGEMENT_RESERVE,
             ..Accounting::default()
-        })))
+        })), Pool::Shared)
     }
 
     fn set_limit(&self, limit: Option<usize>) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).limit = limit;
+        let mut accounting = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        accounting.limit = limit;
+        accounting.management_reserve = MANAGEMENT_RESERVE;
     }
 
     fn used(&self) -> usize {
@@ -508,10 +538,13 @@ impl Reservation {
         if let Some(budget) = &self.budget {
             let mut accounting = budget.0.lock().unwrap_or_else(PoisonError::into_inner);
             let used = accounting.used.checked_add(additional).ok_or(())?;
-            if accounting.limit.is_some_and(|limit| used > limit) {
+            let proxy_used = accounting.proxy_used.checked_add(additional).ok_or(())?;
+            if accounting.limit.is_some_and(|limit| used > limit ||
+                (budget.1 == Pool::Proxy && proxy_used > limit.saturating_sub(accounting.management_reserve))) {
                 return Err(());
             }
             accounting.used = used;
+            if budget.1 == Pool::Proxy { accounting.proxy_used = proxy_used; }
             #[cfg(test)]
             {
                 accounting.peak = accounting.peak.max(used);
@@ -527,6 +560,7 @@ impl Drop for Reservation {
         if let Some(budget) = &self.budget {
             let mut accounting = budget.0.lock().unwrap_or_else(PoisonError::into_inner);
             accounting.used -= self.bytes;
+            if budget.1 == Pool::Proxy { accounting.proxy_used -= self.bytes; }
         }
     }
 }

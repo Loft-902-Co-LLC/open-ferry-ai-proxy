@@ -148,7 +148,7 @@ async fn guard(State(state): State<DashboardState>, request: Request, next: Next
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| *addr);
     match check_key(&state.management, peer, request.headers()).await {
-        Ok(()) => open_ferry_server::ingress::after_auth(request, next).await,
+        Ok(()) => open_ferry_server::ingress::after_management_auth(request, next).await,
         Err(refusal) => refused(&refusal).into_response(),
     }
 }

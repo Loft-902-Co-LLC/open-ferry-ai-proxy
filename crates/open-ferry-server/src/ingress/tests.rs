@@ -18,6 +18,7 @@ fn ingress(limit: usize) -> Ingress {
     );
     // Isolate exhaustion tests from the production multipart floor.
     ingress.budget.set_limit(Some(limit));
+    ingress.budget.0.lock().unwrap().management_reserve = 0;
     ingress
 }
 
@@ -264,7 +265,9 @@ async fn trickled_body_still_has_a_total_deadline() {
 #[tokio::test]
 async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_three_bodies() {
     let ingress = ingress(32);
-    let mut buffer = BudgetBuffer::new(Some(ingress.budget.clone()));
+    let mut proxy = ingress.budget.clone();
+    proxy.1 = Pool::Proxy;
+    let mut buffer = BudgetBuffer::new(Some(proxy.clone()));
     buffer.push(&[0; 28]).unwrap();
     let bytes = buffer.finish();
     ingress.reconfigure(
@@ -274,8 +277,8 @@ async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_three_bodies() 
         },
         8,
     );
-    assert_eq!(ingress.budget.0.lock().unwrap().limit, Some(24));
-    let mut other = BudgetBuffer::new(Some(ingress.budget.clone()));
+    assert_eq!(ingress.budget.0.lock().unwrap().limit, Some(MANAGEMENT_RESERVE + 24));
+    let mut other = BudgetBuffer::new(Some(proxy));
     assert!(other.push(b"x").is_err());
     drop(bytes);
     other.push(b"x").unwrap();
@@ -299,7 +302,26 @@ async fn a_multipart_body_at_the_limit_fits_the_budget_floor() {
     drop(response);
     assert_eq!(ingress.budget.used(), 0);
     let raised = Ingress::new(IngressConfig::default(), 256 << 20);
-    assert_eq!(raised.budget.0.lock().unwrap().limit, Some(3 * (256 << 20)));
+    assert_eq!(raised.budget.0.lock().unwrap().limit, Some(MANAGEMENT_RESERVE + 3 * (256 << 20)));
+}
+
+#[test]
+fn proxy_pressure_preserves_room_for_a_full_management_upload() {
+    let ingress = Ingress::new(IngressConfig { buffered_body_bytes: Some(12), ..IngressConfig::default() }, 4);
+    let mut proxy = ingress.budget.clone();
+    proxy.1 = Pool::Proxy;
+    let mut held = Reservation { budget: Some(proxy.clone()), bytes: 0 };
+    held.grow_to(12).unwrap();
+    let mut extra = Reservation { budget: Some(proxy), bytes: 0 };
+    assert!(extra.grow_to(1).is_err());
+    let mut management = ingress.budget.clone();
+    management.1 = Pool::Management;
+    let mut upload = Reservation { budget: Some(management), bytes: 0 };
+    upload.grow_to(MANAGEMENT_RESERVE).unwrap();
+    assert_eq!(ingress.reserved_body_bytes(), 12 + MANAGEMENT_RESERVE);
+    drop(upload);
+    drop(held);
+    assert_eq!(ingress.reserved_body_bytes(), 0);
 }
 
 #[tokio::test]
