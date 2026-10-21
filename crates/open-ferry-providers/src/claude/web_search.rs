@@ -358,15 +358,21 @@ mod tests {
         // cargo test runs unit tests concurrently. Exercise the real global
         // store in a child harness so other cache tests keep their own policy.
         const CHILD: &str = "OFP_P36_CACHE_SCOPE_TEST_CHILD";
+        const RAN: &str = "P36 stale-scope child assertions passed";
         if std::env::var_os(CHILD).is_none() {
+            let module = module_path!().split_once("::").unwrap().1;
+            let test =
+                format!("{module}::stale_executor_scope_is_rejected_after_global_settings_change");
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "claude::web_search::tests::stale_executor_scope_is_rejected_after_global_settings_change", "--nocapture"])
+                .args(["--exact", &test, "--nocapture"])
                 .env(CHILD, "1")
-                .output().unwrap();
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stdout)
+                output.status.success() && stdout.lines().any(|line| line == RAN),
+                "child must run the assertions: {stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
             );
             return;
         }
@@ -389,6 +395,7 @@ mod tests {
         options.metadata.execution_session_id = Some("policy-probe".into());
         assert!(scope(Some(&old), &auth, &request, &options).is_none());
         assert!(scope(Some(&current), &auth, &request, &options).is_some());
+        println!("\n{RAN}");
     }
 
     #[test]
