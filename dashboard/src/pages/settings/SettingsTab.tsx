@@ -10,7 +10,7 @@ import {
 
 import { callProblem, cantSaveConfig } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
-import { useApiCall, useApiQuery } from "../../api/hooks";
+import { useConfigEditor, useConfigQuery } from "../../api/hooks";
 import { API_KEYS, CONFIG, V8_CONFIG } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Loading, QueryState } from "../../components/QueryState";
@@ -67,6 +67,7 @@ interface ReviewRequest {
 }
 
 interface SettingsEditorProps {
+  editor: ReturnType<typeof useConfigEditor>;
   config: UseQueryResult;
   facts: UseQueryResult<ServerFacts>;
   keys: UseQueryResult<ApiKeysAnswer>;
@@ -82,6 +83,7 @@ interface SettingsEditorProps {
  * settings form, with one bar and one review for the changes to both.
  */
 function SettingsEditor({
+  editor,
   config,
   facts,
   keys,
@@ -91,7 +93,7 @@ function SettingsEditor({
   onKeysReadOnly,
   onUnsavedChange,
 }: SettingsEditorProps) {
-  const call = useApiCall();
+  const { call } = editor;
   const client = useQueryClient();
   const formId = useId();
   const root = useRef<HTMLDivElement>(null);
@@ -145,7 +147,7 @@ function SettingsEditor({
     if (keysSaved.length === 0) {
       return;
     }
-    client.setQueryData<ApiKeysAnswer>([API_KEYS], (answer) =>
+    client.setQueryData<ApiKeysAnswer>([API_KEYS, "config-editor", editor.scope], (answer) =>
       answer === undefined
         ? answer
         : { ...answer, "api-keys": applyKeyChanges(keysIn(answer), keysSaved) },
@@ -162,12 +164,12 @@ function SettingsEditor({
       let addressProblem: string | null = null;
       if (edited !== null) {
         const answer = await call<unknown>(CONFIG);
-        client.setQueryData([CONFIG], answer);
+        client.setQueryData([CONFIG, "config-editor", editor.scope], answer);
         let freshFacts = facts.data;
         if (edited.managementAddress !== base.managementAddress) {
           // The proxy's port may have moved since the page read it.
           freshFacts = await readServerFacts(call);
-          client.setQueryData(FACTS, freshFacts);
+          client.setQueryData([...FACTS, editor.scope], freshFacts);
           addressProblem = managementAddressProblem(edited.managementAddress, freshFacts.proxyPort);
           restart = restartNotice(edited.managementAddress, {
             tls: tlsOn(answer),
@@ -180,7 +182,7 @@ function SettingsEditor({
       let freshKeys: string[] | null = null;
       if (changes.length > 0) {
         const answer = await call<unknown>(API_KEYS);
-        client.setQueryData([API_KEYS], answer);
+        client.setQueryData([API_KEYS, "config-editor", editor.scope], answer);
         freshKeys = keysIn(answer);
       }
       return { edited, base, changes, fresh, freshKeys, restart, addressProblem };
@@ -366,13 +368,14 @@ export interface SettingsTabProps {
  * save".
  */
 export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
-  const config = useApiQuery<unknown>(CONFIG);
-  const call = useApiCall();
+  const editor = useConfigEditor();
+  const config = useConfigQuery<unknown>(editor, CONFIG);
+  const { call } = editor;
   const facts = useQuery({
-    queryKey: FACTS,
+    queryKey: [...FACTS, editor.scope],
     queryFn: ({ signal }) => readServerFacts(call, signal),
   });
-  const keys = useApiQuery<ApiKeysAnswer>(API_KEYS);
+  const keys = useConfigQuery<ApiKeysAnswer>(editor, API_KEYS);
   // Kept here, so they outlast the editor starting afresh below.
   const [keyChanges, setKeyChanges] = useState<KeyChange[]>([]);
   const [keysReadOnly, setKeysReadOnly] = useState(false);
@@ -385,6 +388,7 @@ export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
           ? "loading"
           : "loaded"
       }
+      editor={editor}
       config={config}
       facts={facts}
       keys={keys}

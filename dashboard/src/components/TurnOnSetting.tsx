@@ -1,8 +1,8 @@
-import { useMutation, useQueryClient, type QueryKey } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryKey } from "@tanstack/react-query";
 import { Power } from "lucide-react";
 
 import { callProblem, cantSaveConfig } from "../api/access";
-import { useApiCall } from "../api/hooks";
+import { useConfigEditor } from "../api/hooks";
 import { Alert } from "./Alert";
 import { Button } from "./Button";
 import { Code } from "./Code";
@@ -27,7 +27,12 @@ export interface TurnOnSettingProps {
  * save it) is told apart, with the line to put in config.yaml instead.
  */
 export function TurnOnSetting({ path, label, configKey, invalidate }: TurnOnSettingProps) {
-  const call = useApiCall();
+  const editor = useConfigEditor();
+  const { call } = editor;
+  useQuery({
+    queryKey: [path, "config-version", editor.scope],
+    queryFn: async () => { await editor.ready(); return true; },
+  });
   const client = useQueryClient();
   const turnOn = useMutation({
     mutationFn: () => call(path, { method: "PUT", json: { value: true } }),

@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Power, PowerOff, RotateCcw, Trash2 } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
 
@@ -13,7 +13,7 @@ import {
   type ResetAnswer,
   type StatusAnswer,
 } from "../../api/credentials";
-import { useApiCall } from "../../api/hooks";
+import { useApiCall, useConfigEditor } from "../../api/hooks";
 import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/Dialog";
@@ -385,6 +385,14 @@ export function CredentialItem({
   const titleId = useId();
   const detailsId = useId();
   const call = useApiCall();
+  const editor = useConfigEditor();
+  const configKey = credential.account_type === "api_key" && credential.source === "memory" &&
+    credential.runtime_only !== true;
+  useQuery({
+    queryKey: [AUTH_FILE_STATUS, "config-version", editor.scope],
+    queryFn: async () => { await editor.ready(); return true; },
+    enabled: configKey,
+  });
   const client = useQueryClient();
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -401,8 +409,9 @@ export function CredentialItem({
   };
 
   const toggle = useMutation({
-    mutationFn: (disabled: boolean) =>
-      call<StatusAnswer>(AUTH_FILE_STATUS, {
+    mutationFn: (disabled: boolean) => configKey
+      ? editor.toggleCredential(credential, disabled)
+      : call<StatusAnswer>(AUTH_FILE_STATUS, {
         method: "PATCH",
         json: { name: credential.name, auth_index: credential.auth_index, disabled },
       }),

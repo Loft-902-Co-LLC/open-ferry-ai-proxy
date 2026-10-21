@@ -5,7 +5,7 @@ import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from "re
 import { callProblem, saveProblem } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
 import { CLIENT_SETUP, type ClientSetup } from "../../api/dashboard";
-import { useApiCall, useApiQuery } from "../../api/hooks";
+import { useApiQuery, useConfigEditor, useConfigQuery } from "../../api/hooks";
 import { API_KEYS } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
@@ -216,7 +216,8 @@ export function ClientSetupCard({
   collapsible = false,
   next = false,
 }: ClientSetupCardProps) {
-  const call = useApiCall();
+  const editor = useConfigEditor();
+  const { call } = editor;
   const client = useQueryClient();
   const [address, setAddress] = useState<string | null>(null);
   const [keyIndex, setKeyIndex] = useState(0);
@@ -255,11 +256,8 @@ export function ClientSetupCard({
   // the first one's place. One entry at a time, against the list as the
   // server has it just then, so a key added meanwhile stays. The new key goes
   // in first, so the list is never left empty, which would let every client
-  // in. Then each example goes by its place, the last first so that the
-  // places of the others hold. Places keep the keys out of URLs, at the cost
-  // of a race: a change to the list from elsewhere meanwhile can move the
-  // entries, and then the entry now at a place goes instead. The card reads
-  // the list again afterwards.
+  // in. Then each example goes by its place, the last first. If-Match
+  // refuses a concurrent change before it can move a different key here.
   const replaceExamples = useMutation({
     mutationFn: async (key: string | null) => {
       const list = [...((await call<ApiKeysAnswer>(API_KEYS))["api-keys"] ?? [])];
@@ -276,7 +274,7 @@ export function ClientSetupCard({
       }
       for (let index = list.length - 1; index >= 0; index--) {
         if (isExampleKey(list[index] ?? "")) {
-          await call(API_KEYS, { method: "DELETE", query: { index: String(index) } });
+          await call(API_KEYS, { method: "DELETE", query: { index: String(index) }, configTarget: { key: list[index] ?? "" } });
         }
       }
     },
@@ -289,7 +287,7 @@ export function ClientSetupCard({
     refetchInterval: (query) =>
       replaceExamples.isSuccess && query.state.data?.safe_mode === true ? SAFE_MODE_POLL_MS : false,
   });
-  const keys = useApiQuery<ApiKeysAnswer>(API_KEYS);
+  const keys = useConfigQuery<ApiKeysAnswer>(editor, API_KEYS);
 
   const card = useRef<HTMLDivElement>(null);
   const safeModeAction = useRef<HTMLButtonElement>(null);
@@ -318,7 +316,7 @@ export function ClientSetupCard({
     replaceExamples.mutate(key);
   };
 
-  const loaded = setup.data !== undefined;
+  const loaded = setup.data !== undefined && !keys.isPending;
   const safeMode = setup.data?.safe_mode === true;
   // Safe mode, and the news that it has lifted, stay in view: there's
   // nothing to close while the proxy refuses every request.
@@ -365,7 +363,7 @@ export function ClientSetupCard({
     </div>
   );
 
-  if (setup.isPending) {
+  if (setup.isPending || keys.isPending) {
     return frame(<Loading>Reading the proxy&apos;s setup…</Loading>);
   }
   if (setup.isError) {
@@ -415,7 +413,7 @@ export function ClientSetupCard({
   const writeError = addKey.error ?? replaceExamples.error;
   const keyOptions =
     choices.length === 0
-      ? [{ value: "0", label: keys.isPending ? "Loading…" : "No client keys yet" }]
+      ? [{ value: "0", label: "No client keys yet" }]
       : choices.map((key, index) => ({
           value: String(index),
           label:
@@ -548,7 +546,7 @@ export function ClientSetupCard({
           <SnippetPanel shown={selected} copied={copied} />
         </Tabs>
       )}
-      {chosenKey === null && !keys.isPending && (
+      {chosenKey === null && (
         <p className="flex items-center gap-2 text-muted">
           <Badge tone="warn">No key</Badge> The setups show where a client key goes. Make one
           above.

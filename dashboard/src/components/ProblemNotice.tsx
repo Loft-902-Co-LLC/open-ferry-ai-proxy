@@ -5,6 +5,7 @@ import type { CallProblem } from "../api/access";
 import { useSession } from "../session/session";
 import { Alert, type AlertTone } from "./Alert";
 import { Code } from "./Code";
+import { Button } from "./Button";
 
 /** Where the server log is shown: the Logs page's second tab. */
 export const SERVER_LOG_PATH = "/logs?tab=server";
@@ -113,6 +114,16 @@ export function explainProblem(problem: CallProblem): Explanation {
             The ledger section on the Usage page says why.
           </p>
         ),
+      };
+    case "config-conflict":
+      return {
+        tone: "warn",
+        title: "The config changed since this page loaded",
+        body: <>
+          <p>The server refused this save. Reload the latest config before saving again.
+            Unsaved edits will be lost on reload; copy them first if you want to keep them.</p>
+          <Button onClick={() => { window.location.reload(); }}>Reload latest config</Button>
+        </>,
       };
     case "config-not-saved":
       return {

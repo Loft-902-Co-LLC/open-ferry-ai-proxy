@@ -54,6 +54,10 @@ export interface ApiRequest {
   body?: BodyInit;
   /** The body's content type, for `body`. */
   contentType?: string;
+  /** The config version this write is based on; omitted on older servers. */
+  ifMatch?: string;
+  /** An index deletion's intended key. Local validation only; never sent. */
+  configTarget?: { key: string; baseUrl?: string };
   signal?: AbortSignal;
 }
 
@@ -125,11 +129,17 @@ async function send(
   key: string,
   url: string,
   accept: string,
-  init: Pick<RequestInit, "method" | "body" | "signal"> & { contentType?: string | undefined },
+  init: Pick<RequestInit, "method" | "body" | "signal"> & {
+    contentType?: string | undefined;
+    ifMatch?: string | undefined;
+  },
 ): Promise<Response> {
   const headers: Record<string, string> = { Accept: accept, Authorization: `Bearer ${key}` };
   if (init.contentType !== undefined) {
     headers["Content-Type"] = init.contentType;
+  }
+  if (init.ifMatch !== undefined) {
+    headers["If-Match"] = init.ifMatch;
   }
   let response: Response;
   try {
@@ -178,6 +188,7 @@ export async function apiRequest<T = unknown>(
     body,
     signal: request.signal,
     contentType,
+    ifMatch: request.ifMatch,
   });
   const data = await readBody(response, request.signal);
   return { status: response.status, headers: response.headers, data: data as T };

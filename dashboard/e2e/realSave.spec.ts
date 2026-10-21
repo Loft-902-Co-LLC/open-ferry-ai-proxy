@@ -1,7 +1,6 @@
 // A real save: the dashboard a debug build of open-ferry embeds, changing
 // config.yaml through the binary's own management API rather than a mock.
-// CI's dashboard job builds no binary, so this runs only when OPEN_FERRY_BIN
-// names one, as a manual pass:
+// CI builds the embedded binary in dashboard-real. For a local pass:
 //
 //   npm run build                                  (in dashboard/)
 //   cargo build -p open-ferry --bin open-ferry     (embeds dashboard/dist)
@@ -10,7 +9,8 @@
 // The spec starts the binary itself and stops it afterwards. It listens on
 // 127.0.0.1 only, on OPEN_FERRY_E2E_PORT (18517 unless set, never 8317),
 // over a config in a fresh temp directory with dummy keys, and sends every
-// outbound request to a dead proxy at 127.0.0.1:9. The page may reach
+// outbound request to a dead proxy at 127.0.0.1:9, except one local fake
+// provider with its own direct override. The page may reach
 // nothing but the binary. The management key is random and never printed,
 // and neither is config.yaml, which holds it: checks on the file report a
 // description, not its text.
@@ -18,10 +18,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const BIN = process.env.OPEN_FERRY_BIN ?? "";
 const PORT = Number(process.env.OPEN_FERRY_E2E_PORT ?? "18517");
@@ -32,6 +33,10 @@ const NL = "\n";
 
 const CLAUDE_KEY = "sk-ant-dummy-0000000000000000";
 const GEMINI_KEY = "AIza-dummy-gemini-000000000000";
+const EDITED_KEY = "AIza-dummy-edited-000000000000";
+const COMPAT_KEY = "sk-compat-dummy-000000000000";
+const MODEL = "dashboard-local-model";
+const ANSWER = "The local fake provider answered.";
 
 test.skip(BIN === "", "set OPEN_FERRY_BIN to a debug build of open-ferry to run the real-save pass");
 test.describe.configure({ mode: "serial" });
@@ -42,6 +47,10 @@ let managementKey = "";
 let server: ChildProcess | null = null;
 let exited: number | null = null;
 let page: Page | null = null;
+let fake: Server | null = null;
+let fakeOrigin = "";
+let fakeRequests = 0;
+let persistedClientKeys: string[] = [];
 const violations: string[] = [];
 const pageErrors: string[] = [];
 const offOrigin: string[] = [];
@@ -102,7 +111,7 @@ function expectCommentsKept() {
   expectFile("# The dashboard's real-save pass: dummy keys only.", "its first comment");
   expectFile("# Every outbound request goes to a dead proxy.", "the proxy comment");
   expectFile("# The client keys:", "the client keys comment");
-  expectFile(/^some-future-setting: keep-me/m, "the setting open-ferry doesn't type");
+  expectFile(/^[ #]*some-future-setting: keep-me/m, "the setting open-ferry doesn't type, kept as a comment after migration");
 }
 
 async function call(path: string, method = "GET", body?: unknown): Promise<Response> {
@@ -146,20 +155,14 @@ async function waitForServer() {
   throw new Error(`open-ferry didn't serve ${APP} within a minute; its log is in ${dir}`);
 }
 
-test.beforeAll(async ({ browser }) => {
-  test.setTimeout(120_000);
-  expect(PORT, "the port").not.toBe(8317);
-  dir = mkdtempSync(join(tmpdir(), "ofp-real-save-"));
-  mkdirSync(join(dir, "auths"));
-  configPath = join(dir, "config.yaml");
-  managementKey = `mgmt-dummy-${randomBytes(18).toString("hex")}`;
-  writeFileSync(configPath, configText());
-
-  const log = openSync(join(dir, "server.log"), "w");
+async function startServer() {
+  exited = null;
+  const log = openSync(join(dir, "server.log"), "a");
   const child = spawn(resolve(BIN), ["-config", configPath, "-no-browser"], {
     cwd: dir,
     env: {
       ...process.env,
+      OPEN_FERRY_SELF_UPDATE: "off",
       HTTP_PROXY: DEAD,
       HTTPS_PROXY: DEAD,
       ALL_PROXY: DEAD,
@@ -178,8 +181,72 @@ test.beforeAll(async ({ browser }) => {
   });
   server = child;
   await waitForServer();
+}
 
-  const opened = await browser.newPage();
+async function stopServer() {
+  const child = server;
+  if (child !== null && exited === null) {
+    const stopped = new Promise((done) => child.once("exit", done));
+    child.kill();
+    await stopped;
+  }
+  server = null;
+}
+
+// A failed Playwright fill/paste can quote its argument. Replace that
+// diagnostic before it reaches a reporter or a failure context.
+async function fillSecret(field: Locator, value: string) {
+  try { await field.fill(value); }
+  catch { throw new Error("Could not fill a secret field"); }
+}
+async function pasteSecret(text: string) {
+  // Exercise CodeMirror's plain-text paste handler without the OS clipboard.
+  // CDP insertText on a multiline selection makes Chromium synthesize inline
+  // style attributes, which the dashboard's CSP correctly refuses.
+  try {
+    await the().getByRole("textbox", { name: "config.yaml" }).evaluate((element, text) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", text);
+      element.dispatchEvent(new ClipboardEvent("paste", {
+        clipboardData: data, bubbles: true, cancelable: true, composed: true,
+      }));
+    }, text);
+  }
+  catch { throw new Error("Could not edit config.yaml"); }
+}
+
+async function openYaml() {
+  const page = the();
+  await page.goto(`${APP}settings?tab=file`);
+  await page.getByRole("button", { name: "Show config.yaml" }).click();
+  await expectEditorShows("# The dashboard's real-save pass", "the first comment");
+  return page.getByRole("textbox", { name: "config.yaml" });
+}
+async function editYaml(change: (text: string) => string) {
+  const page = the();
+  const editor = await openYaml();
+  const draft = change(file());
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await pasteSecret(draft);
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const review = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await review.getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+}
+
+test.beforeAll(async ({ browser }) => {
+  test.setTimeout(120_000);
+  expect(Number.isInteger(PORT) && PORT > 0 && PORT < 65536 && PORT !== 8317, "a safe loopback port").toBe(true);
+  dir = mkdtempSync(join(tmpdir(), "ofp-real-save-"));
+  mkdirSync(join(dir, "auths"));
+  configPath = join(dir, "config.yaml");
+  managementKey = `mgmt-dummy-${randomBytes(18).toString("hex")}`;
+  writeFileSync(configPath, configText());
+
+  await startServer();
+
+  const opened = await browser.newPage({ bypassCSP: false, serviceWorkers: "block" });
   page = opened;
   await opened.exposeFunction("reportCspViolation", (text: string) => {
     violations.push(text);
@@ -204,20 +271,20 @@ test.beforeAll(async ({ browser }) => {
   });
 
   await opened.goto(`${APP}signin`);
-  await opened.getByLabel("Management key").fill(managementKey);
+  await fillSecret(opened.getByLabel("Management key"), managementKey);
   await opened.getByRole("button", { name: "Sign in" }).click();
   await expect(opened.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
 });
 
 test.afterAll(async () => {
   await page?.close();
-  // Only the open-ferry this spec started.
-  const child = server;
-  if (child !== null && exited === null) {
-    const stopped = new Promise((done) => child.once("exit", done));
-    child.kill();
-    await stopped;
-  }
+  // Only the open-ferry and fake provider this spec started.
+  await stopServer();
+  await new Promise<void>((done, reject) => {
+    if (fake === null) { done(); return; }
+    fake.close((error) => { if (error) reject(error); else done(); });
+    fake.closeAllConnections();
+  });
   if (dir !== "" && test.info().errors.length === 0) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -231,7 +298,7 @@ test("lifts safe mode from the Overview, then makes a key", async () => {
   await expect(page.getByText("The proxy is out of safe mode")).toBeVisible();
   await expect(page.getByText("The proxy is in safe mode")).toHaveCount(0);
   const replaced = await clientKeys();
-  expect(replaced).toHaveLength(1);
+  expect(replaced.length, "the replacement client key count").toBe(1);
   expectFile("your-api-key", "no example keys", false);
   expectFile(replaced[0] ?? "-", "the new key");
   expectCommentsKept();
@@ -239,7 +306,7 @@ test("lifts safe mode from the Overview, then makes a key", async () => {
   await page.getByRole("button", { name: "Make a new key" }).click();
   await expect(page.getByText(/^Added a client key\./)).toBeVisible();
   const keys = await clientKeys();
-  expect(keys).toHaveLength(2);
+  expect(keys.length, "the client key count").toBe(2);
   expectFile(keys[1] ?? "-", "the key made on the Overview");
   await expect(page.getByRole("combobox", { name: "Client key" }).getByRole("option")).toHaveCount(2);
 });
@@ -250,7 +317,7 @@ test("turns settings on where the Usage and Logs pages offer to", async () => {
   await expect(page.getByText("Usage isn't being recorded")).toBeVisible();
   await page.getByRole("button", { name: "Start recording" }).click();
   await expect(page.getByText("Usage isn't being recorded")).toHaveCount(0);
-  expectFile(/^usage-statistics-enabled: true$/m, "usage-statistics-enabled: true");
+  expectFile(/^ *usage-statistics-enabled: true$/m, "usage-statistics-enabled: true");
 
   // The recent calls show once the ledger has a row: one call, which fails
   // at the dead proxy.
@@ -271,21 +338,21 @@ test("turns settings on where the Usage and Logs pages offer to", async () => {
   await expect(off).toBeVisible();
   await page.getByRole("button", { name: "Log every request" }).click();
   await expect(off).toHaveCount(0);
-  expectFile(/^request-log: true$/m, "request-log: true, from the Usage page");
+  expectFile(/^ *request-log: true$/m, "request-log: true, from the Usage page");
 
   await management("PATCH", "request-log", { value: false });
-  expectFile(/^request-log: false$/m, "request-log: false again");
+  expectFile(/^ *request-log: false$/m, "request-log: false again");
   await page.goto(`${APP}logs`);
   await expect(page.getByText("Only failed requests are logged")).toBeVisible();
   await page.getByRole("button", { name: "Log every request" }).click();
   await expect(page.getByText("Only failed requests are logged")).toHaveCount(0);
-  expectFile(/^request-log: true$/m, "request-log: true, from the Logs page");
+  expectFile(/^ *request-log: true$/m, "request-log: true, from the Logs page");
 
   await page.goto(`${APP}logs?tab=server`);
   await expect(page.getByText("The server doesn't write its log to a file")).toBeVisible();
   await page.getByRole("button", { name: "Log to a file" }).click();
   await expect(page.getByText("The server doesn't write its log to a file")).toHaveCount(0);
-  expectFile(/^logging-to-file: true$/m, "logging-to-file: true");
+  expectFile(/^ *logging-to-file: true$/m, "logging-to-file: true");
   expectCommentsKept();
 });
 
@@ -330,18 +397,18 @@ test("saves every setting through its own route", async () => {
   await expect(page.getByText("No unsaved changes.")).toBeVisible();
 
   const saved: [RegExp, string][] = [
-    [/^proxy-url: "?https:\/\/127\.0\.0\.1:9"?$/m, "the new proxy"],
-    [/^routing:\n(?: {2}.*\n)*? {2}strategy: "?fill-first"?$/m, "routing.strategy: fill-first"],
-    [/^request-retry: 4\b/m, "request-retry: 4"],
-    [/^max-retry-credentials: 2$/m, "max-retry-credentials: 2"],
-    [/^max-retry-interval: 7$/m, "max-retry-interval: 7"],
-    [/^force-model-prefix: true$/m, "force-model-prefix: true"],
-    [/^request-log: false$/m, "request-log: false"],
-    [/^logging-to-file: false$/m, "logging-to-file: false"],
-    [/^debug: true$/m, "debug: true"],
-    [/^logs-max-total-size-mb: 64$/m, "logs-max-total-size-mb: 64"],
-    [/^error-logs-max-files: 5$/m, "error-logs-max-files: 5"],
-    [/^usage-statistics-enabled: false$/m, "usage-statistics-enabled: false"],
+    [/^ *proxy-url: "?https:\/\/127\.0\.0\.1:9"?$/m, "the new proxy"],
+    [/^routing:\n(?: +.*\n)*? +strategy: "?fill-first"?$/m, "routing.strategy: fill-first"],
+    [/^ *request-retry: 4\b/m, "request-retry: 4"],
+    [/^ *max-retry-credentials: 2$/m, "max-retry-credentials: 2"],
+    [/^ *max-retry-interval: 7$/m, "max-retry-interval: 7"],
+    [/^ *force-model-prefix: true$/m, "force-model-prefix: true"],
+    [/^ *request-log: false$/m, "request-log: false"],
+    [/^ *logging-to-file: false$/m, "logging-to-file: false"],
+    [/^ *debug: true$/m, "debug: true"],
+    [/^ *logs-max-total-size-mb: 64$/m, "logs-max-total-size-mb: 64"],
+    [/^ *error-logs-max-files: 5$/m, "error-logs-max-files: 5"],
+    [/^ *usage-statistics-enabled: false$/m, "usage-statistics-enabled: false"],
   ];
   for (const [pattern, description] of saved) {
     expectFile(pattern, description);
@@ -374,7 +441,7 @@ test("adds and deletes a client key on the Settings page", async () => {
   await add.getByRole("button", { name: "Add to the list" }).click();
   // The new key waits for the review, like a setting's edit.
   await expect(card.getByText("Not saved yet")).toBeVisible();
-  expect(await clientKeys()).toHaveLength(2);
+  expect((await clientKeys()).length, "the client key count").toBe(2);
   await page.getByRole("button", { name: "Review and save" }).click();
   const review = page.getByRole("dialog", { name: "Review the changes" });
   await review.getByRole("button", { name: "Save 1 change" }).click();
@@ -382,17 +449,17 @@ test("adds and deletes a client key on the Settings page", async () => {
   await expect(card.getByText("Not saved yet")).toHaveCount(0);
   await expect(card.getByRole("listitem")).toHaveCount(3);
   const keys = await clientKeys();
-  expect(keys).toHaveLength(3);
+  expect(keys.length, "the client key count").toBe(3);
   const added = keys[2] ?? "-";
   expectFile(added, "the key added on the Settings page");
 
   await card.getByRole("button", { name: /^Delete / }).last().click();
   await expect(card.getByText("Will be deleted")).toBeVisible();
-  expect(await clientKeys()).toHaveLength(3);
+  expect((await clientKeys()).length, "the client key count").toBe(3);
   await page.getByRole("button", { name: "Review and save" }).click();
   await review.getByRole("button", { name: "Save 1 change" }).click();
   await expect(card.getByRole("listitem")).toHaveCount(2);
-  expect(await clientKeys()).toHaveLength(2);
+  expect((await clientKeys()).length, "the client key count").toBe(2);
   expectFile(added, "the deleted key", false);
   expectCommentsKept();
 });
@@ -445,11 +512,11 @@ test("adds and removes provider keys on the Credentials page", async () => {
   await page.goto(`${APP}credentials?start=key`);
   const add = page.getByRole("dialog", { name: "Add a provider API key" });
   await add.getByLabel("Provider").selectOption("gemini");
-  await add.getByLabel("API key", { exact: true }).fill(GEMINI_KEY);
+  await fillSecret(add.getByLabel("API key", { exact: true }), GEMINI_KEY);
   await add.getByLabel("Base URL (optional)").fill(DEAD);
   await add.getByRole("button", { name: "Add the key" }).click();
   await expect(page.getByText("Added the Gemini key: the server uses it from now on.")).toBeVisible();
-  expectFile(/^gemini-api-key:$/m, "a gemini-api-key list");
+  expectFile(/^ *gemini:$/m, "the v8 Gemini key group");
   expectFile(GEMINI_KEY, "the Gemini key");
 
   await page.getByRole("button", { name: /^Delete the Claude key / }).click();
@@ -461,8 +528,163 @@ test("adds and removes provider keys on the Credentials page", async () => {
   expectCommentsKept();
 });
 
+test("edits and removes a provider API key through the dashboard", async () => {
+  const page = the();
+  await editYaml((text) => text.replace(GEMINI_KEY, EDITED_KEY));
+  expectFile(GEMINI_KEY, "the old provider key", false);
+  expectFile(EDITED_KEY, "the edited provider key");
+  await page.goto(`${APP}credentials`);
+  await page.getByRole("button", { name: /^Delete the Gemini key / }).click();
+  await page.getByRole("dialog", { name: "Delete this Gemini key?" })
+    .getByRole("button", { name: "Delete key" }).click();
+  await expect(page.getByRole("button", { name: /^Delete the Gemini key / })).toHaveCount(0);
+  expectFile(EDITED_KEY, "the removed provider key", false);
+});
+
+test("adds a local compatible provider and records a successful proxy request", async () => {
+  fake = createServer((request, response) => {
+    if (request.url !== "/v1/chat/completions" || request.method !== "POST" ||
+        request.headers.authorization !== `Bearer ${COMPAT_KEY}`) {
+      response.writeHead(400).end();
+      return;
+    }
+    request.resume();
+    fakeRequests++;
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+      id: "local-answer", object: "chat.completion", created: 1, model: MODEL,
+      choices: [{ index: 0, message: { role: "assistant", content: ANSWER }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 },
+    }));
+  });
+  await new Promise<void>((done) => { fake?.listen(0, "127.0.0.1", done); });
+  const address = fake.address();
+  if (address === null || typeof address === "string" || address.port === 8317) {
+    throw new Error("The fake provider needs a safe loopback port");
+  }
+  fakeOrigin = `http://127.0.0.1:${String(address.port)}`;
+  await editYaml((text) => text.replace(/^api-keys:$/m,
+    "api-keys:\n    openai-compatibility:\n" +
+    `        - name: dashboard-local\n          base-url: ${fakeOrigin}/v1\n` +
+    `          keys:\n            - api-key: ${COMPAT_KEY}\n              proxy-url: direct\n` +
+    `          models:\n            - name: ${MODEL}\n              alias: ${MODEL}`));
+  expectFile(COMPAT_KEY, "the local provider credential");
+  const page = the();
+  await page.goto(`${APP}usage`);
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await expect(page.getByText("Usage isn't being recorded")).toHaveCount(0);
+  const [key] = await clientKeys();
+  const response = await fetch(`${ORIGIN}/v1/chat/completions`, {
+    method: "POST", headers: { Authorization: `Bearer ${key ?? ""}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "hello" }] }),
+  });
+  expect(response.status, "the local proxy response status").toBe(200);
+  const body = await response.json() as { choices?: { message?: { content?: string } }[] };
+  expect(body.choices?.[0]?.message?.content === ANSWER, "the fake provider's answer").toBe(true);
+  expect(fakeRequests, "requests received by the fake provider").toBe(1);
+  await expect.poll(async () => {
+    const usage = await call("/open-ferry/api/v1/usage/requests");
+    const data = await usage.json() as { requests?: { model: string; status: number }[] };
+    return data.requests?.some((request) => request.model === MODEL && request.status === 200) ?? false;
+  }, { message: "the usage ledger records the local provider call", timeout: 15_000 }).toBe(true);
+  await page.goto(`${APP}usage`);
+  const row = page.getByRole("table", { name: "Calls to providers, newest first" })
+    .getByRole("row").filter({ hasText: MODEL });
+  await expect(row, "the dashboard reports the local model request").toHaveCount(1);
+  await expect(row.getByText("200", { exact: true })).toBeVisible();
+  persistedClientKeys = await clientKeys();
+});
+
+test("refuses stale settings and YAML saves after an on-disk edit", async () => {
+  const page = the();
+  await page.goto(`${APP}settings`);
+  const retries = page.getByRole("textbox", { name: "Retries" });
+  await expect(retries).toHaveValue("4");
+  await retries.fill("6");
+  await page.getByRole("button", { name: "Review and save" }).click();
+  const review = page.getByRole("dialog", { name: "Review the changes" });
+  await expect(review).toBeVisible();
+  // The disk changes after review's read, before the actual write.
+  writeFileSync(configPath, file().replace(/(request-retry: )4\b/, (_, prefix: string) => `${prefix}8`));
+  await expect.poll(async () => {
+    const config = await management<Record<string, unknown>>("GET", "config");
+    return config["request-retry"];
+  }, { message: "the server loaded the independent on-disk retry change" }).toBe(8);
+  await review.getByRole("button", { name: "Save 1 setting" }).click();
+  await expect(review.getByText("The config changed since this page loaded")).toBeVisible();
+  await expect(review.getByText(/Unsaved edits will be lost on reload/)).toBeVisible();
+  expectFile(/^ *request-retry: 8\b/m, "the on-disk retry value after the refused settings save");
+  page.once("dialog", (dialog) => { void dialog.accept(); });
+  await review.getByRole("button", { name: "Reload latest config" }).click();
+  await expect(retries).toHaveValue("8");
+
+  const editor = await openYaml();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await pasteSecret("\n# unsaved dashboard edit\n");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const yamlReview = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(yamlReview).toBeVisible();
+  writeFileSync(configPath, `${file()}\n# independent disk edit\n`);
+  const onDisk = file();
+  await yamlReview.getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(yamlReview.getByText("The config changed since this page loaded")).toBeVisible();
+  expect(file() === onDisk, "the refused YAML save leaves every on-disk byte unchanged").toBe(true);
+  page.once("dialog", (dialog) => { void dialog.accept(); });
+  await yamlReview.getByRole("button", { name: "Reload latest config" }).click();
+  await page.getByRole("button", { name: "Show config.yaml" }).click();
+  await expectEditorShows("# The dashboard's real-save pass", "the reloaded file");
+});
+
+test("restarts on the same config and auth directory with saved settings and credentials", async () => {
+  const beforeRestart = file();
+  await stopServer();
+  await startServer();
+  expect(file() === beforeRestart, "restart keeps the saved file byte for byte").toBe(true);
+  const page = the();
+  await page.goto(`${APP}settings`);
+  await expect(page.getByRole("textbox", { name: "Retries" })).toHaveValue("8");
+  await expect(page.getByRole("combobox", { name: "How credentials are picked" })).toHaveValue("fill-first");
+  await expect(page.getByRole("textbox", { name: "Log directory limit (MB)" })).toHaveValue("64");
+  const keys = await clientKeys();
+  expect(JSON.stringify(keys) === JSON.stringify(persistedClientKeys), "client keys survived restart").toBe(true);
+  await page.goto(`${APP}credentials`);
+  await expect(page.getByRole("button", { name: /^Delete the Claude key / })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Delete the Gemini key / })).toHaveCount(0);
+  expectFile(COMPAT_KEY, "the saved compatible-provider credential after restart");
+  await page.goto(APP);
+  await page.getByRole("button", { name: "Connect a client", exact: true }).click();
+  await page.getByText("Address, model and shell", { exact: true }).click();
+  await page.getByRole("combobox", { name: "Model", exact: true }).selectOption(MODEL);
+  await expect(page.getByRole("combobox", { name: "Model", exact: true })).toHaveValue(MODEL);
+  const setup = await (await call("/open-ferry/api/v1/client-setup")).json() as { safe_mode: boolean; models: { id: string }[] };
+  expect(setup.safe_mode, "safe mode stays lifted after restart").toBe(false);
+  expect(setup.models.some((model) => model.id === MODEL), "the saved provider model is active after restart").toBe(true);
+  expectCommentsKept();
+});
+
+test("shows plain update status and refuses install and rollback with CLI instructions", async () => {
+  const page = the();
+  await page.goto(`${APP}about`);
+  await expect(page.getByRole("region", { name: "Updates" })).toBeVisible();
+  await expect(page.getByText(/To update this server, run.*open-ferry update.*then restart it/)).toBeVisible();
+  const response = await call("/open-ferry/api/v1/update");
+  expect(response.status, "plain update status").toBe(200);
+  const status = await response.json() as { supervisor: unknown };
+  expect(status.supervisor, "a plain run has no supervisor").toBeNull();
+  await expect(page.getByRole("button", { name: "Install now" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Roll back" })).toHaveCount(0);
+  for (const action of ["install", "rollback"]) {
+    const refused = await call(`/open-ferry/api/v1/update/${action}`, "POST",
+      action === "rollback" ? { target: "0.0.1" } : undefined);
+    expect(refused.status, `plain ${action} status`).toBe(409);
+    const error = await refused.json() as { error: string; message: string };
+    expect(error.error).toBe("not_supervised");
+    expect(error.message).toBe("this install is not supervised; run `open-ferry update` (or `open-ferry update -rollback`) on the server's computer, then restart the server");
+  }
+});
+
 test("ran under the binary's policy, on its origin only", () => {
-  expect(violations, "Content-Security-Policy violations").toEqual([]);
-  expect(pageErrors, "uncaught exceptions").toEqual([]);
-  expect(offOrigin, "requests that left the binary's origin").toEqual([]);
+  expect(violations.length, "Content-Security-Policy violation count").toBe(0);
+  expect(pageErrors.length, "uncaught exception count").toBe(0);
+  expect(offOrigin.length, "requests that left the binary's origin").toBe(0);
 });

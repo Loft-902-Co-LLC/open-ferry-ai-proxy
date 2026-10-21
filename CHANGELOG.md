@@ -10,6 +10,8 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Added
 
+- Real-server dashboard journeys in the required Ubuntu CI aggregate, covering first run, config saves, credentials, a loopback provider, usage, restart persistence and plain-install updates.
+
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
 - **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, its calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing login is a 401; the usual token is never sent in its place. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
@@ -90,6 +92,8 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Fixed
 
 - Machine-wide installs and later machine commands on Windows work when run from the built-in Administrator account (for example on cloud Windows Server VMs), including when new objects default to the installing account as owner.
+- Whole-file v8 YAML saves preserve the replacement document's trailing comments, including a dashboard edit that only adds a final comment.
+- Dashboard config saves use the loaded config ETag as `If-Match` on v8 writes, refusing concurrent changes with a reload action and an unsaved-edit warning. Older endpoints without ETags remain usable.
 
 ## [0.0.2] - 2026-10-20
 
