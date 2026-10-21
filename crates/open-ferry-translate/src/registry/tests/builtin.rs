@@ -37,6 +37,29 @@ fn parse(chunk: &[u8]) -> Value {
     serde_json::from_slice(chunk).expect("chunk is JSON")
 }
 
+#[test]
+fn builtin_response_parser_preserves_argument_number_text() {
+    let registry = Registry::builtin();
+    let request = json!({});
+    let ctx = context("gemini", &request, &request);
+    let body = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{"n":1E+2}}}]}}]}"#;
+    for client in [Format::OPENAI, Format::CLAUDE] {
+        let output = registry
+            .translate_non_stream(&Format::GEMINI, &client, &ctx, body.to_vec())
+            .unwrap();
+        let output = crate::json::exact::from_slice(&output).unwrap();
+        let args = if client == Format::OPENAI {
+            output["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            output["content"][0]["input"].to_string()
+        };
+        assert_eq!(args, r#"{"n":1E+2}"#, "{client}");
+    }
+}
+
 // Not upstream's: every Responses stream sharing pickRequestJSON must keep
 // JSON null distinct from unavailable bytes, through the registry too.
 #[test]
