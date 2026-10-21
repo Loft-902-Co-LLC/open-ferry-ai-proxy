@@ -181,9 +181,14 @@ export class ConfigEditor {
     this.adopt(fresh);
     return fresh;
   }
-  private async forWrite(paths: readonly string[], wholeFile = false): Promise<Snapshot> {
-    const fresh = await this.read();
-    const base = this.base;
+  private async forWrite(paths: readonly string[], wholeFile = false, fromRead = false): Promise<Snapshot> {
+    const fresh = await this.store.read();
+    if (this.versioned && fresh.etag === undefined) {
+      throw new Error("The server omitted the config version. Reload before saving.");
+    }
+    // A whole-list payload is built from a prior read even in a one-click
+    // form. Its re-read must not bless changes made after that payload.
+    const base = this.dirty || wholeFile || fromRead ? this.base : fresh;
     const conflicts = wholeFile && base?.etag !== fresh.etag ? ["config.yaml"] :
       paths.filter((path) => !same(valueAt(base?.tree, path), valueAt(fresh.tree, path))).map(fieldName);
     if (conflicts.length > 0) throw new ConfigConflict(conflicts);
@@ -341,7 +346,7 @@ export class ConfigEditor {
       return (await this.response<T>(path, request)).data;
     }
     const locations = this.paths(path);
-    const fresh = await this.forWrite(locations, path === CONFIG_YAML);
+    const fresh = await this.forWrite(locations, path === CONFIG_YAML, path === API_KEYS && request.method === "PUT");
     let target = path;
     let change = request;
     let value: unknown = request.json;
