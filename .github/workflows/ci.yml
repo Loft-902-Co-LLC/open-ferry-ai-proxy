@@ -718,6 +718,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Out-Host inside the installer bypasses PowerShell stream redirection.
+          # Capture the entire qualification process at the OS boundary and emit
+          # only ownership/lifecycle evidence, never generated config keys.
+          if ($env:OFP_OWNER_CAPTURED -ne '1') {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = Join-Path $PSHOME 'pwsh.exe'
+            $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            $info.WorkingDirectory = (Get-Location).ProviderPath
+            foreach ($arg in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)) {
+              $info.ArgumentList.Add($arg)
+            }
+            $info.Environment['OFP_OWNER_CAPTURED'] = '1'
+            $process = [Diagnostics.Process]::Start($info)
+            try {
+              $stdout = $process.StandardOutput.ReadToEndAsync()
+              $stderr = $process.StandardError.ReadToEndAsync()
+              $process.WaitForExit()
+              $captured = $stdout.GetAwaiter().GetResult() + "`n" + $stderr.GetAwaiter().GetResult()
+              foreach ($line in $captured.Split("`n")) {
+                if ($line -match '^(Runner SID:|Installed owner |Service owner |Published install-self|Standalone published init|Service and machine)') {
+                  Write-Host $line
+                }
+              }
+              $global:LASTEXITCODE = $process.ExitCode
+              if ($process.ExitCode -ne 0) { throw 'Windows ownership qualification failed; raw output withheld because it may contain generated keys' }
+            } finally { $process.Dispose() }
+            return
+          }
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
           if ($identity.User.Value -notmatch '-500$') { throw 'Expected the RID-500 hosted Administrator' }
           if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
