@@ -784,8 +784,10 @@ async fn ingress_capacity_reload_wakes_a_full_listener() {
 
 #[tokio::test]
 async fn ingress_finite_h2_response_reclaims_its_slot_after_the_producer_finishes() {
+    let mut config = limits();
+    config.max_connections = Some(1);
     let served = start_limited(
-        limits(),
+        config,
         None,
         Some(Router::new().route("/big", get(|| async { "x".repeat(4096) }))),
     );
@@ -809,6 +811,10 @@ async fn ingress_finite_h2_response_reclaims_its_slot_after_the_producer_finishe
         "finished response retained its admission slot"
     );
     drop(stream);
+    let mut recovered = connect(served.addr).await;
+    get_request(&mut recovered, "/big", false).await;
+    assert!(is_ok(&read_response(&mut recovered).await));
+    drop(recovered);
     within(served.control.release()).await;
     within(served.server).await.unwrap().unwrap();
 }

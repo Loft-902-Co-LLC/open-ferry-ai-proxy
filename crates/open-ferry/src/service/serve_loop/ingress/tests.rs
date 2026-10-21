@@ -274,25 +274,56 @@ async fn a_reset_delivery_keeps_its_reclamation_deadline() {
 
 #[test]
 fn nofile_without_a_raise_leaves_child_policy_unset() {
-    let mut remembered=Vec::new();
-    let result=raise_nofile_with(||Ok((256,256)),10240,true,|_|panic!("unchanged limit was set"),|limit|remembered.push(limit)).unwrap();
-    assert_eq!(result,((256,256),false));
-    assert!(remembered.is_empty(),"never-raised limit installed a child restore policy");
+    let mut remembered = Vec::new();
+    let result = raise_nofile_with(
+        || Ok((256, 256)),
+        10240,
+        true,
+        |_| panic!("unchanged limit was set"),
+        |limit| remembered.push(limit),
+    )
+    .unwrap();
+    assert_eq!(result, ((256, 256), false));
+    assert!(
+        remembered.is_empty(),
+        "never-raised limit installed a child restore policy"
+    );
 }
 #[test]
 fn a_failed_nofile_raise_does_not_install_child_policy() {
-    let mut remembered=Vec::new();
-    let result=raise_nofile_with(||Ok((256,10240)),10240,true,|_|Err(1),|limit|remembered.push(limit)).unwrap();
-    assert_eq!(result,((256,10240),true));
-    assert!(remembered.is_empty(),"failed raise installed a child restore policy");
+    let mut remembered = Vec::new();
+    let result = raise_nofile_with(
+        || Ok((256, 10240)),
+        10240,
+        true,
+        |_| Err(1),
+        |limit| remembered.push(limit),
+    )
+    .unwrap();
+    assert_eq!(result, ((256, 10240), true));
+    assert!(
+        remembered.is_empty(),
+        "failed raise installed a child restore policy"
+    );
 }
 #[test]
 fn apple_einval_retry_records_only_the_successful_raise() {
-    let events=std::cell::RefCell::new(Vec::new());
-    let result=raise_nofile_with(||Ok((256,u64::MAX)),65536,true,|limit| {
-        events.borrow_mut().push(("set",limit.0));
-        if limit.0==65536 {Err(22)} else {Ok(())}
-    },|limit|events.borrow_mut().push(("remember",limit.0))).unwrap();
-    assert_eq!(result,((10240,u64::MAX),false));
-    assert_eq!(*events.borrow(),[("set",65536),("set",10240),("remember",256)],"snapshot preceded a successful raise");
+    let events = std::cell::RefCell::new(Vec::new());
+    let result = raise_nofile_with(
+        || Ok((256, u64::MAX)),
+        65536,
+        true,
+        |limit| {
+            events.borrow_mut().push(("set", limit.0));
+            if limit.0 == 65536 { Err(22) } else { Ok(()) }
+        },
+        |limit| events.borrow_mut().push(("remember", limit.0)),
+    )
+    .unwrap();
+    assert_eq!(result, ((10240, u64::MAX), false));
+    assert_eq!(
+        *events.borrow(),
+        [("set", 65536), ("set", 10240), ("remember", 256)],
+        "snapshot preceded a successful raise"
+    );
 }

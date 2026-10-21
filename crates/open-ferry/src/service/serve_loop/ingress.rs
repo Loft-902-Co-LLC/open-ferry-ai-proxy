@@ -58,24 +58,33 @@ fn descriptor_ceiling() -> u64 {
 }
 
 // Portable seam shared by actual syscalls and injected raise/retry regressions.
-#[cfg(any(unix,test))]
+#[cfg(any(unix, test))]
 fn raise_nofile_with(
-    get: impl FnOnce()->Result<(u64,u64),i32>,
-    ceiling:u64,
-    retry_einval:bool,
-    mut set: impl FnMut((u64,u64))->Result<(),i32>,
-    mut remember: impl FnMut((u64,u64)),
-) -> Result<((u64,u64),bool),i32> {
-    let original=get()?;
-    if original.0>=original.1 { return Ok((original,false)); }
-    let mut raised=(raise_target(original.1,ceiling),original.1);
-    if raised.0<=original.0 {return Ok((original,false));}
-    let mut result=set(raised);
-    if result==Err(22) && retry_einval {
-        raised.0=raised.0.min(10240);
-        result=set(raised);
+    get: impl FnOnce() -> Result<(u64, u64), i32>,
+    ceiling: u64,
+    retry_einval: bool,
+    mut set: impl FnMut((u64, u64)) -> Result<(), i32>,
+    mut remember: impl FnMut((u64, u64)),
+) -> Result<((u64, u64), bool), i32> {
+    let original = get()?;
+    if original.0 >= original.1 {
+        return Ok((original, false));
     }
-    Ok(if result.is_ok() {remember(original); (raised,false)} else {(original,true)})
+    let mut raised = (raise_target(original.1, ceiling), original.1);
+    if raised.0 <= original.0 {
+        return Ok((original, false));
+    }
+    let mut result = set(raised);
+    if result == Err(22) && retry_einval {
+        raised.0 = raised.0.min(10240);
+        result = set(raised);
+    }
+    Ok(if result.is_ok() {
+        remember(original);
+        (raised, false)
+    } else {
+        (original, true)
+    })
 }
 
 pub(super) fn default_connection_cap() -> usize {
@@ -83,23 +92,57 @@ pub(super) fn default_connection_cap() -> usize {
     *CAP.get_or_init(|| {
         #[cfg(unix)]
         {
-            let outcome=raise_nofile_with(|| {
-                let mut limit=libc::rlimit {rlim_cur:0,rlim_max:0};
-                // SAFETY: getrlimit initializes the sized local structure.
-                if unsafe {libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit)}==0 {Ok((limit.rlim_cur,limit.rlim_max))}
-                else {Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL))}
-            },descriptor_ceiling(),cfg!(target_os="macos"),|next| {
-                let limit=libc::rlimit {rlim_cur:next.0,rlim_max:next.1};
-                // SAFETY: only the process soft limit changes, within hard.
-                if unsafe {libc::setrlimit(libc::RLIMIT_NOFILE,&limit)}==0 {Ok(())}
-                else {Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL))}
-            },|original| open_ferry_core::process_limits::remember_nofile_limit(libc::rlimit {rlim_cur:original.0,rlim_max:original.1}));
+            let outcome = raise_nofile_with(
+                || {
+                    let mut limit = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    // SAFETY: getrlimit initializes the sized local structure.
+                    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+                        Ok((limit.rlim_cur, limit.rlim_max))
+                    } else {
+                        Err(io::Error::last_os_error()
+                            .raw_os_error()
+                            .unwrap_or(libc::EINVAL))
+                    }
+                },
+                descriptor_ceiling(),
+                cfg!(target_os = "macos"),
+                |next| {
+                    let limit = libc::rlimit {
+                        rlim_cur: next.0,
+                        rlim_max: next.1,
+                    };
+                    // SAFETY: only the process soft limit changes, within hard.
+                    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error()
+                            .raw_os_error()
+                            .unwrap_or(libc::EINVAL))
+                    }
+                },
+                |original| {
+                    open_ferry_core::process_limits::remember_nofile_limit(libc::rlimit {
+                        rlim_cur: original.0,
+                        rlim_max: original.1,
+                    })
+                },
+            );
             match outcome {
-                Ok((limit,failed))=> {
-                    if failed {tracing::warn!(cap=cap_from_limit(limit.0),"could not raise open-file limit; using the current limit for admission");}
+                Ok((limit, failed)) => {
+                    if failed {
+                        tracing::warn!(
+                            cap = cap_from_limit(limit.0),
+                            "could not raise open-file limit; using the current limit for admission"
+                        );
+                    }
                     return cap_from_limit(limit.0);
                 }
-                Err(_)=>tracing::warn!("could not read open-file limit; using the default admission cap"),
+                Err(_) => tracing::warn!(
+                    "could not read open-file limit; using the default admission cap"
+                ),
             }
         }
         cap_from_limit(8192)
@@ -254,7 +297,11 @@ impl Traffic {
         }
         const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
         let mut state = self.state();
-        let before = (state.protocol, state.partial_head, state.connection_blocked_since);
+        let before = (
+            state.protocol,
+            state.partial_head,
+            state.connection_blocked_since,
+        );
         while state.protocol == Protocol::Unknown && !bytes.is_empty() {
             if bytes[0] != PREFACE[state.preface] {
                 state.protocol = Protocol::Http1;
@@ -271,7 +318,13 @@ impl Traffic {
             frames.feed(bytes, true, &mut state, self.config.header_timeout);
             state.read_frames = frames;
         }
-        if before != (state.protocol, state.partial_head, state.connection_blocked_since) {
+        if before
+            != (
+                state.protocol,
+                state.partial_head,
+                state.connection_blocked_since,
+            )
+        {
             self.changed.notify_one();
         }
     }
@@ -293,7 +346,8 @@ impl Traffic {
             state.idle_since = Some(Instant::now());
         }
         if (idle_was_none && state.idle_since.is_some())
-            || (connection_was_unblocked && state.connection_blocked_since.is_some()) {
+            || (connection_was_unblocked && state.connection_blocked_since.is_some())
+        {
             self.changed.notify_one();
         }
     }
@@ -385,13 +439,22 @@ impl Traffic {
                 consider(at + duration, "response write progress", None);
             }
             let connection_blocked = state.protocol == Protocol::Http2 && state.send_window <= 0;
-            if connection_blocked && state.deliveries.values().any(|progress| progress.pending != 0)
-                && let Some(at) = state.connection_blocked_since {
+            if connection_blocked
+                && state
+                    .deliveries
+                    .values()
+                    .any(|progress| progress.pending != 0)
+                && let Some(at) = state.connection_blocked_since
+            {
                 consider(at + duration, "connection window progress", None);
             }
             for (&id, progress) in &state.deliveries {
                 if progress.reset {
-                    consider(progress.progressed + RESET_GRACE, "stream reset grace", None);
+                    consider(
+                        progress.progressed + RESET_GRACE,
+                        "stream reset grace",
+                        None,
+                    );
                 } else if progress.pending != 0 && !connection_blocked {
                     let stream = (state.protocol == Protocol::Http2).then_some(id);
                     consider(
@@ -728,7 +791,12 @@ impl Delivery {
     fn new(bytes: Bytes, flight: Arc<Flight>) -> Self {
         if !bytes.is_empty() {
             let mut state = flight.traffic.state();
-            if state.send_window <= 0 && !state.deliveries.values().any(|progress| progress.pending != 0) {
+            if state.send_window <= 0
+                && !state
+                    .deliveries
+                    .values()
+                    .any(|progress| progress.pending != 0)
+            {
                 state.connection_blocked_since = Some(Instant::now());
             }
             let progress = state.deliveries.get_mut(&flight.id).unwrap();

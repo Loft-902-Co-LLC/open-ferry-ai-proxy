@@ -27,9 +27,7 @@ const FIXED_SCRATCH: usize = 6 << 20;
 ///   fixed table allowance would not cover malformed input.
 /// The reservation never shrinks between frames, covering retained scratch.
 pub(super) fn working_bytes(window: usize) -> usize {
-    ring_capacity(window + BLOCK)
-        + ring_capacity(window + BLOCK + MAX_LITERALS)
-        + FIXED_SCRATCH
+    ring_capacity(window + BLOCK) + ring_capacity(window + BLOCK + MAX_LITERALS) + FIXED_SCRATCH
 }
 
 fn ring_capacity(required: usize) -> usize {
@@ -42,7 +40,9 @@ fn ring_capacity(required: usize) -> usize {
 }
 
 fn malformed() -> DecodeError {
-    DecodeError::Failed("failed to decode zstd request body: malformed frame or entropy header".into())
+    DecodeError::Failed(
+        "failed to decode zstd request body: malformed frame or entropy header".into(),
+    )
 }
 
 fn little(input: &[u8], offset: usize, len: usize) -> Result<u64, DecodeError> {
@@ -60,31 +60,45 @@ pub(super) fn frame_window(input: &[u8]) -> Result<Option<usize>, DecodeError> {
     if (0x184d2a50..=0x184d2a5f).contains(&magic) {
         return Ok(None);
     }
-    if magic != 0xfd2fb528 { return Err(malformed()); }
+    if magic != 0xfd2fb528 {
+        return Err(malformed());
+    }
     let descriptor = *input.get(4).ok_or_else(malformed)?;
     let single = descriptor & 0x20 != 0;
     let dictionary_size = [0, 1, 2, 4][usize::from(descriptor & 3)];
     let content_size_len = match descriptor >> 6 {
-        0 => usize::from(single), 1 => 2, 2 => 4, _ => 8,
+        0 => usize::from(single),
+        1 => 2,
+        2 => 4,
+        _ => 8,
     };
     let content_offset = 5 + usize::from(!single) + dictionary_size;
     let content_size = little(input, content_offset, content_size_len)?
         + if content_size_len == 2 { 256 } else { 0 };
-    let window = if single { content_size } else {
+    let window = if single {
+        content_size
+    } else {
         let wd = *input.get(5).ok_or_else(malformed)?;
         let base = 1u64 << (10 + (wd >> 3));
         base + (base / 8) * u64::from(wd & 7)
     };
-    Ok(Some(usize::try_from(window).map_err(|_| DecodeError::TooLarge)?))
+    Ok(Some(
+        usize::try_from(window).map_err(|_| DecodeError::TooLarge)?,
+    ))
 }
 
-struct Bits<'a> { input: &'a [u8], position: usize }
+struct Bits<'a> {
+    input: &'a [u8],
+    position: usize,
+}
 impl Bits<'_> {
     fn read(&mut self, count: usize) -> Result<u32, DecodeError> {
         let mut value = 0;
         for bit in 0..count {
             let offset = self.position + bit;
-            value |= u32::from((self.input.get(offset / 8).ok_or_else(malformed)? >> (offset % 8)) & 1) << bit;
+            value |=
+                u32::from((self.input.get(offset / 8).ok_or_else(malformed)? >> (offset % 8)) & 1)
+                    << bit;
         }
         self.position += count;
         Ok(value)
@@ -96,7 +110,9 @@ impl Bits<'_> {
 fn fse_header(input: &[u8], max_log: u32, max_symbol: usize) -> Result<usize, DecodeError> {
     let mut bits = Bits { input, position: 0 };
     let log = bits.read(4)? + 5;
-    if log > max_log { return Err(malformed()); }
+    if log > max_log {
+        return Err(malformed());
+    }
     let total = 1u32 << log;
     let mut sum = 0;
     let mut symbols = 0;
@@ -110,19 +126,33 @@ fn fse_header(input: &[u8], max_log: u32, max_symbol: usize) -> Result<usize, De
         let value = if small < threshold {
             bits.position -= 1;
             small
-        } else if unchecked > mask { unchecked - threshold } else { unchecked };
+        } else if unchecked > mask {
+            unchecked - threshold
+        } else {
+            unchecked
+        };
         symbols += 1;
-        if symbols > max_symbol + 1 { return Err(malformed()); }
+        if symbols > max_symbol + 1 {
+            return Err(malformed());
+        }
         if value == 1 {
             loop {
                 let skip = bits.read(2)? as usize;
                 symbols += skip;
-                if symbols > max_symbol + 1 { return Err(malformed()); }
-                if skip != 3 { break; }
+                if symbols > max_symbol + 1 {
+                    return Err(malformed());
+                }
+                if skip != 3 {
+                    break;
+                }
             }
-        } else { sum += if value == 0 { 1 } else { value - 1 }; }
+        } else {
+            sum += if value == 0 { 1 } else { value - 1 };
+        }
     }
-    if sum != total { return Err(malformed()); }
+    if sum != total {
+        return Err(malformed());
+    }
     Ok(bits.position.div_ceil(8))
 }
 
@@ -130,29 +160,54 @@ fn fse_header(input: &[u8], max_log: u32, max_symbol: usize) -> Result<usize, De
 /// the actual decoding, history, integrity and complete format validation.
 pub(super) fn validate_block(input: &[u8]) -> Result<(), DecodeError> {
     let block_header = little(input, 0, 3)?;
-    if (block_header >> 1) & 3 != 2 { return Ok(()); }
+    if (block_header >> 1) & 3 != 2 {
+        return Ok(());
+    }
     let size = (block_header >> 3) as usize;
     let raw = input.get(3..3 + size).ok_or_else(malformed)?;
     let first = *raw.first().ok_or_else(malformed)?;
     let kind = first & 3;
     let format = (first >> 2) & 3;
     let (header_len, encoded) = if kind < 2 {
-        let len = match format { 0 | 2 => 1, 1 => 2, _ => 3 };
+        let len = match format {
+            0 | 2 => 1,
+            1 => 2,
+            _ => 3,
+        };
         let regenerated = little(raw, 0, len)? >> if len == 1 { 3 } else { 4 };
         (len, if kind == 1 { 1 } else { regenerated as usize })
     } else {
-        let (len, width) = match format { 0 | 1 => (3, 10), 2 => (4, 14), _ => (5, 18) };
+        let (len, width) = match format {
+            0 | 1 => (3, 10),
+            2 => (4, 14),
+            _ => (5, 18),
+        };
         (len, (little(raw, 0, len)? >> (4 + width)) as usize)
     };
-    let literals = raw.get(header_len..header_len + encoded).ok_or_else(malformed)?;
-    if kind == 2 && let Some(&length) = literals.first() && length < 128 {
-        let header = literals.get(1..1 + usize::from(length)).ok_or_else(malformed)?;
+    let literals = raw
+        .get(header_len..header_len + encoded)
+        .ok_or_else(malformed)?;
+    if kind == 2
+        && let Some(&length) = literals.first()
+        && length < 128
+    {
+        let header = literals
+            .get(1..1 + usize::from(length))
+            .ok_or_else(malformed)?;
         fse_header(header, 6, 255)?;
     }
     let sequences = raw.get(header_len + encoded..).ok_or_else(malformed)?;
     let first = *sequences.first().ok_or_else(malformed)?;
-    if first == 0 { return Ok(()); }
-    let count_len = if first < 128 { 1 } else if first < 255 { 2 } else { 3 };
+    if first == 0 {
+        return Ok(());
+    }
+    let count_len = if first < 128 {
+        1
+    } else if first < 255 {
+        2
+    } else {
+        3
+    };
     let modes = *sequences.get(count_len).ok_or_else(malformed)?;
     let mut source = sequences.get(count_len + 1..).ok_or_else(malformed)?;
     for (shift, log, symbol) in [(6, 9, 35), (4, 8, 31), (2, 9, 52)] {
