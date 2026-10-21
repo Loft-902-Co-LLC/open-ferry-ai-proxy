@@ -634,14 +634,15 @@ async fn ingress_h2_resets_only_the_stalled_stream_and_keeps_its_peer_stream() {
     }
     gate.proceed.notify_one();
     h2_window(&mut stream, 3, 32).await;
+    let mut healthy = Vec::new();
     loop {
         let frame = read_h2_packet(&mut stream).await;
         if frame.0 == 0 && frame.2 == 3 {
-            assert_eq!(frame.3, b"ok");
-            assert_ne!(frame.1 & 1, 0);
-            break;
+            healthy.extend_from_slice(&frame.3);
+            if frame.1 & 1 != 0 { break; }
         }
     }
+    assert_eq!(healthy, b"ok");
     assert_eq!(served.control.live_count(), 1);
     drop(stream);
     until(|| served.control.live_count() == 0).await;
@@ -733,7 +734,7 @@ async fn ingress_h2_oversize_rejection_does_not_drain_the_connection() {
         let frame = read_h2_packet(&mut stream).await;
         assert_ne!(frame.0, 7);
         if frame.0 == 0 && frame.2 == 3 {
-            assert_eq!(frame.3, b"ok");
+            assert_eq!(frame.3, b"hello 127.0.0.1");
             break;
         }
     }
