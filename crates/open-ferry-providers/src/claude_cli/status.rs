@@ -84,6 +84,7 @@ pub async fn auth_status_guarded(
         (dir, work, super::SpawnEnvironment::Inherited)
     };
     let mut command = Command::new(&program);
+    open_ferry_core::process_limits::restore_in_child(command.as_std_mut());
     command
         .args(["auth", "status", "--json"])
         .current_dir(work)

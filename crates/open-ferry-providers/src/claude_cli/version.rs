@@ -64,6 +64,7 @@ pub(super) async fn check_version_in(
         (None, super::SpawnEnvironment::Inherited)
     };
     let mut command = Command::new(&program);
+    open_ferry_core::process_limits::restore_in_child(command.as_std_mut());
     if let Some(work) = work {
         command.current_dir(work);
     }
