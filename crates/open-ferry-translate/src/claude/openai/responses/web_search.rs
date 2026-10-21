@@ -159,7 +159,9 @@ fn convert_with_query(item: &Value, fallback_query: &str, with_result: bool) -> 
 pub(super) struct SearchHistory {
     boundary_after: Vec<bool>,
     skip: std::collections::HashSet<usize>,
-    paused_query: std::collections::HashMap<usize, String>,
+    paused_query: std::collections::HashMap<usize, std::sync::Arc<str>>,
+    #[cfg(test)]
+    scan_steps: usize,
 }
 
 fn is_paused(item: &Value) -> bool {
@@ -185,41 +187,54 @@ impl SearchHistory {
             boundary_after: vec![false; items.len()],
             skip: Default::default(),
             paused_query: Default::default(),
+            #[cfg(test)]
+            scan_steps: 0,
         };
         let mut boundary = false;
+        let mut next_by_id = std::collections::HashMap::new();
+        let mut successors = vec![None; items.len()];
         for (index, item) in items.iter().enumerate().rev() {
-            history.boundary_after[index] = boundary;
-            boundary |= is_turn_boundary(item.as_ref());
-        }
-        for (index, item) in items.iter().enumerate() {
+            #[cfg(test)]
+            {
+                history.scan_steps += 1;
+            }
             let item = item.as_ref();
-            if !is_paused(item) {
+            history.boundary_after[index] = boundary;
+            if is_turn_boundary(item) {
+                boundary = true;
+                next_by_id.clear();
                 continue;
             }
-            let id = str_of(item.get("id")).trim().to_owned();
-            if id.is_empty() {
-                continue;
-            }
-            for (next, item) in items.iter().enumerate().skip(index + 1) {
-                let item = item.as_ref();
-                if is_turn_boundary(item) {
-                    break;
-                }
-                if str_of(item.get("type")) == "web_search_call"
-                    && str_of(item.get("id")).trim() == id
-                {
-                    history.skip.insert(index);
-                    let mut query = responses_web_search_call_query(items[index].as_ref());
-                    if query.is_empty() {
-                        query = history
-                            .paused_query
-                            .get(&index)
-                            .cloned()
-                            .unwrap_or_default();
+            if str_of(item.get("type")) == "web_search_call" {
+                let id = str_of(item.get("id")).trim().to_owned();
+                if !id.is_empty() {
+                    let next = next_by_id.insert(id, index);
+                    if is_paused(item) {
+                        successors[index] = next;
                     }
-                    history.paused_query.insert(next, query);
-                    break;
                 }
+            }
+        }
+        // Forward propagation retains the closest nonempty query in a paused
+        // chain. Share inherited strings instead of copying them at every link.
+        for (index, successor) in successors.into_iter().enumerate() {
+            #[cfg(test)]
+            {
+                history.scan_steps += 1;
+            }
+            if let Some(next) = successor {
+                history.skip.insert(index);
+                let query = responses_web_search_call_query(items[index].as_ref());
+                let query = if query.is_empty() {
+                    history
+                        .paused_query
+                        .get(&index)
+                        .cloned()
+                        .unwrap_or_else(|| std::sync::Arc::from(""))
+                } else {
+                    std::sync::Arc::from(query)
+                };
+                history.paused_query.insert(next, query);
             }
         }
         history
@@ -232,7 +247,7 @@ impl SearchHistory {
         let query = self
             .paused_query
             .get(&index)
-            .map(String::as_str)
+            .map(AsRef::as_ref)
             .unwrap_or("");
         let with_result =
             !is_paused(item) || self.boundary_after.get(index).copied().unwrap_or(false);
@@ -321,6 +336,137 @@ pub(super) fn attach_claude_citations(block: &mut Map<String, Value>, annotation
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Preserve the original forward-lookahead algorithm as a semantic oracle.
+    fn previous_scan(items: &[Value]) -> SearchHistory {
+        let mut history = SearchHistory {
+            boundary_after: vec![false; items.len()],
+            skip: Default::default(),
+            paused_query: Default::default(),
+            scan_steps: 0,
+        };
+        let mut boundary = false;
+        for (index, item) in items.iter().enumerate().rev() {
+            history.boundary_after[index] = boundary;
+            boundary |= is_turn_boundary(item);
+        }
+        for (index, item) in items.iter().enumerate() {
+            if !is_paused(item) {
+                continue;
+            }
+            let id = str_of(item.get("id")).trim().to_owned();
+            if id.is_empty() {
+                continue;
+            }
+            for (next, item) in items.iter().enumerate().skip(index + 1) {
+                if is_turn_boundary(item) {
+                    break;
+                }
+                if str_of(item.get("type")) == "web_search_call"
+                    && str_of(item.get("id")).trim() == id
+                {
+                    history.skip.insert(index);
+                    let query = responses_web_search_call_query(&items[index]);
+                    let query = if query.is_empty() {
+                        history
+                            .paused_query
+                            .get(&index)
+                            .cloned()
+                            .unwrap_or_else(|| std::sync::Arc::from(""))
+                    } else {
+                        std::sync::Arc::from(query)
+                    };
+                    history.paused_query.insert(next, query);
+                    break;
+                }
+            }
+        }
+        history
+    }
+
+    #[test]
+    fn indexed_search_history_matches_previous_scan_on_generated_inputs() {
+        let mut state = 36u64;
+        for length in 0..80 {
+            for _ in 0..12 {
+                let mut items = Vec::new();
+                for _ in 0..length {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let id = match (state >> 16) % 6 {
+                        0 => Value::Null,
+                        1 => json!(""),
+                        2 => json!(" a "),
+                        3 => json!("a"),
+                        4 => json!(2),
+                        _ => json!("2"),
+                    };
+                    let query = match (state >> 24) % 4 {
+                        0 => json!({"query":"q"}),
+                        1 => json!({"queries":["other"]}),
+                        2 => json!({"url":"https://example.com"}),
+                        _ => json!({}),
+                    };
+                    let item = match (state >> 32) % 12 {
+                        0 => json!({"type":"message","role":"user"}),
+                        1 => json!({"role":"user"}),
+                        2 => json!({"type":"function_call_output"}),
+                        3 => json!({"type":"custom_tool_call_output"}),
+                        4 => json!({"type":"tool_search_output"}),
+                        5 => json!({"type":"message","role":"assistant"}),
+                        6 => {
+                            json!({"type":"web_search_call","id":id,"status":"completed","action":query,"results":[]})
+                        }
+                        7 => {
+                            json!({"type":"web_search_call","id":id,"status":"in_progress","action":query,"results":null})
+                        }
+                        8 => {
+                            json!({"type":"web_search_call","status":"in_progress","action":query})
+                        }
+                        _ => {
+                            json!({"type":"web_search_call","id":id,"status":" IN_PROGRESS ","action":query})
+                        }
+                    };
+                    items.push(item);
+                }
+                let borrowed: Vec<_> = items.iter().map(std::borrow::Cow::Borrowed).collect();
+                let indexed = SearchHistory::scan(&borrowed);
+                let previous = previous_scan(&items);
+                assert_eq!(indexed.boundary_after, previous.boundary_after);
+                assert_eq!(indexed.skip, previous.skip);
+                assert_eq!(indexed.paused_query, previous.paused_query);
+                for (i, item) in items.iter().enumerate() {
+                    assert_eq!(
+                        indexed.claude_blocks(i, item),
+                        previous.claude_blocks(i, item)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_search_history_counts_linear_work_and_shares_inherited_queries() {
+        for repeated in [false, true] {
+            let items: Vec<_> = (0..20_000)
+                .map(|i| {
+                    Box::new(json!({"type":"web_search_call",
+                "id":if repeated {"same".into()} else {format!("id{i}")},"status":"in_progress",
+                "action":{"query":if i==0 {"q".repeat(1024)} else {String::new()}}}))
+                })
+                .collect();
+            let history = SearchHistory::scan(&items);
+            assert_eq!(history.scan_steps, 2 * items.len());
+            if repeated {
+                assert_eq!(history.skip.len(), items.len() - 1);
+                assert!(std::sync::Arc::ptr_eq(
+                    &history.paused_query[&1],
+                    &history.paused_query[&19_999]
+                ));
+            } else {
+                assert!(history.skip.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn tool_use_ids_are_sanitized_and_prefixed() {
