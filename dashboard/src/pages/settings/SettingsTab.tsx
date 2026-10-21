@@ -41,6 +41,8 @@ import {
   saveCall,
   settingChanges,
   settingValuesOf,
+  serverFactsIn,
+  type SettingId,
   type ServerFacts,
   type SettingValues,
 } from "./settingsModel";
@@ -144,6 +146,15 @@ function SettingsEditor({
 
   /** Marks `saved` as saved: the form and the key list take them as the server's. */
   const settleSaved = (saved: readonly PendingChange[]) => {
+    const accepted = editor.editor.acceptedValue<unknown>(CONFIG);
+    if (accepted !== undefined) {
+      // Publish the acknowledged values/version together before clearing
+      // RHF's draft, even while the background read is pending.
+      client.setQueryData([CONFIG, "config-draft", editor.scope], accepted);
+      client.setQueryData([...FACTS, editor.scope], {
+        data: serverFactsIn(accepted.tree), snapshot: { ...accepted, data: accepted.tree },
+      });
+    }
     const keysSaved: KeyChange[] = [];
     for (const pending of saved) {
       if (pending.kind === "setting") {
@@ -174,14 +185,17 @@ function SettingsEditor({
       let fresh: SettingValues | null = null;
       let restart: string | null = null;
       let addressProblem: string | null = null;
+      const moved = new Set<SettingId>();
       if (edited !== null) {
         const snapshot = await editor.editor.readValue<unknown>(CONFIG);
         const answer = snapshot.data;
         client.setQueryData([CONFIG, "config-draft", editor.scope], snapshot);
         let freshFacts = facts.data;
+        let addressSnapshot = snapshot;
         if (edited.managementAddress !== base.managementAddress) {
           // The proxy's port may have moved since the page read it.
           const factsSnapshot = await editor.editor.readValue<unknown>(V8_CONFIG);
+          addressSnapshot = factsSnapshot;
           freshFacts = await readServerFacts(() => Promise.resolve(factsSnapshot.data));
           client.setQueryData([...FACTS, editor.scope], { data: freshFacts, snapshot: factsSnapshot });
           addressProblem = managementAddressProblem(edited.managementAddress, freshFacts.proxyPort);
@@ -192,6 +206,11 @@ function SettingsEditor({
           });
         }
         fresh = settingValuesOf(answer, freshFacts);
+        if (editor.editor.versioned) {
+          for (const id of SETTING_IDS.filter((id) => edited[id] !== base[id])) {
+            if (editor.editor.draftMoved(saveCall(id, edited[id]).path, id === "managementAddress" ? addressSnapshot : snapshot)) moved.add(id);
+          }
+        }
       }
       let freshKeys: string[] | null = null;
       if (changes.length > 0) {
@@ -200,9 +219,9 @@ function SettingsEditor({
         freshKeys = keysIn(answer);
         editor.editor.checkKeyTargets(changes, freshKeys);
       }
-      return { edited, base, changes, fresh, freshKeys, restart, addressProblem };
+      return { edited, base, changes, fresh, freshKeys, restart, addressProblem, moved };
     },
-    onSuccess: ({ edited, base, changes, fresh, freshKeys, restart, addressProblem }) => {
+    onSuccess: ({ edited, base, changes, fresh, freshKeys, restart, addressProblem, moved }) => {
       if (addressProblem !== null) {
         // Shown at the field, as any problem with an edit is.
         settings.form.setError(
@@ -229,7 +248,9 @@ function SettingsEditor({
             settings.settle(id, fresh[id]);
           }
         }
-        const settingsFound = settingChanges(base, edited, fresh);
+        const settingsFound = settingChanges(base, edited, fresh).map((change) => ({ ...change,
+          movedOnServer: editor.editor.versioned ? moved.has(change.id) : change.movedOnServer,
+        }));
         found.push(...settingsFound.map((change): PendingChange => ({ kind: "setting", change })));
         if (settingsFound.some((change) => change.id === "managementAddress")) {
           restartFound = restart;

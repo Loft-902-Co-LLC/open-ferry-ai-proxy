@@ -173,6 +173,7 @@ export class ConfigEditor {
   private establishedVersion = false;
   private explicitDrafts = false;
   private drafts = new Map<string, Snapshot>();
+  private accepted: Snapshot | undefined;
   private yamlBase: ConfigRead<unknown> | undefined;
   recovery: ApiError | null = null;
   readonly store: ConfigStore;
@@ -275,14 +276,23 @@ export class ConfigEditor {
     if (this.versioned && fresh.etag === undefined) {
       throw new Error("The server omitted the config version. Reload before saving.");
     }
-    const base = this.dirty ? this.base : fresh;
-    const conflicts = paths.filter((path) => (this.explicitDrafts && !this.drafts.has(path)) || !same(
-      valueAt((this.drafts.get(path) ?? base)?.tree, path),
-      valueAt(fresh.tree, path),
-    )).map(fieldName);
+    const conflicts = this.changedPaths(paths, fresh).map(fieldName);
     if (conflicts.length > 0) throw new ConfigConflict(conflicts);
     return fresh;
   }
+  private changedPaths(paths: readonly string[], fresh: Snapshot): string[] {
+    const base = this.dirty ? this.base : fresh;
+    return paths.filter((path) => (this.explicitDrafts && !this.drafts.has(path)) || !same(
+      valueAt((this.drafts.get(path) ?? base)?.tree, path),
+      valueAt(fresh.tree, path),
+    ));
+  }
+  readonly draftMoved = (path: string, fresh: Snapshot): boolean => this.changedPaths(this.paths(path), fresh).length > 0;
+  /** The exact JSON update accepted at this response's version. */
+  readonly acceptedValue = <T>(path: string): ConfigRead<T> | undefined => this.accepted === undefined ? undefined : {
+    ...this.accepted, recovery: null,
+    data: (path === V8_CONFIG ? this.accepted.tree : formValues(this.accepted.tree, path)) as T,
+  };
   private paths(path: string): string[] {
     if (path === CONFIG_YAML) return [""];
     if (path === API_KEYS) return ["access/api-keys"];
@@ -324,6 +334,7 @@ export class ConfigEditor {
       tree: changedTree(this.base?.tree, changes),
       etag: answer.headers.get("etag") ?? fresh.etag,
     };
+    this.accepted = { tree: changedTree(fresh.tree, changes), etag: this.base.etag };
     // A field may be edited again before its invalidated query renders.
     // Its accepted value and response version are already one new base.
     for (const change of changes) if (this.drafts.has(change.path)) this.drafts.set(change.path, this.base);

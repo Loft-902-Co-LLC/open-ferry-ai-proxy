@@ -1940,3 +1940,51 @@ describe("Settings convergence safety", () => {
     expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual([]);
   });
 });
+
+describe("saved Settings review baselines", () => {
+  async function whileRefetchHeld(check: (user: ReturnType<typeof renderApp>["user"], state: ReturnType<typeof versionedServer>) => Promise<void>) {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    fireEvent.change(screen.getByRole("textbox", { name: "Retries" }), { target: { value: "3" } });
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    const pending: (() => void)[] = [];
+    let held = true;
+    state.api.use(route("GET", V8_CONFIG, () => {
+      const answer = { json: structuredClone(state.tree), headers: { ETag: state.tag() } };
+      return held && state.tree.routing.retry["request-retry"] === 3
+        ? new Promise((resolve) => { pending.push(() => { resolve(answer); }); }) : answer;
+    }));
+    try {
+      await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+      await screen.findByText("Saved 1 setting. The server uses it from now on.");
+      await waitFor(() => { expect(pending.length).toBeGreaterThan(0); });
+      held = false; // New review reads work; the background responses stay pending.
+      await check(user, state);
+    } finally {
+      held = false;
+      await act(async () => { for (const release of pending) release(); await Promise.resolve(); });
+    }
+  }
+  it("does not count a just-saved path as unsaved while its refetch is pending", async () => {
+    await whileRefetchHeld(async (_user, state) => {
+      expectNothingUnsaved();
+      expect(state.tree.routing.retry["request-retry"]).toBe(3);
+      expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`)[0]?.headers.get("if-match")).toBe('"1"');
+      await Promise.resolve();
+    });
+  });
+  it("shows no moved warning when the next edit uses the accepted saved-path base", async () => {
+    await whileRefetchHeld(async (user, state) => {
+      fireEvent.change(screen.getByRole("textbox", { name: "Retries" }), { target: { value: "4" } });
+      await user.click(screen.getByRole("button", { name: "Review and save" }));
+      const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+      expect(dialog).not.toHaveTextContent("changed on the server");
+      expect(dialog).not.toHaveTextContent("Changed on the server");
+      await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+      await screen.findByText("Saved 1 setting. The server uses it from now on.");
+      expect(state.tree.routing.retry["request-retry"]).toBe(4);
+      expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual(['"1"', '"2"']);
+    });
+  });
+});
