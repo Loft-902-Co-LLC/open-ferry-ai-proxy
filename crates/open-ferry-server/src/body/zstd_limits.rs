@@ -118,8 +118,11 @@ impl Bits<'_> {
     }
 }
 
-/// Nonallocating equivalent of fse/fse_decoder.rs:225-302, with the symbol
-/// bound checked before every zero-run growth instead of after the table.
+/// Parses the probability encoding from fse/fse_decoder.rs:225-302 without
+/// allocation. Rejects oversized symbol/accuracy tables before ruzstd's growth;
+/// in particular, an intermediate zero run must already fit the symbol bound.
+/// This is stricter about rejecting invalid headers before allocation, rather
+/// than a complete duplicate of ruzstd's table/bitstream acceptance checks.
 fn fse_header(input: &[u8], max_log: u32, max_symbol: usize) -> Result<usize, DecodeError> {
     let mut bits = Bits { input, position: 0 };
     let log = bits.read(4)? + 5;
@@ -169,8 +172,10 @@ fn fse_header(input: &[u8], max_log: u32, max_symbol: usize) -> Result<usize, De
     Ok(bits.position.div_ceil(8))
 }
 
-/// Preflight only allocation-driving entropy headers; ruzstd still performs
-/// the actual decoding, history, integrity and complete format validation.
+/// Parses allocation-driving entropy headers and all three sequence-count
+/// encodings, including two-byte zero, as ruzstd does. Malformed/truncated
+/// headers and oversized entropy tables are refused before allocation; ruzstd
+/// still performs decoding, history, integrity and complete format validation.
 pub(super) fn validate_block(input: &[u8]) -> Result<(), DecodeError> {
     let block_header = little(input, 0, 3)?;
     if (block_header >> 1) & 3 != 2 {
@@ -211,16 +216,17 @@ pub(super) fn validate_block(input: &[u8]) -> Result<(), DecodeError> {
     }
     let sequences = raw.get(header_len + encoded..).ok_or_else(malformed)?;
     let first = *sequences.first().ok_or_else(malformed)?;
-    if first == 0 {
+    let (count, count_len) = match first {
+        0..=127 => (u32::from(first), 1),
+        128..=254 => (
+            (u32::from(first - 128) << 8) | little(sequences, 1, 1)? as u32,
+            2,
+        ),
+        255 => (little(sequences, 1, 2)? as u32 + 0x7f00, 3),
+    };
+    if count == 0 {
         return Ok(());
     }
-    let count_len = if first < 128 {
-        1
-    } else if first < 255 {
-        2
-    } else {
-        3
-    };
     let modes = *sequences.get(count_len).ok_or_else(malformed)?;
     let mut source = sequences.get(count_len + 1..).ok_or_else(malformed)?;
     for (shift, log, symbol) in [(6, 9, 35), (4, 8, 31), (2, 9, 52)] {

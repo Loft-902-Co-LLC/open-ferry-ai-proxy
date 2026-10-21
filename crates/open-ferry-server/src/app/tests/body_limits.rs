@@ -100,6 +100,90 @@ async fn unauthenticated_declared_oversize_is_rejected_without_reading() {
 }
 
 #[tokio::test]
+async fn two_byte_zero_zstd_sequences_match_ruzstd_through_request_handling() {
+    use http::header;
+    use std::io::Read;
+
+    for (frame, expected) in [
+        (
+            &b"\x28\xb5\x2f\xfd\x00\x00\x2d\x00\x00\x10\x7b\x7d\x80\x00"[..],
+            &b"{}"[..],
+        ),
+        (
+            &b"\x28\xb5\x2f\xfd\x00\x00\x45\x00\x00\x28hello\x80\x00"[..],
+            &b"hello"[..],
+        ),
+    ] {
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(frame).unwrap();
+        let mut direct = Vec::new();
+        decoder.read_to_end(&mut direct).unwrap();
+        assert_eq!(direct, expected);
+
+        // Drive the production router's authentication, body admission and
+        // handler decoding, and compare with that same uncompressed request.
+        let app = crate::router(state_with_limit(2048));
+        let request = |body: Bytes, encoded: bool| {
+            let mut builder = Request::post("/v1/responses")
+                .header(header::AUTHORIZATION, "Bearer test-key")
+                .header(header::CONTENT_TYPE, "application/json");
+            if encoded {
+                builder = builder.header(header::CONTENT_ENCODING, "zstd");
+            }
+            builder.body(Body::from(body)).unwrap()
+        };
+        let plain = app
+            .clone()
+            .oneshot(request(Bytes::copy_from_slice(expected), false))
+            .await
+            .unwrap();
+        let compressed = app
+            .oneshot(request(Bytes::copy_from_slice(frame), true))
+            .await
+            .unwrap();
+        assert_eq!(compressed.status(), plain.status());
+        let plain_text = body_text(plain).await;
+        let compressed_text = body_text(compressed).await;
+        assert!(!plain_text.contains("decode zstd"));
+        assert_eq!(compressed_text, plain_text, "fixture {expected:?}");
+
+        // Assert the decoded bytes as well, through the shared request reader.
+        let mut headers = http::HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
+        assert_eq!(
+            crate::body::read_decoded(&headers, Body::from(frame), 2048)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    // Truncated two-/three-byte counts and every nonzero count encoding still
+    // require their following bytes/modes. None may become a zero-count bypass.
+    for count in [
+        &b"\x80"[..],
+        &b"\xff"[..],
+        &b"\xff\x00"[..],
+        &b"\x01"[..],
+        &b"\x80\x01"[..],
+        &b"\xff\x00\x00"[..],
+    ] {
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0];
+        let block_size = 3 + count.len();
+        frame.extend_from_slice(&(((block_size as u32) << 3) | 5).to_le_bytes()[..3]);
+        frame.extend_from_slice(b"\x10{}");
+        frame.extend_from_slice(count);
+        let mut headers = http::HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
+        assert_eq!(
+            crate::body::read_decoded(&headers, Body::from(frame), 2048)
+                .await
+                .unwrap_err()
+                .status(),
+            400
+        );
+    }
+}
+
+#[tokio::test]
 async fn every_body_route_rejects_chunked_oversize_in_the_upstream_shape() {
     let app = crate::router(state_with_limit(64));
     for route in ROUTES {
