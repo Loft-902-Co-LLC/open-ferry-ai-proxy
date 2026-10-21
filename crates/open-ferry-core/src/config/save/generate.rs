@@ -24,7 +24,9 @@
 //! Deviations from upstream:
 //! - The untyped sections above always hold upstream's defaults here,
 //!   where upstream's hold what the file set; the merge keeps the file's
-//!   values in them instead of writing them back re-rendered.
+//!   values in them instead of writing them back re-rendered. The save layer
+//!   supplies the decoded plugin config nodes before encoding, because their
+//!   pending comments can affect later generated fields too.
 //! - A payload value that is a mapping with a key that isn't a string, or
 //!   a timestamp whose zone is 24 hours or more from UTC, can't be written
 //!   (the loader keeps neither); saving fails with an error naming the
