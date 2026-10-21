@@ -10,7 +10,8 @@ use std::sync::atomic::AtomicUsize;
 use tokio::time::Instant;
 
 /// Let GOAWAY reach the peer, then reclaim an idle peer that never completes
-/// h2's graceful ping exchange. Never cuts a stream that is still open.
+/// h2's graceful ping exchange. Accepted streams also have an absolute drain
+/// bound of this grace plus the configured body deadline.
 const GOAWAY_GRACE: Duration = Duration::from_secs(5);
 
 /// Reserve half the process limit (at least 256 descriptors) for upstream
@@ -99,6 +100,7 @@ pub(super) fn default_connection_cap() -> usize {
                 }
                 return cap_from_limit(limit.rlim_cur);
             }
+            tracing::warn!("could not read open-file limit; using the default admission cap");
         }
         // Winsock sockets are not CRT file descriptors and Windows exposes no
         // RLIMIT_NOFILE for them. Use a conservative finite handle envelope.
@@ -414,10 +416,14 @@ impl Traffic {
     }
 
     #[cfg(test)]
-    pub(super) fn has_partial_headers(&self) -> bool { self.state().partial_head.is_some() }
+    pub(super) fn has_partial_headers(&self) -> bool {
+        self.state().partial_head.is_some()
+    }
 
     #[cfg(test)]
-    pub(super) fn connection_send_window(&self) -> i64 { self.state().send_window }
+    pub(super) fn connection_send_window(&self) -> i64 {
+        self.state().send_window
+    }
 }
 
 /// Only frame headers (nine bytes), lengths and stream lifecycle bits are kept.

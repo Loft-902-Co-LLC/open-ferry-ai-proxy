@@ -639,7 +639,9 @@ async fn ingress_h2_resets_only_the_stalled_stream_and_keeps_its_peer_stream() {
         let frame = read_h2_packet(&mut stream).await;
         if frame.0 == 0 && frame.2 == 3 {
             healthy.extend_from_slice(&frame.3);
-            if frame.1 & 1 != 0 { break; }
+            if frame.1 & 1 != 0 {
+                break;
+            }
         }
     }
     assert_eq!(healthy, b"ok");

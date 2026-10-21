@@ -51,12 +51,12 @@
 //! - The mode is fixed when the request arrives, where upstream reads
 //!   `request-log` again when it finishes; commercial mode is read live,
 //!   where upstream reads it only at start.
-//! - Bodies are kept in memory up to [`CAPTURE_LIMIT`] bytes each instead
-//!   of spilled to temporary files, so there are no spill files to purge at
-//!   start; what is left out is counted in one line at the end of the log.
-//! - With `request-log` off, the client's body is kept as the handler reads
-//!   it, whatever its size, where upstream reads a body of up to 1 MiB
-//!   ahead of the handler.
+//! - Request capture and decoded rendering are bounded to
+//!   [`REQUEST_CAPTURE_LIMIT`] bytes; response and attempt bodies keep the
+//!   [`CAPTURE_LIMIT`] bound. Bodies stay in memory instead of spilling to
+//!   files, and omitted bytes are noted in the log.
+//! - In either logging mode, the server captures the client's prefix as
+//!   authenticated admission reads it. Upstream reads ahead of the handler.
 //! - With `request-log` off, an error log has an `=== API RESPONSE n ===`
 //!   section for each attempt but an upstream WebSocket's: its answer's
 //!   status and headers, the body of an answer with an error status, and

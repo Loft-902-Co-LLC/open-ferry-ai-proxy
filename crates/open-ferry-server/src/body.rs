@@ -8,6 +8,8 @@
 //!   disables its limit. Both raw and decoded bodies are bounded.
 //! - `gzip` is decoded as well as `zstd`.
 //! - The text of a zstd decoding error differs.
+//! - Zstd windows are limited to the smaller of the upload limit and 8 MiB;
+//!   decoder working storage is reserved before expansion.
 //! - A JSON body with 128 or more arrays and objects inside one another is
 //!   refused with a 400 ([`check_depth`]), in the error format of the route
 //!   that read it, before a translator or an executor sees it. Upstream
