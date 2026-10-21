@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_web_search.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude's server-side web search as a Responses `web_search_call`.
@@ -119,12 +119,19 @@ pub(super) fn build_responses_web_search_call_item(
 pub(super) fn convert_responses_web_search_call_to_claude_blocks(
     item: &Value,
 ) -> Option<[Value; 2]> {
+    convert_with_query(item, "", true)?.try_into().ok()
+}
+
+fn convert_with_query(item: &Value, fallback_query: &str, with_result: bool) -> Option<Vec<Value>> {
     let tool_use_id = claude_web_search_tool_use_id(str_of(item.get("id")).trim());
     if tool_use_id.is_empty() {
         return None;
     }
     let mut input = Map::new();
-    let query = responses_web_search_call_query(item);
+    let mut query = responses_web_search_call_query(item);
+    if query.is_empty() {
+        query = fallback_query.to_owned();
+    }
     if !query.is_empty() {
         input.insert("query".into(), query.into());
     }
@@ -134,6 +141,9 @@ pub(super) fn convert_responses_web_search_call_to_claude_blocks(
         "name": WEB_SEARCH_TOOL_NAME,
         "input": input,
     });
+    if !with_result {
+        return Some(vec![tool_use]);
+    }
     let content =
         responses_web_search_results_to_claude(item.get("results")).unwrap_or_else(|| json!([]));
     let result = json!({
@@ -141,7 +151,97 @@ pub(super) fn convert_responses_web_search_call_to_claude_blocks(
         "tool_use_id": tool_use_id,
         "content": content,
     });
-    Some([tool_use, result])
+    Some(vec![tool_use, result])
+}
+
+/// Paused searches are replayed without invented results; a continuation in
+/// the same assistant run replaces the paused item and inherits its query.
+pub(super) struct SearchHistory {
+    boundary_after: Vec<bool>,
+    skip: std::collections::HashSet<usize>,
+    paused_query: std::collections::HashMap<usize, String>,
+}
+
+fn is_paused(item: &Value) -> bool {
+    str_of(item.get("type")) == "web_search_call"
+        && crate::go::equal_fold(str_of(item.get("status")).trim(), "in_progress")
+        && item.get("results").is_none()
+}
+
+fn is_turn_boundary(item: &Value) -> bool {
+    let kind = str_of(item.get("type"));
+    let role = str_of(item.get("role"));
+    match kind.as_ref() {
+        "message" => role != "assistant",
+        "" if !role.is_empty() => role != "assistant",
+        "function_call_output" | "custom_tool_call_output" | "tool_search_output" => true,
+        _ => false,
+    }
+}
+
+impl SearchHistory {
+    pub(super) fn scan(items: &[impl AsRef<Value>]) -> Self {
+        let mut history = Self {
+            boundary_after: vec![false; items.len()],
+            skip: Default::default(),
+            paused_query: Default::default(),
+        };
+        let mut boundary = false;
+        for (index, item) in items.iter().enumerate().rev() {
+            history.boundary_after[index] = boundary;
+            boundary |= is_turn_boundary(item.as_ref());
+        }
+        for (index, item) in items.iter().enumerate() {
+            let item = item.as_ref();
+            if !is_paused(item) {
+                continue;
+            }
+            let id = str_of(item.get("id")).trim().to_owned();
+            if id.is_empty() {
+                continue;
+            }
+            for (next, item) in items.iter().enumerate().skip(index + 1) {
+                let item = item.as_ref();
+                if is_turn_boundary(item) {
+                    break;
+                }
+                if str_of(item.get("type")) == "web_search_call"
+                    && str_of(item.get("id")).trim() == id
+                {
+                    history.skip.insert(index);
+                    let mut query = responses_web_search_call_query(items[index].as_ref());
+                    if query.is_empty() {
+                        query = history
+                            .paused_query
+                            .get(&index)
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                    history.paused_query.insert(next, query);
+                    break;
+                }
+            }
+        }
+        history
+    }
+
+    pub(super) fn claude_blocks(&self, index: usize, item: &Value) -> Option<Vec<Value>> {
+        if self.skip.contains(&index) {
+            return None;
+        }
+        let query = self
+            .paused_query
+            .get(&index)
+            .map(String::as_str)
+            .unwrap_or("");
+        let with_result =
+            !is_paused(item) || self.boundary_after.get(index).copied().unwrap_or(false);
+        if with_result && query.is_empty() {
+            convert_responses_web_search_call_to_claude_blocks(item).map(Vec::from)
+        } else {
+            convert_with_query(item, query, with_result)
+        }
+    }
 }
 
 /// `responsesWebSearchCallQuery`: the query of a `web_search_call`, also

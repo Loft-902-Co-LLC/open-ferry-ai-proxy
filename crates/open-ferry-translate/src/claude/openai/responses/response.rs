@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_response.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages events → OpenAI Responses events.
@@ -472,7 +472,18 @@ impl ClaudeToOpenAIResponsesStream {
                 // when the next block starts or at `message_stop`, so that
                 // the final stop reason counts.
                 let tool_use_id = str_of(block.get("tool_use_id"));
-                if let Some(&position) = self.web_search_by_tool_id.get(&*tool_use_id) {
+                let position = self
+                    .web_search_by_tool_id
+                    .get(&*tool_use_id)
+                    .copied()
+                    .or_else(|| {
+                        if tool_use_id.is_empty() {
+                            return None;
+                        }
+                        self.start_web_search(index, &tool_use_id, out);
+                        self.web_search_by_tool_id.get(&*tool_use_id).copied()
+                    });
+                if let Some(position) = position {
                     self.web_searches[position].results =
                         claude_web_search_results_to_responses(block.get("content"));
                 }
@@ -748,7 +759,12 @@ impl ClaudeToOpenAIResponsesStream {
         }
         for position in 0..self.web_searches.len() {
             if !self.web_searches[position].emitted {
-                self.finalize_web_search(position, tool_status, out);
+                let status = web_search_status(
+                    &self.stop_reason,
+                    tool_status,
+                    self.web_searches[position].results.as_ref(),
+                );
+                self.finalize_web_search(position, status, out);
             }
         }
 
@@ -763,6 +779,12 @@ impl ClaudeToOpenAIResponsesStream {
         response.insert("error".into(), Value::Null);
         if let Some(details) = incomplete_details(&self.stop_reason) {
             response.insert("incomplete_details".into(), details);
+        }
+        if context_window_exceeded(&self.stop_reason) {
+            response.insert("error".into(), context_window_error());
+        }
+        if pause_turn(&self.stop_reason) {
+            response.insert("end_turn".into(), false.into());
         }
         for (key, value) in self.echo.iter().flatten() {
             response.insert((*key).into(), value.clone());
@@ -1523,7 +1545,26 @@ fn non_stream_with_tool_search(
                     }
                     "web_search_tool_result" => {
                         let tool_use_id = str_of(block.get("tool_use_id"));
-                        if let Some(&position) = web_search_by_tool_id.get(&*tool_use_id) {
+                        let position =
+                            web_search_by_tool_id
+                                .get(&*tool_use_id)
+                                .copied()
+                                .or_else(|| {
+                                    if tool_use_id.is_empty() {
+                                        return None;
+                                    }
+                                    let position = push_item(
+                                        &mut items,
+                                        &mut block_to_item,
+                                        "web_search_call",
+                                        index,
+                                    );
+                                    items[position].id = responses_web_search_call_id(&tool_use_id);
+                                    items[position].call_id = tool_use_id.to_string();
+                                    web_search_by_tool_id.insert(tool_use_id.to_string(), position);
+                                    Some(position)
+                                });
+                        if let Some(position) = position {
                             items[position].results =
                                 claude_web_search_results_to_responses(block.get("content"));
                         }
@@ -1606,7 +1647,7 @@ fn non_stream_with_tool_search(
     }
 
     let (_, status) = terminal_state(&stop_reason);
-    let incomplete = status == "incomplete";
+    let incomplete = matches!(status, "incomplete" | "failed");
     let mut out = json!({
         "id": response_id,
         "object": "response",
@@ -1624,6 +1665,12 @@ fn non_stream_with_tool_search(
             "total_tokens": 0,
         },
     });
+    if context_window_exceeded(&stop_reason) {
+        out["error"] = context_window_error();
+    }
+    if pause_turn(&stop_reason) {
+        out["end_turn"] = false.into();
+    }
     if let Some(request) = picked {
         for (key, value) in echo_fields(request, |_| None) {
             out[key] = value;
@@ -1651,7 +1698,10 @@ fn non_stream_with_tool_search(
                     &claude_web_search_query(&item.args),
                     item.results.as_ref(),
                 );
-                search.insert("status".into(), status.into());
+                search.insert(
+                    "status".into(),
+                    web_search_status(&stop_reason, status, item.results.as_ref()).into(),
+                );
                 Value::Object(search)
             }
             "message" => message_item(&item.id, status, &item.text, &item.annotations),
@@ -1868,7 +1918,9 @@ fn reasoning_carrier(block: &Value) -> String {
 /// `claudeResponsesTerminalState`: the final event and the response status.
 /// A stop that has [`incomplete_details`] leaves the response incomplete.
 fn terminal_state(stop_reason: &str) -> (&'static str, &'static str) {
-    if incomplete_details(stop_reason).is_some() {
+    if context_window_exceeded(stop_reason) {
+        ("response.failed", "failed")
+    } else if incomplete_details(stop_reason).is_some() {
         ("response.incomplete", "incomplete")
     } else {
         ("response.completed", "completed")
@@ -1877,7 +1929,11 @@ fn terminal_state(stop_reason: &str) -> (&'static str, &'static str) {
 
 /// `claudeResponsesOutputStatus`
 fn output_status(stop_reason: &str) -> &'static str {
-    terminal_state(stop_reason).1
+    if context_window_exceeded(stop_reason) || incomplete_details(stop_reason).is_some() {
+        "incomplete"
+    } else {
+        "completed"
+    }
 }
 
 /// `claudeResponsesIncompleteDetails`: the `incomplete_details` of a stop
@@ -1887,10 +1943,25 @@ fn output_status(stop_reason: &str) -> &'static str {
 fn incomplete_details(stop_reason: &str) -> Option<Value> {
     match crate::go::to_lower(stop_reason.trim()).as_str() {
         "max_tokens" => Some(json!({"reason": "max_output_tokens"})),
-        // Claude paused a long server tool turn. That isn't a token limit,
-        // and Responses has no reason for it, so the details stay `null`.
-        "pause_turn" => Some(Value::Null),
+        "refusal" => Some(json!({"reason":"content_filter"})),
         _ => None,
+    }
+}
+
+fn context_window_exceeded(reason: &str) -> bool {
+    crate::go::equal_fold(reason.trim(), "model_context_window_exceeded")
+}
+fn pause_turn(reason: &str) -> bool {
+    crate::go::equal_fold(reason.trim(), "pause_turn")
+}
+fn context_window_error() -> Value {
+    json!({"code":"context_length_exceeded","message":"Claude stopped because the conversation filled the model context window (stop_reason: model_context_window_exceeded)."})
+}
+fn web_search_status(reason: &str, status: &'static str, results: Option<&Value>) -> &'static str {
+    if pause_turn(reason) && results.is_none() {
+        "in_progress"
+    } else {
+        status
     }
 }
 
@@ -2016,3 +2087,7 @@ impl crate::registry::StreamTranslator for ClaudeToOpenAIResponsesStream {
         self.tool_input_error()
     }
 }
+
+#[cfg(test)]
+#[path = "response/stop_reasons_tests.rs"]
+mod stop_reasons_tests;

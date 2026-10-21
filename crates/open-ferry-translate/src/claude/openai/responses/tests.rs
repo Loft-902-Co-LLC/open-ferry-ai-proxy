@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/claude/openai/responses/ (v8.0.32, MIT):
+// Ported from CLIProxyAPI internal/translator/claude/openai/responses/ (v8.0.36, MIT):
 // - claude_openai-responses_server_tool_test.go → `server_tool`
 // - claude_openai-responses_reasoning_order_test.go → `reasoning_order`
 // - claude_openai-responses_citations_test.go → `citations`
@@ -478,7 +478,7 @@ mod server_tool {
     }
 
     #[test]
-    fn web_search_result_without_matching_use_is_ignored() {
+    fn web_search_result_without_matching_use_keeps_continuation() {
         let events = stream(&[
             message_start("msg_ws"),
             block_start(
@@ -494,8 +494,8 @@ mod server_tool {
         {
             assert_eq!(
                 count_at(data, "response.output"),
-                0,
-                "orphan result produced output items: {data}"
+                1,
+                "continuation result lost its output item: {data}"
             );
         }
     }
@@ -1213,14 +1213,14 @@ mod pause {
     use super::*;
 
     // TestClaudeResponsesServerToolStopReason: a `pause_turn` stop, in any
-    // case and with spaces around it, leaves the response incomplete with
-    // `null` details; `max_tokens` gives its reason; the other stops
+    // case and with spaces around it, completes with end_turn=false;
+    // `max_tokens` gives its incomplete reason; the other stops
     // complete it. The search and the usage survive either way.
     #[test]
     fn server_tool_stop_reason() {
         for (reason, status, detail) in [
-            ("pause_turn", "incomplete", Some(Value::Null)),
-            (" PAUSE_TURN ", "incomplete", Some(Value::Null)),
+            ("pause_turn", "completed", None),
+            (" PAUSE_TURN ", "completed", None),
             (
                 "max_tokens",
                 "incomplete",

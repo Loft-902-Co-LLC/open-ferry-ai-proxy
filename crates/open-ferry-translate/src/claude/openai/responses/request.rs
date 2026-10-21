@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → Claude Messages request.
@@ -62,9 +62,7 @@ use super::tools::{
     Descriptor, RequestTools, allows_external_web_access, is_unsupported_builtin_tool_type,
     qualify, tool_description, tool_name, tool_parameters,
 };
-use super::web_search::{
-    attach_claude_citations, convert_responses_web_search_call_to_claude_blocks,
-};
+use super::web_search::attach_claude_citations;
 use crate::apply_patch;
 use crate::common::cache_control;
 use crate::common::claude::{
@@ -207,7 +205,10 @@ fn convert(
     // Before the prefill check, so an interrupted turn ends with a made-up
     // tool result rather than an assistant turn some models reject.
     let mut messages = repair_tool_pairing(messages);
-    if !compat && rejects_assistant_prefill(model_name) && messages.last().is_some_and(is_assistant)
+    if !compat
+        && rejects_assistant_prefill(model_name)
+        && messages.last().is_some_and(is_assistant)
+        && !messages.last().is_some_and(ends_with_server_tool)
     {
         messages.pop();
     }
@@ -248,7 +249,8 @@ fn convert(
     if native_tool_search && let Some(anchor) = tool_search::deferred_anchor_tool(&claude_tools) {
         claude_tools.insert(anchor_index.unwrap_or(claude_tools.len()), anchor);
     }
-    if !claude_tools.is_empty() {
+    let has_tools = !claude_tools.is_empty();
+    if has_tools {
         out.insert("tools".into(), claude_tools.into());
     }
     let name_map = tools.name_map(&included);
@@ -258,9 +260,49 @@ fn convert(
         out.insert("tool_choice".into(), choice);
     }
 
+    let choice = request.get("tool_choice");
+    let choice_kind = choice
+        .and_then(|v| v.as_str().or_else(|| v.get("type").and_then(Value::as_str)))
+        .unwrap_or("")
+        .trim();
+    let choice_none = choice_kind == "none";
+    let forced_filtered = !out.contains_key("tool_choice")
+        && match choice {
+            Some(Value::String(s)) => s == "required",
+            Some(Value::Object(_)) => {
+                !matches!(choice_kind, "" | "auto" | "none") && !included.contains(choice_kind)
+            }
+            _ => false,
+        };
+    if request.get("parallel_tool_calls") == Some(&Value::Bool(false))
+        && has_tools
+        && !choice_none
+        && !forced_filtered
+    {
+        let choice = out
+            .entry("tool_choice")
+            .or_insert_with(|| json!({"type":"auto"}));
+        if choice.get("type").and_then(Value::as_str) != Some("none") {
+            choice["disable_parallel_tool_use"] = true.into();
+        }
+    }
+
     let mut out = Value::Object(out);
     apply_translated_to_claude(&mut out, request, "openai-response", model_name, models);
     (out, drops.err())
+}
+
+fn ends_with_server_tool(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|parts| parts.last())
+        .is_some_and(|part| {
+            matches!(
+                go::to_lower(str_of(part.get("type")).trim()).as_str(),
+                "server_tool_use" | "web_search_tool_result"
+            )
+        })
 }
 
 /// `normalizeCodexAgentMessages`: Codex's multi-agent `agent_message` items
@@ -484,7 +526,8 @@ fn convert_input(
     let mut answered = HashSet::new();
     let mut called = HashSet::new();
 
-    for item in &items {
+    let search_history = super::web_search::SearchHistory::scan(&items);
+    for (item_index, item) in items.iter().enumerate() {
         let item: &Value = item;
         // These already became system blocks.
         if is_system_level_role(&str_of(item.get("role"))) {
@@ -506,8 +549,8 @@ fn convert_input(
                 turns.push(role, parts);
             }
             "web_search_call" => {
-                if let Some(blocks) = convert_responses_web_search_call_to_claude_blocks(item) {
-                    turns.push("assistant", blocks.into());
+                if let Some(blocks) = search_history.claude_blocks(item_index, item) {
+                    turns.push("assistant", blocks);
                 }
             }
             "reasoning" => {
@@ -1262,6 +1305,7 @@ fn convert_tool_choice(
         },
         choice @ Value::Object(_) => {
             let kind = str_of(choice.get("type"));
+            let kind = kind.trim();
             if kind != "function" && kind != "custom" {
                 return None;
             }

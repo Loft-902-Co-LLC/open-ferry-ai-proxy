@@ -1,5 +1,5 @@
 // Ported from responsesSSEFramer and its helpers in CLIProxyAPI
-// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.32, MIT).
+// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Puts a Responses event stream back into whole events as it passes, drops
@@ -268,7 +268,9 @@ impl Framer {
         let status = error.status;
         let err_text = stream_error_text(&error, status);
         self.terminal_error = Some(error);
-        let failure_event = if self.failure_event == "response.failed" {
+        let is_response_failed =
+            json::get(payload, "type").is_some_and(|value| value.str() == "response.failed");
+        let failure_event = if is_response_failed || self.failure_event == "response.failed" {
             "response.failed"
         } else {
             "error"
@@ -284,7 +286,25 @@ impl Framer {
             0
         };
         let chunk = if failure_event == "response.failed" {
-            failed_chunk(status, &err_text, sequence)
+            let chunk = failed_chunk(status, &err_text, sequence);
+            if is_response_failed
+                && json::get(payload, "response").is_some_and(|value| value.is_object())
+            {
+                let repaired = self.repair_completed_payload(payload);
+                let original = repaired.as_deref().unwrap_or(payload);
+                let response = json::get(original, "response").expect("response object");
+                let response = json::try_set_raw(response.raw, "status", br#""failed""#)
+                    .unwrap_or_else(|| response.raw.to_vec());
+                let sanitized = json::get(chunk.as_bytes(), "response.error");
+                let response = sanitized
+                    .and_then(|error| json::try_set_raw(&response, "error", error.raw))
+                    .unwrap_or(response);
+                json::try_set_raw(chunk.as_bytes(), "response", &response)
+                    .map(|value| String::from_utf8_lossy(&value).into_owned())
+                    .unwrap_or(chunk)
+            } else {
+                chunk
+            }
         } else {
             error_chunk(status, &err_text, sequence)
         };

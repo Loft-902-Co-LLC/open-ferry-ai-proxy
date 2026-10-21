@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor.go,
 // claude_executor_execute.go, claude_executor_stream.go,
-// claude_executor_tokens.go and claude_executor_auth.go (v8.0.32, MIT).
+// claude_executor_tokens.go and claude_executor_auth.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`ClaudeExecutor`], which calls Anthropic's Messages API with an API key
@@ -514,6 +514,23 @@ impl ClaudeExecutor {
             .ok_or_else(apply_patch_error)?;
         if format == Format::OPENAI_RESPONSE {
             out = ensure_responses_usage_details(out);
+        }
+        if format == Format::OPENAI
+            && serde_json::from_slice::<Value>(&out)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/error/code")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("context_length_exceeded")
+        {
+            return Err(ExecError::upstream(
+                400,
+                String::from_utf8_lossy(&out).into_owned(),
+            ));
         }
         Ok(Response {
             payload: Bytes::from(out),

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_responses_handlers_stream_test.go,
 // openai_responses_handlers_stream_error_test.go,
-// openai_responses_compact_test.go and issue6332_test.go (v8.0.32, MIT).
+// openai_responses_compact_test.go and issue6332_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses stream writer, from upstream's tests, and the routes end to
@@ -1069,8 +1069,8 @@ async fn ends_without_a_failure_after_a_failed_event() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        "event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"},\
-         \"sequence_number\":3}\n\n"
+        "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":3,\
+         \"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"boom\"},\"status\":\"failed\"}}\n\n"
     );
 }
 
@@ -1476,4 +1476,54 @@ async fn pre_first_token_tick_after_partial_frame_keeps_bootstrap_headers() {
     .expect("the partial-frame wait commits on a keepalive tick");
     assert_eq!(dispatcher.calls().len(), 1);
     assert_eq!(dispatcher.live_streams(), 0);
+}
+
+#[tokio::test]
+async fn failed_response_keeps_envelope_and_long_output_while_sanitizing_error() {
+    for codex in [false, true] {
+        for empty_output in [false, true] {
+            let output = serde_json::json!([
+                {"id":"rs_1","type":"reasoning","encrypted_content":"c".repeat(3000),"summary":[]},
+                {"id":"msg_1","type":"message","status":"incomplete","content":[{"type":"output_text","text":"a".repeat(3000)}]},
+                {"id":"fc_1","type":"function_call","arguments":{"raw":"b".repeat(3000)}}]);
+            let mut items = Vec::new();
+            if empty_output {
+                for (index, item) in output.as_array().unwrap().iter().enumerate() {
+                    let event = serde_json::json!({"type":"response.output_item.done","output_index":index,"item":item});
+                    items.push(ok(&format!(
+                        "event: response.output_item.done\ndata: {event}\n\n"
+                    )));
+                }
+            }
+            let event = serde_json::json!({"type":"response.failed","sequence_number":3,"response":{
+                "id":"msg_long","object":"response","created_at":1700000000,"status":"failed",
+                "error":{"code":"context_length_exceeded","message":"window exceeded Bearer dummy-secret-token"},
+                "output":if empty_output {serde_json::json!([])} else {output.clone()},
+                "usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}});
+            items.push(ok(&format!("event: response.failed\ndata: {event}\n\n")));
+            let body = run(Framer::new(codex), items).await;
+            assert_eq!(body.matches("event: response.failed").count(), 1);
+            assert!(!body.contains("event: error"));
+            let event: Value = body
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .map(|data| serde_json::from_str(data).unwrap())
+                .next_back()
+                .unwrap();
+            assert_eq!(event["response"]["id"], "msg_long");
+            assert_eq!(event["response"]["status"], "failed");
+            assert_eq!(event["response"]["output"], output);
+            assert_eq!(event["response"]["usage"]["total_tokens"], 30);
+            assert_eq!(
+                event["response"]["error"]["code"],
+                "context_length_exceeded"
+            );
+            assert!(
+                !event["response"]["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("dummy-secret-token")
+            );
+        }
+    }
 }

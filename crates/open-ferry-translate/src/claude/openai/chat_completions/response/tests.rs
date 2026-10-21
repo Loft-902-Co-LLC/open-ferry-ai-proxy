@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/chat-completions/claude_openai_response_test.go,
-// claude_openai_native_response_test.go and noop_optimization_test.go (v8.0.32, MIT).
+// claude_openai_native_response_test.go and noop_optimization_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
@@ -582,5 +582,48 @@ fn non_stream_native_messages_json() {
         let empty: Value =
             serde_json::from_str(&text_at(&calls, "1.function.arguments")).expect("JSON");
         assert_eq!(empty, json!({}), "{name}");
+    }
+}
+
+#[test]
+fn context_window_stream_and_whole_response_return_error_without_success_usage() {
+    let response =
+        json!({"id":"msg_context","type":"message","role":"assistant","model":"claude-test",
+        "content":[{"type":"text","text":"Partial"}],"stop_reason":"model_context_window_exceeded",
+        "usage":{"input_tokens":7,"output_tokens":4}})
+        .to_string();
+    let out = convert_claude_response_to_openai_chat_completions_non_stream(response.as_bytes());
+    assert_eq!(out["error"]["code"], "context_length_exceeded");
+    assert!(out.get("usage").is_none());
+    let Native::Events { sse, .. } = messages_json_to_sse(response.as_bytes()) else {
+        panic!("test response")
+    };
+    let mut stream = ClaudeToOpenAIChatCompletionsStream::new("claude-test");
+    let events: Vec<_> = sse
+        .lines()
+        .filter_map(|line| stream.translate_line(line.as_bytes()))
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.get("error").is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        events.last().unwrap()["error"]["code"],
+        "context_length_exceeded"
+    );
+    assert!(!events.iter().any(|event| event.get("usage").is_some()));
+    for (reason, finish) in [
+        ("refusal", "content_filter"),
+        ("max_tokens", "length"),
+        ("pause_turn", "stop"),
+    ] {
+        let response = response.replace("model_context_window_exceeded", reason);
+        let out =
+            convert_claude_response_to_openai_chat_completions_non_stream(response.as_bytes());
+        assert_eq!(out["choices"][0]["finish_reason"], finish);
+        assert_eq!(out["usage"]["completion_tokens"], 4);
     }
 }

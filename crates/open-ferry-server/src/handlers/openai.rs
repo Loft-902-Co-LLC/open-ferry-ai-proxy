@@ -1,6 +1,6 @@
 // Ported from ChatCompletions, Completions, their response handlers and
 // chunkHasFinishReason in CLIProxyAPI
-// sdk/api/handlers/openai/openai_handlers.go (v8.0.32, MIT).
+// sdk/api/handlers/openai/openai_handlers.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1/chat/completions` and `POST /v1/completions`.
@@ -217,11 +217,15 @@ async fn stream_chat(
 struct ChatWriter {
     /// Whether a chunk written has carried a `finish_reason`.
     saw_finish_reason: bool,
+    terminal_chunk_error: Option<ErrorMessage>,
 }
 
 impl StreamWriter for ChatWriter {
     fn write_chunk(&mut self, chunk: Bytes, out: &mut BytesMut) {
-        if !self.saw_finish_reason && chunk_has_finish_reason(&chunk) {
+        if let Some(error) = chunk_terminal_error(&chunk) {
+            self.terminal_chunk_error = Some(error);
+            self.saw_finish_reason = true;
+        } else if !self.saw_finish_reason && chunk_has_finish_reason(&chunk) {
             self.saw_finish_reason = true;
         }
         out.extend_from_slice(b"data: ");
@@ -229,7 +233,14 @@ impl StreamWriter for ChatWriter {
         out.extend_from_slice(b"\n\n");
     }
 
+    fn chunk_error(&mut self) -> Option<ErrorMessage> {
+        self.terminal_chunk_error.clone()
+    }
+
     fn write_terminal_error(&mut self, error: &ErrorMessage, out: &mut BytesMut) {
+        if self.terminal_chunk_error.is_some() {
+            return;
+        }
         let body = openai_body(error.http_status(), &error.text, false);
         out.extend_from_slice(b"data: ");
         out.extend_from_slice(body.as_bytes());
@@ -250,10 +261,34 @@ impl StreamWriter for ChatWriter {
     }
 }
 
+fn chunk_terminal_error(chunk: &[u8]) -> Option<ErrorMessage> {
+    let mut chunk = go::trim_space(chunk);
+    if let Some(rest) = chunk.strip_prefix(b"data:") {
+        chunk = go::trim_space(rest);
+    }
+    if json::get(chunk, "choices").is_some()
+        || !json::get(chunk, "error").is_some_and(|error| error.is_object())
+    {
+        return None;
+    }
+    let message = json::get(chunk, "error.message")
+        .map(|value| value.str())
+        .unwrap_or_default();
+    let message = if message.is_empty() {
+        String::from_utf8_lossy(chunk).into_owned()
+    } else {
+        message
+    };
+    Some(ErrorMessage::new(400, message))
+}
+
 /// Whether a chunk, with or without its `data:` prefix, has a choice whose
 /// `finish_reason` is there and neither `null` nor empty
 /// (`chunkHasFinishReason`).
 fn chunk_has_finish_reason(chunk: &[u8]) -> bool {
+    if chunk_terminal_error(chunk).is_some() {
+        return true;
+    }
     let mut chunk = go::trim_space(chunk);
     if let Some(rest) = chunk.strip_prefix(b"data:") {
         chunk = go::trim_space(rest);
@@ -314,5 +349,42 @@ mod tests {
         for value in [json!(false), json!("yes"), json!(0), json!(null), json!({})] {
             assert!(!gjson_bool(&value), "{value}");
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_reason_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn terminal_error_first_or_after_content_stops_without_duplicate_error_or_done() {
+        for content in [false, true] {
+            let mut items = Vec::new();
+            if content {
+                items.push(Ok(Bytes::from_static(
+                    br#"{"choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}"#,
+                )));
+            }
+            items.push(Ok(Bytes::from_static(br#"{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}"#)));
+            items.push(Err(ErrorMessage::new(
+                502,
+                "upstream stream closed before message_stop",
+            )));
+            let body = forward(stream::iter(items).boxed(), ChatWriter::default(), None)
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(body.matches("\"error\":").count(), 1);
+            assert!(body.contains("context_length_exceeded"));
+            assert!(!body.contains("[DONE]"));
+            assert!(!body.contains("upstream stream closed"));
+        }
+        assert!(chunk_has_finish_reason(
+            br#"data: {"error":{"message":"context"}}"#
+        ));
+        assert!(chunk_terminal_error(br#"{"choices":[],"error":{"message":"context"}}"#).is_none());
     }
 }
