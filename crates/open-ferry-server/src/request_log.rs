@@ -43,7 +43,8 @@
 //!   key.
 //! - Capture never reads ahead of authentication. In either mode, the raw
 //!   prefix and its decoded rendering are each limited to 64 KiB, with a
-//!   size note when truncated. Smaller bodies retain upstream's output.
+//!   size note when truncated. Unread bodies remain empty with an incomplete
+//!   capture marker, even in Full mode; upstream eagerly captures them.
 //! - A client that leaves before the answer's head is logged with status
 //!   499; one that leaves during the body, with what was sent.
 //! - The trace ID is the latest selection's, taken when the answer's head

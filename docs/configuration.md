@@ -41,16 +41,19 @@ limit (at least 256 descriptors), divides the remainder by four for two listener
 and two handles, and has a floor of max(limit / 8, 16) and a ceiling of 8192.
 Windows uses an 8192-handle envelope, yielding the unchanged 1024 per listener.
 A failed raise warns once with the fallback cap. Helper processes restore the
-original soft limit before exec; accepted sockets are not inherited by helpers.
+original soft limit before exec only after a successful raise. They preserve
+inherited hard limits, never raise a subsequently lowered soft limit, and still
+spawn if observation/restoration fails. Accepted sockets are not inherited.
 
 Authentication runs before any body reservation or read, using the route's
 existing client-key or management-key check. Missing/wrong credentials keep their
 existing 401/403; keyless proxy setups still use the budget. Full request logging
-also waits for a body consumer. Only the OAuth callback routes accept bodies
-without a key: `/v0/management/oauth-callback`, `/v8/management/oauth/callback`,
-`/anthropic/callback` and `/codex/callback` have a fixed 64 KiB bound outside the
-shared pool. The GET pages use their query; health and unknown routes do not read
-bodies. OPTIONS answers without reading one.
+also waits for a body consumer. The POST callbacks `/v0/management/oauth-callback`
+and `/v8/management/oauth/callback` retain their 64 KiB bound and share a separate
+process-wide 2 MiB pool (32 maximum JSON callbacks). Pool exhaustion returns 503
+with Retry-After: 1 before buffering. GET callbacks, including `/anthropic/callback`
+and `/codex/callback`, read queries only and never poll bodies. Health, unknown
+routes and OPTIONS also do not consume bodies.
 
 The effective aggregate budget is max(configured budget, 3 * proxy body limit +
 96 MiB). The 96 MiB reserve fits one maximum 32 MiB management multipart upload
@@ -61,10 +64,13 @@ therefore has an effective 288 MiB floor, including 96 MiB for management. Raisi
 the proxy limit to 256 MiB gives an 864 MiB floor. Management retains its handler
 bounds (16 MiB normally, 32 MiB for uploads) on either listener, independently of
 `max-request-body-bytes`; dashboard API handlers retain their 64 KiB bound. This
-also keeps management reachable when proxy uploads exhaust their allowance.
+keeps new proxy charges out of management headroom. After a lowering reload,
+retained old proxy charges may temporarily use the new headroom until released.
 
 Declared lengths reserve before the first body poll, including 100-continue.
-Chunked input grows its reservation while reading. Exhaustion answers 503 with
+Chunked input grows geometrically and charges its full Vec capacity before
+allocation, with capacity capped at the upload limit. The bound excludes allocator
+granularity and transient old/new Vec overlap during realloc. Exhaustion answers 503 with
 Retry-After: 1. Declared oversize answers the flat pre-handler 413 after auth;
 chunked oversize is replayed as a body-read error so each handler keeps its
 upstream 413 shape. Recoverable H2 size/budget errors do not drain the connection.
@@ -75,11 +81,15 @@ stay charged while the handler uses them; temporary holds are released when it
 returns, including for SSE. Bytes retained by the response itself stay charged
 until their last owner disappears. Existing owned management writes retain their
 allowance while finishing after a disconnect. Zstd windows over min(body limit,
-8 MiB) are refused before allocation; decoder working storage is reserved before
-expansion and output is drained in fixed chunks. Parsed objects, translations,
+8 MiB) are refused before init. Each frame uses its own window to precharge ring
+growth/overlap plus 6 MiB of fixed scratch, including malformed-input allowances.
+An entropy-header preflight bounds FSE probability vectors before decoding.
+Later frames grow that reservation before init. Output drains in fixed chunks. Parsed objects, translations,
 responses, protocol buffers and log rendering are outside this payload budget.
 Request logging instead captures and renders at most a marked 64 KiB prefix;
 compressed expansion over the rendering bound is omitted with a size note.
+Unread bodies (including Full-mode 401/404/405 and early 400 responses) remain
+empty with an incomplete-capture marker; upstream eagerly logs those bodies.
 
 Reload updates admission immediately without eviction, and changes the shared
 budget without discarding existing charges. Each upload carries its original
@@ -89,14 +99,19 @@ space. Warnings contain only static guard names and counts, rate-limited per gua
 
 Only pending output starts the write timer: upstream silence while an SSE
 producer waits does not. Progress on one H2 stream never masks another's stall,
-and queued chunks of one progressing stream share its clock. TCP progress is
+and queued chunks of one progressing stream share its clock. Connection-window
+stalls have an independent clock. Live producers can receive RST_STREAM/CANCEL;
+reset attempts keep a one-second fallback deadline. If a finished producer left
+final DATA queued, or reset ownership survives that grace, the connection is cut. TCP progress is
 observed below TLS, including flushes that write bytes while returning Pending.
 
 During GOAWAY, incomplete-header deadlines remain armed. An idle peer gets five
 seconds to complete the exchange. The drain also has an absolute bound of five
 seconds plus the upload total deadline (or upload idle deadline, or 900 seconds
 when both are disabled), even if streams continue arriving. With defaults that
-bound is 905 seconds. Accepted protocol task lifetimes, including H2 CONNECT,
+bound is 905 seconds. This bound applies to idle/408 drains, not blue-green
+release or stop. After a 408 on one H2 stream it cuts other streams too, including
+progressing SSE. Accepted protocol task lifetimes, including H2 CONNECT,
 determine activity; late DATA cannot invent an open stream.
 
 SSE responses otherwise have no maximum duration. H1 WebSockets and H2 extended
