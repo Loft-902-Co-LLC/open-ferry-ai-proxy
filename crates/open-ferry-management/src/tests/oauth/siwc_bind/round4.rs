@@ -128,6 +128,8 @@ async fn round4_shutdown_preserves_real_login_with_stopped_sync() {
 }
 
 #[tokio::test]
+// Rule test: services FakeSync during shutdown. Production closes runtime sync
+// first; round5's closed-sync collector test covers that ordering.
 async fn round4_shutdown_waits_for_worker_and_session_sync() {
     real_shutdown(false).await;
 }
@@ -271,20 +273,29 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     )
     .await
     .unwrap();
-    let waiting = Arc::new(tokio::sync::Notify::new());
-    api.state.oauth_sessions().overrides().bind_lock_wait = Some(waiting.clone());
+    let misses = Arc::new(AtomicUsize::new(0));
+    api.state.oauth_sessions().overrides().bind_file_misses = Some(misses.clone());
+    let (miss_release, miss_released) = std::sync::mpsc::channel();
+    let miss_pause = Arc::new((
+        tokio::sync::Notify::new(),
+        std::sync::Mutex::new(miss_released),
+    ));
+    api.state.oauth_sessions().overrides().bind_after_file_miss = Some(miss_pause.clone());
+    // Queue B while A owns its first reservation, before A's F miss. Once
+    // A defers, B stays ahead even if this process is descheduled past backoff.
+    let (before_file, release_file) = pause_write(&api, true);
     deliver(&api, &first, "codex", issued());
-    tokio::time::timeout(SETTLE, waiting.notified())
+    entered(&before_file).await;
+    let queued = Arc::new(tokio::sync::Notify::new());
+    api.state.oauth_sessions().overrides().bind_turn_started = Some(queued.clone());
+    deliver(&api, &second, "codex", issued());
+    tokio::time::timeout(SETTLE, queued.notified())
         .await
         .unwrap();
-    deliver(&api, &second, "codex", issued());
-    tokio::time::timeout(SETTLE, async {
-        while starts.load(Ordering::SeqCst) < 2 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    api.state.oauth_sessions().overrides().bind_before_file = None;
+    release_file.send(()).unwrap();
+    entered(&miss_pause).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
     let other_bound = tokio::time::timeout(SETTLE, async {
         loop {
             if api
@@ -301,9 +312,16 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     })
     .await
     .is_ok();
+    let attempts_at_completion = misses.load(Ordering::SeqCst);
+    api.state.oauth_sessions().overrides().bind_after_file_miss = None;
+    miss_release.send(()).unwrap();
     drop(guard);
     completed(&api, &first).await;
     completed(&api, &second).await;
+    assert_eq!(
+        attempts_at_completion, 1,
+        "cross-credential progress needed more F attempts"
+    );
     assert!(
         other_bound,
         "a busy credential retained the global FIFO head"

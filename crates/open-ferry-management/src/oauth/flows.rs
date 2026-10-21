@@ -569,6 +569,13 @@ async fn complete(
     let sessions = state.oauth_sessions();
     let store = sessions.store();
     let provider = login.client.provider();
+    let is_bind = matches!(login.client, Client::Siwc(_));
+    if is_bind && let Err(error) = sessions.check_bind_worker() {
+        bind_error(store, &login.state, error);
+        return;
+    }
+    // Advisory only: another exchange may consume the last permit; the
+    // non-waiting acquisition immediately before spawn is authoritative.
     let exchange = tokio::time::timeout(
         sessions.exchange_timeout(),
         login
@@ -602,11 +609,15 @@ async fn complete(
     if !store.is_pending(&login.state, provider.name()) {
         return;
     }
-    let is_bind = matches!(login.client, Client::Siwc(_));
     // Shutdown keeps the production JoinSet/StopOnDrop ownership chain alive
     // until this guard drops, after the session has its durable outcome.
     let _completion = if is_bind {
         let Some(completion) = sessions.bind_completion() else {
+            bind_error(
+                store,
+                &login.state,
+                super::siwc_bind::SaveError::ShuttingDown,
+            );
             return;
         };
         Some(completion)
@@ -615,10 +626,14 @@ async fn complete(
     };
     let saved = match (record, login.client) {
         (Credential::Login(record), Client::Claude(_) | Client::Codex(_)) => {
-            save_token_record(&state, *record)
-                .await
-                .map(|path| (path, true))
-                .map_err(|error| error.to_string())
+            use crate::token_record::SaveError;
+            match save_token_record(&state, *record).await {
+                Ok(path) => Ok((path, true)),
+                Err(SaveError::Sync { path, .. }) => Ok((path, false)),
+                Err(error) => Err(super::siwc_bind::SaveError::Failed(std::io::Error::other(
+                    error,
+                ))),
+            }
         }
         (Credential::Bind(tokens), Client::Siwc(bind)) => super::siwc_bind::save(
             &state,
@@ -634,18 +649,10 @@ async fn complete(
                 String::new(),
                 outcome == super::siwc_bind::SaveOutcome::Synchronized,
             )
-        })
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return "SIWC bind workers are busy; start a new binding".to_owned();
-            }
-            format!(
-                "SIWC binding failed ({:?}, OS {:?})",
-                error.kind(),
-                error.raw_os_error()
-            )
         }),
-        _ => Err("OAuth credential kind mismatch".to_owned()),
+        _ => Err(super::siwc_bind::SaveError::Failed(std::io::Error::other(
+            "OAuth credential kind mismatch",
+        ))),
     };
     match saved {
         Ok((path, synchronized)) => {
@@ -657,24 +664,51 @@ async fn complete(
                         "SIWC binding saved, runtime sync unavailable; the saved credential will load on restart"
                     );
                 }
-            } else {
+            } else if synchronized {
                 tracing::info!(
                     "{provider} authentication successful; credential saved as {}",
                     saved_name(&path)
                 );
+            } else {
+                tracing::warn!(
+                    "{provider} authentication saved as {}; runtime sync unavailable; the saved credential will load on restart",
+                    saved_name(&path)
+                );
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            if is_bind {
+                let pause = sessions.overrides().bind_before_complete.clone();
+                if let Some(pause) = pause {
+                    pause.0.notify_one();
+                    pause.1.notified().await;
+                }
             }
             store.complete(&login.state);
         }
-        Err(error) => {
-            tracing::error!("{SAVE_FAILED}: {error}");
-            store.set_error(
-                &login.state,
-                if error == "SIWC bind workers are busy; start a new binding" {
-                    &error
-                } else {
-                    SAVE_FAILED
-                },
+        Err(error) => bind_error(store, &login.state, error),
+    }
+}
+
+const BIND_BUSY: &str = "SIWC bind workers are busy; start a new binding";
+
+fn bind_error(store: &super::sessions::Store, session: &str, error: super::siwc_bind::SaveError) {
+    use super::siwc_bind::SaveError;
+    match error {
+        SaveError::Busy => {
+            tracing::info!("{BIND_BUSY}");
+            store.set_error(session, BIND_BUSY);
+        }
+        SaveError::ShuttingDown => {
+            tracing::info!("SIWC bind cancelled: server shutting down");
+            store.set_error(session, "server shutting down");
+        }
+        SaveError::Failed(error) => {
+            tracing::error!(
+                "{SAVE_FAILED}: credential save failed ({:?}, OS {:?})",
+                error.kind(),
+                error.raw_os_error()
             );
+            store.set_error(session, SAVE_FAILED);
         }
     }
 }

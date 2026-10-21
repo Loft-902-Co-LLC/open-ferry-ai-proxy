@@ -51,6 +51,9 @@ use crate::Route;
 use forwarder::Forwarders;
 use sessions::Store;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 /// A provider whose logins are served.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Provider {
@@ -110,7 +113,7 @@ pub(crate) struct Sessions {
     forwarders: Forwarders,
     logins: Mutex<Logins>,
     pub(super) bind_workers: std::sync::Arc<bind_workers::BindWorkers>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     overrides: Mutex<Overrides>,
 }
 
@@ -125,7 +128,7 @@ struct Logins {
 
 /// What a test changes: where the providers' endpoints are, the ports the
 /// forwarders take, and how long a login waits.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 pub(crate) struct Overrides {
     /// The base URL of both providers' endpoints: a closed local port
@@ -142,26 +145,43 @@ pub(crate) struct Overrides {
     /// How long a callback page waits for its login to end.
     pub(crate) page: Option<Duration>,
     /// Notified only after acquiring the bind's credential lock polls Pending.
+    #[cfg(test)]
     pub(crate) bind_lock_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Notified after a busy save releases both locks and reserves a writer.
+    #[cfg(test)]
     pub(crate) bind_admission_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Holds a persisted bind after revision allocation, before releasing its lock.
+    #[cfg(test)]
     pub(crate) bind_after_sync: Option<std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
     /// Notified after worker RAII has released its reservation and FIFO turn.
+    #[cfg(test)]
     pub(crate) bind_worker_finished: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Enlarged only by signal tests, separating cancellation from the deadline.
+    #[cfg(test)]
     pub(crate) bind_drain_budget: Option<Duration>,
     /// Records actual reservation starts for retry-spacing regressions.
+    #[cfg(test)]
     pub(crate) bind_admission_times: Option<BindAdmissionTimes>,
     /// Pause after the last session fence, before writing.
     pub(crate) bind_before_write: Option<BindWritePause>,
     /// Pause a live worker in filesystem work before the final session fence.
     pub(crate) bind_before_file: Option<BindWritePause>,
+    #[cfg(test)]
     pub(crate) bind_worker_starts: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     pub(crate) bind_shutdown_grace: Option<Duration>,
+    pub(crate) bind_before_complete:
+        Option<std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
+    #[cfg(test)]
+    pub(crate) bind_after_file_miss: Option<BindWritePause>,
+    #[cfg(test)]
+    pub(crate) bind_turn_started: Option<std::sync::Arc<tokio::sync::Notify>>,
+    #[cfg(test)]
+    pub(crate) bind_file_misses: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    #[cfg(test)]
+    pub(crate) bind_worker_error: Option<std::io::ErrorKind>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type BindWritePause = std::sync::Arc<(
     tokio::sync::Notify,
     std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
@@ -170,7 +190,7 @@ pub(crate) type BindWritePause = std::sync::Arc<(
 #[cfg(test)]
 type BindAdmissionTimes = std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Default for Overrides {
     fn default() -> Self {
         Self {
@@ -179,27 +199,54 @@ impl Default for Overrides {
             wait: None,
             exchange: None,
             page: None,
+            #[cfg(test)]
             bind_lock_wait: None,
+            #[cfg(test)]
             bind_admission_wait: None,
+            #[cfg(test)]
             bind_after_sync: None,
             bind_before_write: None,
             bind_before_file: None,
+            #[cfg(test)]
             bind_worker_starts: None,
             bind_shutdown_grace: None,
+            bind_before_complete: None,
+            #[cfg(test)]
+            bind_after_file_miss: None,
+            #[cfg(test)]
+            bind_turn_started: None,
+            #[cfg(test)]
+            bind_file_misses: None,
+            #[cfg(test)]
+            bind_worker_error: None,
+            #[cfg(test)]
             bind_drain_budget: None,
+            #[cfg(test)]
             bind_admission_times: None,
+            #[cfg(test)]
             bind_worker_finished: None,
         }
     }
 }
 
 impl Sessions {
-    fn try_bind_worker(&self) -> std::io::Result<bind_workers::Worker> {
+    fn try_bind_worker(&self) -> Result<bind_workers::Worker, siwc_bind::SaveError> {
         let logins = self.logins();
         if logins.shut_down {
-            return Err(std::io::Error::other("SIWC bind session ended"));
+            return Err(siwc_bind::SaveError::ShuttingDown);
         }
         self.bind_workers.try_worker()
+    }
+
+    fn check_bind_worker(&self) -> Result<(), siwc_bind::SaveError> {
+        let logins = self.logins();
+        if logins.shut_down {
+            Err(siwc_bind::SaveError::ShuttingDown)
+        } else if !self.bind_workers.available() {
+            Err(siwc_bind::SaveError::Busy)
+        } else {
+            Ok(())
+        }
     }
 
     fn admit_bind(&self, session: &str, registration: u64) -> bool {
@@ -258,18 +305,26 @@ impl Sessions {
             std::mem::take(&mut logins.tasks)
         };
         let grace = bind_workers::SHUTDOWN_GRACE;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let grace = self.overrides().bind_shutdown_grace.unwrap_or(grace);
         if tokio::time::timeout(grace, self.bind_workers.idle())
             .await
             .is_err()
         {
             let (workers, completions) = self.bind_workers.counts();
-            tracing::warn!(
-                workers,
-                completions,
-                "SIWC bind shutdown grace expired; workers may still be writing"
-            );
+            if workers != 0 {
+                tracing::warn!(
+                    workers,
+                    completions,
+                    "SIWC bind shutdown grace expired; workers may still be writing"
+                );
+            } else if completions != 0 {
+                tracing::warn!(
+                    workers,
+                    completions,
+                    "SIWC bind shutdown grace expired; sessions are still finalizing"
+                );
+            }
         }
         tasks.shutdown().await;
     }
@@ -283,7 +338,7 @@ impl Sessions {
     }
 
     /// What a test changes.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn overrides(&self) -> MutexGuard<'_, Overrides> {
         self.overrides
             .lock()
@@ -298,7 +353,7 @@ impl Sessions {
 
     /// Anthropic's endpoints.
     fn claude_endpoints(&self) -> claude::Endpoints {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(base) = self.overrides().endpoints.clone() {
             return claude::Endpoints::with_base(&base);
         }
@@ -307,7 +362,7 @@ impl Sessions {
 
     /// OpenAI's endpoints.
     fn codex_endpoints(&self) -> codex::Endpoints {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(base) = self.overrides().endpoints.clone() {
             return codex::Endpoints::with_base(&base);
         }
@@ -315,7 +370,7 @@ impl Sessions {
     }
 
     fn siwc_endpoints(&self) -> open_ferry_providers::codex::siwc::Endpoints {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(base) = self.overrides().endpoints.clone() {
             return open_ferry_providers::codex::siwc::Endpoints::with_base(&base);
         }
@@ -324,7 +379,7 @@ impl Sessions {
 
     /// The port `provider`'s forwarder listens on.
     fn callback_port(&self, provider: Provider) -> u16 {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some((claude, codex)) = self.overrides().ports {
             return match provider {
                 Provider::Claude => claude,
@@ -336,7 +391,7 @@ impl Sessions {
 
     /// How long a login waits for its callback.
     fn wait_timeout(&self) -> Duration {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(wait) = self.overrides().wait {
             return wait;
         }
@@ -345,7 +400,7 @@ impl Sessions {
 
     /// How long a login's code exchange may take.
     fn exchange_timeout(&self) -> Duration {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(exchange) = self.overrides().exchange {
             return exchange;
         }
@@ -354,7 +409,7 @@ impl Sessions {
 
     /// How long a callback page waits for its login to end.
     fn page_wait(&self) -> Duration {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(page) = self.overrides().page {
             return page;
         }

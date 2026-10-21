@@ -155,13 +155,13 @@ pub(super) async fn save(
     session: String,
     registration: u64,
     lifeline: &mut Lifeline,
-) -> io::Result<SaveOutcome> {
+) -> Result<SaveOutcome, SaveError> {
     use open_ferry_core::manager::{SIWC_BIND_DRAIN_TIMEOUT, SiwcBindDrain};
     if tokens.access_token.trim().is_empty()
         || tokens.refresh_token.trim().is_empty()
         || tokens.client_id.trim().is_empty()
     {
-        return Err(invalid());
+        return Err(invalid().into());
     }
     let store = state.credential_store().map_err(|_| invalid())?;
     let files = store.files.clone();
@@ -173,15 +173,29 @@ pub(super) async fn save(
     // A dedicated worker keeps its FIFO place without occupying a pool slot.
     // Nothing reserved or thread-confined crosses this future's awaits.
     let mut work = Box::pin(run_bind_worker(state, move || {
+        #[cfg(test)]
+        if let Some(kind) = checking.oauth_sessions().overrides().bind_worker_error {
+            return Err(io::Error::new(kind, "injected worker I/O failure").into());
+        }
         let manager = checking.manager();
         let turn = manager.siwc_bind_turn(&target.registered.id);
+        #[cfg(test)]
+        if let Some(started) = checking
+            .oauth_sessions()
+            .overrides()
+            .bind_turn_started
+            .clone()
+        {
+            started.notify_one();
+        }
         let mut failures = 0u32;
         loop {
             if cancelled.load(Ordering::Acquire) {
-                return Err(invalid());
+                return Err(cancelled_save(&checking));
             }
             let mut file_busy = false;
             let mut attempted = false;
+            let session_ended = AtomicBool::new(false);
             let attempt = (|| -> io::Result<Option<Saved>> {
                 let Some(mut reservation) = turn.reserve_siwc_bind() else {
                     return Ok(None);
@@ -216,13 +230,13 @@ pub(super) async fn save(
                     SiwcBindDrain::Ready => {}
                     SiwcBindDrain::TimedOut | SiwcBindDrain::Interrupted => return Ok(None),
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 let before_file = checking
                     .oauth_sessions()
                     .overrides()
                     .bind_before_file
                     .clone();
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if let Some(pause) = before_file {
                     pause.0.notify_one();
                     pause
@@ -234,6 +248,15 @@ pub(super) async fn save(
                 }
                 let Some(guard) = try_acquire_credential_lock(&target.path)? else {
                     file_busy = true;
+                    #[cfg(test)]
+                    if let Some(misses) = checking
+                        .oauth_sessions()
+                        .overrides()
+                        .bind_file_misses
+                        .clone()
+                    {
+                        misses.fetch_add(1, Ordering::SeqCst);
+                    }
                     #[cfg(test)]
                     if let Some(signal) =
                         checking.oauth_sessions().overrides().bind_lock_wait.clone()
@@ -265,9 +288,10 @@ pub(super) async fn save(
                                     .oauth_sessions()
                                     .admit_bind(&checking_session, registration)
                             {
+                                session_ended.store(true, Ordering::Release);
                                 return Err(io::Error::other("SIWC bind session ended"));
                             }
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "test-support"))]
                             {
                                 let pause = checking
                                     .oauth_sessions()
@@ -299,7 +323,14 @@ pub(super) async fn save(
                     }
                     None => Ok(None),
                 }
-            })()?;
+            })()
+            .map_err(|error| {
+                if session_ended.load(Ordering::Acquire) {
+                    cancelled_save(&checking)
+                } else {
+                    SaveError::Failed(error)
+                }
+            })?;
             if let Some(saved) = attempt {
                 return Ok((saved, target));
             }
@@ -311,25 +342,43 @@ pub(super) async fn save(
                 .unwrap_or_default()
                 .subsec_nanos()
                 % 21;
-            let backoff =
-                retry_delay(attempted, failures) + std::time::Duration::from_millis(u64::from(jitter));
+            let backoff = retry_delay(attempted, failures)
+                + std::time::Duration::from_millis(u64::from(jitter));
             if file_busy {
                 turn.defer_file_retry(backoff);
+                // Test pauses are after deferral and all transaction guards.
+                #[cfg(test)]
+                {
+                    let pause = checking
+                        .oauth_sessions()
+                        .overrides()
+                        .bind_after_file_miss
+                        .clone();
+                    if let Some(pause) = pause {
+                        pause.0.notify_one();
+                        pause
+                            .1
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(30))
+                            .unwrap();
+                    }
+                }
             }
             if !turn.wait_retry(backoff, &cancelled) {
-                return Err(invalid());
+                return Err(cancelled_save(&checking));
             }
         }
     }));
     let ((record, data, guard, management_guard), returned) = tokio::select! {
-        result = &mut work => result?,
+        result = &mut work => result,
         () = ended(state, &session, lifeline) => {
             // A signal cancels admission, but cannot turn an already durable
             // write into SAVE_FAILED or skip its completed-token command.
             drop(cancellation);
-            work.await?
+            work.await
         }
-    };
+    }?;
     target = returned;
     let file = AuthFile {
         path: target.path,
@@ -339,7 +388,7 @@ pub(super) async fn save(
         Some(command) => store
             .sync
             .completed_token_command(record, Some(file), command),
-        None => return Err(invalid()),
+        None => return Err(invalid().into()),
     };
     #[cfg(test)]
     let pause = state.oauth_sessions().overrides().bind_after_sync.clone();
@@ -356,10 +405,25 @@ pub(super) async fn save(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SaveOutcome {
-    Synchronized,
-    RuntimeSyncUnavailable,
+#[derive(Debug)]
+pub(super) enum SaveError {
+    Busy,
+    ShuttingDown,
+    Failed(io::Error),
+}
+
+fn cancelled_save(state: &ManagementState) -> SaveError {
+    if state.oauth_sessions().is_shut_down() {
+        SaveError::ShuttingDown
+    } else {
+        SaveError::Failed(invalid())
+    }
+}
+
+impl From<io::Error> for SaveError {
+    fn from(error: io::Error) -> Self {
+        Self::Failed(error)
+    }
 }
 
 // Capacity denial is retried promptly even after earlier transaction misses.
@@ -371,6 +435,12 @@ fn retry_delay(attempted: bool, failures: u32) -> std::time::Duration {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SaveOutcome {
+    Synchronized,
+    RuntimeSyncUnavailable,
+}
+
 fn drain_backoff(timeouts: u32) -> std::time::Duration {
     std::time::Duration::from_millis((20u64 << timeouts.saturating_sub(1).min(6)).min(1000))
 }
@@ -379,8 +449,8 @@ fn drain_backoff(timeouts: u32) -> std::time::Duration {
 /// the blocking pool needed by detached saves holding shared admission.
 async fn run_bind_worker<T: Send + 'static>(
     _state: &ManagementState,
-    work: impl FnOnce() -> io::Result<T> + Send + 'static,
-) -> io::Result<T> {
+    work: impl FnOnce() -> Result<T, SaveError> + Send + 'static,
+) -> Result<T, SaveError> {
     // Refuse immediately before spawning, without a turn or reservation.
     // Session cancellation cannot return this permit: only worker exit does.
     let permit = _state.oauth_sessions().try_bind_worker()?;
@@ -416,12 +486,13 @@ async fn run_bind_worker<T: Send + 'static>(
                 finished.notify_one();
             }
             let _ = send.send(result);
-        })?;
+        })
+        .map_err(SaveError::Failed)?;
     drop(thread);
     match receive.await {
         Ok(Ok(result)) => result,
         Ok(Err(panic)) => std::panic::resume_unwind(panic),
-        Err(_) => Err(io::Error::other("SIWC bind worker ended without a result")),
+        Err(_) => Err(io::Error::other("SIWC bind worker ended without a result").into()),
     }
 }
 
@@ -462,6 +533,10 @@ pub(crate) async fn save_for_test(state: &ManagementState, session: &str) -> io:
     )
     .await
     .map(|_| ())
+    .map_err(|error| match error {
+        SaveError::Failed(error) => error,
+        other => io::Error::other(format!("{other:?}")),
+    })
 }
 
 impl Drop for CancelOnDrop {

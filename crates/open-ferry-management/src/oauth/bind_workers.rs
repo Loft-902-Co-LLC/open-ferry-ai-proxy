@@ -28,13 +28,16 @@ impl Default for BindWorkers {
 }
 
 impl BindWorkers {
-    pub(super) fn try_worker(self: &Arc<Self>) -> std::io::Result<Worker> {
-        let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "SIWC bind worker capacity exhausted",
-            )
-        })?;
+    pub(super) fn available(&self) -> bool {
+        self.permits.available_permits() != 0
+    }
+
+    pub(super) fn try_worker(self: &Arc<Self>) -> Result<Worker, super::siwc_bind::SaveError> {
+        let permit = self
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| super::siwc_bind::SaveError::Busy)?;
         self.workers.fetch_add(1, Ordering::AcqRel);
         Ok(Worker {
             registry: self.clone(),
