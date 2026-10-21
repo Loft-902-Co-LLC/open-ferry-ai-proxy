@@ -48,6 +48,16 @@ cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 ```
 
+For changes to the translator, providers, core, parity tool or its CI inputs,
+`check (ubuntu-latest)` also requires offline differential parity against the
+pinned CLIProxyAPI submodule: every hand-written case plus `--random 25 --seed 1`.
+This runs on PRs and in the merge queue. Unexpected differences fail; accepted
+known differences come from the tool's checked-in case markers. A separate daily
+run uses 5000 random cases per generator and a rotating seed, outside the required
+checks. Both keep failing synthetic inputs for 14 days. See
+[parity in CI](tools/parity/README.md#in-ci) for manual dispatch, local reproduction
+and turning an artifact into a regression fixture.
+
 The merge queue also runs the two slowest, which a PR's own run leaves out: the blue-green process tests, split between three runners per OS, and the release builds, which must hold none of their test seams:
 
 ```sh

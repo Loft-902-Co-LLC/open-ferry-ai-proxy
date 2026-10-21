@@ -1044,6 +1044,9 @@ fn write_failure(
     if !case.events.is_empty() {
         report["events"] = json!(case.events);
     }
+    if !case.translated_request.is_empty() {
+        report["translated_request"] = json!(case.translated_request);
+    }
     report["upstream_output"] = upstream_output;
     report["open_ferry_output"] = rust_output;
     fs::create_dir_all(dir)?;
@@ -1060,5 +1063,52 @@ fn clip(text: &str) -> String {
     match text.char_indices().nth(MAX) {
         Some((end, _)) => format!("{}…", &text[..end]),
         None => text.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Not upstream's: an unexpected difference fails the tally and its saved
+    // input keeps every Case field needed to make a regression fixture.
+    #[test]
+    fn failure_artifact_keeps_complete_input() {
+        let dir = std::env::temp_dir().join(format!("parity-failure-{}", std::process::id()));
+        let mut case = Case::response("artifact-input", " {\"input\": 1e2} ", vec!["event".into()]);
+        case.model = "synthetic-model".into();
+        case.translated_request = "{\"translated\":true}".into();
+        case.options = json!({"stream": true});
+        let evaluated = || Evaluated {
+            outcome: Outcome::Different(vec![Difference::whole("go".into(), "rust".into())]),
+            go_output: "{\"side\":\"go\"}".into(),
+            go_value: Some(json!({"side": "go"})),
+            rust_output: Ok(json!({"side": "rust"})),
+        };
+        let mut tally = Tally::default();
+        tally.record(&case, evaluated(), &dir).unwrap();
+        assert_eq!(tally.different, 1);
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("artifact-input.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["case"], case.name);
+        assert_eq!(report["model"], case.model);
+        assert_eq!(report["request_text"], case.request);
+        assert_eq!(report["translated_request"], case.translated_request);
+        assert_eq!(report["events"], json!(case.events));
+        assert_eq!(report["options"], case.options);
+        assert_eq!(report["upstream_output"], json!({"side": "go"}));
+        assert_eq!(report["open_ferry_output"], json!({"side": "rust"}));
+
+        // Only the checked-in marker accepts a difference; it neither adds
+        // another failure nor emits a file for that accepted case.
+        case.name = "accepted-difference".into();
+        case.known_difference = Some("synthetic test marker");
+        tally.record(&case, evaluated(), &dir).unwrap();
+        assert_eq!(tally.different, 1);
+        assert_eq!(tally.known.len(), 1);
+        assert!(!dir.join("accepted-difference.json").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

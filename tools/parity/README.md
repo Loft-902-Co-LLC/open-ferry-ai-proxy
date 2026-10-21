@@ -112,6 +112,54 @@ Options:
 
 The exit status is 0 when every case is identical, equivalent or a known difference (see below).
 
+## In CI
+
+The existing required `check (ubuntu-latest)` includes offline parity on pull
+requests and in the merge queue. Its path filter covers the translate, providers
+and core crates, this tool, the upstream submodule pin, Cargo manifests and lock
+file, the toolchain, the config example read by the cases, and its CI files.
+Unrelated changes skip parity; a manual CI dispatch runs it. Every hand-written
+case and `--random 25 --seed 1` run across all suites. Any unexpected difference
+returns a nonzero status and fails the aggregate. The checked-in accepted cases
+are the `known_difference` markers in `src/cases.rs`, `src/cases/**` and
+`src/interactions/**/cases.rs`; the equivalence rules remain in `src/compare.rs`
+and [UPSTREAM.md](../../UPSTREAM.md).
+
+[Parity (scheduled)](../../.github/workflows/parity-scheduled.yml) runs daily at
+06:23 UTC with `--random 5000` and the Actions run number as its printed seed.
+This separate workflow fails visibly on a mismatch and is outside the required
+checks. Its manual dispatch accepts optional `seed` and `random` inputs; an empty
+seed uses the run number. For example:
+
+```sh
+gh workflow run parity-scheduled.yml --ref main -f seed=42 -f random=100
+```
+
+Both runs use the same reusable job. It checks out the exact
+`reference/cliproxyapi` gitlink (currently `911f49cbd49f4fe2516979754a7488a3fd14fe64`,
+v8.0.32), checks that the checkout matches, and uses Go 1.26.4, satisfying that
+pin's `go 1.26.0`. Cargo uses CI's shared Rust dependency cache, filled by the
+existing main-branch test job. The Go module downloads and the harness's own
+`target/parity/go-build` cache are kept separately. No credentials or live
+provider calls are used. The log and job summary show both commits, seed, random
+count, each suite's case count, and identical, equivalent, known and different
+totals.
+
+On failure, `parity-failures-<run-id>-<attempt>` keeps the first 200 unexpected
+cases per suite, both outputs, metadata and the log for 14 days. Download it from
+the failed run's Actions page, or with `gh run download <run-id> -n <artifact>`.
+To keep a failing case as a regression fixture:
+
+1. Find its suite from the artifact directory and the corresponding hand-written
+   cases function in `src/cases/**` or `src/interactions/**/cases.rs`.
+2. Add a `Case::new` (request) or `Case::response` (response) with the saved
+   `model`, exact `request_text` and `events`. Copy `translated_request` and
+   `options` when present. Keep the request text rather than reserializing the
+   parsed `request`, so whitespace and number spelling stay reproducible.
+3. Give it a descriptive name, leave `known_difference` unset, and reproduce
+   locally against the pinned checkout with the recorded seed and random count.
+   After fixing the translator, rerun parity and commit the case with the fix.
+
 ## How it works
 
 Upstream's translators are in `internal/` packages, which only code inside the CLIProxyAPI module can import. `go/main.go` is a small harness that reads JSON lines from stdin and writes each translation to stdout. A line can carry `options`, a JSON object of inputs that aren't part of the request, such as a signature's target provider. The tool builds it with `go build -overlay`, which adds the file to the module as `cmd/open-ferry-parity` at build time, along with each `go/parity_*.go`; such a file adds its translators to `go/main.go`'s from `init()`. Your checkout is not modified. The builds use a Go build cache of their own, `target/parity/go-build`, so parity runs in two checkouts at once don't mix up each other's harnesses; the first run in a checkout builds the CLIProxyAPI packages from scratch.
