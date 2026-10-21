@@ -10,7 +10,7 @@
 // streamRoutedImages, forwardRawImageStream, handleOpenAICompatImages,
 // streamOpenAICompatImages, handleXAIImages, collectXAIImages,
 // collectImagesWithModel, streamXAIImages and streamImagesWithModel)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1/images/generations` and `POST /v1/images/edits`.
@@ -147,9 +147,18 @@ pub(crate) async fn generations(
         let payload = compat_json_request(&raw, &model, stream);
         return routed(&state, &client, &model, payload, stream).await;
     }
-    if xai::is_model(&model) {
+    if xai::is_registered_model(&state, &model) {
         let request = xai::generations_request(&raw, &model, &format);
-        return xai_images(&state, &client, request, format, "image_generation", stream).await;
+        return xai_images(
+            &state,
+            &client,
+            request,
+            &model,
+            format,
+            "image_generation",
+            stream,
+        )
+        .await;
     }
     let payload = compat_json_request(&raw, &model, stream);
     compat(&state, &client, &model, payload, format, stream).await
@@ -200,14 +209,14 @@ async fn edits_from_json(state: &AppState, client: &ClientRequest, body: Body) -
         let payload = compat_json_request(&raw, &model, stream);
         return routed(state, client, &model, payload, stream).await;
     }
-    if xai::is_model(&model) {
+    if xai::is_registered_model(state, &model) {
         let images = xai::images_from_json(&raw);
         if images.is_empty() {
             return invalid_request(400, "image is required");
         }
         let options = xai::edit_options_from_json(&raw);
         let request = xai::edit_request(&model, &prompt, &images, &format, &options);
-        return xai_images(state, client, request, format, "image_edit", stream).await;
+        return xai_images(state, client, request, &model, format, "image_edit", stream).await;
     }
     let payload = compat_json_request(&raw, &model, stream);
     compat(state, client, &model, payload, format, stream).await
@@ -247,7 +256,7 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
     let stream = parse_bool(&form_value(&form, "stream"), false);
 
     // A Codex image tool model's base is never an xAI one.
-    if xai::is_model(&model) {
+    if xai::is_registered_model(state, &model) {
         let images: Vec<String> = files.iter().map(FileHeader::data_url).collect();
         let size = form_value(&form, "size");
         let aspect = xai::aspect_ratio(&form_value(&form, "aspect_ratio"), "");
@@ -258,7 +267,7 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
             n: parse_int(&form_value(&form, "n"), 0),
         };
         let request = xai::edit_request(&model, &prompt, &images, &format, &options);
-        return xai_images(state, client, request, format, "image_edit", stream).await;
+        return xai_images(state, client, request, &model, format, "image_edit", stream).await;
     }
     let (payload, content_type) = compat_form_request(&form, &model, stream);
     let mut client = client.clone();
@@ -383,7 +392,10 @@ fn is_compat_model(state: &AppState, model: &str) -> bool {
 /// A 400 for a model none of the three serve, or `None` (upstream's
 /// `rejectUnsupportedImagesModel`).
 fn reject(state: &AppState, model: &str) -> Option<Response> {
-    if is_codex_tool_model(model) || xai::is_model(model) || is_compat_model(state, model) {
+    if is_codex_tool_model(model)
+        || xai::is_registered_model(state, model)
+        || is_compat_model(state, model)
+    {
         return None;
     }
     let message = format!(
@@ -573,12 +585,13 @@ async fn xai_images(
     state: &AppState,
     client: &ClientRequest,
     request: Vec<u8>,
+    requested_model: &str,
     format: String,
     prefix: &'static str,
     stream: bool,
 ) -> Response {
     let timing = Timing::of(state);
-    let model = json::str_at(&request, "model").trim().to_owned();
+    let model = xai::routing_model(state, requested_model);
     let payload = Bytes::from(request);
     let call = match Call::image(state, client, Format::OPENAI_IMAGE, &model, payload, false) {
         Ok(call) => call,

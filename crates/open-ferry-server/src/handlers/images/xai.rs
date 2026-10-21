@@ -6,7 +6,7 @@
 // collectXAIImagesFromJSON, xaiImagesEditOptionsFromJSON,
 // mimeTypeFromOutputFormat, extractXAIImagesResponse,
 // buildImagesAPIResponseFromXAI and the events of streamImagesWithModel)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI image requests, and the OpenAI images API answers and events made
@@ -20,6 +20,7 @@ use open_ferry_translate::go;
 
 use super::model_parts;
 use crate::json::{self, Val};
+use crate::state::AppState;
 
 /// The xAI image models (upstream's `defaultXAIImagesModel`,
 /// `xaiImagesQualityModel` and `xaiImages20Model`).
@@ -39,13 +40,57 @@ const DEFAULT_RESOLUTION: &str = "1k";
 /// `grok/`, in any case (upstream's `isXAIImagesModel`).
 pub(super) fn is_model(model: &str) -> bool {
     let (prefix, base) = model_parts(model);
+    MODELS.contains(&go::to_lower(base.trim()).as_str())
+        && (prefix.is_empty() || is_vendor_alias(prefix))
+}
+
+fn is_vendor_alias(prefix: &str) -> bool {
+    matches!(
+        go::to_lower(prefix.trim()).as_str(),
+        "xai" | "x-ai" | "grok"
+    )
+}
+
+fn registered(state: &AppState, model: &str) -> Option<String> {
+    [model.trim().to_owned(), go::to_lower(model.trim())]
+        .into_iter()
+        .find(|candidate| {
+            state
+                .catalog()
+                .model_providers(candidate)
+                .iter()
+                .any(|p| go::equal_fold(p.trim(), "xai"))
+        })
+}
+
+pub(super) fn is_registered_model(state: &AppState, model: &str) -> bool {
+    let (prefix, base) = model_parts(model);
     if !MODELS.contains(&go::to_lower(base.trim()).as_str()) {
         return false;
     }
-    matches!(
-        go::to_lower(prefix.trim()).as_str(),
-        "" | "xai" | "x-ai" | "grok"
-    )
+    is_model(model)
+        || registered(state, &format!("{prefix}/{}", canonical_model(model))).is_some()
+        || registered(state, model).is_some()
+}
+
+/// Registered prefixes win; built-in vendor aliases can fall back even when
+/// force-model-prefix is enabled. A custom prefix remains strict.
+pub(super) fn routing_model(state: &AppState, model: &str) -> String {
+    let canonical = canonical_model(model);
+    let (prefix, _) = model_parts(model);
+    if prefix.is_empty() {
+        return canonical.to_owned();
+    }
+    let prefixed = format!("{prefix}/{canonical}");
+    if let Some(model) = registered(state, &prefixed).or_else(|| registered(state, model)) {
+        return model;
+    }
+    if (!is_vendor_alias(prefix) && state.settings().config.force_model_prefix)
+        || registered(state, canonical).is_none()
+    {
+        return prefixed;
+    }
+    canonical.to_owned()
 }
 
 /// `url` for `url` in any case, else `b64_json` (upstream's

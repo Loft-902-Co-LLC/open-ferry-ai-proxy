@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_images_handlers_test.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The images endpoints, their request builders and their answers.
@@ -1199,5 +1199,111 @@ async fn image_keepalives_after_first_payload_do_not_need_the_pre_first_token_sw
         .await
         .expect("image payload and two keepalives arrive before the timeout");
         assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
+// Ports the registered-prefix and forced vendor-alias routing regressions.
+#[tokio::test]
+async fn xai_routing_keeps_prefix_separate_from_payload_for_every_body() {
+    for (requested, registered, forced, expected) in [
+        (
+            "team/Grok-Imagine-Image",
+            "team/grok-imagine-image",
+            true,
+            "team/grok-imagine-image",
+        ),
+        (
+            "XAI/Grok-Imagine-Image",
+            "xai/grok-imagine-image",
+            true,
+            "xai/grok-imagine-image",
+        ),
+        (
+            "xai/grok-imagine-image",
+            "grok-imagine-image",
+            true,
+            "grok-imagine-image",
+        ),
+        (
+            "x-ai/grok-imagine-image",
+            "grok-imagine-image",
+            true,
+            "grok-imagine-image",
+        ),
+        (
+            "grok/grok-imagine-image",
+            "grok-imagine-image",
+            true,
+            "grok-imagine-image",
+        ),
+        (
+            "xai/grok-imagine-image",
+            "grok-imagine-image",
+            false,
+            "grok-imagine-image",
+        ),
+    ] {
+        for body_kind in ["generation", "json-edit", "form-edit", "stream"] {
+            let catalog = FakeCatalog::new().serve(registered, &["xai"]);
+            let dispatcher =
+                FakeDispatcher::new(vec![Outcome::reply(r#"{"data":[{"b64_json":"AA=="}]}"#)]);
+            let config = ServerConfig {
+                api_keys: vec!["sk-test".into()],
+                force_model_prefix: forced,
+                ..ServerConfig::default()
+            };
+            let app = router(state(config, catalog, &dispatcher));
+            let request = match body_kind {
+                "form-edit" => post_form(
+                    &[("model", requested), ("prompt", "cat")],
+                    &[("image", "a.png", Some("image/png"), PNG)],
+                ),
+                kind => {
+                    let uri = if kind == "json-edit" {
+                        EDITS
+                    } else {
+                        GENERATIONS
+                    };
+                    post_json(uri, &serde_json::json!({"model": requested, "prompt": "cat", "image": "https://img.test/a.png", "stream": kind == "stream"}).to_string())
+                }
+            };
+            let (status, _, body) = send(&app, request).await;
+            assert_eq!(status, StatusCode::OK, "{requested} {body_kind}: {body}");
+            let calls = dispatcher.calls();
+            let call = &calls[0];
+            assert_eq!(call.request.model, expected);
+            assert_eq!(
+                json::str_at(&call.request.payload, "model"),
+                "grok-imagine-image"
+            );
+            assert_eq!(call.providers, ["xai"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn xai_custom_only_credentials_do_not_accept_unregistered_vendor_or_custom_prefix() {
+    for requested in ["xai/grok-imagine-image", "other/grok-imagine-image"] {
+        let dispatcher = FakeDispatcher::new(vec![]);
+        let catalog = FakeCatalog::new().serve("team/grok-imagine-image", &["xai"]);
+        let app = router(state(
+            ServerConfig {
+                api_keys: vec!["sk-test".into()],
+                force_model_prefix: true,
+                ..ServerConfig::default()
+            },
+            catalog,
+            &dispatcher,
+        ));
+        let (status, _, _) = send(
+            &app,
+            post_json(
+                GENERATIONS,
+                &serde_json::json!({"model": requested, "prompt": "cat"}).to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(dispatcher.calls().is_empty());
     }
 }

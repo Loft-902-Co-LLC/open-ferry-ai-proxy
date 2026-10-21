@@ -1,6 +1,6 @@
 // Modelled on the keys of CLIProxyAPI sdk/config's SDKConfig that the HTTP
 // handlers read, as internal/api/server_options.go (effectiveSDKConfig) fills
-// them (v8.0.32, MIT).
+// them (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Settings for the HTTP layer.
@@ -19,6 +19,8 @@ pub struct ServerConfig {
     /// The keys clients must present (`api-keys`). Keys are trimmed, and empty
     /// and repeated ones dropped. With none left, every request is let in.
     pub api_keys: Vec<String>,
+    /// Require configured credential prefixes, except built-in image vendor aliases.
+    pub force_model_prefix: bool,
     /// Whether to pass providers' response headers on to clients
     /// (`passthrough-headers`).
     pub passthrough_headers: bool,
@@ -62,6 +64,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             api_keys: Vec::new(),
+            force_model_prefix: false,
             passthrough_headers: false,
             nonstream_keepalive: None,
             streaming: StreamingConfig::default(),
@@ -106,6 +109,7 @@ impl From<&Config> for ServerConfig {
         };
         Self {
             api_keys: config.api_keys.clone(),
+            force_model_prefix: config.force_model_prefix,
             passthrough_headers: config.passthrough_headers,
             nonstream_keepalive: seconds(config.nonstream_keepalive_interval),
             streaming: StreamingConfig {
