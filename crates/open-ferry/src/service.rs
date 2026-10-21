@@ -358,7 +358,7 @@ pub async fn run(
         }
         Err(error) => {
             tracing::error!("failed to create watcher: {error}");
-            service.close_management_queues();
+            service.close_management_queues().await;
             shut_down(&service, &stop_server, server).await;
             return ExitCode::FAILURE;
         }
@@ -391,7 +391,7 @@ pub async fn run(
             () = service.work(&config_path, &mut events) => {}
         }
     }
-    service.close_management_queues();
+    service.close_management_queues().await;
     let code = shut_down(&service, &stop_server, server).await;
     #[cfg(test)]
     shutdown_diagnostics::record("return from run");
@@ -404,7 +404,7 @@ async fn server_ended(
     service: &mut Service,
     result: Result<io::Result<()>, tokio::task::JoinError>,
 ) -> ExitCode {
-    service.close_management_queues();
+    service.close_management_queues().await;
     #[cfg(test)]
     shutdown_diagnostics::record("server ended; stop update checks");
     stop_update_checks(&service.management).await;
@@ -2318,16 +2318,16 @@ impl Service {
     }
 
     /// Close producers in the same order on every service shutdown path.
-    fn close_management_queues(&mut self) {
-        self.close_sync();
-        self.close_reloads();
+    async fn close_management_queues(&mut self) {
+        self.close_sync().await;
+        self.close_reloads().await;
     }
 
     /// Takes no more reloads from the management API, and answers those
     /// asked for, so no handler waits on a loop that has stopped.
-    fn close_reloads(&mut self) {
+    async fn close_reloads(&mut self) {
         self.reload_requests.close();
-        while let Ok(request) = self.reload_requests.try_recv() {
+        while let Some(request) = self.reload_requests.recv().await {
             let _ = request.applied.send(());
         }
         self.settle_reloads();
@@ -2344,14 +2344,15 @@ impl Service {
         });
     }
 
-    /// Refuse queued changes and cancel observation acknowledgements at shutdown.
+    /// Refuse changes through terminal closure, including pre-close permits.
+    /// Cancel observation acknowledgements at shutdown.
     /// Running workers keep their operation until they finish; no reads are started.
-    fn close_sync(&mut self) {
+    async fn close_sync(&mut self) {
         self.sync_requests.close();
         self.config_generation.fetch_add(1, Ordering::SeqCst);
         self.dirty_reads.clear();
         self.reads.clear();
-        while self.sync_requests.try_recv().is_ok() {}
+        while self.sync_requests.recv().await.is_some() {}
     }
 
     fn observation_path(&self, path: &Path) -> PathBuf {
@@ -7631,7 +7632,7 @@ mod tests {
         })
         .await
         .unwrap();
-        service.close_sync();
+        service.close_sync().await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), parked)
                 .await
@@ -8124,7 +8125,7 @@ mod tests {
                         })
                         .unwrap();
                 }
-                _ => service.close_sync(),
+                _ => service.close_sync().await,
             }
             if change == "new-registration-event" {
                 std::fs::write(&path, &payload.data).unwrap();
@@ -8816,7 +8817,7 @@ self-update:
                 operation: None,
             })
             .unwrap_or_else(|_| panic!("the queue is full"));
-        service.close_sync();
+        service.close_sync().await;
         assert!(
             tokio::time::timeout(Duration::from_secs(5), done)
                 .await
@@ -9535,6 +9536,7 @@ port: {port}
     }
 
     mod round5_shutdown;
+    mod round6_shutdown;
 
     #[tokio::test]
     async fn a_stalled_management_shutdown_preserves_the_ledger_reserve() {
@@ -9719,7 +9721,7 @@ port: {port}
             operation: None,
         };
         reload.requests.try_send(request).unwrap();
-        service.close_reloads();
+        service.close_reloads().await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), done)
                 .await
