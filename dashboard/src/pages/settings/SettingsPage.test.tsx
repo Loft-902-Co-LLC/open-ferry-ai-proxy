@@ -2141,3 +2141,63 @@ describe("save-batch accepted publication", () => {
     } finally { await release(); }
   });
 });
+
+
+describe("focused Settings drafts", () => {
+  it("keeps the original snapshot when a refetch converges between keystrokes", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    const retries = screen.getByRole("textbox", { name: "Retries" });
+    await user.click(retries);
+    await user.clear(retries);
+    await user.type(retries, "2");
+    state.external(false, 2);
+    await refetchOnFocus();
+    expect(retries).toHaveFocus();
+    expect(retries).toHaveValue("2");
+    await user.type(retries, "5");
+    expect(retries).toHaveValue("25");
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Review the changes" }) !== null ||
+        screen.queryByText("The config changed since this page loaded") !== null).toBe(true);
+    });
+    const dialog = screen.queryByRole("dialog", { name: "Review the changes" });
+    if (dialog !== null) {
+      await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+      await waitFor(() => { expect(screen.queryByText("Saved 1 setting. The server uses it from now on.") !== null ||
+        within(dialog).queryByText("The config changed since this page loaded") !== null).toBe(true); });
+    }
+    expect(state.tree.routing.retry["request-retry"]).toBe(2);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`)).toEqual([]);
+    expect(screen.getByText(/Changed fields: Retries/)).toBeVisible();
+  });
+  it.each(["05", "5 ", " 5"])("preserves equivalent text %j through blur, then follows later reads", async (text) => {
+    const state = versionedServer();
+    state.external(false, 5);
+    const { user } = await openSettings();
+    const retries = screen.getByRole("textbox", { name: "Retries" });
+    await fill(user, retries, text);
+    expect(retries).toHaveValue(text);
+    expectNothingUnsaved();
+    await user.tab();
+    expect(retries).toHaveValue(text);
+    expectNothingUnsaved();
+    state.external(false, 7);
+    await refetchOnFocus();
+    expect(retries).toHaveValue("7");
+    expectNothingUnsaved();
+  });
+  it("keeps a space in an otherwise empty Proxy field through blur", async () => {
+    versionedServer();
+    const { user } = await openSettings();
+    const proxy = screen.getByLabelText("Proxy for outbound requests");
+    await user.click(proxy);
+    await user.type(proxy, " ");
+    expect(proxy).toHaveValue(" ");
+    expectNothingUnsaved();
+    await user.tab();
+    expect(proxy).toHaveValue(" ");
+    expectNothingUnsaved();
+  });
+});

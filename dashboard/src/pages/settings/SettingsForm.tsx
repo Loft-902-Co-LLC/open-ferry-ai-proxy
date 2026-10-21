@@ -1,5 +1,5 @@
 import type { UseQueryResult } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useForm, useWatch, type FieldErrors, type Resolver } from "react-hook-form";
 
 import { UPDATE_MODES, UPDATE_MODE_LABELS, type UpdateMode } from "../../api/update";
@@ -80,16 +80,19 @@ export function useSettingsForm(config: unknown, facts: ServerFacts | undefined)
   });
   const current = useWatch({ control: form.control });
   const { dirtyFields } = form.formState;
-  // Semantic equality releases a draft. Clear RHF's dirty flag at the
-  // same boundary, so a later refetch cannot leave an unbound old value.
+  const [focused, focus] = useState<SettingId | null>(null);
+  // Keep the base through a typing session. On blur, semantic equality
+  // clears RHF's dirty flag without rewriting the text the user entered.
   useEffect(() => {
     for (const id of SETTING_IDS) {
-      if (dirtyFields[id] === true && !isEdited(current[id], loaded[id])) {
-        form.resetField(id, { defaultValue: formValueOf(loaded[id]) });
+      const value = current[id];
+      if (id !== focused && dirtyFields[id] === true && value !== undefined && !isEdited(value, loaded[id])) {
+        form.resetField(id, { defaultValue: value });
       }
     }
-  }, [current, loaded, dirtyFields, form]);
+  }, [current, loaded, dirtyFields, focused, form]);
   const unsaved = SETTING_IDS.filter((id) => isEdited(current[id], loaded[id]));
+  const retained = focused !== null && dirtyFields[focused] === true ? [...new Set([...unsaved, focused])] : unsaved;
   const problems = useMemo(() => loadedProblems(loaded, facts), [loaded, facts]);
 
   /** Marks `id` saved as `value`, so the form no longer counts it unsaved. */
@@ -105,7 +108,7 @@ export function useSettingsForm(config: unknown, facts: ServerFacts | undefined)
     form.reset(formValues, { keepDirtyValues: false });
   }, [form, formValues]);
 
-  return { form, loaded, unsaved, problems, settle, discard };
+  return { form, loaded, unsaved, retained, focus, problems, settle, discard };
 }
 
 export type SettingsFormState = ReturnType<typeof useSettingsForm>;
@@ -152,6 +155,11 @@ export interface SettingsFormProps {
   onDraft: (id: SettingId) => void;
 }
 
+function settingTarget(target: EventTarget): SettingId | null {
+  const name = target instanceof HTMLInputElement || target instanceof HTMLSelectElement ? target.name : "";
+  return SETTING_IDS.includes(name as SettingId) ? name as SettingId : null;
+}
+
 /**
  * The settings most often changed, grouped as they are used. A save sends
  * only the settings changed here, each through its own route, after showing
@@ -176,9 +184,11 @@ export function SettingsForm({ id, settings, facts, onSubmit, onDraft }: Setting
       noValidate
       className="space-y-4"
       onChangeCapture={(event) => {
-        const name = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target.name : "";
-        if (SETTING_IDS.includes(name as SettingId)) onDraft(name as SettingId);
+        const setting = settingTarget(event.target);
+        if (setting !== null) onDraft(setting);
       }}
+      onFocusCapture={(event) => { settings.focus(settingTarget(event.target)); }}
+      onBlurCapture={() => { settings.focus(null); }}
       onSubmit={(event) => {
         event.preventDefault();
         onSubmit();
