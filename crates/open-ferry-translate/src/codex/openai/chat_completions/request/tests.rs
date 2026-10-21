@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_request_test.go
-// (v8.0.36, MIT), and codex_openai_user_turn_test.go (v8.0.36, MIT).
+// (v8.0.38, MIT), and codex_openai_user_turn_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
@@ -2344,4 +2344,32 @@ fn user_turns_in_detail() {
         ])),
         "{body}"
     );
+}
+
+#[test]
+fn only_explicit_parallel_false_is_preserved() {
+    for stream in [false, true] {
+        for field in [
+            None,
+            Some(json!(false)),
+            Some(json!(true)),
+            Some(Value::Null),
+            Some(json!(0)),
+            Some(json!("false")),
+            Some(json!([])),
+            Some(json!({})),
+        ] {
+            let mut request = json!({"messages":[{"role":"user","content":"hello"}],"input":"hello","stream":stream});
+            if let Some(value) = &field {
+                request["parallel_tool_calls"] = value.clone();
+            }
+            let expected = field != Some(Value::Bool(false));
+            let out = convert_openai_chat_completions_request_to_codex("gpt-5.6", &request, stream);
+            assert_eq!(
+                out["parallel_tool_calls"],
+                json!(expected),
+                "field={field:?}, stream={stream}"
+            );
+        }
+    }
 }

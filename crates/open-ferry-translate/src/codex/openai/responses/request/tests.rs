@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
-// (v8.0.36, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.38, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
 
@@ -340,7 +340,7 @@ fn normalizes_required_fields() {
             "model": "gpt-5.6",
             "stream": "true",
             "store": true,
-            "parallel_tool_calls": false,
+            "parallel_tool_calls": null,
             "include": ["file_search_call.results", "reasoning.encrypted_content"],
             "max_output_tokens": 4096,
             "max_completion_tokens": 4096,
@@ -885,4 +885,32 @@ fn normalizes_empty_function_call_arguments() {
         "custom_tool_call must not gain arguments; output: {out}"
     );
     assert_eq!(text_at(&out, "input.9.type"), "message", "output: {out}");
+}
+
+#[test]
+fn only_explicit_parallel_false_is_preserved() {
+    for stream in [false, true] {
+        for field in [
+            None,
+            Some(json!(false)),
+            Some(json!(true)),
+            Some(Value::Null),
+            Some(json!(0)),
+            Some(json!("false")),
+            Some(json!([])),
+            Some(json!({})),
+        ] {
+            let mut request = json!({"messages":[{"role":"user","content":"hello"}],"input":"hello","stream":stream});
+            if let Some(value) = &field {
+                request["parallel_tool_calls"] = value.clone();
+            }
+            let expected = field != Some(Value::Bool(false));
+            let out = convert_openai_responses_request_to_codex("gpt-5.6", request);
+            assert_eq!(
+                out["parallel_tool_calls"],
+                json!(expected),
+                "field={field:?}, stream={stream}"
+            );
+        }
+    }
 }
