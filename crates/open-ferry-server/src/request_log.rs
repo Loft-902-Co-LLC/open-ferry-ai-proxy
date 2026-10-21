@@ -24,10 +24,10 @@
 //!   management API (`/v0/management`, `/v8/management`, `/management`),
 //!   nor the dashboard's API (`/open-ferry/`), nor an OAuth callback (a
 //!   path ending `/callback`).
-//! - With `request-log` on, the client's body is read before the handler
-//!   runs, up to the server's body limit, and every answer is kept.
-//! - With it off, what the handler reads of the client's body is kept as it
-//!   reads it (not a multipart form), and only an error answer.
+//! - With `request-log` on, a bounded prefix of the client's body is kept
+//!   as authenticated admission reads it, and every answer is kept.
+//! - With it off, the same capture is made (not a multipart form), and
+//!   only an error answer is kept.
 //! - A WebSocket session's log is written when the session ends, with the
 //!   upstream attempts of all its turns.
 //!
@@ -41,18 +41,15 @@
 //! - OAuth callbacks aren't logged, nor is the dashboard's API, which is
 //!   open-ferry's own and, like the management API, holds the management
 //!   key.
-//! - With `request-log` off, a body of up to 1 MiB isn't read ahead of the
-//!   handler: every body is kept as the handler reads it.
-//! - With `request-log` on, the body read ahead is bounded by the server's
-//!   body limit, which the handler then enforces; a body that fails to read
-//!   is logged as far as it was read.
+//! - Capture never reads ahead of authentication. In either mode, the raw
+//!   prefix and its decoded rendering are each limited to 64 KiB, with a
+//!   size note when truncated. Smaller bodies retain upstream's output.
 //! - A client that leaves before the answer's head is logged with status
 //!   499; one that leaves during the body, with what was sent.
 //! - The trace ID is the latest selection's, taken when the answer's head
 //!   is ready.
-//! - Ingress admission buffers HTTP bodies before routing. Logging shares
-//!   those admitted bytes (including for error-only capture) instead of
-//!   allocating another copy; multipart error-only capture remains disabled.
+//! - Authenticated admission buffers bodies before the handler. Logging
+//!   copies only its bounded prefix; multipart error-only capture is disabled.
 //!
 //! [`RequestContext`]: open_ferry_core::observe::RequestContext
 //! [`RequestLogger::start`]: open_ferry_core::observe::request_log::RequestLogger::start

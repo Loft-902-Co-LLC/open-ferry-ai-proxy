@@ -104,7 +104,10 @@ mod tests {
 
     #[test]
     fn ingress_change_lines_are_open_ferry_additions() {
-        for name in super::UNLOGGED.iter().filter(|name| name.starts_with("ingress-limits.")) {
+        for name in super::UNLOGGED
+            .iter()
+            .filter(|name| name.starts_with("ingress-limits."))
+        {
             let go = json!({"details": []});
             let rust = json!({"details": [format!("{name}: 0 -> 7")]});
             assert_eq!(compare(&go, rust).0, 0, "{name}");

@@ -1,6 +1,7 @@
 //! open-ferry additions: one body-storage budget for both listeners and a
 //! reloadable source of ingress settings. Reservations follow the actual
-//! `Bytes` owners, including clones retained by the request logger.
+//! `Bytes` owners retained by handlers or responses. Request logging keeps
+//! its own bounded prefix instead of retaining admitted storage.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -362,7 +363,7 @@ async fn admitted(
     {
         return rejected(503, "request body buffer budget exhausted");
     }
-    // Only owners actually retained by the response or logger stay charged.
+    // Only owners actually retained by the response stay charged.
     // A long SSE response does not extend the handler's temporary allowance.
     response
 }
