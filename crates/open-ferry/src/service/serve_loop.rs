@@ -33,8 +33,8 @@
 //! is in, which then gets `Connection: close` or GOAWAY. [`FIRST_REQUEST_DEADLINE`]
 //! bounds the wait, counted once from the release (a handshake that ends
 //! late doesn't get a fresh one, and one still running at the deadline is
-//! ended). The loop enforces it itself: hyper's header-read timeout does
-//! nothing without a timer, and none is configured. HTTP/2 can admit more
+//! ended). The loop enforces it independently of normal ingress deadlines.
+//! HTTP/2 can admit more
 //! than one stream after a release: h2 lets the streams in flight arrive
 //! for about a round trip during its two-stage GOAWAY. They are served.
 //!
@@ -43,8 +43,10 @@
 //! WebSockets over HTTP/2), the peer's address as `ConnectInfo<SocketAddr>`,
 //! TCP_NODELAY (`send_at_once`) and, on a failed accept, a connection error
 //! ignored and any other error logged and followed by a second's wait.
-//! Connections that no release is waiting for keep axum's timeouts, which
-//! are none.
+//! open-ferry adds per-listener admission, TLS/header/idle deadlines and
+//! progress-based response write deadlines (see [`ingress`]). The server
+//! router adds upload deadlines and a shared buffered-body budget. New
+//! connections snapshot deadlines; admission and body storage follow reloads.
 //!
 //! The loop's stop, [`ServeControl::stop`], is `axum::serve`'s graceful
 //! shutdown: every connection gets hyper's graceful shutdown at once, and
@@ -81,6 +83,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, watch};
 use tokio_rustls::TlsAcceptor;
 use tower_service::Service;
+
+mod ingress;
+use ingress::{Admission, AdmissionGuard, Flight, Guarded, ResponseBody, Traffic};
+use open_ferry_server::config::IngressConfig;
+use open_ferry_server::ingress::Ingress;
 
 /// How long a connection that has carried no request gets, once the
 /// release has come, to carry one. Then it is closed.
@@ -554,6 +561,9 @@ struct CoreState {
 /// counted while any of them has it, so the count follows the IO: an
 /// upgraded connection is counted until its IO closes, or is cut.
 struct ConnCore {
+    /// Admission follows the IO owner, even after a cut retires live_count.
+    admission: OnceLock<AdmissionGuard>,
+    traffic: OnceLock<Arc<Traffic>>,
     shared: Arc<Shared>,
     id: u64,
     /// A request has reached the service.
@@ -584,6 +594,8 @@ impl ConnCore {
         open_ferry_supervisor::sockets::windows::set_no_inherit(&socket)?;
         let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
         let core = Arc::new(Self {
+            admission: OnceLock::new(),
+            traffic: OnceLock::new(),
             shared: shared.clone(),
             id,
             seen_request: AtomicBool::new(false),
@@ -642,6 +654,9 @@ impl ConnCore {
     }
 
     fn note_upgrade(&self) {
+        if let Some(traffic) = self.traffic.get() {
+            traffic.upgrade();
+        }
         let mut state = self.state();
         if !state.retired && !state.upgraded {
             state.upgraded = true;
@@ -692,6 +707,9 @@ impl ConnCore {
 impl Drop for ConnCore {
     fn drop(&mut self) {
         self.retire();
+        if let Some(traffic) = self.traffic.get() {
+            traffic.wake();
+        }
     }
 }
 
@@ -796,7 +814,7 @@ fn duplicate_listener(listener: &std::net::TcpListener) -> io::Result<TcpListene
 pub(crate) fn run(
     listener: std::net::TcpListener,
     tls: Option<Arc<rustls::ServerConfig>>,
-    app: Router,
+    mut app: Router,
     control: &ServeControl,
 ) -> impl Future<Output = io::Result<()>> + Send + 'static {
     let mut registration = control.register_loop();
@@ -804,6 +822,10 @@ pub(crate) fn run(
     let acceptor = tls.map(TlsAcceptor::from);
     async move {
         registration.start();
+        let ingress = ingress::router_settings(&mut app).await;
+        let _default_cap = ingress::default_connection_cap();
+        let admission = Arc::new(Admission::default());
+        let mut settings = ingress.subscribe();
         // Counted as started, a loop that leaves must be counted as failed.
         if let Err(error) = listener.set_nonblocking(true) {
             registration.fail();
@@ -876,15 +898,31 @@ pub(crate) fn run(
                     None => std::future::pending().await,
                 }
             };
+            let limits = settings.borrow_and_update().limits.clone();
+            // Keep the listener/backlog, but never accept or duplicate a
+            // socket above the cap. A mode change still wins immediately.
+            if accepting.is_some() && admission.full(&limits) {
+                ingress.warn("connections per listener");
+                tokio::select! {
+                    biased;
+                    _ = mode.changed() => {}
+                    _ = admission.changed.notified() => {}
+                    _ = settings.changed() => {}
+                    () = tokio::time::sleep(Duration::from_secs(30)) => {}
+                }
+                continue;
+            }
             tokio::select! {
                 // A change of mode wins over a connection waiting to be
                 // accepted.
                 biased;
                 _ = mode.changed() => {}
+                _ = settings.changed() => {}
                 accepted = accepted => match accepted {
                     Ok((stream, peer)) => {
                         if let Err(error) =
-                            spawn_connection(&shared, stream, peer, acceptor.clone(), app.clone())
+                            spawn_connection(&shared, stream, peer, acceptor.clone(), app.clone(),
+                                (&admission, ingress.clone(), limits.clone()))
                         {
                             tracing::error!(
                                 "dropping {peer}: its socket can't be duplicated or made non-inheritable: {error}"
@@ -934,8 +972,11 @@ fn spawn_connection(
     peer: SocketAddr,
     acceptor: Option<TlsAcceptor>,
     app: Router,
+    settings: (&Arc<Admission>, Ingress, IngressConfig),
 ) -> io::Result<()> {
+    let (admission, ingress, limits) = settings;
     let core = ConnCore::register(shared, &stream)?;
+    let _ = core.admission.set(admission.admit());
     let task = TaskGuard::new(shared);
     super::send_at_once(&stream);
     let mut mode = shared.mode.subscribe();
@@ -943,13 +984,19 @@ fn spawn_connection(
     tokio::spawn(async move {
         let _task = task;
         match acceptor {
-            None => serve_connection(stream, peer, app, core, mode).await,
+            None => serve_connection(stream, peer, app, core, mode, ingress, limits).await,
             Some(acceptor) => {
                 // A stop or a cut ends a handshake; a release lets it run,
                 // to the same deadline as the first request.
                 let stream = tokio::select! {
                     stream = crate::tls::handshake(&acceptor, stream, peer) => stream,
                     () = core.cut_wake.notified() => None,
+                    () = async {
+                        match limits.tls_handshake_timeout {
+                            Some(duration) => tokio::time::sleep(duration).await,
+                            None => std::future::pending().await,
+                        }
+                    } => { ingress.warn("TLS handshake"); None },
                     // The timer and the watch are unconstrained: a handshake
                     // that fills the task's budget mustn't starve them.
                     () = tokio::task::unconstrained(async { let _ = mode.wait_for(|mode| *mode == Mode::Stopping).await; }) => None,
@@ -959,7 +1006,7 @@ fn spawn_connection(
                     }
                 };
                 if let Some(stream) = stream {
-                    serve_connection(stream, peer, app, core, mode).await;
+                    serve_connection(stream, peer, app, core, mode, ingress, limits).await;
                 }
             }
         }
@@ -997,25 +1044,38 @@ async fn serve_connection<I>(
     app: Router,
     core: Arc<ConnCore>,
     mut mode: watch::Receiver<Mode>,
+    ingress: Ingress,
+    limits: IngressConfig,
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let io = TokioIo::new(Tracked {
-        inner: io,
-        core: core.clone(),
+    let traffic = Traffic::new(limits, ingress);
+    let _ = core.traffic.set(traffic.clone());
+    tokio::spawn(ingress::watch_traffic(
+        Arc::downgrade(&core),
+        traffic.clone(),
+    ));
+    let io = TokioIo::new(Guarded {
+        inner: Tracked {
+            inner: io,
+            core: core.clone(),
+        },
+        traffic: traffic.clone(),
     });
     let service = {
         let core = core.clone();
         let mode = mode.clone();
+        let traffic = traffic.clone();
         service_fn(move |request: hyper::Request<Incoming>| {
             core.note_request();
+            let flight = Flight::new(traffic.clone());
             let connect = request.method() == hyper::Method::CONNECT;
             // An answer that is ready at once is written before the task
             // can ask hyper to shut down gracefully, so a request that
             // arrives once the loop is released says it closes by itself.
             // HTTP/2 has no such header; its GOAWAY comes from the shutdown.
-            let closing =
-                *mode.borrow() == Mode::Released && request.version() <= hyper::Version::HTTP_11;
+            let version = request.version();
+            let mode = mode.clone();
             let mut router = app.clone();
             let mut request = request.map(Body::new);
             request.extensions_mut().insert(ConnectInfo(peer));
@@ -1031,6 +1091,17 @@ async fn serve_connection<I>(
                     .await
                     .unwrap_or_else(|error| match error {});
                 let status = response.status();
+                // A release may arrive while the handler waits, and the
+                // connection may write before its mode watcher is polled.
+                let closing = matches!(*mode.borrow(), Mode::Released | Mode::Stopping)
+                    && version <= hyper::Version::HTTP_11;
+                if response
+                    .extensions()
+                    .get::<open_ferry_server::ingress::IngressRejection>()
+                    .is_some()
+                {
+                    flight.close_after_response();
+                }
                 let mut response = response;
                 if status == StatusCode::SWITCHING_PROTOCOLS || (connect && status.is_success()) {
                     core.note_upgrade();
@@ -1040,11 +1111,14 @@ async fn serve_connection<I>(
                         hyper::header::HeaderValue::from_static("close"),
                     );
                 }
-                Ok::<_, Infallible>(response)
+                Ok::<_, Infallible>(response.map(|body| ResponseBody::new(body, flight)))
             }
         })
     };
     let mut builder = Builder::new(TokioExecutor::new());
+    // The transport watcher covers detection, the first head and keep-alive
+    // gaps without resetting on trickled bytes, for both HTTP versions.
+    builder.http1().header_read_timeout(None);
     // The CONNECT protocol HTTP/2 WebSockets need, as `axum::serve` has it.
     builder.http2().enable_connect_protocol();
     let mut connection = pin!(builder.serve_connection_with_upgrades(io, service));
@@ -1083,6 +1157,13 @@ async fn serve_connection<I>(
         tokio::select! {
             biased;
             () = core.cut_wake.notified() => break,
+            () = traffic.idle_wake.notified() => {
+                if traffic.idle_expired.load(Ordering::Acquire) {
+                    connection.as_mut().graceful_shutdown();
+                    finishing = Finishing::Graceful;
+                    deadline = None;
+                }
+            }
             result = connection.as_mut() => {
                 if let Err(error) = result {
                     tracing::trace!("failed to serve connection from {peer}: {error:#}");
