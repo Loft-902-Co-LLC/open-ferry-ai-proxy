@@ -7,8 +7,9 @@
 //! hints carry no constraint used by that decision; their presence is retained
 //! where they can change a property map. No Antigravity request cleaner is exposed.
 //! The 64-level depth limit bounds recursion; a separate 100,000-node copy budget
-//! bounds reference fan-out during inlining. Either limit preserves arguments when
-//! the projection cannot finish. Upstream has neither expansion bound.
+//! bounds the projected schema. Either limit preserves arguments when the
+//! projection cannot finish. Shared inlining also uses upstream's 256 KiB
+//! allowance, cycle hints, and inner-schema reference root.
 //!
 //! Deliberate projection deviations from upstream's raw-path quirks:
 //! - Scalar `required` beside `allOf` is retained here; upstream's array-only
@@ -23,14 +24,15 @@
 //!
 //! The scalar-required and literal-type shapes never come from our Gemini cleaner.
 
-use super::{analyze, array, gjson_array, local_ref, str_of};
+use super::{array, gjson_array, str_of};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
-const NAME_MAPS: [&str; 5] = [
+const NAME_MAPS: [&str; 6] = [
     "properties",
     "patternProperties",
     "dependentSchemas",
+    "dependencies",
     "$defs",
     "definitions",
 ];
@@ -141,7 +143,9 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
         .is_some_and(|s| s.eq_ignore_ascii_case("array"))
         || array(&node, "type")
             .any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("array")));
-    if is_array && node.get("items").is_none() {
+    if !node.get("$ref").is_none_or(Value::is_null) {
+        // Resolve the referenced type and items before synthesizing either.
+    } else if is_array && node.get("items").is_none() {
         node["items"] = json!({"type":"string"});
     } else if node.get("items").is_some()
         && (node.get("type").is_none_or(Value::is_null) || node.get("type") == Some(&json!("")))
@@ -244,73 +248,14 @@ fn copy_bounded(value: &Value, depth: usize, remaining: &mut usize) -> Option<Va
         _ => value.clone(),
     })
 }
-fn inline(
-    value: &Value,
-    root: &Value,
-    active: &mut BTreeSet<String>,
-    depth: usize,
-    remaining: &mut usize,
-) -> Option<Value> {
-    if depth > 64 {
-        return None;
-    }
-    *remaining = remaining.checked_sub(1)?;
-    if let Some(values) = value.as_array() {
-        return Some(Value::Array(
-            values
-                .iter()
-                .map(|v| inline(v, root, active, depth + 1, remaining))
-                .collect::<Option<Vec<_>>>()?,
-        ));
-    }
-    let Some(map) = value.as_object() else {
-        return Some(value.clone());
-    };
-    let mut out = Map::new();
-    let mut resolved = false;
-    if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-        && let Some(target) = local_ref(root, reference)
-    {
-        if !active.insert(reference.to_owned()) {
-            if let Some(target) = target.as_object() {
-                for key in ["type", "nullable", "description"] {
-                    if let Some(value) = target.get(key) {
-                        out.insert(key.to_owned(), copy_bounded(value, depth + 1, remaining)?);
-                    }
-                }
-            }
-            for (key, value) in map.iter().filter(|(k, _)| k.as_str() != "$ref") {
-                out.insert(key.clone(), copy_bounded(value, depth + 1, remaining)?);
-            }
-            out.insert("description".into(), json!("reference hint"));
-            return Some(Value::Object(out));
-        }
-        if let Value::Object(target) = inline(target, root, active, depth + 1, remaining)? {
-            out.extend(target);
-            resolved = true;
-        }
-        active.remove(reference);
-    }
-    for (key, value) in map {
-        if key == "$ref" {
-            if !resolved {
-                out.insert("description".into(), json!("reference hint"));
-            }
-            continue;
-        }
-        out.insert(
-            key.clone(),
-            inline(value, root, active, depth + 1, remaining)?,
-        );
-    }
-    Some(Value::Object(out))
-}
 // The name-map flag follows upstream's trailing keyword parity, protecting names
 // such as properties.properties while visiting all the same JSON containers.
 fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
     if let Some(map) = value.as_object_mut() {
         for (key, child) in map {
-            walk(child, NAME_MAPS.contains(&key.as_str()) && !name_map, phase);
+            if name_map || !crate::gemini_schema::is_literal_value_keyword(key) {
+                walk(child, NAME_MAPS.contains(&key.as_str()) && !name_map, phase);
+            }
         }
     } else if let Some(values) = value.as_array_mut() {
         for child in values {
@@ -318,6 +263,11 @@ fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
         }
     }
     phase(value, name_map);
+}
+fn reference_hint(value: &mut Value, name_map: bool) {
+    if !name_map && let Some(map) = value.as_object_mut() && map.shift_remove("$ref").is_some() {
+        map.insert("description".into(), json!("reference hint"));
+    }
 }
 fn hint_presence(value: &mut Value, _: bool) {
     let Some(map) = value.as_object_mut() else {
@@ -609,10 +559,11 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
         return false;
     };
     let wrapped = json!({"schema":schema});
-    let Some(mut projected) = inline(&wrapped, &wrapped, &mut BTreeSet::new(), 0, &mut 100_000)
-    else {
+    let inlined = crate::gemini_schema::local_refs::inline_for_clean(&wrapped);
+    let Some(mut projected) = copy_bounded(&inlined, 0, &mut 100_000) else {
         return false;
     };
+    walk(&mut projected, false, reference_hint);
     walk(&mut projected, false, hint_presence);
     walk(&mut projected, false, conditionals);
     walk(&mut projected, false, all_of);
@@ -625,6 +576,9 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
     let Some(schema) = projected.get("schema") else {
         return false;
     };
-    analyze(schema, schema).properties.contains_key(placeholder)
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|properties| properties.contains_key(placeholder))
         && gjson_array(schema.get("required")).any(|v| str_of(Some(v)) == placeholder)
 }

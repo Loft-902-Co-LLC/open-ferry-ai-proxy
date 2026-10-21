@@ -910,10 +910,10 @@ fn reclean_projection_matches_upstream_edges() {
   ["structural {\"else\": {\"properties\": {\"_\": {}}}}",{"else":{"properties":{"_":{}}}},true,false],
   ["structural {\"flag\": {\"type\": \"string\"}}",{"flag":{"type":"string"}},true,false],
   ["structural {\"flag\": {\"type\": \"string\", \"required\": true}}",{"flag":{"type":"string","required":true}},false,false],
-  ["structural {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"$ref\": \"#/$defs/x\", \"$defs\": {\"x\": {\"required\": [\"flag\"]}}}",{"type":"object","properties":{"flag":{"type":"string"}},"$ref":"#/$defs/x","$defs":{"x":{"required":["flag"]}}},true,false],
-  ["structural {\"$ref\": \"#/schema/$defs/x\", \"$defs\": {\"x\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}}}",{"$ref":"#/schema/$defs/x","$defs":{"x":{"type":"object","properties":{"flag":{"type":"string"}}}}},true,false],
-  ["structural {\"$ref\": \"#/schema/$defs/x\", \"$defs\": {\"x\": {\"$ref\": \"#/schema/$defs/x\", \"type\": \"object\", \"properties\": {\"flag\": {}}}}}",{"$ref":"#/schema/$defs/x","$defs":{"x":{"$ref":"#/schema/$defs/x","type":"object","properties":{"flag":{}}}}},true,false],
-  ["structural {\"properties\": {\"$ref\": \"#/schema/$defs/x\"}, \"$defs\": {\"x\": {}}}",{"properties":{"$ref":"#/schema/$defs/x"},"$defs":{"x":{}}},false,true],
+  ["structural {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"$ref\": \"#/$defs/x\", \"$defs\": {\"x\": {\"required\": [\"flag\"]}}}",{"type":"object","properties":{"flag":{"type":"string"}},"$ref":"#/$defs/x","$defs":{"x":{"required":["flag"]}}},false,false],
+  ["structural {\"$ref\": \"#/schema/$defs/x\", \"$defs\": {\"x\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}}}",{"$ref":"#/schema/$defs/x","$defs":{"x":{"type":"object","properties":{"flag":{"type":"string"}}}}},false,false],
+  ["structural {\"$ref\": \"#/schema/$defs/x\", \"$defs\": {\"x\": {\"$ref\": \"#/schema/$defs/x\", \"type\": \"object\", \"properties\": {\"flag\": {}}}}}",{"$ref":"#/schema/$defs/x","$defs":{"x":{"$ref":"#/schema/$defs/x","type":"object","properties":{"flag":{}}}}},false,false],
+  ["structural {\"properties\": {\"$ref\": \"#/schema/$defs/x\"}, \"$defs\": {\"x\": {}}}",{"properties":{"$ref":"#/schema/$defs/x"},"$defs":{"x":{}}},true,false],
   ["structural {\"type\": [\"array\", \"object\"], \"properties\": {\"flag\": {}}, \"items\": {}}",{"type":["array","object"],"properties":{"flag":{}},"items":{}},true,false],
   ["structural {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}], \"oneOf\": [{\"type\": \"object\", \"properties\": {\"_\": {}}}]}",{"anyOf":[{"type":"object","properties":{"flag":{"type":"string"}}}],"oneOf":[{"type":"object","properties":{"_":{}}}]},true,false],
   ["structural {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"anyOf\": [{\"required\": [\"flag\"]}]}",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"required":["flag"]}]},true,false]
@@ -1091,20 +1091,8 @@ fn cached_schema_text_keeps_first_seen_order() {
 // allocate its exponentially expanded tree. No wall-clock assertion is needed.
 #[test]
 fn reclean_node_budget_preserves_arguments() {
-    let mut defs = serde_json::Map::new();
-    defs.insert(
-        "d16".into(),
-        json!({"type":"object","properties":{"leaf":{"type":"string"}}}),
-    );
-    for i in (0..16).rev() {
-        let reference = format!("#/schema/$defs/d{}", i + 1);
-        defs.insert(
-            format!("d{i}"),
-            json!({"type":"object","properties":{"a":{"$ref":reference},"b":{"$ref":reference}}}),
-        );
-    }
-    let schema =
-        json!({"type":"object","properties":{"p":{"$ref":"#/schema/$defs/d0"}},"$defs":defs});
+    let schema = json!({"type":"object","properties":{"p":{"type":"string"}},
+        "default":vec![Value::Null; 100_001]});
     assert!(!reclean::requires(&schema, "_"));
     let original = json!({"tools":[{"name":"T","input_schema":{"type":"object","properties":{"p":{"type":"string"}},"additionalProperties":false}}]});
     let sent =
@@ -1166,4 +1154,17 @@ fn schema_dedup_release_timings() {
             );
         }
     }
+}
+
+#[test]
+fn reclean_resolves_refs_against_inner_schema_and_preserves_literal_data() {
+    let schema = json!({"$ref":"#/$defs/T","$defs":{"T":{"type":"object",
+        "properties":{"flag":{"type":"string"}},"additionalProperties":false}}});
+    assert!(reclean::requires(&schema, "_"));
+    let schema = json!({"type":"object","properties":{"flag":{"type":"string"}},
+        "default":{"properties":{"_":{}},"required":["_"]},"additionalProperties":false});
+    assert!(reclean::requires(&schema, "_"));
+    let schema = json!({"type":"object","properties":{"$ref":{"type":"string"}},
+        "required":["$ref"],"additionalProperties":false});
+    assert!(!reclean::requires(&schema, "_"));
 }

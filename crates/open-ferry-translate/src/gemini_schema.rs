@@ -10,7 +10,8 @@
 //! `CleanJSONSchemaForGeminiJSONSchema`. It keeps standard constraints such as
 //! `pattern` and `minLength`, and `additionalProperties` in both its forms. It
 //! removes what Gemini rejects:
-//! - `$ref` becomes a description hint, and `const` becomes `enum`
+//! - local `$ref` targets are inlined within 256 KiB; unresolved refs become
+//!   description hints, and `const` becomes `enum`
 //! - enum values become strings
 //! - `allOf` is merged into its parent; multi-branch `anyOf` and `oneOf`
 //!   unions are kept, while single branches are merged or unwrapped
@@ -35,7 +36,7 @@
 //! Upstream's other cleaners are not ported: `CleanJSONSchemaForAntigravity`
 //! with its tool and response variants, and the legacy
 //! `CleanJSONSchemaForGemini`. Neither are the passes only they run (local
-//! `$ref` inlining, constraint and `not` hints, the empty-schema placeholder).
+//! constraint and `not` hints, the empty-schema placeholder).
 //! Antigravity is out of scope, and nothing here calls the legacy cleaner.
 //!
 //! Deviations from upstream:
@@ -76,6 +77,8 @@
 //!   keyword is dropped, leaving the parent schema rather than retaining a
 //!   stricter partial union. Upstream copies without bound, multiplying nested
 //!   properties at each level.
+
+pub(crate) mod local_refs;
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -469,10 +472,11 @@ const UNSUPPORTED_KEYWORDS: [&str; 32] = [
 
 /// Keywords whose value maps names chosen by the schema's author to
 /// subschemas, so a key directly under one is a name, never a keyword.
-const NAME_MAP_KEYWORDS: [&str; 5] = [
+const NAME_MAP_KEYWORDS: [&str; 6] = [
     "properties",
     "patternProperties",
     "dependentSchemas",
+    "dependencies",
     "$defs",
     "definitions",
 ];
@@ -488,6 +492,9 @@ pub(crate) fn clean_json_schema_for_gemini_json_schema(
     budget: &mut SchemaCopyBudget,
 ) -> Value {
     let mut doc = normalize_malformed_schema_objects(schema);
+
+    // Resolve before the passes discard definition containers.
+    doc = local_refs::inline_for_clean(&doc);
 
     // Convert and add hints.
     convert_refs_to_hints(&mut doc);
@@ -506,8 +513,8 @@ pub(crate) fn clean_json_schema_for_gemini_json_schema(
     remove_keywords(&mut doc, &["nullable", "title"]);
     remove_placeholder_fields(&mut doc);
     cleanup_required_fields(&mut doc);
-    sanitize_array_items(&mut doc);
     sanitize_object_properties(&mut doc);
+    sanitize_array_items(&mut doc);
     doc
 }
 
@@ -544,6 +551,21 @@ fn sanitize_array_items(doc: &mut Value) {
             set(doc, &type_path, Value::from("array"));
         } else if !kind.eq_ignore_ascii_case("array") {
             delete(doc, &path);
+        }
+    }
+    // Reference targets may introduce arrays after the initial repair pass.
+    for path in find_paths(doc, "type") {
+        let parent = trim_suffix(&path, ".type");
+        if !is_property_definition(&parent)
+            && is_array_declared_type(get(doc, &path))
+            && get(doc, &join_path(&parent, "items")).is_none()
+            && get(doc, &join_path(&parent, "$ref")).is_none()
+        {
+            set(
+                doc,
+                &join_path(&parent, "items"),
+                object([("type", Value::from("string"))]),
+            );
         }
     }
 }
@@ -799,7 +821,9 @@ fn repair_schema_node(node: &Map<String, Value>) -> (Map<String, Value>, bool) {
         }
     }
 
-    if is_array_declared_type(node.get("type")) {
+    if !node.get("$ref").is_none_or(Value::is_null) {
+        // Synthesized siblings must not override the referenced array schema.
+    } else if is_array_declared_type(node.get("type")) {
         if !node.contains_key("items") {
             node.insert("items".into(), object([("type", Value::from("string"))]));
             modified = true;
@@ -1017,6 +1041,9 @@ fn convert_refs_to_hints(doc: &mut Value) {
     for path in paths {
         let name = ref_name(&bounded_text(get(doc, &path)));
         let parent = trim_suffix(&path, ".$ref");
+        if is_property_definition(&parent) {
+            continue;
+        }
         let mut hint = format!("See: {name}");
         let existing = bounded_text(get(doc, &description_path(&parent)));
         if !existing.is_empty() {
@@ -1682,7 +1709,9 @@ fn walk_for_extensions(value: &Value, path: &str, paths: &mut Vec<String>) {
                     paths.push(child_path);
                     continue;
                 }
-                walk_for_extensions(value, &child_path, paths);
+                if !is_literal_value_keyword(key) || is_property_definition(path) {
+                    walk_for_extensions(value, &child_path, paths);
+                }
             }
         }
         _ => {}
@@ -1937,13 +1966,19 @@ fn find_paths_by_fields<'f>(doc: &Value, fields: &[&'f str]) -> HashMap<&'f str,
     paths
 }
 
+pub(crate) fn is_literal_value_keyword(key: &str) -> bool {
+    matches!(key, "default" | "example" | "examples" | "const" | "enum")
+}
+
 fn walk(value: &Value, path: &str, visit: &mut dyn FnMut(&str, &str)) {
     match value {
         Value::Object(fields) => {
             for (key, value) in fields {
                 let child_path = join_path(path, &escape_key(key));
                 visit(key, &child_path);
-                walk(value, &child_path, visit);
+                if !is_literal_value_keyword(key) || is_property_definition(path) {
+                    walk(value, &child_path, visit);
+                }
             }
         }
         Value::Array(items) => {

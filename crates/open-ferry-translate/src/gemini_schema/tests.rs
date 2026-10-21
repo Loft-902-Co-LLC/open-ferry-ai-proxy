@@ -1169,7 +1169,7 @@ fn matches_upstream_output() {
         ),
         (
             r##"{"type":"object","properties":{"p":{"$ref":"#/$defs/Foo~1Bar","description":"x"}},"$defs":{"Foo/Bar":{"type":"string"}}}"##,
-            r#"{"type":"object","properties":{"p":{"type":"object","description":"x (See: Foo/Bar)"}}}"#,
+            r#"{"type":"object","properties":{"p":{"type":"string","description":"x"}}}"#,
         ),
         (
             r#"{"allOf":[{"properties":{"a.b":{"type":"string"}},"required":["a.b"]},{"required":["c"],"if":{}}],"type":"object","properties":{"c":{"type":"integer"}}}"#,
@@ -1194,7 +1194,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":["array","null"],"items":{"type":"string"},"x-a":1,"properties":{"x-b":{"x-c":2}}}"#,
-            r#"{"type":"object","items":{"type":"string"},"properties":{"x-b":{}}}"#,
+            r#"{"type":"object","properties":{"x-b":{}}}"#,
         ),
         // A root const: upstream's path ".enum" names a key under "".
         (
@@ -1574,7 +1574,7 @@ fn object_type_for_properties_in_detail() {
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":["array","object"],"items":{"type":"string"},"properties":{"x":{"type":"string"}}}}}"#,
-            r#"{"type":"object","properties":{"e":{"type":"object","items":{"type":"string"},"properties":{"x":{"type":"string"}},"description":"Accepts: array | object"}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"x":{"type":"string"}},"description":"Accepts: array | object"}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":"OBJECT","properties":{}}}}"#,
@@ -1626,7 +1626,7 @@ fn object_type_for_properties_in_detail() {
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":"array","items":{"type":"string"},"properties":{"a":{"type":"string"}}}}}"#,
-            r#"{"type":"object","properties":{"e":{"type":"object","items":{"type":"string"},"properties":{"a":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"a":{"type":"string"}}}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"e":{"properties":{"a":{"type":"string"}},"anyOf":[{"type":"null"},{"type":"string"}]}}}"#,
@@ -2582,13 +2582,23 @@ fn removes_content_annotations_but_keeps_same_named_properties_issue6699() {
             "contentEncoding":{"type":"string","contentEncoding":"base64"}
         }
     }));
-    for node in [&out, &out["properties"]["value"]["anyOf"][1],
-        &out["properties"]["directPayload"], &out["properties"]["contentMediaType"],
-        &out["properties"]["contentEncoding"]] {
+    for node in [
+        &out,
+        &out["properties"]["value"]["anyOf"][1],
+        &out["properties"]["directPayload"],
+        &out["properties"]["contentMediaType"],
+        &out["properties"]["contentEncoding"],
+    ] {
         assert!(node.get("contentMediaType").is_none(), "{out}");
         assert!(node.get("contentEncoding").is_none(), "{out}");
     }
-    assert_eq!(out["properties"]["value"]["anyOf"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        out["properties"]["value"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     assert_eq!(out["properties"]["value"]["anyOf"][1]["type"], "string");
     for name in ["contentMediaType", "contentEncoding"] {
         assert_eq!(out["properties"][name]["type"], "string");
