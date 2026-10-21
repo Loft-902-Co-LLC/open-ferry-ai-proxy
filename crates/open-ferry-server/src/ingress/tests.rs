@@ -745,3 +745,87 @@ async fn warnings_count_every_guard_hit_but_are_rate_limited() {
     assert_eq!(warnings["test guard"].total, 3);
     assert_eq!(warnings["test guard"].since_log, 0);
 }
+
+#[tokio::test]
+async fn public_get_callbacks_answer_without_polling_the_body() {
+    let ingress=ingress(12);
+    let router=ingress.install(Router::new().route("/codex/callback",axum::routing::get(|| async { "ok" })).layer(axum::middleware::from_fn(public_request)));
+    let polls=Arc::new(AtomicUsize::new(0));
+    let count=polls.clone();
+    let body=Body::from_stream(stream::poll_fn(move |_| {
+        count.fetch_add(1,Ordering::SeqCst);
+        std::task::Poll::<Option<Result<Bytes,std::io::Error>>>::Pending
+    }));
+    let task=tokio::spawn(router.oneshot(Request::get("/codex/callback").body(body).unwrap()));
+    settle().await;
+    assert_eq!(polls.load(Ordering::SeqCst),0,"GET callback polled an unused request body");
+    assert!(task.is_finished());
+    assert_eq!(task.await.unwrap().unwrap().status(),200);
+    assert_eq!(ingress.reserved_body_bytes(),0);
+}
+
+#[tokio::test]
+async fn public_callback_pool_is_bounded_independent_and_released_on_every_exit() {
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+    let dispatcher=FakeDispatcher::new([]);
+    let state=state(ServerConfig { api_keys: vec!["client-secret".into()], body_limit:12, ingress:IngressConfig {buffered_body_bytes:Some(36),..IngressConfig::default()}, ..ServerConfig::default()},FakeCatalog::new(),&dispatcher);
+    let ingress=state.ingress().clone();
+    let authenticated=crate::router(state);
+    let router=ingress.install(Router::new().route("/oauth/callback",post(|_: Bytes| async { "ok" })).layer(axum::middleware::from_fn(public_request)));
+    // 2 MiB / 64 KiB = 32 concurrent maximum callback payloads.
+    for exit in ["completion","error","disconnect"] {
+        let mut tasks=Vec::new();
+        let finish=Arc::new(Notify::new());
+        for index in 0..32 {
+            let started=Arc::new(Notify::new());
+            let signal=started.clone();
+            let gate=finish.clone();
+            let body=Body::from_stream(stream::once(async move {
+                signal.notify_one();
+                gate.notified().await;
+                if exit=="error" && index==0 { Err(std::io::Error::other("callback read failed")) }
+                else { Ok(Bytes::from_static(b"{}")) }
+            }));
+            tasks.push(tokio::spawn(router.clone().oneshot(Request::post("/oauth/callback").header(header::CONTENT_LENGTH,"65536").body(body).unwrap())));
+            started.notified().await;
+        }
+        let refused=router.clone().oneshot(Request::post("/oauth/callback").header(header::CONTENT_LENGTH,"65536").body(Body::from("{}")).unwrap()).await.unwrap();
+        assert_eq!(refused.status(),503,"unauthenticated callbacks exceeded their aggregate pool");
+        assert_eq!(ingress.reserved_body_bytes(),0);
+        let mut authenticated_tasks=Vec::new();
+        for _ in 0..3 {
+            let started=Arc::new(Notify::new());
+            authenticated_tasks.push(tokio::spawn(authenticated.clone().oneshot(Request::post("/v1/chat/completions").header(header::AUTHORIZATION,"Bearer client-secret").header(header::CONTENT_LENGTH,"12").body(stalled(started.clone())).unwrap())));
+            started.notified().await;
+        }
+        assert_eq!(ingress.reserved_body_bytes(),36,"callbacks reduced authenticated capacity");
+        for task in authenticated_tasks { task.abort(); let _=task.await; }
+        let first=tasks.remove(0);
+        if exit=="disconnect" { first.abort(); let _=first.await; }
+        else { finish.notify_one(); let response=first.await.unwrap().unwrap(); assert_eq!(response.status(),if exit=="error" {400} else {200}); }
+        let next=router.clone().oneshot(Request::post("/oauth/callback").header(header::CONTENT_LENGTH,"65536").body(Body::from("{}")).unwrap()).await.unwrap();
+        assert_eq!(next.status(),200,"callback reservation leaked after {exit}");
+        for task in tasks { task.abort(); let _=task.await; }
+        settle().await;
+    }
+}
+
+#[test]
+fn buffer_capacity_is_charged_through_growth_and_finished_ownership() {
+    let ingress=ingress(31);
+    let mut buffer=BudgetBuffer::new(Some(ingress.budget.clone()));
+    for size in [1,7,1,7,1,14] {
+        buffer.push(&vec![b'x';size]).unwrap();
+        assert!(buffer.reservation.bytes>=buffer.bytes.capacity(),"owned capacity {} exceeded charge {}",buffer.bytes.capacity(),buffer.reservation.bytes);
+        assert!(buffer.bytes.capacity()<=31);
+    }
+    let capacity=buffer.bytes.capacity();
+    let bytes=buffer.finish();
+    assert!(ingress.reserved_body_bytes()>=capacity);
+    let clone=bytes.clone();
+    drop(bytes);
+    assert!(ingress.reserved_body_bytes()>=capacity);
+    drop(clone);
+    assert_eq!(ingress.reserved_body_bytes(),0);
+}
