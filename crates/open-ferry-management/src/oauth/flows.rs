@@ -686,6 +686,10 @@ async fn complete(
                 }
             }
             store.complete(&login.state);
+            #[cfg(test)]
+            if is_bind && let Some(events) = sessions.overrides().bind_shutdown_events.clone() {
+                events.lock().unwrap().push("collector finalized");
+            }
         }
         Err(error) => bind_error(store, &login.state, error),
     }

@@ -39,35 +39,35 @@ async fn round5_closed_sync_shutdown_waits_for_collector_finalization() {
     let upstream = Upstream::answering(tokens()).await;
     let api = login_api(&dir, &upstream.url);
     let (session, pause) = paused_collector(&api).await;
-    let state = api.state.clone();
-    let shutdown = tokio::spawn(async move { state.shutdown().await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let waited = !shutdown.is_finished();
-    let pending = !api
-        .state
-        .oauth_sessions()
-        .store()
-        .get(&session)
-        .unwrap()
-        .completed;
+    // This runtime is current-thread. One explicit poll reaches idle before
+    // any owner-abort/join suspension can disguise a premature idle return.
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    api.state.oauth_sessions().overrides().bind_shutdown_events = Some(events.clone());
+    let shutdown = api.state.shutdown();
+    tokio::pin!(shutdown);
+    let polled =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(shutdown.as_mut().poll(cx))).await;
+    assert!(polled.is_pending());
+    let before_release = events.lock().unwrap().clone();
     pause.1.notify_one();
-    tokio::time::timeout(SETTLE, shutdown)
-        .await
-        .unwrap()
-        .unwrap();
-    let finalized = api
-        .state
-        .oauth_sessions()
-        .store()
-        .get(&session)
-        .unwrap()
-        .completed;
+    tokio::time::timeout(SETTLE, shutdown).await.unwrap();
     idle(&api).await;
     assert!(
-        waited && pending,
-        "closed-sync shutdown ignored the sole collector"
+        before_release.is_empty(),
+        "shutdown passed idle with the collector paused"
     );
-    assert!(finalized, "shutdown returned before store.complete");
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["collector finalized", "shutdown passed idle"]
+    );
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .get(&session)
+            .unwrap()
+            .completed
+    );
 }
 
 #[tokio::test]

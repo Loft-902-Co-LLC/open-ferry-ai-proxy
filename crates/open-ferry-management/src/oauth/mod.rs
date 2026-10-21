@@ -181,6 +181,8 @@ pub(crate) struct Overrides {
     pub(crate) bind_worker_error: Option<std::io::ErrorKind>,
     #[cfg(test)]
     pub(crate) bind_cancel_observed: Option<std::sync::Arc<tokio::sync::Notify>>,
+    #[cfg(test)]
+    pub(crate) bind_shutdown_events: Option<BindShutdownEvents>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -189,6 +191,8 @@ pub(crate) type BindWritePause = std::sync::Arc<(
     std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 )>;
 
+#[cfg(test)]
+type BindShutdownEvents = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
 #[cfg(test)]
 type BindAdmissionTimes = std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>;
 
@@ -223,6 +227,8 @@ impl Default for Overrides {
             bind_worker_error: None,
             #[cfg(test)]
             bind_cancel_observed: None,
+            #[cfg(test)]
+            bind_shutdown_events: None,
             #[cfg(test)]
             bind_drain_budget: None,
             #[cfg(test)]
@@ -338,6 +344,10 @@ impl Sessions {
                     "SIWC bind shutdown grace expired; sessions are still finalizing"
                 );
             }
+        }
+        #[cfg(test)]
+        if let Some(events) = self.overrides().bind_shutdown_events.clone() {
+            events.lock().unwrap().push("shutdown passed idle");
         }
         tasks.shutdown().await;
     }
