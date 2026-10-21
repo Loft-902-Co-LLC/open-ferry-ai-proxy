@@ -2090,7 +2090,8 @@ describe("save-batch accepted publication", () => {
     // notifications without blocking either write's own guarded read.
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const answer = await answerFetch(input, init);
-      if (held && init?.signal !== undefined && String(input).endsWith(V8_CONFIG)) {
+      const address = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (held && init?.signal !== undefined && address.endsWith(V8_CONFIG)) {
         return new Promise<Response>((resolve) => { pending.push(() => { resolve(answer); }); });
       }
       return answer;
