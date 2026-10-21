@@ -362,3 +362,71 @@ fn paused_status_uses_go_unicode_case_folding() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0]["type"], "server_tool_use");
 }
+
+#[test]
+fn parallel_guard_resolves_forced_names_and_preserves_exact_string_choices() {
+    // Go-probed: literal type-named tools cannot hide a missing forced name.
+    let tools = json!([{"type":"function","name":"function","parameters":{"type":"object"}},
+        {"type":"custom","name":"custom"}]);
+    for compat in [false, true] {
+        for choice in [
+            json!({"type":"function","function":{"name":"filtered_out"}}),
+            json!({"type":"custom","custom":{"name":"filtered_out"}}),
+        ] {
+            let out = request(
+                "claude-test",
+                &json!({"input":"hi","tools":tools,
+                "parallel_tool_calls":false,"tool_choice":choice}),
+                compat,
+            );
+            assert!(out.get("tool_choice").is_none(), "{out}");
+        }
+        for (choice, expected) in [
+            (json!(" none "), true),
+            (json!("none"), false),
+            (json!({"type":" none "}), false),
+        ] {
+            let out = request(
+                "claude-test",
+                &json!({"input":"hi","tools":tools,
+                "parallel_tool_calls":false,"tool_choice":choice}),
+                compat,
+            );
+            if expected {
+                assert_eq!(
+                    out["tool_choice"],
+                    json!({"type":"auto","disable_parallel_tool_use":true})
+                );
+            } else {
+                assert!(out.get("tool_choice").is_none(), "{out}");
+            }
+        }
+        for choice in [
+            json!({"type":"function","function":{"name":"lookup","namespace":"ops"}}),
+            json!({"type":"custom","custom":{"name":"lookup","namespace":"ops"}}),
+            json!({"type":"function","name":"lookup","namespace":"ops"}),
+            json!({"type":"function","name":"lookup"}),
+        ] {
+            let out = request(
+                "claude-test",
+                &json!({"input":"hi",
+                "tools":[{"type":"namespace","name":"ops","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}],
+                "parallel_tool_calls":false,"tool_choice":choice}),
+                compat,
+            );
+            assert_eq!(out["tool_choice"]["name"], out["tools"][0]["name"], "{out}");
+            assert_eq!(
+                out["tool_choice"]["disable_parallel_tool_use"], true,
+                "{out}"
+            );
+        }
+        let out = request(
+            "claude-test",
+            &json!({"input":"hi","parallel_tool_calls":false,
+            "tools":[{"type":"namespace","name":"ops","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}],
+            "tool_choice":{"type":"function","name":" lookup "}}),
+            compat,
+        );
+        assert!(out.get("tool_choice").is_none(), "{out}");
+    }
+}

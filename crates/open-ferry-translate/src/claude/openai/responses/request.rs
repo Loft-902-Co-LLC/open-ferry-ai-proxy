@@ -254,30 +254,14 @@ fn convert(
         out.insert("tools".into(), claude_tools.into());
     }
     let name_map = tools.name_map(&included);
-    if let Some(choice) =
-        convert_tool_choice(request.get("tool_choice"), &tools, &included, &name_map)
-    {
-        out.insert("tool_choice".into(), choice);
+    let choice = convert_tool_choice(request.get("tool_choice"), &tools, &included, &name_map);
+    if let Some(value) = choice.value {
+        out.insert("tool_choice".into(), value);
     }
-
-    let choice = request.get("tool_choice");
-    let choice_kind = choice
-        .and_then(|v| v.as_str().or_else(|| v.get("type").and_then(Value::as_str)))
-        .unwrap_or("")
-        .trim();
-    let choice_none = choice_kind == "none";
-    let forced_filtered = !out.contains_key("tool_choice")
-        && match choice {
-            Some(Value::String(s)) => s == "required",
-            Some(Value::Object(_)) => {
-                !matches!(choice_kind, "" | "auto" | "none") && !included.contains(choice_kind)
-            }
-            _ => false,
-        };
     if request.get("parallel_tool_calls") == Some(&Value::Bool(false))
         && has_tools
-        && !choice_none
-        && !forced_filtered
+        && !choice.none
+        && !choice.forced_filtered
     {
         let choice = out
             .entry("tool_choice")
@@ -1291,23 +1275,38 @@ fn web_search_tool(tool: &Value) -> Option<Value> {
 
 /// `tool_choice`: `auto`, `required` if any tool survived, or one named
 /// function or custom tool that did. Others are left out.
+#[derive(Default)]
+struct ToolChoice {
+    value: Option<Value>,
+    none: bool,
+    forced_filtered: bool,
+}
+
 fn convert_tool_choice(
     choice: Option<&Value>,
     tools: &RequestTools,
     included: &HashSet<String>,
     name_map: &HashMap<String, String>,
-) -> Option<Value> {
-    match choice? {
-        Value::String(choice) => match choice.as_str() {
-            "auto" => Some(json!({"type": "auto"})),
-            "required" if !included.is_empty() => Some(json!({"type": "any"})),
-            _ => None,
+) -> ToolChoice {
+    let mut out = ToolChoice::default();
+    match choice {
+        Some(Value::String(choice)) => match choice.as_str() {
+            "auto" => out.value = Some(json!({"type": "auto"})),
+            "none" => out.none = true,
+            "required" if !included.is_empty() => out.value = Some(json!({"type": "any"})),
+            "required" => out.forced_filtered = true,
+            _ => {}
         },
-        choice @ Value::Object(_) => {
+        Some(choice @ Value::Object(_)) => {
             let kind = str_of(choice.get("type"));
             let kind = kind.trim();
+            if kind == "none" {
+                out.none = true;
+                return out;
+            }
             if kind != "function" && kind != "custom" {
-                return None;
+                out.forced_filtered = !matches!(kind, "" | "auto") && !included.contains(kind);
+                return out;
             }
             let first = |keys: [&str; 3]| {
                 keys.into_iter()
@@ -1323,15 +1322,18 @@ fn convert_tool_choice(
             if let Some(mapped) = name_map.get(&name).filter(|mapped| !mapped.is_empty()) {
                 name = mapped.clone();
             }
-            included.contains(&name).then(|| {
-                object([
+            if included.contains(&name) {
+                out.value = Some(object([
                     ("name", tools.claude_name(&name).into()),
                     ("type", "tool".into()),
-                ])
-            })
+                ]));
+            } else {
+                out.forced_filtered = true;
+            }
         }
-        _ => None,
+        _ => {}
     }
+    out
 }
 
 fn text_block(text: impl Into<Value>) -> Value {
