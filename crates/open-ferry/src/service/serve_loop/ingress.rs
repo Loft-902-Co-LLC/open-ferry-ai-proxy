@@ -57,55 +57,52 @@ fn descriptor_ceiling() -> u64 {
     u64::MAX
 }
 
+// Portable syscall seam. The initial implementation deliberately retains the
+// f080f73f remember-before-attempt ordering for baseline regression evidence.
+#[cfg(any(unix,test))]
+fn raise_nofile_with(
+    get: impl FnOnce()->Result<(u64,u64),i32>,
+    ceiling:u64,
+    retry_einval:bool,
+    mut set: impl FnMut((u64,u64))->Result<(),i32>,
+    mut remember: impl FnMut((u64,u64)),
+) -> Result<((u64,u64),bool),i32> {
+    let original=get()?;
+    remember(original);
+    if original.0>=original.1 { return Ok((original,false)); }
+    let mut raised=(raise_target(original.1,ceiling),original.1);
+    let mut result=set(raised);
+    if result==Err(22) && retry_einval {
+        raised.0=raised.0.min(10240);
+        result=set(raised);
+    }
+    Ok(if result.is_ok() {(raised,false)} else {(original,true)})
+}
+
 pub(super) fn default_connection_cap() -> usize {
     static CAP: OnceLock<usize> = OnceLock::new();
     *CAP.get_or_init(|| {
         #[cfg(unix)]
         {
-            // SAFETY: these calls initialize/read a local rlimit and alter only
-            // this process's descriptor soft limit, never its hard limit.
-            let mut limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
-                open_ferry_core::process_limits::remember_nofile_limit(limit);
-                if limit.rlim_cur < limit.rlim_max {
-                    let raised = libc::rlimit {
-                        rlim_cur: raise_target(limit.rlim_max, descriptor_ceiling()),
-                        rlim_max: limit.rlim_max,
-                    };
-                    let result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) };
-                    #[cfg(target_os = "macos")]
-                    let (result, raised) = if result != 0
-                        && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
-                    {
-                        let retried = libc::rlimit {
-                            rlim_cur: raised.rlim_cur.min(10240),
-                            rlim_max: raised.rlim_max,
-                        };
-                        (
-                            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &retried) },
-                            retried,
-                        )
-                    } else {
-                        (result, raised)
-                    };
-                    if result == 0 {
-                        limit = raised;
-                    } else {
-                        tracing::warn!(
-                            cap = cap_from_limit(limit.rlim_cur),
-                            "could not raise open-file limit; using the current limit for admission"
-                        );
-                    }
+            let outcome=raise_nofile_with(|| {
+                let mut limit=libc::rlimit {rlim_cur:0,rlim_max:0};
+                // SAFETY: getrlimit initializes the sized local structure.
+                if unsafe {libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit)}==0 {Ok((limit.rlim_cur,limit.rlim_max))}
+                else {Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL))}
+            },descriptor_ceiling(),cfg!(target_os="macos"),|next| {
+                let limit=libc::rlimit {rlim_cur:next.0,rlim_max:next.1};
+                // SAFETY: only the process soft limit changes, within hard.
+                if unsafe {libc::setrlimit(libc::RLIMIT_NOFILE,&limit)}==0 {Ok(())}
+                else {Err(io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL))}
+            },|original| open_ferry_core::process_limits::remember_nofile_limit(libc::rlimit {rlim_cur:original.0,rlim_max:original.1}));
+            match outcome {
+                Ok((limit,failed))=> {
+                    if failed {tracing::warn!(cap=cap_from_limit(limit.0),"could not raise open-file limit; using the current limit for admission");}
+                    return cap_from_limit(limit.0);
                 }
-                return cap_from_limit(limit.rlim_cur);
+                Err(_)=>tracing::warn!("could not read open-file limit; using the default admission cap"),
             }
-            tracing::warn!("could not read open-file limit; using the default admission cap");
         }
-        // Winsock sockets are not CRT file descriptors and Windows exposes no
-        // RLIMIT_NOFILE for them. Use a conservative finite handle envelope.
         cap_from_limit(8192)
     })
 }
