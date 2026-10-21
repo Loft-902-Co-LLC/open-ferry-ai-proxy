@@ -14,6 +14,7 @@ pub struct MetaReasoningSignatureInfo {
     pub decoded_len: usize,
     pub payload_len: usize,
     pub bucket_exponent: usize,
+    pub router_suffix: String,
 }
 
 pub fn is_valid_meta_reasoning_signature(raw: &str) -> bool {
@@ -37,6 +38,15 @@ pub fn inspect_meta_reasoning_signature(raw: &str) -> Result<MetaReasoningSignat
             "invalid Meta reasoning signature: expected Q-PaDg prefix"
         ));
     }
+    let (sig, suffix) = match sig.split_once('.') {
+        Some((head, tail)) => {
+            if !valid_router_suffix(tail) {
+                return Err(error!("invalid Meta reasoning signature: router suffix must be 1-128 alphanumeric characters"));
+            }
+            (head, tail)
+        }
+        None => (sig, ""),
+    };
     if sig.len() % 4 == 1 {
         return Err(error!("invalid Meta reasoning signature: base64url length {} cannot decode", sig.len()));
     }
@@ -73,6 +83,7 @@ pub fn inspect_meta_reasoning_signature(raw: &str) -> Result<MetaReasoningSignat
         ));
     }
     Ok(MetaReasoningSignatureInfo {
+        router_suffix: suffix.to_owned(),
         decoded_len: decoded.len(),
         payload_len,
         bucket_exponent: payload_len.ilog2() as usize - 10,
@@ -115,6 +126,18 @@ mod tests {
     }
 
     #[test]
+    fn router_suffix_is_bounded_and_native_shape_is_still_checked() {
+        let native = format!("Q-PaDgE{}", "A".repeat(1419));
+        for suffix in ["A", "Router123", &"x".repeat(128)] {
+            assert_eq!(inspect_meta_reasoning_signature(&format!("{native}.{suffix}")).unwrap().router_suffix, suffix);
+        }
+        for suffix in ["", "a.b", "a-b", "a_b", "é", &"x".repeat(129)] {
+            assert!(inspect_meta_reasoning_signature(&format!("{native}.{suffix}")).is_err());
+        }
+        assert!(inspect_meta_reasoning_signature("Q-PaDgE.Router").is_err());
+    }
+
+    #[test]
     fn rejects_noncanonical_and_nonbucket_values() {
         for len in [44, 45, 1068, 1070, 45 + 3072] {
             let mut bytes = vec![0; len];
@@ -128,4 +151,8 @@ mod tests {
         sig.push('B');
         assert!(inspect_meta_reasoning_signature(&sig).is_err());
     }
+}
+
+pub(super) fn valid_router_suffix(suffix: &str) -> bool {
+    !suffix.is_empty() && suffix.len() <= 128 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
 }

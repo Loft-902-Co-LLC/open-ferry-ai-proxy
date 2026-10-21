@@ -34,21 +34,21 @@ pub(crate) fn sanitize_reasoning(body: &mut Value, is_compat: bool) -> bool {
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let keep_meta = is_compat && Provider::from_model_name(target) == Provider::Meta;
+    let keep_meta = if Provider::from_model_name(target) == Provider::Meta { 2 } else { 0 };
     sanitize_reasoning_with_options(body, is_compat, is_compat, keep_meta)
 }
 
 /// Keeps foreign-format encrypted reasoning for Meta, while applying the
 /// usual Responses content and orphan-ID rules.
 pub(crate) fn sanitize_reasoning_for_meta(body: &mut Value) -> bool {
-    sanitize_reasoning_with_options(body, false, true, true)
+    sanitize_reasoning_with_options(body, false, true, 1)
 }
 
 fn sanitize_reasoning_with_options(
     body: &mut Value,
     is_compat: bool,
     keep_foreign: bool,
-    keep_meta: bool,
+    keep_meta: u8,
 ) -> bool {
     // Codex doesn't persist items with store off, so a reasoning ID without
     // usable encrypted content would be looked up and fail.
@@ -75,7 +75,7 @@ fn sanitize_item(
     strip_ids: bool,
     is_compat: bool,
     keep_foreign: bool,
-    keep_meta: bool,
+    keep_meta: u8,
 ) -> bool {
     let mut changed = false;
     let has_content = matches!(item.get("content"), Some(Value::Array(parts)) if !parts.is_empty());
@@ -104,9 +104,11 @@ fn sanitize_item(
         Value::String(raw) if raw.as_str() != raw.trim() => {
             Some("encrypted_content has leading or trailing whitespace".to_owned())
         }
-        Value::String(raw) if keep_meta => inspect_meta_reasoning_signature(raw)
-            .err()
-            .map(|error| error.to_string()),
+        Value::String(raw) if keep_meta != 0 => match inspect_meta_reasoning_signature(raw) {
+            Err(error) => Some(error.to_string()),
+            Ok(info) if keep_meta == 1 && !info.router_suffix.is_empty() => Some("router-suffixed Meta reasoning signature is not accepted by the native Meta upstream".to_owned()),
+            Ok(_) => None,
+        },
         // With foreign replay enabled a third-party Responses model (such as
         // Muse) expects its own encrypted content of an unknown format back;
         // an empty one and a known provider's still go.
