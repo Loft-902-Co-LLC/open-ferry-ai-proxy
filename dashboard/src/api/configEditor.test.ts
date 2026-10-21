@@ -268,6 +268,13 @@ describe("a form's config version", () => {
     expect(api.callsTo("PUT", target)[0]?.json()).toEqual([keep]);
   });
 
+  it.each([undefined, '"base"'])("rejects unmapped client-key methods even without ETags (%s)", async (etag) => {
+    const api = mockApi(route("GET", V8_CONFIG, { json: {}, headers: etag === undefined ? {} : { ETag: etag } }));
+    await expect(editor().call(API_KEYS, { method: "POST", json: ["unit-unmapped"] }))
+      .rejects.toThrow("This config write has no versioned route.");
+    expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+
   it("refuses an index delete which now names another client key", async () => {
     const api = mockApi(route("GET", V8_CONFIG, { json: { access: { "api-keys": ["unit-other"] } }, headers: { ETag: '"base"' } }));
     await expect(editor().call(API_KEYS, { method: "DELETE", query: { index: 0 }, configTarget: { key: "unit-intended" } }))

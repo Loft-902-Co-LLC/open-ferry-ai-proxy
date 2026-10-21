@@ -319,6 +319,9 @@ export class ConfigEditor {
     }
     await this.ready();
     const writing = request.method !== undefined && request.method !== "GET";
+    if (writing && path === API_KEYS && !["DELETE", "PATCH", "PUT"].includes(request.method ?? "")) {
+      throw new Error("This config write has no versioned route.");
+    }
     if (!this.versioned) {
       const answer = await this.response<T>(path, request);
       if (writing) this.store.changed();
