@@ -16,13 +16,15 @@
 //! kept, in test builds only, for the test of that path.
 //!
 //! Deviations from upstream:
-//! - Handshakes run on their own tasks and one that takes over ten seconds
-//!   is dropped; upstream's server has no handshake timeout.
+//! - Handshakes run on their own tasks with the configured ingress timeout
+//!   (ten seconds by default); upstream's server has no handshake timeout.
 
 #[cfg(test)]
 use std::io;
+#[cfg(test)]
 use std::net::SocketAddr;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 #[cfg(test)]
@@ -42,13 +44,17 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 #[cfg(test)]
 use tokio::net::TcpListener;
+#[cfg(test)]
 use tokio::net::TcpStream;
 #[cfg(test)]
 use tokio::sync::mpsc;
+#[cfg(test)]
 use tokio_rustls::TlsAcceptor;
+#[cfg(test)]
 use tokio_rustls::server::TlsStream;
 
 /// How long a client gets to finish its handshake.
+#[cfg(test)]
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reads the certificate chain and key for `tls.cert` and `tls.key`.
@@ -80,6 +86,7 @@ pub fn load(cert: &str, key: &str) -> Result<Arc<ServerConfig>, String> {
 /// Runs the TLS handshake with the client at `addr` on `stream`, giving it
 /// [`HANDSHAKE_TIMEOUT`]. A handshake that fails or times out is logged
 /// and gives `None`.
+#[cfg(test)]
 pub(crate) async fn handshake(
     acceptor: &TlsAcceptor,
     stream: TcpStream,
