@@ -20,6 +20,7 @@ use open_ferry_providers::codex::token::SiwcTokenData;
 use open_ferry_providers::oauth::{Pkce, generate_state};
 use serde_json::Value;
 
+use super::mutation_path::BindMutationPath;
 use crate::auth_files::run_blocking;
 use crate::credential_files::is_unsafe_name;
 use crate::state::ManagementState;
@@ -36,6 +37,7 @@ pub(super) struct Target {
     real_path: PathBuf,
     directory: PathBuf,
     identity: BindIdentity,
+    mutation_path: BindMutationPath,
     record: Auth,
     registered: Auth,
     command: Option<CompletedTokenCommand>,
@@ -96,6 +98,7 @@ pub(super) async fn prepare(state: &ManagementState, name: &str) -> io::Result<B
         record.metadata = metadata;
         Ok::<_, io::Error>(Target {
             path,
+            mutation_path: BindMutationPath::bound(real_path.clone(), file_id),
             real_path,
             directory,
             identity,
@@ -137,8 +140,8 @@ pub(crate) fn eligible(auth: &Auth) -> bool {
 }
 
 impl Target {
-    pub(super) fn name(&self) -> &str {
-        &self.record.file_name
+    pub(super) fn mutation_path(&self) -> BindMutationPath {
+        self.mutation_path.clone()
     }
 }
 

@@ -1121,3 +1121,63 @@ async fn bind_callback_rejects_normalized_alternatives_and_accepts_exact_url() {
     completed(&api, &state).await;
     assert_eq!(upstream.requests().len(), 1);
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn differently_cased_upload_invalidates_the_same_bind_file() {
+    let dir = AuthDir::new();
+    dir.write("account.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api
+        .get(&START.replace("codex-bind.json", "account.json"))
+        .await
+        .expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    api.post("/v8/management/credentials?name=ACCOUNT.json", OUTER)
+        .await
+        .expect(StatusCode::OK);
+    assert!(
+        !api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .get(state)
+            .unwrap()
+            .status
+            .contains("target changed")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn differently_cased_distinct_upload_preserves_the_other_bind_file() {
+    let dir = AuthDir::new();
+    dir.write("account.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api
+        .get(&START.replace("codex-bind.json", "account.json"))
+        .await
+        .expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    let upper = dir.path().join("ACCOUNT.json");
+    if upper.exists() {
+        eprintln!("UNVERIFIED: this filesystem is not case-sensitive");
+        return;
+    }
+    api.post("/v8/management/credentials?name=ACCOUNT.json", OUTER)
+        .await
+        .expect(StatusCode::OK);
+    assert!(upper.is_file());
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+    assert!(dir.read_json("account.json").get("use_siwc").is_none());
+}

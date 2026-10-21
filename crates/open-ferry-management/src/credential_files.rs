@@ -134,6 +134,7 @@ use crate::auth_files::run_blocking;
 use crate::bind::{self, GoStruct, Nullable, set_string};
 use crate::go::{decode_rune, equal_fold, lossy};
 use crate::json::{self, Json};
+use crate::oauth::mutation_path::BindMutationPath;
 use crate::owned::owned;
 use crate::query::Query;
 use crate::state::{CredentialStore, ManagementState, StoreUnavailable};
@@ -453,7 +454,7 @@ async fn write_auth_file(
         mutation
             .oauth_sessions()
             .store()
-            .invalidate_bind_target(&file);
+            .invalidate_bind_target(&BindMutationPath::capture(path.clone()));
         files
             .write_file(&file, &contents)
             .map_err(|error| Failure::internal(format!("failed to write file: {error}")))
@@ -603,9 +604,18 @@ async fn delete_all(state: &ManagementState, store: &CredentialStore) -> Respons
     for name in names {
         let files = Arc::clone(&store.files);
         let guard = state.credential_lock().lock().await;
-        state.oauth_sessions().store().invalidate_bind_target(&name);
-        // As upstream, a file that can't be removed is passed over.
-        let Ok(path) = run_blocking(move || files.remove_file(&name)).await else {
+        let mutation = state.clone();
+        // Resolve identity before removal, under the management mutation lock.
+        let Ok(path) = run_blocking(move || {
+            let path = files.file_path(&name)?;
+            mutation
+                .oauth_sessions()
+                .store()
+                .invalidate_bind_target(&BindMutationPath::capture(path));
+            files.remove_file(&name)
+        })
+        .await
+        else {
             continue;
         };
         // Made under the lock, so the change takes its revision there.
@@ -660,11 +670,17 @@ async fn delete_one(
     }
     let files = Arc::clone(&store.files);
     let guard = state.credential_lock().lock().await;
-    state
-        .oauth_sessions()
-        .store()
-        .invalidate_bind_target(&file_name);
-    let removed = match run_blocking(move || files.remove_file(&file_name)).await {
+    let mutation = state.clone();
+    let removed = match run_blocking(move || {
+        let path = files.file_path(&file_name)?;
+        mutation
+            .oauth_sessions()
+            .store()
+            .invalidate_bind_target(&BindMutationPath::capture(path));
+        files.remove_file(&file_name)
+    })
+    .await
+    {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(Failure::new(StatusCode::NOT_FOUND, "auth file not found"));

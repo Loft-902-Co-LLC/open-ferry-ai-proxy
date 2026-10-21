@@ -44,6 +44,7 @@ use open_ferry_translate::go::to_lower;
 use tokio::sync::{oneshot, watch};
 
 use super::Redacted;
+use super::mutation_path::BindMutationPath;
 use crate::go::equal_fold;
 
 /// How long a session lasts after it starts or fails (`oauthSessionTTL`).
@@ -169,7 +170,7 @@ struct Inner {
 struct Entry {
     session: Session,
     bind: bool,
-    bind_target: String,
+    bind_target: Option<BindMutationPath>,
     bind_redirect: String,
     committing: bool,
     /// Where the session's callback goes, until one has gone or the session
@@ -259,7 +260,7 @@ impl Store {
             state.to_owned(),
             Entry {
                 bind: false,
-                bind_target: String::new(),
+                bind_target: None,
                 bind_redirect: String::new(),
                 committing: false,
                 session,
@@ -350,12 +351,22 @@ impl Store {
         }
     }
 
-    pub(super) fn mark_bind_target(&self, state: &str, target: &str, redirect: &str) -> bool {
+    pub(super) fn mark_bind_target(
+        &self,
+        state: &str,
+        target: BindMutationPath,
+        redirect: &str,
+    ) -> bool {
         let mut inner = self.lock();
         let now = Instant::now();
         inner.purge(now);
         if inner.sessions.iter().any(|(key, entry)| {
-            key != state && entry.bind_target == target && entry.session.is_pending()
+            key != state
+                && entry
+                    .bind_target
+                    .as_ref()
+                    .is_some_and(|bound| bound.matches(&target))
+                && entry.session.is_pending()
         }) {
             return false;
         }
@@ -363,7 +374,7 @@ impl Store {
             return false;
         };
         entry.bind = true;
-        entry.bind_target = target.to_owned();
+        entry.bind_target = Some(target);
         entry.bind_redirect = redirect.to_owned();
         entry.session.expires_at = later(now, Duration::from_secs(300));
         true
@@ -377,14 +388,16 @@ impl Store {
             .map(|entry| entry.bind_redirect.clone())
     }
 
-    pub(crate) fn invalidate_bind_target(&self, target: &str) {
+    pub(crate) fn invalidate_bind_target(&self, target: &BindMutationPath) {
         let mut inner = self.lock();
         let expiry = later(Instant::now(), inner.completed_ttl);
-        for entry in inner
-            .sessions
-            .values_mut()
-            .filter(|e| e.bind_target == target && e.session.is_pending() && !e.committing)
-        {
+        for entry in inner.sessions.values_mut().filter(|e| {
+            e.bind_target
+                .as_ref()
+                .is_some_and(|bound| bound.matches(target))
+                && e.session.is_pending()
+                && !e.committing
+        }) {
             entry.session.status = "SIWC binding target changed; start a new binding".to_owned();
             entry.session.expires_at = expiry;
             entry.callback = None;

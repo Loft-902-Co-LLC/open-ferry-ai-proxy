@@ -254,7 +254,7 @@ async fn start_with_bind(
     if let Client::Siwc(bind) = &client
         && !sessions
             .store()
-            .mark_bind_target(&oauth_state, bind.target.name(), &redirect)
+            .mark_bind_target(&oauth_state, bind.target.mutation_path(), &redirect)
     {
         sessions.store().release(&oauth_state, registration.id);
         return json::error(

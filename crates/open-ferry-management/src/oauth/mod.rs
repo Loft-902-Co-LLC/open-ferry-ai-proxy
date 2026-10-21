@@ -32,6 +32,7 @@
 mod callback;
 mod flows;
 mod forwarder;
+pub(crate) mod mutation_path;
 pub(crate) mod sessions;
 pub(crate) mod siwc_bind;
 
