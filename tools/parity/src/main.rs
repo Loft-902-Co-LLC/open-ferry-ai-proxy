@@ -46,7 +46,7 @@ usage: open-ferry-parity --upstream <CLIProxyAPI checkout> [options]
 options:
   --random <n>   random cases to generate per translator (default 5000)
   --seed <n>     seed for the random cases (default 1)
-  --suite <name> run only this suite (directory slug); repeat to select several
+  --suite <name> run only this offline suite (directory slug); repeat to select several
                  (default: all suites; unknown names are errors)
   --show <n>     kinds of difference to print (default 10)
   --go <path>    Go binary (default: go on PATH)
@@ -107,6 +107,9 @@ impl Args {
         parsed.upstream = upstream.ok_or("--upstream is required")?;
         if parsed.live.is_some() && parsed.model.is_none() {
             return Err("--live needs --model".into());
+        }
+        if parsed.live.is_some() && !parsed.suites.is_empty() {
+            return Err("--suite cannot be combined with --live".into());
         }
         Ok(parsed)
     }
@@ -650,12 +653,12 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         .join("target")
         .join("parity");
     fs::create_dir_all(&work_dir)?;
-    let suites = selected_suites(args)?;
     let upstream = Upstream::build(&args.upstream, &args.go, &work_dir)?;
     if let (Some(url), Some(model)) = (&args.live, &args.model) {
         return run_live(url, model, &upstream, &work_dir);
     }
 
+    let suites = selected_suites(args)?;
     let failures_dir = fresh_dir(&work_dir.join("failures"))?;
 
     println!("open-ferry parity");
@@ -1273,6 +1276,30 @@ mod tests {
             .record(&case, evaluated, Path::new("unused-no-failure"))
             .unwrap();
         assert_eq!(tally.resolved, ["resolved-marker"]);
+    }
+
+    #[test]
+    fn suite_filter_rejects_live_mode_without_running_it() {
+        let flags = [
+            "--upstream",
+            ".",
+            "--live",
+            "https://example.invalid",
+            "--model",
+            "m",
+        ];
+        assert!(Args::parse(flags.into_iter().map(str::to_owned)).is_ok());
+        assert_eq!(
+            Args::parse(
+                flags
+                    .into_iter()
+                    .chain(["--suite", "config-save"])
+                    .map(str::to_owned)
+            )
+            .err()
+            .unwrap(),
+            "--suite cannot be combined with --live"
+        );
     }
 
     // Go iterates a map of aliases that overwrite the same destination key.

@@ -114,7 +114,8 @@ The exit status is 0 when every case is identical, equivalent or a known differe
 
 Use a repeatable `--suite <name>` to run selected suites by their directory
 slugs, for example `--suite config-save --suite config-diff`. Unknown names
-are errors; omitting the flag runs all suites. For a focused config-save sweep:
+are errors; omitting the flag runs all suites. This offline filter cannot be
+combined with `--live`. For a focused config-save sweep:
 
 ```sh
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI --suite config-save --random 5000 --seed 10
