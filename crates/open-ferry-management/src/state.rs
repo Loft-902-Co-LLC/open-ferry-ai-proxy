@@ -423,8 +423,9 @@ impl ManagementState {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stops the OAuth logins in progress and waits for them to end; no
-    /// login starts after this. The service calls it as it shuts down.
+    /// Refuses new OAuth logins and stops existing ones after at most a
+    /// ten-second grace for SIWC workers and session finalization. A committed
+    /// collector can outlive the grace while the process remains alive.
     pub async fn shutdown(&self) {
         self.inner.oauth_sessions.shutdown().await;
     }
@@ -537,7 +538,8 @@ impl ManagementState {
         self.parts.config_reload.as_ref()
     }
 
-    /// Non-waiting owned guard for bind work confined to one blocking thread.
+    /// Non-waiting owned guard acquired on the dedicated bind worker and
+    /// returned to its async collector until sync revision allocation.
     pub(crate) fn try_credential_lock(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         Arc::clone(&self.inner.credential_lock)
             .try_lock_owned()
