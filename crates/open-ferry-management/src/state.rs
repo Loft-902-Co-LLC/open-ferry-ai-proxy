@@ -537,6 +537,13 @@ impl ManagementState {
         self.parts.config_reload.as_ref()
     }
 
+    /// Non-waiting owned guard for bind work confined to one blocking thread.
+    pub(crate) fn try_credential_lock(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        Arc::clone(&self.inner.credential_lock)
+            .try_lock_owned()
+            .ok()
+    }
+
     /// The lock that orders the handlers changing the config, as upstream's
     /// `mu` does: held from copying the config until the copy is saved and
     /// in place. Take it with `.lock().await`.
@@ -556,13 +563,6 @@ impl ManagementState {
     /// it, never the service, and they let it go before they wait for a
     /// [`CredentialSync`] call, as upstream lets `authStatusMu` go before
     /// its post-auth persist hook.
-    /// Non-waiting owned guard for bind work confined to one blocking thread.
-    pub(crate) fn try_credential_lock(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        Arc::clone(&self.inner.credential_lock)
-            .try_lock_owned()
-            .ok()
-    }
-
     pub(crate) fn credential_lock(&self) -> &tokio::sync::Mutex<()> {
         &self.inner.credential_lock
     }
