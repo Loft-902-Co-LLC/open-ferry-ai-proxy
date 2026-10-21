@@ -2,8 +2,8 @@
 // NewSessionCacheWithCapacity, Get, GetAndRefresh, Set, SetAliases,
 // replaceAliasGroupsLocked, evictExcessLocked, removeAliasGroupLocked,
 // compactSessionAliases, isLocalPromptCacheSessionAlias,
-// mergeSessionAliases, Touch, CompareAndDelete, InvalidateAuth, Len and
-// cleanup) (v8.0.36, MIT).
+// mergeSessionAliases, setSessionAliases, latestSessionAuth, Touch,
+// CompareAndDelete, InvalidateAuth, Len and cleanup) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The session bindings: which credential each session key is bound to,
@@ -15,8 +15,9 @@
 //! holds more keys than its cap, the oldest groups go first.
 //!
 //! Deviations from upstream:
-//! - A key is held as the SHA-256 of its text, never as the text (policy:
-//!   session IDs stay out of memory dumps and debug output), with whether
+//! - A key, including the session index, is held as the SHA-256 of its text,
+//!   never as the text (policy: session IDs stay out of memory dumps and
+//!   debug output), with whether
 //!   it is a prompt cache key, which compaction needs.
 //! - There is no lock: the cache lives in the manager's state, behind its
 //!   lock. The time is passed in, and expired groups are swept by the
@@ -27,7 +28,7 @@
 //!   to, so the two agree.
 //! - `Invalidate` isn't ported: nothing calls it but the plugin host.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -124,6 +125,15 @@ fn compact(aliases: Vec<Key>) -> Vec<Key> {
         .collect()
 }
 
+/// A real selection's session, provider and order, independent of TTL
+/// refreshes and eviction order (upstream's `sessionBinding`).
+#[derive(Clone, Debug)]
+struct Binding {
+    session: Key,
+    provider: String,
+    sequence: u64,
+}
+
 /// The keys of one logical session, the credential they are bound to, and
 /// until when (upstream's `sessionEntry`).
 #[derive(Debug)]
@@ -132,6 +142,7 @@ struct Group {
     expires_at: Timestamp,
     /// The keys; the first is the primary.
     aliases: Vec<Key>,
+    binding: Option<Binding>,
 }
 
 /// Session keys bound to credentials, for a TTL, with a cap on the keys
@@ -147,6 +158,9 @@ pub(crate) struct SessionCache {
     primaries: HashMap<Key, u64>,
     /// The group each key belongs to (upstream's `entries`).
     entries: HashMap<Key, u64>,
+    /// Only this session's groups need to be visited for guardian inheritance.
+    session_groups: HashMap<Key, HashSet<u64>>,
+    binding_sequence: u64,
     next_seq: u64,
     next_sweep: Option<Timestamp>,
 }
@@ -171,6 +185,8 @@ impl SessionCache {
             groups: BTreeMap::new(),
             primaries: HashMap::new(),
             entries: HashMap::new(),
+            session_groups: HashMap::new(),
+            binding_sequence: 0,
             next_seq: 0,
             next_sweep: None,
         }
@@ -204,12 +220,14 @@ impl SessionCache {
         let group = self.groups.get(&seq)?;
         let auth = group.auth.clone();
         let aliases = compact(merge(&[key], &group.aliases));
-        self.replace(&auth, add(now, self.ttl), aliases, &[seq]);
+        let binding = group.binding.clone();
+        self.replace(&auth, add(now, self.ttl), aliases, binding, &[seq]);
         Some(auth)
     }
 
     /// Binds `session_id` to `auth`, with the keys of its session
     /// (upstream's `Set`).
+    #[cfg(test)]
     pub(crate) fn set(&mut self, session_id: &str, auth: &str, now: Timestamp) {
         self.set_aliases(auth, &[session_id], now);
     }
@@ -217,6 +235,39 @@ impl SessionCache {
     /// Binds every one of `session_ids`, and the keys of their sessions, to
     /// `auth` as one session (upstream's `SetAliases`).
     pub(crate) fn set_aliases(&mut self, auth: &str, session_ids: &[&str], now: Timestamp) {
+        self.bind_aliases(auth, session_ids, None, now);
+    }
+
+    /// Records a real selection, including reuse of an existing binding
+    /// (upstream's `setSessionAliases`). Refreshes keep this order.
+    pub(crate) fn set_session_aliases(
+        &mut self,
+        auth: &str,
+        provider: &str,
+        session_id: &str,
+        keys: &[&str],
+        now: Timestamp,
+    ) {
+        let binding = Key::of(session_id)
+            .filter(|_| !provider.is_empty())
+            .map(|session| {
+                self.binding_sequence = self.binding_sequence.wrapping_add(1);
+                Binding {
+                    session,
+                    provider: provider.to_owned(),
+                    sequence: self.binding_sequence,
+                }
+            });
+        self.bind_aliases(auth, keys, binding, now);
+    }
+
+    fn bind_aliases(
+        &mut self,
+        auth: &str,
+        session_ids: &[&str],
+        binding: Option<Binding>,
+        now: Timestamp,
+    ) {
         if auth.is_empty() {
             return;
         }
@@ -237,7 +288,38 @@ impl SessionCache {
         if aliases.is_empty() {
             return;
         }
-        self.replace(auth, add(now, self.ttl), aliases, &previous);
+        let binding = binding.or_else(|| {
+            previous
+                .iter()
+                .filter_map(|seq| self.groups.get(seq)?.binding.as_ref())
+                .max_by_key(|binding| binding.sequence)
+                .cloned()
+        });
+        self.replace(auth, add(now, self.ttl), aliases, binding, &previous);
+    }
+
+    /// The newest live selection on one of the requested real providers
+    /// (upstream's `latestSessionAuth`). Neither TTL nor selection or
+    /// eviction order is refreshed by observing a parent.
+    pub(crate) fn latest_session_auth(
+        &mut self,
+        session_id: &str,
+        providers: &HashSet<String>,
+        now: Timestamp,
+    ) -> Option<String> {
+        self.sweep(now);
+        let session = Key::of(session_id)?;
+        self.session_groups
+            .get(&session)?
+            .iter()
+            .filter_map(|seq| {
+                let group = self.groups.get(seq)?;
+                let binding = group.binding.as_ref()?;
+                (now < group.expires_at && providers.contains(&binding.provider))
+                    .then_some((group, binding.sequence))
+            })
+            .max_by_key(|(_, sequence)| *sequence)
+            .map(|(group, _)| group.auth.clone())
     }
 
     /// Refreshes `session_id`'s session if it is bound to `expected`
@@ -260,7 +342,8 @@ impl SessionCache {
             return false;
         }
         let aliases = compact(merge(&[key], &group.aliases));
-        self.replace(expected, add(now, self.ttl), aliases, &[seq]);
+        let binding = group.binding.clone();
+        self.replace(expected, add(now, self.ttl), aliases, binding, &[seq]);
         true
     }
 
@@ -294,7 +377,7 @@ impl SessionCache {
         };
         let surviving: Vec<Key> = group.aliases.into_iter().filter(|k| *k != key).collect();
         if !surviving.is_empty() {
-            self.replace(&group.auth, group.expires_at, surviving, &[]);
+            self.replace(&group.auth, group.expires_at, surviving, group.binding, &[]);
         }
         true
     }
@@ -321,6 +404,15 @@ impl SessionCache {
         self.entries.len()
     }
 
+    /// How many sessions and group references the inheritance index holds.
+    #[cfg(test)]
+    pub(crate) fn index_len(&self) -> (usize, usize) {
+        (
+            self.session_groups.len(),
+            self.session_groups.values().map(HashSet::len).sum(),
+        )
+    }
+
     /// Whether `session_id` is held, live or not.
     #[cfg(test)]
     pub(crate) fn contains(&self, session_id: &str) -> bool {
@@ -340,7 +432,14 @@ impl SessionCache {
     /// `expires_at` as the newest group, and drops the oldest groups while
     /// the cache holds too many keys (upstream's
     /// `replaceAliasGroupsLocked` and `evictExcessLocked`).
-    fn replace(&mut self, auth: &str, expires_at: Timestamp, aliases: Vec<Key>, previous: &[u64]) {
+    fn replace(
+        &mut self,
+        auth: &str,
+        expires_at: Timestamp,
+        aliases: Vec<Key>,
+        binding: Option<Binding>,
+        previous: &[u64],
+    ) {
         for seq in previous {
             self.remove_group(*seq);
         }
@@ -356,12 +455,19 @@ impl SessionCache {
         for key in &aliases {
             self.entries.insert(*key, seq);
         }
+        if let Some(binding) = &binding {
+            self.session_groups
+                .entry(binding.session)
+                .or_default()
+                .insert(seq);
+        }
         self.groups.insert(
             seq,
             Group {
                 auth: auth.to_owned(),
                 expires_at,
                 aliases,
+                binding,
             },
         );
         while self.entries.len() > self.max_entries {
@@ -376,6 +482,14 @@ impl SessionCache {
     /// `removeAliasGroupLocked`).
     fn remove_group(&mut self, seq: u64) -> Option<Group> {
         let group = self.groups.remove(&seq)?;
+        if let Some(binding) = &group.binding
+            && let Some(groups) = self.session_groups.get_mut(&binding.session)
+        {
+            groups.remove(&seq);
+            if groups.is_empty() {
+                self.session_groups.remove(&binding.session);
+            }
+        }
         if let Some(primary) = group.aliases.first()
             && self.primaries.get(primary) == Some(&seq)
         {

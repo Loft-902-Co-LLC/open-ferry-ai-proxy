@@ -2,7 +2,8 @@
 // (TestExtractSessionID*, TestExtractExplicitSessionIDs_EnhancedHarnesses
 // and TestSessionAffinitySelector_LongCompositeIDBoundConsistency) and
 // selector_lcp_test.go (TestSessionAffinitySelectorPromptCacheKeyCamelCase
-// and TestSessionAffinitySelectorNestedAntigravityPayload) (v8.0.36, MIT).
+// and TestSessionAffinitySelectorNestedAntigravityPayload), and
+// selector_guardian_affinity_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the session a call binds under, and the session it may fall
@@ -39,6 +40,34 @@ use crate::session::Payload;
 
 /// A case's name, headers, body and the session it names.
 type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str, &'a str);
+
+#[test]
+fn guardian_header_is_a_flag_with_first_value_precedence() {
+    for (values, expected) in [
+        (vec!["guardian"], true),
+        (vec!["  GuArDiAn\t"], true),
+        (vec!["\u{a0}guardian\u{2003}"], true),
+        (vec!["collab_spawn"], false),
+        (vec!["guardian-extra"], false),
+        (vec![""], false),
+        (vec!["collab_spawn", "guardian"], false),
+        (vec!["guardian", "collab_spawn"], true),
+    ] {
+        let mut pairs = vec![("Session_id", "review")];
+        pairs.extend(values.iter().map(|value| ("x-openai-subagent", *value)));
+        let session =
+            Session::with_derived(&headers(&pairs), &Payload::parse(b""), "", "").unwrap();
+        assert_eq!(session.is_guardian, expected, "{values:?}");
+    }
+    let session = Session::with_derived(
+        &headers(&[("Session_id", "review")]),
+        &Payload::parse(b""),
+        "",
+        "",
+    )
+    .unwrap();
+    assert!(!session.is_guardian);
+}
 
 /// The session of a call with headers `pairs` and body `payload`, the
 /// derived session `derived` and the execution session `execution`, as

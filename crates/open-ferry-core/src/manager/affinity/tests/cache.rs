@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/session_cache_test.go, and the
 // session cache tests of selector_test.go, selector_lcp_test.go and
-// session_affinity_metadata_test.go (v8.0.36, MIT).
+// session_affinity_metadata_test.go, and selector_guardian_affinity_test.go
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the session cache: binding, refreshing, unbinding, expiry, the
@@ -24,6 +25,22 @@ use super::{at, base};
 use crate::manager::affinity::cache::SessionCache;
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
+
+#[test]
+fn selection_index_stays_bounded_under_saturated_access() {
+    let mut cache = SessionCache::with_capacity(HOUR, 10);
+    for index in 0..1000 {
+        cache.set_session_aliases(
+            "auth",
+            "codex",
+            &format!("session-{index}"),
+            &[&format!("model-{index}")],
+            base(),
+        );
+        assert_eq!(cache.index_len(), (cache.len(), cache.len()));
+        assert!(cache.len() <= 10);
+    }
+}
 
 // TestSessionCache_CapacityEvictionOrder.
 #[test]
@@ -291,4 +308,153 @@ fn debug_output_holds_no_session_key() {
     let debug = format!("{cache:?}");
     assert!(!debug.contains("secret-session-id"), "{debug}");
     assert!(debug.contains("Key(..)"), "{debug}");
+}
+
+// Both lazy expiry and the periodic on-use sweep remove the session index.
+#[test]
+fn selection_index_is_cleaned_on_expiry_and_sweep() {
+    for direct in [false, true] {
+        let mut cache = SessionCache::new(Duration::from_millis(100));
+        cache.set_session_aliases("auth", "codex", "parent", &["parent-model"], at(0));
+        assert_eq!(cache.index_len(), (1, 1));
+        cache.get("missing", at(90));
+        if direct {
+            assert_eq!(cache.get("parent-model", at(100)), None);
+        } else {
+            cache.get("missing", at(150));
+        }
+        assert_eq!(cache.index_len(), (0, 0));
+        assert_eq!(cache.len(), 0);
+    }
+}
+
+#[test]
+fn selection_index_is_cleaned_on_removal_and_eviction() {
+    for action in ["failed", "auth_invalidated", "evicted"] {
+        let mut cache = SessionCache::with_capacity(HOUR, 1);
+        cache.set_session_aliases("auth-b", "codex", "parent", &["parent-model"], base());
+        match action {
+            "failed" => {
+                assert!(cache.compare_and_delete("parent-model", "auth-b", base()));
+            }
+            "auth_invalidated" => cache.invalidate_auth("auth-b"),
+            "evicted" => cache.set("other-model", "auth-a", base()),
+            _ => unreachable!(),
+        }
+        assert_eq!(cache.index_len(), (0, 0), "{action}");
+        assert_eq!(
+            cache.latest_session_auth(
+                "parent",
+                &std::collections::HashSet::from(["codex".into()]),
+                base()
+            ),
+            None,
+            "{action}"
+        );
+    }
+}
+
+#[test]
+fn selection_index_survives_alias_changes_without_leaking_groups() {
+    let mut cache = SessionCache::new(HOUR);
+    let providers = std::collections::HashSet::from(["codex".into()]);
+    cache.set_session_aliases("auth-b", "codex", "parent", &["primary", "alias"], base());
+    assert!(!cache.compare_and_delete("primary", "auth-a", base()));
+    assert!(cache.compare_and_delete("primary", "auth-b", base()));
+    assert_eq!(cache.index_len(), (1, 1));
+    assert_eq!(
+        cache
+            .latest_session_auth("parent", &providers, base())
+            .as_deref(),
+        Some("auth-b")
+    );
+    for index in 0..128 {
+        cache.set_session_aliases(
+            "auth-b",
+            "codex",
+            "parent",
+            &[&format!("pck:{index}"), "alias"],
+            base(),
+        );
+        assert_eq!(cache.index_len(), (1, 1));
+        assert_eq!(cache.len(), 2);
+    }
+    cache.set_session_aliases("auth-a", "codex", "new-parent", &["alias"], base());
+    assert_eq!(cache.index_len(), (1, 1));
+    assert_eq!(
+        cache.latest_session_auth("parent", &providers, base()),
+        None
+    );
+    assert_eq!(
+        cache
+            .latest_session_auth("new-parent", &providers, base())
+            .as_deref(),
+        Some("auth-a")
+    );
+    cache.invalidate_auth("auth-a");
+    assert_eq!(cache.index_len(), (0, 0));
+}
+
+#[test]
+fn selection_order_survives_refresh_and_alias_merge() {
+    let mut cache = SessionCache::new(Duration::from_millis(100));
+    let providers = std::collections::HashSet::from(["codex".into()]);
+    cache.set_session_aliases("auth-a", "codex", "parent", &["older-model"], at(0));
+    cache.set_session_aliases("auth-b", "codex", "parent", &["newer-model"], at(10));
+    assert!(cache.touch("older-model", "auth-a", at(20)));
+    cache.get_and_refresh("older-model", at(30));
+    cache.set_aliases("auth-a", &["older-model", "conversation"], at(40));
+    assert_eq!(
+        cache
+            .latest_session_auth("parent", &providers, at(40))
+            .as_deref(),
+        Some("auth-b")
+    );
+    assert_eq!(cache.index_len(), (1, 2));
+    cache.set_session_aliases("auth-a", "codex", "parent", &["older-model"], at(40));
+    assert_eq!(
+        cache
+            .latest_session_auth("parent", &providers, at(40))
+            .as_deref(),
+        Some("auth-a")
+    );
+    cache.set_aliases("auth-a", &["newer-model", "older-model"], at(50));
+    assert_eq!(cache.index_len(), (1, 1));
+    assert_eq!(
+        cache
+            .latest_session_auth("parent", &providers, at(50))
+            .as_deref(),
+        Some("auth-a")
+    );
+}
+
+#[test]
+fn parent_lookup_neither_refreshes_ttl_nor_eviction_order() {
+    let providers = std::collections::HashSet::from(["codex".into()]);
+    let mut cache = SessionCache::with_capacity(Duration::from_millis(100), 2);
+    cache.set_session_aliases("auth-b", "codex", "private-parent-id", &["first"], at(0));
+    cache.set_session_aliases("auth-a", "codex", "other", &["second"], at(1));
+    assert_eq!(
+        cache
+            .latest_session_auth("private-parent-id", &providers, at(40))
+            .as_deref(),
+        Some("auth-b")
+    );
+    assert!(!format!("{cache:?}").contains("private-parent-id"));
+    cache.set("third", "auth-c", at(41));
+    assert_eq!(
+        cache.latest_session_auth("private-parent-id", &providers, at(41)),
+        None
+    );
+    assert_eq!(cache.index_len(), (1, 1));
+    assert_eq!(
+        cache
+            .latest_session_auth("other", &providers, at(90))
+            .as_deref(),
+        Some("auth-a")
+    );
+    assert_eq!(
+        cache.latest_session_auth("other", &providers, at(101)),
+        None
+    );
 }
