@@ -561,7 +561,28 @@ pub fn finals() -> Vec<Case> {
         cases.push(through(argument_number_text(), "gemini", client, json!({})));
     }
     cases.push(null_original_request());
+    cases.push(interactions_response_with_trailing_data());
     cases
+}
+
+// Seed 8 / registry-non-stream / interactions-passthrough-5928222864759345745-29-final.
+// Keep the complete saved request and response bytes, including the suffix.
+fn interactions_response_with_trailing_data() -> Case {
+    let saved: Value =
+        serde_json::from_str(include_str!("testdata/interactions-trailing-response.json"))
+            .expect("saved Interactions response case");
+    let mut case = Case::response(
+        "interactions-response-trailing-data",
+        saved["request_text"].as_str().expect("request text"),
+        saved["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .map(|event| event.as_str().expect("event text").to_owned())
+            .collect(),
+    );
+    case.model = saved["model"].as_str().expect("model").to_owned();
+    case.with_options(json!({"from":"interactions", "to":"openai"}))
 }
 
 pub fn lookups() -> Vec<Case> {

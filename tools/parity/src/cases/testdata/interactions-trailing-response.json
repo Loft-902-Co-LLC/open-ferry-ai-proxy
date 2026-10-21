@@ -1,0 +1,7 @@
+{
+  "model": "gemini-2.5-pro",
+  "request_text": "{\"input\":{\"type\":\"image\",\"mime_type\":\"text/plain\",\"uri\":\"https://example.com/files/1\"},\"agent\":\"\",\"environment_id\":\"env_1\",\"reasoning\":{\"effort\":\"xhigh\",\"summary\":\"\"},\"tools\":[{\"functionDeclarations\":[{\"name\":\"mcp__server__tool\",\"description\":\"line one\\nline two\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}},{\"name\":\"run-shell\",\"description\":\"\u2028separators\u2029\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}},{\"name\":\"run-shell\",\"description\":\"line one\\nline two\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}]}],\"generation_config\":{\"thinking_summaries\":\"AUTO\",\"response_schema\":{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}},\"tool_choice\":{\"allowed_tools\":{\"mode\":\"validated\",\"tools\":[\"mcp__server__tool\"]}}}",
+  "events": [
+    "{\"id\":\"interaction_40\",\"model\":\"gemini-2.5-flash\",\"object\":\"interaction\",\"status\":\"failed\",\"finish_reason\":\"stop\",\"steps\":[{\"type\":\"function_call\",\"id\":\"call_660\",\"name\":\"\\u540d\\u524d\",\"arguments\":{\"city\":\"x-anthropic-billing-header: cc_version=2.1.0; cc_entrypoint=cli\",\"count\":0}},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"[1,2]\"}]}]} trailing"
+  ]
+}
