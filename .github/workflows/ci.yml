@@ -777,7 +777,7 @@ jobs:
           }
           try {
             # Capture init's generated keys; never print or upload its output.
-            $output = & .\install.ps1 -System -NoMigrate -Version 0.0.2 -InstallDir $install -ConfigPath $config 2>&1
+            $output = & .\install.ps1 -System -NoMigrate -Version 0.0.2 -InstallDir $install -ConfigPath $config *>&1
             if ($LASTEXITCODE -ne 0) { throw "Installer failed: $($output | Select-String 'install.ps1: error:')" }
             if (-not ($output | Select-String -SimpleMatch 'Checking the build provenance attestation with gh')) {
               throw 'The real attestation check did not run'
@@ -805,7 +805,7 @@ jobs:
             $legacyConfig = Join-Path $data 'old-owner-probe.yaml'
             try {
               [RunnerOwner]::SetOwner($identity.User.Value)
-              $output = & $exe init -system -config $legacyConfig 2>&1
+              $output = & $exe init -system -config $legacyConfig *>&1
               if ($LASTEXITCODE -ne 0) { throw 'Standalone published init probe failed' }
               $owner = Owner $legacyConfig
               Write-Host "Standalone published init with object-creator token made owner $owner"
