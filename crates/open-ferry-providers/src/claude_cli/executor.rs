@@ -302,15 +302,7 @@ impl ClaudeCliExecutor {
         if let Some(tap) = &run.tap {
             tap.response_head(200, &headers);
         }
-        let translator = (format != Format::CLAUDE).then(|| {
-            let original = original_request(request, options);
-            let context = ResponseContext {
-                model: &request.model,
-                original_request: &original,
-                request: &translation,
-            };
-            Registry::global().response_stream(&Format::CLAUDE, &format, &context)
-        });
+        let translator = Self::response_translator(request, options, &translation, &format);
         let mut state = Stream {
             run,
             translator,
@@ -335,6 +327,26 @@ impl ClaudeCliExecutor {
         })
         .boxed();
         Ok(StreamResponse { headers, chunks })
+    }
+
+    fn response_translator(
+        request: &Request,
+        options: &Options,
+        translation: &Value,
+        format: &Format,
+    ) -> Option<ResponseStream> {
+        (format != &Format::CLAUDE).then(|| {
+            let original = original_request(request, options);
+            let context = ResponseContext {
+                model: &request.model,
+                original_request: &original,
+                request: translation,
+            };
+            let mut translator =
+                Registry::global().response_stream(&Format::CLAUDE, format, &context);
+            crate::apply_patch_responses::initialize_stream(&mut translator, format, &original);
+            translator
+        })
     }
 }
 
@@ -587,6 +599,90 @@ impl ProviderExecutor for ClaudeCliExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initializes_an_empty_patch_stream_before_finalizing() {
+        let request = Request {
+            model: "claude-sonnet-5-5".into(),
+            payload: Bytes::from_static(
+                br#"{"input":"Hi","tools":[{"type":"custom","name":"apply_patch"}]}"#,
+            ),
+        };
+        let mut options = Options::new(Format::OPENAI_RESPONSE);
+        options.original_request = request.payload.clone();
+        let translator = ClaudeCliExecutor::response_translator(
+            &request,
+            &options,
+            &serde_json::json!({}),
+            &Format::OPENAI_RESPONSE,
+        );
+        let mut stream = Stream {
+            run: Run {
+                name: "test".into(),
+                hint: String::new(),
+                timeout_secs: 1,
+                deadline: Instant::now(),
+                running: None,
+                events: Events::new(false),
+                tap: None,
+            },
+            translator,
+            responses: true,
+            pending: VecDeque::new(),
+            finished: false,
+        };
+        stream.end();
+        let error = stream.pending.pop_back().unwrap().unwrap_err();
+        assert_eq!(error.status, 502);
+        assert_eq!(
+            error.message,
+            crate::claude::stream::APPLY_PATCH_ERROR_MESSAGE
+        );
+        assert!(
+            stream
+                .pending
+                .iter()
+                .filter_map(|chunk| chunk.as_ref().ok())
+                .any(|chunk| { String::from_utf8_lossy(chunk).contains("response.failed") })
+        );
+    }
+
+    #[test]
+    fn a_cli_result_without_events_or_messages_fails_before_translation() {
+        let mut events = Events::new(false);
+        let Step::Done(Err(error)) =
+            events.feed(br#"{"type":"result","subtype":"success","is_error":false}"#)
+        else {
+            panic!("a zero-event result must fail before creating the stream translator");
+        };
+        assert_eq!(error.status, 502);
+        assert!(error.message.contains("answered without a message"));
+    }
+
+    #[tokio::test]
+    async fn patch_tools_are_refused_before_starting_a_cli_run() {
+        let executor = ClaudeCliExecutor::new().with_spawn_guard(Some(
+            super::super::SpawnGuard::new(|_, _, _| Err("test forbids subprocesses".into())),
+        ));
+        let request = Request {
+            model: "claude-sonnet-5-5".into(),
+            payload: Bytes::from_static(
+                br#"{"input":"Hi","tools":[{"type":"custom","name":"apply_patch"}]}"#,
+            ),
+        };
+        let mut options = Options::new(Format::OPENAI_RESPONSE);
+        options.stream = true;
+        options.original_request = request.payload.clone();
+        let error = match executor
+            .execute_stream(Arc::new(Auth::default()), request, options)
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("client tools must be rejected before running Claude Code"),
+        };
+        assert_eq!(error.status, 400);
+        assert!(error.message.contains("client tools aren't supported"));
+    }
 
     #[test]
     fn writes_events_as_sse() {

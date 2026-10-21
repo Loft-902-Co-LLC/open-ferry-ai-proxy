@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/meta_executor.go,
 // meta_executor_execute.go and meta_executor_stream.go, and
-// internal/runtime/executor/helps/meta_tools.go (v8.0.32, MIT).
+// internal/runtime/executor/helps/meta_tools.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`MetaExecutor`], which calls Meta's API (Muse Spark models) with an API
@@ -94,10 +94,12 @@ use crate::codex::usage::ensure_responses_usage_details;
 use crate::observe_send::{self, Attempt, BodyTap};
 use crate::redact::{Policy, Secrets};
 
+mod compaction;
 mod completed;
 mod error;
 mod request;
 mod stream;
+mod telemetry;
 mod tools;
 
 /// The `alt` of a `/responses/compact` call.
@@ -206,6 +208,11 @@ impl MetaExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         refuse_compact(options)?;
+        let (request, options) = crate::claude::compaction::expand_for(request, options, "meta")?;
+        let (request, options) = (&request, &options);
+        if crate::claude::compaction::requested(request, options) {
+            return self.execute_compaction(auth, request, options).await;
+        }
         let creds = Self::credentials(auth)?;
         let mut prepared = prepare(
             self.config.as_deref(),
@@ -261,6 +268,11 @@ impl MetaExecutor {
         options: Options,
     ) -> Result<StreamResponse, ExecError> {
         refuse_compact(&options)?;
+        let (request, options) = crate::claude::compaction::expand_for(&request, &options, "meta")?;
+        if crate::claude::compaction::requested(&request, &options) {
+            let response = self.execute_compaction(auth, &request, &options).await?;
+            return crate::claude::compaction::into_stream(response);
+        }
         let creds = Self::credentials(auth)?;
         let prepared = prepare(
             self.config.as_deref(),
@@ -322,6 +334,8 @@ impl MetaExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
+        let (request, options) = crate::claude::compaction::expand_for(request, options, "meta")?;
+        let (request, options) = (&request, &options);
         Self::credentials(auth)?;
         let prepared = prepare(
             self.config.as_deref(),

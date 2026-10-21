@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor_stream.go
 // (the stream loops and validateClaudeStreamingResponse),
 // claude_executor_diagnostics.go (observeClaudeStreamLine) and
-// helps/apply_patch.go (the stream failure helpers) (v8.0.32, MIT).
+// helps/apply_patch.go (the stream failure helpers) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude's SSE stream, read a line at a time.
@@ -9,7 +9,7 @@
 //! A Claude client gets whole events, each with its blank line, as Claude
 //! sent them. Any other client gets each line translated to its format. A
 //! `message_stop` event ends the stream; a connection that fails before it
-//! ends the stream with an error, while a clean end without it just ends.
+//! ends the stream with an error, including a clean premature EOF.
 //!
 //! A non-streaming call that Claude answered with a stream is checked first
 //! ([`validate`]): it must hold a `message_start` with an ID and model and a
@@ -57,18 +57,6 @@ pub(crate) const APPLY_PATCH_ERROR_MESSAGE: &str =
 /// The 502 for a tool call whose input couldn't be translated.
 pub(crate) fn apply_patch_error() -> ExecError {
     ExecError::upstream(502, APPLY_PATCH_ERROR_MESSAGE)
-}
-
-/// The JSON of a `data:` line, if it has valid JSON.
-fn data_event(line: &[u8]) -> Option<Value> {
-    let data = trim_space(line).strip_prefix(b"data:")?;
-    serde_json::from_slice(trim_space(data)).ok()
-}
-
-/// The `type` of a `data:` line's event, if it has valid JSON; a
-/// `message_stop` ends a reply (`observeClaudeStreamLine`).
-fn event_type(line: &[u8]) -> Option<String> {
-    data_event(line).map(|event| str_at(&event, "type"))
 }
 
 /// A 502 for a stream that doesn't hold a complete reply.
@@ -163,6 +151,9 @@ struct State {
     /// The event read so far, for a Claude client.
     event: Vec<u8>,
     completed: bool,
+    observation: Vec<u8>,
+    observation_overflow: bool,
+    stream_error: Option<String>,
     pending: VecDeque<Result<Bytes, ExecError>>,
     finished: bool,
 }
@@ -174,6 +165,9 @@ pub(crate) fn forward(response: reqwest::Response, setup: StreamSetup) -> ChunkS
         setup,
         event: Vec::new(),
         completed: false,
+        observation: Vec::new(),
+        observation_overflow: false,
+        stream_error: None,
         pending: VecDeque::new(),
         finished: false,
     };
@@ -200,13 +194,51 @@ impl State {
             None => return self.end(None),
         };
         let line = self.redact(line);
-        if event_type(&line).as_deref() == Some("message_stop") {
-            self.completed = true;
+        if !self.observation_overflow && self.observation.len() + line.len() < MAX_LINE {
+            self.observation.extend_from_slice(&line);
+            self.observation.push(b'\n');
+        } else {
+            self.observation_overflow = true;
+        }
+        if trim_space(&line).is_empty() {
+            self.observe_event();
         }
         if self.setup.translator.is_none() {
             self.forward_line(&line);
         } else {
             self.translate_line(&line);
+        }
+        if self.stream_error.is_some() && !self.finished {
+            self.end(None);
+        }
+    }
+
+    fn observe_event(&mut self) {
+        let raw = std::mem::take(&mut self.observation);
+        if std::mem::take(&mut self.observation_overflow) {
+            return;
+        }
+        let data: Vec<_> = raw
+            .split(|b| *b == b'\n')
+            .filter_map(|line| trim_space(line).strip_prefix(b"data:"))
+            .map(trim_space)
+            .filter(|data| !data.is_empty())
+            .collect();
+        let bare = data.is_empty();
+        let payload = if bare { raw.clone() } else { data.join(&b'\n') };
+        let Ok(event) = serde_json::from_slice::<Value>(trim_space(&payload)) else {
+            return;
+        };
+        match str_at(&event, "type").as_str() {
+            "message_stop" => self.completed = true,
+            "message" if bare && !str_at(&event, "stop_reason").trim().is_empty() => {
+                self.completed = true
+            }
+            "error" if !bare && self.stream_error.is_none() => {
+                self.stream_error =
+                    Some(String::from_utf8_lossy(trim_space(&payload)).into_owned());
+            }
+            _ => {}
         }
     }
 
@@ -277,6 +309,7 @@ impl State {
     /// failed before `message_stop`.
     fn end(&mut self, error: Option<LineError>) {
         self.finished = true;
+        self.observe_event();
         match self.setup.translator.as_mut() {
             None => self.flush(),
             Some(translator) => {
@@ -292,16 +325,18 @@ impl State {
         if self.completed {
             return;
         }
-        if let Some(error) = error {
-            tracing::debug!("claude: stream read failed: {error}");
-            let error = wrap_fast(
-                self.setup.fast,
-                self.setup.status,
-                plain_error(error.to_string()),
-            );
-            self.reader.report(&error);
-            self.pending.push_back(Err(error));
-        }
+        let error = match error {
+            Some(error) => plain_error(error.to_string()),
+            None => ExecError::upstream(
+                502,
+                self.stream_error
+                    .take()
+                    .unwrap_or_else(|| "upstream stream closed before message_stop".to_owned()),
+            ),
+        };
+        let error = wrap_fast(self.setup.fast, self.setup.status, error);
+        self.reader.report(&error);
+        self.pending.push_back(Err(error));
     }
 }
 
@@ -360,25 +395,92 @@ mod tests {
         }
     }
 
-    #[test]
-    fn spots_message_stop() {
-        let is_message_stop =
-            |line: &[u8]| event_type(line).is_some_and(|kind| kind == "message_stop");
-        assert!(is_message_stop(b" data: {\"type\":\"message_stop\"} "));
-        assert!(is_message_stop(b"data:{\"type\":\"message_stop\"}"));
-        assert!(!is_message_stop(b"event: message_stop"));
-        assert!(!is_message_stop(b"data: {\"type\":\"message_delta\"}"));
-        assert!(!is_message_stop(b"data: message_stop"));
+    async fn forward_chunks(chunks: &[&'static [u8]]) -> Vec<Result<Bytes, ExecError>> {
+        let chunks = chunks.to_vec();
+        let app = axum::Router::new().fallback(move || {
+            let chunks = chunks.clone();
+            async move {
+                axum::body::Body::from_stream(futures_util::stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Ok::<_, std::io::Error>(Bytes::from_static(chunk))),
+                ))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let chunks = forward(
+            response,
+            StreamSetup {
+                translator: None,
+                responses: false,
+                fast: false,
+                status: 200,
+                secrets: Secrets::new(),
+            },
+        )
+        .collect()
+        .await;
+        server.abort();
+        chunks
     }
 
-    #[test]
-    fn spots_error_events() {
-        assert_eq!(
-            event_type(b"data: {\"type\":\"error\",\"error\":{}}").as_deref(),
-            Some("error")
-        );
-        assert_eq!(event_type(b"event: error"), None);
-        assert_eq!(event_type(b"data: {nope"), None);
-        assert_eq!(event_type(b"data: {}").as_deref(), Some(""));
+    #[tokio::test]
+    async fn spots_message_stop() {
+        for (body, complete) in [
+            (
+                &[b" data: {\"type\":\"message_stop\"} ".as_slice()][..],
+                true,
+            ),
+            (&[b"data:{\"type\":\"message_stop\"}".as_slice()][..], true),
+            (&[b"event: message_stop".as_slice()][..], false),
+            (
+                &[b"data: {\"type\":\"message_delta\"}".as_slice()][..],
+                false,
+            ),
+            (&[b"data: message_stop".as_slice()][..], false),
+            (
+                &[
+                    b"event: message_stop\n".as_slice(),
+                    b"data: {\"type\":\"message_stop\"}\n".as_slice(),
+                    b"\n".as_slice(),
+                ][..],
+                true,
+            ),
+        ] {
+            let chunks = forward_chunks(body).await;
+            assert_eq!(chunks.iter().all(Result::is_ok), complete, "{body:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn spots_error_events() {
+        for (body, is_error) in [
+            (b"data: {\"type\":\"error\",\"error\":{}}".as_slice(), true),
+            (b"event: error".as_slice(), false),
+            (b"data: {nope".as_slice(), false),
+            (b"data: {}".as_slice(), false),
+        ] {
+            let chunks = forward_chunks(&[body]).await;
+            let error = chunks
+                .iter()
+                .find_map(|chunk| chunk.as_ref().err())
+                .unwrap();
+            assert_eq!(error.status, 502);
+            assert_eq!(
+                error.message.contains("before message_stop"),
+                !is_error,
+                "{body:?}"
+            );
+        }
     }
 }

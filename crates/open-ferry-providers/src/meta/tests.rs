@@ -779,7 +779,7 @@ async fn error_events_end_the_call() {
         (r#"{"type":"error","error":{"code":"bad"}}"#, 502, false),
     ] {
         let sse = format!(
-            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\"}}}}\n\ndata: {event}\n\n{}",
+            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\"}}}}\n\nevent: error\ndata: {event}\n\n{}",
             ok_stream("never read")
         );
         let mock = Mock::start(Reply::sse(&sse)).await;
@@ -809,6 +809,7 @@ async fn error_events_end_the_call() {
         assert_eq!(error.status, status, "{event}");
         assert_eq!(error.message, event);
         assert!(text.contains("response.created"), "{text}");
+        assert!(!text.contains("event: error"), "{text}");
         assert!(!text.contains("never read"), "{text}");
     }
 }
@@ -1535,4 +1536,246 @@ async fn the_taps_see_the_answer_as_it_came() {
         assert!(!shown.contains(ECHOED), "{shown}");
         assert!(raw.seen().contains(ECHOED), "{}", raw.seen());
     }
+}
+
+// TestMetaExecutor subscription telemetry stream and collected response paths.
+#[tokio::test]
+async fn subscription_telemetry_never_reaches_clients() {
+    for private in [
+        "event: response.subscription_usage\ndata: {\"remaining\":100}\n\n",
+        "event: response.subscription_usage\n\n",
+        "event: response.subscription_usage\ndata: {\ndata: \"subscription\":{}}\n\n",
+        "data: {\"type\":\"response.subscription_usage\",\"subscription\":{}}\n\n",
+        "event: telemetry\ndata: {\"subscription\":{\"remaining\":100}}\n\n",
+    ] {
+        let data = format!("{private}{}{private}", ok_stream("hello"));
+        let mock = Mock::start(Reply::sse(&data)).await;
+        let request = request("muse-spark-1.3", r#"{"input":"hi"}"#);
+        let response = executor()
+            .execute(
+                api_key_auth(&mock.url),
+                request.clone(),
+                options("openai-response"),
+            )
+            .await
+            .unwrap();
+        let payload = String::from_utf8(response.payload.to_vec()).unwrap();
+        assert!(payload.contains("hello"));
+        assert!(!payload.contains("subscription"));
+        let response = executor()
+            .execute_stream(
+                api_key_auth(&mock.url),
+                request,
+                stream_options("openai-response"),
+            )
+            .await
+            .unwrap();
+        let (payload, error) = collect(response).await;
+        assert!(error.is_none(), "{error:?}");
+        assert!(payload.contains("hello"));
+        assert!(!payload.contains("subscription"), "{payload}");
+        assert!(!payload.contains("event: telemetry"), "{payload}");
+    }
+}
+
+// TestMetaExecutor*Compaction*: summary request, capsule replay, stream usage,
+// foreign capsule removal, original-request triggers and invalid summaries.
+#[tokio::test]
+async fn remote_compaction_preserves_client_number_spelling() {
+    let mock = Mock::start(Reply::sse(
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Summary\"}]}]}}\n\n",
+    )).await;
+    let payload = r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history","client_number":1E20,"client_scale":1E0}]},{"type":"compaction_trigger"}]}"#;
+    executor()
+        .execute(
+            api_key_auth(&mock.url),
+            request("muse-spark-1.3", payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap();
+    let sent = mock.last();
+    assert!(sent.body.contains("\"client_scale\":1E0"), "{}", sent.body);
+    assert!(
+        sent.body.contains("\"client_number\":1E20"),
+        "{}",
+        sent.body
+    );
+}
+
+#[tokio::test]
+async fn remote_compaction_seals_and_replays_summary_with_usage() {
+    let summary = json!({"id":"summary", "object":"response", "status":"completed",
+        "output":[{"type":"reasoning","summary":[{"text":"private"}]},{"type":"message","status":"completed","content":[{"type":"text","text":"Task progress."},{"type":"output_text","text":"Next steps."}]}],
+        "usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":4}}});
+    let reply = format!(
+        "data: {}\n\n",
+        json!({"type":"response.completed","response":summary})
+    );
+    let payload = json!({"input":[{"role":"user","content":"Long history"},{"type":"compaction_trigger"}],
+        "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}], "additional_tools":[], "tool_choice":"auto", "previous_response_id":"old"});
+    for stream in [false, true] {
+        for original_only in [false, true] {
+            let mock = Mock::start(Reply::sse(&reply)).await;
+            let mut opts = options("openai-response");
+            opts.stream = stream;
+            if original_only {
+                opts.original_request = Bytes::from(payload.to_string());
+            }
+            let req = request(
+                "muse-spark-1.3",
+                &if original_only {
+                    json!({"input":[]}).to_string()
+                } else {
+                    payload.to_string()
+                },
+            );
+            let result: Value = if stream {
+                let response = executor()
+                    .execute_stream(api_key_auth(&mock.url), req, opts)
+                    .await
+                    .unwrap();
+                assert_eq!(response.headers["content-type"], "text/event-stream");
+                let (output, error) = collect(response).await;
+                assert!(error.is_none());
+                let events: Vec<Value> = output
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(events.len(), 5);
+                assert_eq!(events[0]["type"], "response.created");
+                assert_eq!(events[2]["type"], "response.output_item.added");
+                assert_eq!(events[3]["type"], "response.output_item.done");
+                assert_eq!(events[4]["type"], "response.completed");
+                events[4]["response"].clone()
+            } else {
+                let response = executor()
+                    .execute(api_key_auth(&mock.url), req, opts)
+                    .await
+                    .unwrap();
+                serde_json::from_slice(&response.payload).unwrap()
+            };
+            let sent = mock.last().json();
+            for field in [
+                "tools",
+                "additional_tools",
+                "tool_choice",
+                "previous_response_id",
+            ] {
+                assert!(sent.get(field).is_none(), "{field}: {sent}");
+            }
+            let sent_input = sent["input"].to_string();
+            assert!(!sent_input.contains("compaction_trigger"));
+            assert!(sent_input.contains("Long history"));
+            assert!(sent_input.contains("concise and comprehensive summary"));
+            assert_eq!(result["status"], "completed");
+            assert_eq!(result["output"][0]["type"], "compaction");
+            assert_eq!(result["usage"], summary["usage"]);
+            let capsule = result["output"][0]["encrypted_content"].as_str().unwrap();
+            assert!(capsule.starts_with("cpa-ag-compact-v1:"));
+            // The shared decoder proves interoperability with Claude's capsule path.
+            let replay = json!({"input":[{"type":"compaction","encrypted_content":capsule},{"type":"compaction","encrypted_content":"foreign"}]});
+            let req = request("muse-spark-1.3", &replay.to_string());
+            let mut opts = options("openai-response");
+            opts.original_request = req.payload.clone();
+            let (expanded, expanded_opts) =
+                crate::claude::compaction::expand_for(&req, &opts, "meta").unwrap();
+            assert_eq!(expanded.payload, expanded_opts.original_request);
+            let body: Value = serde_json::from_slice(&expanded.payload).unwrap();
+            assert_eq!(body["input"].as_array().unwrap().len(), 1);
+            assert_eq!(body["input"][0]["role"], "developer");
+            assert_eq!(
+                body["input"][0]["content"][0]["text"],
+                "Context summary from previous turns:\nTask progress.\nNext steps."
+            );
+            let counted = executor()
+                .count_tokens(api_key_auth(&mock.url), req.clone(), opts.clone())
+                .await
+                .unwrap();
+            let expected = executor()
+                .count_tokens(api_key_auth(&mock.url), expanded, expanded_opts)
+                .await
+                .unwrap();
+            assert_eq!(counted.payload, expected.payload);
+            executor()
+                .execute(api_key_auth(&mock.url), req, opts)
+                .await
+                .unwrap();
+            let sent = mock.last().json();
+            assert!(!sent["input"].to_string().contains("encrypted_content"));
+            assert!(sent.to_string().contains("Task progress."));
+        }
+    }
+}
+
+#[tokio::test]
+async fn remote_compaction_rejects_incomplete_and_invalid_capsules() {
+    for status in ["incomplete", "failed", "in_progress", ""] {
+        let body = json!({"type":"response.completed","response":{"status":status,"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}});
+        let mock = Mock::start(Reply::sse(&format!("data: {body}\n\n"))).await;
+        let req = request(
+            "muse-spark-1.3",
+            r#"{"input":[{"type":"compaction_trigger"}]}"#,
+        );
+        for stream in [false, true] {
+            let error = if stream {
+                executor()
+                    .execute_stream(
+                        api_key_auth(&mock.url),
+                        req.clone(),
+                        stream_options("openai-response"),
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+            } else {
+                executor()
+                    .execute(
+                        api_key_auth(&mock.url),
+                        req.clone(),
+                        options("openai-response"),
+                    )
+                    .await
+                    .unwrap_err()
+            };
+            assert_eq!(error.status, 502, "{status}: {error:?}");
+        }
+    }
+    let mock = Mock::start(Reply::sse("")).await;
+    let req = request(
+        "muse-spark-1.3",
+        r#"{"input":[{"type":"compaction","encrypted_content":"cpa-ag-compact-v1:broken"}]}"#,
+    );
+    for stream in [false, true] {
+        let error = if stream {
+            executor()
+                .execute_stream(
+                    api_key_auth(&mock.url),
+                    req.clone(),
+                    stream_options("openai-response"),
+                )
+                .await
+                .err()
+                .unwrap()
+        } else {
+            executor()
+                .execute(
+                    api_key_auth(&mock.url),
+                    req.clone(),
+                    options("openai-response"),
+                )
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(
+        executor()
+            .count_tokens(api_key_auth(&mock.url), req, options("openai-response"))
+            .await
+            .unwrap_err()
+            .status,
+        400
+    );
 }

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor.go
 // (the stream reader of ExecuteStream), helps/apply_patch.go
 // (EndApplyPatchStream) and helps/claude_input_tokens.go
-// (TranslateStreamWithClaudeInputTokens) (v8.0.32, MIT).
+// (TranslateStreamWithClaudeInputTokens) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An OpenAI-compatible provider's SSE stream, read a frame at a time and
@@ -90,6 +90,7 @@ struct State {
     /// Whether one of them is `[DONE]`.
     data_done: bool,
     seen_done: bool,
+    saw_finish_reason: bool,
     failed: bool,
     pending: VecDeque<Result<Bytes, ExecError>>,
     finished: bool,
@@ -111,6 +112,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         data_lines: 0,
         data_done: false,
         seen_done: false,
+        saw_finish_reason: false,
         failed: false,
         pending: VecDeque::new(),
         finished: false,
@@ -224,6 +226,25 @@ impl State {
                 self.fail_with_payload(error);
                 return true;
             }
+            if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {
+                self.saw_finish_reason = serde_json::from_slice::<serde_json::Value>(payload)
+                    .ok()
+                    .is_some_and(|chunk| {
+                        chunk
+                            .get("choices")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|choices| {
+                                choices.iter().any(|choice| {
+                                    choice.get("finish_reason").is_some_and(|reason| {
+                                        !reason.is_null()
+                                            && !crate::json::str_at(choice, "finish_reason")
+                                                .trim()
+                                                .is_empty()
+                                    })
+                                })
+                            })
+                    });
+            }
         }
 
         let line = [b"data: ".as_slice(), payload].concat();
@@ -329,11 +350,13 @@ impl State {
             self.pending
                 .push_back(Err(ExecError::new(ErrorKind::Upstream, error.to_string())));
         } else if !self.seen_done {
-            if self.setup.response_format == Format::OPENAI_RESPONSE {
-                self.fail(StatusError::new(
-                    502,
-                    "upstream stream closed before [DONE]",
-                ));
+            if self.setup.response_format == Format::OPENAI_RESPONSE
+                || (self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason)
+            {
+                let error = ExecError::upstream(502, "upstream stream closed before [DONE]")
+                    .with_usage_kept();
+                self.reader.report(&error);
+                self.stop(error);
                 return;
             }
             // Other clients keep working with providers that send no [DONE].

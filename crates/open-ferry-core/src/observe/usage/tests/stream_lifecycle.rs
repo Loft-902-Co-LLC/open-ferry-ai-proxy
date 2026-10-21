@@ -465,3 +465,60 @@ fn meta_client_disconnect_depends_on_terminal_event() {
         }
     }
 }
+// StreamUsageBuffer.PublishFailure: truncation preserves already observed usage.
+#[test]
+fn truncated_streams_retain_usage_from_all_claude_upstream_protocols() {
+    use super::support::{ClientCall, Harness, auth, int_at};
+    use crate::exec::ExecError;
+    use crate::observe::AttemptKind;
+    for (provider, payload, input, output) in [
+        (
+            "claude",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+            5,
+            2,
+        ),
+        (
+            "gemini",
+            "data: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n",
+            5,
+            2,
+        ),
+        (
+            "vertex",
+            "data: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n",
+            5,
+            2,
+        ),
+        (
+            "openai",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+            5,
+            2,
+        ),
+    ] {
+        let harness = Harness::new();
+        let driver = ClientCall::new("test").stream().tap(&harness);
+        driver.attempt(
+            AttemptKind::Stream,
+            provider,
+            "test",
+            &auth("dummy", "0", provider),
+        );
+        driver.head(200, &[("content-type", "text/event-stream")]);
+        driver.chunk(payload);
+        let mut error = ExecError::upstream(502, "upstream stream closed before completion");
+        if provider != "claude" {
+            error = error.with_usage_kept();
+        }
+        driver.fail(&error);
+        let record = harness.record();
+        assert_eq!(record["failed"], true, "{provider}");
+        assert_eq!(int_at(&record, "/tokens/input_tokens"), input, "{provider}");
+        assert_eq!(
+            int_at(&record, "/tokens/output_tokens"),
+            output,
+            "{provider}"
+        );
+    }
+}

@@ -573,10 +573,13 @@ impl ClaudeExecutor {
                 original_request: &original,
                 request: &prepared.translation,
             };
-            self.response_registry(&format)
+            let mut translator = self
+                .response_registry(&format)
                 .as_ref()
                 .unwrap_or_else(|| Registry::global())
-                .response_stream(&Format::CLAUDE, &format, &context)
+                .response_stream(&Format::CLAUDE, &format, &context);
+            crate::apply_patch_responses::initialize_stream(&mut translator, &format, &original);
+            translator
         });
         let chunks = stream::forward(
             response,
