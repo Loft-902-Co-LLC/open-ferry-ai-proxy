@@ -261,13 +261,11 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
   }, [edited, editor, onUnsavedChange]);
 
   // A clean editor follows query updates; a draft retains its own base.
-  if (initial !== seenInitial) {
+  if (!edited && initial !== seenInitial) {
     setSeenInitial(initial);
-    if (!edited) {
-      setBase(initial);
-      setDraft(initial);
-      setRound((value) => value + 1);
-    }
+    setBase(initial);
+    setDraft(initial);
+    setRound((value) => value + 1);
   }
 
   const read = useMutation({

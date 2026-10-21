@@ -1182,6 +1182,28 @@ describe("config.yaml", () => {
     expect(screen.getByText("No unsaved changes.", { selector: "[role=status]:not([hidden] *)" })).toBeVisible();
   });
 
+  it("follows a sibling refetch once a YAML draft is discarded", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    const editor = await openFile(user);
+    const draft = `${YAML}# mine\n`;
+    fireEvent.change(editor, { target: { value: draft } });
+    const reads = state.api.callsTo("GET", CONFIG_YAML).length;
+    const latest = `${YAML}# from another form\n`;
+    state.yaml = latest;
+    await user.click(screen.getByRole("tab", { name: "Settings", exact: true }));
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(review).getByRole("button", { name: "Save 1 setting" }));
+    await screen.findByText("Saved 1 setting. The server uses it from now on.");
+    await waitFor(() => { expect(state.api.callsTo("GET", CONFIG_YAML).length).toBeGreaterThan(reads); });
+    await user.click(screen.getByRole("tab", { name: "config.yaml" }));
+    expect(editor).toHaveValue(draft);
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(screen.getByRole("textbox", { name: "config.yaml" })).toHaveValue(latest);
+  });
+
   it("uses stored normalized YAML and its ETag as the next draft baseline", async () => {
     const state = server();
     let etag = '"loaded"';
