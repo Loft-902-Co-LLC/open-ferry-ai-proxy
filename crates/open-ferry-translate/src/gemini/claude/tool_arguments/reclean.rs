@@ -8,7 +8,8 @@
 //! where they can change a property map. No Antigravity request cleaner is exposed.
 //! The 64-level depth limit bounds recursion; a separate 100,000-node copy budget
 //! bounds the projected schema. Either limit preserves arguments when the
-//! projection cannot finish. Shared inlining also uses upstream's 256 KiB
+//! projection cannot finish. Inlining first preflights the source and copies
+//! against its own 8 MiB/100,000-node allowance. It also uses upstream's 256 KiB
 //! allowance, cycle hints, and inner-schema reference root.
 //!
 //! Deliberate projection deviations from upstream's raw-path quirks:

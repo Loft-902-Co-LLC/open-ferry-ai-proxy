@@ -60,7 +60,7 @@
 //!   most its first 1,024 bytes of JSON. Upstream writes all of it: each
 //!   level of such values nested in one another escapes the text of the level
 //!   below once more, doubling it, so a 600-byte schema can come out as 16 MB.
-//! - Copying conditional properties and materializing required-only union
+//! - Inlining references, copying conditional properties and materializing required-only union
 //!   branches share limits of 8 MiB of bytes, 65,536 nodes and 4 MiB of path
 //!   work across all tool schemas in one translation call, spent in tool order.
 //!   Copied branches and written property values are charged at their
@@ -105,7 +105,7 @@ pub(crate) const SCHEMA_COPY_BYTES_PER_REQUEST: usize = 8 * 1024 * 1024;
 const SCHEMA_COPY_NODES_PER_REQUEST: usize = 65_536;
 const SCHEMA_COPY_PATH_WORK_PER_REQUEST: usize = 4 * 1024 * 1024;
 
-/// One translation call's allowance, shared by both copy passes and every tool.
+/// One translation call's allowance, shared by reference expansion, copy passes and every tool.
 #[derive(Clone, Copy)]
 pub(crate) struct SchemaCopyBudget {
     remaining: usize,
@@ -496,7 +496,7 @@ pub(crate) fn clean_json_schema_for_gemini_json_schema(
     let mut doc = normalize_malformed_schema_objects(schema);
 
     // Resolve before the passes discard definition containers.
-    doc = local_refs::inline_for_clean(&doc);
+    doc = local_refs::inline_for_clean(&doc, budget);
 
     // Convert and add hints.
     convert_refs_to_hints(&mut doc);

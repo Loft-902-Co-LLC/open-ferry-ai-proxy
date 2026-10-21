@@ -6,7 +6,9 @@
 //! at 64 links. Containers and reference hops share a 128-level output bound;
 //! the argument projection uses 64 levels. Over-depth targets become hints.
 
-use super::{NAME_MAP_KEYWORDS, is_literal_value_keyword, merge_hint, ref_name};
+use super::{
+    CopyCost, NAME_MAP_KEYWORDS, SchemaCopyBudget, is_literal_value_keyword, merge_hint, ref_name,
+};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -15,16 +17,32 @@ const MAX_REFERENCE_DEPTH: usize = 64;
 pub(crate) const MAX_OUTPUT_DEPTH: usize = 128;
 const MAX_DESCRIPTION_BYTES: usize = 512;
 
-pub(crate) fn inline_for_clean(schema: &Value) -> Value {
-    inline_with_depth(schema, MAX_OUTPUT_DEPTH).0
+pub(crate) fn inline_for_clean(schema: &Value, budget: &mut SchemaCopyBudget) -> Value {
+    inline_with_depth(schema, MAX_OUTPUT_DEPTH, budget).0
 }
 
 pub(crate) fn inline_for_projection(schema: &Value) -> Option<Value> {
-    let (value, truncated) = inline_with_depth(schema, 64);
+    // The projection has its own total allowance, including the source clone.
+    // Preflight before the shared inliner allocates, not after expansion.
+    let nodes = node_count(schema, 100_000, false);
+    if nodes > 100_000 {
+        return None;
+    }
+    let bytes = super::copy_bytes(schema, super::SCHEMA_COPY_BYTES_PER_REQUEST)?;
+    let mut budget = SchemaCopyBudget {
+        remaining: super::SCHEMA_COPY_BYTES_PER_REQUEST - bytes,
+        nodes: 100_000 - nodes,
+        path_work: usize::MAX,
+    };
+    let (value, truncated) = inline_with_depth(schema, 64, &mut budget);
     (!truncated).then_some(value)
 }
 
-fn inline_with_depth(schema: &Value, max_depth: usize) -> (Value, bool) {
+fn inline_with_depth(
+    schema: &Value,
+    max_depth: usize,
+    budget: &mut SchemaCopyBudget,
+) -> (Value, bool) {
     if structural_depth(schema) > max_depth {
         return (Value::Object(depth_hint(schema)), true);
     }
@@ -39,7 +57,7 @@ fn inline_with_depth(schema: &Value, max_depth: usize) -> (Value, bool) {
         && map.len() == 1
         && let Some(inner @ Value::Object(_)) = map.get("schema")
     {
-        let (value, truncated) = inline_with_depth(inner, max_depth - 1);
+        let (value, truncated) = inline_with_depth(inner, max_depth - 1, budget);
         return (
             Value::Object(Map::from_iter([("schema".into(), value)])),
             truncated,
@@ -50,13 +68,51 @@ fn inline_with_depth(schema: &Value, max_depth: usize) -> (Value, bool) {
         remaining: COPY_BYTES,
         max_depth,
         depth_exhausted: false,
+        budget,
+        budget_exhausted: false,
         active: HashSet::new(),
         targets: HashMap::new(),
         #[cfg(test)]
         target_size_scans: 0,
     };
     let value = resolver.root();
-    (value, resolver.depth_exhausted)
+    (value, resolver.depth_exhausted || resolver.budget_exhausted)
+}
+
+// Counts only material copied by cleaning, or the complete source preflight
+// when `for_clean` is false. This is iterative and stops before unbounded work.
+fn node_count(value: &Value, limit: usize, for_clean: bool) -> usize {
+    let mut count = 0usize;
+    let mut stack = vec![(value, false, false)];
+    while let Some((value, name_map, literal)) = stack.pop() {
+        count += 1;
+        if count > limit {
+            return count;
+        }
+        match value {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    if for_clean
+                        && !literal
+                        && !name_map
+                        && matches!(key.as_str(), "$defs" | "definitions")
+                    {
+                        continue;
+                    }
+                    stack.push((
+                        value,
+                        !literal && !name_map && NAME_MAP_KEYWORDS.contains(&key.as_str()),
+                        literal || (!name_map && is_literal_value_keyword(key)),
+                    ));
+                }
+            }
+            Value::Array(values) => {
+                stack.extend(values.iter().map(|value| (value, false, literal)))
+            }
+            _ => {}
+        }
+    }
+    count
 }
 
 // Iterative preflight also covers literal subtrees, which are cloned verbatim.
@@ -129,22 +185,36 @@ fn contains_ref_token(value: &Value) -> bool {
     }
 }
 
-struct Resolver<'a> {
+struct Resolver<'a, 'b> {
     root: &'a Value,
     remaining: usize,
     max_depth: usize,
     depth_exhausted: bool,
+    budget: &'b mut SchemaCopyBudget,
+    budget_exhausted: bool,
     active: HashSet<String>,
-    targets: HashMap<String, Option<(&'a Value, usize, usize)>>,
+    targets: HashMap<String, Option<(&'a Value, usize, usize, usize)>>,
     #[cfg(test)]
     target_size_scans: usize,
 }
 
-impl<'a> Resolver<'a> {
+impl<'a> Resolver<'a, '_> {
+    fn spend_inline(&mut self, bytes: usize, nodes: usize) -> bool {
+        let fits = self
+            .budget
+            .spend(CopyCost {
+                bytes,
+                nodes,
+                path_work: 0,
+            })
+            .is_some();
+        self.budget_exhausted |= !fits;
+        fits
+    }
     // Targets and their stored size are independent of the active reference
     // stack and remaining budget. Expanded results are not: caching those would
     // change cycle fallback and per-reference charging.
-    fn target(&mut self, reference: &str) -> Option<(&'a Value, usize, usize)> {
+    fn target(&mut self, reference: &str) -> Option<(&'a Value, usize, usize, usize)> {
         if let Some(target) = self.targets.get(reference) {
             return *target;
         }
@@ -157,6 +227,7 @@ impl<'a> Resolver<'a> {
                 target,
                 expansion_size(target, false),
                 structural_depth(target),
+                node_count(target, 100_000, true),
             )
         });
         self.targets.insert(reference.to_owned(), target);
@@ -171,7 +242,7 @@ impl<'a> Resolver<'a> {
         // ahead of the schema the caller actually sends.
         let mut out = self.entries(map, 1);
         if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-            && let Some((target, cost, target_depth)) = self.target(reference)
+            && let Some((target, cost, target_depth, nodes)) = self.target(reference)
         {
             out.shift_remove("$ref");
             self.depth_exhausted |= 1 + target_depth > self.max_depth;
@@ -179,6 +250,7 @@ impl<'a> Resolver<'a> {
                 .remaining
                 .checked_sub(cost)
                 .filter(|_| 1 + target_depth <= self.max_depth)
+                .filter(|_| self.spend_inline(cost, nodes))
             {
                 self.remaining = remaining;
                 self.active.insert(reference.to_owned());
@@ -205,13 +277,14 @@ impl<'a> Resolver<'a> {
             }
             Value::Object(map) => {
                 if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-                    && let Some((target, cost, target_depth)) = self.target(reference)
+                    && let Some((target, cost, target_depth, nodes)) = self.target(reference)
                 {
                     self.depth_exhausted |= depth + 1 + target_depth > self.max_depth;
                     if depth + 1 + target_depth > self.max_depth
                         || self.active.len() >= MAX_REFERENCE_DEPTH
                         || self.active.contains(reference)
                         || cost > self.remaining
+                        || !self.spend_inline(cost, nodes)
                     {
                         return Value::Object(self.fallback(map, target, reference, depth));
                     }
@@ -281,6 +354,9 @@ impl<'a> Resolver<'a> {
         if let Value::Object(target) = target {
             for key in ["type", "nullable", "description"] {
                 if let Some(value) = target.get(key) {
+                    if map.contains_key(key) {
+                        continue;
+                    }
                     if depth + 1 + structural_depth(value) > self.max_depth {
                         self.depth_exhausted = true;
                         continue;
@@ -291,13 +367,22 @@ impl<'a> Resolver<'a> {
                         if description.len() > MAX_DESCRIPTION_BYTES {
                             continue;
                         }
-                        if !map.contains_key("description") {
-                            let cost = encoded_string_size(description);
-                            let Some(remaining) = self.remaining.checked_sub(cost) else {
-                                continue;
-                            };
-                            self.remaining = remaining;
+                        if encoded_string_size(description) > self.remaining {
+                            continue;
                         }
+                    }
+                    let Some(bytes) = super::copy_bytes(value, self.budget.remaining) else {
+                        self.budget_exhausted = true;
+                        continue;
+                    };
+                    let nodes = node_count(value, self.budget.nodes, false);
+                    if !self.spend_inline(bytes, nodes) {
+                        continue;
+                    }
+                    if key == "description"
+                        && let Some(description) = value.as_str()
+                    {
+                        self.remaining -= encoded_string_size(description);
                     }
                     out.insert(key.into(), value.clone());
                 }

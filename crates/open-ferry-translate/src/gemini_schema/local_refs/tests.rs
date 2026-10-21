@@ -9,6 +9,10 @@ fn clean(schema: &Value) -> Value {
     clean_json_schema_for_gemini_json_schema(schema, &mut SchemaCopyBudget::default())
 }
 
+fn inline_for_clean(schema: &Value) -> Value {
+    super::inline_for_clean(schema, &mut SchemaCopyBudget::default())
+}
+
 #[test]
 fn local_definitions_property_reuse_and_sibling_overrides() {
     let schema = json!({"type":"object","properties":{
@@ -204,11 +208,14 @@ fn repeated_references_lookup_and_size_the_target_once_but_each_spends_budget() 
         .map(|i| (format!("p{i}"), json!({"$ref":"#/$defs/Large"})))
         .collect();
     let root = json!({"properties":properties,"$defs":{"Large":{"type":"string","description":"x".repeat(32*1024)}}});
+    let mut budget = SchemaCopyBudget::default();
     let mut resolver = Resolver {
         root: &root,
         remaining: COPY_BYTES,
         max_depth: MAX_OUTPUT_DEPTH,
         depth_exhausted: false,
+        budget: &mut budget,
+        budget_exhausted: false,
         active: HashSet::new(),
         targets: HashMap::new(),
         target_size_scans: 0,
@@ -276,6 +283,101 @@ fn materialized_unions_cannot_deepen_inlined_output_past_the_cap() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+fn translate_diamonds(chat: bool, count: usize, levels: usize) -> Value {
+    let schema = diamond(levels);
+    let tools: Vec<_> = (0..count)
+        .map(|i| {
+            if chat {
+                json!({"type":"function","function":{"name":format!("T{i}"),"parameters":schema}})
+            } else {
+                json!({"name":format!("T{i}"),"input_schema":schema})
+            }
+        })
+        .collect();
+    let request = json!({"messages":[{"role":"user","content":"hi"}],"tools":tools});
+    let (out, error) = if chat {
+        crate::gemini::openai::chat_completions::convert_openai_request_to_gemini(
+            "gemini-2.5-pro",
+            &request,
+            false,
+        )
+    } else {
+        crate::gemini::claude::convert_claude_request_to_gemini(
+            "gemini-2.5-pro",
+            &request,
+            false,
+            crate::models::ModelCatalog::embedded(),
+        )
+    };
+    assert!(error.is_none());
+    out
+}
+
+fn check_many_diamonds(chat: bool) {
+    let out = translate_diamonds(chat, 100, 14);
+    let tools = out["tools"][0]["functionDeclarations"].as_array().unwrap();
+    assert_eq!(tools.len(), 100);
+    assert!(
+        serde_json::to_vec(&out).unwrap().len()
+            <= crate::gemini_schema::SCHEMA_COPY_BYTES_PER_REQUEST
+    );
+    assert!(
+        tools[0]["parametersJsonSchema"]
+            .to_string()
+            .contains("properties")
+    );
+    assert!(
+        tools[99]["parametersJsonSchema"]
+            .to_string()
+            .contains("See:")
+    );
+    assert!(tools[99]["parametersJsonSchema"].to_string().len() < 256);
+}
+
+#[test]
+fn many_diamond_tools_share_claude_request_allowance() {
+    check_many_diamonds(false);
+}
+
+#[test]
+fn many_diamond_tools_share_chat_request_allowance() {
+    check_many_diamonds(true);
+}
+
+#[test]
+fn under_allowance_inlining_matches_independent_per_schema_cleaning() {
+    let schema = diamond(8);
+    let expected =
+        clean_json_schema_for_gemini_json_schema(&schema, &mut SchemaCopyBudget::unlimited());
+    for chat in [false, true] {
+        let out = translate_diamonds(chat, 2, 8);
+        for tool in out["tools"][0]["functionDeclarations"].as_array().unwrap() {
+            assert_eq!(tool["parametersJsonSchema"], expected);
+        }
+    }
+}
+
+#[test]
+fn projection_preflights_source_nodes_and_bytes_before_inlining() {
+    assert!(inline_for_projection(&json!({"default":vec![Value::Null;100_001]})).is_none());
+    assert!(
+        inline_for_projection(
+            &json!({"default":"x".repeat(super::super::SCHEMA_COPY_BYTES_PER_REQUEST)})
+        )
+        .is_none()
+    );
+    let mut budget = SchemaCopyBudget {
+        remaining: 0,
+        nodes: 0,
+        path_work: 0,
+    };
+    let schema =
+        json!({"$ref":"#/$defs/S","$defs":{"S":{"type":"string","description":"x".repeat(512)}}});
+    let out = super::inline_for_clean(&schema, &mut budget);
+    assert!(out["description"].as_str().unwrap().starts_with("See:"));
+    assert!(!out.to_string().contains(&"x".repeat(512)));
 }
 
 #[test]
