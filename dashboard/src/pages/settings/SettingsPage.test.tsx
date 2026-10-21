@@ -1216,6 +1216,44 @@ describe("config.yaml", () => {
     expect(state.yaml).toContain("request-retry: 5");
   });
 
+  it("explains a broken stored file on Settings and links to the YAML repair editor", async () => {
+    const state = server();
+    state.api.use(route("GET", V8_CONFIG, {
+      status: 500, json: { error: "invalid_config", message: "yaml: line 4: expected a value" },
+    }));
+    renderApp("/settings");
+    expect((await screen.findAllByText("config.yaml doesn't parse"))[0]).toBeVisible();
+    expect(screen.getAllByText("yaml: line 4: expected a value")[0]).toBeVisible();
+    expect(screen.getAllByRole("link", { name: "YAML editor" })[0]).toHaveAttribute("href", "/settings?tab=file");
+    expect(screen.queryByText("The server failed (HTTP 500)")).not.toBeInTheDocument();
+  });
+
+  it("opens broken config.yaml in explicit unguarded recovery mode and repairs it through raw routes", async () => {
+    const state = server();
+    state.yaml = "broken: [\n";
+    state.api.use(route("GET", V8_CONFIG, {
+      status: 500, json: { error: "invalid_config", message: "yaml: line 1: expected closing bracket" },
+    }));
+    const { user } = renderApp("/settings?tab=file");
+    await user.click(await screen.findByRole("button", { name: "Show config.yaml" }));
+    const editor = await screen.findByRole("textbox", { name: "config.yaml" });
+    expect(editor).toHaveValue("broken: [\n");
+    expect(screen.getByText("Recovery mode: config.yaml doesn't parse")).toBeVisible();
+    expect(screen.getByText(/Saving replaces the whole file without version checks/)).toBeVisible();
+    fireEvent.change(editor, { target: { value: YAML } });
+    state.yaml = "broken: [ # changed meanwhile\n";
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    expect(within(dialog).getByText("config.yaml changed on the server since you opened it")).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    await screen.findByText("Saved config.yaml. The server uses it from now on.");
+    const writes = state.api.callsTo("PUT", CONFIG_YAML);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.headers.has("if-match")).toBe(false);
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toEqual([]);
+    expect(state.yaml).toBe(YAML);
+  });
+
   it("says why the server refused the file, and keeps the edit", async () => {
     const state = server();
     state.api.use(

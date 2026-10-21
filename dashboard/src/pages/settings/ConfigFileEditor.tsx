@@ -425,6 +425,12 @@ export function ConfigFileEditor({
         </>
       ) : (
         <>
+          {editor.editor.recovery !== null && (
+            <Alert tone="warn" live title="Recovery mode: config.yaml doesn't parse">
+              <p>The server is still running its last good config. Saving replaces the whole file without version checks. Copy your edits before reloading if the file changes meanwhile.</p>
+              {editor.editor.recovery.detail !== null && <p>{editor.editor.recovery.detail}</p>}
+            </Alert>
+          )}
           <p className="text-muted">
             <Code>Ctrl</Code>+<Code>F</Code> (<Code>⌘</Code>+<Code>F</Code> on a Mac) searches.{" "}
             <Code>Tab</Code> leaves the editor, so indent with spaces.

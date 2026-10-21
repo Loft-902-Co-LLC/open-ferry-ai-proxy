@@ -1,6 +1,6 @@
 // Shared reads follow the current file. Each dirty form retains its draft's
 // baseline and compares only the fields it will write before rebasing.
-import { ApiError, isUnsupportedRoute, type ApiRequest, type ApiResponse } from "./client";
+import { ApiError, isApiError, isUnsupportedRoute, type ApiRequest, type ApiResponse } from "./client";
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "./management";
 import { AUTH_FILE_STATUS, type Credential, type StatusAnswer } from "./credentials";
 
@@ -148,9 +148,15 @@ export class ConfigStore {
   };
 }
 
+/** Only a stored-file parse failure permits the explicitly unguarded repair path. */
+export function isBrokenConfig(error: unknown): error is ApiError {
+  return isApiError(error) && error.status === 500 && error.code === "invalid_config";
+}
+
 export class ConfigEditor {
   private base: Snapshot | undefined;
   private dirty = false;
+  recovery: ApiError | null = null;
   readonly store: ConfigStore;
 
   constructor(store: ConfigStore | ResponseCall) {
@@ -159,7 +165,7 @@ export class ConfigEditor {
   private get response(): ResponseCall { return this.store.response; }
   get versioned(): boolean { return this.base?.etag !== undefined; }
   readonly setDirty = (dirty: boolean) => { this.dirty = dirty; };
-  readonly reset = () => { this.base = undefined; this.dirty = false; };
+  readonly reset = () => { this.base = undefined; this.dirty = false; this.recovery = null; };
   readonly ready = async () => {
     this.base ??= await this.store.ready();
     return this.base.etag;
@@ -290,6 +296,27 @@ export class ConfigEditor {
 
 
   readonly call = async <T>(path: string, request: ApiRequest = {}): Promise<T> => {
+    try {
+      return await this.perform<T>(path, request);
+    } catch (error) {
+      if (path !== CONFIG_YAML || (request.method !== undefined && request.method !== "GET") ||
+          !isBrokenConfig(error)) throw error;
+      this.recovery = error;
+      this.base = { tree: undefined, etag: undefined };
+      return (await this.response<T>(CONFIG_YAML, request)).data;
+    }
+  };
+
+  private async perform<T>(path: string, request: ApiRequest): Promise<T> {
+    if (this.recovery !== null) {
+      if (path !== CONFIG_YAML) throw this.recovery;
+      const answer = await this.response<T>(CONFIG_YAML, request);
+      if (request.method === "PUT") {
+        this.reset();
+        this.store.changed();
+      }
+      return answer.data;
+    }
     await this.ready();
     const writing = request.method !== undefined && request.method !== "GET";
     if (!this.versioned) {
@@ -383,5 +410,5 @@ export class ConfigEditor {
       }
     }
     return this.send<T>(target, change, fresh, path === CONFIG_YAML ? [] : [{ path: locations[0] ?? "", value }]);
-  };
+  }
 }
