@@ -408,7 +408,7 @@ pub fn requests() -> Vec<Case> {
                     }
                 }),
             ),
-            "upstream copies the generation settings in Go's map order, so which of two for the same field wins changes from run to run; the port takes the last listed",
+            crate::cases::MAP_ORDER_DEPENDENT,
         ),
         known(
             Case::new(

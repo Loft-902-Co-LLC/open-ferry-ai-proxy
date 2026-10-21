@@ -1055,7 +1055,7 @@ impl Tally {
         };
 
         match (differences, case.known_difference) {
-            (None, Some(reason)) if !reason.contains("map order") => {
+            (None, Some(reason)) if reason != cases::MAP_ORDER_DEPENDENT => {
                 self.resolved.push(case.name.clone())
             }
             (None, _) => {}
@@ -1245,6 +1245,22 @@ mod tests {
         assert_eq!(suites[0].2.len(), 2);
         args.suites.insert("unknown-suite".into());
         assert!(selected_suites(&args).is_err());
+    }
+
+    #[test]
+    fn unrelated_marker_text_does_not_suppress_resolved_advice() {
+        let case = Case::new("resolved-marker", "", "{}")
+            .known_difference("unrelated text mentioning map order");
+        let evaluated = Evaluated {
+            go_output: "{}".into(),
+            go_value: Some(json!({})),
+            rust_output: Ok(json!({})),
+        };
+        let mut tally = Tally::default();
+        tally
+            .record(&case, evaluated, Path::new("unused-no-failure"))
+            .unwrap();
+        assert_eq!(tally.resolved, ["resolved-marker"]);
     }
 
     // Go iterates a map of aliases that overwrite the same destination key.
