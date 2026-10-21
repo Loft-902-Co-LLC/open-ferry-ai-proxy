@@ -27,6 +27,10 @@
 //!   values in them instead of writing them back re-rendered. The save layer
 //!   supplies the decoded plugin config nodes before encoding, because their
 //!   pending comments can affect later generated fields too.
+//!   These nodes have aliases and merges expanded, as Go's Config.UnmarshalYAML
+//!   does in flattenV8 before decoding PluginInstanceConfig.Raw. A plugin node
+//!   decoded directly in isolation would retain anchors and merge keys; the
+//!   config decoder path used here and by parity expands them first.
 //! - A payload value that is a mapping with a key that isn't a string, or
 //!   a timestamp whose zone is 24 hours or more from UTC, can't be written
 //!   (the loader keeps neither); saving fails with an error naming the

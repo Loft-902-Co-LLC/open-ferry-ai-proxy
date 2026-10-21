@@ -1,0 +1,14 @@
+[
+  {
+    "expected": "plugins:\n    configs:\n        gamma:\n            enabled: false # on\n        zeta: # moved\n{}\nauth-dir: /x\n",
+    "file": "plugins:\n  configs:\n    gamma: \u0026g # moved\n      enabled: false # on\n    zeta: null # null comment\ndebug: false\n"
+  },
+  {
+    "expected": "plugins:\n    configs:\n        gamma:\n            enabled: false # on\n        zeta: # moved\n{}\nauth-dir: /x\n",
+    "file": "plugins:\n  configs:\n    gamma: \u0026g # moved\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false\n"
+  },
+  {
+    "expected": "plugins:\n    configs:\n        gamma:\n            enabled: false # on\n        zeta: # moved\n{}\nauth-dir: /x\n",
+    "file": "plugins:\n  configs:\n    gamma: \u0026g # moved\n      enabled: false # on\n    zeta:  # null comment\ndebug: false\n"
+  }
+]
