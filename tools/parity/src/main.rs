@@ -1088,10 +1088,9 @@ mod tests {
         let mut tally = Tally::default();
         tally.record(&case, evaluated(), &dir).unwrap();
         assert_eq!(tally.different, 1);
-        let report: Value = serde_json::from_str(
-            &fs::read_to_string(dir.join("artifact-input.json")).unwrap(),
-        )
-        .unwrap();
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("artifact-input.json")).unwrap())
+                .unwrap();
         assert_eq!(report["case"], case.name);
         assert_eq!(report["model"], case.model);
         assert_eq!(report["request_text"], case.request);
