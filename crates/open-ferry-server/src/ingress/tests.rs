@@ -829,3 +829,70 @@ fn buffer_capacity_is_charged_through_growth_and_finished_ownership() {
     drop(clone);
     assert_eq!(ingress.reserved_body_bytes(),0);
 }
+
+async fn measure_zstd(input: Vec<u8>, limit: usize) -> (Result<Bytes,Response>, crate::allocation_probe::Measurements, usize) {
+    let ingress=Ingress::new(IngressConfig::default(),limit);
+    let scope=RequestScope { ingress:ingress.clone(),body_limit:limit,rejected:Arc::new(AtomicBool::new(false)),decoded:Arc::default() };
+    let body=Body::from(input);
+    let mut headers=HeaderMap::new();
+    headers.insert(header::CONTENT_ENCODING,HeaderValue::from_static("zstd"));
+    let (result,stats)=REQUEST_INGRESS.scope(scope,async {
+        crate::allocation_probe::start();
+        let result=crate::body::read_decoded(&headers,body,limit).await;
+        let stats=crate::allocation_probe::finish_stats();
+        (result,stats)
+    }).await;
+    let charged=ingress.budget.0.lock().unwrap().peak;
+    (result,stats,charged)
+}
+fn rle_zstd_frame(window: u8, blocks: usize, block_size: usize) -> Vec<u8> {
+    let mut frame=vec![0x28,0xb5,0x2f,0xfd,0,window];
+    for block in 0..blocks {
+        let header=((block_size as u32)<<3)|2|u32::from(block+1==blocks);
+        frame.extend_from_slice(&header.to_le_bytes()[..3]);
+        frame.push(b'x');
+    }
+    frame
+}
+#[tokio::test]
+async fn malformed_zstd_literals_at_a_small_limit_cannot_outallocate_the_precharge() {
+    let frame=vec![0x28,0xb5,0x2f,0xfd,0,0,45,0,0,0xfd,0xff,0xff,b'x',0];
+    let (result,stats,charged)=measure_zstd(frame,1024).await;
+    assert!(result.is_err());
+    assert!(!stats.overflow);
+    assert!(stats.peak<=charged,"malformed decoder peak {} exceeded reservation {}",stats.peak,charged);
+}
+#[tokio::test]
+async fn a_small_zstd_frame_uses_its_own_window_in_the_precharge() {
+    let (result,stats,charged)=measure_zstd(rle_zstd_frame(0x30,1,2048),64<<20).await;
+    assert_eq!(result.unwrap().len(),2048);
+    assert!(!stats.overflow);
+    assert!(stats.peak<=charged);
+    assert!(charged<=8<<20,"64 KiB frame window reserved {} bytes",charged);
+}
+#[tokio::test]
+async fn an_eight_mib_zstd_frame_has_a_measured_and_tight_allocation_bound() {
+    let (result,stats,charged)=measure_zstd(rle_zstd_frame(0x68,64,128<<10),8<<20).await;
+    assert_eq!(result.unwrap().len(),8<<20);
+    assert!(!stats.overflow);
+    assert!(stats.peak<=charged,"decoder plus output peak {} exceeded total reservation {}",stats.peak,charged);
+    assert!(charged<=39<<20,"8 MiB frame plus output reserved {} bytes",charged);
+}
+
+#[tokio::test]
+async fn malformed_zstd_probability_runs_are_rejected_before_large_scratch_allocations() {
+    let mut content=vec![0,1,0x80]; // zero literals, one sequence, compressed LL table
+    let mut probabilities=vec![0xff; (128<<10)-3];
+    // Accuracy 9, followed by probability zero and an overlong zero-symbol run.
+    probabilities[0]=0x14;
+    probabilities[1]=0xe0;
+    content.extend_from_slice(&probabilities);
+    let mut frame=vec![0x28,0xb5,0x2f,0xfd,0,0];
+    frame.extend_from_slice(&(((content.len() as u32)<<3)|5).to_le_bytes()[..3]);
+    frame.extend_from_slice(&content);
+    let (result,stats,charged)=measure_zstd(frame,8<<20).await;
+    assert!(result.is_err());
+    assert!(!stats.overflow);
+    assert!(stats.peak<=charged);
+    assert!(stats.largest<1<<20,"malformed probability table allocated {} bytes",stats.largest);
+}
