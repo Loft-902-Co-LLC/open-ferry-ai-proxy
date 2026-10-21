@@ -53,11 +53,21 @@ unwind. Logging shares admitted bytes rather than copying them. Parsed JSON,
 translations, response bodies and protocol buffers are not part of this raw and
 decoded request-body budget. Raw oversized bodies are rejected before routing
 or logging, using the same pre-handler 413 shape as declared oversized bodies.
-Multipart uploads also reserve one additional raw body's worth for parser
-copies, before any declared body is read. Admission therefore requires room for
-both raw input and multipart copies. A reservation is retained through the
+Multipart uploads reserve two additional raw body lengths for parser input and
+collected field copies, before any declared body is read. Admission therefore
+requires room for three body lengths in total. Reservations are retained through the
 response so extractors that copy input cannot release accounting prematurely;
 log-owned byte clones may keep it longer while queued for writing.
+Decoded input is retained through the response as well, so replacing it with
+parsed or translated input cannot evade the decoded-byte charge.
+Management multipart writes already finish as gate-owned tasks after a client
+disconnects; their raw input and parser allowance stay charged until that work
+finishes too. Ordinary request cancellation drops its reservations immediately.
+
+An idle HTTP/2 connection gets five seconds to finish the GOAWAY ping exchange
+before its socket is cut if it still has no open streams. This prevents a peer
+that ignores the graceful exchange from holding an admission slot indefinitely.
+Streams admitted during the GOAWAY round trip are allowed to finish.
 
 Reload changes admission capacity immediately, without evicting existing
 connections; new connections snapshot the new transport deadlines. Each upload
@@ -72,11 +82,15 @@ SSE responses may run indefinitely, including silence while awaiting upstream
 data, while they remain in flight. WebSockets over HTTP/1 upgrade and HTTP/2
 extended CONNECT have no header, upload or idle cutoff once upgraded. Their
 sockets still occupy admission capacity, their existing per-message body bound
-still applies, stalled writes are bounded, and blue-green `cut` still closes
+still applies, the TCP/TLS write guard remains active, and blue-green `cut` still closes
 them. The existing Responses keep-alive/ping behavior is unchanged; no new ping
 or mandatory maximum WebSocket lifetime is introduced. A quiet upgraded socket
 may therefore occupy one admission slot until the peer leaves or the service
 cuts it.
+HTTP/2 WebSocket stream flow control may likewise retain a slot while its peer
+does not consume data; the normal HTTP/2 response-body delivery watchdog applies
+to HTTP responses, including SSE. WebSocket message size and admission bound
+the upgraded transport without adding a new protocol-level ping or idle cutoff.
 
 These other switches' configuration contract is available for the v8.0.32 sync. Runtime behavior is wired by the corresponding provider and server changes.
 

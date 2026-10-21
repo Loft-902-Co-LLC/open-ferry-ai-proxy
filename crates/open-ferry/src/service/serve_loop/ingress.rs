@@ -9,6 +9,10 @@ use open_ferry_server::ingress::{Ingress, IngressProbe};
 use std::sync::atomic::AtomicUsize;
 use tokio::time::Instant;
 
+/// Let GOAWAY reach the peer, then reclaim an idle peer that never completes
+/// h2's graceful ping exchange. Never cuts a stream that is still open.
+const GOAWAY_GRACE: Duration = Duration::from_secs(5);
+
 /// Reserve half the process limit (at least 256 descriptors) for upstream
 /// sockets, credentials and files. Split the remainder between two listeners,
 /// then allow two descriptors for each accepted connection. A practical ceiling
@@ -128,6 +132,7 @@ struct State {
     deliveries: HashMap<u64, Instant>,
     next_delivery: u64,
     draining: bool,
+    draining_since: Option<Instant>,
 }
 
 pub(super) struct Traffic {
@@ -140,8 +145,8 @@ pub(super) struct Traffic {
 }
 
 impl Traffic {
-    pub(super) fn new(config: IngressConfig, ingress: Ingress) -> Arc<Self> {
-        let now = Instant::now();
+    pub(super) fn new(config: IngressConfig, ingress: Ingress, started_at: Instant) -> Arc<Self> {
+        let now = started_at;
         Arc::new(Self {
             state: Mutex::new(State {
                 protocol: Protocol::Unknown,
@@ -158,6 +163,7 @@ impl Traffic {
                 deliveries: HashMap::new(),
                 next_delivery: 0,
                 draining: false,
+                draining_since: None,
             }),
             config,
             ingress,
@@ -234,6 +240,15 @@ impl Traffic {
     fn due(&self) -> Option<(Instant, &'static str)> {
         let state = self.state();
         let mut due = Vec::with_capacity(5);
+        if state.active == 0
+            && state.streams.is_empty()
+            && let Some(started) = state.draining_since
+        {
+            due.push((
+                state.idle_since.unwrap_or(started).max(started) + GOAWAY_GRACE,
+                "GOAWAY completion",
+            ));
+        }
         if !state.draining {
             if state.protocol != Protocol::Http1 || !state.upgraded {
                 due.extend(state.first_head.map(|at| (at, "request headers")));
@@ -376,6 +391,7 @@ pub(super) async fn watch_traffic(core: Weak<ConnCore>, traffic: Arc<Traffic>) {
                     let mut state = traffic.state();
                     if guard == "idle connection" && state.protocol == Protocol::Http2 {
                         state.draining = true;
+                        state.draining_since = Some(Instant::now());
                         traffic.idle_expired.store(true, Ordering::Release);
                         traffic.idle_wake.notify_one();
                     } else { drop(state); core.cut(); return; }
@@ -393,6 +409,7 @@ impl Flight {
     pub(super) fn close_after_response(&self) {
         let mut state = self.0.state();
         state.draining = true;
+        state.draining_since = Some(Instant::now());
         self.0.idle_expired.store(true, Ordering::Release);
         self.0.idle_wake.notify_one();
     }
