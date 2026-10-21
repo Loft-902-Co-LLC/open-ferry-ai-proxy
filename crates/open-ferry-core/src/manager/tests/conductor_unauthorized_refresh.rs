@@ -135,7 +135,7 @@ async fn codex_ten_day_jwt_refreshes_on_day_six_without_an_executor_lead() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn missing_or_rejected_outer_bearer_is_due_even_with_future_expiry() {
+async fn rejected_outer_bearer_is_due_even_with_future_expiry() {
     use crate::manager::refresh::should_refresh;
     let h = Harness::new(Settings::default());
     let now = h.now();
@@ -149,8 +149,23 @@ async fn missing_or_rejected_outer_bearer_is_due_even_with_future_expiry() {
     auth.rejected_access_token = auth.outer_access_token().to_owned();
     assert_eq!(auth.outer_refresh_due_at(now, None), Some(now));
     assert!(should_refresh(&auth, None, now));
-    auth.metadata.remove("access_token");
+}
+
+// Not upstream's: ordinary Codex records use the partition refresh path too.
+// Recover a missing bearer immediately even when metadata claims future expiry.
+#[tokio::test(start_paused = true)]
+async fn missing_outer_bearer_refreshes_immediately_as_open_ferry_deviation() {
+    use crate::manager::refresh::{next_refresh_check_at, should_refresh};
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let auth = auth_with_metadata(
+        "codex",
+        "codex",
+        json!({"refresh_token":"dummy-refresh","expired":rfc3339(now+TimeDelta::days(8))}),
+    );
+    assert!(!auth.use_siwc());
     assert_eq!(auth.outer_refresh_due_at(now, None), Some(now));
+    assert_eq!(next_refresh_check_at(now, &auth, None), Some(now));
     assert!(should_refresh(&auth, None, now));
 }
 
