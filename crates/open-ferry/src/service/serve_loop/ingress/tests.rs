@@ -262,7 +262,7 @@ async fn a_reset_delivery_keeps_its_reclamation_deadline() {
         .deliveries
         .get_mut(&flight.id)
         .unwrap()
-        .reset = true;
+        .reset_at = Some(Instant::now());
     tokio::time::advance(Duration::from_secs(2)).await;
     assert!(
         traffic
@@ -270,6 +270,131 @@ async fn a_reset_delivery_keeps_its_reclamation_deadline() {
             .is_some_and(|(at, _, stream)| at <= Instant::now() && stream.is_none()),
         "reset delivery lost its deadline"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_data_progress_cannot_extend_reset_reclamation() {
+    let config = IngressConfig {
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    let flight = Flight::new(traffic.clone());
+    let mut queued = Delivery::new(Bytes::from_static(b"queued EOS data"), flight.clone());
+    let reset_at = Instant::now();
+    traffic
+        .state()
+        .deliveries
+        .get_mut(&flight.id)
+        .unwrap()
+        .reset_at = Some(reset_at);
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_millis(400)).await;
+        queued.advance(1);
+        assert_eq!(
+            traffic.due(),
+            Some((
+                reset_at + Duration::from_secs(1),
+                "stream reset grace",
+                None
+            )),
+            "queued DATA renewed reset reclamation"
+        );
+    }
+    assert!(traffic.due().unwrap().0 <= Instant::now());
+    drop(queued);
+    // Even all pending bytes disappearing cannot remove the reset deadline
+    // while a surviving Flight still owns this delivery.
+    assert_eq!(traffic.due().unwrap().0, reset_at + Duration::from_secs(1));
+    drop(flight);
+    assert_ne!(traffic.due().unwrap().1, "stream reset grace");
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_h2_stream_cannot_renew_a_deferred_stall_deadline() {
+    let config = IngressConfig {
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    let a = Flight::new(traffic.clone());
+    let b = Flight::new(traffic.clone());
+    let a_cancel = Arc::new(TaskCancel::default());
+    let b_cancel = Arc::new(TaskCancel::default());
+    traffic.state().deliveries.get_mut(&a.id).unwrap().cancel = Some(a_cancel.clone());
+    traffic.state().deliveries.get_mut(&b.id).unwrap().cancel = Some(b_cancel.clone());
+    let mut queued_a = Delivery::new(Bytes::from_static(b"stalled"), a.clone());
+    let mut queued_b = Delivery::new(Bytes::from(vec![b'b'; 65534 + 20]), b.clone());
+    let started = Instant::now();
+    // A has exhausted its own one-byte window. B used the remaining connection
+    // credit. Drive the observed frames directly: no watcher can run between a
+    // WINDOW_UPDATE and the DATA that consumes it in the same connection poll.
+    traffic.received(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 1]);
+    queued_a.advance(1);
+    traffic.written(&[0, 0, 1, 0, 0, 0, 0, 0, 1, b'a']);
+    traffic.received(&[0, 0, 4, 8, 0, 0, 0, 0, 3, 0, 0, 0xff, 0xfd]);
+    queued_b.advance(65534);
+    let mut initial_b = vec![0, 0xff, 0xfe, 0, 0, 0, 0, 0, 3];
+    initial_b.resize(9 + 65534, b'b');
+    traffic.written(&initial_b);
+    for _ in 0..8 {
+        tokio::time::advance(Duration::from_millis(375)).await;
+        traffic.received(&[0, 0, 4, 8, 0, 0, 0, 0, 3, 0, 0, 0, 1]);
+        traffic.received(&[0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        queued_b.advance(1);
+        traffic.written(&[0, 0, 1, 0, 0, 0, 0, 0, 3, b'b']);
+        assert_eq!(traffic.connection_send_window(), 0);
+    }
+    assert_eq!(
+        traffic.due(),
+        Some((
+            started + Duration::from_secs(3),
+            "response write progress",
+            Some(a.id)
+        )),
+        "B's connection progress suppressed A's expired stream deadline"
+    );
+
+    // Exercise the actual watchdog cancellation path, with a registered local
+    // socket. The executor turns this signal into RST_STREAM/CANCEL; the existing
+    // raw-H2 isolation regression checks that wire mapping.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (client, accepted) = tokio::join!(
+        TcpStream::connect(listener.local_addr().unwrap()),
+        listener.accept()
+    );
+    let client = client.unwrap();
+    let (server, _) = accepted.unwrap();
+    let control = ServeControl::new();
+    let core = ConnCore::register(&control.shared, &server).unwrap();
+    let watcher = tokio::spawn(watch_traffic(Arc::downgrade(&core), traffic.clone()));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+        if a_cancel.cancelled.load(Ordering::Acquire) {
+            break;
+        }
+    }
+    assert!(a_cancel.cancelled.load(Ordering::Acquire));
+    assert!(!b_cancel.cancelled.load(Ordering::Acquire));
+    assert!(!core.is_cut());
+    drop(queued_a);
+    drop(a);
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_millis(375)).await;
+        traffic.received(&[0, 0, 4, 8, 0, 0, 0, 0, 3, 0, 0, 0, 1]);
+        traffic.received(&[0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        queued_b.advance(1);
+        traffic.written(&[0, 0, 1, 0, 0, 0, 0, 0, 3, b'b']);
+        assert!(traffic.due().unwrap().0 > Instant::now());
+        assert!(!b_cancel.cancelled.load(Ordering::Acquire));
+        assert!(!core.is_cut());
+    }
+    watcher.abort();
+    let _ = watcher.await;
+    core.cut();
+    drop((client, server));
 }
 
 #[test]

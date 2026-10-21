@@ -15,6 +15,9 @@ use tokio::time::Instant;
 const GOAWAY_GRACE: Duration = Duration::from_secs(5);
 // A signalled reset is an attempt, not proof that h2 released queued DATA.
 const RESET_GRACE: Duration = Duration::from_secs(1);
+// Shared flow control may defer a stream's own stall deadline only this long.
+// Other streams' progress cannot renew this allowance.
+const STREAM_STALL_GRACE: Duration = Duration::from_secs(1);
 
 /// Reserve half the process limit (at least 256 descriptors) for upstream
 /// sockets, credentials and files. Split the remainder between two listeners,
@@ -452,16 +455,17 @@ impl Traffic {
                 consider(at + duration, "connection window progress", None);
             }
             for (&id, progress) in &state.deliveries {
-                if progress.reset {
-                    consider(
-                        progress.progressed + RESET_GRACE,
-                        "stream reset grace",
-                        None,
-                    );
-                } else if progress.pending != 0 && !connection_blocked {
+                if let Some(reset_at) = progress.reset_at {
+                    consider(reset_at + RESET_GRACE, "stream reset grace", None);
+                } else if progress.pending != 0 {
                     let stream = (state.protocol == Protocol::Http2).then_some(id);
+                    let grace = if connection_blocked {
+                        STREAM_STALL_GRACE
+                    } else {
+                        Duration::ZERO
+                    };
                     consider(
-                        progress.progressed + duration,
+                        progress.progressed + duration + grace,
                         "response write progress",
                         stream,
                     );
@@ -595,8 +599,7 @@ pub(super) async fn watch_traffic(core: Weak<ConnCore>, traffic: Arc<Traffic>) {
                         && let Some(progress) = state.deliveries.get_mut(&id)
                         && let Some(cancel) = progress.cancel.clone()
                         && !cancel.done.load(Ordering::Acquire) {
-                        progress.reset = true;
-                        progress.progressed = Instant::now();
+                        progress.reset_at.get_or_insert_with(Instant::now);
                         drop(state);
                         cancel.cancel();
                         continue;
@@ -619,7 +622,7 @@ struct StreamProgress {
     pending: usize,
     progressed: Instant,
     cancel: Option<Arc<TaskCancel>>,
-    reset: bool,
+    reset_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -729,7 +732,7 @@ impl Flight {
                     pending: 0,
                     progressed: Instant::now(),
                     cancel: None,
-                    reset: false,
+                    reset_at: None,
                 },
             );
             id
