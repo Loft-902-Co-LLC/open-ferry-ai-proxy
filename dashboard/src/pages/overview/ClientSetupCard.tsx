@@ -459,7 +459,7 @@ export function ClientSetupCard({
           </p>
         </Alert>
       )}
-      {keys.isError && !keysUnsupported && <ProblemNotice problem={callProblem(keys.error)} />}
+      {keys.isError && !keysUnsupported && <ProblemNotice problem={callProblem(keys.error)} live />}
       {addKey.isSuccess && made?.saved === true && (
         <Alert tone="ok" live>
           <p>

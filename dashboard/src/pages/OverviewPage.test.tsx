@@ -113,6 +113,15 @@ function cardTitles(): string[] {
 }
 
 describe("connecting a client", () => {
+  it("announces a client-key read failure without calling it a refused save", async () => {
+    const state = server([KEY]);
+    state.api.use(route("GET", API_KEYS, { status: 500, json: { error: "read_failed" } }));
+    renderApp("/");
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("The server failed (HTTP 500)");
+    expect(notice).not.toHaveTextContent("refused this save");
+  });
+
   it("fills the setups in with this page's address, the key masked and a model", async () => {
     const { api } = server([KEY]);
     renderApp("/");
