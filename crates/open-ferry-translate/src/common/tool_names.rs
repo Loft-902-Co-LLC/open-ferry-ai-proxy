@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/util/translator.go (FixJSON, CanonicalToolName,
-// ToolNameMapFromClaudeRequest, MapToolName) (v8.0.36, MIT).
+// ToolNameMapFromClaudeRequest, UnambiguousToolNameMapFromClaudeRequest, MapToolName) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Repairing tool call arguments that use single quotes, and restoring the
@@ -15,7 +15,7 @@ use crate::go;
 use crate::json::{path, str_of};
 
 /// The tools a Claude request declares, by [`canonical_tool_name`], each
-/// with the name as the client first wrote it.
+/// with its declared spelling, or an empty value for an ambiguous name.
 pub(crate) type ToolNameMap = HashMap<String, String>;
 
 /// `FixJSON`: turns single-quoted strings into double-quoted ones, so that
@@ -101,6 +101,19 @@ pub(crate) fn canonical_tool_name(name: &str) -> String {
 /// `ToolNameMapFromClaudeRequest`: the names of the tools a Claude request
 /// declares, by `name` or else `function.name`. `None` if there are none.
 pub(crate) fn tool_name_map_from_claude_request(request: &Value) -> Option<ToolNameMap> {
+    build_tool_name_map(request, false)
+}
+
+/// `UnambiguousToolNameMapFromClaudeRequest`: precomputes the collision
+/// policy. Ambiguous canonical names have empty values; use [`map_tool_name`]
+/// so every spelling of such a name is kept as returned by the provider.
+pub(crate) fn unambiguous_tool_name_map_from_claude_request(
+    request: &Value,
+) -> Option<ToolNameMap> {
+    build_tool_name_map(request, true)
+}
+
+fn build_tool_name_map(request: &Value, reject_ambiguous: bool) -> Option<ToolNameMap> {
     let Some(Value::Array(tools)) = request.get("tools") else {
         return None;
     };
@@ -115,7 +128,17 @@ pub(crate) fn tool_name_map_from_claude_request(request: &Value) -> Option<ToolN
         }
         let key = canonical_tool_name(&name);
         if !key.is_empty() {
-            names.entry(key).or_insert(name);
+            match names.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(name);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry)
+                    if reject_ambiguous && entry.get() != &name =>
+                {
+                    entry.insert(String::new());
+                }
+                _ => {}
+            }
         }
     }
     (!names.is_empty()).then_some(names)

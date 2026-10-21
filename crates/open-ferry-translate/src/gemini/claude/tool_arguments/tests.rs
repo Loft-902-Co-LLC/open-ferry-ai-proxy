@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/sanitize_test.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/util/sanitize_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;
@@ -1055,11 +1055,11 @@ fn nameless_tools_match_no_call() {
 #[test]
 fn empty_canonical_names_are_not_restored() {
     let request = json!({"tools":[{"name":""},{"name":"__"}]});
-    assert_eq!(client_name(&request, "_"), "_");
-    assert_eq!(client_name(&request, "__"), "__");
-    assert_eq!(client_name(&request, ""), "");
+    assert_eq!(legacy_client_name(&request, "_"), "_");
+    assert_eq!(legacy_client_name(&request, "__"), "__");
+    assert_eq!(legacy_client_name(&request, ""), "");
     let request = json!({"tools":[{"name":"Read"}]});
-    assert_eq!(client_name(&request, "_read"), "Read");
+    assert_eq!(legacy_client_name(&request, "_read"), "Read");
 }
 
 // Not upstream's: an unbounded projection must conservatively retain arguments.
@@ -1168,4 +1168,52 @@ fn reclean_resolves_refs_against_inner_schema_and_preserves_literal_data() {
     let schema = json!({"type":"object","properties":{"$ref":{"type":"string"}},
         "required":["$ref"],"additionalProperties":false});
     assert!(!reclean::requires(&schema, "_"));
+}
+
+#[test]
+fn cached_name_policy_matches_legacy_scanning() {
+    use crate::common::tool_names::{map_tool_name, unambiguous_tool_name_map_from_claude_request};
+    let names = [
+        "", "Read", "read", "READ", "_Read", "__read", " Read ", "Write", "write", "读取", "___",
+        "missing", "say\"hi", "a\\b",
+    ];
+    let mut requests = vec![
+        Value::Null,
+        json!({}),
+        json!({"tools":null}),
+        json!({"tools":{}}),
+        json!({"tools":[{"name":"Read"},{"name":"read"},{"name":"_Read"}]}),
+        json!({"tools":[{"name":"Read"},{"name":"Read"}]}),
+        json!({"tools":[{"name":" ","function":{"name":"Read"}},{"function":{"name":"__Write"}},{"name":"___"}]}),
+    ];
+    // Deterministic randomized fixtures, as in upstream's differential test.
+    let mut seed = 6816_u64;
+    for _ in 0..500 {
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as usize
+        };
+        let count = next() % 12;
+        let tools: Vec<_> = (0..count)
+            .map(|_| {
+                let name = names[next() % names.len()];
+                if next() % 2 == 0 {
+                    json!({"name":name})
+                } else {
+                    json!({"function":{"name":name}})
+                }
+            })
+            .collect();
+        requests.push(json!({"tools":tools}));
+    }
+    for request in requests {
+        let cached = unambiguous_tool_name_map_from_claude_request(&request);
+        for name in names {
+            assert_eq!(
+                map_tool_name(cached.as_ref(), name),
+                legacy_client_name(&request, name),
+                "request={request}, name={name:?}"
+            );
+        }
+    }
 }
