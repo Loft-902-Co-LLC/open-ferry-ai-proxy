@@ -46,6 +46,28 @@ impl<'de> Deserialize<'de> for Key {
     }
 }
 
+// Only the recognized type and complete messages matter here. Decode bytes
+// so malformed UTF-8 and lone surrogate escapes insert replacement characters
+// instead of rejecting a value that a later duplicate may overwrite. No match
+// contains U+FFFD, so its replacement count cannot affect recognition.
+struct MatchString(String);
+
+impl<'de> Deserialize<'de> for MatchString {
+    fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        struct StringVisitor;
+        impl Visitor<'_> for StringVisitor {
+            type Value = MatchString;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON string")
+            }
+            fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<MatchString, E> {
+                Ok(MatchString(String::from_utf8_lossy(bytes).into_owned()))
+            }
+        }
+        decoder.deserialize_bytes(StringVisitor)
+    }
+}
+
 #[derive(Default)]
 struct Body {
     error_type: String,
@@ -84,12 +106,12 @@ impl<'de> Visitor<'de> for Decode<'_> {
                     envelope: false,
                 })?;
             } else if !self.envelope && matches!(key, Key::Type) {
-                if let Some(value) = map.next_value::<Option<String>>()? {
-                    self.body.error_type = value;
+                if let Some(value) = map.next_value::<Option<MatchString>>()? {
+                    self.body.error_type = value.0;
                 }
             } else if !self.envelope && matches!(key, Key::Message) {
-                if let Some(value) = map.next_value::<Option<String>>()? {
-                    self.body.message = value;
+                if let Some(value) = map.next_value::<Option<MatchString>>()? {
+                    self.body.message = value.0;
                 }
             } else {
                 map.next_value::<IgnoredAny>()?;

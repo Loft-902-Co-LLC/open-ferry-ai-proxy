@@ -975,6 +975,56 @@ mod per_minute_tests {
     }
 
     #[test]
+    fn duplicate_message_with_lone_surrogate_keeps_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for malformed in [r#""\ud800""#, r#""\udc00""#, r#""x\ud800\n""#] {
+            let raw = format!(
+                r#"{{"error":{{"type":"rate_limit_error","message":{malformed},"message":{}}}}}"#,
+                json!(MESSAGE)
+            );
+            assert_range(&headers(now), raw.as_bytes(), now, 30);
+            // A malformed last value must replace, rather than disappear.
+            let raw = format!(
+                r#"{{"error":{{"type":"rate_limit_error","message":{},"message":{malformed},"message":null}}}}"#,
+                json!(MESSAGE)
+            );
+            assert_range(&headers(now), raw.as_bytes(), now, 4 * 3600);
+        }
+    }
+
+    #[test]
+    fn duplicate_type_with_lone_surrogate_keeps_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let raw = format!(
+            r#"{{"error":{{"type":"x\ud800","type":"rate_limit_error","message":{}}}}}"#,
+            json!(MESSAGE)
+        );
+        assert_range(&headers(now), raw.as_bytes(), now, 30);
+        let raw = format!(
+            r#"{{"error":{{"type":"rate_limit_error","type":"rate_limit_error\ud800","message":{}}}}}"#,
+            json!(MESSAGE)
+        );
+        assert_range(&headers(now), raw.as_bytes(), now, 4 * 3600);
+    }
+
+    #[test]
+    fn duplicate_values_with_invalid_utf8_keep_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for field in ["type", "message"] {
+            let mut raw = format!(r#"{{"error":{{"{field}":"x"#).into_bytes();
+            raw.push(0xff);
+            raw.extend_from_slice(
+                format!(
+                    r#"","type":"rate_limit_error","message":{}}}}}"#,
+                    json!(MESSAGE)
+                )
+                .as_bytes(),
+            );
+            assert_range(&headers(now), &raw, now, 30);
+        }
+    }
+
+    #[test]
     fn malformed_ambiguous_and_quota_inputs_keep_conservative_cooldown() {
         let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         for (retry, seconds) in [
