@@ -57,8 +57,7 @@ fn descriptor_ceiling() -> u64 {
     u64::MAX
 }
 
-// Portable syscall seam. The initial implementation deliberately retains the
-// f080f73f remember-before-attempt ordering for baseline regression evidence.
+// Portable seam shared by actual syscalls and injected raise/retry regressions.
 #[cfg(any(unix,test))]
 fn raise_nofile_with(
     get: impl FnOnce()->Result<(u64,u64),i32>,
@@ -68,15 +67,15 @@ fn raise_nofile_with(
     mut remember: impl FnMut((u64,u64)),
 ) -> Result<((u64,u64),bool),i32> {
     let original=get()?;
-    remember(original);
     if original.0>=original.1 { return Ok((original,false)); }
     let mut raised=(raise_target(original.1,ceiling),original.1);
+    if raised.0<=original.0 {return Ok((original,false));}
     let mut result=set(raised);
     if result==Err(22) && retry_einval {
         raised.0=raised.0.min(10240);
         result=set(raised);
     }
-    Ok(if result.is_ok() {(raised,false)} else {(original,true)})
+    Ok(if result.is_ok() {remember(original); (raised,false)} else {(original,true)})
 }
 
 pub(super) fn default_connection_cap() -> usize {

@@ -8,7 +8,7 @@ pub fn remember_nofile_limit(limit: libc::rlimit) {
     let _ = ORIGINAL_NOFILE.set(limit);
 }
 
-/// Register in the parent, before spawning. The child performs only setrlimit.
+/// Register in the parent. Child-side observation/restoration is best-effort.
 pub fn restore_in_child(command: &mut std::process::Command) {
     #[cfg(unix)]
     if let Some(limit) = ORIGINAL_NOFILE.get().copied() {
@@ -22,10 +22,14 @@ pub fn restore_in_child(command: &mut std::process::Command) {
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 struct Limit { soft:u64, hard:u64 }
 
-// Syscall injection seam; initially preserves f080f73f's child policy verbatim.
+// Shared by the real post-fork hook and portable syscall-policy regressions.
 #[cfg(any(unix,test))]
-fn restore_with(original: Limit, _get: impl FnOnce()->Result<Limit,i32>, set: impl FnOnce(Limit)->Result<(),i32>) -> std::io::Result<()> {
-    set(original).map_err(std::io::Error::from_raw_os_error)
+fn restore_with(original: Limit, get: impl FnOnce()->Result<Limit,i32>, set: impl FnOnce(Limit)->Result<(),i32>) -> std::io::Result<()> {
+    if let Ok(current) = get() {
+        let next=Limit {soft:current.soft.min(original.soft),hard:current.hard};
+        let _ = set(next);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

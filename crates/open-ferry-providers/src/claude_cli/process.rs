@@ -163,6 +163,7 @@ pub(crate) fn spawn_guarded(
     let prompt = PromptFile::create(&dir, invocation.system)
         .map_err(|error| format!("couldn't write the system prompt file: {error}"))?;
     let mut command = Command::new(&program);
+    open_ferry_core::process_limits::restore_in_child(command.as_std_mut());
     command
         .args(arguments(
             invocation.model,
@@ -217,9 +218,7 @@ pub(crate) fn no_window(command: &mut Command) {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn no_window(command: &mut Command) {
-    open_ferry_core::process_limits::restore_in_child(command.as_std_mut());
-}
+pub(crate) fn no_window(_command: &mut Command) {}
 
 /// Reads standard error to its end, keeping the first [`MAX_STDERR`] bytes.
 async fn read_stderr(mut stderr: impl AsyncRead + Unpin) -> Vec<u8> {
