@@ -1249,8 +1249,8 @@ mod tests {
 
     #[test]
     fn unrelated_marker_text_does_not_suppress_resolved_advice() {
-        let case = Case::new("resolved-marker", "", "{}")
-            .known_difference("unrelated text mentioning map order");
+        let mut case = Case::new("resolved-marker", "", "{}");
+        case.known_difference = Some("unrelated text mentioning map order");
         let evaluated = Evaluated {
             outcome: Outcome::Identical,
             go_output: "{}".into(),
