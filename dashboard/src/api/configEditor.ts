@@ -160,13 +160,18 @@ export class ConfigStore {
     this.checkVersion(snapshot);
     return snapshot;
   };
-  readonly ready = (): Promise<Snapshot> => {
+  readonly ready = async (): Promise<Snapshot> => {
     this.initial ??= this.read().catch((error: unknown) => {
       if (isUnsupportedRoute(error)) return { tree: undefined, etag: undefined };
       this.initial = undefined;
       throw error;
     });
-    return this.initial;
+    const snapshot = await this.initial;
+    if (this.versioned && snapshot.etag === undefined) {
+      this.initial = this.read().catch((error: unknown) => { this.initial = undefined; throw error; });
+      return this.initial;
+    }
+    return snapshot;
   };
 }
 
@@ -192,7 +197,7 @@ export class ConfigEditor {
   readonly setDirty = (dirty: boolean) => { this.dirty = dirty; };
   readonly reset = () => { this.base = undefined; this.dirty = false; this.recovery = null; };
   readonly ready = async () => {
-    this.base ??= await this.store.ready();
+    if (this.base === undefined || (this.store.versioned && this.base.etag === undefined)) this.base = await this.store.ready();
     this.store.checkVersion(this.base);
     return this.base.etag;
   };
