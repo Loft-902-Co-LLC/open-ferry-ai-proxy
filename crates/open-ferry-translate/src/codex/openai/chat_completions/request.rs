@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_request.go
-// (v8.0.32, MIT), with the user turn checks.
+// (v8.0.36, MIT), with the user turn checks.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions request → Codex request.

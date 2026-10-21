@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/session_affinity_metadata_test.go
 // (TestSessionAffinityDelayedSuccessDoesNotOverwriteReboundAuth and
 // TestSessionAffinityOnResultWithMismatchedNamespaceFailsToUnbind)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the results that refresh or drop a session's bindings.

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/filelock_unix.go,
-// filelock_windows.go and token.go:19-62 (v8.0.32, MIT).
+// filelock_windows.go and token.go:19-62 (v8.0.36, MIT).
 //! Per-credential process mutex and exclusive OS lock, with a bounded wait.
 //!
 //! Async acquisition uses `spawn_blocking`, or runs inline without a runtime.

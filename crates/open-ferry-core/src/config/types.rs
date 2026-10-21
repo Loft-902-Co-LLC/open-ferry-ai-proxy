@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config.go, sdk_config.go,
 // config_types.go, config_defaults.go and vertex_compat.go, and the strategy names of
-// sdk/cliproxy/service_config.go (v8.0.32, MIT).
+// sdk/cliproxy/service_config.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The typed configuration.

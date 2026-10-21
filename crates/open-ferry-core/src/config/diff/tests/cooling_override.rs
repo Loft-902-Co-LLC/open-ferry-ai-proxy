@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/watcher/diff/cooling_override_test.go
-// (TestBuildConfigChangeDetailsIncludesAllCoolingOverrides) (v8.0.32, MIT).
+// (TestBuildConfigChangeDetailsIncludesAllCoolingOverrides) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The per-key `disable-cooling` overrides.

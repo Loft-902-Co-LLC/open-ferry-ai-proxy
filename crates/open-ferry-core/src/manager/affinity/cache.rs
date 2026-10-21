@@ -3,7 +3,7 @@
 // replaceAliasGroupsLocked, evictExcessLocked, removeAliasGroupLocked,
 // compactSessionAliases, isLocalPromptCacheSessionAlias,
 // mergeSessionAliases, Touch, CompareAndDelete, InvalidateAuth, Len and
-// cleanup) (v8.0.32, MIT).
+// cleanup) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The session bindings: which credential each session key is bound to,

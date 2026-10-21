@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_websockets_executor_store_test.go
-// (xAI shared-store and auth-removal cases) (v8.0.32, MIT).
+// (xAI shared-store and auth-removal cases) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/logging/log_dir_cleaner_test.go
 // (TestEnforceLogDirSizeLimitDeletesOldest,
-// TestEnforceLogDirSizeLimitSkipsProtected) (v8.0.32, MIT).
+// TestEnforceLogDirSizeLimitSkipsProtected) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The log directory's cleaner.

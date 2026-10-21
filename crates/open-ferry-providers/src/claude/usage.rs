@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI
-// internal/runtime/executor/helps/responses_usage_helpers.go (v8.0.32, MIT).
+// internal/runtime/executor/helps/responses_usage_helpers.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Fills in the token details a Responses `usage` object may lack, so that

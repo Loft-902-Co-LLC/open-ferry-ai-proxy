@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_request.go
-// and codex_executor_auth.go (v8.0.32, MIT).
+// and codex_executor_auth.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Shared SIWC request rules for HTTP and WebSocket callers. Identity is

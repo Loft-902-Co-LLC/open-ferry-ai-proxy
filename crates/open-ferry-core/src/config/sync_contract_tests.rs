@@ -2,7 +2,7 @@
 // claude_header_defaults_test.go, tls_handshake_timeout_test.go,
 // internal/watcher/diff/config_diff_test.go and the configuration contracts
 // in internal/config/config_types.go, sdk_config.go and vertex_compat.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::testing::TempDir;

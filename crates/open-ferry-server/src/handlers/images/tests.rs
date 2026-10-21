@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_images_handlers_test.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The images endpoints, their request builders and their answers.

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_vertex_executor.go
-// (native Interactions routing, URLs, Execute and ExecuteStream) (v8.0.32, MIT).
+// (native Interactions routing, URLs, Execute and ExecuteStream) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Vertex's opt-in native Interactions endpoint. All native service-account

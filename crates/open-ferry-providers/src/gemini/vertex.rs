@@ -3,7 +3,7 @@
 // their service-account and API-key variants, isImagenModel,
 // getVertexAction, convertImagenToGeminiResponse, convertToImagenRequest,
 // vertexCreds, vertexAPICreds, vertexBaseURL, vertexAPIKeyModelsURL,
-// vertexAPIVersionSuffix) (v8.0.32, MIT).
+// vertexAPIVersionSuffix) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`VertexExecutor`]: calls Gemini models on Vertex AI.

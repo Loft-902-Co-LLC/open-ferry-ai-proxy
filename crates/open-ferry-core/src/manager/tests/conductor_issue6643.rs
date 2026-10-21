@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6643_test.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6643_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A success from a call dispatched before a cooldown was recorded doesn't
