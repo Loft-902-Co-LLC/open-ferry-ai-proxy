@@ -246,15 +246,16 @@ interface ConfigFileProps {
 }
 
 /** Describe the open draft's save rules, even if the server changes provenance. */
-function RecoveryNotice({ base, latest }: { base: ConfigRead<string>; latest: ConfigRead<string> }) {
+function RecoveryNotice({ base, latest, guarded }: { base: ConfigRead<string>; latest: ConfigRead<string>; guarded: boolean }) {
   if (base.recovery !== null && latest.recovery === null) {
     return <Alert tone="warn" live title="Recovery draft: config.yaml can be read again">
       <p>Save will refuse this recovery draft because the server can read the file again. Discard to start from the current file.</p>
     </Alert>;
   }
   if (latest.recovery !== null) {
-    return <Alert tone="warn" live title={base.recovery === null ? "The server can't use config.yaml right now" : "Recovery mode: the server can't use config.yaml"}>
-      <p>{base.recovery === null
+    const refusesWorkingDraft = base.recovery === null && guarded;
+    return <Alert tone="warn" live title={refusesWorkingDraft ? "The server can't use config.yaml right now" : "Recovery mode: the server can't use config.yaml"}>
+      <p>{refusesWorkingDraft
         ? "This draft was opened from a working file, so Save will refuse. Discard to start from the current file."
         : "The server is still running its last good config. Saving replaces the whole file without version checks. Copy your edits before reloading if the file changes meanwhile."}</p>
       {latest.recovery.detail !== null && <p>{latest.recovery.detail}</p>}
@@ -335,7 +336,7 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
 
   return (
     <div className="space-y-3">
-      <RecoveryNotice base={edited ? base : initial} latest={initial} />
+      <RecoveryNotice base={edited ? base : initial} latest={initial} guarded={editor.versioned} />
       {saved && !edited && !readAfterSaveFailed && (
         <Alert tone="ok" live>
           <p>Saved config.yaml. The server uses it from now on.</p>

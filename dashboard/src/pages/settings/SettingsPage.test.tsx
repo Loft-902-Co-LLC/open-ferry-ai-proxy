@@ -2034,7 +2034,7 @@ describe("session config version guard", () => {
     state.api.use(route("GET", V8_CONFIG, { json: state.tree }));
     await act(async () => { await router.navigate("/settings?tab=file"); });
     await user.click(await screen.findByRole("button", { name: "Show config.yaml" }));
-    expect(await within(screen.getByRole("region", { name: "config.yaml", exact: true })).findByText("The server omitted the config version. Reload before saving.")).toBeVisible();
+    expect(await within(screen.getByRole("region", { name: "config.yaml" })).findByText("The server omitted the config version. Reload before saving.")).toBeVisible();
     expect(state.api.callsTo("GET", CONFIG_YAML)).toHaveLength(rawReads);
     expect(state.api.calls.filter((call) => call.method === "PUT")).toEqual([]);
   });

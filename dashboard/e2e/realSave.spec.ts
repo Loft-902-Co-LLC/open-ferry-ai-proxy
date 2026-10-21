@@ -485,7 +485,7 @@ test("saves every setting through its own route", async () => {
   await expect(form.usage).not.toBeChecked();
 });
 
-test("saves YAML after discarding a draft across a sibling Settings save without reloading", async () => {
+test("saves YAML after a sibling save and follows converged Settings fields without reloading", async () => {
   const page = the();
   const editor = await openYaml();
   await editor.click();
@@ -514,12 +514,40 @@ test("saves YAML after discarding a draft across a sibling Settings save without
   await pasteSecret("\n# YAML edit after sibling Settings save\n");
   await page.getByRole("button", { name: "Review changes" }).click();
   const review = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(review).toBeVisible();
   await expect(review.getByText("config.yaml changed on the server since you opened it")).toHaveCount(0);
   await review.getByRole("button", { name: "Save config.yaml" }).click();
   await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
   expectFile(/^ *request-retry: 5\b/m, "the sibling Settings change");
   expectFile("# YAML edit after sibling Settings save", "the new YAML draft");
   expectFile("# discarded YAML draft", "the discarded draft", false);
+
+  // Convergence releases the Settings path: it must then follow later reads.
+  await page.getByRole("tab", { name: "Settings", exact: true }).click();
+  await retries.fill("6");
+  for (const value of [6, 7]) {
+    await page.getByRole("tab", { name: "config.yaml" }).click();
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+A");
+    await pasteSecret(file().replace(/(request-retry: )\d+\b/, `$1${String(value)}`));
+    await page.getByRole("button", { name: "Review changes" }).click();
+    await expect(review).toBeVisible();
+    await review.getByRole("button", { name: "Save config.yaml" }).click();
+    await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+    await page.getByRole("tab", { name: "Settings", exact: true }).click();
+    await expect(retries).toHaveValue(String(value));
+    await expect(page.getByRole("button", { name: "Review and save" })).toHaveCount(0);
+  }
+  expectFile(/^ *request-retry: 7\b/m, "the newer value after convergence");
+  const freshTag = (await call("/v8/management/config")).headers.get("etag");
+  await retries.fill("8");
+  await page.getByRole("button", { name: "Review and save" }).click();
+  const settingWrite = page.waitForResponse((response) => new URL(response.url()).pathname === "/v8/management/config/routing/retry/request-retry" && response.request().method() === "PUT");
+  await page.getByRole("dialog").getByRole("button", { name: "Save 1 setting" }).click();
+  const accepted = await settingWrite;
+  expect(accepted.status(), "the deliberate edit after convergence").toBe(200);
+  expect(accepted.request().headers()["if-match"], "the converged field's new draft version").toBe(freshTag);
+  expectFile(/^ *request-retry: 8\b/m, "the deliberate Settings edit after convergence");
   await management("PATCH", "request-retry", { value: 4 });
 });
 
