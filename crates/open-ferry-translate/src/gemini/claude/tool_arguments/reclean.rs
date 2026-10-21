@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/gemini_schema.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/util/gemini_schema.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Structural projection of the wrapped re-clean used by the argument cleaner.
@@ -7,8 +7,10 @@
 //! hints carry no constraint used by that decision; their presence is retained
 //! where they can change a property map. No Antigravity request cleaner is exposed.
 //! The 64-level depth limit bounds recursion; a separate 100,000-node copy budget
-//! bounds reference fan-out during inlining. Either limit preserves arguments when
-//! the projection cannot finish. Upstream has neither expansion bound.
+//! bounds the projected schema. Either limit preserves arguments when the
+//! projection cannot finish. Inlining first preflights the source and copies
+//! against its own 8 MiB/100,000-node allowance. It also uses upstream's 256 KiB
+//! allowance, cycle hints, and inner-schema reference root.
 //!
 //! Deliberate projection deviations from upstream's raw-path quirks:
 //! - Scalar `required` beside `allOf` is retained here; upstream's array-only
@@ -23,19 +25,20 @@
 //!
 //! The scalar-required and literal-type shapes never come from our Gemini cleaner.
 
-use super::{analyze, array, gjson_array, local_ref, str_of};
+use super::{analyze, array, gjson_array, str_of};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
-const NAME_MAPS: [&str; 5] = [
+const NAME_MAPS: [&str; 6] = [
     "properties",
     "patternProperties",
     "dependentSchemas",
+    "dependencies",
     "$defs",
     "definitions",
 ];
 const REPAIR_CONTAINERS: &str = "properties patternProperties additionalProperties items prefixItems $defs definitions dependentSchemas dependentRequired dependencies if then else not contains propertyNames unevaluatedProperties unevaluatedItems contentSchema additionalItems default const example examples discriminator xml externalDocs enumDescriptions enumTitles";
-const REMOVED: &str = "minLength maxLength exclusiveMinimum exclusiveMaximum pattern minItems maxItems uniqueItems contains format default examples minimum maximum multipleOf $schema $defs definitions const $ref $id id additionalProperties $anchor $vocabulary $dynamicRef $dynamicAnchor propertyNames patternProperties dependentRequired dependentSchemas dependencies if then else $comment enumDescriptions enumTitles prefill deprecated encrypted discriminator additionalItems unevaluatedProperties unevaluatedItems contentSchema not";
+const REMOVED: &str = "minLength maxLength exclusiveMinimum exclusiveMaximum pattern minItems maxItems uniqueItems contains format default examples minimum maximum multipleOf $schema $defs definitions const $ref $id id additionalProperties $anchor $vocabulary $dynamicRef $dynamicAnchor propertyNames patternProperties dependentRequired dependentSchemas dependencies if then else $comment enumDescriptions enumTitles prefill deprecated encrypted discriminator readOnly writeOnly additionalItems unevaluatedProperties unevaluatedItems contentSchema contentMediaType contentEncoding not";
 
 fn string_required(schema: &Value) -> Vec<String> {
     array(schema, "required")
@@ -66,41 +69,36 @@ fn non_object_type(value: Option<&Value>) -> bool {
     }
 }
 fn repair_properties(
-    props: &Map<String, Value>,
+    mut props: Map<String, Value>,
     depth: usize,
 ) -> Option<(Map<String, Value>, Vec<String>)> {
-    let mut out = Map::new();
     let mut promoted = Vec::new();
-    for (name, schema) in props {
-        let mut schema = if schema == &Value::Bool(true) {
-            json!({})
-        } else {
-            schema.clone()
-        };
-        if let Some(map) = schema.as_object_mut() {
+    for (name, schema) in &mut props {
+        if schema == &Value::Bool(true) {
+            *schema = json!({});
+        } else if let Some(map) = schema.as_object_mut() {
             if let Some(Value::Bool(required)) = map.get("required") {
                 if *required {
                     promoted.push(name.clone());
                 }
                 map.shift_remove("required");
             }
-            schema = repair(&schema, depth + 1)?;
+            *schema = repair(std::mem::take(schema), depth + 1)?;
         }
-        out.insert(name.clone(), schema);
     }
     promoted.sort();
-    Some((out, promoted))
+    Some((props, promoted))
 }
-fn repair(schema: &Value, depth: usize) -> Option<Value> {
+fn repair(mut node: Value, depth: usize) -> Option<Value> {
     if depth > 64 {
         return None;
     }
-    let Some(map) = schema.as_object() else {
-        return Some(schema.clone());
-    };
-    let mut node = Value::Object(map.clone());
+    if !node.is_object() {
+        return Some(node);
+    }
     if !non_object_type(node.get("type")) {
-        let bare: Map<_, _> = map
+        let names: Vec<_> = node
+            .as_object()?
             .iter()
             .filter(|(key, value)| {
                 value.is_object()
@@ -109,13 +107,21 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
                         .split_whitespace()
                         .any(|k| k == key.as_str())
             })
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let bare: Map<_, _> = names
+            .into_iter()
+            .map(|name| {
+                let value = node
+                    .as_object_mut()
+                    .expect("object")
+                    .shift_remove(&name)
+                    .expect("collected name");
+                (name, value)
+            })
             .collect();
         if !bare.is_empty() {
-            let (bare, promoted) = repair_properties(&bare, depth)?;
-            for key in bare.keys() {
-                node.as_object_mut()?.shift_remove(key);
-            }
+            let (bare, promoted) = repair_properties(bare, depth)?;
             if let Some(props) = node.get_mut("properties").and_then(Value::as_object_mut) {
                 props.extend(bare);
             } else {
@@ -127,9 +133,9 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
             promote(&mut node, promoted);
         }
     }
-    if let Some(props) = node.get("properties").and_then(Value::as_object) {
-        let (props, promoted) = repair_properties(props, depth)?;
-        node["properties"] = Value::Object(props);
+    if let Some(Value::Object(props)) = node.get_mut("properties") {
+        let (repaired, promoted) = repair_properties(std::mem::take(props), depth)?;
+        *props = repaired;
         if node.get("type").is_none() {
             node["type"] = json!("object");
         }
@@ -141,7 +147,9 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
         .is_some_and(|s| s.eq_ignore_ascii_case("array"))
         || array(&node, "type")
             .any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("array")));
-    if is_array && node.get("items").is_none() {
+    if !node.get("$ref").is_none_or(Value::is_null) {
+        // Resolve the referenced type and items before synthesizing either.
+    } else if is_array && node.get("items").is_none() {
         node["items"] = json!({"type":"string"});
     } else if node.get("items").is_some()
         && (node.get("type").is_none_or(Value::is_null) || node.get("type") == Some(&json!("")))
@@ -162,19 +170,22 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
         "contentSchema",
         "additionalItems",
     ] {
-        if let Some(value) = node.get(key).cloned() {
+        if let Some(value) = node.get_mut(key) {
             if value.is_object() {
-                node[key] = repair(&value, depth + 1)?;
-            } else if value == Value::Bool(true) && key != "additionalProperties" {
-                node[key] = json!({});
-            } else if let Some(values) = value.as_array().filter(|_| key == "items") {
-                node[key] = repair_list(values, depth)?;
+                *value = repair(std::mem::take(value), depth + 1)?;
+            } else if value == &Value::Bool(true) && key != "additionalProperties" {
+                *value = json!({});
+            } else if let Value::Array(values) = value
+                && key == "items"
+            {
+                *value = repair_list(std::mem::take(values), depth)?;
             }
         }
     }
     for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
-        if let Some(values) = node.get(key).and_then(Value::as_array) {
-            node[key] = repair_list(values, depth)?;
+        if let Some(Value::Array(values)) = node.get_mut(key) {
+            let repaired = repair_list(std::mem::take(values), depth)?;
+            node[key] = repaired;
         }
     }
     for key in [
@@ -184,19 +195,20 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
         "dependentSchemas",
         "dependencies",
     ] {
-        if let Some(values) = node.get(key).and_then(Value::as_object) {
+        if let Some(Value::Object(values)) = node.get_mut(key) {
+            let values = std::mem::take(values);
             let out = if key == "patternProperties" {
                 repair_properties(values, depth)?.0
             } else {
                 values
-                    .iter()
-                    .map(|(k, v)| {
+                    .into_iter()
+                    .map(|(key, value)| {
                         Some((
-                            k.clone(),
-                            if v == &Value::Bool(true) {
+                            key,
+                            if value == Value::Bool(true) {
                                 json!({})
                             } else {
-                                repair(v, depth + 1)?
+                                repair(value, depth + 1)?
                             },
                         ))
                     })
@@ -207,12 +219,12 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
     }
     Some(node)
 }
-fn repair_list(values: &[Value], depth: usize) -> Option<Value> {
+fn repair_list(values: Vec<Value>, depth: usize) -> Option<Value> {
     Some(Value::Array(
         values
-            .iter()
+            .into_iter()
             .map(|value| {
-                if value == &Value::Bool(true) {
+                if value == Value::Bool(true) {
                     Some(json!({}))
                 } else {
                     repair(value, depth + 1)
@@ -244,73 +256,14 @@ fn copy_bounded(value: &Value, depth: usize, remaining: &mut usize) -> Option<Va
         _ => value.clone(),
     })
 }
-fn inline(
-    value: &Value,
-    root: &Value,
-    active: &mut BTreeSet<String>,
-    depth: usize,
-    remaining: &mut usize,
-) -> Option<Value> {
-    if depth > 64 {
-        return None;
-    }
-    *remaining = remaining.checked_sub(1)?;
-    if let Some(values) = value.as_array() {
-        return Some(Value::Array(
-            values
-                .iter()
-                .map(|v| inline(v, root, active, depth + 1, remaining))
-                .collect::<Option<Vec<_>>>()?,
-        ));
-    }
-    let Some(map) = value.as_object() else {
-        return Some(value.clone());
-    };
-    let mut out = Map::new();
-    let mut resolved = false;
-    if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-        && let Some(target) = local_ref(root, reference)
-    {
-        if !active.insert(reference.to_owned()) {
-            if let Some(target) = target.as_object() {
-                for key in ["type", "nullable", "description"] {
-                    if let Some(value) = target.get(key) {
-                        out.insert(key.to_owned(), copy_bounded(value, depth + 1, remaining)?);
-                    }
-                }
-            }
-            for (key, value) in map.iter().filter(|(k, _)| k.as_str() != "$ref") {
-                out.insert(key.clone(), copy_bounded(value, depth + 1, remaining)?);
-            }
-            out.insert("description".into(), json!("reference hint"));
-            return Some(Value::Object(out));
-        }
-        if let Value::Object(target) = inline(target, root, active, depth + 1, remaining)? {
-            out.extend(target);
-            resolved = true;
-        }
-        active.remove(reference);
-    }
-    for (key, value) in map {
-        if key == "$ref" {
-            if !resolved {
-                out.insert("description".into(), json!("reference hint"));
-            }
-            continue;
-        }
-        out.insert(
-            key.clone(),
-            inline(value, root, active, depth + 1, remaining)?,
-        );
-    }
-    Some(Value::Object(out))
-}
 // The name-map flag follows upstream's trailing keyword parity, protecting names
 // such as properties.properties while visiting all the same JSON containers.
 fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
     if let Some(map) = value.as_object_mut() {
         for (key, child) in map {
-            walk(child, NAME_MAPS.contains(&key.as_str()) && !name_map, phase);
+            if name_map || !crate::gemini_schema::is_literal_value_keyword(key) {
+                walk(child, NAME_MAPS.contains(&key.as_str()) && !name_map, phase);
+            }
         }
     } else if let Some(values) = value.as_array_mut() {
         for child in values {
@@ -318,6 +271,14 @@ fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
         }
     }
     phase(value, name_map);
+}
+fn reference_hint(value: &mut Value, name_map: bool) {
+    if !name_map
+        && let Some(map) = value.as_object_mut()
+        && map.shift_remove("$ref").is_some()
+    {
+        map.insert("description".into(), json!("reference hint"));
+    }
 }
 fn hint_presence(value: &mut Value, _: bool) {
     let Some(map) = value.as_object_mut() else {
@@ -605,14 +566,19 @@ fn placeholders(node: &mut Value, _: bool) {
 }
 
 pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
-    let Some(schema) = repair(schema, 0) else {
+    let Some(schema) = repair(schema.clone(), 0) else {
         return false;
     };
-    let wrapped = json!({"schema":schema});
-    let Some(mut projected) = inline(&wrapped, &wrapped, &mut BTreeSet::new(), 0, &mut 100_000)
-    else {
+    let wrapped = Value::Object(Map::from_iter([("schema".into(), schema)]));
+    let Some(inlined) = crate::gemini_schema::local_refs::inline_for_projection(&wrapped) else {
         return false;
     };
+    drop(wrapped);
+    let Some(mut projected) = copy_bounded(&inlined, 0, &mut 100_000) else {
+        return false;
+    };
+    drop(inlined);
+    walk(&mut projected, false, reference_hint);
     walk(&mut projected, false, hint_presence);
     walk(&mut projected, false, conditionals);
     walk(&mut projected, false, all_of);
@@ -627,4 +593,41 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
     };
     analyze(schema, schema).properties.contains_key(placeholder)
         && gjson_array(schema.get("required")).any(|v| str_of(Some(v)) == placeholder)
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+    use crate::gemini_schema::local_refs::tests::{NESTED_CHAINS, nested_reference_chain};
+
+    #[test]
+    fn nested_refs_repair_gate_and_direct_projection_fit_two_mib_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                // This shape passes repair's gate and necessarily reaches the
+                // inliner inside requires, unlike the intentionally deep cases.
+                let shallow = nested_reference_chain(4, 4);
+                let repaired = repair(shallow.clone(), 0).expect("under repair's depth gate");
+                let wrapped = Value::Object(Map::from_iter([("schema".into(), repaired)]));
+                let out = crate::gemini_schema::local_refs::inline_for_projection(&wrapped)
+                    .expect("under the inliner's depth and copy limits");
+                assert!(copy_bounded(&out, 0, &mut 100_000).is_some());
+                assert!(!requires(&shallow, "_"));
+                assert!(!requires(&shallow, "reason"));
+                for (links, levels) in NESTED_CHAINS {
+                    let schema = nested_reference_chain(links, levels);
+                    assert!(!requires(&schema, "_"));
+                    assert!(!requires(&schema, "reason"));
+                    if let Some(out) =
+                        crate::gemini_schema::local_refs::inline_for_projection(&schema)
+                    {
+                        assert!(copy_bounded(&out, 0, &mut 100_000).is_some());
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

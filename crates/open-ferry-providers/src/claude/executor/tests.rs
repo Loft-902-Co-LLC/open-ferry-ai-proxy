@@ -1,3 +1,6 @@
+// Ported from CLIProxyAPI internal/runtime/executor/claude_executor_stop_reasons_test.go (v8.0.36, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
 //! The executor against a mock Anthropic server on 127.0.0.1, covering what
 //! upstream's `claude_executor_*_test.go` test of the ported paths. The mock
 //! records each request's path, query, headers and body, and replies with
@@ -2917,3 +2920,31 @@ async fn web_search_results_survive_replay_only_for_the_same_credential() {
 
 #[path = "capability_tests.rs"]
 mod capability_tests;
+
+#[tokio::test]
+async fn context_window_chat_is_http_400_and_refusal_remains_successful() {
+    for reason in ["model_context_window_exceeded", "refusal"] {
+        let reply = SSE.replace("end_turn", reason);
+        let mock = Mock::start(Reply::sse(&reply)).await;
+        let result = mock
+            .executor()
+            .execute(
+                api_key_auth(),
+                request(openai_payload(false)),
+                options(Format::OPENAI),
+            )
+            .await;
+        if reason == "model_context_window_exceeded" {
+            let error = result.unwrap_err();
+            assert_eq!(error.status, 400);
+            assert!(error.message.contains("context_length_exceeded"));
+            assert!(!error.message.contains(API_KEY));
+        } else {
+            let response = result.unwrap();
+            let body: Value = serde_json::from_slice(&response.payload).unwrap();
+            assert_eq!(body["choices"][0]["finish_reason"], "content_filter");
+            assert!(body.get("usage").is_some());
+        }
+        assert_eq!(mock.requests().len(), 1);
+    }
+}
