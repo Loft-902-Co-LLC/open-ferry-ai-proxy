@@ -180,7 +180,7 @@ async fn exact_and_nested_route_suffixes_keep_first_capability_per_key() {
     let config = Config::parse(format!("claude-api-key: [{{api-key: {API_KEY}, prefix: tenant, models: [{{name: custom-claude, alias: fast, thinking: {{levels: [low]}}}}, {{name: custom-claude, alias: 'fast(high)', thinking: {{levels: [high]}}}}, {{name: custom-claude, alias: 'fast(high)', thinking: {{levels: [max]}}}}]}}]")).unwrap();
     let manager = manager(&mock, config, false);
     for route in ["tenant/fast(high)", "tenant/fast(high)(low)"] {
-        call(&manager, "configured-api", route, json!({"model":"auto", "messages":[{"role":"user", "content":"hi"}], "reasoning_effort":"high"}), Format::OPENAI).await;
+        call(&manager, "configured-api", route, json!({"model":"models/fast(high)", "messages":[{"role":"user", "content":"hi"}], "reasoning_effort":"high"}), Format::OPENAI).await;
         assert_eq!(
             mock.last().json()["output_config"]["effort"],
             "high",
