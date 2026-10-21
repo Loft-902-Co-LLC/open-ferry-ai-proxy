@@ -51,8 +51,10 @@ existing 401/403; keyless proxy setups still use the budget. Full request loggin
 also waits for a body consumer. The POST callbacks `/v0/management/oauth-callback`
 and `/v8/management/oauth/callback` retain their 64 KiB bound and share a separate
 process-wide 2 MiB pool (32 maximum JSON callbacks). Pool exhaustion returns 503
-with Retry-After: 1 before buffering. GET callbacks, including `/anthropic/callback`
-and `/codex/callback`, read queries only and never poll bodies. Health, unknown
+with Retry-After: 1. Declared lengths are refused before polling; chunked bodies
+first yield a frame, dropped if its capacity cannot be reserved. GET callbacks,
+including `/anthropic/callback` and `/codex/callback`, read queries only and never
+poll bodies. Health, unknown
 routes and OPTIONS also do not consume bodies.
 
 The effective aggregate budget is max(configured budget, 3 * proxy body limit +
@@ -83,9 +85,12 @@ until their last owner disappears. Existing owned management writes retain their
 allowance while finishing after a disconnect. Zstd windows over min(body limit,
 8 MiB) are refused before init. Each frame uses its own window to precharge ring
 growth/overlap plus 6 MiB of fixed scratch, including malformed-input allowances.
-An entropy-header preflight bounds FSE probability vectors before decoding.
-Later frames grow that reservation before init. Output drains in fixed chunks. Parsed objects, translations,
-responses, protocol buffers and log rendering are outside this payload budget.
+An entropy-header preflight bounds FSE probability vectors before decoding and
+accepts all ruzstd sequence-count encodings, including two-byte zero. Later frames
+grow that reservation before init; the decoder is destroyed before its working
+charge is released, including on unwind. Output drains in fixed chunks. Parsed
+objects, translations, responses, protocol buffers and log rendering are outside
+this payload budget.
 Request logging instead captures and renders at most a marked 64 KiB prefix;
 compressed expansion over the rendering bound is omitted with a size note.
 Unread bodies (including Full-mode 401/404/405 and early 400 responses) remain
@@ -100,10 +105,14 @@ space. Warnings contain only static guard names and counts, rate-limited per gua
 Only pending output starts the write timer: upstream silence while an SSE
 producer waits does not. Progress on one H2 stream never masks another's stall,
 and queued chunks of one progressing stream share its clock. Connection-window
-stalls have an independent clock. Live producers can receive RST_STREAM/CANCEL;
-reset attempts keep a one-second fallback deadline. If a finished producer left
-final DATA queued, or reset ownership survives that grace, the connection is cut. TCP progress is
-observed below TLS, including flushes that write bytes while returning Pending.
+stalls have an independent clock. With zero connection credit, a stream's own
+deadline is deferred by at most one second; other streams cannot renew it.
+This can also cancel a healthy stream starved by congestion for that long.
+Live producers can receive RST_STREAM/CANCEL; reset attempts keep a fixed
+one-second fallback deadline that subsequent DATA progress cannot extend. If a
+finished producer left final DATA queued, or reset ownership survives that grace,
+the connection is cut. TCP progress is observed below TLS, including flushes that
+write bytes while returning Pending.
 
 During GOAWAY, incomplete-header deadlines remain armed. An idle peer gets five
 seconds to complete the exchange. The drain also has an absolute bound of five
