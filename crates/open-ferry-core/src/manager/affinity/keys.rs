@@ -2,7 +2,8 @@
 // (extractConversationAlias, extractExplicitSessionIDs, extractSessionIDs,
 // extractMessageHashIDs, computeSessionHash, truncateString,
 // extractMessageContent, extractResponsesAPIContent and isSubagentSession)
-// and isHierarchyParent in home_session_alias.go (v8.0.36, MIT).
+// and isGuardianRequest, and isHierarchyParent in home_session_alias.go
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The session a call binds under: the one the client named, else the one
@@ -27,6 +28,7 @@ use std::fmt;
 use http::HeaderMap;
 use serde_json::Value;
 
+use crate::manager::text::equal_fold;
 use crate::observe::usage::json::Node;
 use crate::session::{
     Payload, Roots, bound_session_identity, candidate, derived_session_id, extract_session_info,
@@ -47,6 +49,8 @@ pub(crate) struct Session {
     pub(super) fallback: String,
     /// Whether the client said the session is a fork of its parent.
     pub(super) is_fork: bool,
+    /// Whether the caller requested a guardian review, independent of its model.
+    pub(super) is_guardian: bool,
 }
 
 impl fmt::Debug for Session {
@@ -127,6 +131,10 @@ impl Session {
             primary: bound_session_identity(&primary),
             fallback,
             is_fork,
+            is_guardian: headers
+                .get("x-openai-subagent")
+                .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+                .is_some_and(|value| equal_fold(value.trim(), "guardian")),
         })
     }
 

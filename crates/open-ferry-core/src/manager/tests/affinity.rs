@@ -72,6 +72,8 @@ use crate::manager::select::{PickArgs, Selection, SelectorState};
 use crate::manager::{CallResult, Entry, ModelAlias, RoutingStrategy, Settings};
 use crate::session::Payload;
 
+mod guardian;
+
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(60 * 60);
 

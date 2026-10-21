@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/selector.go
 // (SessionAffinitySelector, NewSessionAffinitySelectorWithConfig, Pick,
 // OnResult, InvalidateAuth and highestPriorityAuths) and
-// sdk/cliproxy/service_config.go (newRoutingSelector) (v8.0.36, MIT).
+// sdk/cliproxy/service_config.go (newRoutingSelector) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Session affinity (`routing.session-affinity`): a conversation stays on
@@ -22,7 +22,8 @@
 //! credential its fallback is bound to, and the two are bound together. A
 //! subagent's session takes its parent's credential only with
 //! `routing.session-affinity-subagents` (the default), and is bound alone;
-//! so is a fork.
+//! so is a fork. Guardian reviews may inherit the parent's latest selection
+//! across models on an eligible real provider, without refreshing the parent.
 //!
 //! Deviations from upstream:
 //! - The bindings are the cache's (see `cache`): hashed keys, a sweep on use
@@ -46,6 +47,7 @@ use super::classify::{
 };
 use super::cooldown::CallResult;
 use super::credential::priority;
+use super::select::{canonical_scheduling_provider, executor_key_from_auth};
 use super::settings::{RoutingState, Settings};
 use super::text::canonical_model_key;
 use crate::auth::{Auth, AuthError, Timestamp};
@@ -130,21 +132,47 @@ impl Affinity {
             .then(|| format!("{scope}::{}::{model_key}", session.fallback));
         let alias = fallback_key.as_deref().filter(|_| !is_subagent && !is_fork);
         let find = |id: &str| available.iter().copied().find(|auth| auth.id == id);
+        // Only a real pick changes selection order. Preserved bindings can
+        // gain aliases during failover without becoming a new selection.
+        let bind = |cache: &mut SessionCache, id: &str, selected: Option<&Auth>| {
+            let mut keys = vec![cache_key.as_str()];
+            keys.extend(alias);
+            if let Some(auth) = selected {
+                let provider = scheduling_provider(auth, scope);
+                cache.set_session_aliases(id, &provider, &session.primary, &keys, now);
+            } else {
+                cache.set_aliases(id, &keys, now);
+            }
+        };
 
         if let Some(id) = self.cache.get_and_refresh(&cache_key, now) {
-            let auth = match find(&id) {
-                Some(auth) => auth,
-                // The bound credential isn't available: pick again, for an
-                // even spread.
-                None => fallback(&tier)?,
-            };
-            let bind_id = if self.rebind_on_quota_only && transient_auth_ids.contains(&id) {
-                &id
+            if let Some(auth) = find(&id) {
+                bind(&mut self.cache, &auth.id, Some(auth));
+                return Ok(auth);
+            }
+            let auth = fallback(&tier)?;
+            if self.rebind_on_quota_only && transient_auth_ids.contains(&id) {
+                bind(&mut self.cache, &id, None);
             } else {
-                &auth.id
-            };
-            self.bind(&cache_key, alias, bind_id, now);
+                bind(&mut self.cache, &auth.id, Some(auth));
+            }
             return Ok(auth);
+        }
+        if is_subagent && self.subagents && session.is_guardian {
+            let scope_provider = canonical_scheduling_provider(scope);
+            let providers = available
+                .iter()
+                .map(|auth| scheduling_provider(auth, scope))
+                .filter(|provider| scope_provider == "mixed" || *provider == scope_provider)
+                .collect();
+            if let Some(id) = self
+                .cache
+                .latest_session_auth(&session.fallback, &providers, now)
+                && let Some(auth) = find(&id)
+            {
+                bind(&mut self.cache, &auth.id, Some(auth));
+                return Ok(auth);
+            }
         }
         if let Some(fallback_key) = &fallback_key
             && let Some(id) = self.cache.get(fallback_key, now)
@@ -152,7 +180,7 @@ impl Affinity {
             if let Some(auth) = find(&id)
                 && (!is_subagent || self.subagents)
             {
-                self.bind(&cache_key, alias, &auth.id, now);
+                bind(&mut self.cache, &auth.id, Some(auth));
                 return Ok(auth);
             }
             if !is_subagent
@@ -161,22 +189,13 @@ impl Affinity {
                 && transient_auth_ids.contains(&id)
             {
                 let auth = fallback(&tier)?;
-                self.bind(&cache_key, alias, &id, now);
+                bind(&mut self.cache, &id, None);
                 return Ok(auth);
             }
         }
         let auth = fallback(&tier)?;
-        self.bind(&cache_key, alias, &auth.id, now);
+        bind(&mut self.cache, &auth.id, Some(auth));
         Ok(auth)
-    }
-
-    /// Binds `cache_key`, with `alias` when the two are one session, to
-    /// credential `auth` (upstream's `bind` in `Pick`).
-    fn bind(&mut self, cache_key: &str, alias: Option<&str>, auth: &str, now: Timestamp) {
-        match alias {
-            Some(alias) => self.cache.set_aliases(auth, &[cache_key, alias], now),
-            None => self.cache.set(cache_key, auth, now),
-        }
     }
 
     /// Records a call's outcome for `session` in `scope`: a success refreshes
@@ -234,6 +253,17 @@ impl Affinity {
     #[cfg(test)]
     pub(crate) fn bound(&mut self, key: &str, now: Timestamp) -> Option<String> {
         self.cache.get(key, now)
+    }
+}
+
+/// The selected credential's real scheduling provider, including named
+/// compatibility channels, or the route's scope for an unnamed provider.
+fn scheduling_provider(auth: &Auth, scope: &str) -> String {
+    let provider = canonical_scheduling_provider(&executor_key_from_auth(auth));
+    if provider.is_empty() {
+        canonical_scheduling_provider(scope)
+    } else {
+        provider
     }
 }
 

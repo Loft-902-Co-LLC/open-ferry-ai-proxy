@@ -32,6 +32,7 @@ fn affinity_rebind_quota_preserves_alias_but_isolates_subagents_and_forks() {
                 primary: primary.into(),
                 fallback: fallback.into(),
                 is_fork,
+                is_guardian: false,
             };
             let low = Arc::new(Auth {
                 id: "low".into(),
