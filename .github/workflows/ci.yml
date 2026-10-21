@@ -80,7 +80,7 @@ jobs:
                 echo "Rust change: $path"
                 rust=true
               fi
-              if [[ $path == dashboard/* || $path == *.rs || $path == crates/* || $path == Cargo.* || $path == rust-toolchain.toml || $path == .cargo/* || $path == .github/workflows/ci.yml || $path == .github/actions/* || $path == docs/agents.md ]]; then
+              if [[ $path == dashboard/* || $path == *.rs || $path == crates/* || $path == Cargo.* || $path == config.example.yaml || $path == release-keys.pub || $path == rust-toolchain.toml || $path == .cargo/* || $path == .github/workflows/ci.yml || $path == .github/actions/* || $path == docs/agents.md ]]; then
                 dashboard_real=true
               fi
             done < "$RUNNER_TEMP/changed"
