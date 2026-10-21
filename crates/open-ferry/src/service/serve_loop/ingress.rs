@@ -189,6 +189,7 @@ struct State {
     deliveries: HashMap<u64, StreamProgress>,
     protocol_tasks: usize,
     send_window: i64,
+    connection_blocked_since: Option<Instant>,
     next_delivery: u64,
     draining: bool,
     draining_since: Option<Instant>,
@@ -221,6 +222,7 @@ impl Traffic {
                 deliveries: HashMap::new(),
                 protocol_tasks: 0,
                 send_window: 65535,
+                connection_blocked_since: None,
                 next_delivery: 0,
                 draining: false,
                 draining_since: None,
@@ -256,7 +258,7 @@ impl Traffic {
         }
         const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
         let mut state = self.state();
-        let before = (state.protocol, state.partial_head);
+        let before = (state.protocol, state.partial_head, state.connection_blocked_since);
         while state.protocol == Protocol::Unknown && !bytes.is_empty() {
             if bytes[0] != PREFACE[state.preface] {
                 state.protocol = Protocol::Http1;
@@ -273,7 +275,7 @@ impl Traffic {
             frames.feed(bytes, true, &mut state, self.config.header_timeout);
             state.read_frames = frames;
         }
-        if before != (state.protocol, state.partial_head) {
+        if before != (state.protocol, state.partial_head, state.connection_blocked_since) {
             self.changed.notify_one();
         }
     }
@@ -284,6 +286,7 @@ impl Traffic {
         }
         let mut state = self.state();
         let idle_was_none = state.idle_since.is_none();
+        let connection_was_unblocked = state.connection_blocked_since.is_none();
         if state.protocol == Protocol::Http2 {
             let mut frames = std::mem::take(&mut state.write_frames);
             frames.feed(bytes, false, &mut state, self.config.header_timeout);
@@ -293,7 +296,8 @@ impl Traffic {
             // the handler returning its response head/body.
             state.idle_since = Some(Instant::now());
         }
-        if idle_was_none && state.idle_since.is_some() {
+        if (idle_was_none && state.idle_since.is_some())
+            || (connection_was_unblocked && state.connection_blocked_since.is_some()) {
             self.changed.notify_one();
         }
     }
@@ -384,12 +388,16 @@ impl Traffic {
             if let Some(at) = state.write_pending {
                 consider(at + duration, "response write progress", None);
             }
+            let connection_blocked = state.protocol == Protocol::Http2 && state.send_window <= 0;
+            if connection_blocked && state.deliveries.values().any(|progress| progress.pending != 0)
+                && let Some(at) = state.connection_blocked_since {
+                consider(at + duration, "connection window progress", None);
+            }
             for (&id, progress) in &state.deliveries {
                 if progress.reset {
                     consider(progress.progressed + RESET_GRACE, "stream reset grace", None);
-                } else if progress.pending != 0 {
-                    let stream =
-                        (state.protocol == Protocol::Http2 && state.send_window > 0).then_some(id);
+                } else if progress.pending != 0 && !connection_blocked {
+                    let stream = (state.protocol == Protocol::Http2).then_some(id);
                     consider(
                         progress.progressed + duration,
                         "response write progress",
@@ -482,11 +490,15 @@ impl Frames {
                 state.send_window = state
                     .send_window
                     .saturating_add(i64::from(u32::from_be_bytes(self.payload) & 0x7fff_ffff));
+                state.connection_blocked_since = (state.send_window <= 0).then(Instant::now);
             } else if !incoming && kind == 0 {
                 let length = (usize::from(self.head[0]) << 16)
                     | (usize::from(self.head[1]) << 8)
                     | usize::from(self.head[2]);
                 state.send_window -= length as i64;
+                // DATA delivery is connection progress even when it used the
+                // last credit. Never borrow a stream's earlier timestamp.
+                state.connection_blocked_since = (state.send_window <= 0).then(Instant::now);
             }
             if incoming && matches!(kind, 1 | 9) && flags & 4 != 0 {
                 state.partial_head = None;
@@ -720,6 +732,9 @@ impl Delivery {
     fn new(bytes: Bytes, flight: Arc<Flight>) -> Self {
         if !bytes.is_empty() {
             let mut state = flight.traffic.state();
+            if state.send_window <= 0 && !state.deliveries.values().any(|progress| progress.pending != 0) {
+                state.connection_blocked_since = Some(Instant::now());
+            }
             let progress = state.deliveries.get_mut(&flight.id).unwrap();
             let starting = progress.pending == 0;
             if starting {
