@@ -1111,19 +1111,19 @@ fn models_without_a_template_use_the_first_entry_when_gpt_5_5_is_absent() {
 
 #[test]
 fn non_codex_and_synthesized_models_disable_codex_only_modes() {
+    let models = [
+        model("gpt-5.5"),
+        model("gpt-6.1-sol"),
+        model("new-partner-model"),
+    ];
     for providers in [
         vec!["claude".to_owned()],
         vec!["codex".to_owned(), "xai".to_owned()],
         vec![],
     ] {
         let lookup = |_: &str| providers.clone();
-        let entries = build(
-            &ModelRegistry::new(),
-            &[model("gpt-5.5"), model("new-partner-model")],
-            Some(&lookup),
-            false,
-            "",
-        );
+        let entries = build(&ModelRegistry::new(), &models, Some(&lookup), false, "");
+        assert_eq!(entries.len(), models.len());
         for entry in entries {
             assert_eq!(entry["tool_mode"], "direct");
             assert_eq!(entry["use_responses_lite"], false);
@@ -1131,25 +1131,32 @@ fn non_codex_and_synthesized_models_disable_codex_only_modes() {
         }
     }
     let lookup = |_: &str| vec!["codex".to_owned()];
-    let baseline = build_plain(&[model("gpt-5.5")], false, "");
-    let entries = build(
-        &ModelRegistry::new(),
-        &[model("gpt-5.5"), model("new-partner-model")],
-        Some(&lookup),
-        false,
-        "",
-    );
+    let baseline = build_plain(&[model("gpt-5.5"), model("gpt-6.1-sol")], false, "");
+    let capable = baseline
+        .iter()
+        .find(|entry| entry["slug"] == "gpt-6.1-sol")
+        .unwrap();
+    assert_eq!(capable["tool_mode"], "code_mode_only");
+    assert_eq!(capable["use_responses_lite"], true);
+    assert_eq!(capable["supports_reasoning_effort_updates"], true);
+    let entries = build(&ModelRegistry::new(), &models, Some(&lookup), false, "");
+    assert_eq!(entries.len(), models.len());
     for entry in entries {
-        if entry["slug"] == "gpt-5.5" {
+        if let Some(template) = baseline
+            .iter()
+            .find(|template| template["slug"] == entry["slug"])
+        {
             for key in [
                 "tool_mode",
                 "use_responses_lite",
                 "supports_reasoning_effort_updates",
             ] {
-                assert_eq!(entry.get(key), baseline[0].get(key));
+                assert_eq!(entry.get(key), template.get(key));
             }
         } else {
             assert_eq!(entry["tool_mode"], "direct");
+            assert_eq!(entry["use_responses_lite"], false);
+            assert_eq!(entry["supports_reasoning_effort_updates"], false);
         }
     }
 }
