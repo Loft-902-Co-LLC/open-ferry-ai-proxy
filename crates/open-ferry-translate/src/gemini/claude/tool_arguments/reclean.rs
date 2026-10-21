@@ -601,10 +601,20 @@ mod depth_tests {
     use crate::gemini_schema::local_refs::tests::{NESTED_CHAINS, nested_reference_chain};
 
     #[test]
-    fn nested_refs_projection_fits_two_mib_stack() {
+    fn nested_refs_repair_gate_and_direct_projection_fit_two_mib_stack() {
         std::thread::Builder::new()
             .stack_size(2 << 20)
             .spawn(|| {
+                // This shape passes repair's gate and necessarily reaches the
+                // inliner inside requires, unlike the intentionally deep cases.
+                let shallow = nested_reference_chain(4, 4);
+                let repaired = repair(shallow.clone(), 0).expect("under repair's depth gate");
+                let wrapped = Value::Object(Map::from_iter([("schema".into(), repaired)]));
+                let out = crate::gemini_schema::local_refs::inline_for_projection(&wrapped)
+                    .expect("under the inliner's depth and copy limits");
+                assert!(copy_bounded(&out, 0, &mut 100_000).is_some());
+                assert!(!requires(&shallow, "_"));
+                assert!(!requires(&shallow, "reason"));
                 for (links, levels) in NESTED_CHAINS {
                     let schema = nested_reference_chain(links, levels);
                     assert!(!requires(&schema, "_"));

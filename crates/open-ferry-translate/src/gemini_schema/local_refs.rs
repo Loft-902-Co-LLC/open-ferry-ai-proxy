@@ -212,6 +212,11 @@ struct Resolver<'a, 'b> {
     target_size_scans: usize,
 }
 
+enum FallbackSiblings<'a> {
+    Unresolved(&'a Map<String, Value>),
+    Resolved(Map<String, Value>),
+}
+
 impl<'a> Resolver<'a, '_> {
     fn spend_inline(&mut self, bytes: usize, nodes: usize) -> bool {
         let fits = self
@@ -281,7 +286,12 @@ impl<'a> Resolver<'a, '_> {
                     return Value::Object(target);
                 }
             }
-            return Value::Object(self.fallback(&out, target, reference, 0));
+            return Value::Object(self.fallback(
+                FallbackSiblings::Resolved(out),
+                target,
+                reference,
+                0,
+            ));
         }
         Value::Object(out)
     }
@@ -306,7 +316,12 @@ impl<'a> Resolver<'a, '_> {
                         || cost > self.remaining
                         || !self.spend_inline(cost, nodes)
                     {
-                        return Value::Object(self.fallback(map, target, reference, depth));
+                        return Value::Object(self.fallback(
+                            FallbackSiblings::Unresolved(map),
+                            target,
+                            reference,
+                            depth,
+                        ));
                     }
                     self.remaining -= cost;
                     self.active.insert(reference.to_owned());
@@ -365,11 +380,15 @@ impl<'a> Resolver<'a, '_> {
 
     fn fallback(
         &mut self,
-        map: &Map<String, Value>,
+        siblings: FallbackSiblings<'_>,
         target: &Value,
         reference: &str,
         depth: usize,
     ) -> Map<String, Value> {
+        let map = match &siblings {
+            FallbackSiblings::Unresolved(map) => *map,
+            FallbackSiblings::Resolved(map) => map,
+        };
         let mut out = Map::new();
         if let Value::Object(target) = target {
             for key in ["type", "nullable", "description"] {
@@ -408,15 +427,22 @@ impl<'a> Resolver<'a, '_> {
                 }
             }
         }
-        // Sibling schemas still resolve even when this reference cannot expand.
-        // Active references stay marked while their fallback siblings are read.
-        let inserted = self.active.insert(reference.to_owned());
-        let mut siblings = self.entries(map, depth + 1);
+        let mut siblings = match siblings {
+            // Root siblings have already been resolved and charged. Transfer
+            // their allocations rather than resolving and cloning them again.
+            FallbackSiblings::Resolved(siblings) => siblings,
+            FallbackSiblings::Unresolved(map) => {
+                // Keep active references marked while fallback siblings resolve.
+                let inserted = self.active.insert(reference.to_owned());
+                let siblings = self.entries(map, depth + 1);
+                if inserted {
+                    self.active.remove(reference);
+                }
+                siblings
+            }
+        };
         siblings.shift_remove("$ref");
         out.extend(siblings);
-        if inserted {
-            self.active.remove(reference);
-        }
         let hint = format!("See: {}", ref_name(reference));
         let description = out.get("description").and_then(Value::as_str).unwrap_or("");
         out.insert(

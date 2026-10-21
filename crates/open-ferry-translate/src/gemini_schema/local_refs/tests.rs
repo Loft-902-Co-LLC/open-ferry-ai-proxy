@@ -413,7 +413,7 @@ fn many_diamond_tools_share_chat_request_allowance() {
 }
 
 #[test]
-fn under_allowance_inlining_matches_independent_per_schema_cleaning() {
+fn under_allowance_shared_budget_matches_unlimited_request_budget() {
     let schema = diamond(8);
     let expected =
         clean_json_schema_for_gemini_json_schema(&schema, &mut SchemaCopyBudget::unlimited());
@@ -423,6 +423,45 @@ fn under_allowance_inlining_matches_independent_per_schema_cleaning() {
             assert_eq!(tool["parametersJsonSchema"], expected);
         }
     }
+}
+
+#[test]
+fn root_fallback_preserves_resolved_siblings_without_copying_them() {
+    let root = json!({"$ref":"#/$defs/Large","title":"kept",
+        "properties":{"v":{"$ref":"#/$defs/S"}},"default":{"note":"x".repeat(4096)},
+        "$defs":{"S":{"type":"string"},"Large":{"type":"object","nullable":true,
+            "description":"target","default":"x".repeat(COPY_BYTES + 1)}}});
+    let expected = json!({"type":"object","nullable":true,"description":"target (See: Large)",
+        "title":"kept","properties":{"v":{"type":"string"}},"default":{"note":"x".repeat(4096)}});
+    let mut budget = SchemaCopyBudget::default();
+    let mut resolver = Resolver {
+        root: &root,
+        remaining: COPY_BYTES,
+        max_depth: MAX_OUTPUT_DEPTH,
+        depth_exhausted: false,
+        budget: &mut budget,
+        budget_exhausted: false,
+        active: HashSet::new(),
+        targets: HashMap::new(),
+        lookups: HashMap::new(),
+        target_size_scans: 0,
+    };
+    assert_eq!(resolver.root().to_string(), expected.to_string());
+
+    let mut siblings = resolver.entries(root.as_object().unwrap(), 1);
+    siblings.shift_remove("$ref");
+    let allocation = siblings["default"]["note"].as_str().unwrap().as_ptr();
+    let out = Value::Object(resolver.fallback(
+        FallbackSiblings::Resolved(siblings),
+        &root["$defs"]["Large"],
+        "#/$defs/Large",
+        0,
+    ));
+    assert_eq!(out.to_string(), expected.to_string());
+    assert_eq!(
+        out["default"]["note"].as_str().unwrap().as_ptr(),
+        allocation
+    );
 }
 
 #[test]
