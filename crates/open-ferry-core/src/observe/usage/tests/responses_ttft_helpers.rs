@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/runtime/executor/helps/responses_ttft_helpers_test.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the Responses token-event classifier and the time to first
@@ -301,4 +301,61 @@ fn observe_responses_token_event_first_packet_fallback() {
     assert!(!ttft.is_set());
     assert!(ttft.is_first_packet_set());
     assert_eq!(ttft.duration(), Duration::from_millis(7));
+}
+
+// TestIsResponsesTokenEvent_CompletedReasoning, including non-string text.
+#[test]
+fn completed_reasoning_is_output_only_with_nonempty_string_text() {
+    use serde_json::{Value, json};
+    for field in ["summary", "content"] {
+        for (text, expected) in [
+            (json!("thinking"), true),
+            (json!(" "), true),
+            (json!(""), false),
+            (Value::Null, false),
+            (json!(123), false),
+            (json!({"value":"thinking"}), false),
+            (json!([]), false),
+        ] {
+            let mut event = json!({"type":"response.output_item.done","item":{"type":"reasoning"}});
+            event["item"][field] = json!([{}, {"text":""}, {"text":text}]);
+            for prefix in ["", "data: "] {
+                let payload = format!("{prefix}{event}");
+                assert_eq!(
+                    is_responses_token_event(payload.as_bytes()),
+                    expected,
+                    "{payload}"
+                );
+            }
+            event["type"] = "response.output_item.added".into();
+            assert!(!is_responses_token_event(event.to_string().as_bytes()));
+        }
+    }
+    for item in [
+        json!({"type":"reasoning"}),
+        json!({"type":"reasoning","summary":[],"content":[]}),
+        json!({"type":"reasoning","encrypted_content":"opaque"}),
+    ] {
+        let payload = json!({"type":"response.output_item.done","item":item});
+        assert!(!is_responses_token_event(payload.to_string().as_bytes()));
+    }
+}
+
+// TestObserveResponsesTokenEvent_CompletedReasoningKeepsFirstTokenTime.
+#[test]
+fn completed_reasoning_preserves_an_earlier_token_timestamp() {
+    let start = Instant::now();
+    let mut ttft = Ttft::default();
+    ttft.start(start);
+    observe(
+        &mut ttft,
+        r#"{"type":"response.reasoning_summary_text.delta","delta":"thinking"}"#,
+        start + Duration::from_millis(100),
+    );
+    observe(
+        &mut ttft,
+        r#"{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":"thinking"}]}}"#,
+        start + Duration::from_millis(1100),
+    );
+    assert_eq!(ttft.duration(), Duration::from_millis(100));
 }

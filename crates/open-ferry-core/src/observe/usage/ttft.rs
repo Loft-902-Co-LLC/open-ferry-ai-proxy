@@ -4,7 +4,7 @@
 // gemini_ttft_helpers.go (IsGeminiTokenEvent) and usage_helpers.go
 // (StartResponseTTFT, IsTTFTSet, IsFirstPacketSet, RecordFirstPacket,
 // ObserveTokenEvent, MarkFirstResponseByte, setTTFT, ttftDuration)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Time to first token: how long an upstream attempt took to give its first
@@ -87,6 +87,12 @@ pub fn is_responses_token_event(payload: &[u8]) -> bool {
         "response.output_item.done" => match doc.get("item.type").string().as_ref() {
             "function_call" => has(&doc, "item.arguments"),
             "custom_tool_call" => has(&doc, "item.input"),
+            "reasoning" => ["item.summary", "item.content"].into_iter().any(|field| {
+                doc.get(field).array().into_iter().any(|part| {
+                    let text = part.get("text");
+                    text.is_string() && !text.string().is_empty()
+                })
+            }),
             "message" => doc.get("item.content").array().into_iter().any(|content| {
                 !content.get("text").string().is_empty()
                     || !content.get("refusal").string().is_empty()
