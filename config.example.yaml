@@ -49,6 +49,19 @@ server:
   # Default is 0; values <= 0 keep open-ferry's default of 64 MiB (CLIProxyAPI has no limit then).
   max-request-body-bytes: 0
 
+  # open-ferry additions, applied to the proxy and separate management listeners.
+  # Unset or 0 keeps the default; -1 disables that guard. Durations are seconds
+  # (positive values above one year use one year). See docs/configuration.md.
+  # ingress-limits:
+  #   max-connections: 0                 # OS-derived per listener; Windows: 1024
+  #   header-timeout-seconds: 30         # Complete head, including keep-alive gaps
+  #   tls-handshake-timeout-seconds: 10  # Inbound TLS, distinct from requests.tls-*
+  #   idle-timeout-seconds: 120          # HTTP/2 with no open streams sends GOAWAY
+  #   body-idle-timeout-seconds: 60      # No incoming body bytes: 408 and close
+  #   body-total-timeout-seconds: 900    # Whole upload, never the response stream
+  #   buffered-body-bytes: 268435456     # Shared 256 MiB, at least one body's limit
+  #   write-stall-timeout-seconds: 120   # Pending output without delivery progress
+
   # Token for requests to GitHub's API: the management API's check for the latest release.
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
   # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.

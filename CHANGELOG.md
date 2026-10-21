@@ -11,6 +11,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Added
 
 - Real-server dashboard journeys in the required Ubuntu CI aggregate, covering first run, config saves, credentials, a loopback provider, usage, restart persistence and plain-install updates.
+- **Ingress resource limits**, open-ferry additions for both listeners: bounded connections and aggregate request-body storage, header and TLS handshake deadlines, upload progress and total deadlines, idle HTTP/2 GOAWAY, and stalled-response protection. Long SSE streams and upgraded WebSockets remain supported. Defaults, overrides and reload behavior are in [configuration](docs/configuration.md#ingress-limits-open-ferry-additions).
 
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
