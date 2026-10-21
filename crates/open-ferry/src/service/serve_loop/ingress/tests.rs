@@ -288,6 +288,35 @@ fn nofile_without_a_raise_leaves_child_policy_unset() {
         remembered.is_empty(),
         "never-raised limit installed a child restore policy"
     );
+    // A ceiling below the inherited soft limit must not lower the listener.
+    assert_eq!(
+        raise_nofile_with(
+            || Ok((20000, 65536)),
+            10240,
+            true,
+            |_| panic!("ceiling lowered the listener limit"),
+            |_| panic!("unchanged ceiling installed a child restore policy"),
+        )
+        .unwrap(),
+        ((20000, 65536), false)
+    );
+    // Nor may the lower Apple retry turn a failed raise into a reduction.
+    let mut attempts = Vec::new();
+    assert_eq!(
+        raise_nofile_with(
+            || Ok((20000, 65536)),
+            65536,
+            true,
+            |limit| {
+                attempts.push(limit.0);
+                if limit.0 == 65536 { Err(22) } else { Ok(()) }
+            },
+            |_| panic!("lower retry installed a child restore policy"),
+        )
+        .unwrap(),
+        ((20000, 65536), true)
+    );
+    assert_eq!(attempts, [65536]);
 }
 #[test]
 fn a_failed_nofile_raise_does_not_install_child_policy() {
