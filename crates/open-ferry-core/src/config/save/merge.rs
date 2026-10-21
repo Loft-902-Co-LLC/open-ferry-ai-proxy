@@ -52,6 +52,9 @@
 //!   the list's key), and `preserveV8Comments` then puts the file's comments
 //!   back on their keys, so upstream writes such a comment twice in a row.
 //!   It is written once here.
+//!   Pending plugin line comments can also reach a new generated `auth-dir`
+//!   and a later original key. Go restores the original plugin key's comment
+//!   after replacement, so it writes both copies too; those outputs match.
 //! - open-ferry's own `routing.quota` is trimmed to the generated keys as
 //!   the OAuth maps are ([`prune_routing_quota`]), so a setting cleared in
 //!   the config leaves the file instead of coming back on the next load.
