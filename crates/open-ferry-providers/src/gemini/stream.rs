@@ -122,7 +122,9 @@ impl State {
             Some(Err(error)) => return self.end(Some(error)).await,
             None => return self.end(None).await,
         };
-        self.saw_finish_reason |= json_payload(&line).is_some_and(has_finish_signal);
+        if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {
+            self.saw_finish_reason = json_payload(&line).is_some_and(has_finish_signal);
+        }
         match self.setup.lines {
             Lines::Gemini => {
                 let filtered = filter_sse_usage_metadata(&line);

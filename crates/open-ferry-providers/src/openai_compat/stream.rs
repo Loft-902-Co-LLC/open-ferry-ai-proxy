@@ -226,24 +226,25 @@ impl State {
                 self.fail_with_payload(error);
                 return true;
             }
-            self.saw_finish_reason |= serde_json::from_slice::<serde_json::Value>(payload)
-                .ok()
-                .and_then(|chunk| {
-                    chunk
-                        .get("choices")
-                        .and_then(serde_json::Value::as_array)
-                        .cloned()
-                })
-                .is_some_and(|choices| {
-                    choices.iter().any(|choice| {
-                        choice.get("finish_reason").is_some_and(|reason| {
-                            !reason.is_null()
-                                && !crate::json::str_at(choice, "finish_reason")
-                                    .trim()
-                                    .is_empty()
-                        })
-                    })
-                });
+            if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {
+                self.saw_finish_reason = serde_json::from_slice::<serde_json::Value>(payload)
+                    .ok()
+                    .is_some_and(|chunk| {
+                        chunk
+                            .get("choices")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|choices| {
+                                choices.iter().any(|choice| {
+                                    choice.get("finish_reason").is_some_and(|reason| {
+                                        !reason.is_null()
+                                            && !crate::json::str_at(choice, "finish_reason")
+                                                .trim()
+                                                .is_empty()
+                                    })
+                                })
+                            })
+                    });
+            }
         }
 
         let line = [b"data: ".as_slice(), payload].concat();
