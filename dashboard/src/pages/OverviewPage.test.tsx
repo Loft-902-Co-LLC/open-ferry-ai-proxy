@@ -824,7 +824,7 @@ describe("config conflict Reload", () => {
   it("shows a failed Reload in the owning notice without an unhandled rejection", async () => {
     const { api } = server([KEY]);
     api.use(
-      route("GET", V8_CONFIG, { json: { access: { "api-keys": [KEY] } }, headers: { ETag: '\"base\"' } }),
+      route("GET", V8_CONFIG, { json: { access: { "api-keys": [KEY] } }, headers: { ETag: '"base"' } }),
       route("PUT", `${V8_CONFIG}/access/api-keys`, { status: 412, json: { error: "precondition_failed" } }),
     );
     const { user } = renderApp("/");
