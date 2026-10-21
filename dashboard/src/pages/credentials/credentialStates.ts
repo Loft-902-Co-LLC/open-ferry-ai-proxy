@@ -611,6 +611,18 @@ const BIND_START_ERRORS = new Set([
 export function explainBindError(error: string): ReasonText {
   const message = error.trim();
   switch (message) {
+    case "server shutting down":
+      return {
+        title: "The server is shutting down",
+        meaning: "It stopped this binding before saving it.",
+        action: "Start again once it is running again.",
+      };
+    case "SIWC bind workers are busy; start a new binding":
+      return {
+        title: "The server is busy saving bindings",
+        meaning: "All binding workers are occupied. This binding wasn't saved.",
+        action: "Wait for the other bindings to finish, then start a new binding.",
+      };
     case "invalid SIWC bind target":
       return {
         title: "This credential can't take OpenAI API access",
