@@ -358,8 +358,7 @@ pub async fn run(
         }
         Err(error) => {
             tracing::error!("failed to create watcher: {error}");
-            service.close_sync();
-            service.close_reloads();
+            service.close_management_queues();
             shut_down(&service, &stop_server, server).await;
             return ExitCode::FAILURE;
         }
@@ -387,37 +386,46 @@ pub async fn run(
                 break;
             }
             result = &mut server => {
-                #[cfg(test)]
-                shutdown_diagnostics::record("server ended; stop update checks");
-                stop_update_checks(&service.management).await;
-                #[cfg(test)]
-                shutdown_diagnostics::record("stop catalogs");
-                service.stop_catalogs();
-                #[cfg(test)]
-                shutdown_diagnostics::record("stop auto refresh");
-                service.manager.stop_auto_refresh();
-                #[cfg(test)]
-                shutdown_diagnostics::record("stop OAuth sessions");
-                service.management.shutdown().await;
-                #[cfg(test)]
-                shutdown_diagnostics::record("stop ledger");
-                stop_ledger(&service.ledger).await;
-                #[cfg(test)]
-                shutdown_diagnostics::record("flush cooldowns");
-                open_ferry_core::manager::cooldown_store::flush(&service.manager);
-                #[cfg(test)]
-                shutdown_diagnostics::record("return from run");
-                return exit_code(result);
+                return server_ended(&mut service, result).await;
             }
             () = service.work(&config_path, &mut events) => {}
         }
     }
-    service.close_sync();
-    service.close_reloads();
+    service.close_management_queues();
     let code = shut_down(&service, &stop_server, server).await;
     #[cfg(test)]
     shutdown_diagnostics::record("return from run");
     code
+}
+
+/// The server-ended select arm must settle both queues before waiting for
+/// management tasks: the service loop is no longer polling either queue.
+async fn server_ended(
+    service: &mut Service,
+    result: Result<io::Result<()>, tokio::task::JoinError>,
+) -> ExitCode {
+    service.close_management_queues();
+    #[cfg(test)]
+    shutdown_diagnostics::record("server ended; stop update checks");
+    stop_update_checks(&service.management).await;
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop catalogs");
+    service.stop_catalogs();
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop auto refresh");
+    service.manager.stop_auto_refresh();
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop OAuth sessions");
+    service.management.shutdown().await;
+    #[cfg(test)]
+    shutdown_diagnostics::record("stop ledger");
+    stop_ledger(&service.ledger).await;
+    #[cfg(test)]
+    shutdown_diagnostics::record("flush cooldowns");
+    open_ferry_core::manager::cooldown_store::flush(&service.manager);
+    #[cfg(test)]
+    shutdown_diagnostics::record("return from run");
+    exit_code(result)
 }
 
 type Server = tokio::task::JoinHandle<io::Result<()>>;
@@ -2307,6 +2315,12 @@ impl Service {
                 let _ = request.applied.send(());
             }
         }
+    }
+
+    /// Close producers in the same order on every service shutdown path.
+    fn close_management_queues(&mut self) {
+        self.close_sync();
+        self.close_reloads();
     }
 
     /// Takes no more reloads from the management API, and answers those
@@ -9519,6 +9533,8 @@ port: {port}
         assert_eq!(service.store.base_dir(), new_auth);
         assert_eq!(service.watcher.as_ref().unwrap().auth_dir(), new_auth);
     }
+
+    mod round5_shutdown;
 
     #[tokio::test]
     async fn a_stalled_management_shutdown_preserves_the_ledger_reserve() {

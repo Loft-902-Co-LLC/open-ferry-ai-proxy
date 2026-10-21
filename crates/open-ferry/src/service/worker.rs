@@ -1841,6 +1841,7 @@ async fn activate_unless_cancelled(
     if let Err(error) = activated {
         timing.failed.store(true, Ordering::SeqCst);
         let (stop, _) = watch::channel(false);
+        service.close_management_queues();
         super::shut_down_by(
             &service,
             &stop,
@@ -1889,6 +1890,7 @@ async fn activate_unless_cancelled(
         Err(error) => {
             timing.failed.store(true, Ordering::SeqCst);
             let (stop, _) = watch::channel(false);
+            service.close_management_queues();
             super::shut_down_by(
                 &service,
                 &stop,
@@ -1964,8 +1966,7 @@ async fn activate_unless_cancelled(
             if let Some(observed) = &timing.watcher_error {
                 observed().await;
             }
-            service.close_sync();
-            service.close_reloads();
+            service.close_management_queues();
             super::shut_down_by(
                 &service,
                 &stop_server,
@@ -1984,8 +1985,7 @@ async fn activate_unless_cancelled(
     // resumes. It cleans up as the watcher's failure does, without the
     // failed flag; the worker keeps the lease.
     if cancel.is_some_and(|cancel| *cancel.borrow()) {
-        service.close_sync();
-        service.close_reloads();
+        service.close_management_queues();
         super::shut_down_by(
             &service,
             &stop_server,
@@ -2049,8 +2049,7 @@ async fn activate_unless_cancelled(
         control.cut();
         // Refuse queued credential work without waiting for observation I/O.
         // A failed take over held until stop intentionally exits with failure.
-        service.close_sync();
-        service.close_reloads();
+        service.close_management_queues();
         let _ = tokio::time::timeout_at(deadline, service.gate.close(service.gate.epoch())).await;
         super::shut_down_by(
             &service,
@@ -2324,8 +2323,7 @@ async fn service_loop(serving: Serving, stop: oneshot::Receiver<tokio::time::Ins
     };
     drop(settlement);
     drop(commands);
-    service.close_sync();
-    service.close_reloads();
+    service.close_management_queues();
     if super::shut_down_by(
         &service,
         &stop_server,

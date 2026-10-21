@@ -60,6 +60,7 @@ windows-service = "0.8.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [dev-dependencies]
+open-ferry-management = { workspace = true, features = ["test-support"] }
 open-ferry-update = { workspace = true, features = ["test-support"] }
 flate2 = "1.1.10"
 minisign = "0.10.0"
