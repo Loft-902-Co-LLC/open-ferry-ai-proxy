@@ -290,6 +290,28 @@ test.afterAll(async () => {
   }
 });
 
+test("reviews a second YAML edit after legacy migration without leaving the editor", async () => {
+  const page = the();
+  const editor = await openYaml();
+  expectFile(/^host: 127\.0\.0\.1$/m, "the original legacy layout before its first YAML save");
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await pasteSecret("\n# first YAML migration save\n");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  expectFile(/^server:$/m, "the stored v8 layout");
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await pasteSecret("\n# second YAML edit after normalization\n");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const review = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(review.getByText("config.yaml changed on the server since you opened it")).toHaveCount(0);
+  await review.getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  expectFile("# second YAML edit after normalization", "the second YAML save");
+});
+
 test("lifts safe mode from the Overview, then makes a key", async () => {
   const page = the();
   await page.goto(APP);
