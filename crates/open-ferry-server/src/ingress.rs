@@ -46,6 +46,12 @@ pub(crate) fn request_budget() -> Option<BodyBudget> {
         .ok()
 }
 
+pub(crate) fn reserve_decoder(bytes: usize) -> Result<Reservation, ()> {
+    let mut reservation = Reservation { budget: request_budget(), bytes: 0 };
+    reservation.grow_to(bytes)?;
+    Ok(reservation)
+}
+
 pub(crate) fn warn_budget() {
     let _ = REQUEST_INGRESS.try_with(|scope| {
         scope.rejected.store(true, Ordering::Release);
@@ -446,7 +452,7 @@ impl BodyBudget {
 
 /// Charged bytes are returned even on cancellation, unwind, and disconnect.
 #[derive(Debug)]
-struct Reservation {
+pub(crate) struct Reservation {
     budget: Option<BodyBudget>,
     bytes: usize,
 }

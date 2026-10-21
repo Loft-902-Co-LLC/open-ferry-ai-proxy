@@ -319,6 +319,24 @@ async fn decoding_is_charged_in_addition_to_raw_storage() {
 }
 
 #[tokio::test]
+async fn zstd_working_storage_is_reserved_before_expansion() {
+    let ingress = ingress(1 << 20);
+    let router = ingress.wrap(Router::new().route("/", post(|request: Request| async move {
+        let (parts, body) = request.into_parts();
+        match crate::body::read_decoded(&parts.headers, body, 1 << 20).await {
+            Ok(bytes) => Response::new(Body::from(bytes)),
+            Err(response) => response,
+        }
+    })));
+    let compressed = ruzstd::encoding::compress_to_vec(&[b'a'; 4096][..], ruzstd::encoding::CompressionLevel::Fastest);
+    let raw_len = compressed.len();
+    let response = router.oneshot(Request::post("/").header(header::CONTENT_ENCODING, "zstd").body(Body::from(compressed)).unwrap()).await.unwrap();
+    assert_eq!(response.status(), 503);
+    assert_eq!(ingress.budget.used(), 0);
+    assert_eq!(ingress.budget.0.lock().unwrap().peak, raw_len);
+}
+
+#[tokio::test]
 async fn multipart_parser_copies_are_reserved_before_reading() {
     let ingress = ingress(6);
     let polled = Arc::new(AtomicUsize::new(0));
