@@ -196,16 +196,20 @@ fn base_url(base: &str, project: &str, location: &str) -> String {
 
 impl VertexExecutor {
     pub(super) fn openapi_compat(&self) -> OpenAiCompatExecutor {
-        let config = self.config.clone().unwrap_or_else(|| {
-            let mut config = Config::default();
-            config.proxy_url = self.clients.effective_proxy("").to_owned();
-            Arc::new(config)
-        });
-        let executor = OpenAiCompatExecutor::new(PROVIDER, config);
-        match &self.models {
-            Some(models) => executor.with_models(models.clone()),
-            None => executor,
-        }
+        self.openapi
+            .get_or_init(|| {
+                let config = self.config.clone().unwrap_or_else(|| {
+                    let mut config = Config::default();
+                    config.proxy_url = self.clients.effective_proxy("").to_owned();
+                    Arc::new(config)
+                });
+                let executor = OpenAiCompatExecutor::new(PROVIDER, config);
+                match &self.models {
+                    Some(models) => executor.with_models(models.clone()),
+                    None => executor,
+                }
+            })
+            .clone()
     }
 
     pub(super) async fn openapi_executor(
@@ -237,7 +241,13 @@ impl VertexExecutor {
                 .tokens
                 .token(&self.clients.get(&auth.proxy_url), &account)
                 .await
-                .map_err(|_| ExecError::from(StatusError::new(500, "internal server error")))?;
+                .map_err(|_| {
+                    tracing::error!(
+                        error_kind = "token_fetch",
+                        "{NAME}: access token request failed"
+                    );
+                    ExecError::from(StatusError::new(500, "internal server error"))
+                })?;
             if token.trim().is_empty() {
                 return Err(StatusError::new(401, "missing access token").into());
             }

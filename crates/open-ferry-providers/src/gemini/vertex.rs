@@ -45,7 +45,7 @@
 //! - Refresh returns the credential as it is; the Home service isn't
 //!   ported.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
@@ -97,6 +97,7 @@ pub struct VertexExecutor {
     config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
     tokens: TokenCache,
+    openapi: OnceLock<crate::openai_compat::OpenAiCompatExecutor>,
     /// Where service-account calls go instead of their location's endpoint,
     /// in tests.
     service_account_base_url: Option<String>,
@@ -125,6 +126,7 @@ impl VertexExecutor {
             config: None,
             models: None,
             tokens: TokenCache::default(),
+            openapi: OnceLock::new(),
             service_account_base_url: None,
         }
     }
@@ -133,6 +135,7 @@ impl VertexExecutor {
     /// static catalog.
     pub fn with_models(mut self, models: Arc<dyn ModelCatalog>) -> Self {
         self.models = Some(models);
+        self.openapi = OnceLock::new();
         self
     }
 
@@ -140,6 +143,7 @@ impl VertexExecutor {
     /// them.
     pub fn with_config(mut self, config: Arc<Config>) -> Self {
         self.config = Some(config);
+        self.openapi = OnceLock::new();
         self
     }
 

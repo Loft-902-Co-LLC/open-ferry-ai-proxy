@@ -114,11 +114,12 @@ const NAME: &str = "openai compat executor";
 
 /// Calls an OpenAI-compatible provider (upstream's
 /// `OpenAICompatExecutor`).
+#[derive(Clone)]
 pub struct OpenAiCompatExecutor {
     provider: String,
     config: Arc<Config>,
     models: Option<Arc<dyn ModelCatalog>>,
-    clients: Clients,
+    clients: Arc<Clients>,
     /// Explicit Vertex OpenAPI credentials reuse this executor without any
     /// OpenAI-compatible provider settings.
     vertex_credentials: Option<(String, String)>,
@@ -166,7 +167,7 @@ impl OpenAiCompatExecutor {
     /// entries of `config`. Credentials without a `proxy_url` go through
     /// the config's `proxy-url`.
     pub fn new(provider: impl Into<String>, config: Arc<Config>) -> Self {
-        let clients = Clients::new(config.proxy_url.clone()).for_provider(NAME);
+        let clients = Arc::new(Clients::new(config.proxy_url.clone()).for_provider(NAME));
         Self {
             provider: provider.into(),
             config,

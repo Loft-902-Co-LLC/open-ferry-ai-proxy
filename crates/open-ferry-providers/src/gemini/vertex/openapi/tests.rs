@@ -255,3 +255,73 @@ async fn static_key_metadata_cannot_override_the_openapi_destination() {
         assert_eq!(mock.hits(), 0);
     }
 }
+
+#[tokio::test]
+async fn openapi_requests_reuse_the_http_client() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    use std::sync::Mutex;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recording = seen.clone();
+    let app = axum::Router::new().fallback(move |ConnectInfo(peer): ConnectInfo<SocketAddr>| {
+        recording.lock().unwrap().push(peer);
+        async { axum::Json(serde_json::from_str::<Value>(CHAT).unwrap()) }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let executor = VertexExecutor::new("direct");
+    for _ in 0..2 {
+        executor
+            .execute(
+                key_auth("vertex", "dummy", &url),
+                request("meta/llama", PAYLOAD),
+                options(&Format::OPENAI),
+            )
+            .await
+            .unwrap();
+    }
+    let peers = seen.lock().unwrap();
+    assert_eq!(peers.len(), 2);
+    assert_eq!(
+        peers[0], peers[1],
+        "both requests must use the same pooled connection"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn openapi_token_fetch_logs_only_the_failure_kind() {
+    let token = Mock::start(Reply::error(
+        400,
+        r#"{"error":"MARKER-token","error_description":"MARKER-account MARKER-path"}"#,
+    ))
+    .await;
+    let mut auth = service_account_auth(&token.url, "us-central1");
+    auth.metadata.get_mut("service_account").unwrap()["client_email"] =
+        "MARKER-account@example.test".into();
+    let (logs, _capture) = crate::secret_echo::Logs::capture();
+    let error = VertexExecutor::new("direct")
+        .execute(
+            Arc::new(auth),
+            request("meta/llama", PAYLOAD),
+            options(&Format::OPENAI),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 500);
+    assert_eq!(token.hits(), 1);
+    let logged = logs.text();
+    assert!(logged.contains("access token request failed"));
+    assert!(logged.contains("error_kind=\"token_fetch\""));
+    assert!(!logged.contains("MARKER"));
+    assert!(!logged.contains(&token.url));
+    assert!(!error.message.contains("MARKER"));
+}
