@@ -122,9 +122,9 @@ function SettingsEditor({
 
   useEffect(() => {
     editor.setDirty(unsaved > 0);
-    editor.editor.retainDrafts(settings.unsaved.map((id) => saveCall(id, settings.loaded[id]).path));
+    editor.editor.retainDrafts(settings.retained.map((id) => saveCall(id, settings.loaded[id]).path));
     onUnsavedChange(unsaved > 0);
-  }, [editor, unsaved, settings.unsaved, settings.loaded, onUnsavedChange]);
+  }, [editor, unsaved, settings.retained, settings.loaded, onUnsavedChange]);
 
   // A field scrolled into view, as by Tab, stops clear of the bar, with room
   // for the start of its hint: its scroll margin is the bar's height and
