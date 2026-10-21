@@ -3959,11 +3959,12 @@ fn adoption_load_and_save_complete_with_owned_threads() {
         done_tx.send(loading.load().is_ok()).unwrap();
     });
     let deadline = Instant::now() + Duration::from_secs(5);
-    while lock(&manager.shared.load_gate.state).2 == 0 && Instant::now() < deadline {
+    while lock(&manager.shared.load_gate.state).waiting_exclusive == 0 && Instant::now() < deadline
+    {
         std::thread::yield_now();
     }
     assert!(
-        lock(&manager.shared.load_gate.state).2 != 0,
+        lock(&manager.shared.load_gate.state).waiting_exclusive != 0,
         "reload queued acknowledgement"
     );
     save_release_tx.send(()).unwrap();

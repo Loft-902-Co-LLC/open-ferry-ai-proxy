@@ -713,6 +713,39 @@ impl FileStore {
         .map(|p| p.auth)
     }
 
+    /// The bind transaction with non-blocking save-mutex admission. A busy
+    /// store returns None so the caller can withdraw its manager reservation.
+    /// Every disk/account/identity/byte check is shared with bind_siwc_locked.
+    pub fn try_bind_siwc_locked(
+        &self,
+        auth: &Auth,
+        siwc: Map<String, Value>,
+        guard: &super::credential_lock::CredentialLock,
+        check: &BindCheck<'_>,
+    ) -> io::Result<Option<Auth>> {
+        let permit = self.permit()?;
+        let path = self.resolve_auth_path(auth)?;
+        refuse_lock_name(&path)?;
+        if !guard.guards(&path)? {
+            return Err(invalid(
+                "auth filestore: credential lock guard is for another file",
+            ));
+        }
+        let _save = match self.save_lock.try_lock() {
+            Ok(save) => save,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        };
+        self.persist_codex_partition_under_save(
+            &permit,
+            &path,
+            auth,
+            &super::codex_refresh::CodexPersistIntent::SiwcBind(siwc),
+            Some(check),
+        )
+        .map(|persisted| Some(persisted.auth))
+    }
+
     /// Applies successful rotations against the locked, fresh disk baseline.
     /// Returns the record actually persisted and per-partition match results;
     /// a superseded rotation never replaces a newer disk partition.
@@ -808,6 +841,20 @@ impl FileStore {
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.persist_codex_partition_under_save(_permit, path, auth, intent, check)
+    }
+
+    // The caller already holds this store's save mutex and the credential
+    // guard was checked immediately before taking it. Admission variants
+    // share this complete transaction body so no fence can drift.
+    fn persist_codex_partition_under_save(
+        &self,
+        _permit: &WritePermit,
+        path: &Path,
+        auth: &Auth,
+        intent: &super::codex_refresh::CodexPersistIntent,
+        check: Option<&BindCheck<'_>>,
+    ) -> io::Result<CodexPersisted> {
         self.check_file(path)?;
         if matches!(
             intent,
@@ -2533,6 +2580,33 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"second-test"}"#);
         after.insert("id_token".into(), json!(format!("x.{payload}.x")));
         assert!(claims.check(&after, fresh_id).is_err());
+    }
+
+    #[test]
+    fn bind_try_variant_refuses_save_mutex_contention_without_running_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        let path = dir.path().join("codex.json");
+        fs::write(
+            &path,
+            br#"{"type":"codex","access_token":"dummy","refresh_token":"dummy"}"#,
+        )
+        .unwrap();
+        let auth = Auth {
+            file_name: "codex.json".into(),
+            provider: "codex".into(),
+            ..Auth::default()
+        };
+        let guard = super::super::credential_lock::acquire_sync(&path).unwrap();
+        let _held = store.save_lock.lock().unwrap();
+        assert!(
+            store
+                .try_bind_siwc_locked(&auth, Map::new(), &guard, &|_, _| panic!(
+                    "busy store admitted bind"
+                ))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[cfg(any(unix, windows))]

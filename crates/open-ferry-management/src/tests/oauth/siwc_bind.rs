@@ -5,6 +5,8 @@
 use super::*;
 use open_ferry_core::auth::AuthStore as _;
 
+mod admission;
+
 const START: &str =
     "/v8/management/oauth/auth-url?provider=codex&mode=siwc-bind&name=codex-bind.json";
 const OUTER: &str = r#"{"type":"codex","access_token":"outer-bind-test","refresh_token":"outer-refresh-test","priority":9,"unknown":{"keep":true},"siwc":{"device_id":"123e4567-e89b-42d3-a456-426614174000"}}"#;

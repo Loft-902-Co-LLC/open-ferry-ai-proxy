@@ -94,7 +94,7 @@ mod select;
 mod settings;
 mod siwc_bind;
 #[doc(hidden)]
-pub use siwc_bind::SiwcBindWaiter;
+pub use siwc_bind::SiwcBindReservation;
 mod summary;
 mod text;
 mod websocket;
@@ -826,7 +826,7 @@ impl Manager {
 // std's borrowed RwLock guard cannot be transferred between threads.
 #[derive(Default)]
 struct ReloadBarrier {
-    state: Mutex<(usize, bool, usize)>,
+    state: Mutex<ReloadState>,
     changed: Condvar,
 }
 
@@ -836,27 +836,43 @@ pub(crate) struct ReloadGuard {
     reload: bool,
 }
 
+#[derive(Default)]
+struct ReloadState {
+    shared: usize,
+    exclusive: bool,
+    waiting_exclusive: usize,
+    waiting_shared: usize,
+    bind_reserved: bool,
+}
+
 impl ReloadBarrier {
     fn acquire(self: &Arc<Self>, reload: bool) -> ReloadGuard {
         let mut state = lock(&self.state);
         if reload {
-            state.2 += 1;
-            while state.0 != 0 || state.1 {
+            state.waiting_exclusive += 1;
+            while state.shared != 0 || state.exclusive {
                 state = self
                     .changed
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
             }
-            state.2 -= 1;
-            state.1 = true;
+            state.waiting_exclusive -= 1;
+            state.exclusive = true;
         } else {
-            while state.1 || state.2 != 0 {
+            let queued = state.exclusive || state.waiting_exclusive != 0;
+            if queued {
+                state.waiting_shared += 1;
+            }
+            while state.exclusive || state.waiting_exclusive != 0 {
                 state = self
                     .changed
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
             }
-            state.0 += 1;
+            if queued {
+                state.waiting_shared -= 1;
+            }
+            state.shared += 1;
         }
         ReloadGuard {
             barrier: self.clone(),
@@ -869,9 +885,9 @@ impl Drop for ReloadGuard {
     fn drop(&mut self) {
         let mut state = lock(&self.barrier.state);
         if self.reload {
-            state.1 = false;
+            state.exclusive = false;
         } else {
-            state.0 -= 1;
+            state.shared -= 1;
         }
         self.barrier.changed.notify_all();
     }

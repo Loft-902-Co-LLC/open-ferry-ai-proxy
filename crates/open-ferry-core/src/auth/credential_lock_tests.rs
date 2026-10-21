@@ -395,3 +395,21 @@ async fn nonregular_leaf_alias_keeps_its_lock_in_the_credential_parent() {
     assert!(!directory.join("nonregular.lock").exists());
     drop(guard);
 }
+
+#[test]
+fn try_lock_never_waits_for_process_os_or_registry_contention() {
+    let dir = scratch();
+    let path = dir.path().join("codex.json");
+    fs::write(&path, b"{}").unwrap();
+    let held = acquire_sync(&path).unwrap();
+    assert!(try_acquire_credential_lock(&path).unwrap().is_none());
+    drop(held);
+    let held = open_lock(&credential_lock_path(&path).unwrap()).unwrap();
+    held.try_lock().unwrap();
+    assert!(try_acquire_credential_lock(&path).unwrap().is_none());
+    held.unlock().unwrap();
+    let registry = LOCKS.get_or_init(Mutex::default).lock().unwrap();
+    assert!(try_acquire_credential_lock(&path).unwrap().is_none());
+    drop(registry);
+    assert!(try_acquire_credential_lock(&path).unwrap().is_some());
+}

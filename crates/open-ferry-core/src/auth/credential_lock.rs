@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -126,6 +126,41 @@ fn open_lock(path: &Path) -> io::Result<File> {
         return Err(io::Error::other("credential lock is not a regular file"));
     }
     Ok(file)
+}
+
+/// Tries both process and OS locks once, without waiting or creating parent
+/// directories. The lock file itself is opened with the usual no-follow checks.
+/// Call from a blocking thread: path resolution and opening still perform I/O.
+pub fn try_acquire_credential_lock(credential: &Path) -> io::Result<Option<CredentialLock>> {
+    let path = credential_lock_path(credential)?;
+    let process = {
+        let mut locks = match LOCKS.get_or_init(Mutex::default).try_lock() {
+            Ok(locks) => locks,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(TryLockError::WouldBlock) => return Ok(None),
+        };
+        match locks.get(&path).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(path.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    let Ok(process) = process.try_lock_owned() else {
+        return Ok(None);
+    };
+    let file = open_lock(&path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(CredentialLock {
+            file,
+            path,
+            _process: process,
+        })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
 fn timeout() -> io::Error {

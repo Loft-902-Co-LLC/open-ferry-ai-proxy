@@ -2,133 +2,185 @@
 // (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Bind admission fences registration mutation through the durable file write.
-//! The existing reload barrier is acquired without waiting while a file lock
-//! is held. Busy callers release their file lock and queue a writer, avoiding inversion
-//! with ordinary persistence. No manager state mutex is held during file I/O.
+//! Unlike upstream's per-credential mutation gate, bind uses the global
+//! reload barrier. Reservation and commit stay on one running blocking
+//! thread. Only the bounded shared drain may wait; all other locks are tries.
 
-use super::{Manager, ReloadGuard, lock};
+use super::{Manager, lock};
 use crate::auth::{Auth, AuthKind, AuthSource};
 use std::io;
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::TryLockError;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-/// A waiting exclusive bind. Dropping it, including when its async caller is
-/// cancelled, withdraws the writer preference and wakes shared mutations.
+/// Maximum shared-drain wait per bind attempt, independent of Tokio progress.
+pub const SIWC_BIND_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+const CANCEL_POLL: Duration = Duration::from_millis(10);
+
+/// Thread-confined reservation: it cannot be moved into a queued task.
+/// A caller must release it before waiting for any file/management lock.
 #[doc(hidden)]
-pub struct SiwcBindWaiter {
-    manager: Manager,
-    queued: bool,
+pub struct SiwcBindReservation<'a> {
+    manager: &'a Manager,
+    started: Instant,
+    exclusive: bool,
+    _thread: PhantomData<Rc<()>>,
 }
 
-impl SiwcBindWaiter {
-    /// Advisory only: the commit rechecks after taking its file/store locks.
-    pub fn is_ready(&self) -> bool {
-        let state = lock(&self.manager.shared.load_gate.state);
-        self.queued && state.0 == 0 && !state.1
+impl SiwcBindReservation<'_> {
+    /// Waits only for existing shared holders, for at most 100 ms. A reload
+    /// arriving meanwhile wins, and cancellation is sampled every 10 ms.
+    pub fn wait_drained(&self, cancelled: &AtomicBool) -> bool {
+        let barrier = &self.manager.shared.load_gate;
+        let deadline = self.started + SIWC_BIND_DRAIN_TIMEOUT;
+        let mut state = lock(&barrier.state);
+        loop {
+            if cancelled.load(Ordering::Acquire)
+                || Instant::now() >= deadline
+                || state.exclusive
+                || state.waiting_exclusive != 1
+            {
+                return false;
+            }
+            if state.shared == 0 {
+                return true;
+            }
+            let wait = CANCEL_POLL.min(deadline.saturating_duration_since(Instant::now()));
+            (state, _) = barrier
+                .changed
+                .wait_timeout(state, wait)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
 
-    /// Tries the reserved write after the caller reacquires its file/store
-    /// locks. A busy result retains the reservation for another bounded wait.
+    /// Converts to exclusive admission without waiting. The caller's closure
+    /// must only try other locks and must not call back into the manager.
     pub fn try_commit<T>(
         &mut self,
         expected: &Auth,
+        cancelled: &AtomicBool,
         commit: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<Option<T>> {
-        self.manager
-            .try_commit_siwc_bind_inner(expected, Some(&mut self.queued), commit)
+        if cancelled.load(Ordering::Acquire) || self.started.elapsed() >= SIWC_BIND_DRAIN_TIMEOUT {
+            return Ok(None);
+        }
+        {
+            let mut state = match self.manager.shared.load_gate.state.try_lock() {
+                Ok(state) => state,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => return Ok(None),
+            };
+            if state.shared != 0 || state.exclusive || state.waiting_exclusive != 1 {
+                return Ok(None);
+            }
+            state.waiting_exclusive -= 1;
+            state.exclusive = true;
+            self.exclusive = true;
+        }
+        let current = {
+            let state = match self.manager.shared.state.try_lock() {
+                Ok(state) => state,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => return Ok(None),
+            };
+            state
+                .auths
+                .get(&expected.id)
+                .map(|entry| entry.auth.clone())
+                .ok_or_else(|| io::Error::other("SIWC bind registration changed"))?
+        };
+        validate_registration(&current, expected)?;
+        commit().map(Some)
     }
 }
 
-impl Drop for SiwcBindWaiter {
+impl Drop for SiwcBindReservation<'_> {
     fn drop(&mut self) {
-        if self.queued {
-            let barrier = &self.manager.shared.load_gate;
-            let mut state = lock(&barrier.state);
-            state.2 -= 1;
-            barrier.changed.notify_all();
+        let barrier = &self.manager.shared.load_gate;
+        let mut state = lock(&barrier.state);
+        if self.exclusive {
+            state.exclusive = false;
+        } else {
+            state.waiting_exclusive -= 1;
         }
+        state.bind_reserved = false;
+        barrier.changed.notify_all();
     }
 }
 
 impl Manager {
-    /// Runs a short synchronous SIWC disk commit against its start-time
-    /// registration. `None` means the mutation barrier is busy: release all
-    /// store/file locks before retrying. `commit` must not call the manager.
+    /// Call only inside work already running on a blocking thread. At most
+    /// one bind reserves, and parked shared callers get their turn first.
+    #[doc(hidden)]
+    pub fn reserve_siwc_bind(&self) -> Option<SiwcBindReservation<'_>> {
+        let mut state = match self.shared.load_gate.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        if state.bind_reserved
+            || state.exclusive
+            || state.waiting_exclusive != 0
+            || state.waiting_shared != 0
+        {
+            return None;
+        }
+        state.bind_reserved = true;
+        state.waiting_exclusive += 1;
+        Some(SiwcBindReservation {
+            manager: self,
+            started: Instant::now(),
+            exclusive: false,
+            _thread: PhantomData,
+        })
+    }
+
+    /// Non-waiting bridge retained for synchronous callers/tests. Async bind
+    /// saves instead reserve and drain inside one already-running worker.
     #[doc(hidden)]
     pub fn try_commit_siwc_bind<T>(
         &self,
         expected: &Auth,
         commit: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<Option<T>> {
-        self.try_commit_siwc_bind_inner(expected, None, commit)
-    }
-
-    /// Queue only after releasing every credential file and management lock.
-    /// New shared mutation permits then wait behind this bind, as for reloads.
-    #[doc(hidden)]
-    pub fn queue_siwc_bind(&self) -> SiwcBindWaiter {
-        lock(&self.shared.load_gate.state).2 += 1;
-        SiwcBindWaiter {
-            manager: self.clone(),
-            queued: true,
-        }
-    }
-
-    fn try_commit_siwc_bind_inner<T>(
-        &self,
-        expected: &Auth,
-        queued: Option<&mut bool>,
-        commit: impl FnOnce() -> io::Result<T>,
-    ) -> io::Result<Option<T>> {
-        let barrier = &self.shared.load_gate;
-        let gate = {
-            let mut state = lock(&barrier.state);
-            if state.0 != 0 || state.1 || (queued.is_none() && state.2 != 0) {
-                return Ok(None);
-            }
-            if let Some(queued) = queued {
-                if !*queued {
-                    return Err(io::Error::other("SIWC bind admission ended"));
-                }
-                state.2 -= 1;
-                *queued = false;
-            }
-            state.1 = true;
-            ReloadGuard {
-                barrier: barrier.clone(),
-                reload: true,
-            }
+        let Some(mut reservation) = self.reserve_siwc_bind() else {
+            return Ok(None);
         };
-        let current = self
-            .get(&expected.id)
-            .ok_or_else(|| io::Error::other("SIWC bind registration changed"))?;
-        if !current.provider.trim().eq_ignore_ascii_case("codex")
-            || current.auth_kind() != Some(AuthKind::OAuth)
-            || current.auth_source_kind() != Some(AuthSource::File)
-            || current
-                .attribute("path")
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-            || ["access_token", "refresh_token"].iter().any(|key| {
-                current
-                    .metadata_str(key)
-                    .is_none_or(|value| value.trim().is_empty())
-            })
-            || expected.registration_epoch == 0
-            || current.registration_epoch != expected.registration_epoch
-            || current.provider != expected.provider
-            || current.file_name != expected.file_name
-            || current.attribute("path") != expected.attribute("path")
-            || current.auth_source_kind() != expected.auth_source_kind()
-            || current.auth_kind() != expected.auth_kind()
-        {
-            return Err(io::Error::other("SIWC bind registration changed"));
+        if lock(&self.shared.load_gate.state).shared != 0 {
+            return Ok(None);
         }
-        crate::auth::file_store::check_bind_metadata(&expected.metadata, &current.metadata)?;
-        let result = commit().map(Some);
-        drop(gate);
-        result
+        reservation.try_commit(expected, &AtomicBool::new(false), commit)
     }
+}
+
+fn validate_registration(current: &Auth, expected: &Auth) -> io::Result<()> {
+    if !current.provider.trim().eq_ignore_ascii_case("codex")
+        || current.auth_kind() != Some(AuthKind::OAuth)
+        || current.auth_source_kind() != Some(AuthSource::File)
+        || current
+            .attribute("path")
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        || ["access_token", "refresh_token"].iter().any(|key| {
+            current
+                .metadata_str(key)
+                .is_none_or(|value| value.trim().is_empty())
+        })
+        || expected.registration_epoch == 0
+        || current.registration_epoch != expected.registration_epoch
+        || current.provider != expected.provider
+        || current.file_name != expected.file_name
+        || current.attribute("path") != expected.attribute("path")
+        || current.auth_source_kind() != expected.auth_source_kind()
+        || current.auth_kind() != expected.auth_kind()
+    {
+        return Err(io::Error::other("SIWC bind registration changed"));
+    }
+    crate::auth::file_store::check_bind_metadata(&expected.metadata, &current.metadata)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -205,29 +257,52 @@ mod tests {
         assert!(manager.get(&expected.id).is_none());
     }
     #[test]
-    fn waiting_bind_blocks_new_shared_mutations_and_drop_releases_them() {
+    fn bounded_bind_wait_releases_parked_shared_mutations() {
         let (manager, _) = setup();
         let active = manager.mutation_gate();
-        let waiter = manager.queue_siwc_bind();
-        assert!(!waiter.is_ready());
-        let (started, waiting) = std::sync::mpsc::channel();
+        let (started, ready) = std::sync::mpsc::channel();
         let (finished, done) = std::sync::mpsc::channel();
-        let changing = manager.clone();
+        let reserving = manager.clone();
         let task = std::thread::spawn(move || {
+            let reservation = reserving.reserve_siwc_bind().unwrap();
             started.send(()).unwrap();
-            let _gate = changing.mutation_gate();
+            assert!(!reservation.wait_drained(&AtomicBool::new(false)));
+            drop(reservation);
             finished.send(()).unwrap();
         });
-        waiting.recv().unwrap();
+        ready.recv().unwrap();
+        let changing = manager.clone();
+        let shared = std::thread::spawn(move || {
+            let _gate = changing.mutation_gate();
+        });
+        done.recv_timeout(Duration::from_millis(800)).unwrap();
+        shared.join().unwrap();
         drop(active);
-        assert!(waiter.is_ready());
-        assert!(
-            done.recv_timeout(std::time::Duration::from_millis(50))
-                .is_err()
-        );
-        drop(waiter);
-        done.recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn only_one_bind_reserves_and_existing_shared_waiters_go_next() {
+        let (manager, _) = setup();
+        let reservation = manager.reserve_siwc_bind().unwrap();
+        assert!(manager.reserve_siwc_bind().is_none());
+        let changing = manager.clone();
+        let task = std::thread::spawn(move || {
+            let _gate = changing.mutation_gate();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while lock(&manager.shared.load_gate.state).waiting_shared == 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        drop(reservation);
+        // The queued shared caller either still waits (blocking a new bind)
+        // or already entered. It cannot be overtaken before admission.
+        let state = lock(&manager.shared.load_gate.state);
+        if state.waiting_shared != 0 {
+            assert!(!state.bind_reserved);
+        }
+        drop(state);
         task.join().unwrap();
     }
 }

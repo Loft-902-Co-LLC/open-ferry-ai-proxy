@@ -79,7 +79,7 @@ struct Inner {
     clients: Clients,
     oauth_sessions: oauth::Sessions,
     /// Upstream's `authStatusMu`.
-    credential_lock: tokio::sync::Mutex<()>,
+    credential_lock: Arc<tokio::sync::Mutex<()>>,
     /// Upstream's `mu`, as the handlers that change the config take it.
     config_write_lock: tokio::sync::Mutex<()>,
 }
@@ -151,7 +151,7 @@ impl ManagementState {
                 updating: Updating::default(),
                 clients: Clients::default(),
                 oauth_sessions: oauth::Sessions::default(),
-                credential_lock: tokio::sync::Mutex::new(()),
+                credential_lock: Arc::new(tokio::sync::Mutex::new(())),
                 config_write_lock: tokio::sync::Mutex::new(()),
             }),
             parts: Arc::default(),
@@ -556,6 +556,13 @@ impl ManagementState {
     /// it, never the service, and they let it go before they wait for a
     /// [`CredentialSync`] call, as upstream lets `authStatusMu` go before
     /// its post-auth persist hook.
+    /// Non-waiting owned guard for bind work confined to one blocking thread.
+    pub(crate) fn try_credential_lock(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        Arc::clone(&self.inner.credential_lock)
+            .try_lock_owned()
+            .ok()
+    }
+
     pub(crate) fn credential_lock(&self) -> &tokio::sync::Mutex<()> {
         &self.inner.credential_lock
     }
