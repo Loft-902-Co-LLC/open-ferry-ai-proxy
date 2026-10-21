@@ -2020,3 +2020,22 @@ describe("recovery draft provenance", () => {
     expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 });
+
+
+describe("session config version guard", () => {
+  it("refuses a missing version after the YAML page remounts without reading or writing raw", async () => {
+    const state = versionedServer();
+    const { user, router } = renderApp("/settings?tab=file");
+    await user.click(await screen.findByRole("button", { name: "Show config.yaml" }));
+    await screen.findByRole("textbox", { name: "config.yaml" });
+    const rawReads = state.api.callsTo("GET", CONFIG_YAML).length;
+    await act(async () => { await router.navigate("/"); });
+    await screen.findByRole("heading", { name: "Overview", level: 1 });
+    state.api.use(route("GET", V8_CONFIG, { json: state.tree }));
+    await act(async () => { await router.navigate("/settings?tab=file"); });
+    await user.click(await screen.findByRole("button", { name: "Show config.yaml" }));
+    expect(await within(screen.getByRole("region", { name: "config.yaml", exact: true })).findByText("The server omitted the config version. Reload before saving.")).toBeVisible();
+    expect(state.api.callsTo("GET", CONFIG_YAML)).toHaveLength(rawReads);
+    expect(state.api.calls.filter((call) => call.method === "PUT")).toEqual([]);
+  });
+});

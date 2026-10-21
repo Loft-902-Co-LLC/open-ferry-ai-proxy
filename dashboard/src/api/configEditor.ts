@@ -146,11 +146,19 @@ export class ConfigConflict extends ApiError {
  * queries; editor baselines remain independent only while they have drafts. */
 export class ConfigStore {
   private initial: Promise<Snapshot> | undefined;
+  private establishedVersion = false;
+  get versioned(): boolean { return this.establishedVersion; }
+  readonly checkVersion = (snapshot: Snapshot): void => {
+    if (this.versioned && snapshot.etag === undefined) throw new Error("The server omitted the config version. Reload before saving.");
+    this.establishedVersion ||= snapshot.etag !== undefined;
+  };
   constructor(readonly response: ResponseCall, readonly changed: () => void = () => { /* No mounted queries in standalone adapters. */ }) {}
 
   readonly read = async (signal?: AbortSignal): Promise<Snapshot> => {
     const answer = await this.response(V8_CONFIG, { signal });
-    return { tree: answer.data, etag: answer.headers.get("etag") ?? undefined };
+    const snapshot = { tree: answer.data, etag: answer.headers.get("etag") ?? undefined };
+    this.checkVersion(snapshot);
+    return snapshot;
   };
   readonly ready = (): Promise<Snapshot> => {
     this.initial ??= this.read().catch((error: unknown) => {
@@ -170,7 +178,6 @@ export function isBrokenConfig(error: unknown): boolean {
 export class ConfigEditor {
   private base: Snapshot | undefined;
   private dirty = false;
-  private establishedVersion = false;
   private explicitDrafts = false;
   private drafts = new Map<string, Snapshot>();
   private accepted: Snapshot | undefined;
@@ -182,12 +189,12 @@ export class ConfigEditor {
     this.store = store instanceof ConfigStore ? store : new ConfigStore(store);
   }
   private get response(): ResponseCall { return this.store.response; }
-  get versioned(): boolean { return this.establishedVersion || this.base?.etag !== undefined; }
+  get versioned(): boolean { return this.store.versioned || this.base?.etag !== undefined; }
   readonly setDirty = (dirty: boolean) => { this.dirty = dirty; };
   readonly reset = () => { this.base = undefined; this.dirty = false; this.recovery = null; };
   readonly ready = async () => {
     this.base ??= await this.store.ready();
-    this.establishedVersion ||= this.base.etag !== undefined;
+    this.store.checkVersion(this.base);
     return this.base.etag;
   };
   /** Capture from the event's rendered query value, before RHF changes it. */
@@ -201,8 +208,7 @@ export class ConfigEditor {
     for (const path of this.drafts.keys()) if (!keep.has(path)) this.drafts.delete(path);
   };
   private version(snapshot: Snapshot): void {
-    if (this.versioned && snapshot.etag === undefined) throw new Error("The server omitted the config version. Reload before saving.");
-    this.establishedVersion ||= snapshot.etag !== undefined;
+    this.store.checkVersion(snapshot);
   }
   /** No draft baseline is mutated here: the caller renders this single value. */
   readonly readValue = async <T>(path: string, signal?: AbortSignal): Promise<ConfigRead<T>> => {
