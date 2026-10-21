@@ -220,8 +220,10 @@ impl Traffic {
     }
 
     fn received(&self, mut bytes: &[u8]) {
+        if bytes.is_empty() { return; }
         const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
         let mut state = self.state();
+        let before = (state.protocol, state.partial_head);
         while state.protocol == Protocol::Unknown && !bytes.is_empty() {
             if bytes[0] != PREFACE[state.preface] {
                 state.protocol = Protocol::Http1;
@@ -238,11 +240,13 @@ impl Traffic {
             frames.feed(bytes, true, &mut state, self.config.header_timeout);
             state.read_frames = frames;
         }
-        self.changed.notify_one();
+        if before != (state.protocol, state.partial_head) { self.changed.notify_one(); }
     }
 
     fn written(&self, bytes: &[u8]) {
+        if bytes.is_empty() { return; }
         let mut state = self.state();
+        let idle_was_none = state.idle_since.is_none();
         if state.protocol == Protocol::Http2 {
             let mut frames = std::mem::take(&mut state.write_frames);
             frames.feed(bytes, false, &mut state, self.config.header_timeout);
@@ -252,7 +256,7 @@ impl Traffic {
             // the handler returning its response head/body.
             state.idle_since = Some(Instant::now());
         }
-        self.changed.notify_one();
+        if idle_was_none && state.idle_since.is_some() { self.changed.notify_one(); }
     }
 
     pub(super) fn established(&self, started: Instant) {

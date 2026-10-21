@@ -76,6 +76,44 @@ async fn a_queued_chunk_does_not_expire_while_its_stream_is_progressing() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn socket_progress_survives_successive_pending_tls_flushes() {
+    struct StepSocket { writable: bool }
+    impl AsyncWrite for StepSocket {
+        fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+            if std::mem::take(&mut self.writable) { Poll::Ready(Ok(bytes.len().min(1))) } else { Poll::Pending }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    }
+    struct BufferedTls { socket: SocketIo<StepSocket> }
+    impl AsyncWrite for BufferedTls {
+        fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> { Poll::Pending }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if let Poll::Ready(Ok(_)) = Pin::new(&mut self.socket).poll_write(cx, b"encrypted") {
+                assert!(Pin::new(&mut self.socket).poll_write(cx, b"encrypted").is_pending());
+            }
+            Poll::Pending
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    }
+    let config = IngressConfig { write_stall_timeout: Some(Duration::from_secs(2)), ..IngressConfig::default() };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    let _flight = Flight::new(traffic.clone());
+    let mut io = Guarded { inner: BufferedTls { socket: SocketIo { inner: StepSocket { writable: false }, traffic: traffic.clone() } }, traffic: traffic.clone() };
+    for _ in 0..5 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        io.inner.socket.inner.writable = true;
+        std::future::poll_fn(|cx| {
+            assert!(Pin::new(&mut io).poll_flush(cx).is_pending());
+            Poll::Ready(())
+        }).await;
+        assert!(traffic.due().unwrap().0 > Instant::now());
+    }
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert!(traffic.due().unwrap().0 <= Instant::now());
+}
+
+#[tokio::test(start_paused = true)]
 async fn h2_headers_have_one_deadline_and_connect_data_is_not_a_header() {
     let config = IngressConfig::default();
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());

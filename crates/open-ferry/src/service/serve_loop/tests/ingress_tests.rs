@@ -645,6 +645,36 @@ async fn ingress_h2_connection_window_stall_still_closes_the_connection() {
 }
 
 #[tokio::test]
+async fn ingress_h2_oversize_rejection_does_not_drain_the_connection() {
+    let served = start_limited(IngressConfig { header_timeout: None, idle_timeout: None, ..limits() }, None, None);
+    let mut stream = raw_h2(&served, 65535).await;
+    let block = b"\x82\x86\x84\x01\x09localhost\x00\x0econtent-length\x071048577";
+    let mut head = vec![0, 0, block.len() as u8, 1, 4, 0, 0, 0, 1];
+    head.extend_from_slice(block);
+    stream.write_all(&head).await.unwrap();
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        assert_ne!(frame.0, 7, "a size rejection sent GOAWAY");
+        if frame.0 == 0 && frame.2 == 1 { break; }
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    settle().await;
+    tokio::time::resume();
+    assert_eq!(served.control.live_count(), 1);
+    h2_get(&mut stream, 3, "/").await;
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        assert_ne!(frame.0, 7);
+        if frame.0 == 0 && frame.2 == 3 { assert_eq!(frame.3, b"ok"); break; }
+    }
+    drop(stream);
+    until(|| served.control.live_count() == 0).await;
+    within(served.control.release()).await;
+    within(served.server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn ingress_capacity_reload_wakes_a_full_listener() {
     let config = IngressConfig {
         max_connections: Some(1),

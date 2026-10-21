@@ -24,7 +24,9 @@ use crate::errors::{JSON_UTF8, error_response};
 const MANAGEMENT_BODY_LIMIT: usize = 32 << 20;
 const MANAGEMENT_RESERVE: usize = 3 * MANAGEMENT_BODY_LIMIT;
 fn budget_floor(body_limit: usize) -> usize {
-    body_limit.saturating_mul(3).saturating_add(MANAGEMENT_RESERVE)
+    body_limit
+        .saturating_mul(3)
+        .saturating_add(MANAGEMENT_RESERVE)
 }
 
 tokio::task_local! {
@@ -41,7 +43,9 @@ struct RequestScope {
 
 /// The limit captured when this upload started, including downstream decoding.
 pub(crate) fn body_limit(current: usize) -> usize {
-    REQUEST_INGRESS.try_with(|scope| scope.body_limit).unwrap_or(current)
+    REQUEST_INGRESS
+        .try_with(|scope| scope.body_limit)
+        .unwrap_or(current)
 }
 
 /// The budget of the request currently being decoded. Standalone body-reader
@@ -53,7 +57,10 @@ pub(crate) fn request_budget() -> Option<BodyBudget> {
 }
 
 pub(crate) fn reserve_decoder(bytes: usize) -> Result<Reservation, ()> {
-    let mut reservation = Reservation { budget: request_budget(), bytes: 0 };
+    let mut reservation = Reservation {
+        budget: request_budget(),
+        bytes: 0,
+    };
     reservation.grow_to(bytes)?;
     Ok(reservation)
 }
@@ -65,8 +72,7 @@ pub(crate) fn warn_budget() {
     });
 }
 
-/// Keep decoded storage charged while a handler retains parsed/transformed
-/// input for its response stream, even if it drops the original Bytes early.
+/// Keep temporary decoded storage charged until the handler returns.
 pub(crate) fn retain_decoded(bytes: &Bytes) {
     let _ = REQUEST_INGRESS.try_with(|scope| {
         scope
@@ -83,7 +89,7 @@ pub(crate) fn budget_response(response: Response) -> Response {
     let rejected_budget = REQUEST_INGRESS
         .try_with(|scope| scope.rejected.load(Ordering::Acquire))
         .unwrap_or(false);
-    if rejected_budget && response.extensions().get::<IngressRejection>().is_none() {
+    if rejected_budget && response.extensions().get::<BudgetRejection>().is_none() {
         rejected(503, "request body buffer budget exhausted")
     } else {
         response
@@ -135,7 +141,9 @@ impl Ingress {
     }
 
     /// Current charged request storage, without inspecting any request data.
-    pub fn reserved_body_bytes(&self) -> usize { self.budget.used() }
+    pub fn reserved_body_bytes(&self) -> usize {
+        self.budget.used()
+    }
 
     /// Waits for a reload, without polling or opening any network connection.
     pub async fn changed(&self) {
@@ -185,7 +193,7 @@ pub async fn after_auth(request: Request, next: Next) -> Response {
         Some(mut ingress) => {
             ingress.budget.1 = Pool::Proxy;
             layer(State(ingress), request, next).await
-        },
+        }
         None => next.run(request).await,
     }
 }
@@ -197,15 +205,18 @@ pub async fn after_management_auth(request: Request, next: Next) -> Response {
         Some(mut ingress) => {
             ingress.budget.1 = Pool::Management;
             layer(State(ingress), request, next).await
-        },
+        }
         None => next.run(request).await,
     }
 }
 
 /// OAuth callbacks accept at most 64 KiB, without using the authenticated pool.
 pub async fn public_request(request: Request, next: Next) -> Response {
-    let mut limits = request.extensions().get::<Ingress>()
-        .map(Ingress::limits).unwrap_or_default();
+    let mut limits = request
+        .extensions()
+        .get::<Ingress>()
+        .map(Ingress::limits)
+        .unwrap_or_default();
     limits.buffered_body_bytes = None;
     layer(State(Ingress::new(limits, 64 << 10)), request, next).await
 }
@@ -253,6 +264,9 @@ pub struct IngressProbe;
 #[derive(Clone)]
 pub struct IngressRejection;
 
+#[derive(Clone)]
+struct BudgetRejection;
+
 async fn probe(State(ingress): State<Ingress>, request: Request, next: Next) -> Response {
     if request.extensions().get::<IngressProbe>().is_some() {
         let mut response = Response::new(Body::empty());
@@ -276,7 +290,9 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
         return next.run(request).await;
     }
     let mut snapshot = ingress.settings.borrow().clone();
-    if ingress.budget.1 == Pool::Management { snapshot.body_limit = MANAGEMENT_BODY_LIMIT; }
+    if ingress.budget.1 == Pool::Management {
+        snapshot.body_limit = MANAGEMENT_BODY_LIMIT;
+    }
     let (parts, body) = request.into_parts();
     let (raw, parser, oversized) = match buffer(&ingress, &snapshot, &parts.headers, body).await {
         Ok(buffered) => buffered,
@@ -294,7 +310,15 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
         ]
         .iter()
         .any(|prefix| parts.uri.path().starts_with(prefix));
-    let response = admitted(ingress, snapshot.body_limit, parts, raw, parser, oversized, next);
+    let response = admitted(
+        ingress,
+        snapshot.body_limit,
+        parts,
+        raw,
+        parser,
+        oversized,
+        next,
+    );
     if owned_upload {
         return match tokio::spawn(response).await {
             Ok(response) => response,
@@ -324,25 +348,19 @@ async fn admitted(
     };
     let _hold = (raw.clone(), parser);
     let body = if oversized {
-        Body::from_stream(futures_util::stream::iter([
-            Ok(raw), Err(BodyTooLarge),
-        ]))
-    } else { Body::from(raw) };
+        Body::from_stream(futures_util::stream::iter([Ok(raw), Err(BodyTooLarge)]))
+    } else {
+        Body::from(raw)
+    };
     let response = REQUEST_INGRESS
-        .scope(
-            scope.clone(),
-            next.run(Request::from_parts(parts, body)),
-        )
+        .scope(scope.clone(), next.run(Request::from_parts(parts, body)))
         .await;
     // Handlers may translate body failures; preserve the budget's 503 and
     // close/GOAWAY marker even when a route gives other errors its own shape.
     if scope.rejected.load(Ordering::Acquire)
-        && response.extensions().get::<IngressRejection>().is_none()
+        && response.extensions().get::<BudgetRejection>().is_none()
     {
         return rejected(503, "request body buffer budget exhausted");
-    }
-    if response.extensions().get::<IngressRejection>().is_some() {
-        return response;
     }
     // Only owners actually retained by the response or logger stay charged.
     // A long SSE response does not extend the handler's temporary allowance.
@@ -352,7 +370,9 @@ async fn admitted(
 #[derive(Debug)]
 pub(crate) struct BodyTooLarge;
 impl std::fmt::Display for BodyTooLarge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("http: request body too large") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("http: request body too large")
+    }
 }
 impl std::error::Error for BodyTooLarge {}
 
@@ -372,7 +392,8 @@ pub(crate) fn rejected(status: u16, message: &'static str) -> Response {
         Bytes::from(serde_json::json!({"error": message}).to_string()),
         JSON_UTF8,
     );
-    response.extensions_mut().insert(IngressRejection);
+    if status == 408 { response.extensions_mut().insert(IngressRejection); }
+    if status == 503 { response.extensions_mut().insert(BudgetRejection); }
     response
 }
 
@@ -486,7 +507,11 @@ async fn buffer(
 pub(crate) struct BodyBudget(Arc<Mutex<Accounting>>, Pool);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pool { Shared, Proxy, Management }
+enum Pool {
+    Shared,
+    Proxy,
+    Management,
+}
 
 #[derive(Debug, Default)]
 struct Accounting {
@@ -500,11 +525,14 @@ struct Accounting {
 
 impl BodyBudget {
     fn new(limit: Option<usize>) -> Self {
-        Self(Arc::new(Mutex::new(Accounting {
-            limit,
-            management_reserve: MANAGEMENT_RESERVE,
-            ..Accounting::default()
-        })), Pool::Shared)
+        Self(
+            Arc::new(Mutex::new(Accounting {
+                limit,
+                management_reserve: MANAGEMENT_RESERVE,
+                ..Accounting::default()
+            })),
+            Pool::Shared,
+        )
     }
 
     fn set_limit(&self, limit: Option<usize>) {
@@ -539,12 +567,17 @@ impl Reservation {
             let mut accounting = budget.0.lock().unwrap_or_else(PoisonError::into_inner);
             let used = accounting.used.checked_add(additional).ok_or(())?;
             let proxy_used = accounting.proxy_used.checked_add(additional).ok_or(())?;
-            if accounting.limit.is_some_and(|limit| used > limit ||
-                (budget.1 == Pool::Proxy && proxy_used > limit.saturating_sub(accounting.management_reserve))) {
+            if accounting.limit.is_some_and(|limit| {
+                used > limit
+                    || (budget.1 == Pool::Proxy
+                        && proxy_used > limit.saturating_sub(accounting.management_reserve))
+            }) {
                 return Err(());
             }
             accounting.used = used;
-            if budget.1 == Pool::Proxy { accounting.proxy_used = proxy_used; }
+            if budget.1 == Pool::Proxy {
+                accounting.proxy_used = proxy_used;
+            }
             #[cfg(test)]
             {
                 accounting.peak = accounting.peak.max(used);
@@ -560,7 +593,9 @@ impl Drop for Reservation {
         if let Some(budget) = &self.budget {
             let mut accounting = budget.0.lock().unwrap_or_else(PoisonError::into_inner);
             accounting.used -= self.bytes;
-            if budget.1 == Pool::Proxy { accounting.proxy_used -= self.bytes; }
+            if budget.1 == Pool::Proxy {
+                accounting.proxy_used -= self.bytes;
+            }
         }
     }
 }
