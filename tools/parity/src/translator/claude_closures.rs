@@ -7,18 +7,8 @@ use serde_json::Value;
 pub(super) fn closes_calls(event: &str) -> bool {
     event
         .strip_prefix("data:")
-        .and_then(|data| {
-            open_ferry_translate::json::exact::from_slice(open_ferry_translate::go::trim_space(
-                data.as_bytes(),
-            ))
-            .ok()
-        })
-        .is_some_and(|data| {
-            matches!(
-                data["type"].as_str(),
-                Some("message_stop" | "content_block_start")
-            )
-        })
+        .and_then(|data| open_ferry_translate::json::first_string_field(data.as_bytes(), "type"))
+        .is_some_and(|kind| matches!(kind.as_str(), "message_stop" | "content_block_start"))
 }
 
 fn tool_frame(frame: &Value) -> bool {
@@ -245,6 +235,24 @@ mod tests {
         data.into_iter()
             .map(|data| json!({"event":data["type"],"data":data}))
             .collect()
+    }
+
+    #[test]
+    fn closing_events_use_the_first_lenient_type_field() {
+        for event in [
+            r#"data: {"type":"message_stop"} trailing"#,
+            r#"data:{"type":"content_block_start","type":"other"}"#,
+            r#"data:{"type":"message_stop","unfinished":"#,
+        ] {
+            assert!(closes_calls(event), "{event}");
+        }
+        for event in [
+            r#"data:{"type":"other","type":"message_stop"}"#,
+            r#"data:0 {"type":"message_stop"}"#,
+            r#"data:[] {"type":"message_stop"}"#,
+        ] {
+            assert!(!closes_calls(event), "{event}");
+        }
     }
 
     #[test]
