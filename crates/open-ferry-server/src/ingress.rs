@@ -211,15 +211,28 @@ pub async fn after_management_auth(request: Request, next: Next) -> Response {
     }
 }
 
-/// OAuth callbacks accept at most 64 KiB, without using the authenticated pool.
+/// GET callbacks read only queries (v8.0.36 server_routes.go:153-184).
+/// POST callbacks share 2 MiB across both listeners, separate from authenticated
+/// uploads: 32 simultaneous maximum 64 KiB code/state/redirect JSON payloads.
 pub async fn public_request(request: Request, next: Next) -> Response {
+    if request.method() == Method::GET || request.method() == Method::HEAD {
+        return next.run(request).await;
+    }
+    static CALLBACK_POOL: std::sync::OnceLock<BodyBudget> = std::sync::OnceLock::new();
+    let pool = CALLBACK_POOL.get_or_init(|| {
+        let budget = BodyBudget::new(Some(2 << 20));
+        budget.0.lock().unwrap_or_else(PoisonError::into_inner).management_reserve = 0;
+        budget
+    });
     let mut limits = request
         .extensions()
         .get::<Ingress>()
         .map(Ingress::limits)
         .unwrap_or_default();
     limits.buffered_body_bytes = None;
-    layer(State(Ingress::new(limits, 64 << 10)), request, next).await
+    let mut callbacks = Ingress::new(limits, 64 << 10);
+    callbacks.budget = pool.clone();
+    layer(State(callbacks), request, next).await
 }
 
 #[derive(Default)]
