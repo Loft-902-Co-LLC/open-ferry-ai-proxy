@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_refresh.go and
-// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.32, MIT).
+// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Token refresh: the background loop that refreshes OAuth credentials
@@ -92,6 +92,10 @@ const REFRESH_MAX_CONCURRENCY: usize = 16;
 const REFRESH_PENDING_BACKOFF: Duration = Duration::from_secs(60);
 /// The wait after a failed refresh (upstream's `refreshFailureBackoff`).
 const REFRESH_FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
+/// Refresh well before Codex's nominal ten-day JWT expiry, since upstream can
+/// invalidate the bearer earlier. SIWC retains its separate five-minute lead.
+pub const CODEX_OUTER_REFRESH_LEAD: Duration = Duration::from_secs(96 * 3600);
 /// The first wait after `invalid_grant` (upstream's
 /// `invalidGrantBackoffBase`).
 const INVALID_GRANT_BACKOFF_BASE: Duration = Duration::from_secs(60);
@@ -284,6 +288,43 @@ fn is_disabled(auth: &Auth) -> bool {
     auth.disabled || auth.status == Status::Disabled
 }
 
+/// A committed stream's 401 cannot retry inline. Reject its current bearer and
+/// wake background refresh, preserving an existing failure backoff and the
+/// terminal refresh-token failure state. Called under the manager state lock.
+pub(super) fn schedule_unauthorized_refresh(
+    auth: &mut Auth,
+    result: &super::CallResult,
+    now: Timestamp,
+    was_terminal: bool,
+) -> bool {
+    if was_terminal
+        || result.success
+        || !has_refresh_credential(auth)
+        || super::classify::should_skip_credential_cooldown(result.error.as_ref())
+        || !result.error.as_ref().is_some_and(|error| {
+            error.http_status == 401 || is_unauthorized_error(ErrView::Auth(error))
+        })
+    {
+        return false;
+    }
+    let token = access_token(auth);
+    if !token.is_empty() {
+        auth.rejected_access_token = token;
+    }
+    if non_zero(auth.next_refresh_after).is_none() {
+        auth.next_refresh_after = Some(
+            if non_zero(auth.last_refreshed_at)
+                .is_some_and(|last| now - last < delta(REFRESH_FAILURE_BACKOFF))
+            {
+                add(now, REFRESH_FAILURE_BACKOFF)
+            } else {
+                now
+            },
+        );
+    }
+    true
+}
+
 /// Whether a credential should refresh now (upstream's `shouldRefresh`).
 /// `lead` is how long before expiry its executor refreshes, if it does.
 pub(crate) fn should_refresh(auth: &Auth, lead: Option<Duration>, now: Timestamp) -> bool {
@@ -293,7 +334,7 @@ pub(crate) fn should_refresh(auth: &Auth, lead: Option<Duration>, now: Timestamp
     if refresh_held(auth, now) {
         return false;
     }
-    if auth.siwc_refresh_due_at(now).is_some() {
+    if auth.outer_refresh_due_at(now, lead).is_some() || auth.siwc_refresh_due_at(now).is_some() {
         return [
             auth.outer_refresh_due_at(now, lead),
             auth.siwc_refresh_due_at(now),
@@ -345,7 +386,7 @@ pub(crate) fn next_refresh_check_at(
     {
         return Some(held);
     }
-    if auth.siwc_refresh_due_at(now).is_some() {
+    if auth.outer_refresh_due_at(now, lead).is_some() || auth.siwc_refresh_due_at(now).is_some() {
         return [
             auth.outer_refresh_due_at(now, lead),
             auth.siwc_refresh_due_at(now),
@@ -403,7 +444,7 @@ fn next_check_for_entry(
 impl Auth {
     /// Due time for the refreshable outer Codex partition. The outer metadata
     /// refresh timestamp wins over runtime time so SIWC rotations cannot
-    /// postpone the outer interval. `None` lead uses Codex's 24-hour default.
+    /// postpone the outer interval. `None` lead uses Codex's 96-hour default.
     pub fn outer_refresh_due_at(
         &self,
         now: Timestamp,
@@ -411,6 +452,10 @@ impl Auth {
     ) -> Option<Timestamp> {
         if !crate::auth::codex_refresh::is_codex_auth(self) || refresh_token(self).is_empty() {
             return None;
+        }
+        let token = self.outer_access_token();
+        if token.is_empty() || self.rejected_access_token == token {
+            return Some(now);
         }
         if self.codex_refresh_failure.as_ref().is_some_and(|failure| {
             failure.partition == crate::auth::CodexCredentialPartition::Outer
@@ -428,7 +473,7 @@ impl Auth {
                 sub(expiry, interval).min(interval_due)
             })
         } else {
-            let lead = lead.unwrap_or(Duration::from_secs(24 * 3600));
+            let lead = lead.unwrap_or(CODEX_OUTER_REFRESH_LEAD);
             if lead.is_zero() && expiry.is_none() {
                 return None;
             }
@@ -2300,7 +2345,7 @@ impl Manager {
     }
 
     /// Marks `failed_token` as refused by the provider while it is still the
-    /// credential's access token and carries no expiry of its own, so the
+    /// credential's access token, regardless of its nominal expiry, so the
     /// credential reads as expired, and isn't picked, until a refresh works
     /// or its tokens change (upstream's `markRejectedAccessToken`).
     pub(crate) fn mark_rejected_access_token(&self, id: &str, failed_token: &str) {
@@ -2309,8 +2354,9 @@ impl Manager {
         let Some(entry) = state.auths.get_mut(id) else {
             return;
         };
-        if access_token(&entry.auth) != failed_token
-            || entry.auth.access_token_expiration_time().is_some()
+        if failed_token.is_empty()
+            || access_token(&entry.auth) != failed_token
+            || entry.auth.rejected_access_token == failed_token
         {
             return;
         }

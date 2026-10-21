@@ -7,7 +7,7 @@
 // internal/config/config_normalization.go, internal/modelconfig/model_info.go,
 // ParseSuffix in internal/thinking/suffix.go, the per-account settings read
 // in internal/watcher/synthesizer/file.go and helpers.go, and the plan claim
-// in internal/auth/codex/jwt_parser.go (v8.0.32, MIT).
+// in internal/auth/codex/jwt_parser.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which models a credential serves, and registering them.
@@ -50,8 +50,8 @@
 //!   aliases from attributes its file loader sets from the credential's file.
 //!   When an attribute is missing, they are read from the metadata here, as
 //!   that loader reads them: the plan type from `plan_type` or the
-//!   `id_token` claims; the excluded models from `excluded_models`, merged
-//!   with the global list; the aliases from `model_aliases`.
+//!   `id_token` claims; credential-owned exclusions from `excluded_models`,
+//!   overriding the global list; the aliases from `model_aliases`.
 //! - Of an `id_token`'s claims, only the plan type is checked; upstream also
 //!   rejects claims whose other fields have the wrong type.
 //! - The rules' maps are looked up by channel, also matching a key that
@@ -524,7 +524,7 @@ fn auth_models_gated(
         go::to_lower(auth.provider.trim())
     };
     let mut excluded = oauth_excluded_models(rules, &provider, kind);
-    if let Some(list) = credential_excluded_models(auth, rules, &provider) {
+    if let Some(list) = credential_excluded_models(auth) {
         excluded = list;
     }
 
@@ -831,39 +831,20 @@ fn oauth_excluded_models(rules: &RegistrationRules, provider: &str, kind: &str) 
     channel_entries(&rules.oauth_excluded_models, &go::to_lower(provider.trim())).to_vec()
 }
 
-/// The credential's own complete exclusion list, if it has one: its
-/// `excluded_models` attribute, a comma-separated list; or, without one, the
-/// `excluded_models` list in its metadata merged with the global list.
-fn credential_excluded_models(
-    auth: &Auth,
-    rules: &RegistrationRules,
-    provider: &str,
-) -> Option<Vec<String>> {
+/// The credential's own rules, if nonempty. Global inheritance is resolved by
+/// the caller against its current registration rules, never merged here.
+fn credential_excluded_models(auth: &Auth) -> Option<Vec<String>> {
     if let Some(value) = auth.attributes.get("excluded_models") {
-        if value.trim().is_empty() {
-            return None;
-        }
-        return Some(value.split(',').map(str::to_owned).collect());
+        let models: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_owned)
+            .collect();
+        return (!models.is_empty()).then_some(models);
     }
-    let raw = auth
-        .metadata
-        .get("excluded_models")
-        .or_else(|| auth.metadata.get("excluded-models"));
-    let Some(Value::Array(items)) = raw else {
-        return None;
-    };
-    let mut excluded: Vec<String> = items
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if excluded.is_empty() {
-        return None;
-    }
-    excluded.extend_from_slice(channel_entries(&rules.oauth_excluded_models, provider));
-    Some(excluded)
+    let (models, _) = crate::auth::synthesizer::file::extract_excluded_models(&auth.metadata);
+    (!models.is_empty()).then_some(models)
 }
 
 /// The entry `entries[i]` for a credential from the config with

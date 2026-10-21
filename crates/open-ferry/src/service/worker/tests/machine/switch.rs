@@ -737,9 +737,18 @@ mod held_refresh {
         let (dir, prepared) = super::super::prepared::prepared(false);
         let file = dir.path().join("auth").join("codex-a.json");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // Keep automatic refresh outside its 96-hour lead so only the forced
+        // refresh below reaches the held executor.
         std::fs::write(
             &file,
-            r#"{"type":"codex","email":"a@example.com","access_token":"access-0","refresh_token":"refresh-0"}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "type": "codex",
+                "email": "a@example.com",
+                "access_token": "access-0",
+                "refresh_token": "refresh-0",
+                "expired": (chrono::Utc::now() + chrono::TimeDelta::days(10)).to_rfc3339(),
+            }))
+            .unwrap(),
         )
         .unwrap();
         let held = Arc::new(Held::default());
