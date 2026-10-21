@@ -420,10 +420,10 @@ export class ConfigEditor {
             groups.push({ ...(baseUrl === undefined ? {} : { "base-url": baseUrl }), keys: [key] });
           } else {
             const group = record(groups[at]);
-            for (const name of Object.keys(group)) {
-              if (name !== "keys") delete key[name];
-            }
-            groups[at] = { ...group, keys: [...(Array.isArray(group.keys) ? group.keys : []), key] };
+            const added = Object.fromEntries(Object.entries(key)
+              .filter(([name]) => name === "keys" || !Object.hasOwn(group, name)));
+            const keys: unknown[] = Array.isArray(group.keys) ? group.keys : [];
+            groups[at] = { ...group, keys: [...keys, added] };
           }
         }
         target = `${V8_CONFIG}/api-keys/${family}`;
