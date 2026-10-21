@@ -781,3 +781,101 @@ async fn ingress_capacity_reload_wakes_a_full_listener() {
     within(control.release()).await;
     within(server).await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn ingress_finite_h2_response_reclaims_its_slot_after_the_producer_finishes() {
+    let served = start_limited(
+        limits(),
+        None,
+        Some(Router::new().route("/big", get(|| async { "x".repeat(4096) }))),
+    );
+    let mut stream = raw_h2(&served, 1).await;
+    h2_get(&mut stream, 1, "/big").await;
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        if frame.0 == 0 {
+            assert_eq!(frame.3.len(), 1);
+            break;
+        }
+    }
+    settle().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(4)).await;
+    settle().await;
+    tokio::time::resume();
+    assert_eq!(
+        served.control.live_count(),
+        0,
+        "finished response retained its admission slot"
+    );
+    drop(stream);
+    within(served.control.release()).await;
+    within(served.server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn ingress_recent_connection_progress_does_not_inherit_an_old_stream_deadline() {
+    let gate = Gate::default();
+    let handler_gate = gate.clone();
+    let routes = sse_routes().route(
+        "/big",
+        get(move || {
+            let gate = handler_gate.clone();
+            async move {
+                gate.started.notify_one();
+                gate.proceed.notified().await;
+                "b".repeat(65534)
+            }
+        }),
+    );
+    let served = start_limited(limits(), None, Some(routes));
+    let mut stream = raw_h2(&served, 1).await;
+    h2_get(&mut stream, 1, "/sse").await;
+    loop {
+        if read_h2_packet(&mut stream).await.0 == 0 {
+            break;
+        }
+    }
+    h2_get(&mut stream, 3, "/big").await;
+    within(gate.started.notified()).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(1750)).await;
+    tokio::time::resume();
+    h2_window(&mut stream, 3, 65533).await;
+    gate.proceed.notify_one();
+    let mut bytes = 0;
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        if frame.0 == 0 && frame.2 == 3 {
+            bytes += frame.3.len();
+            if frame.1 & 1 != 0 {
+                break;
+            }
+        }
+    }
+    assert_eq!(bytes, 65534);
+    assert_eq!(traffic(&served).unwrap().connection_send_window(), 0);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(500)).await;
+    settle().await;
+    tokio::time::resume();
+    assert_eq!(
+        served.control.live_count(),
+        1,
+        "a recent connection-window stall used another stream's old clock"
+    );
+    h2_window(&mut stream, 0, 65535).await;
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        if frame.0 == 3 && frame.2 == 1 {
+            break;
+        }
+    }
+    h2_get(&mut stream, 5, "/big").await;
+    within(gate.started.notified()).await;
+    assert_eq!(served.control.live_count(), 1);
+    drop(stream);
+    until(|| served.control.live_count() == 0).await;
+    within(served.control.release()).await;
+    within(served.server).await.unwrap().unwrap();
+}
