@@ -2638,3 +2638,39 @@ fn removes_access_annotations_but_keeps_names_and_literal_values_issue6778() {
     assert_eq!(out["properties"]["literal"]["example"], literal);
     assert_eq!(out["properties"]["literal"]["examples"], json!([literal]));
 }
+
+#[test]
+fn every_path_writer_preflights_depth_before_recursing() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            for count in [128, 5_000, 20_000] {
+                let path = vec!["p"; count].join(".");
+                let mut doc = json!({});
+                set(&mut doc, &path, json!({"type":"string"}));
+                assert_eq!(doc, json!({}), "{count} path keys");
+            }
+            let mut doc = json!({});
+            set(
+                &mut doc,
+                &vec!["p"; 127].join("."),
+                json!({"type":"string"}),
+            );
+            assert!(local_refs::fits_at_depth(&doc, 0));
+            assert!(!doc.as_object().unwrap().is_empty());
+            assert!(!serde_json::to_vec(&doc).unwrap().is_empty());
+            drop(doc);
+
+            // Definition-shaped keys in copied literal data still count.
+            let mut literal = json!({});
+            for _ in 0..126 {
+                literal = json!({"$defs":literal});
+            }
+            let mut doc = json!({});
+            set(&mut doc, "example.value", literal);
+            assert_eq!(doc, json!({}));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

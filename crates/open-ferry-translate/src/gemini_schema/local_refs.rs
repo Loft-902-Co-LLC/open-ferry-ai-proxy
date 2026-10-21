@@ -120,6 +120,10 @@ fn node_count(value: &Value, limit: usize, for_clean: bool) -> usize {
 // Iterative preflight also covers literal subtrees, which are cloned verbatim.
 // Definition containers discarded by cleaning do not contribute to output depth.
 fn structural_depth(value: &Value) -> usize {
+    container_depth(value, true)
+}
+
+fn container_depth(value: &Value, discard_definitions: bool) -> usize {
     let mut maximum = 0;
     let mut stack = vec![(value, 0, false, false)];
     while let Some((value, depth, name_map, literal)) = stack.pop() {
@@ -130,7 +134,11 @@ fn structural_depth(value: &Value) -> usize {
                     return maximum;
                 }
                 for (key, value) in map {
-                    if !literal && !name_map && matches!(key.as_str(), "$defs" | "definitions") {
+                    if discard_definitions
+                        && !literal
+                        && !name_map
+                        && matches!(key.as_str(), "$defs" | "definitions")
+                    {
                         continue;
                     }
                     stack.push((
@@ -159,7 +167,10 @@ fn structural_depth(value: &Value) -> usize {
 }
 
 pub(super) fn fits_at_depth(value: &Value, ancestors: usize) -> bool {
-    ancestors.saturating_add(structural_depth(value)) <= MAX_OUTPUT_DEPTH
+    // Path writes may carry literal data too, so count even definition-shaped
+    // fields here; the inliner's target preflight can discard schema definitions.
+    ancestors <= MAX_OUTPUT_DEPTH
+        && ancestors.saturating_add(container_depth(value, false)) <= MAX_OUTPUT_DEPTH
 }
 
 fn depth_hint(value: &Value) -> Map<String, Value> {

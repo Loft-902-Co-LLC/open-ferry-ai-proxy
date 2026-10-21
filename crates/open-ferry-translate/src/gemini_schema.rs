@@ -1149,6 +1149,11 @@ fn merge_conditionals(doc: &mut Value, budget: &mut SchemaCopyBudget) {
             let relative = format!("properties.{}", escape_key(key));
             let destination = join_path(&parent, &relative);
             let path_keys = keys(&destination);
+            if !local_refs::fits_at_depth(value, path_keys.len()) {
+                // Like an exhausted copy allowance, omit this entire branch
+                // and all later conditional promotions before building paths.
+                return;
+            }
             if target.contains(&path_keys) {
                 continue;
             }
@@ -1266,8 +1271,12 @@ impl RequiredNames {
 /// Fills what is missing at `destination` from `incoming`, recursing into
 /// objects, without replacing anything already there.
 fn merge_missing_schema_at_path(doc: &mut Value, destination: &str, incoming: &Value) {
+    let path_keys = keys(destination);
+    if !local_refs::fits_at_depth(incoming, path_keys.len()) {
+        return;
+    }
     let Some(existing) = get(doc, destination) else {
-        set(doc, destination, incoming.clone());
+        set_keys(doc, &path_keys, incoming.clone());
         return;
     };
     let (true, Value::Object(incoming)) = (existing.is_object(), incoming) else {
@@ -1334,14 +1343,14 @@ fn required_only_branch_cost(
         let name = str_of(Some(name));
         let path = format!("properties.{}", escape_key(&name));
         let path_keys = keys(&path);
+        let property = get(parent_props, &escape_key(&name)).expect("checked required name");
+        let destination_depth = keys(&join_path(destination, &path)).len();
+        if !local_refs::fits_at_depth(property, destination_depth) {
+            return BranchCopyCost::OverBudget;
+        }
         // Repeated overwrites add no property; an sjson -1 append still does.
         if !charged.insert(name.clone()) && target.contains(&path_keys) {
             continue;
-        }
-        let property = get(parent_props, &escape_key(&name)).expect("checked required name");
-        // Unlike upward merges, materialization copies a property deeper.
-        if !local_refs::fits_at_depth(property, keys(&join_path(destination, &path)).len()) {
-            return BranchCopyCost::OverBudget;
         }
         let property_cost = property_costs
             .entry(name.to_string())
@@ -2065,7 +2074,12 @@ fn build_index(key: &str) -> Option<usize> {
 /// indices and object keys alike.
 pub(crate) fn set(doc: &mut Value, path: &str, new: Value) {
     if !path.is_empty() {
-        set_keys(doc, &keys(path), new);
+        let path_keys = keys(path);
+        // An escaped property name may decode into thousands of path keys.
+        // Gate every writer before set_keys/built recurse, including leaf edits.
+        if local_refs::fits_at_depth(&new, path_keys.len()) {
+            set_keys(doc, &path_keys, new);
+        }
     }
 }
 
