@@ -65,15 +65,20 @@ pub fn repair_lossy_plugin_reencode(
             source = steps[index]["body"].as_str()?;
         }
         let original = plugin_values(source)?;
-        let rust_value = plugin_values(rust)?;
-        if rust_value != original {
+        let rust_values = plugin_values(rust)?;
+        if rust_values != original {
             return None;
         }
         if go == rust {
             continue;
         }
+        let (PluginValues::Mapping(go_value), PluginValues::Mapping(rust_value)) =
+            (plugin_values(go)?, rust_values)
+        else {
+            return None;
+        };
         let sources = [(source, vec![configs_range(source)?])];
-        let expected = scalar_losses(&plugin_values(go)?, &rust_value)?;
+        let expected = scalar_losses(&go_value, &rust_value)?;
         let (go_range, rust_range) = (configs_range(go)?, configs_range(rust)?);
         let go_lines: Vec<&str> = go.split_inclusive('\n').collect();
         let rust_lines: Vec<&str> = rust.split_inclusive('\n').collect();
@@ -142,14 +147,25 @@ pub fn repair_lossy_plugin_reencode(
     Some(Deviation::UpstreamLossyPluginReencode)
 }
 
-fn plugin_values(text: &str) -> Option<AnyValue> {
+#[derive(PartialEq)]
+enum PluginValues {
+    Missing,
+    Mapping(AnyValue),
+}
+
+fn plugin_values(text: &str) -> Option<PluginValues> {
     let AnyValue::Map(root) = AnyValue::parse_yaml(text).ok()? else {
         return None;
     };
-    let AnyValue::Map(plugins) = root.get("plugins")? else {
+    let Some(plugins) = root.get("plugins") else {
+        return Some(PluginValues::Missing);
+    };
+    let AnyValue::Map(plugins) = plugins else {
         return None;
     };
-    let value = plugins.get("configs")?;
+    let Some(value) = plugins.get("configs") else {
+        return Some(PluginValues::Missing);
+    };
     fn supported(value: &AnyValue) -> bool {
         match value {
             AnyValue::AnyMap => false,
@@ -158,7 +174,8 @@ fn plugin_values(text: &str) -> Option<AnyValue> {
             _ => true,
         }
     }
-    (matches!(value, AnyValue::Map(_)) && supported(value)).then(|| value.clone())
+    (matches!(value, AnyValue::Map(_)) && supported(value))
+        .then(|| PluginValues::Mapping(value.clone()))
 }
 
 fn scalar_losses(go: &AnyValue, rust: &AnyValue) -> Option<usize> {
