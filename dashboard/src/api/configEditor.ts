@@ -324,7 +324,9 @@ export class ConfigEditor {
       tree: changedTree(this.base?.tree, changes),
       etag: answer.headers.get("etag") ?? fresh.etag,
     };
-    for (const change of changes) this.drafts.delete(change.path);
+    // A field may be edited again before its invalidated query renders.
+    // Its accepted value and response version are already one new base.
+    for (const change of changes) if (this.drafts.has(change.path)) this.drafts.set(change.path, this.base);
     this.store.changed();
     return answer.data;
   }
