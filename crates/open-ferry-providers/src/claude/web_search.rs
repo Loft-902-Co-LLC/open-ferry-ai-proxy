@@ -8,7 +8,7 @@
 //! The store is in-process only; expired entries are swept on access rather
 //! than by upstream's background timer. Entry count, not bytes, is bounded.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -153,6 +153,8 @@ struct Entry {
 struct Cache {
     entries: HashMap<String, Entry>,
     clock: u64,
+    recency: BTreeSet<(u64, String)>,
+    expiry: BTreeSet<(Instant, String)>,
 }
 
 impl Cache {
@@ -163,39 +165,62 @@ impl Cache {
         }
         Some(digest(format!("{}\0{id}", scope.key.trim()).as_bytes()))
     }
+    fn remove(&mut self, key: &str) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.recency.remove(&(entry.used, key.to_owned()));
+            self.expiry.remove(&(entry.expires, key.to_owned()));
+        }
+    }
+    fn purge_expired(&mut self, now: Instant) {
+        while let Some((expires, key)) = self.expiry.first() {
+            if *expires > now {
+                break;
+            }
+            let key = key.clone();
+            self.remove(&key);
+        }
+    }
     fn put(&mut self, scope: &Scope, id: &str, content: &Value, now: Instant) {
         let Some(key) = Self::key(scope, id) else {
             return;
         };
-        self.entries.retain(|_, entry| entry.expires > now);
+        self.remove(&key);
+        // Each expired entry is removed once; live entries are never scanned.
+        self.purge_expired(now);
         self.clock += 1;
+        let expires = now + scope.ttl;
+        self.recency.insert((self.clock, key.clone()));
+        self.expiry.insert((expires, key.clone()));
         self.entries.insert(
             key,
             Entry {
                 content: content.clone(),
-                expires: now + scope.ttl,
+                expires,
                 used: self.clock,
             },
         );
         while self.entries.len() > scope.limit {
-            let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.used)
-                .map(|(key, _)| key.clone())
-            else {
+            let Some((_, oldest)) = self.recency.first().cloned() else {
                 break;
             };
-            self.entries.remove(&oldest);
+            self.remove(&oldest);
         }
     }
     fn get(&mut self, scope: &Scope, id: &str, now: Instant) -> Option<Value> {
         let key = Self::key(scope, id)?;
-        self.entries.retain(|_, entry| entry.expires > now);
+        let entry = self.entries.get(&key)?;
+        if entry.expires <= now {
+            self.remove(&key);
+            return None;
+        }
+        self.recency.remove(&(entry.used, key.clone()));
+        self.expiry.remove(&(entry.expires, key.clone()));
         let entry = self.entries.get_mut(&key)?;
         self.clock += 1;
         entry.used = self.clock;
         entry.expires = now + scope.ttl;
+        self.recency.insert((entry.used, key.clone()));
+        self.expiry.insert((entry.expires, key));
         Some(entry.content.clone())
     }
 }
@@ -376,6 +401,39 @@ mod tests {
         let large = json!("x".repeat(5 << 20));
         cache.put(&scope, "large", &large, now);
         assert_eq!(cache.get(&scope, "large", now), Some(large));
+    }
+
+    #[test]
+    fn reads_expire_only_the_requested_entry_and_indexes_stay_bounded() {
+        let mut cache = Cache::default();
+        let mut scope = scope_key("lazy-expiry");
+        scope.ttl = Duration::from_secs(60);
+        scope.limit = 2;
+        let now = Instant::now();
+        cache.put(&scope, "live", &json!([1]), now);
+        let mut short = scope.clone();
+        short.ttl = Duration::from_secs(1);
+        cache.put(&short, "expired", &json!([2]), now);
+        let later = now + Duration::from_secs(2);
+        for _ in 0..1000 {
+            assert!(cache.get(&scope, "live", later).is_some());
+        }
+        // Reading another key does not sweep the expired one, and repeated
+        // sliding reads retain exactly one expiry/recency record per entry.
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.expiry.len(), 2);
+        assert_eq!(cache.recency.len(), 2);
+        cache.put(&scope, "new", &json!([3]), later);
+        assert!(cache.get(&scope, "live", later).is_some());
+        assert!(cache.get(&scope, "expired", later).is_none());
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.expiry.len(), 2);
+        assert_eq!(cache.recency.len(), 2);
+        // Overwriting a key removes its old index records, too.
+        cache.put(&scope, "new", &json!([4]), later);
+        assert_eq!(cache.get(&scope, "new", later), Some(json!([4])));
+        assert_eq!(cache.expiry.len(), 2);
+        assert_eq!(cache.recency.len(), 2);
     }
 
     #[test]
