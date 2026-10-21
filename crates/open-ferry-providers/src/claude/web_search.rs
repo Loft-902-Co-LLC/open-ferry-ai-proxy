@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use open_ferry_core::auth::Auth;
-use open_ferry_core::config::Config;
+use open_ferry_core::config::{CodexWebSearchResultCacheConfig, Config};
 use open_ferry_core::exec::{Format, Options, Request};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -28,42 +28,17 @@ fn contains_marker(data: &[u8]) -> bool {
         .any(|part| part == RESULT_MARKER)
 }
 
-/// The request is already a Value. Search its serialized bytes without
-/// allocating another body, stopping at the first marker before taking the
-/// cache lock or walking messages for restoration.
+/// A decoded JSON body contains the quoted marker exactly when a key or
+/// string value equals it. Avoid serializing another body for this guard.
 fn value_contains_marker(value: &Value) -> bool {
-    use std::io::{self, Write};
-    #[derive(Default)]
-    struct Marker {
-        matched: usize,
-        found: bool,
+    match value {
+        Value::String(value) => value == "web_search_tool_result",
+        Value::Array(values) => values.iter().any(value_contains_marker),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| key == "web_search_tool_result" || value_contains_marker(value)),
+        _ => false,
     }
-    impl Write for Marker {
-        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-            if self.found {
-                return Err(io::Error::other("marker found"));
-            }
-            for byte in data {
-                if *byte == RESULT_MARKER[self.matched] {
-                    self.matched += 1;
-                    if self.matched == RESULT_MARKER.len() {
-                        self.found = true;
-                        return Err(io::Error::other("marker found"));
-                    }
-                } else {
-                    // Only the leading/trailing quote can overlap a prefix.
-                    self.matched = usize::from(*byte == RESULT_MARKER[0]);
-                }
-            }
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut marker = Marker::default();
-    let _ = serde_json::to_writer(&mut marker, value);
-    marker.found
 }
 
 #[cfg(test)]
@@ -82,6 +57,7 @@ pub(crate) struct Scope {
     key: String,
     ttl: Duration,
     limit: usize,
+    generation: u64,
 }
 
 // Matches upstream: file-derived auth IDs survive token replacement, and
@@ -132,7 +108,14 @@ pub(crate) fn scope(
     if identity.is_empty() {
         return None;
     }
+    let settings = Settings::from(config);
+    let cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+    // A stale executor snapshot cannot create a scope after a config change.
+    if cache.settings.is_some_and(|current| current != settings) {
+        return None;
+    }
     Some(Scope {
+        generation: cache.generation,
         key: format!("claude:{}:{session}", digest(identity.as_bytes())),
         ttl: config.effective_ttl(),
         limit: config.effective_limit(),
@@ -146,6 +129,33 @@ fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Apply the authoritative service config at startup and on reload. Dropping
+/// all entries on a policy change also prevents old attempts from retaining
+/// content or restoring it after a disable/re-enable cycle.
+pub fn apply_config(config: &CodexWebSearchResultCacheConfig) {
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .configure(Settings::from(config));
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Settings {
+    enabled: bool,
+    ttl: Duration,
+    limit: usize,
+}
+
+impl From<&CodexWebSearchResultCacheConfig> for Settings {
+    fn from(config: &CodexWebSearchResultCacheConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            ttl: config.effective_ttl(),
+            limit: config.effective_limit(),
+        }
+    }
+}
+
 struct Entry {
     content: Value,
     expires: Instant,
@@ -157,9 +167,28 @@ struct Cache {
     clock: u64,
     recency: BTreeSet<(u64, String)>,
     expiry: BTreeSet<(Instant, String)>,
+    settings: Option<Settings>,
+    generation: u64,
 }
 
 impl Cache {
+    fn configure(&mut self, settings: Settings) {
+        if self.settings == Some(settings) {
+            return;
+        }
+        self.entries.clear();
+        self.recency.clear();
+        self.expiry.clear();
+        self.clock = 0;
+        self.generation += 1;
+        self.settings = Some(settings);
+    }
+    fn allows(&self, scope: &Scope) -> bool {
+        scope.generation == self.generation
+            && self.settings.is_none_or(|settings| {
+                settings.enabled && settings.ttl == scope.ttl && settings.limit == scope.limit
+            })
+    }
     fn key(scope: &Scope, id: &str) -> Option<String> {
         let id = id.trim();
         if id.is_empty() {
@@ -183,6 +212,9 @@ impl Cache {
         }
     }
     fn put(&mut self, scope: &Scope, id: &str, content: &Value, now: Instant) {
+        if !self.allows(scope) {
+            return;
+        }
         let Some(key) = Self::key(scope, id) else {
             return;
         };
@@ -209,6 +241,9 @@ impl Cache {
         }
     }
     fn get(&mut self, scope: &Scope, id: &str, now: Instant) -> Option<Value> {
+        if !self.allows(scope) {
+            return None;
+        }
         let key = Self::key(scope, id)?;
         let entry = self.entries.get(&key)?;
         if entry.expires <= now {
@@ -314,6 +349,7 @@ mod tests {
             key: key.to_owned(),
             ttl: Duration::from_secs(1800),
             limit: 1024,
+            generation: 0,
         }
     }
 
@@ -436,6 +472,60 @@ mod tests {
         assert_eq!(cache.get(&scope, "new", later), Some(json!([4])));
         assert_eq!(cache.expiry.len(), 2);
         assert_eq!(cache.recency.len(), 2);
+    }
+
+    #[test]
+    fn config_changes_purge_entries_and_reject_in_flight_scopes() {
+        let mut cache = Cache::default();
+        let mut scope = scope_key("config-reload");
+        let now = Instant::now();
+        let mut settings = Settings {
+            enabled: true,
+            ttl: scope.ttl,
+            limit: scope.limit,
+        };
+        cache.configure(settings);
+        scope.generation = cache.generation;
+        cache.put(&scope, "result", &json!([1]), now);
+        cache.configure(settings);
+        assert_eq!(cache.get(&scope, "result", now), Some(json!([1])));
+        // Disable, re-enable, shorten TTL, then shrink the count limit.
+        for next in [
+            Settings {
+                enabled: false,
+                ..settings
+            },
+            settings,
+            Settings {
+                ttl: Duration::from_secs(1),
+                ..settings
+            },
+            Settings {
+                ttl: Duration::from_secs(1),
+                limit: 1,
+                ..settings
+            },
+        ] {
+            let old = scope.clone();
+            cache.configure(next);
+            assert!(cache.entries.is_empty());
+            assert!(cache.expiry.is_empty());
+            assert!(cache.recency.is_empty());
+            assert!(cache.get(&old, "result", now).is_none());
+            cache.put(&old, "late-result", &json!([2]), now);
+            assert!(cache.entries.is_empty());
+            scope.generation = cache.generation;
+            scope.ttl = next.ttl;
+            scope.limit = next.limit;
+            cache.put(&scope, "result", &json!([3]), now);
+            assert_eq!(cache.get(&scope, "result", now).is_some(), next.enabled);
+            settings = next;
+        }
+        assert!(settings.enabled);
+        cache.put(&scope, "new", &json!([4]), now);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.get(&scope, "result", now).is_none());
+        assert!(cache.get(&scope, "new", now + scope.ttl).is_none());
     }
 
     #[test]

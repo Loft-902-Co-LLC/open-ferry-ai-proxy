@@ -1867,6 +1867,9 @@ impl Service {
     /// claude-cli, Gemini, Vertex AI, and the OpenAI-compatible ones (see
     /// [`Self::register_compat_executors`]).
     fn register_executors(&mut self) {
+        open_ferry_providers::claude::apply_web_search_cache_config(
+            &self.config.client.codex.web_search_result_cache,
+        );
         self.register_native_executors();
         self.register_compat_executors();
     }
@@ -3403,6 +3406,9 @@ impl Service {
         let applied_hash = sha256.clone();
         let previous = std::mem::replace(&mut self.config, config);
         let config = Arc::clone(&self.config);
+        open_ferry_providers::claude::apply_web_search_cache_config(
+            &config.client.codex.web_search_result_cache,
+        );
         self.log_level.set_debug(config.debug);
         if (&previous.host, previous.port, &previous.tls)
             != (&config.host, config.port, &config.tls)

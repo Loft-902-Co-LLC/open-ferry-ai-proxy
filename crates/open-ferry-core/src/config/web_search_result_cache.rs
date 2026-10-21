@@ -9,6 +9,8 @@ use std::fmt;
 use std::time::Duration;
 
 /// Settings at `client.codex.web-search-result-cache`.
+/// Memory is bounded by `limit` entries of upstream-sized results; there is
+/// no per-entry byte cap. Disabling or changing the policy purges the store.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CodexWebSearchResultCacheConfig {
     pub enabled: bool,

@@ -49,3 +49,4 @@ pub(crate) mod usage;
 mod web_search;
 
 pub use executor::ClaudeExecutor;
+pub use web_search::apply_config as apply_web_search_cache_config;
