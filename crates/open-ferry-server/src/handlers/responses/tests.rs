@@ -334,6 +334,23 @@ async fn forward_filters_upstream_private_events() {
     assert_eq!(body, format!("{CREATED}{COMPLETED}\n"));
 }
 
+#[tokio::test]
+async fn subscription_telemetry_is_filtered_for_all_clients() {
+    for codex in [false, true] {
+        for private in [
+            "event: response.subscription_usage\n\n",
+            "event: response.subscription_usage\ndata: {}\n\n",
+            "data: {\"type\":\"response.subscription_usage\"}\n\n",
+        ] {
+            let input = format!("{CREATED}{private}{COMPLETED}");
+            for split in 0..=input.len() {
+                let body = run(Framer::new(codex), vec![ok(&input[..split]), ok(&input[split..])]).await;
+                assert_eq!(body, format!("{CREATED}{COMPLETED}\n"), "{private} split {split}");
+            }
+        }
+    }
+}
+
 // TestForwardResponsesStreamExposesTerminalErrors
 #[tokio::test]
 async fn exposes_terminal_errors() {

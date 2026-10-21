@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/meta_executor_stream.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Translates Meta's event stream to the client's format, a line at a time.
@@ -72,6 +72,7 @@ pub(super) struct Setup {
 
 struct State {
     reader: LineReader,
+    telemetry: super::telemetry::Filter,
     translator: ResponseStream,
     apply_patch: apply_patch_responses::State,
     claude: claude_tokens::State,
@@ -103,6 +104,7 @@ impl State {
             claude_tokens::State::new(&setup.source_format, &Format::CODEX, &setup.response_format);
         Self {
             reader: LineReader::new(response),
+            telemetry: super::telemetry::Filter::default(),
             translator: setup.translator,
             apply_patch: setup.apply_patch,
             claude,
@@ -143,7 +145,8 @@ impl State {
         match self.reader.next_line().await {
             Some(Ok(line)) => {
                 let line = self.redact(line);
-                self.line(line).await
+                for line in self.telemetry.line(line) { self.line(line).await?; }
+                Ok(())
             }
             Some(Err(error)) => self.end(Some(error)).await,
             None => self.end(None).await,
@@ -161,7 +164,7 @@ impl State {
 
     /// Handles one line of Meta's stream.
     async fn line(&mut self, line: Vec<u8>) -> Result<(), ExecError> {
-        let Some(rest) = line.strip_prefix(b"data:") else {
+        let Some(rest) = trim_space(&line).strip_prefix(b"data:") else {
             return self.emit(&line).await;
         };
         let mut data = trim_space(rest).to_vec();
@@ -238,6 +241,7 @@ impl State {
     /// is the stream's last chunk.
     async fn end(&mut self, read_error: Option<LineError>) -> Result<(), ExecError> {
         self.finished = true;
+        if let Some(line) = self.telemetry.finish() { self.emit(&line).await?; }
         let (frames, bridge_error) = self.apply_patch.finish_stream();
         let mut chunks = Vec::new();
         for frame in frames {

@@ -98,6 +98,7 @@ mod completed;
 mod error;
 mod request;
 mod stream;
+mod telemetry;
 mod tools;
 
 /// The `alt` of a `/responses/compact` call.

@@ -1536,3 +1536,30 @@ async fn the_taps_see_the_answer_as_it_came() {
         assert!(raw.seen().contains(ECHOED), "{}", raw.seen());
     }
 }
+
+
+// TestMetaExecutor subscription telemetry stream and collected response paths.
+#[tokio::test]
+async fn subscription_telemetry_never_reaches_clients() {
+    for private in [
+        "event: response.subscription_usage\ndata: {\"remaining\":100}\n\n",
+        "event: response.subscription_usage\n\n",
+        "event: response.subscription_usage\ndata: {\ndata: \"subscription\":{}}\n\n",
+        "data: {\"type\":\"response.subscription_usage\",\"subscription\":{}}\n\n",
+        "event: telemetry\ndata: {\"subscription\":{\"remaining\":100}}\n\n",
+    ] {
+        let data = format!("{private}{}{private}", ok_stream("hello"));
+        let mock = Mock::start(Reply::sse(&data)).await;
+        let request = request("muse-spark-1.3", r#"{"input":"hi"}"#);
+        let response = executor().execute(api_key_auth(&mock.url), request.clone(), options("openai-response")).await.unwrap();
+        let payload = String::from_utf8(response.payload.to_vec()).unwrap();
+        assert!(payload.contains("hello"));
+        assert!(!payload.contains("subscription"));
+        let response = executor().execute_stream(api_key_auth(&mock.url), request, stream_options("openai-response")).await.unwrap();
+        let (payload, error) = collect(response).await;
+        assert!(error.is_none(), "{error:?}");
+        assert!(payload.contains("hello"));
+        assert!(!payload.contains("subscription"), "{payload}");
+        assert!(!payload.contains("event: telemetry"), "{payload}");
+    }
+}
