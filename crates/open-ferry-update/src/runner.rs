@@ -46,6 +46,7 @@ impl Runner for ProcessRunner {
     ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let mut command = tokio::process::Command::new(binary);
+            open_ferry_core::process_limits::restore_in_child(command.as_std_mut());
             command
                 .arg("--version")
                 .stdin(Stdio::null())

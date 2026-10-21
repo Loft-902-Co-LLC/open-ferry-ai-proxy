@@ -26,6 +26,7 @@ pub mod manager;
 pub mod models;
 pub mod multipart;
 pub mod observe;
+pub mod process_limits;
 pub mod registry;
 pub mod session;
 #[cfg(feature = "blue-green-test")]

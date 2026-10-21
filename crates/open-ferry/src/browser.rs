@@ -43,6 +43,7 @@ fn open_with(
 
 fn spawn(url: &str) -> io::Result<()> {
     let mut command = opener();
+    open_ferry_core::process_limits::restore_in_child(&mut command);
     let mut child = command
         .arg(url)
         .stdin(Stdio::null())

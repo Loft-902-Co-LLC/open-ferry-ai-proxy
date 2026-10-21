@@ -23,6 +23,7 @@ fn cap_from_limit(limit: u64) -> usize {
         .min(8192) as usize
 }
 
+#[cfg(any(unix, test))]
 fn raise_target(hard: u64, ceiling: u64) -> u64 { hard.min(ceiling) }
 
 #[cfg(target_os = "macos")]
@@ -50,18 +51,18 @@ pub(super) fn default_connection_cap() -> usize {
                 rlim_max: 0,
             };
             if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+                open_ferry_core::process_limits::remember_nofile_limit(limit);
                 if limit.rlim_cur < limit.rlim_max {
                     let raised = libc::rlimit {
                         rlim_cur: raise_target(limit.rlim_max, descriptor_ceiling()),
                         rlim_max: limit.rlim_max,
                     };
-                    let mut raised = raised;
-                    let mut result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) };
+                    let result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) };
                     #[cfg(target_os = "macos")]
-                    if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
-                        raised.rlim_cur = raised.rlim_cur.min(10240);
-                        result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) };
-                    }
+                    let (result, raised) = if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+                        let retried = libc::rlimit { rlim_cur: raised.rlim_cur.min(10240), rlim_max: raised.rlim_max };
+                        (unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &retried) }, retried)
+                    } else { (result, raised) };
                     if result == 0 {
                         limit = raised;
                     } else {
