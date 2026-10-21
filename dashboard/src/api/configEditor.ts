@@ -202,10 +202,6 @@ export class ConfigEditor {
   }
   /** No draft baseline is mutated here: the caller renders this single value. */
   readonly readValue = async <T>(path: string, signal?: AbortSignal): Promise<ConfigRead<T>> => {
-    if (path === CONFIG_YAML && this.recovery !== null) {
-      const answer = await this.response<T>(CONFIG_YAML, { signal });
-      return { data: answer.data, tree: undefined, etag: undefined, recovery: this.recovery };
-    }
     try {
       let fresh: Snapshot;
       try { fresh = await this.store.read(signal); }
@@ -233,11 +229,15 @@ export class ConfigEditor {
     }
   };
   readonly saveYaml = async (base: ConfigRead<unknown>, request: ApiRequest): Promise<unknown> => {
-    if (this.recovery !== null) {
-      const answer = await this.response(CONFIG_YAML, request);
-      this.recovery = null;
-      this.store.changed();
-      return answer.data;
+    if (base.recovery !== null) {
+      try { await this.store.read(); }
+      catch (error) {
+        if (!isBrokenConfig(error)) throw error;
+        const answer = await this.response(CONFIG_YAML, request);
+        this.store.changed();
+        return answer.data;
+      }
+      throw new RecoveryEnded();
     }
     if (base.etag === undefined) {
       if (this.versioned) throw new RecoveryEnded();
@@ -248,6 +248,7 @@ export class ConfigEditor {
     let fresh: Snapshot;
     try { fresh = await this.store.read(); }
     catch (error) {
+      if (isApiError(error) && isBrokenConfig(error)) throw new StoredConfigUnusable(error.detail);
       throw error;
     }
     this.version(fresh);

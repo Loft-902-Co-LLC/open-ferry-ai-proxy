@@ -113,13 +113,14 @@ function cardTitles(): string[] {
 }
 
 describe("connecting a client", () => {
-  it("announces a client-key read failure without calling it a refused save", async () => {
+  it("announces an unusable config read with its detail and repair link", async () => {
     const state = server([KEY]);
-    state.api.use(route("GET", API_KEYS, { status: 500, json: { error: "read_failed" } }));
+    state.api.use(route("GET", API_KEYS, { status: 500, json: { error: "invalid_config", message: "config file is empty" } }));
     renderApp("/");
-    const notice = await screen.findByRole("alert");
-    expect(notice).toHaveTextContent("The server failed (HTTP 500)");
-    expect(notice).not.toHaveTextContent("refused this save");
+    const notice = (await screen.findByText("The server can't use config.yaml")).closest('[role="status"]') as HTMLElement;
+    expect(notice).not.toBeNull();
+    expect(notice).toHaveTextContent("config file is empty");
+    expect(within(notice).getByRole("link", { name: "YAML editor" })).toHaveAttribute("href", "/settings?tab=file");
   });
 
   it("fills the setups in with this page's address, the key masked and a model", async () => {

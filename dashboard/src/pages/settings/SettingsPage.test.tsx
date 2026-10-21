@@ -246,6 +246,17 @@ function expectNothingUnsaved() {
     return screen.findByRole("textbox", { name: "config.yaml" });
   }
 
+async function refetchOnFocus() {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10_000);
+  try {
+    await act(async () => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+  } finally { clock.mockRestore(); focusManager.setFocused(undefined); }
+}
+
 loadFirst(() => import("./SettingsPage"));
 
 describe("the settings form", () => {
@@ -1348,7 +1359,7 @@ describe("config.yaml", () => {
       status: 500, json: { error: "invalid_config", message: "yaml: line 4: expected a value" },
     }));
     renderApp("/settings");
-    expect((await screen.findAllByText("config.yaml doesn't parse"))[0]).toBeVisible();
+    expect((await screen.findAllByText("The server can't use config.yaml"))[0]).toBeVisible();
     expect(screen.getAllByText("yaml: line 4: expected a value")[0]).toBeVisible();
     expect(screen.getAllByRole("link", { name: "YAML editor" })[0]).toHaveAttribute("href", "/settings?tab=file");
     expect(screen.queryByText("The server failed (HTTP 500)")).not.toBeInTheDocument();
@@ -1364,7 +1375,7 @@ describe("config.yaml", () => {
     await user.click(await screen.findByRole("button", { name: "Show config.yaml" }));
     const editor = await screen.findByRole("textbox", { name: "config.yaml" });
     expect(editor).toHaveValue("broken: [\n");
-    expect(screen.getByText("Recovery mode: config.yaml doesn't parse")).toBeVisible();
+    expect(screen.getByText("Recovery mode: the server can't use config.yaml")).toBeVisible();
     expect(screen.getByText(/Saving replaces the whole file without version checks/)).toBeVisible();
     fireEvent.change(editor, { target: { value: YAML } });
     state.yaml = "broken: [ # changed meanwhile\n";
@@ -1380,6 +1391,23 @@ describe("config.yaml", () => {
     expect(writes[0]?.headers.has("if-match")).toBe(false);
     expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toEqual([]);
     expect(state.yaml).toBe(YAML);
+    // Another client now repairs the file. A background read must leave
+    // recovery without needing a reset, and the next draft is guarded.
+    state.api.use(
+      route("GET", V8_CONFIG, { json: state.v8, headers: { ETag: '"repaired"' } }),
+      route("GET", "/v8/management/config.yaml", { text: YAML, headers: { ETag: '"repaired"' } }),
+      route("PUT", "/v8/management/config.yaml", { json: {}, headers: { ETag: '"saved"' } }),
+    );
+    await refetchOnFocus();
+    await waitFor(() => { expect(screen.queryByText(/Recovery mode:/)).not.toBeInTheDocument(); });
+    fireEvent.change(screen.getByRole("textbox", { name: "config.yaml" }), { target: { value: `${YAML}# versioned again\n` } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const guarded = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    await user.click(within(guarded).getByRole("button", { name: "Save config.yaml" }));
+    await screen.findByText("Saved config.yaml. The server uses it from now on.");
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")[0]?.headers.get("if-match")).toBe('"repaired"');
+    expect(state.api.callsTo("PUT", CONFIG_YAML)).toHaveLength(1);
+
   });
 
   it.each([
@@ -1653,5 +1681,52 @@ describe("draft snapshot regressions", () => {
     await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
     expect(await within(dialog).findByText("The config changed since this page loaded")).toBeVisible();
     expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toEqual([]);
+  });
+});
+
+describe("recovery snapshot regressions", () => {
+  it("never sends a versioned review draft raw when a background read enters recovery", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    fireEvent.change(await openFile(user), { target: { value: `${YAML}# guarded draft\n` } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    state.broken("invalid v8 layout");
+    await refetchOnFocus();
+    await screen.findByText(/Recovery mode:/);
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    expect(await within(dialog).findByText("The stored config.yaml has become unusable")).toBeVisible();
+    expect(dialog).toHaveTextContent("Nothing was saved");
+    expect(state.api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toEqual([]);
+  });
+  it.each(["invalid v8 layout", "config file is empty"])("explains unusable stored YAML accurately: %s", async (detail) => {
+    const state = versionedServer();
+    state.broken(detail);
+    const { user } = renderApp("/settings?tab=file");
+    await user.click(await screen.findByRole("button", { name: "Show config.yaml" }));
+    expect(await screen.findByText("Recovery mode: the server can't use config.yaml")).toBeVisible();
+    const notice = screen.getByText("Recovery mode: the server can't use config.yaml").closest('[role="status"]');
+    expect(notice).not.toBeNull();
+    expect(within(notice as HTMLElement).getByText(detail)).toBeVisible();
+  });
+  it("reports an unusable stored file before a write as a recovery problem, preserving the draft", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    const editor = await openFile(user);
+    const draft = `${YAML}# valid draft\n`;
+    fireEvent.change(editor, { target: { value: draft } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    state.broken("stored file is empty");
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    expect(await within(dialog).findByText("The stored config.yaml has become unusable")).toBeVisible();
+    expect(dialog).toHaveTextContent("stored file is empty");
+    expect(dialog).toHaveTextContent("Nothing was saved");
+    expect(within(dialog).getByRole("button", { name: "Reload latest config" })).toBeVisible();
+    expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(editor).toHaveValue(draft);
+    expect(screen.getByText("Unsaved changes.")).toBeVisible();
   });
 });
