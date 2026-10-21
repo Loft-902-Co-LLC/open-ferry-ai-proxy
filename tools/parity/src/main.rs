@@ -951,7 +951,9 @@ impl Tally {
         };
 
         match (differences, case.known_difference) {
-            (None, Some(_)) => self.resolved.push(case.name.clone()),
+            (None, Some(reason)) if !reason.contains("map order") => {
+                self.resolved.push(case.name.clone())
+            }
             (None, _) => {}
             (Some(_), Some(reason)) => self.known.push((case.name.clone(), reason)),
             (Some(differences), None) => {
@@ -1109,6 +1111,10 @@ mod tests {
         assert_eq!(tally.known.len(), 1);
         assert_eq!(tally.different, 0);
         assert_eq!(tally.failure_files, 0);
+        assert!(
+            tally.resolved.is_empty(),
+            "a lucky map order must not advise removing its marker"
+        );
         assert!(!dir.exists());
     }
 
