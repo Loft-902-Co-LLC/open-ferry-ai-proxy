@@ -16,8 +16,9 @@
 //! message, or a whole Claude SSE stream, into one interaction.
 //!
 //! Deviations from upstream:
-//! - An event or body that is not valid JSON is treated as having no fields.
-//!   gjson reads what it can from malformed JSON.
+//! - An invalid stream event or incomplete first JSON body value is treated
+//!   as having no fields; gjson reads partial JSON. Complete body values ignore
+//!   trailing data as gjson does.
 //! - Where upstream copies Claude's JSON text into a string (a text, name or
 //!   ID that is an object or an array), we write the same JSON compactly.
 //! - Upstream leaves out a streamed `tool_use` block's `input` when its JSON
@@ -321,8 +322,8 @@ impl ClaudeToInteractionsStream {
 /// Converts a whole Claude response into an interaction: a Claude message,
 /// or else a Claude SSE stream, read line by line.
 pub fn convert_claude_response_to_interactions_non_stream(model_name: &str, body: &[u8]) -> Value {
-    match exact::from_slice(body) {
-        Ok(root) if root.get("content").is_some() => message_to_interaction(model_name, &root),
+    match exact::first(body).and_then(Result::ok) {
+        Some(root) if root.get("content").is_some() => message_to_interaction(model_name, &root),
         _ => stream_to_interaction(model_name, body),
     }
 }

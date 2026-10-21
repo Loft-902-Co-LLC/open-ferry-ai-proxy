@@ -308,3 +308,19 @@ fn numbers_keep_their_text() {
     let created = find_event(&frames, "interaction.created").expect("interaction.created");
     assert_eq!(created["interaction"]["id"], "-0");
 }
+
+#[test]
+fn whole_response_ignores_trailing_data_after_the_first_value() {
+    let body = r#"{"id":"msg_1","model":"m","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":2}}"#;
+    let expected = convert_claude_response_to_interactions_non_stream("m", body.as_bytes());
+    assert_eq!(expected["model"], "m");
+    for suffix in [" trailing", " {}", " []"] {
+        assert_eq!(
+            convert_claude_response_to_interactions_non_stream(
+                "m",
+                format!("{body}{suffix}").as_bytes()
+            ),
+            expected
+        );
+    }
+}

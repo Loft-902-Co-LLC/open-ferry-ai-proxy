@@ -847,6 +847,13 @@ pub fn interactions_streams() -> Vec<Case> {
 pub fn interactions_finals() -> Vec<Case> {
     let mut cases = vec![
         response(
+            "trailing-data-after-interaction",
+            "m",
+            &[
+                r#"{"id":"interaction_1","model":"m","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}],"usage":{"total_input_tokens":3,"total_output_tokens":2}} trailing"#,
+            ],
+        ),
+        response(
             "overflowing-cached-tokens-final",
             "",
             &[
@@ -1126,6 +1133,7 @@ pub fn claude_streams() -> Vec<Case> {
 /// Interactions.
 pub fn claude_finals() -> Vec<Case> {
     let bodies = [
+        ("trailing-data-after-claude-message", r#"{"id":"msg_1","model":"m","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":2}} trailing"#.to_owned()),
         (
             "response-to-interactions-non-stream",
             r#"{"id":"msg_1","model":"claude-test","content":[{"type":"thinking","thinking":"reasoning"},{"type":"text","text":"ok"},{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"x"}}],"usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":1,"cache_creation_input_tokens":4,"thinking_tokens":5}}"#.to_owned(),

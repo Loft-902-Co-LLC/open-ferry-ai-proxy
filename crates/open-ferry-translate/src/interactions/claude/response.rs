@@ -336,7 +336,9 @@ impl InteractionsToClaudeStream {
 
 /// Converts a whole Interactions response body into a Claude message.
 pub fn convert_interactions_response_to_claude_non_stream(model_name: &str, body: &[u8]) -> Value {
-    let root = exact::from_slice(body).unwrap_or(Value::Null);
+    let root = exact::first(body)
+        .and_then(Result::ok)
+        .unwrap_or(Value::Null);
     let interaction = root.get("interaction").unwrap_or(&root);
     let mut out = json!({
         "id": "",
