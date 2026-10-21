@@ -35,15 +35,19 @@ function plural(count: number, one: string, many: string): string {
   return `${count.toLocaleString("en")} ${count === 1 ? one : many}`;
 }
 
+/** The highlighting parser is permissive, so only name a line it marks. */
+function yamlErrorLine(text: string): number | null {
+  const cursor = yamlLanguage.parser.parse(text).cursor();
+  do {
+    if (cursor.type.isError) return text.slice(0, cursor.from).split(/\r\n?|\n/).length;
+  } while (cursor.next());
+  return null;
+}
+
 /** Why the server didn't save the file, in its words where it gave them. */
 function SaveProblem({ error, draft, onReload }: { error: unknown; draft: string; onReload: () => void }) {
   if (isApiError(error) && (error.code === "invalid_yaml" || (error.status === 400 && error.code === "invalid_body"))) {
-    let line: number | null = null;
-    yamlLanguage.parser.parse(draft).iterate({
-      enter(node) {
-        if (line === null && node.type.isError) line = draft.slice(0, node.from).split(/\r\n?|\n/).length;
-      },
-    });
+    const line = yamlErrorLine(draft);
     return (
       <Alert tone="danger" live title="That isn't valid YAML">
         <p>{line !== null && `Check line ${String(line)}. `}{error.detail} Nothing was saved.</p>
