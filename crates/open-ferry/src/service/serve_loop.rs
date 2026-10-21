@@ -975,6 +975,7 @@ fn spawn_connection(
     settings: (&Arc<Admission>, Ingress, IngressConfig),
 ) -> io::Result<()> {
     let (admission, ingress, limits) = settings;
+    let accepted_at = tokio::time::Instant::now();
     let core = ConnCore::register(shared, &stream)?;
     let _ = core.admission.set(admission.admit());
     let task = TaskGuard::new(shared);
@@ -984,19 +985,29 @@ fn spawn_connection(
     tokio::spawn(async move {
         let _task = task;
         match acceptor {
-            None => serve_connection(stream, peer, app, core, mode, ingress, limits).await,
+            None => {
+                serve_connection(
+                    stream,
+                    peer,
+                    app,
+                    core,
+                    mode,
+                    (ingress, limits, accepted_at),
+                )
+                .await
+            }
             Some(acceptor) => {
                 // A stop or a cut ends a handshake; a release lets it run,
                 // to the same deadline as the first request.
                 let stream = tokio::select! {
-                    stream = crate::tls::handshake(&acceptor, stream, peer) => stream,
+                    biased;
                     () = core.cut_wake.notified() => None,
-                    () = async {
+                    () = tokio::task::unconstrained(async {
                         match limits.tls_handshake_timeout {
-                            Some(duration) => tokio::time::sleep(duration).await,
+                            Some(duration) => tokio::time::sleep_until(accepted_at + duration).await,
                             None => std::future::pending().await,
                         }
-                    } => { ingress.warn("TLS handshake"); None },
+                    }) => { ingress.warn("TLS handshake"); None },
                     // The timer and the watch are unconstrained: a handshake
                     // that fills the task's budget mustn't starve them.
                     () = tokio::task::unconstrained(async { let _ = mode.wait_for(|mode| *mode == Mode::Stopping).await; }) => None,
@@ -1004,9 +1015,18 @@ fn spawn_connection(
                         tracing::debug!("closing {peer}: no handshake within the first-request deadline");
                         None
                     }
+                    stream = crate::tls::handshake(&acceptor, stream, peer) => stream,
                 };
                 if let Some(stream) = stream {
-                    serve_connection(stream, peer, app, core, mode, ingress, limits).await;
+                    serve_connection(
+                        stream,
+                        peer,
+                        app,
+                        core,
+                        mode,
+                        (ingress, limits, tokio::time::Instant::now()),
+                    )
+                    .await;
                 }
             }
         }
@@ -1044,12 +1064,20 @@ async fn serve_connection<I>(
     app: Router,
     core: Arc<ConnCore>,
     mut mode: watch::Receiver<Mode>,
-    ingress: Ingress,
-    limits: IngressConfig,
+    settings: (Ingress, IngressConfig, tokio::time::Instant),
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let traffic = Traffic::new(limits, ingress);
+    let (ingress, limits, started_at) = settings;
+    if limits
+        .header_timeout
+        .is_some_and(|duration| started_at + duration <= tokio::time::Instant::now())
+    {
+        ingress.warn("request headers");
+        core.cut();
+        return;
+    }
+    let traffic = Traffic::new(limits, ingress, started_at);
     let _ = core.traffic.set(traffic.clone());
     tokio::spawn(ingress::watch_traffic(
         Arc::downgrade(&core),

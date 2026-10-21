@@ -9,13 +9,26 @@ fn descriptor_reserve_two_listeners_and_two_handles_are_accounted_for() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_delayed_connection_task_keeps_the_accept_time_header_deadline() {
+    let config = IngressConfig::default();
+    let accepted_at = Instant::now();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), accepted_at);
+    assert_eq!(
+        traffic.due().unwrap().0,
+        accepted_at + Duration::from_secs(30)
+    );
+    assert!(traffic.due().unwrap().0 < Instant::now());
+}
+
+#[tokio::test(start_paused = true)]
 async fn write_deadline_tracks_delivery_progress_and_not_upstream_silence() {
     let config = IngressConfig {
         write_stall_timeout: Some(Duration::from_secs(2)),
         ..IngressConfig::default()
     };
     let ingress = Ingress::new(config.clone(), 64);
-    let traffic = Traffic::new(config, ingress);
+    let traffic = Traffic::new(config, ingress, Instant::now());
     let flight = Flight::new(traffic.clone());
     tokio::time::advance(Duration::from_secs(200)).await;
     assert!(
@@ -36,7 +49,7 @@ async fn write_deadline_tracks_delivery_progress_and_not_upstream_silence() {
 #[tokio::test(start_paused = true)]
 async fn h2_headers_have_one_deadline_and_connect_data_is_not_a_header() {
     let config = IngressConfig::default();
-    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64));
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     let flight = Flight::new(traffic.clone());
     traffic.received(&[0, 0, 3, 1, 0, 0, 0, 0, 1, 1]);
@@ -60,7 +73,7 @@ async fn h2_headers_have_one_deadline_and_connect_data_is_not_a_header() {
 #[tokio::test(start_paused = true)]
 async fn h2_idle_deadline_excludes_open_streams_and_restarts_when_both_end() {
     let config = IngressConfig::default();
-    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64));
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     let flight = Flight::new(traffic.clone());
     traffic.received(&[0, 0, 0, 1, 4, 0, 0, 0, 1]);

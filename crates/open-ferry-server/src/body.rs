@@ -109,7 +109,10 @@ pub(crate) async fn read_decoded(
         return Ok(raw);
     }
     match decode(&raw, &encoding, limit) {
-        Ok(decoded) => Ok(decoded),
+        Ok(decoded) => {
+            crate::ingress::retain_decoded(&decoded);
+            Ok(decoded)
+        }
         Err(DecodeError::TooLarge) => Err(invalid_request(413, TOO_LARGE)),
         Err(DecodeError::Budget) => {
             crate::ingress::warn_budget();

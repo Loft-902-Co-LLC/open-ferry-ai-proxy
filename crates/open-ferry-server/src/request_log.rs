@@ -50,6 +50,9 @@
 //!   499; one that leaves during the body, with what was sent.
 //! - The trace ID is the latest selection's, taken when the answer's head
 //!   is ready.
+//! - Ingress admission buffers HTTP bodies before routing. Logging shares
+//!   those admitted bytes (including for error-only capture) instead of
+//!   allocating another copy; multipart error-only capture remains disabled.
 //!
 //! [`RequestContext`]: open_ferry_core::observe::RequestContext
 //! [`RequestLogger::start`]: open_ferry_core::observe::request_log::RequestLogger::start
@@ -101,7 +104,7 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
         None
     };
     let Some(mode) = mode else {
-        let mut response = next.run(request).await;
+        let mut response = crate::ingress::budget_response(next.run(request).await);
         set_trace_header(&context, response.headers_mut());
         return response;
     };
@@ -153,7 +156,8 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
         downstream: Some(downstream),
     };
 
-    let mut response = next.run(Request::from_parts(parts, body)).await;
+    let mut response =
+        crate::ingress::budget_response(next.run(Request::from_parts(parts, body)).await);
     set_trace_header(&context, response.headers_mut());
     let Some(downstream) = pending.downstream.take() else {
         return response;

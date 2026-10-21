@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -23,19 +24,54 @@ use crate::config::IngressConfig;
 use crate::errors::{JSON_UTF8, error_response};
 
 tokio::task_local! {
-    static REQUEST_INGRESS: Ingress;
+    static REQUEST_INGRESS: RequestScope;
+}
+
+#[derive(Clone)]
+struct RequestScope {
+    ingress: Ingress,
+    rejected: Arc<AtomicBool>,
+    decoded: Arc<Mutex<Vec<Bytes>>>,
 }
 
 /// The budget of the request currently being decoded. Standalone body-reader
 /// unit tests have no router; production requests always run inside this scope.
 pub(crate) fn request_budget() -> Option<BodyBudget> {
     REQUEST_INGRESS
-        .try_with(|ingress| ingress.budget.clone())
+        .try_with(|scope| scope.ingress.budget.clone())
         .ok()
 }
 
 pub(crate) fn warn_budget() {
-    let _ = REQUEST_INGRESS.try_with(|ingress| ingress.warn("buffered body bytes"));
+    let _ = REQUEST_INGRESS.try_with(|scope| {
+        scope.rejected.store(true, Ordering::Release);
+        scope.ingress.warn("buffered body bytes");
+    });
+}
+
+/// Keep decoded storage charged while a handler retains parsed/transformed
+/// input for its response stream, even if it drops the original Bytes early.
+pub(crate) fn retain_decoded(bytes: &Bytes) {
+    let _ = REQUEST_INGRESS.try_with(|scope| {
+        scope
+            .decoded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(bytes.clone());
+    });
+}
+
+/// Let the request logger see the same budget response the client receives,
+/// even if a route normally rewrites body-read errors into another format.
+pub(crate) fn budget_response(response: Response) -> Response {
+    let rejected_budget = REQUEST_INGRESS
+        .try_with(|scope| scope.rejected.load(Ordering::Acquire))
+        .unwrap_or(false);
+    if rejected_budget && response.extensions().get::<IngressRejection>().is_none() {
+        rejected(503, "request body buffer budget exhausted")
+    } else {
+        response
+    }
 }
 
 /// Reloadable ingress state shared by the proxy and management routers.
@@ -184,21 +220,67 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
         return next.run(request).await;
     }
     let snapshot = ingress.settings.borrow().clone();
-    let (mut parts, body) = request.into_parts();
+    let (parts, body) = request.into_parts();
     let (raw, parser) = match buffer(&ingress, &snapshot, &parts.headers, body).await {
         Ok(buffered) => buffered,
         Err(response) => return response,
     };
+    // Management writes already run in gate-owned tasks that finish after a
+    // disconnect. Keep multipart copy accounting until that existing work
+    // finishes, rather than dropping it with the caller's HTTP future.
+    let owned_upload = parser.bytes > 0
+        && [
+            "/v0/management",
+            "/v8/management",
+            "/management",
+            "/open-ferry/",
+        ]
+        .iter()
+        .any(|prefix| parts.uri.path().starts_with(prefix));
+    let response = admitted(ingress, parts, raw, parser, next);
+    if owned_upload {
+        return match tokio::spawn(response).await {
+            Ok(response) => response,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => rejected(500, "request handling stopped"),
+        };
+    }
+    response.await
+}
+
+async fn admitted(
+    ingress: Ingress,
+    mut parts: http::request::Parts,
+    raw: Bytes,
+    parser: Reservation,
+    next: Next,
+) -> Response {
     parts.extensions.insert(BufferedRequest(raw.clone()));
     // Keep the reservation through downstream extractors, including ones
     // whose collected bytes no longer share the input Bytes owner.
-    let hold = (raw.clone(), parser);
+    let scope = RequestScope {
+        ingress,
+        rejected: Arc::new(AtomicBool::new(false)),
+        decoded: Arc::default(),
+    };
+    let hold = HeldRequest {
+        _raw: raw.clone(),
+        _parser: parser,
+        _decoded: scope.decoded.clone(),
+    };
     let response = REQUEST_INGRESS
         .scope(
-            ingress.clone(),
+            scope.clone(),
             next.run(Request::from_parts(parts, Body::from(raw))),
         )
         .await;
+    // Handlers may translate body failures; preserve the budget's 503 and
+    // close/GOAWAY marker even when a route gives other errors its own shape.
+    if scope.rejected.load(Ordering::Acquire)
+        && response.extensions().get::<IngressRejection>().is_none()
+    {
+        return rejected(503, "request body buffer budget exhausted");
+    }
     if response.extensions().get::<IngressRejection>().is_some() {
         return response;
     }
@@ -214,7 +296,13 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
 
 struct HeldBody {
     inner: Body,
-    hold: Option<(Bytes, Reservation)>,
+    hold: Option<HeldRequest>,
+}
+
+struct HeldRequest {
+    _raw: Bytes,
+    _parser: Reservation,
+    _decoded: Arc<Mutex<Vec<Bytes>>>,
 }
 
 impl HttpBody for HeldBody {
@@ -282,7 +370,8 @@ async fn buffer(
     let mut buffer = BudgetBuffer::new(Some(ingress.budget.clone()));
     // Multipart parsers may copy fields out of their raw input (multer on
     // management routes, quoted-printable parts in the proxy). Reserve an
-    // additional body's worth for those copies before they can be made.
+    // two additional body lengths for parser input and collected field copies
+    // before either allocation can be made (multer can hold both at once).
     let multipart = headers.get(header::CONTENT_TYPE).is_some_and(|value| {
         value.to_str().is_ok_and(|value| {
             value
@@ -302,7 +391,7 @@ async fn buffer(
             rejected(503, "request body buffer budget exhausted")
         })?;
         if multipart {
-            parser.grow_to(length as usize).map_err(|()| {
+            parser.grow_copies(length as usize).map_err(|()| {
                 ingress.warn("buffered body bytes");
                 rejected(503, "request body buffer budget exhausted")
             })?;
@@ -348,7 +437,7 @@ async fn buffer(
             rejected(503, "request body buffer budget exhausted")
         })?;
         if multipart {
-            parser.grow_to(buffer.len()).map_err(|()| {
+            parser.grow_copies(buffer.len()).map_err(|()| {
                 ingress.warn("buffered body bytes");
                 rejected(503, "request body buffer budget exhausted")
             })?;
@@ -397,6 +486,10 @@ struct Reservation {
 }
 
 impl Reservation {
+    fn grow_copies(&mut self, bytes: usize) -> Result<(), ()> {
+        self.grow_to(bytes.checked_mul(2).ok_or(())?)
+    }
+
     fn grow_to(&mut self, bytes: usize) -> Result<(), ()> {
         let additional = bytes.saturating_sub(self.bytes);
         if additional == 0 {

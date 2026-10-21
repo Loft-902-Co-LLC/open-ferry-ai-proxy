@@ -297,6 +297,91 @@ async fn the_shared_body_reader_preserves_budget_ownership_without_recopying() {
 }
 
 #[tokio::test]
+async fn cancellation_after_admission_releases_regular_bodies_and_tracks_owned_upload_work() {
+    for owned in [false, true] {
+        let ingress = ingress(16);
+        let started = Arc::new(Notify::new());
+        let proceed = Arc::new(Notify::new());
+        let (signal, gate) = (started.clone(), proceed.clone());
+        let path = if owned { "/v0/management/upload" } else { "/" };
+        let router = ingress.wrap(Router::new().route(
+            path,
+            post(move |bytes: Bytes| {
+                let (signal, gate) = (signal.clone(), gate.clone());
+                async move {
+                    let copy = bytes.to_vec();
+                    signal.notify_one();
+                    gate.notified().await;
+                    copy
+                }
+            }),
+        ));
+        let mut request = Request::post(path).header(header::CONTENT_LENGTH, "4");
+        if owned {
+            request = request.header(header::CONTENT_TYPE, "multipart/form-data; boundary=x");
+        }
+        let task = tokio::spawn(router.oneshot(request.body(Body::from("abcd")).unwrap()));
+        started.notified().await;
+        task.abort();
+        let _ = task.await;
+        if owned {
+            assert_eq!(
+                ingress.budget.used(),
+                12,
+                "a detached management upload lost its accounting"
+            );
+            proceed.notify_one();
+            settle().await;
+        }
+        assert_eq!(ingress.budget.used(), 0);
+    }
+}
+
+#[tokio::test]
+async fn decoded_storage_stays_charged_when_the_handler_transforms_its_input() {
+    use std::io::Write;
+    let ingress = Ingress::new(
+        IngressConfig {
+            buffered_body_bytes: Some(128),
+            ..IngressConfig::default()
+        },
+        64,
+    );
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&[b'a'; 64]).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let charged = compressed.len() + 64;
+    let router = ingress.wrap(Router::new().route(
+        "/",
+        post(|request: Request| async move {
+            let (parts, body) = request.into_parts();
+            let decoded = crate::body::read_decoded(&parts.headers, body, 64)
+                .await
+                .unwrap();
+            let transformed = decoded.to_vec();
+            drop(decoded);
+            Response::new(Body::from_stream(
+                stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(transformed)) })
+                    .chain(stream::pending()),
+            ))
+        }),
+    ));
+    let response = router
+        .oneshot(
+            Request::post("/")
+                .header(header::CONTENT_ENCODING, "gzip")
+                .body(Body::from(compressed))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(ingress.budget.used(), charged);
+    drop(response);
+    assert_eq!(ingress.budget.used(), 0);
+}
+
+#[tokio::test]
 async fn an_upgrade_header_cannot_bypass_upload_admission() {
     let ingress = ingress(4);
     let mut held = BudgetBuffer::new(Some(ingress.budget.clone()));

@@ -226,6 +226,13 @@ async fn ingress_idle_http2_sends_goaway_and_partial_http2_heads_expire() {
                 }
             }
             assert!(goaway, "idle HTTP/2 must send GOAWAY");
+            // This peer deliberately never answers the graceful ping. It
+            // still relinquishes its socket after the bounded GOAWAY grace.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(6)).await;
+            settle().await;
+            tokio::time::resume();
+            assert_eq!(served.control.live_count(), 0);
         }
         served.control.cut();
         within(served.server).await.unwrap().unwrap();
@@ -386,6 +393,25 @@ async fn ingress_slow_sse_reader_is_cut_and_live_handles_return_to_baseline() {
     let served = start_limited(limits(), None, Some(routes));
     let mut stream = connect(served.addr).await;
     SockRef::from(&stream).set_recv_buffer_size(1024).unwrap();
+    until(|| traffic(&served).is_some()).await;
+    let io_owner = {
+        let core = served
+            .control
+            .shared
+            .connections()
+            .map
+            .values()
+            .find_map(Weak::upgrade)
+            .unwrap();
+        core.socket
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .set_send_buffer_size(4096)
+            .unwrap();
+        Arc::downgrade(&core)
+    };
     get_request(&mut stream, "/sse", false).await;
     until(|| traffic(&served).is_some_and(|traffic| traffic.has_pending_write())).await;
     tokio::time::pause();
@@ -399,6 +425,11 @@ async fn ingress_slow_sse_reader_is_cut_and_live_handles_return_to_baseline() {
     );
     within(served.control.release()).await;
     within(served.server).await.unwrap().unwrap();
+    drop(stream);
+    assert!(
+        io_owner.upgrade().is_none(),
+        "the socket owner retained an OS handle"
+    );
 }
 
 #[tokio::test]
@@ -472,25 +503,31 @@ async fn ingress_http2_flow_control_stall_is_cut_even_when_tcp_is_writable() {
         }),
     );
     let served = start_limited(limits(), None, Some(routes));
-    let (mut sender, driver) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-        .initial_stream_window_size(1)
-        .handshake(TokioIo::new(connect(served.addr).await))
-        .await
-        .unwrap();
-    let driver = tokio::spawn(driver);
-    let response = within(sender.send_request(h2_get("/sse"))).await.unwrap();
-    assert_eq!(response.status(), 200);
-    until(|| traffic(&served).is_some_and(|traffic| traffic.has_pending_delivery())).await;
-    settle().await;
+    let mut stream = connect(served.addr).await;
+    // A raw peer advertises exactly one stream-window byte and NEVER sends
+    // WINDOW_UPDATE. Receiving its first DATA proves the window is exhausted;
+    // no scheduler timing or client's automatic window management is involved.
+    stream.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x06\x04\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x01").await.unwrap();
+    let block = b"\x82\x86\x04\x04/sse\x01\x09localhost";
+    let mut head = vec![0, 0, block.len() as u8, 1, 5, 0, 0, 0, 1];
+    head.extend_from_slice(block);
+    stream.write_all(&head).await.unwrap();
+    let mut saw_data = false;
+    for _ in 0..8 {
+        if read_h2_frame(&mut stream).await == 0 {
+            saw_data = true;
+            break;
+        }
+    }
+    assert!(saw_data);
+    assert!(traffic(&served).unwrap().has_pending_delivery());
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3)).await;
     settle().await;
     tokio::time::resume();
     assert_eq!(served.control.live_count(), 0);
-    drop(response);
     within(served.control.release()).await;
     within(served.server).await.unwrap().unwrap();
-    driver.abort();
 }
 
 #[tokio::test]
