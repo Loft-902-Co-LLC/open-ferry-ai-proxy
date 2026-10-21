@@ -258,6 +258,8 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     }
     let upstream = Upstream::answering(tokens()).await;
     let api = login_api(&dir, &upstream.url);
+    let starts = Arc::new(AtomicUsize::new(0));
+    api.state.oauth_sessions().overrides().bind_worker_starts = Some(starts.clone());
     let first = start_login(&api, START).await;
     let second = start_login(&api, &START.replace("codex-bind.json", "second.json")).await;
     let guard = open_ferry_core::auth::credential_lock::acquire_credential_lock(
@@ -272,7 +274,14 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
         .await
         .unwrap();
     deliver(&api, &second, "codex", issued());
-    let other_bound = tokio::time::timeout(Duration::from_millis(800), async {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while starts.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let other_bound = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if api
                 .state
