@@ -87,7 +87,7 @@ async fn validates_targets_before_issuing_a_url() {
 async fn callbacks_keep_issued_client_ids_and_sync_the_persisted_credential() {
     let (logs, _capture) = Logs::capture();
     let upstream = Upstream::answering(tokens()).await;
-    for route in ["get", "post", "query", "page", "forwarder"] {
+    for route in ["get", "post", "query", "forwarder"] {
         let dir = AuthDir::new();
         dir.write("codex-bind.json", OUTER);
         let mut config = dir.config();
@@ -120,7 +120,7 @@ async fn callbacks_keep_issued_client_ids_and_sync_the_persisted_credential() {
                 let path = location
                     .strip_prefix(&format!("http://127.0.0.1:{SERVER_PORT}"))
                     .unwrap();
-                assert_eq!(open_page(&api, path).await.status, StatusCode::OK);
+                api.get(path).await.expect(StatusCode::OK);
             }
             _ => {
                 let body = if route == "post" {
@@ -158,7 +158,7 @@ async fn callbacks_keep_issued_client_ids_and_sync_the_persisted_credential() {
         assert!(!status.body.contains("123e4567"));
     }
     let requests = upstream.requests();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 4);
     for request in requests {
         let body = request_body(&request);
         assert!(body.contains("client_id=issued-bind-test"));
@@ -820,4 +820,20 @@ async fn v8_credentials_advertise_siwc_without_token_values() {
     assert_eq!(file["siwc_expires_at"], "2030-01-02T03:04:05Z");
     let legacy = api.get("/v0/management/auth-files").await.expect(StatusCode::OK);
     assert!(legacy["files"][0].get("siwc_bind_supported").is_none());
+}
+
+#[tokio::test]
+async fn legacy_sinks_refuse_bind_states_and_leave_the_target_untouched() {
+    let dir = AuthDir::new();
+    let path = dir.write("codex-bind.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api.get(START).await.expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    api.get(&format!("/v0/management/oauth-callback?state={state}&code=dummy&client_id=dummy")).await.expect(StatusCode::CONFLICT);
+    api.post("/v0/management/oauth-callback", &json!({"state":state, "code":"dummy", "client_id":"dummy"}).to_string()).await.expect(StatusCode::CONFLICT);
+    let page = open_page(&api, &format!("/codex/callback?state={state}&code=dummy&client_id=dummy")).await;
+    assert_eq!(page.status, StatusCode::CONFLICT);
+    assert!(api.state.oauth_sessions().store().is_pending(state, "codex"));
+    assert_eq!(std::fs::read(path).unwrap(), OUTER.as_bytes());
+    assert!(api.sync.calls().is_empty());
 }

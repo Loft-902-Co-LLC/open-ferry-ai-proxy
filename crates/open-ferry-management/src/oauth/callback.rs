@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/oauth_callback.go
 // (oauthCallbackRequest, PostOAuthCallback, GetOAuthCallback,
 // handleOAuthCallback, firstNonEmpty) and internal/api/server_routes.go
-// (the /anthropic/callback and /codex/callback handlers) (v8.0.32, MIT).
+// (the /anthropic/callback and /codex/callback handlers) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes that take a login's callback, which need no key: the
@@ -133,6 +133,14 @@ impl GoStruct for CallbackRequest {
 /// `POST /v0/management/oauth-callback` (`PostOAuthCallback`): the
 /// callback as a JSON body, which may give the redirect's URL instead.
 pub(super) async fn post(State(state): State<ManagementState>, body: Body) -> Response {
+    post_impl(&state, body, false).await
+}
+
+pub(super) async fn post_v8(State(state): State<ManagementState>, body: Body) -> Response {
+    post_impl(&state, body, true).await
+}
+
+async fn post_impl(state: &ManagementState, body: Body, v8: bool) -> Response {
     let body = match bind::read_body(body).await {
         Ok(body) => body,
         Err(response) => return response,
@@ -140,7 +148,7 @@ pub(super) async fn post(State(state): State<ManagementState>, body: Body) -> Re
     let Some(request) = bind::decode::<CallbackRequest>(&body) else {
         return failure(StatusCode::BAD_REQUEST, "invalid body");
     };
-    handle(&state, request)
+    handle(state, request, v8)
 }
 
 /// `GET /v0/management/oauth-callback` (`GetOAuthCallback`): the callback
@@ -149,9 +157,22 @@ pub(super) async fn get(
     State(state): State<ManagementState>,
     RawQuery(query): RawQuery,
 ) -> Response {
+    get_impl(&state, query, false)
+}
+
+pub(super) async fn get_v8(
+    State(state): State<ManagementState>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    get_impl(&state, query, true)
+}
+
+fn get_impl(state: &ManagementState, query: Option<String>, v8: bool) -> Response {
     let query = Query::parse(query.as_deref());
     let request = CallbackRequest {
-        conflicting: ["provider", "state", "code", "client_id", "error"].iter().any(|key| query.count(key) > 1),
+        conflicting: ["provider", "state", "code", "client_id", "error"]
+            .iter()
+            .any(|key| query.count(key) > 1),
         provider: text(query.value("provider")),
         code: text(query.value("code")),
         client_id: text(query.value("client_id")),
@@ -159,53 +180,99 @@ pub(super) async fn get(
         error: first_non_empty(&[query.value("error"), query.value("error_description")]),
         redirect_url: String::new(),
     };
-    handle(&state, request)
+    handle(state, request, v8)
 }
 
 /// Hands a callback to its login (`handleOAuthCallback`).
-fn handle(state: &ManagementState, request: CallbackRequest) -> Response {
+fn handle(state: &ManagementState, request: CallbackRequest, v8: bool) -> Response {
     let mut oauth_state = request.state.trim().to_owned();
     let mut code = request.code.trim().to_owned();
     let mut error = request.error.trim().to_owned();
     let mut client_id = request.client_id.trim().to_owned();
 
     let redirect = request.redirect_url.trim();
-    let parsed_query = if redirect.is_empty() { None } else {
+    let parsed_query = if redirect.is_empty() {
+        None
+    } else {
         match redirect_query(redirect) {
             Some(query) => Some(query),
             None => return failure(StatusCode::BAD_REQUEST, "invalid redirect_url"),
         }
     };
-    if oauth_state.is_empty() && let Some(query) = &parsed_query {
+    if oauth_state.is_empty()
+        && let Some(query) = &parsed_query
+    {
         oauth_state = text(query.value("state"));
     }
     let binding = state.oauth_sessions().store().bind_redirect(&oauth_state);
     if let Some(expected) = binding {
-        if request.conflicting { return failure(StatusCode::BAD_REQUEST, "conflicting callback parameters"); }
+        if !v8 {
+            return failure(
+                StatusCode::CONFLICT,
+                "SIWC callbacks require /v8/management/oauth/callback",
+            );
+        }
+        if request.conflicting {
+            return failure(StatusCode::BAD_REQUEST, "conflicting callback parameters");
+        }
         if let Some(query) = &parsed_query {
+            let has_user_info = redirect.split_once("://").is_some_and(|(_, rest)| {
+                rest.split(['/', '?', '#'])
+                    .next()
+                    .unwrap_or_default()
+                    .contains('@')
+            });
             let parsed = reqwest::Url::parse(redirect).ok();
             let expected = reqwest::Url::parse(&expected).ok();
-            if !parsed.as_ref().zip(expected.as_ref()).is_some_and(|(url, expected)|
-                url.scheme() == expected.scheme() && url.host_str() == expected.host_str()
-                    && url.port() == expected.port() && url.path() == expected.path()
-                    && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()) {
+            if has_user_info
+                || !parsed
+                    .as_ref()
+                    .zip(expected.as_ref())
+                    .is_some_and(|(url, expected)| {
+                        url.scheme() == expected.scheme()
+                            && url.host_str() == expected.host_str()
+                            && url.port() == expected.port()
+                            && url.path() == expected.path()
+                            && url.username().is_empty()
+                            && url.password().is_none()
+                            && url.fragment().is_none()
+                    })
+            {
                 return failure(StatusCode::BAD_REQUEST, "unexpected SIWC callback URL");
             }
-            for (key, selected) in [("state", &mut oauth_state), ("code", &mut code), ("client_id", &mut client_id), ("error", &mut error)] {
+            for (key, selected) in [
+                ("state", &mut oauth_state),
+                ("code", &mut code),
+                ("client_id", &mut client_id),
+                ("error", &mut error),
+            ] {
                 let value = text(query.value(key));
-                if query.count(key) > 1 || (!value.is_empty() && !selected.is_empty() && value != *selected) {
+                if query.count(key) > 1
+                    || (!value.is_empty() && !selected.is_empty() && value != *selected)
+                {
                     return failure(StatusCode::BAD_REQUEST, "conflicting callback parameters");
                 }
-                if selected.is_empty() { *selected = value; }
+                if selected.is_empty() {
+                    *selected = value;
+                }
             }
         }
         if error.is_empty() && (code.is_empty() || client_id.is_empty()) {
-            return failure(StatusCode::BAD_REQUEST, "SIWC callback requires code and client_id");
+            return failure(
+                StatusCode::BAD_REQUEST,
+                "SIWC callback requires code and client_id",
+            );
         }
     } else if let Some(query) = &parsed_query {
-        if code.is_empty() { code = text(query.value("code")); }
-        if error.is_empty() { error = first_non_empty(&[query.value("error"), query.value("error_description")]); }
-        if client_id.is_empty() { client_id = text(query.value("client_id")); }
+        if code.is_empty() {
+            code = text(query.value("code"));
+        }
+        if error.is_empty() {
+            error = first_non_empty(&[query.value("error"), query.value("error_description")]);
+        }
+        if client_id.is_empty() {
+            client_id = text(query.value("client_id"));
+        }
     }
 
     if oauth_state.is_empty() {
@@ -286,6 +353,17 @@ pub(super) async fn codex_page(
     State(state): State<ManagementState>,
     RawQuery(query): RawQuery,
 ) -> Response {
+    let parsed = Query::parse(query.as_deref());
+    if state
+        .oauth_sessions()
+        .store()
+        .is_bind(&text(parsed.value("state")))
+    {
+        return failure(
+            StatusCode::CONFLICT,
+            "SIWC callbacks require /v8/management/oauth/callback",
+        );
+    }
     page(&state, Provider::Codex, query.as_deref()).await
 }
 
@@ -460,6 +538,7 @@ mod tests {
     #[test]
     fn debug_hides_the_callback() {
         let request = CallbackRequest {
+            conflicting: false,
             provider: "codex".into(),
             redirect_url: "http://h/cb?code=MARKER-code".into(),
             code: "MARKER-code".into(),

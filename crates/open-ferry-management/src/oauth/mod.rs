@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/server_management.go and
 // internal/api/server_management_v8.go (the OAuth login routes) and
 // internal/api/server_routes.go (the /anthropic/callback and
-// /codex/callback routes) (v8.0.32, MIT).
+// /codex/callback routes) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OAuth logins started from the management API, for Claude and Codex
@@ -317,13 +317,19 @@ pub(crate) fn routes() -> Vec<Route> {
         ),
         Route::key("/v0/management/codex-auth-url", get(flows::codex_auth_url)),
         Route::key("/v8/management/oauth/auth-url", get(flows::auth_url)),
-        Route::key("/v8/management/oauth/siwc/bind", axum::routing::post(flows::siwc_bind)),
+        Route::key(
+            "/v8/management/oauth/siwc/bind",
+            axum::routing::post(flows::siwc_bind),
+        ),
         Route::key("/v0/management/get-auth-status", get(flows::status)),
         Route::key("/v8/management/oauth/status", get(flows::status)),
         Route::key("/v0/management/oauth-session", delete(flows::cancel)),
         Route::key("/v8/management/oauth/session", delete(flows::cancel)),
         Route::availability("/v0/management/oauth-callback", callback()),
-        Route::availability("/v8/management/oauth/callback", callback()),
+        Route::availability(
+            "/v8/management/oauth/callback",
+            get(callback::get_v8).post(callback::post_v8),
+        ),
         Route::open("/anthropic/callback", get(callback::anthropic_page)),
         Route::open("/codex/callback", get(callback::codex_page)),
     ]

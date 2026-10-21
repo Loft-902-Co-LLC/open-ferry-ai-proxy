@@ -166,8 +166,14 @@ pub(super) async fn auth_url(
 }
 
 /// `POST /v8/management/oauth/siwc/bind`, without a server-side callback listener.
-pub(super) async fn siwc_bind(State(state): State<ManagementState>, body: axum::body::Body) -> Response {
-    let body = match crate::bind::read_body(body).await { Ok(body) => body, Err(response) => return response };
+pub(super) async fn siwc_bind(
+    State(state): State<ManagementState>,
+    body: axum::body::Body,
+) -> Response {
+    let body = match crate::bind::read_body(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let value = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(value) if value.is_object() => value,
         _ => return json::error(StatusCode::BAD_REQUEST, "invalid request body"),
@@ -176,10 +182,22 @@ pub(super) async fn siwc_bind(State(state): State<ManagementState>, body: axum::
         return json::error(StatusCode::BAD_REQUEST, "name is required");
     };
     let name = name.trim();
-    if name.is_empty() { return json::error(StatusCode::BAD_REQUEST, "name is required"); }
-    if state.credential_store().is_err() { return json::error(StatusCode::SERVICE_UNAVAILABLE, "credential store unavailable"); }
+    if name.is_empty() {
+        return json::error(StatusCode::BAD_REQUEST, "name is required");
+    }
+    if state.credential_store().is_err() {
+        return json::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "credential store unavailable",
+        );
+    }
     let _mutation = state.credential_lock().lock().await;
-    if !state.manager().list().iter().any(|a| a.id == name || a.file_name == name) {
+    if !state
+        .manager()
+        .list()
+        .iter()
+        .any(|a| a.id == name || a.file_name == name)
+    {
         return json::error(StatusCode::NOT_FOUND, "auth file not found");
     }
     match super::siwc_bind::prepare(&state, name).await {
@@ -234,9 +252,15 @@ async fn start_with_bind(
         return json::error(StatusCode::TOO_MANY_REQUESTS, "too many oauth sessions");
     };
     if let Client::Siwc(bind) = &client
-        && !sessions.store().mark_bind_target(&oauth_state, bind.target.name(), &redirect) {
+        && !sessions
+            .store()
+            .mark_bind_target(&oauth_state, bind.target.name(), &redirect)
+    {
         sessions.store().release(&oauth_state, registration.id);
-        return json::error(StatusCode::CONFLICT, "a SIWC binding is already pending for this credential");
+        return json::error(
+            StatusCode::CONFLICT,
+            "a SIWC binding is already pending for this credential",
+        );
     }
     let is_bind = matches!(client, Client::Siwc(_));
     // From here, a login that doesn't start drops its session.
@@ -254,7 +278,14 @@ async fn start_with_bind(
 
     let mut forwarder = None;
     if is_web_ui(query) {
-        let Some(target) = callback_url(&config, provider.page()) else {
+        let Some(target) = callback_url(
+            &config,
+            if is_bind {
+                "/v8/management/oauth/callback"
+            } else {
+                provider.page()
+            },
+        ) else {
             tracing::error!("Can't forward the {provider} OAuth callback: no server port");
             return json::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -278,9 +309,16 @@ async fn start_with_bind(
         return json::error(StatusCode::SERVICE_UNAVAILABLE, "server shutting down");
     }
     let mut response = vec![
-        ("status", Json::Str("ok".into())), ("url", Json::Str(url)), ("state", Json::Str(oauth_state)),
+        ("status", Json::Str("ok".into())),
+        ("url", Json::Str(url)),
+        ("state", Json::Str(oauth_state)),
     ];
-    if is_bind { response.extend([("flow", Json::Str("siwc_bind".into())), ("expires_in", Json::Int(300))]); }
+    if is_bind {
+        response.extend([
+            ("flow", Json::Str("siwc_bind".into())),
+            ("expires_in", Json::Int(300)),
+        ]);
+    }
     json::response(StatusCode::OK, &Json::Struct(response))
 }
 
