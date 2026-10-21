@@ -7315,8 +7315,16 @@ mod tests {
     #[tokio::test]
     async fn config_updates_published_unconsumed_registration() {
         let dir = tempfile::tempdir().unwrap();
-        let path = codex_file(dir.path(), "published.json", "");
+        let path = codex_file(dir.path(), "published.json", r#", "plan_type":"pro""#);
         let mut service = service(dir.path(), "oauth-excluded-models:\n  codex: [old-model]\n");
+        let catalogs = Arc::new(open_ferry_core::registry::CatalogStore::new());
+        catalogs
+            .publish_general(
+                br#"{"codex-pro":[{"id":"old-model"},{"id":"new-model"}]}"#,
+                "unconsumed-publication fixture",
+            )
+            .unwrap();
+        service.catalogs = CatalogRuntime::new(catalogs, Duration::from_secs(60));
         let mut held = hold_completion(&mut service);
         service.load_auth_file(&auth_file(&path), next_revision());
         held.entered().await;
@@ -7329,11 +7337,9 @@ mod tests {
         held.release();
         drain_reads(&mut service).await;
         let live = service.manager.list()[0].clone();
-        let mut expected = (*live).clone();
-        assert!(
-            !apply_config_attributes(&service.synthesis_context(), &mut expected),
-            "unconsumed publication receives C1 attributes"
-        );
+        let models = model_ids(&service, &live.id);
+        assert!(!models.iter().any(|model| model == "new-model"));
+        assert!(models.iter().any(|model| model == "old-model"));
         assert_eq!(service.file_auths.get(&path), Some(&live.id));
     }
 
