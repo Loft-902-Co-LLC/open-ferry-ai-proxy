@@ -76,7 +76,7 @@ async fn runs_claude_code_with_its_flags_in_both_prompt_modes() {
             ..fixture.entry()
         };
         let mut body = claude_body("Hello");
-        body["model"] = json!("claude-opus-4-8");
+        body["model"] = json!("claude-opus-4-6");
         body["max_tokens"] = json!(4096);
         body["thinking"] = json!({"type": "enabled", "budget_tokens": 2048});
         execute(&fixture, &entry, Format::CLAUDE, body)
@@ -97,7 +97,7 @@ async fn runs_claude_code_with_its_flags_in_both_prompt_modes() {
                 "--verbose",
                 "--include-partial-messages",
                 "--model",
-                "claude-opus-4-8",
+                "claude-opus-4-6",
                 "--tools",
                 "",
                 "--strict-mcp-config",
@@ -145,6 +145,23 @@ async fn runs_claude_code_with_its_flags_in_both_prompt_modes() {
     let record = fixture.record();
     let argv = strings(&record["argv"]);
     assert_eq!(argv[argv.len() - 2..], ["--effort", "high"]);
+    assert_eq!(record["env"].get("MAX_THINKING_TOKENS"), None);
+}
+
+#[tokio::test]
+async fn adaptive_only_model_maps_a_requested_budget_to_cli_effort() {
+    let fixture = Fixture::new(&success(&["Hi"]));
+    let mut body = claude_body("Hello");
+    body["model"] = json!("claude-opus-4-8");
+    body["max_tokens"] = json!(4096);
+    body["thinking"] = json!({"type": "enabled", "budget_tokens": 2048});
+    execute(&fixture, &fixture.entry(), Format::CLAUDE, body)
+        .await
+        .unwrap();
+    let record = fixture.record();
+    let argv = strings(&record["argv"]);
+    assert_eq!(argv[argv.len() - 2..], ["--effort", "medium"]);
+    assert_eq!(record["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "4096");
     assert_eq!(record["env"].get("MAX_THINKING_TOKENS"), None);
 }
 
