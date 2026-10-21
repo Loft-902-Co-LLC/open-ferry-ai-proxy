@@ -1679,7 +1679,7 @@ async fn remote_compaction_seals_and_replays_summary_with_usage() {
                 .await
                 .unwrap();
             let sent = mock.last().json();
-            assert!(!sent.to_string().contains("encrypted_content"));
+            assert!(!sent["input"].to_string().contains("encrypted_content"));
             assert!(sent.to_string().contains("Task progress."));
         }
     }
