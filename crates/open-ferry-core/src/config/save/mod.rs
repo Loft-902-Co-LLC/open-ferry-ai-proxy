@@ -635,6 +635,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pending_plugin_comments_match_go_across_layouts_and_following_keys() {
+        // The review's S1 example is also a double write in Go: restoring
+        // source key comments reintroduces the comment after replacement.
+        // These complete outputs include legacy, v8 and migrating saves.
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../testdata/plugin-pending-comment-neighbors.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let cfg = Config::parse(case["config"].as_str().unwrap()).unwrap();
+            let actual = render_preserving_comments(
+                case["file"].as_str().unwrap().as_bytes(),
+                &cfg,
+                case["migrate"].as_bool().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(actual).unwrap(),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     /// Checks that `data` is a valid v8 config (upstream's
     /// `ValidateV8Config`).
     fn assert_valid_v8(data: &[u8]) {
