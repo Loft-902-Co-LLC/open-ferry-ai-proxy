@@ -1,13 +1,14 @@
-// Ported from CLIProxyAPI internal/cmd/siwc_bind.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/cmd/siwc_bind.go and
+// internal/api/handlers/management/oauth_siwc.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Management binding uses the same leaf-link refusal and save-time identity
 //! check as the CLI flow. The ID token's signature and nonce aren't verified,
 //! and the SIWC account isn't matched to the outer account.
 
+use open_ferry_core::manager::CompletedTokenCommand;
 use std::io;
 use std::path::PathBuf;
-use open_ferry_core::manager::CompletedTokenCommand;
 
 use open_ferry_core::auth::codex_refresh::{generate_device_id, validate_device_id};
 use open_ferry_core::auth::credential_lock::acquire_credential_lock;
@@ -54,9 +55,20 @@ pub(super) async fn prepare(state: &ManagementState, name: &str) -> io::Result<B
         .map_err(|_| invalid())?
         .files
         .clone();
-    let mut matching = state.manager().list().into_iter().filter(|auth| auth.id == name || auth.file_name == name);
-    let registered = matching.next().filter(|auth| eligible(auth)).filter(|_| matching.next().is_none()).ok_or_else(invalid)?;
-    let command = state.manager().capture_token_command(&registered.id, CodexCredentialPartition::Siwc).ok_or_else(invalid)?;
+    let mut matching = state
+        .manager()
+        .list()
+        .into_iter()
+        .filter(|auth| auth.id == name || auth.file_name == name);
+    let registered = matching
+        .next()
+        .filter(|auth| eligible(auth))
+        .filter(|_| matching.next().is_none())
+        .ok_or_else(invalid)?;
+    let command = state
+        .manager()
+        .capture_token_command(&registered.id, CodexCredentialPartition::Siwc)
+        .ok_or_else(invalid)?;
     let registered = Auth::clone(&registered);
     let name = name.to_owned();
     let target = run_blocking(move || {
@@ -66,6 +78,7 @@ pub(super) async fn prepare(state: &ManagementState, name: &str) -> io::Result<B
         let path = files.file_path(&name)?;
         let real_path = directory.join(&name);
         let (metadata, file_id) = files.read_bind_target(&path)?;
+        open_ferry_core::auth::file_store::check_bind_metadata(&registered.metadata, &metadata)?;
         let identity = BindIdentity::capture(&metadata, file_id);
         if path.canonicalize()? != real_path {
             return Err(invalid());
@@ -76,7 +89,9 @@ pub(super) async fn prepare(state: &ManagementState, name: &str) -> io::Result<B
             .and_then(Value::as_str)
             .and_then(validate_device_id)
             .unwrap_or_else(generate_device_id);
-        if files.resolve_auth_path(&registered)?.canonicalize()? != real_path { return Err(invalid()); }
+        if files.resolve_auth_path(&registered)?.canonicalize()? != real_path {
+            return Err(invalid());
+        }
         let mut record = registered.clone();
         record.metadata = metadata;
         Ok::<_, io::Error>(Target {
@@ -116,11 +131,15 @@ pub(crate) fn eligible(auth: &Auth) -> bool {
         && auth.auth_source_kind() == Some(AuthSource::File)
         && auth.auth_kind() == Some(AuthKind::OAuth)
         && !auth.attribute("path").unwrap_or_default().trim().is_empty()
-        && ["access_token", "refresh_token"].iter().all(|key| auth.metadata_str(key).is_some_and(|v| !v.trim().is_empty()))
+        && ["access_token", "refresh_token"]
+            .iter()
+            .all(|key| auth.metadata_str(key).is_some_and(|v| !v.trim().is_empty()))
 }
 
 impl Target {
-    pub(super) fn name(&self) -> &str { &self.record.file_name }
+    pub(super) fn name(&self) -> &str {
+        &self.record.file_name
+    }
 }
 
 pub(super) async fn save(
@@ -130,10 +149,20 @@ pub(super) async fn save(
     session: String,
     registration: u64,
 ) -> io::Result<()> {
+    if tokens.access_token.trim().is_empty()
+        || tokens.refresh_token.trim().is_empty()
+        || tokens.client_id.trim().is_empty()
+    {
+        return Err(io::Error::other("invalid SIWC bind token data"));
+    }
     let store = state.credential_store().map_err(|_| invalid())?;
     let tokens = tokens.to_json();
     loop {
-        if state.oauth_sessions().is_shut_down() || !state.oauth_sessions().store().is_pending(&session, "codex") { return Err(invalid()); }
+        if state.oauth_sessions().is_shut_down()
+            || !state.oauth_sessions().store().is_pending(&session, "codex")
+        {
+            return Err(invalid());
+        }
         #[cfg(not(test))]
         let guard = acquire_credential_lock(&target.path).await?;
         #[cfg(test)]
@@ -145,11 +174,14 @@ pub(super) async fn save(
             std::future::poll_fn(|cx| {
                 let result = acquire.as_mut().poll(cx);
                 if result.is_pending() && !signalled {
-                    if let Some(waiting) = &waiting { waiting.notify_one(); }
+                    if let Some(waiting) = &waiting {
+                        waiting.notify_one();
+                    }
                     signalled = true;
                 }
                 result
-            }).await?
+            })
+            .await?
         };
         let Ok(management_guard) = state.credential_lock().try_lock() else {
             drop(guard);
@@ -161,21 +193,36 @@ pub(super) async fn save(
         let session = session.clone();
         let tokens = tokens.clone();
         let (committed, returned, guard) = run_blocking(move || {
-            let committed = checking.manager().try_commit_siwc_bind(&target.registered, || {
-                if files.base_dir().canonicalize()? != target.directory || target.path.canonicalize()? != target.real_path { return Err(invalid()); }
-                let record = files.bind_siwc_locked(&target.record, tokens, &guard, &|disk, id| {
-                    if files.base_dir().canonicalize()? != target.directory { return Err(invalid()); }
-                    target.identity.check(disk, id)?;
-                    if checking.oauth_sessions().is_shut_down() || !checking.oauth_sessions().store().admit_bind(&session, registration) {
-                        return Err(io::Error::other("SIWC bind session ended"));
+            let committed = checking
+                .manager()
+                .try_commit_siwc_bind(&target.registered, || {
+                    if files.base_dir().canonicalize()? != target.directory
+                        || target.path.canonicalize()? != target.real_path
+                    {
+                        return Err(invalid());
                     }
-                    Ok(())
+                    let record =
+                        files.bind_siwc_locked(&target.record, tokens, &guard, &|disk, id| {
+                            if files.base_dir().canonicalize()? != target.directory {
+                                return Err(invalid());
+                            }
+                            target.identity.check(disk, id)?;
+                            if checking.oauth_sessions().is_shut_down()
+                                || !checking
+                                    .oauth_sessions()
+                                    .store()
+                                    .admit_bind(&session, registration)
+                            {
+                                return Err(io::Error::other("SIWC bind session ended"));
+                            }
+                            Ok(())
+                        })?;
+                    let data = serde_json::to_vec(&record.metadata).map_err(|_| invalid())?;
+                    Ok((record, data))
                 })?;
-                let data = serde_json::to_vec(&record.metadata).map_err(|_| invalid())?;
-                Ok((record, data))
-            })?;
             Ok::<_, io::Error>((committed, target, guard))
-        }).await?;
+        })
+        .await?;
         target = returned;
         let Some((record, data)) = committed else {
             drop(guard);
@@ -183,18 +230,27 @@ pub(super) async fn save(
             tokio::task::yield_now().await;
             continue;
         };
-        let file = AuthFile { path: target.path, data: data.into() };
+        let file = AuthFile {
+            path: target.path,
+            data: data.into(),
+        };
         let synced = match target.command.take() {
-            Some(command) => store.sync.completed_token_command(record, Some(file), command),
+            Some(command) => store
+                .sync
+                .completed_token_command(record, Some(file), command),
             None => return Err(invalid()),
         };
         #[cfg(test)]
-        if let Some(pause) = state.oauth_sessions().overrides().bind_after_sync.clone() {
+        let pause = state.oauth_sessions().overrides().bind_after_sync.clone();
+        #[cfg(test)]
+        if let Some(pause) = pause {
             pause.0.notify_one();
             pause.1.notified().await;
         }
         drop(guard);
         drop(management_guard);
-        return synced.await.map_err(|_| io::Error::other("SIWC credential sync failed"));
+        return synced
+            .await
+            .map_err(|_| io::Error::other("SIWC credential sync failed"));
     }
 }

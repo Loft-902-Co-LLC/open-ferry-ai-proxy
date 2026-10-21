@@ -837,3 +837,51 @@ async fn legacy_sinks_refuse_bind_states_and_leave_the_target_untouched() {
     assert_eq!(std::fs::read(path).unwrap(), OUTER.as_bytes());
     assert!(api.sync.calls().is_empty());
 }
+
+#[tokio::test]
+async fn start_refuses_manager_disk_account_disagreement_including_empty_account() {
+    for initial in [None, Some("first-account")] {
+        let dir = AuthDir::new();
+        let mut outer: Value = serde_json::from_str(OUTER).unwrap();
+        outer["email"] = json!("dummy@example.test");
+        if let Some(account) = initial { outer["account_id"] = json!(account); }
+        dir.write("codex-bind.json", &outer.to_string());
+        let api = bind_api(&dir);
+        let id = api.manager.list()[0].id.clone();
+        api.manager.edit_unsaved(&id, |auth| { auth.metadata.insert("account_id".into(), json!("different-account")); Ok::<_, ()>(true) }).unwrap();
+        api.post("/v8/management/oauth/siwc/bind", r#"{"name":"codex-bind.json"}"#).await.expect(StatusCode::BAD_REQUEST);
+        assert_eq!(api.state.oauth_sessions().running(), 0);
+        assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+    }
+}
+
+#[tokio::test]
+async fn pending_bind_fences_disk_watcher_and_legacy_upload_account_replacements() {
+    for replacement in ["disk", "watcher", "legacy-upload"] {
+        for initial in [None, Some("first-account")] {
+            let dir = AuthDir::new();
+            let mut outer: Value = serde_json::from_str(OUTER).unwrap();
+            outer["email"] = json!("dummy@example.test");
+            if let Some(account) = initial { outer["account_id"] = json!(account); }
+            let path = dir.write("codex-bind.json", &outer.to_string());
+            let upstream = Upstream::answering(tokens()).await;
+            let api = login_api(&dir, &upstream.url);
+            let state = start_login(&api, START).await;
+            outer["account_id"] = json!("different-account");
+            match replacement {
+                "disk" => atomic_replace(&path, outer.to_string().as_bytes()),
+                "watcher" => {
+                    let expected = api.manager.list()[0].clone();
+                    api.manager.edit_unsaved(&expected.id, |auth| { auth.metadata.insert("account_id".into(), json!("different-account")); Ok::<_, ()>(true) }).unwrap();
+                    assert_eq!(api.manager.get(&expected.id).unwrap().registration_epoch, expected.registration_epoch);
+                }
+                _ => { api.post("/v0/management/auth-files?name=codex-bind.json", &outer.to_string()).await.expect(StatusCode::OK); }
+            }
+            let before = std::fs::read(&path).unwrap();
+            if replacement != "legacy-upload" { deliver(&api, &state, "codex", issued()); }
+            assert!(!failure(&api, &state).await.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+        }
+    }
+}

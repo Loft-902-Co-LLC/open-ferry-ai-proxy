@@ -294,6 +294,7 @@ fn reparse_tag(file: &fs::File) -> io::Result<u32> {
 /// no-user fallback. Neither values nor fingerprints are Debug-printable.
 /// This detects substitution, not ID-token authenticity or SIWC matching.
 pub struct BindIdentity {
+    account_id: Value,
     evidence: [Option<String>; 6],
     grant: [u8; 32],
     file: FileId,
@@ -303,6 +304,7 @@ impl BindIdentity {
     /// Captures the outer identity without keeping the credential file open.
     pub fn capture(metadata: &Map<String, Value>, file: FileId) -> Self {
         Self {
+            account_id: metadata.get("account_id").cloned().unwrap_or(Value::Null),
             evidence: bind_account(metadata),
             grant: bind_grant(metadata),
             file,
@@ -314,6 +316,9 @@ impl BindIdentity {
     pub fn check(&self, metadata: &Map<String, Value>, file: FileId) -> io::Result<()> {
         self.file.supported()?;
         file.supported()?;
+        if account_value(&self.account_id)? != account_value(metadata.get("account_id").unwrap_or(&Value::Null))? {
+            return Err(invalid("SIWC bind target identity changed"));
+        }
         let evidence = bind_account(metadata);
         let same = self
             .evidence
@@ -327,6 +332,29 @@ impl BindIdentity {
             Err(invalid("SIWC bind target identity changed"))
         }
     }
+}
+
+fn account_value(value: &Value) -> io::Result<&str> {
+    match value {
+        Value::Null => Ok(""),
+        Value::String(value) => Ok(value),
+        _ => Err(invalid("invalid SIWC bind account")),
+    }
+}
+
+/// Checks the registered account and independent user evidence without exposing
+/// any values. Empty and absent account IDs match only each other.
+pub fn check_bind_metadata(expected: &Map<String, Value>, current: &Map<String, Value>) -> io::Result<()> {
+    if account_value(expected.get("account_id").unwrap_or(&Value::Null))?
+        != account_value(current.get("account_id").unwrap_or(&Value::Null))? {
+        return Err(invalid("SIWC bind target identity changed"));
+    }
+    let before = bind_account(expected);
+    let after = bind_account(current);
+    if before.iter().zip(&after).all(|(before, after)| before.is_none() || before == after)
+        && (before[2..].iter().any(Option::is_some) || bind_grant(expected) == bind_grant(current)) {
+        Ok(())
+    } else { Err(invalid("SIWC bind target identity changed")) }
 }
 
 fn bind_grant(metadata: &Map<String, Value>) -> [u8; 32] {
