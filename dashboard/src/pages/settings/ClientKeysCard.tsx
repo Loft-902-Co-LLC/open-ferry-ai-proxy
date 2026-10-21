@@ -120,6 +120,7 @@ function KeyItem({ row, writable, onDelete, onUndo }: KeyItemProps) {
         )}
         {row.state === "added" && <Badge tone="info">Not saved yet</Badge>}
         {row.state === "deleted" && <Badge tone="danger">Will be deleted</Badge>}
+        {row.state === "missing" && <Badge tone="warn">Already removed on the server</Badge>}
       </span>
       {/* One button that turns from Delete to Undo and back, so focus stays on it. */}
       {(!saved || writable) && (

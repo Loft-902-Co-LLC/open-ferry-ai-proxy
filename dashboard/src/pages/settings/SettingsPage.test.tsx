@@ -2039,3 +2039,24 @@ describe("session config version guard", () => {
     expect(state.api.calls.filter((call) => call.method === "PUT")).toEqual([]);
   });
 });
+
+
+describe("stale pending key deletion", () => {
+  it("shows an already removed key with Undo while preserving the deletion refusal", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    await user.click(screen.getByRole("button", { name: /^Delete the client key.*0001/ }));
+    state.tree.access["api-keys"] = [KEY_B];
+    state.external(false);
+    await refetchOnFocus();
+    expect(await screen.findByText("Already removed on the server")).toBeVisible();
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    expect(await screen.findByText(/Changed fields: Client API keys/)).toBeVisible();
+    expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+    await user.click(screen.getByRole("button", { name: /^Undo deleting the client key.*0001/ }));
+    expectNothingUnsaved();
+    expect(screen.queryByText("Already removed on the server")).not.toBeInTheDocument();
+    expect(state.tree.access["api-keys"]).toEqual([KEY_B]);
+  });
+});
