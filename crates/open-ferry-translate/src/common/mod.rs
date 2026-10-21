@@ -4,6 +4,7 @@
 //! Helpers shared by translators of every format.
 
 pub(crate) mod cache_control;
+pub(crate) mod codex_replay_signature;
 pub(crate) mod claude;
 pub(crate) mod claude_native_response;
 pub(crate) mod file_data;

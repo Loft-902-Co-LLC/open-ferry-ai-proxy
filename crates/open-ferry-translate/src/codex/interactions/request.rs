@@ -154,12 +154,16 @@ pub fn convert_interactions_request_to_codex(
     copy_system(&mut out, request);
     copy_generation_config(&mut out, request);
     let mut items = Vec::new();
-    let refusal = push_input(&mut items, request.get("input"));
+    let refusal = push_input(&mut items, request.get("input"), model_name);
     if !items.is_empty() {
         set_path(&mut out, "input", Value::Array(items));
     }
     copy_tools(&mut out, request);
     copy_top_level(&mut out, request);
+    const INCLUDE: &str = "reasoning.encrypted_content";
+    if out.get("include").is_none() { out["include"] = serde_json::json!([INCLUDE]); }
+    else if let Some(include) = out.get_mut("include").and_then(Value::as_array_mut)
+        && !include.iter().any(|v| v.as_str() == Some(INCLUDE)) { include.push(INCLUDE.into()); }
     (out, refusal)
 }
 
@@ -258,7 +262,7 @@ fn reasoning_summary(config: &Value) -> Option<&'static str> {
 /// `appendInteractionsInputToCodex`: a string, a list of steps, an object
 /// with `steps` (and a `role` for them), or a single step. Gives the refusal
 /// for the first run of user content left with nothing to send.
-fn push_input(items: &mut Vec<Value>, input: Option<&Value>) -> Option<UnsupportedPartError> {
+fn push_input(items: &mut Vec<Value>, input: Option<&Value>, model: &str) -> Option<UnsupportedPartError> {
     let mut run = UserRun::default();
     match input {
         None => return None,
@@ -268,17 +272,17 @@ fn push_input(items: &mut Vec<Value>, input: Option<&Value>) -> Option<Unsupport
         }
         Some(Value::Array(steps)) => {
             for step in steps {
-                push_step(items, step, "user", &mut run);
+                push_step(items, step, "user", &mut run, model);
             }
         }
         Some(input) => match input.get("steps") {
             Some(Value::Array(steps)) => {
                 let role = step_role(input, "user");
                 for step in steps {
-                    push_step(items, step, role, &mut run);
+                    push_step(items, step, role, &mut run, model);
                 }
             }
-            _ => push_step(items, input, "user", &mut run),
+            _ => push_step(items, input, "user", &mut run, model),
         },
     }
     run.end();
@@ -287,7 +291,7 @@ fn push_input(items: &mut Vec<Value>, input: Option<&Value>) -> Option<Unsupport
 
 /// `appendInteractionsStepToCodex`. A tool result keeps the open user turn
 /// alive; a call, the model's output and a thought close it.
-fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut UserRun) {
+fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut UserRun, model: &str) {
     if let Value::String(text) = step {
         push_role_text(items, role, text, run);
         return;
@@ -295,7 +299,7 @@ fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut
     if let Some(Value::Array(steps)) = step.get("steps") {
         let role = step_role(step, role);
         for nested in steps {
-            push_step(items, nested, role, run);
+            push_step(items, nested, role, run, model);
         }
         return;
     }
@@ -315,7 +319,8 @@ fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut
         }
         "thought" | "reasoning" => {
             run.end();
-            items.push(thought(step));
+            if let Some(item) = thought(step, model)
+                && !items.iter().any(|existing| existing["type"] == "reasoning" && existing["encrypted_content"] == item["encrypted_content"]) { items.push(item); }
         }
         // `user_input`, `message`, no type, and any other.
         _ => {
@@ -440,20 +445,13 @@ fn function_result(step: &Value) -> Value {
 }
 
 /// `appendInteractionsThoughtToCodex`.
-fn thought(step: &Value) -> Value {
+fn thought(step: &Value, model: &str) -> Option<Value> {
+    let raw = ["signature", "thought_signature", "thoughtSignature"].iter().map(|key| str_of(step.get(*key))).find(|s| !s.trim().is_empty())?;
+    let signature = crate::common::codex_replay_signature::for_target(model, &raw)?;
     let mut text = content_text(step.get("content"));
-    if text.is_empty() {
-        text = str_of(step.get("text")).into_owned();
-    }
-    let mut item = Map::new();
-    item.insert("type".into(), "reasoning".into());
-    if !text.is_empty() {
-        item.insert("content".into(), text.into());
-    }
-    if let Some(id) = step.get("id") {
-        item.insert("id".into(), str_of(Some(id)).into());
-    }
-    Value::Object(item)
+    if text.is_empty() { text = str_of(step.get("text")).into_owned(); }
+    let summary = if text.is_empty() { vec![] } else { vec![serde_json::json!({"type":"summary_text","text":text})] };
+    Some(serde_json::json!({"type":"reasoning","encrypted_content":signature,"summary":summary}))
 }
 
 /// `appendInteractionsTextToCodex`.
@@ -860,4 +858,29 @@ fn shorten_name(name: &str) -> String {
         return truncate_bytes(&candidate, NAME_LIMIT).to_owned();
     }
     truncate_bytes(name, NAME_LIMIT).to_owned()
+}
+
+#[cfg(test)]
+mod signature_replay_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn accepts_matching_thought_spellings_once_and_requests_encrypted_reasoning() {
+        let sig = format!("Q-PaDgE{}", "A".repeat(1419));
+        let steps: Vec<_> = ["signature", "thought_signature", "thoughtSignature"].iter().map(|key| {
+            let mut step = json!({"type":"thought","id":"unreplayable-id","text":"summary"});
+            step[*key] = sig.clone().into(); step
+        }).collect();
+        for model in ["muse-spark", "gpt-5"] {
+            let (out, err) = convert_interactions_request_to_codex(model, &json!({"input":steps,"include":["other"]}), false);
+            assert!(err.is_none());
+            assert_eq!(out["include"], json!(["other","reasoning.encrypted_content"]));
+            assert_eq!(out["input"].as_array().unwrap().len(), usize::from(model == "muse-spark"));
+            if model == "muse-spark" {
+                assert_eq!(out["input"][0]["encrypted_content"], sig);
+                assert_eq!(out["input"][0]["summary"][0]["text"], "summary");
+                assert!(out["input"][0].get("id").is_none());
+            }
+        }
+    }
 }

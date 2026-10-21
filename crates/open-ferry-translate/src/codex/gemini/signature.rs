@@ -3,8 +3,6 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
-use crate::signature::{Provider, compatible_signature_for_provider, detect_signature_provider, is_valid_grok_encrypted_content};
-use crate::thinking::base_model_name;
 
 const MAGIC: &str = "cpa-codex-gemini-carrier-v1:";
 
@@ -24,13 +22,7 @@ pub(super) fn decode(raw: &str) -> String {
 
 pub(super) fn for_target(model: &str, raw: &str) -> Option<String> {
     let raw = decode(raw);
-    let target = Provider::from_model_name(base_model_name(model));
-    let effective = if target == Provider::Unknown { Provider::Gpt } else { target };
-    let detected = detect_signature_provider(&raw);
-    if detected != Provider::Unknown {
-        return (detected == effective).then(|| compatible_signature_for_provider(effective, &raw)).flatten();
-    }
-    (target == Provider::Grok && is_valid_grok_encrypted_content(&raw)).then_some(raw)
+    crate::common::codex_replay_signature::for_target(model, &raw)
 }
 
 pub(super) fn set(part: &mut Value, raw: &str) {
