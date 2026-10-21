@@ -332,6 +332,8 @@ mod tests {
 
     #[test]
     fn native_closures_cannot_move_across_provider_events() {
+        // This also passes with the old normalizer. It guards the per-batch
+        // design, rather than distinguishing the whole-closure fix from it.
         let case = Case::response(
             "boundaries",
             "{}",
