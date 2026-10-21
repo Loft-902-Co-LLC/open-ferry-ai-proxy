@@ -229,17 +229,19 @@ interface ConfigFileProps {
   initial: string;
   editor: ConfigEditor;
   onReload: () => void;
+  onStored: (text: string) => void;
   onUnsavedChange?: ((unsaved: boolean) => void) | undefined;
 }
 
 /** The file, in an editor, once loaded. */
-function ConfigFile({ initial, editor, onReload, onUnsavedChange }: ConfigFileProps) {
+function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: ConfigFileProps) {
   const { call } = editor;
   const client = useQueryClient();
   const statusId = useId();
   /** The file as the editor opened it, or as last saved. */
   const [base, setBase] = useState(initial);
   const [draft, setDraft] = useState(initial);
+  const [seenInitial, setSeenInitial] = useState(initial);
   // Counts the editor's fresh starts; Discard starts it again from `base`.
   const [round, setRound] = useState(0);
   const [review, setReview] = useState<Review | null>(null);
@@ -253,10 +255,13 @@ function ConfigFile({ initial, editor, onReload, onUnsavedChange }: ConfigFilePr
   }, [edited, editor, onUnsavedChange]);
 
   // A clean editor follows query updates; a draft retains its own base.
-  if (!edited && initial !== base) {
-    setBase(initial);
-    setDraft(initial);
-    setRound((value) => value + 1);
+  if (initial !== seenInitial) {
+    setSeenInitial(initial);
+    if (!edited) {
+      setBase(initial);
+      setDraft(initial);
+      setRound((value) => value + 1);
+    }
   }
 
   const read = useMutation({
@@ -270,10 +275,25 @@ function ConfigFile({ initial, editor, onReload, onUnsavedChange }: ConfigFilePr
     onSuccess: setReview,
   });
   const save = useMutation({
-    mutationFn: (text: string) =>
-      call<unknown>(CONFIG_YAML, { method: "PUT", body: text, contentType: "application/yaml" }),
-    onSuccess: (_answer, text) => {
-      setBase(text);
+    mutationFn: async (text: string) => {
+      await call<unknown>(CONFIG_YAML, { method: "PUT", body: text, contentType: "application/yaml" });
+      // The server may migrate or normalize YAML. Its stored bytes and
+      // their ETag become the next draft's baseline, never our submission.
+      editor.setDirty(false);
+      try {
+        const stored = await call<unknown>(CONFIG_YAML);
+        if (typeof stored !== "string") throw new NotTextError();
+        return stored;
+      } catch (error) {
+        editor.setDirty(true);
+        throw error;
+      }
+    },
+    onSuccess: (stored) => {
+      onStored(stored);
+      setBase(stored);
+      setDraft(stored);
+      setRound((value) => value + 1);
       setReview(null);
       setSaved(true);
     },
@@ -389,6 +409,7 @@ export function ConfigFileEditor({
   onUnsavedChange?: (unsaved: boolean) => void;
 }) {
   const editor = useConfigEditor();
+  const client = useQueryClient();
   const [visible, setVisible] = useState(false);
   const [round, setRound] = useState(0);
   const file = useQuery({
@@ -448,6 +469,7 @@ export function ConfigFileEditor({
             key={round}
             initial={file.data}
             editor={editor.editor}
+            onStored={(text) => { client.setQueryData([CONFIG_YAML, "config-editor", editor.scope], text); }}
             onReload={() => { void reload(); }}
             onUnsavedChange={onUnsavedChange}
           />

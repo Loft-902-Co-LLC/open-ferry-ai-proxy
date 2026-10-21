@@ -1162,6 +1162,36 @@ describe("config.yaml", () => {
     expect(screen.getByText("No unsaved changes.", { selector: "[role=status]:not([hidden] *)" })).toBeVisible();
   });
 
+  it("uses stored normalized YAML and its ETag as the next draft baseline", async () => {
+    const state = server();
+    let etag = '"loaded"';
+    const stored = "# normalized by the server\ndebug: true\n";
+    state.api.use(
+      route("GET", V8_CONFIG, () => ({ json: state.v8, headers: { ETag: etag } })),
+      route("GET", "/v8/management/config.yaml", () => ({ text: state.yaml, headers: { ETag: etag } })),
+      route("PUT", "/v8/management/config.yaml", () => {
+        state.yaml = stored;
+        etag = '"stored"';
+        return { json: {}, headers: { ETag: etag } };
+      }),
+    );
+    const { user } = await openSettings();
+    fireEvent.change(await openFile(user), { target: { value: `${YAML}# submitted\n` } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    let dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    await screen.findByText("Saved config.yaml. The server uses it from now on.");
+    const editor = screen.getByRole("textbox", { name: "config.yaml" });
+    expect(editor).toHaveValue(stored);
+    fireEvent.change(editor, { target: { value: `${stored}# next edit\n` } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    expect(within(dialog).queryByText(/changed on the server since you opened it/)).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    await screen.findByText("Saved config.yaml. The server uses it from now on.");
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")[1]?.headers.get("if-match")).toBe('"stored"');
+  });
+
   it("warns when the file changed on the server since it was opened", async () => {
     const state = server();
     const { user } = await openSettings();
