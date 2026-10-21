@@ -698,6 +698,89 @@ jobs:
           export OFP_TEST_SCRATCH=/work/target/ofp-scratch &&
           python3 -I tests/install/test_install.py -v" installer'
 
+  # Keep the published binary unchanged: ownership of its receipt/config proves
+  # the installer's primary-token owner reaches install-self and init children.
+  # No Rust build, and only manual full qualification pays for real downloads.
+  windows-admin-owner:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install an attested release as the object-creating Administrator
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          if ($identity.User.Value -notmatch '-500$') { throw 'Expected the RID-500 hosted Administrator' }
+          if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Expected an elevated runner'
+          }
+          $install = 'C:\Program Files\open-ferry'
+          $data = 'C:\ProgramData\open-ferry'
+          $exe = Join-Path $install 'open-ferry.exe'
+          $config = Join-Path $data 'config.yaml'
+          $probe = Join-Path $env:RUNNER_TEMP 'open-ferry-owner-probe'
+          function Owner([string]$Path) {
+            (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+          }
+          [IO.File]::WriteAllText($probe, 'before installer')
+          try {
+            $before = Owner $probe
+            Write-Host "Runner SID: $($identity.User.Value); default creation owner before install: $before"
+            if ($before -ne $identity.User.Value) { throw 'Runner does not reproduce object-creator ownership' }
+          } finally { Remove-Item -LiteralPath $probe -Force }
+          if ((Test-Path -LiteralPath $install) -or (Test-Path -LiteralPath $data)) {
+            throw 'Expected fresh machine install directories'
+          }
+          try {
+            # Capture init's generated keys; never print or upload its output.
+            $output = & .\install.ps1 -System -NoMigrate -Version 0.0.2 -InstallDir $install -ConfigPath $config 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Installer failed: $($output | Select-String 'install.ps1: error:')" }
+            if (-not ($output | Select-String -SimpleMatch 'Checking the build provenance attestation with gh')) {
+              throw 'The real attestation check did not run'
+            }
+            foreach ($path in @($install, $exe, $data, (Join-Path $data 'install-receipt.json'), $config)) {
+              $owner = Owner $path
+              Write-Host "Installed owner $owner : $path"
+              if ($owner -ne 'S-1-5-32-544') { throw "Unexpected owner of $path" }
+            }
+            Write-Host 'Published install-self and init inherited the Administrators default owner.'
+            $output = & $exe service install -system -config $config 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Service install failed: $output" }
+            & $exe service status -system
+            if ($LASTEXITCODE -ne 0) { throw 'Service status failed' }
+            foreach ($root in @($install, $data)) {
+              foreach ($entry in @(Get-Item -LiteralPath $root) + @(Get-ChildItem -LiteralPath $root -Recurse -Force)) {
+                $owner = Owner $entry.FullName
+                Write-Host "Service owner $owner : $($entry.FullName)"
+                # The service itself runs as SYSTEM and creates its own runtime files.
+                if ($owner -notin 'S-1-5-32-544', 'S-1-5-18') { throw "Unexpected owner of $($entry.FullName)" }
+              }
+            }
+          } finally {
+            if (Get-Service -Name open-ferry -ErrorAction SilentlyContinue) {
+              & $exe service uninstall -system
+              if ($LASTEXITCODE -ne 0) { throw 'Service uninstall failed' }
+            }
+            if (Get-Service -Name open-ferry -ErrorAction SilentlyContinue) { throw 'Service registration remains' }
+            foreach ($root in @($install, $data)) {
+              if ([IO.Path]::GetFullPath($root) -notin 'C:\Program Files\open-ferry', 'C:\ProgramData\open-ferry') {
+                throw 'Unexpected cleanup target'
+              }
+              if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+              if (Test-Path -LiteralPath $root) { throw "Cleanup left $root" }
+            }
+            Write-Host 'Service and machine install directories removed.'
+          }
+
   install-scripts-root:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest

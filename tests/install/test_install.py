@@ -3315,6 +3315,35 @@ class PowerShell7Tests(InstallPs1Cases, Case):
 
 @unittest.skipUnless(WINDOWS, "Windows elevation guard")
 class InstallerPrivilegeGuardTests(unittest.TestCase):
+    def test_native_owner_method_compiles_without_running_the_installer(self):
+        source = read_text(INSTALL_PS1)
+        start = source.index("    if (-not ('OpenFerryInstallerNative' -as [type])) {")
+        end = source.index("    # Same rule as scope::Host", start)
+        command = source[start:end] + "\n" + (
+            "$method = [OpenFerryInstallerNative].GetMethod('SetTokenInformation'); "
+            "if ($null -eq $method -or $method.ReturnType -ne [bool] -or "
+            "$method.GetParameters().Count -ne 4) { throw 'Invalid owner P/Invoke' }"
+        )
+        shells = [shell for shell in (POWERSHELL, PWSH) if shell]
+        if not shells:
+            self.skipTest("no Windows PowerShell")
+        for shell in shells:
+            with self.subTest(shell=shell):
+                result = subprocess.run(
+                    [shell, "-NoProfile", "-NonInteractive", "-Command", command],
+                    capture_output=True, text=True, timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_real_machine_owner_is_initialized_before_creating_staging_or_children(self):
+        source = read_text(INSTALL_PS1)
+        guard = "if ($hardened -and $reallyPrivileged -and $testSid -ne 'S-1-5-18') {\n        Initialize-AdminOwner\n    }"
+        owner = source.index(guard)
+        self.assertLess(source.index("an account install must not run as administrator"), owner)
+        self.assertLess(owner, source.index("Initialize-InstallDirectory $InstallDir"))
+        self.assertLess(owner, source.index("[System.IO.FileMode]::CreateNew"))
+        self.assertLess(owner, source.index("[System.Diagnostics.Process]::Start($info)"))
+
     def test_elevated_runners_skip_every_installer_seam(self):
         from unittest.mock import patch
         with patch.dict(globals(), ELEVATED=True), patch.dict(os.environ, OFP_INSTALL_TESTS_STRICT="0"):

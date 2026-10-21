@@ -83,6 +83,11 @@ use crate::login::Login;
 const EXIT_FLUSH: Duration = Duration::from_secs(1);
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Err(error) = open_ferry_supervisor::trust::initialize_admin_owner() {
+        eprintln!("open-ferry: failed to initialize the Administrators default owner: {error}");
+        return ExitCode::FAILURE;
+    }
     let mut args = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .peekable();

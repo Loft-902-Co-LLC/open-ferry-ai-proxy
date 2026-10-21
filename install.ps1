@@ -147,6 +147,7 @@ function Install-OpenFerry {
         $type = $module.DefineType($name.Name, 'Public, Abstract, Sealed')
         $methods = @(
             @('GetTokenInformation', 'advapi32.dll', [type[]]@([IntPtr], [uint32], [IntPtr], [uint32], [IntPtr])),
+            @('SetTokenInformation', 'advapi32.dll', [type[]]@([IntPtr], [uint32], [IntPtr], [uint32])),
             @('CreateDirectoryW', 'kernel32.dll', [type[]]@([string], [IntPtr])),
             @('OpenProcessToken', 'advapi32.dll', [type[]]@([IntPtr], [uint32], [IntPtr])),
             @('CloseHandle', 'kernel32.dll', [type[]]@([IntPtr]))
@@ -248,6 +249,40 @@ function Install-OpenFerry {
     }
     if (-not $System -and $privileged) {
         throw 'an account install must not run as administrator. Run it in a terminal not opened as administrator, or install open-ferry for the whole machine with `install.ps1 -System`.'
+    }
+    function Initialize-AdminOwner {
+        # An elevated token can default to the account SID (notably RID 500).
+        # Set the primary token's creation owner before any staging or child
+        # process: install-self and init must create machine-owned files too.
+        $admin = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+        $bytes = [byte[]]::new($admin.BinaryLength)
+        $admin.GetBinaryForm($bytes, 0)
+        $sid = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+        $owner = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
+        $tokenOut = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
+        [Runtime.InteropServices.Marshal]::WriteIntPtr($tokenOut, [IntPtr]::Zero)
+        try {
+            [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $sid, $bytes.Length)
+            [Runtime.InteropServices.Marshal]::WriteIntPtr($owner, $sid)
+            # TOKEN_ADJUST_DEFAULT is 0x80; TokenOwner is 4. Windows requires
+            # Administrators to be an owner-eligible group in this token.
+            if (-not [OpenFerryInstallerNative]::OpenProcessToken([IntPtr](-1), 0x80, $tokenOut)) {
+                throw 'Could not open the elevated process token to set its default owner; refusing the machine install.'
+            }
+            $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
+            if (-not [OpenFerryInstallerNative]::SetTokenInformation($token, 4, $owner, [IntPtr]::Size)) {
+                throw 'Could not set the elevated process default owner to Administrators; refusing the machine install.'
+            }
+        } finally {
+            $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
+            if ($token -ne [IntPtr]::Zero) { $null = [OpenFerryInstallerNative]::CloseHandle($token) }
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($tokenOut)
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($owner)
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($sid)
+        }
+    }
+    if ($hardened -and $reallyPrivileged -and $testSid -ne 'S-1-5-18') {
+        Initialize-AdminOwner
     }
     # A 32-bit PowerShell on 64-bit Windows sees x86 here and the machine's
     # architecture in PROCESSOR_ARCHITEW6432.
