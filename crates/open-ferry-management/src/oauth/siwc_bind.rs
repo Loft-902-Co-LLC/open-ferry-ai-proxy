@@ -312,7 +312,7 @@ pub(super) async fn save(
                 .subsec_nanos()
                 % 21;
             let backoff =
-                drain_backoff(failures) + std::time::Duration::from_millis(u64::from(jitter));
+                retry_delay(attempted, failures) + std::time::Duration::from_millis(u64::from(jitter));
             if file_busy {
                 turn.defer_file_retry(backoff);
             }
@@ -360,6 +360,15 @@ pub(super) async fn save(
 pub(super) enum SaveOutcome {
     Synchronized,
     RuntimeSyncUnavailable,
+}
+
+// Capacity denial is retried promptly even after earlier transaction misses.
+fn retry_delay(attempted: bool, failures: u32) -> std::time::Duration {
+    if attempted {
+        drain_backoff(failures)
+    } else {
+        ADMISSION_BACKOFF
+    }
 }
 
 fn drain_backoff(timeouts: u32) -> std::time::Duration {
@@ -482,6 +491,14 @@ async fn ended(state: &ManagementState, session: &str, lifeline: &mut Lifeline) 
 #[cfg(test)]
 mod round3_tests {
     use super::*;
+    #[test]
+    fn round5_unreserved_retries_use_the_base_delay() {
+        for failures in 0..100 {
+            assert_eq!(retry_delay(false, failures), ADMISSION_BACKOFF);
+            assert_eq!(retry_delay(true, failures), drain_backoff(failures));
+        }
+    }
+
     #[test]
     fn round3_drain_timeouts_grow_backoff_and_cap_at_one_second() {
         let actual: Vec<_> = (0..10)
