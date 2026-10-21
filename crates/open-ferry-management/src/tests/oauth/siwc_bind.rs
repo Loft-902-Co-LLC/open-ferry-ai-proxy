@@ -7,6 +7,7 @@ use open_ferry_core::auth::AuthStore as _;
 
 mod admission;
 mod mutation_identity;
+mod round3;
 mod route_parity;
 
 const START: &str =
@@ -1290,7 +1291,7 @@ async fn busy_bind_commits_despite_overlapping_mutations_on_another_credential()
         .await
         .unwrap();
     // Both traffic threads can hold shared permits while one waits on the
-    // state mutex. Writer preference must stop their next iterations.
+    // state mutex. The global reservation must stop their next iterations.
     drop(active);
     let result = tokio::time::timeout(Duration::from_secs(2), completed(&api, &session)).await;
     stop.store(true, Ordering::SeqCst);

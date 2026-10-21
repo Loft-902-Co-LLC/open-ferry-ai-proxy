@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 const BOUND: Duration = Duration::from_millis(800);
 
-struct Pause {
+pub(super) struct Pause {
     armed: Arc<AtomicBool>,
     entered: Arc<tokio::sync::Notify>,
     release: std::sync::mpsc::Sender<()>,
@@ -41,7 +41,7 @@ impl Pause {
     fn arm(&self) {
         self.armed.store(true, Ordering::SeqCst);
     }
-    fn resume(&self) {
+    pub(super) fn resume(&self) {
         let _ = self.release.send(());
     }
 }
@@ -52,11 +52,20 @@ impl Drop for Pause {
     }
 }
 
-fn fixture() -> (AuthDir, Pause) {
+pub(super) fn fixture() -> (AuthDir, Pause) {
+    fixture_for("held.json")
+}
+
+pub(super) fn fixture_for(name: &str) -> (AuthDir, Pause) {
+    let name = name.to_owned();
     let (pause, hook) = Pause::new();
+    let name_to_hold = name;
     let dir = AuthDir::guarded(Some(open_ferry_core::auth::file_guard::FileGuard::new(
         move |path| {
-            if path.file_name().is_some_and(|name| name == "held.json") {
+            if path
+                .file_name()
+                .is_some_and(|name| name == name_to_hold.as_str())
+            {
                 hook();
             }
             Ok(())
@@ -68,12 +77,20 @@ fn fixture() -> (AuthDir, Pause) {
     (dir, pause)
 }
 
-async fn shared_holder(api: &Api, pause: &Pause) -> std::thread::JoinHandle<()> {
+pub(super) async fn shared_holder(api: &Api, pause: &Pause) -> std::thread::JoinHandle<()> {
+    shared_holder_for(api, pause, "held.json").await
+}
+
+pub(super) async fn shared_holder_for(
+    api: &Api,
+    pause: &Pause,
+    name: &str,
+) -> std::thread::JoinHandle<()> {
     let manager = api.manager.clone();
     let id = manager
         .list()
         .into_iter()
-        .find(|a| a.file_name == "held.json")
+        .find(|a| a.file_name == name)
         .unwrap()
         .id
         .clone();
@@ -92,7 +109,7 @@ async fn shared_holder(api: &Api, pause: &Pause) -> std::thread::JoinHandle<()> 
     task
 }
 
-fn probe(api: &Api) -> impl FnOnce() + Send + 'static {
+pub(super) fn probe(api: &Api) -> impl FnOnce() + Send + 'static {
     let manager = api.manager.clone();
     let id = manager
         .list()
@@ -106,10 +123,9 @@ fn probe(api: &Api) -> impl FnOnce() + Send + 'static {
     }
 }
 
-async fn patch_pair(fields: bool) {
-    // Exercise a PATCH arriving during a reservation, then the opposite
-    // ordering. The first schedule reproduces the old management-lock cycle.
-    for patch_first in [false, true] {
+async fn patch_pair(fields: bool, patch_first: bool) {
+    // Each ordering is a separate nextest case, including PATCH-first.
+    {
         let (dir, holder_pause) = fixture();
         let upstream = Upstream::answering(tokens()).await;
         let mut api = login_api(&dir, &upstream.url);
@@ -176,12 +192,12 @@ async fn patch_pair(fields: bool) {
 
 #[tokio::test]
 async fn round2_bind_and_patch_status_finish_after_shared_drain() {
-    patch_pair(false).await;
+    patch_pair(false, false).await;
 }
 
 #[tokio::test]
 async fn round2_bind_and_patch_fields_finish_after_shared_drain() {
-    patch_pair(true).await;
+    patch_pair(true, false).await;
 }
 
 #[test]
@@ -266,67 +282,174 @@ async fn round2_overlapping_binds_admit_waiting_shared_mutations() {
     );
     completed(&api, &first).await;
     completed(&api, &second).await;
+    // The route-level liveness check alone can pass with either guard.
+    // Exercise the production turn API on a worker to isolate both rules.
+    let manager = api.manager.clone();
+    tokio::task::spawn_blocking(move || {
+        let older = manager.siwc_bind_turn("codex-bind.json");
+        let newer = manager.siwc_bind_turn("second.json");
+        let reservation = older.reserve_siwc_bind().unwrap();
+        assert!(
+            older.reserve_siwc_bind().is_none(),
+            "overlapping reservations were allowed"
+        );
+        drop(reservation);
+        assert!(
+            newer.reserve_siwc_bind().is_none(),
+            "a newer bind overtook an older FIFO turn"
+        );
+        drop(older);
+        assert!(newer.reserve_siwc_bind().is_some());
+    })
+    .await
+    .unwrap();
 }
 
-fn cancellation_with_parked_worker(stop: &str) {
+fn cancellation_with_free_worker(stop: &str) {
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
+        .worker_threads(2)
         .max_blocking_threads(4)
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        let (dir, pause) = fixture();
-        let upstream = Upstream::answering(tokens()).await;
-        let api = login_api(&dir, &upstream.url);
-        let session = start_login(&api, START).await;
-        let active = shared_holder(&api, &pause).await;
+        let (dir, pause) = fixture_for("codex-bind.json");
+        let api = bind_api(&dir);
+        let active = shared_holder_for(&api, &pause, "codex-bind.json").await;
         let waiting = watch_admission(&api);
-        deliver(&api, &session, "codex", issued());
+        let finished = Arc::new(tokio::sync::Notify::new());
+        api.state.oauth_sessions().overrides().bind_drain_budget = Some(Duration::from_secs(2));
+        api.state.oauth_sessions().overrides().bind_worker_finished = Some(finished.clone());
+        let state = api.state.clone();
+        let saving = tokio::spawn(async move {
+            crate::oauth::siwc_bind::save_for_test(&state, "round3-signal").await
+        });
         tokio::time::timeout(Duration::from_secs(2), waiting.notified())
             .await
             .unwrap();
-        let work = probe(&api);
-        let (started, entered) = std::sync::mpsc::channel();
-        // Model the synchronous bootstrap-destructor recording path: the
-        // sole worker parks in shared admission. The reservation must
-        // release itself without requiring this worker to poll anything.
-        let parked = tokio::spawn(async move {
-            started.send(()).unwrap();
-            work();
-        });
-        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Give the running worker time to enter its timed drain wait. The
+        // enlarged test budget separates signal withdrawal from the deadline.
+        tokio::time::sleep(Duration::from_millis(40)).await;
         match stop {
             "expiry" => api
                 .state
                 .oauth_sessions()
                 .store()
-                .expire_bind_for_test(&session),
-            "cancel" => assert!(api.state.oauth_sessions().store().cancel(&session)),
+                .expire_bind_for_test("round3-signal"),
+            "cancel" => assert!(api.state.oauth_sessions().store().cancel("round3-signal")),
+            "disconnect" => saving.abort(),
             _ => api.state.oauth_sessions().shutdown().await,
         }
-        tokio::time::timeout(BOUND, parked)
+        let withdrew = tokio::time::timeout(BOUND, finished.notified())
             .await
-            .expect("parked runtime worker prevented withdrawal")
-            .unwrap();
-        wait_for_bind_task(&api).await;
+            .is_ok();
+        // Release the shared holder before the final assertions. A signal
+        // must prevent the later write too, not just delay it behind the holder.
         pause.resume();
-        active.join().unwrap();
+        tokio::task::spawn_blocking(move || active.join().unwrap())
+            .await
+            .unwrap();
+        if !withdrew {
+            tokio::time::timeout(Duration::from_secs(3), finished.notified())
+                .await
+                .unwrap();
+        }
+        let result = saving.await;
+        assert!(
+            withdrew,
+            "{stop} did not withdraw before the independent drain deadline"
+        );
+        assert!(result.is_err() || result.unwrap().is_err());
         assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
     });
 }
 
 #[test]
-fn round2_expiry_withdraws_with_a_parked_runtime_worker() {
-    cancellation_with_parked_worker("expiry");
+fn round3_expiry_signal_withdraws_before_deadline() {
+    cancellation_with_free_worker("expiry");
+}
+#[test]
+fn round3_cancel_signal_withdraws_before_deadline() {
+    cancellation_with_free_worker("cancel");
+}
+#[test]
+fn round3_disconnect_signal_withdraws_before_deadline() {
+    cancellation_with_free_worker("disconnect");
+}
+#[test]
+fn round3_shutdown_signal_withdraws_before_deadline() {
+    cancellation_with_free_worker("shutdown");
+}
+
+#[tokio::test]
+async fn round3_patch_first_status_finishes_after_shared_drain() {
+    patch_pair(false, true).await;
+}
+#[tokio::test]
+async fn round3_patch_first_fields_finishes_after_shared_drain() {
+    patch_pair(true, true).await;
 }
 
 #[test]
-fn round2_cancel_withdraws_with_a_parked_runtime_worker() {
-    cancellation_with_parked_worker("cancel");
-}
-
-#[test]
-fn round2_disconnect_withdraws_with_a_parked_runtime_worker() {
-    cancellation_with_parked_worker("disconnect");
+fn round3_four_pending_binds_leave_the_blocking_pool_available() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(4)
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let upstream = Upstream::answering(tokens()).await;
+        let mut fixtures = Vec::new();
+        let mut parked = Vec::new();
+        for _ in 0..4 {
+            let (dir, pause) = fixture_for("codex-bind.json");
+            let api = login_api(&dir, &upstream.url);
+            let session = start_login(&api, START).await;
+            let holder = shared_holder_for(&api, &pause, "codex-bind.json").await;
+            let waiting = watch_admission(&api);
+            deliver(&api, &session, "codex", issued());
+            tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+                .await
+                .unwrap();
+            fixtures.push((dir, api, pause, session, holder));
+        }
+        for (_, api, _, _, _) in &fixtures {
+            let manager = api.manager.clone();
+            let id = manager
+                .list()
+                .into_iter()
+                .find(|a| a.file_name == "codex-bind.json")
+                .unwrap()
+                .id
+                .clone();
+            parked.push(tokio::task::spawn_blocking(move || {
+                manager.edit_unsaved(&id, |_| Ok::<_, ()>(false)).unwrap();
+            }));
+        }
+        let mut resumed = Box::pin(async {
+            for task in parked {
+                task.await.unwrap();
+            }
+        });
+        let result = tokio::time::timeout(BOUND, &mut resumed).await;
+        for (_, api, _, session, _) in &fixtures {
+            api.state.oauth_sessions().store().cancel(session);
+        }
+        if result.is_err() {
+            tokio::time::timeout(Duration::from_secs(3), &mut resumed)
+                .await
+                .unwrap();
+        }
+        for (_, api, pause, _, holder) in fixtures {
+            pause.resume();
+            tokio::task::spawn_blocking(move || holder.join().unwrap())
+                .await
+                .unwrap();
+            wait_for_bind_task(&api).await;
+        }
+        assert!(
+            result.is_ok(),
+            "retained bind turns occupied every blocking-pool slot"
+        );
+    });
 }

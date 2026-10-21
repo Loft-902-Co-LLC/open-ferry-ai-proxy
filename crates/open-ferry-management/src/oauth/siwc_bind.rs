@@ -13,9 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use open_ferry_core::auth::codex_refresh::{generate_device_id, validate_device_id};
-use open_ferry_core::auth::credential_lock::{
-    CredentialLock, acquire_credential_lock, try_acquire_credential_lock,
-};
+use open_ferry_core::auth::credential_lock::try_acquire_credential_lock;
 use open_ferry_core::auth::file_store::BindIdentity;
 use open_ferry_core::auth::{Auth, CodexCredentialPartition};
 use open_ferry_core::config::AuthFile;
@@ -158,39 +156,43 @@ pub(super) async fn save(
     registration: u64,
     lifeline: &mut Lifeline,
 ) -> io::Result<()> {
+    use open_ferry_core::manager::{SIWC_BIND_DRAIN_TIMEOUT, SiwcBindDrain};
     if tokens.access_token.trim().is_empty()
         || tokens.refresh_token.trim().is_empty()
         || tokens.client_id.trim().is_empty()
     {
-        return Err(io::Error::other("invalid SIWC bind token data"));
+        return Err(invalid());
     }
     let store = state.credential_store().map_err(|_| invalid())?;
+    let files = store.files.clone();
     let tokens = tokens.to_json();
-    // This flag reaches running/queued blocking work even if the owner drops.
-    // The thread's own deadline also withdraws when Tokio cannot poll ended().
     let cancellation = CancelOnDrop(Arc::new(AtomicBool::new(false)));
-    loop {
-        if state.oauth_sessions().is_shut_down()
-            || !state.oauth_sessions().store().is_pending(&session, "codex")
-        {
-            return Err(invalid());
-        }
-        let files = store.files.clone();
-        let checking = state.clone();
-        let checking_session = session.clone();
-        let tokens = tokens.clone();
-        let cancelled = cancellation.0.clone();
-        // No reservation or lock is moved into this queued work. Everything
-        // from reservation to withdrawal/commit runs on this one worker.
-        let work = run_blocking(move || {
-            let attempt = || -> io::Result<Attempt> {
-                if cancelled.load(Ordering::Acquire) {
-                    return Err(invalid());
-                }
-                let manager = checking.manager();
-                let Some(mut reservation) = manager.reserve_siwc_bind() else {
-                    return Ok(Attempt::busy(WaitFor::Backoff));
+    let cancelled = cancellation.0.clone();
+    let checking = state.clone();
+    let checking_session = session.clone();
+    // A dedicated worker keeps its FIFO place without occupying a pool slot.
+    // Nothing reserved or thread-confined crosses this future's awaits.
+    let mut work = Box::pin(run_bind_worker(state, move || {
+        let manager = checking.manager();
+        let turn = manager.siwc_bind_turn(&target.registered.id);
+        let mut timeouts = 0u32;
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(invalid());
+            }
+            let attempt = (|| -> io::Result<Option<Saved>> {
+                let Some(mut reservation) = turn.reserve_siwc_bind() else {
+                    return Ok(None);
                 };
+                #[cfg(test)]
+                if let Some(times) = checking
+                    .oauth_sessions()
+                    .overrides()
+                    .bind_admission_times
+                    .clone()
+                {
+                    times.lock().unwrap().push(std::time::Instant::now());
+                }
                 #[cfg(test)]
                 if let Some(signal) = checking
                     .oauth_sessions()
@@ -200,23 +202,47 @@ pub(super) async fn save(
                 {
                     signal.notify_one();
                 }
-                if !reservation.wait_drained(&cancelled) {
-                    return Ok(Attempt::busy(WaitFor::Backoff));
+                let budget = SIWC_BIND_DRAIN_TIMEOUT;
+                #[cfg(test)]
+                let budget = checking
+                    .oauth_sessions()
+                    .overrides()
+                    .bind_drain_budget
+                    .unwrap_or(budget);
+                match reservation.wait_drained(&cancelled, budget) {
+                    SiwcBindDrain::Ready => timeouts = 0,
+                    SiwcBindDrain::TimedOut => {
+                        timeouts = timeouts.saturating_add(1);
+                        return Ok(None);
+                    }
+                    SiwcBindDrain::Interrupted => {
+                        timeouts = 0;
+                        return Ok(None);
+                    }
                 }
                 let Some(guard) = try_acquire_credential_lock(&target.path)? else {
-                    return Ok(Attempt::busy(WaitFor::File));
+                    #[cfg(test)]
+                    if let Some(signal) =
+                        checking.oauth_sessions().overrides().bind_lock_wait.clone()
+                    {
+                        signal.notify_one();
+                    }
+                    return Ok(None);
                 };
                 let Some(management_guard) = checking.try_credential_lock() else {
-                    return Ok(Attempt::busy(WaitFor::Management));
+                    return Ok(None);
                 };
-                let committed = reservation
-                    .try_commit(&target.registered, &cancelled, || {
-                        if files.base_dir().canonicalize()? != target.directory
-                            || target.path.canonicalize()? != target.real_path
-                        {
-                            return Err(invalid());
-                        }
-                        files.try_bind_siwc_locked(&target.record, tokens, &guard, &|disk, id| {
+                let commit = || {
+                    if files.base_dir().canonicalize()? != target.directory
+                        || target.path.canonicalize()? != target.real_path
+                    {
+                        return Err(invalid());
+                    }
+                    files.try_bind_siwc_locked(
+                        &target.record,
+                        tokens.clone(),
+                        &guard,
+                        &|disk, id| {
                             if files.base_dir().canonicalize()? != target.directory {
                                 return Err(invalid());
                             }
@@ -230,122 +256,170 @@ pub(super) async fn save(
                             {
                                 return Err(io::Error::other("SIWC bind session ended"));
                             }
+                            #[cfg(test)]
+                            {
+                                let pause = checking
+                                    .oauth_sessions()
+                                    .overrides()
+                                    .bind_before_write
+                                    .clone();
+                                if let Some(pause) = pause {
+                                    pause.0.notify_one();
+                                    pause
+                                        .1
+                                        .lock()
+                                        .unwrap()
+                                        .recv_timeout(std::time::Duration::from_secs(5))
+                                        .unwrap();
+                                }
+                            }
                             Ok(())
-                        })
-                    })?
+                        },
+                    )
+                };
+                let committed = reservation
+                    .try_commit(&target.registered, &cancelled, commit)?
                     .flatten();
-                // The worker releases global admission before serialization,
-                // returning guards or waiting for any async work.
                 drop(reservation);
                 match committed {
                     Some(record) => {
                         let data = serde_json::to_vec(&record.metadata).map_err(|_| invalid())?;
-                        Ok(Attempt {
-                            wait: WaitFor::Backoff,
-                            saved: Some((record, data, guard, management_guard)),
-                        })
+                        Ok(Some((record, data, guard, management_guard)))
                     }
-                    None => Ok(Attempt::busy(WaitFor::Backoff)),
+                    None => Ok(None),
                 }
-            }();
-            attempt.map(|attempt| (attempt, target))
-        });
-        let (attempt, returned) = tokio::select! {
-            biased;
-            () = ended(state, &session, lifeline) => return Err(invalid()),
-            result = work => result?,
-        };
-        target = returned;
-        let Some((record, data, guard, management_guard)) = attempt.saved else {
-            // Reservation and every acquired guard have already been dropped
-            // on the worker. Waiting cannot close M -> S -> reservation -> M.
-            match attempt.wait {
-                WaitFor::File => {
-                    #[cfg(test)]
-                    if let Some(signal) = state.oauth_sessions().overrides().bind_lock_wait.clone()
-                    {
-                        signal.notify_one();
-                    }
-                    tokio::select! {
-                        biased;
-                        () = ended(state, &session, lifeline) => return Err(invalid()),
-                        acquired = acquire_credential_lock(&target.path) => drop(acquired?),
-                    }
-                }
-                WaitFor::Management => {
-                    tokio::select! {
-                        biased;
-                        () = ended(state, &session, lifeline) => return Err(invalid()),
-                        acquired = state.credential_lock().lock() => drop(acquired),
-                    }
-                }
-                WaitFor::Backoff => {}
+            })()?;
+            if let Some(saved) = attempt {
+                return Ok((saved, target));
             }
             let jitter = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos()
                 % 21;
-            tokio::select! {
-                biased;
-                () = ended(state, &session, lifeline) => return Err(invalid()),
-                () = tokio::time::sleep(ADMISSION_BACKOFF + std::time::Duration::from_millis(u64::from(jitter))) => {},
+            if !turn.wait_retry(
+                drain_backoff(timeouts) + std::time::Duration::from_millis(u64::from(jitter)),
+                &cancelled,
+            ) {
+                return Err(invalid());
             }
-            continue;
-        };
-        let file = AuthFile {
-            path: target.path,
-            data: data.into(),
-        };
-        let synced = match target.command.take() {
-            Some(command) => store
-                .sync
-                .completed_token_command(record, Some(file), command),
-            None => return Err(invalid()),
-        };
-        #[cfg(test)]
-        let pause = state.oauth_sessions().overrides().bind_after_sync.clone();
-        #[cfg(test)]
-        if let Some(pause) = pause {
-            pause.0.notify_one();
-            pause.1.notified().await;
         }
-        drop(guard);
-        drop(management_guard);
-        return synced
-            .await
-            .map_err(|_| io::Error::other("SIWC credential sync failed"));
+    }));
+    let ((record, data, guard, management_guard), returned) = tokio::select! {
+        result = &mut work => result?,
+        () = ended(state, &session, lifeline) => {
+            // A signal cancels admission, but cannot turn an already durable
+            // write into SAVE_FAILED or skip its completed-token command.
+            drop(cancellation);
+            work.await?
+        }
+    };
+    target = returned;
+    let file = AuthFile {
+        path: target.path,
+        data: data.into(),
+    };
+    let synced = match target.command.take() {
+        Some(command) => store
+            .sync
+            .completed_token_command(record, Some(file), command),
+        None => return Err(invalid()),
+    };
+    #[cfg(test)]
+    let pause = state.oauth_sessions().overrides().bind_after_sync.clone();
+    #[cfg(test)]
+    if let Some(pause) = pause {
+        pause.0.notify_one();
+        pause.1.notified().await;
+    }
+    drop(guard);
+    drop(management_guard);
+    synced
+        .await
+        .map_err(|_| io::Error::other("SIWC credential sync failed"))
+}
+
+fn drain_backoff(timeouts: u32) -> std::time::Duration {
+    std::time::Duration::from_millis((20u64 << timeouts.saturating_sub(1).min(6)).min(1000))
+}
+
+/// Operation-scoped dedicated worker: a retained FIFO turn must not consume
+/// the blocking pool needed by detached saves holding shared admission.
+async fn run_bind_worker<T: Send + 'static>(
+    _state: &ManagementState,
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let operation = open_ferry_core::gate::Operation::current();
+    #[cfg(test)]
+    let finished = _state
+        .oauth_sessions()
+        .overrides()
+        .bind_worker_finished
+        .clone();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let thread = std::thread::Builder::new()
+        .name("siwc-bind".into())
+        .spawn(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match operation {
+                    Some(operation) => operation.scope_blocking(work),
+                    None => work(),
+                }));
+            #[cfg(test)]
+            if let Some(finished) = finished {
+                finished.notify_one();
+            }
+            let _ = send.send(result);
+        })?;
+    drop(thread);
+    match receive.await {
+        Ok(Ok(result)) => result,
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(_) => Err(io::Error::other("SIWC bind worker ended without a result")),
     }
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
 
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
-#[derive(Clone, Copy)]
-enum WaitFor {
-    Backoff,
-    File,
-    Management,
-}
-
 type Saved = (
     Auth,
     Vec<u8>,
-    CredentialLock,
+    open_ferry_core::auth::credential_lock::CredentialLock,
     tokio::sync::OwnedMutexGuard<()>,
 );
-struct Attempt {
-    wait: WaitFor,
-    saved: Option<Saved>,
+
+#[cfg(test)]
+pub(crate) async fn save_for_test(state: &ManagementState, session: &str) -> io::Result<()> {
+    let bind = prepare(state, "codex-bind.json").await?;
+    let mut registration = state
+        .oauth_sessions()
+        .store()
+        .register(session, "codex")
+        .unwrap();
+    assert!(state.oauth_sessions().store().mark_bind_target(
+        session,
+        bind.target.mutation_path(),
+        "http://localhost:1455/auth/callback"
+    ));
+    save(
+        state,
+        bind.target,
+        SiwcTokenData {
+            access_token: "round3-test".into(),
+            refresh_token: "round3-test-refresh".into(),
+            client_id: "round3-client".into(),
+            ..Default::default()
+        },
+        session.into(),
+        registration.id,
+        &mut registration.lifeline,
+    )
+    .await
 }
-impl Attempt {
-    fn busy(wait: WaitFor) -> Self {
-        Self { wait, saved: None }
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
     }
 }
 
@@ -364,5 +438,17 @@ async fn ended(state: &ManagementState, session: &str, lifeline: &mut Lifeline) 
             () = lifeline.cut() => return,
             () = tokio::time::sleep(ADMISSION_BACKOFF) => {},
         }
+    }
+}
+
+#[cfg(test)]
+mod round3_tests {
+    use super::*;
+    #[test]
+    fn round3_drain_timeouts_grow_backoff_and_cap_at_one_second() {
+        let actual: Vec<_> = (0..10)
+            .map(|count| drain_backoff(count).as_millis())
+            .collect();
+        assert_eq!(actual, [20, 20, 40, 80, 160, 320, 640, 1000, 1000, 1000]);
     }
 }

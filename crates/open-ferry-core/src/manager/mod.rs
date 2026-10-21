@@ -94,7 +94,7 @@ mod select;
 mod settings;
 mod siwc_bind;
 #[doc(hidden)]
-pub use siwc_bind::SiwcBindReservation;
+pub use siwc_bind::{SIWC_BIND_DRAIN_TIMEOUT, SiwcBindDrain, SiwcBindReservation, SiwcBindTurn};
 mod summary;
 mod text;
 mod websocket;
@@ -843,6 +843,23 @@ struct ReloadState {
     waiting_exclusive: usize,
     waiting_shared: usize,
     bind_reserved: bool,
+    next_ticket: u64,
+    tickets: std::collections::VecDeque<u64>,
+    #[cfg(test)]
+    pause_shared: bool,
+}
+
+impl ReloadState {
+    fn shared_paused(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.pause_shared
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
 }
 
 impl ReloadBarrier {
@@ -863,7 +880,7 @@ impl ReloadBarrier {
             if queued {
                 state.waiting_shared += 1;
             }
-            while state.exclusive || state.waiting_exclusive != 0 {
+            while state.exclusive || state.waiting_exclusive != 0 || state.shared_paused() {
                 state = self
                     .changed
                     .wait(state)

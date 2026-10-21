@@ -145,7 +145,24 @@ pub(crate) struct Overrides {
     pub(crate) bind_admission_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Holds a persisted bind after revision allocation, before releasing its lock.
     pub(crate) bind_after_sync: Option<std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
+    /// Notified after worker RAII has released its reservation and FIFO turn.
+    pub(crate) bind_worker_finished: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Enlarged only by signal tests, separating cancellation from the deadline.
+    pub(crate) bind_drain_budget: Option<Duration>,
+    /// Records actual reservation starts for retry-spacing regressions.
+    pub(crate) bind_admission_times: Option<BindAdmissionTimes>,
+    /// Pause after the last session fence, before writing.
+    pub(crate) bind_before_write: Option<BindWritePause>,
 }
+
+#[cfg(test)]
+type BindWritePause = std::sync::Arc<(
+    tokio::sync::Notify,
+    std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+)>;
+
+#[cfg(test)]
+type BindAdmissionTimes = std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>;
 
 #[cfg(test)]
 impl Default for Overrides {
@@ -159,6 +176,10 @@ impl Default for Overrides {
             bind_lock_wait: None,
             bind_admission_wait: None,
             bind_after_sync: None,
+            bind_before_write: None,
+            bind_drain_budget: None,
+            bind_admission_times: None,
+            bind_worker_finished: None,
         }
     }
 }
