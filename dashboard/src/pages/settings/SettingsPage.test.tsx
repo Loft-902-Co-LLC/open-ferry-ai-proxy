@@ -1201,6 +1201,8 @@ describe("config.yaml", () => {
     await user.click(screen.getByRole("button", { name: "Review changes" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
     expect(within(dialog).getByText("config.yaml changed on the server since you opened it")).toBeVisible();
+    expect(dialog).toHaveTextContent("Saving also undoes what changed meanwhile.");
+    expect(dialog).toHaveTextContent("This save has no version guard.");
     const diff = within(dialog).getByRole("region", { name: "The changes to config.yaml" });
     expect(within(diff).getByRole("deletion")).toHaveTextContent("request-retry: 5");
     expect(within(diff).getAllByRole("insertion").map((line) => line.textContent)).toEqual([
@@ -1275,6 +1277,8 @@ describe("config.yaml", () => {
     await user.click(screen.getByRole("button", { name: "Review changes" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
     expect(within(dialog).getByText("config.yaml changed on the server since you opened it")).toBeVisible();
+    expect(dialog).toHaveTextContent("Saving also undoes what changed meanwhile.");
+    expect(dialog).toHaveTextContent("This save has no version guard.");
     await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
     await screen.findByText("Saved config.yaml. The server uses it from now on.");
     const writes = state.api.callsTo("PUT", CONFIG_YAML);

@@ -160,6 +160,7 @@ interface ReviewDialogProps {
   review: Review | null;
   /** The file as it was when the editor opened it. */
   base: string;
+  versioned: boolean;
   pending: boolean;
   error: unknown;
   onSave: () => void;
@@ -168,7 +169,7 @@ interface ReviewDialogProps {
 }
 
 /** The diff a save makes against the file as the server has it now. */
-function ReviewDialog({ review, base, pending, error, onSave, onClose, onReload }: ReviewDialogProps) {
+function ReviewDialog({ review, base, versioned, pending, error, onSave, onClose, onReload }: ReviewDialogProps) {
   const lines = review === null ? [] : diffLines(review.fresh, review.draft);
   const { added, removed } = diffCounts(lines);
   const same = review !== null && review.fresh === review.draft;
@@ -200,8 +201,9 @@ function ReviewDialog({ review, base, pending, error, onSave, onClose, onReload 
       {moved && (
         <Alert tone="warn" title="config.yaml changed on the server since you opened it">
           <p>
-            Copy your edits and reload the latest file before saving. A server with version
-            checks refuses this save so it cannot overwrite the changes made meanwhile.
+            {versioned
+              ? "Copy your edits and reload the latest file before saving. Version checks refuse this save so it cannot overwrite the changes made meanwhile."
+              : "Saving also undoes what changed meanwhile. This save has no version guard. Copy your edits and reload the latest file before saving."}
           </p>
         </Alert>
       )}
@@ -370,6 +372,7 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
       <ReviewDialog
         review={review}
         base={base}
+        versioned={editor.versioned}
         pending={save.isPending}
         error={save.error}
         onSave={() => {
