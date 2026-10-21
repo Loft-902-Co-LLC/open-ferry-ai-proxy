@@ -12,11 +12,19 @@ use crate::compare::Deviation;
 /// The settings whose change lines open-ferry gives and upstream doesn't
 /// (see the deviations in the port's `config/diff/mod.rs`): the line starts
 /// with the name and a colon.
-const UNLOGGED: [&str; 4] = [
+const UNLOGGED: [&str; 12] = [
     "max-request-body-bytes",
     "streaming.send-keepalive-before-ft",
     "routing.session-affinity-rebind-on",
     "codex.signin-with-chatgpt-identifier",
+    "ingress-limits.max-connections",
+    "ingress-limits.header-timeout-seconds",
+    "ingress-limits.tls-handshake-timeout-seconds",
+    "ingress-limits.idle-timeout-seconds",
+    "ingress-limits.body-idle-timeout-seconds",
+    "ingress-limits.body-total-timeout-seconds",
+    "ingress-limits.buffered-body-bytes",
+    "ingress-limits.write-stall-timeout-seconds",
 ];
 
 /// `config-diff/details`: `{"details": [...]}` from the case's old config
@@ -94,6 +102,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ingress_change_lines_are_open_ferry_additions() {
+        for name in super::UNLOGGED.iter().filter(|name| name.starts_with("ingress-limits.")) {
+            let go = json!({"details": []});
+            let rust = json!({"details": [format!("{name}: 0 -> 7")]});
+            assert_eq!(compare(&go, rust).0, 0, "{name}");
+        }
+    }
+
     /// Any other line that differs still does, and so do names that only
     /// start or contain one of the settings.
     #[test]
@@ -108,6 +125,7 @@ mod tests {
             "vertex[0].interactions-x: true -> false",
             "vertex[0].base-url: https://a -> https://b",
             "max-request-body-bytes 1 -> 2",
+            "ingress-limits.unknown: 0 -> 1",
         ] {
             let rust = json!({ "details": [
                 "max-request-body-bytes: 1 -> 2",
