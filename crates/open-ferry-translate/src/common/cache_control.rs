@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/common/cache_control.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/translator/common/cache_control.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Carrying a client's `cache_control` markers onto Claude content blocks.
@@ -19,9 +19,24 @@ fn valid(src: &Value) -> Option<&Value> {
     }
 }
 
+/// Whether a translated Claude block can carry a cache marker.
+fn can_host(block: &Map<String, Value>) -> bool {
+    match block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "thinking" | "redacted_thinking" => false,
+        "text" => !crate::json::str_of(block.get("text")).trim().is_empty(),
+        _ => true,
+    }
+}
+
 /// `AttachCacheControl`: copies `src`'s marker onto `block`.
 pub(crate) fn attach(block: &mut Map<String, Value>, src: &Value) {
-    if let Some(cache_control) = valid(src) {
+    if let Some(cache_control) = valid(src)
+        && can_host(block)
+    {
         block.insert("cache_control".into(), cache_control.clone());
     }
 }
@@ -34,15 +49,29 @@ pub(crate) fn attach_to(block: &mut Value, src: &Value) {
 }
 
 /// `AttachMessageCacheControl` for array content: a message's marker goes on
-/// its last block, unless that block has one of its own.
+/// its last eligible block, unless that block has one of its own.
 pub(crate) fn attach_to_last_block(blocks: &mut [Value], message: &Value) {
     let Some(cache_control) = valid(message) else {
         return;
     };
-    if let Some(Value::Object(last)) = blocks.last_mut()
+    if let Some(last) = blocks
+        .iter_mut()
+        .rev()
+        .filter_map(Value::as_object_mut)
+        .find(|block| can_host(block))
         && !last.contains_key("cache_control")
     {
         last.insert("cache_control".into(), cache_control.clone());
+    }
+}
+
+/// A dropped part's marker stays at its preceding surviving block, preserving
+/// TTL order. Do not search farther back or replace that block's own marker.
+pub(crate) fn attach_to_preceding_block(blocks: &mut [Value], source: &Value) {
+    if let Some(block) = blocks.last_mut()
+        && block.get("cache_control").is_none()
+    {
+        attach_to(block, source);
     }
 }
 
@@ -104,7 +133,10 @@ mod tests {
     #[test]
     fn a_message_marker_yields_to_the_last_blocks_own() {
         let message = json!({"cache_control": {"type": "ephemeral"}});
-        let mut blocks = vec![json!({"type": "text"}), json!({"type": "text"})];
+        let mut blocks = vec![
+            json!({"type": "text", "text": "a"}),
+            json!({"type": "text", "text": "b"}),
+        ];
         attach_to_last_block(&mut blocks, &message);
         assert_eq!(blocks[1]["cache_control"], json!({"type": "ephemeral"}));
         assert!(blocks[0].get("cache_control").is_none());
@@ -128,5 +160,38 @@ mod tests {
         let mut blocks = vec![json!({"type": "tool_result"})];
         attach_to_tool_result(&mut blocks, &message);
         assert_eq!(blocks[0]["cache_control"], json!({"type": "ephemeral"}));
+    }
+
+    #[test]
+    fn markers_skip_blank_and_thinking_blocks() {
+        let source = json!({"cache_control":{"type":"ephemeral"}});
+        for block in [
+            json!({"type":"text","text":" \n\t"}),
+            json!({"type":"thinking"}),
+            json!({"type":"redacted_thinking"}),
+        ] {
+            let mut block = block;
+            attach_to(&mut block, &source);
+            assert!(block.get("cache_control").is_none());
+        }
+        let mut blocks = vec![
+            json!({"type":"text","text":"keep"}),
+            json!({"type":"thinking"}),
+            json!({"type":"text","text":" "}),
+            Value::Null,
+        ];
+        attach_to_last_block(&mut blocks, &source);
+        assert_eq!(blocks[0]["cache_control"], source["cache_control"]);
+        assert!(
+            blocks[1..]
+                .iter()
+                .all(|block| block.get("cache_control").is_none())
+        );
+        attach_to_last_block(&mut blocks[1..], &source);
+        assert!(
+            blocks[1..]
+                .iter()
+                .all(|block| block.get("cache_control").is_none())
+        );
     }
 }

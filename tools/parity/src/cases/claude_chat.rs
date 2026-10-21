@@ -25,6 +25,22 @@ pub fn requests() -> Vec<Case> {
     };
 
     let mut cases = vec![
+        Case::new("blank-middle-cache-markers", "claude-sonnet-4-6", json!({"messages":[
+            {"role":"system","content":" \n "},
+            {"role":"developer","content":[
+                {"type":"text","text":"S1"},
+                {"type":"text","text":"","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"text","text":"S2","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]},
+            {"role":"user","content":[
+                {"type":"text","text":"  keep  "},
+                {"type":"text","text":" \t ","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"text","text":"end","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]},
+            {"role":"assistant","content":" \n "},
+            {"role":"user","content":" "}
+        ]}).to_string()),
+
         Case::new(
             "typical-sdk-request",
             "claude-sonnet-4-6",
@@ -397,6 +413,19 @@ pub fn requests() -> Vec<Case> {
                 body.to_string(),
             ));
         }
+    }
+    for (name, output) in [
+        (
+            "blank-tool-text",
+            json!([{"type":"text","text":""},{"type":"text","text":" \n "}]),
+        ),
+        (
+            "mixed-tool-text",
+            json!([{"type":"text","text":" "},{"type":"text","text":"  keep  "}]),
+        ),
+    ] {
+        cases.push(Case::new(name, "claude-sonnet-4-6", json!({"messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"call_1","content":output}, {"role":"user","content":"next"}]}).to_string()));
     }
     cases
 }

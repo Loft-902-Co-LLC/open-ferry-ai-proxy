@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → Claude Messages request.
@@ -336,7 +336,7 @@ fn is_system_level_role(role: &str) -> bool {
 /// `appendSystemText`: a system text block, with `source`'s cache marker.
 /// Empty text gives none.
 fn push_system_text(system: &mut Vec<Value>, text: &str, source: Option<&Value>) {
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return;
     }
     let mut block = text_block(text);
@@ -355,7 +355,12 @@ fn push_system_item(system: &mut Vec<Value>, item: &Value) {
             for part in parts {
                 match &*str_of(part.get("type")) {
                     "input_text" | "output_text" | "text" => {
-                        push_system_text(system, &str_of(part.get("text")), Some(part));
+                        let text = str_of(part.get("text"));
+                        if text.trim().is_empty() {
+                            cache_control::attach_to_preceding_block(&mut system[start..], part);
+                        } else {
+                            push_system_text(system, &text, Some(part));
+                        }
                     }
                     // `responsesSystemUnsupportedBlock`: Claude takes only text
                     // here. Anything else becomes a block of just its type, so
@@ -489,7 +494,7 @@ fn convert_input(
     let mut turns = Turns::default();
     let items = match input {
         Some(Value::Array(items)) => normalize_responses_tool_call_outputs(items),
-        Some(Value::String(text)) => {
+        Some(Value::String(text)) if !text.trim().is_empty() => {
             turns.push("user", vec![text_block(text.as_str())]);
             Vec::new()
         }
@@ -668,12 +673,17 @@ fn message_parts(item: &Value) -> (&'static str, Vec<Value>, Option<&'static str
                 match &*str_of(part.get("type")) {
                     kind @ ("input_text" | "output_text") => {
                         if let Some(text) = part.get("text") {
-                            let mut block = Map::new();
-                            block.insert("type".into(), "text".into());
-                            block.insert("text".into(), str_of(Some(text)).into());
-                            attach_claude_citations(&mut block, part.get("annotations"));
-                            cache_control::attach(&mut block, part);
-                            parts.push(Value::Object(block));
+                            let text = str_of(Some(text));
+                            if text.trim().is_empty() {
+                                cache_control::attach_to_preceding_block(&mut parts, part);
+                            } else {
+                                let mut block = Map::new();
+                                block.insert("type".into(), "text".into());
+                                block.insert("text".into(), text.into());
+                                attach_claude_citations(&mut block, part.get("annotations"));
+                                cache_control::attach(&mut block, part);
+                                parts.push(Value::Object(block));
+                            }
                         }
                         role = if kind == "input_text" {
                             "user"
@@ -685,10 +695,12 @@ fn message_parts(item: &Value) -> (&'static str, Vec<Value>, Option<&'static str
                     // whole.
                     "refusal" => {
                         let refusal = str_of(part.get("refusal"));
-                        if !refusal.is_empty() {
+                        if !refusal.trim().is_empty() {
                             let mut block = text_block(refusal);
                             cache_control::attach_to(&mut block, part);
                             parts.push(block);
+                        } else if part.get("refusal").is_some() {
+                            cache_control::attach_to_preceding_block(&mut parts, part);
                         }
                         role = "assistant";
                     }
@@ -710,7 +722,9 @@ fn message_parts(item: &Value) -> (&'static str, Vec<Value>, Option<&'static str
                 }
             }
         }
-        Some(Value::String(text)) if !text.is_empty() => parts.push(text_block(text.as_str())),
+        Some(Value::String(text)) if !text.trim().is_empty() => {
+            parts.push(text_block(text.as_str()))
+        }
         _ => {}
     }
     if role.is_empty() {
@@ -782,7 +796,22 @@ fn tool_result_content(output: Option<&Value>) -> Value {
     let Some(Value::Array(parts)) = output else {
         return str_of(output).into();
     };
-    let blocks: Vec<Value> = parts.iter().filter_map(content_part).collect();
+    let mut dropped_empty_part = false;
+    let blocks: Vec<Value> = parts
+        .iter()
+        .filter_map(content_part)
+        .filter(|block| {
+            if has_visible_content(block) {
+                true
+            } else {
+                dropped_empty_part = true;
+                false
+            }
+        })
+        .collect();
+    if blocks.is_empty() && dropped_empty_part {
+        return "".into();
+    }
     if blocks.is_empty() {
         return output.map(Value::to_string).unwrap_or_default().into();
     }
