@@ -773,7 +773,7 @@ async fn public_get_callbacks_answer_without_polling_the_body() {
 }
 
 #[tokio::test]
-async fn public_callback_pool_is_bounded_independent_and_released_on_every_exit() {
+async fn public_callback_pool_is_independent_and_released_after_completion_read_error_and_abort() {
     use crate::config::ServerConfig;
     use crate::testing::{FakeCatalog, FakeDispatcher, state};
     let dispatcher = FakeDispatcher::new([]);
@@ -985,7 +985,7 @@ async fn a_small_zstd_frame_uses_its_own_window_in_the_precharge() {
     );
 }
 #[tokio::test]
-async fn an_eight_mib_zstd_frame_has_a_measured_and_tight_allocation_bound() {
+async fn an_eight_mib_zstd_frame_has_a_conservative_allocation_bound() {
     let (result, stats, charged) = measure_zstd(rle_zstd_frame(0x68, 64, 128 << 10), 8 << 20).await;
     assert_eq!(result.unwrap().len(), 8 << 20);
     assert!(!stats.overflow);
@@ -1022,4 +1022,74 @@ async fn malformed_zstd_probability_runs_are_rejected_before_large_scratch_alloc
         "malformed probability table allocated {} bytes",
         stats.largest
     );
+}
+
+async fn check_zstd_drop_charge(exit: &str) {
+    use futures_util::FutureExt;
+    use std::cell::RefCell;
+    use std::panic::AssertUnwindSafe;
+    use std::rc::Rc;
+
+    let ingress = ingress(64 << 20);
+    let scope = RequestScope {
+        ingress: ingress.clone(),
+        body_limit: 64 << 20,
+        rejected: Arc::new(AtomicBool::new(false)),
+        decoded: Arc::new(Mutex::new(Vec::new())),
+    };
+    let observations = Rc::new(RefCell::new(Vec::new()));
+    let recorded = observations.clone();
+    let charged_ingress = ingress.clone();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_ENCODING, "zstd".parse().unwrap());
+    let frame = rle_zstd_frame(0x30, 2, 64 << 10);
+    let limit = if exit == "error" { 64 << 10 } else { 64 << 20 };
+    let result = REQUEST_INGRESS
+        .scope(scope, async {
+            crate::body::zstd_drop_probe::start(
+                move || {
+                    recorded
+                        .borrow_mut()
+                        .push(charged_ingress.reserved_body_bytes());
+                },
+                exit == "panic",
+            );
+            let result = AssertUnwindSafe(crate::body::read_decoded(
+                &headers,
+                Body::from(frame),
+                limit,
+            ))
+            .catch_unwind()
+            .await;
+            crate::body::zstd_drop_probe::finish();
+            result
+        })
+        .await;
+    match exit {
+        "success" => assert_eq!(result.unwrap().unwrap().len(), 128 << 10),
+        "error" => assert_eq!(result.unwrap().unwrap_err().status(), 413),
+        "panic" => assert!(result.is_err()),
+        _ => unreachable!(),
+    }
+    assert_eq!(ingress.reserved_body_bytes(), 0, "{exit} leaked its charge");
+    let recorded = observations.borrow();
+    assert_eq!(recorded.len(), 1, "decoder destructor wasn't observed");
+    assert!(
+        recorded[0] >= 6 << 20,
+        "{exit}: decoder still owned its storage after working charge was refunded: {}",
+        recorded[0]
+    );
+}
+
+#[tokio::test]
+async fn zstd_working_charge_covers_decoder_drop_on_success() {
+    check_zstd_drop_charge("success").await;
+}
+#[tokio::test]
+async fn zstd_working_charge_covers_decoder_drop_on_error() {
+    check_zstd_drop_charge("error").await;
+}
+#[tokio::test]
+async fn zstd_working_charge_covers_decoder_drop_on_unwind() {
+    check_zstd_drop_charge("panic").await;
 }
