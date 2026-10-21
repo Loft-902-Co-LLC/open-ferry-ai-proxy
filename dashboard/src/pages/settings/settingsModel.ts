@@ -241,6 +241,11 @@ export async function readServerFacts(
   signal?: AbortSignal,
 ): Promise<ServerFacts> {
   const file = await call(V8_CONFIG, { signal });
+  return serverFactsIn(file);
+}
+
+/** The facts in an already paired disk read or accepted update. */
+export function serverFactsIn(file: unknown): ServerFacts {
   const facts = Object.keys(FACT_PATHS) as (keyof ServerFacts)[];
   return serverFactsOf(
     Object.fromEntries(
