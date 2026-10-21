@@ -183,7 +183,7 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
         .saturating_add(64 << 10);
     let _working =
         crate::ingress::reserve_decoder(working_bytes).map_err(|()| DecodeError::Budget)?;
-    let mut output = crate::ingress::BudgetBuffer::new(crate::ingress::request_budget());
+    let mut output = crate::ingress::BudgetBuffer::with_limit(crate::ingress::request_budget(), limit);
     while !input.is_empty() {
         match decoder.init(&mut input) {
             Ok(()) => {}
@@ -228,7 +228,7 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
 
 /// Decodes a gzip stream of any number of members.
 fn decode_gzip(input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
-    let mut output = crate::ingress::BudgetBuffer::new(crate::ingress::request_budget());
+    let mut output = crate::ingress::BudgetBuffer::with_limit(crate::ingress::request_budget(), limit);
     let mut decoder = flate2::read::MultiGzDecoder::new(input);
     let mut chunk = [0; 16 * 1024];
     loop {

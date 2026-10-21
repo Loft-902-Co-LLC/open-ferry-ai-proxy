@@ -435,7 +435,7 @@ async fn buffer(
     if declared.is_some_and(|length| length > snapshot.body_limit as u64) {
         return Err(rejected(413, "http: request body too large"));
     }
-    let mut buffer = BudgetBuffer::new(Some(ingress.budget.clone()));
+    let mut buffer = BudgetBuffer::with_limit(Some(ingress.budget.clone()), snapshot.body_limit);
     // Multipart parsers may copy fields out of their raw input (multer on
     // management routes, quoted-printable parts in the proxy). Reserve an
     // two additional body lengths for parser input and collected field copies
@@ -623,14 +623,18 @@ impl Drop for Reservation {
 pub(crate) struct BudgetBuffer {
     bytes: Vec<u8>,
     reservation: Reservation,
+    limit: usize,
 }
 
 impl BudgetBuffer {
+    #[cfg(test)]
     pub(crate) fn new(budget: Option<BodyBudget>) -> Self {
-        Self {
-            bytes: Vec::new(),
-            reservation: Reservation { budget, bytes: 0 },
-        }
+        let limit = budget.as_ref().and_then(|budget| budget.0.lock().unwrap_or_else(PoisonError::into_inner).limit).unwrap_or(usize::MAX);
+        Self::with_limit(budget, body_limit(limit))
+    }
+
+    pub(crate) fn with_limit(budget: Option<BodyBudget>, limit: usize) -> Self {
+        Self { bytes: Vec::new(), reservation: Reservation { budget, bytes: 0 }, limit }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -638,9 +642,16 @@ impl BudgetBuffer {
     }
 
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<(), ()> {
-        self.reservation
-            .grow_to(self.bytes.len().checked_add(bytes.len()).ok_or(())?)?;
-        self.bytes.reserve(bytes.len());
+        let needed = self.bytes.len().checked_add(bytes.len()).ok_or(())?;
+        if needed > self.limit { return Err(()); }
+        if needed > self.bytes.capacity() {
+            // Bound retained capacity, excluding allocator granularity and the
+            // transient old/new overlap during realloc. Grow geometrically,
+            // charge the chosen capacity first, then request exactly that size.
+            let capacity = needed.max(self.bytes.capacity().saturating_mul(2)).max(8).min(self.limit);
+            self.reservation.grow_to(capacity)?;
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
