@@ -126,26 +126,17 @@ pub(crate) fn bool_of(value: Option<&Value>) -> bool {
     }
 }
 
-/// gjson's strict integer parser: an optional `-`, then ASCII digits.
-fn parse_int(text: &str) -> Option<i64> {
-    let (negative, digits) = match text.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, text),
-    };
-    if digits.is_empty() {
-        return None;
-    }
-    let mut number: i64 = 0;
-    for byte in digits.bytes() {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        number = number.wrapping_mul(10).wrapping_add(i64::from(byte - b'0'));
-    }
-    Some(if negative {
-        number.wrapping_neg()
+/// Preserve the caller's original bytes for response translators. SDK
+/// callers can supply a readable but truncated original even though HTTP
+/// entry points normally validate JSON before constructing these options.
+pub(crate) fn response_request<'a>(
+    request: &'a open_ferry_core::exec::Request,
+    options: &'a open_ferry_core::exec::Options,
+) -> open_ferry_translate::json::ResponseRequestData<'a> {
+    open_ferry_translate::json::ResponseRequestData::new(if options.original_request.is_empty() {
+        &request.payload
     } else {
-        number
+        &options.original_request
     })
 }
 

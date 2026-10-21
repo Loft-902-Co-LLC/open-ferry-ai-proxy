@@ -259,10 +259,10 @@ impl ClaudeCliExecutor {
             })?;
             message.to_string().into_bytes()
         } else {
-            let original = original_request(request, options);
+            let original = crate::json::response_request(request, options);
             let context = ResponseContext {
                 model: &request.model,
-                original_request: (&original).into(),
+                original_request: original.as_request(),
                 request: &translation,
             };
             let mut out = Registry::global()

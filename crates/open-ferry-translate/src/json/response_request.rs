@@ -53,3 +53,27 @@ impl<'a> From<&'a Value> for ResponseRequest<'a> {
         Self::from((!value.is_null()).then_some(value))
     }
 }
+
+/// Owns the strict parsed value while retaining the exact request bytes.
+/// Production executors and parity use this same byte-oriented constructor.
+pub struct ResponseRequestData<'a> {
+    raw: &'a [u8],
+    parsed: Option<Value>,
+}
+
+impl<'a> ResponseRequestData<'a> {
+    pub fn new(raw: &'a [u8]) -> Self {
+        Self {
+            raw,
+            parsed: super::exact::from_slice(raw).ok(),
+        }
+    }
+
+    pub fn as_request(&self) -> ResponseRequest<'_> {
+        ResponseRequest::from_bytes(self.raw, self.parsed.as_ref())
+    }
+
+    pub fn value(&self) -> &Value {
+        self.parsed.as_ref().unwrap_or(&Value::Null)
+    }
+}

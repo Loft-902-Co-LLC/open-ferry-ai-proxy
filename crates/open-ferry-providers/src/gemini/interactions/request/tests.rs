@@ -277,3 +277,33 @@ fn builds_the_interactions_url() {
         "https://generativelanguage.googleapis.com/v1beta/interactions"
     );
 }
+
+#[test]
+fn response_translation_keeps_tools_from_a_truncated_original_request() {
+    let request = Request {
+        model: "m".into(),
+        payload: Bytes::from_static(b"{}"),
+    };
+    let mut options = Options::new(Format::OPENAI_RESPONSE);
+    let body = br#"{"id":"i","model":"m","status":"completed","create_time":"2026-04-24T00:00:00Z","steps":[{"type":"function_call","id":"c1","name":"lookup","arguments":{"input":"x"}}]}"#;
+    let run = |options: &Options| {
+        translate_answer(
+            &request,
+            options,
+            &serde_json::json!({}),
+            HeaderMap::new(),
+            body.to_vec(),
+        )
+        .unwrap()
+        .payload
+    };
+    options.original_request =
+        Bytes::from_static(br#"{"tools":[{"type":"custom","name":"lookup"}]}"#);
+    let expected = run(&options);
+    let parsed: Value = serde_json::from_slice(&expected).unwrap();
+    assert_eq!(parsed["output"][0]["type"], "custom_tool_call");
+    assert_eq!(parsed["output"][0]["input"], "x");
+    options.original_request =
+        Bytes::from_static(br#"{"tools":[{"type":"custom","name":"lookup"}]"#);
+    assert_eq!(run(&options), expected);
+}

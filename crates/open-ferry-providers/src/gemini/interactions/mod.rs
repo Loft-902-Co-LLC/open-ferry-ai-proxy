@@ -76,7 +76,7 @@ use super::{Credential, GeminiExecutor, build_headers, post, read_answer, reject
 use crate::apply_patch_responses;
 use crate::codex::client::Clients;
 use crate::codex::request::{
-    base_model, original_request, response_format, set_bool_if_different, set_string_if_different,
+    base_model, response_format, set_bool_if_different, set_string_if_different,
 };
 use crate::json::{self, Body};
 use crate::observe_send::Attempt;
@@ -287,17 +287,17 @@ pub(super) fn translate_stream(
 ) -> StreamResponse {
     let headers = response.headers().clone();
     let format = response_format(options);
-    let original = original_request(request, options);
+    let original = crate::json::response_request(request, options);
     let mut translator = Registry::global().response_stream(
         &Format::INTERACTIONS,
         &format,
         &ResponseContext {
             model: &request.model,
-            original_request: (&original).into(),
+            original_request: original.as_request(),
             request: sent,
         },
     );
-    apply_patch_responses::initialize_stream(&mut translator, &format, &original);
+    apply_patch_responses::initialize_stream(&mut translator, &format, original.value());
     let original_bytes = if options.original_request.is_empty() {
         request.payload.clone()
     } else {

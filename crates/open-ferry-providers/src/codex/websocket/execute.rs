@@ -70,7 +70,7 @@ use super::request::{Prepared, prepare};
 use super::session::{Hold, Session, Target};
 use crate::codex::executor::{CodexExecutor, finish_payload};
 use crate::codex::ext;
-use crate::codex::request::{Kind, original_request, response_format};
+use crate::codex::request::{Kind, response_format};
 use crate::codex::terminal::{
     APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
     has_meaningful_output_delta, is_terminal_empty_incomplete, normalize_completion,
@@ -343,10 +343,10 @@ pub(in crate::codex) async fn execute(
                     data.into_owned()
                 };
                 let format = response_format(options);
-                let original = original_request(request, options);
+                let original = crate::json::response_request(request, options);
                 let context = ResponseContext {
                     model: &request.model,
-                    original_request: (&original).into(),
+                    original_request: original.as_request(),
                     request: &prepared.body,
                 };
                 let out = Registry::global()

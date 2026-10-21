@@ -15,7 +15,7 @@ use crate::go;
 
 pub mod exact;
 mod response_request;
-pub use response_request::ResponseRequest;
+pub use response_request::{ResponseRequest, ResponseRequestData};
 pub(crate) mod lenient;
 pub(crate) mod raw;
 
