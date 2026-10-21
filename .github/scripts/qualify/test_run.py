@@ -62,6 +62,7 @@ class QualificationControls(unittest.TestCase):
         self.q.load = None
         self.q.installed_service = False
         self.q.runner_adjustments = []
+        self.q.runner_restorations = []
         self.q.fault_confirmed = False
         self.q.prerequisites = Mock()
         self.q.install = Mock()
@@ -734,13 +735,14 @@ class RunnerAndInstallerSafety(unittest.TestCase):
         path = self.out / "qualification.log"
         return path.read_text(encoding="utf-8") if path.exists() else ""
 
-    def failed_install(self, config):
+    def failed_install(self, config, output=None):
         q = PublishedPreconditions.install_fixture(self)
         if config is None:
             q.config.unlink()
         else:
             q.config.write_text(config, encoding="utf-8", newline="\n")
-        output = "install failed fixture-token fixture-management fixture-client fixture-client-two"
+        if output is None:
+            output = "install failed fixture-token fixture-management fixture-client fixture-client-two"
         def run(args, **kwargs):
             return subprocess.CompletedProcess(args, 1 if args[0] == "sh" else 0, output)
         with patch.object(qualification.subprocess, "run", side_effect=run), \
@@ -764,7 +766,90 @@ class RunnerAndInstallerSafety(unittest.TestCase):
         self.assertIn("Installer output:", self.log())
         for secret in ("fixture-token", "fixture-management", "fixture-client", "fixture-client-two"):
             self.assertNotIn(secret, self.log() + self.output.getvalue() + error)
-        self.assertIn("install failed " + " ".join(["[redacted]"] * 4), self.log())
+        self.assertIn("install failed " + " ".join(["[redacted]"] * 4) + "\n", self.log())
+        self.assertNotIn("-two", self.log() + self.output.getvalue())
+
+    def test_user_config_home_matches_installer_absolute_path_rule(self):
+        (self.work / "candidates.json").write_text(json.dumps(
+            {"mode": "published", "fault": "none", "versions": ["0.0.1", "0.0.2"]}), newline="\n")
+        home, absolute = self.work / "home", self.work / "xdg"
+        for system in ("Linux", "Darwin"):
+            for value in (None, "", "relative/config", str(absolute)):
+                env = {} if value is None else {"XDG_CONFIG_HOME": value}
+                with self.subTest(system=system, value=value), patch.dict(os.environ, env, clear=True), \
+                        patch.object(qualification.platform, "system", return_value=system), \
+                        patch.object(qualification.Path, "home", return_value=home), \
+                        patch.object(qualification, "free_port", return_value=12345):
+                    q = qualification.Qualification()
+                    expected = absolute if value == str(absolute) else home / ".config"
+                    self.assertEqual(q.config, expected / "open-ferry/config.yaml")
+
+    def test_failed_install_with_config_elsewhere_withholds_unredacted_key_lines(self):
+        elsewhere = self.work / "unexpected-config.yaml"
+        elsewhere.write_text("management: {secret-key: fixture-management}\n"
+                             "access: {api-keys: [fixture-client]}\n", newline="\n")
+        output = "Client key:     fixture-client\nManagement key: fixture-management\n"
+        error = self.failed_install(None, output)
+        self.assertTrue(elsewhere.is_file())
+        self.assertIn("installer output withheld", error)
+        self.assertIn("Installer output withheld: cleaned output may still contain init keys", self.log())
+        self.assertNotIn("Installer output:\n", self.log())
+        self.assertNotIn("fixture-client", self.log() + self.output.getvalue() + error)
+        self.assertNotIn("fixture-management", self.log() + self.output.getvalue() + error)
+
+    def test_failed_install_withholds_each_unredacted_key_label(self):
+        for label in ("Client key", "Management key"):
+            with self.subTest(label=label):
+                error = self.failed_install(None, f"  {label}: unregistered-value\n")
+                self.assertIn("installer output withheld", error)
+                self.assertNotIn("unregistered-value", self.log() + self.output.getvalue() + error)
+
+    def test_failed_install_with_redacted_key_lines_shows_output(self):
+        error = self.failed_install("management: {secret-key: fixture-management}\n"
+                                    "access: {api-keys: [fixture-client]}\n",
+                                    "Client key:     fixture-client\nManagement key: fixture-management\n")
+        self.assertIn("installer output above", error)
+        self.assertIn("Installer output:\nClient key:     [redacted]\nManagement key: [redacted]\n", self.log())
+        self.assertNotIn("fixture-client", self.log() + self.output.getvalue())
+        self.assertNotIn("fixture-management", self.log() + self.output.getvalue())
+
+    def test_failed_install_without_config_shows_already_redacted_key_lines(self):
+        output = "  Client key: [redacted]  \nManagement key: [redacted]\n"
+        error = self.failed_install(None, output)
+        self.assertIn("installer output above", error)
+        self.assertIn("Installer output:\n" + output, self.log())
+
+    def test_failed_install_withholds_unlabelled_generated_client_keys(self):
+        clients = ("sk-" + base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("="),
+                   "sk-" + base64.urlsafe_b64encode(bytes([255] * 32)).decode().rstrip("="))
+        for client in clients:
+            with self.subTest(client=client):
+                error = self.failed_install(None, f"init diagnostic: '{client}'\n")
+                self.assertIn("installer output withheld", error)
+                self.assertNotIn("Installer output:\n", self.log())
+                self.assertNotIn(client, self.log() + self.output.getvalue() + error)
+
+    def test_failed_install_shows_sha256sums_and_non_key_shapes(self):
+        checksum = hashlib.sha256(b"installer fixture").hexdigest()
+        output = f"Checked install.sh ({checksum}) against SHA256SUMS\n"
+        # Shorter/longer base64url tokens, embedded prefixes, and invalid pad
+        # bits cannot be client_key's encoding of exactly 32 random bytes.
+        for value in ("sk-" + "A" * 42, "sk-" + "A" * 44,
+                      "prefixsk-" + "A" * 43, "sk-" + "A" * 42 + "B"):
+            output += f"ordinary identifier: {value}\n"
+        error = self.failed_install(None, output)
+        self.assertIn("installer output above", error)
+        self.assertIn("Installer output:\n" + output, self.log())
+
+    def test_failed_install_with_config_inspection_errors_withholds_output(self):
+        for error_type in (PermissionError, NotADirectoryError):
+            with self.subTest(error_type=error_type), \
+                    patch.object(qualification.Path, "lstat", side_effect=error_type("cannot inspect")):
+                error = self.failed_install(None, "private inspection failure output")
+                self.assertIn("installer output withheld", error)
+                self.assertIn("Installer output withheld: its config could not be inspected", self.log())
+                self.assertNotIn("Installer output:\n", self.log())
+                self.assertNotIn("private inspection failure output", self.log() + self.output.getvalue())
 
     def test_failed_install_with_unreadable_or_incomplete_keys_withholds_output(self):
         configs = ("management: [unterminated", "{}", "management: {secret-key: key}\naccess: {}",
@@ -806,6 +891,7 @@ class RunnerAndInstallerSafety(unittest.TestCase):
         q.os = "Linux"
         q.candidates = {"mode": "published", "form": "machine", "fault": "none", "versions": ["0.0.1", "0.0.2"]}
         q.runner_adjustments = []
+        q.runner_restorations = []
         self.metadata = {path: SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0) for path in self.paths}
         def lstat(path):
             value = self.metadata[str(path)]
@@ -889,6 +975,7 @@ class RunnerAndInstallerSafety(unittest.TestCase):
         for failing, restore_failure in ((False, False), (True, False), (False, True), (True, True)):
             with self.subTest(failing=failing, restore_failure=restore_failure):
                 q.runner_adjustments = []
+                q.runner_restorations = []
                 events = []
                 self.chmod.reset_mock()
                 def chmod(path, mode):
@@ -931,6 +1018,56 @@ class RunnerAndInstallerSafety(unittest.TestCase):
                     self.assertIn("lifecycle sentinel", result["error"])
                 if restore_failure:
                     self.assertIn("Runner directory restore failed for /usr/local/bin", self.log())
+                    self.assertEqual(result["runner_restorations"], [{"path": "/usr/local/bin", "status": "failed",
+                                                                   "error": "PermissionError: restore sentinel"}])
+                else:
+                    self.assertEqual(result["runner_restorations"], [{"path": "/usr/local/bin", "status": "restored"}])
+
+    def test_restore_rechecks_directory_type_and_root_owner(self):
+        q = self.runner()
+        q.runner_adjustments.append({"path": "/usr/local/bin", "from": "0777", "to": "0755"})
+        for metadata in (SimpleNamespace(st_mode=stat.S_IFLNK | 0o755, st_uid=0),
+                         SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=1001)):
+            with self.subTest(metadata=metadata):
+                q.runner_restorations = []
+                self.metadata["/usr/local/bin"] = metadata
+                q.restore_runner_directories()
+                self.chmod.assert_not_called()
+                self.assertEqual(q.runner_restorations, [{"path": "/usr/local/bin", "status": "failed",
+                    "error": "RuntimeError: directory is no longer a root-owned real directory; "
+                             "repair its permissions manually"}])
+                self.assertIn("Runner directory restore failed for /usr/local/bin", self.log())
+
+    def test_any_cleanup_failure_skips_restore_and_records_reason_in_result(self):
+        q = self.runner()
+        self.metadata["/usr/local/bin"].st_mode |= 0o022
+        phases = ("root authentication cleanup", "load cleanup", "diagnostics", "service cleanup")
+        for failed_phases in [(phase,) for phase in phases] + [phases]:
+            with self.subTest(failed_phases=failed_phases):
+                q.runner_adjustments, q.runner_restorations = [], []
+                self.chmod.reset_mock()
+                q.prerequisites = q.prepare_runner_directories
+                q.install = Mock(side_effect=RuntimeError("lifecycle sentinel"))
+                q.data, q.load, q.installed_service = self.work / "data", Mock(), True
+                cleanups = {"root authentication cleanup": Mock(), "load cleanup": q.load.finish,
+                            "diagnostics": Mock(), "service cleanup": Mock()}
+                for phase in failed_phases:
+                    cleanups[phase].side_effect = RuntimeError(phase + " sentinel")
+                q.remove_root_auth, q.logs, q.uninstall = (cleanups["root authentication cleanup"],
+                                                          cleanups["diagnostics"], cleanups["service cleanup"])
+                with patch.object(qualification, "prepare_published", return_value=q.candidates), \
+                        patch.object(qualification, "Qualification", return_value=q), \
+                        patch.object(sys, "argv", ["run.py", str(self.work), "--published", "0.0.1,0.0.2", "--form", "machine"]):
+                    self.assertEqual(qualification.main(), 1)
+                cleanups["service cleanup"].assert_called_once()
+                self.chmod.assert_called_once_with("/usr/local/bin", 0o755)
+                result = json.loads((self.out / "result.json").read_text(encoding="utf-8"))
+                self.assertFalse(result["passed"])
+                self.assertEqual([item["phase"] for item in result["errors"]], ["lifecycle", *failed_phases])
+                self.assertEqual(result["runner_restorations"], [{"path": "/usr/local/bin", "status": "skipped",
+                    "reason": "cleanup failed: " + ", ".join(failed_phases) + "; permissions remain protected"}])
+                self.assertIn("Runner directory restore skipped for /usr/local/bin", self.log())
+                self.assertIn(result["runner_restorations"][0]["reason"], self.log())
 
     def test_partial_preparation_is_restored_and_restore_failure_is_best_effort(self):
         q = self.runner()
@@ -948,6 +1085,9 @@ class RunnerAndInstallerSafety(unittest.TestCase):
         q.restore_runner_directories()
         self.assertEqual([call.args for call in self.chmod.call_args_list], [("/usr/local", 0o777), ("/usr", 0o777)])
         self.assertIn("Runner directory restore failed for /usr/local: PermissionError: restore denied", self.log())
+        self.assertEqual(q.runner_restorations[-2:], [
+            {"path": "/usr/local", "status": "failed", "error": "PermissionError: restore denied"},
+            {"path": "/usr", "status": "restored"}])
 
 
 class CandidateSignatures(unittest.TestCase):

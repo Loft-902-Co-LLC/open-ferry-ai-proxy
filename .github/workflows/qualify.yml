@@ -176,7 +176,8 @@ jobs:
             "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
           fi
 
-      # Explicit allowlist: never the mirror, checkout, init output, config or keys.
+      # Explicit allowlist: never the mirror, checkout, config or keys.
+      # Failed init output is logged only after redaction and checks for remaining keys.
       - name: Keep qualification evidence (also on failure)
         if: always() && (!inputs.preflight_only || inputs.published != '')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
