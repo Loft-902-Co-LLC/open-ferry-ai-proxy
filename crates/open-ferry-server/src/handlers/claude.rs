@@ -230,9 +230,11 @@ impl ClaudeWriter {
         match root["type"].as_str().unwrap_or_default() {
             "message_stop" => self.saw_message_stop = true,
             "error" => self.saw_error_event = true,
-            "message" if !sse && !gjson_string(root.get("stop_reason")).trim().is_empty() => {
-                self.saw_message_stop = true;
-                self.saw_bare_message = true;
+            "message" => {
+                if !sse && !gjson_string(root.get("stop_reason")).trim().is_empty() {
+                    self.saw_message_stop = true;
+                    self.saw_bare_message = true;
+                }
             }
             _ if sse && self.event == "error" && root.get("error").is_some() => {
                 self.saw_error_event = true
@@ -353,6 +355,24 @@ mod translated_error_tests {
 mod truncation_tests {
     use super::*;
 
+    #[test]
+    fn sse_message_body_ignores_an_error_header() {
+        for stop_reason in ["", "end_turn"] {
+            let mut writer = ClaudeWriter::default();
+            let mut out = BytesMut::new();
+            writer.write_chunk(
+                Bytes::from(format!(
+                    "event: error\ndata: {{\"type\":\"message\",\"stop_reason\":\"{stop_reason}\",\"error\":{{\"message\":\"ignored\"}}}}\n\n"
+                )),
+                &mut out,
+            );
+            assert!(writer.close_error().is_some());
+            assert!(!writer.saw_error_event);
+            assert!(!writer.saw_message_stop);
+            assert!(!writer.saw_bare_message);
+        }
+    }
+
     fn forward_unchanged(writer: &mut ClaudeWriter, chunk: &[u8]) {
         let mut out = BytesMut::new();
         writer.write_chunk(Bytes::copy_from_slice(chunk), &mut out);
@@ -364,7 +384,10 @@ mod truncation_tests {
     #[test]
     fn bounds_a_single_line_without_a_newline() {
         let mut writer = ClaudeWriter::default();
-        forward_unchanged(&mut writer, b"data: {\"type\":\"message_stop\",\"padding\":\"");
+        forward_unchanged(
+            &mut writer,
+            b"data: {\"type\":\"message_stop\",\"padding\":\"",
+        );
         let chunk = vec![b'x'; 64 * 1024];
         for _ in 0..=MAX_LINE / chunk.len() {
             forward_unchanged(&mut writer, &chunk);
@@ -382,7 +405,10 @@ mod truncation_tests {
     #[test]
     fn bounds_data_lines_without_an_event_boundary() {
         let mut writer = ClaudeWriter::default();
-        forward_unchanged(&mut writer, b"event: error\ndata: {\"type\":\"error\",\"parts\":[\n");
+        forward_unchanged(
+            &mut writer,
+            b"event: error\ndata: {\"type\":\"error\",\"parts\":[\n",
+        );
         let chunk = format!("data: {}\n", "0,".repeat(32 * 1024));
         for _ in 0..=MAX_LINE / (chunk.len() - b"data: \n".len()) {
             forward_unchanged(&mut writer, chunk.as_bytes());
