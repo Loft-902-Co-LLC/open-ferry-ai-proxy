@@ -12,7 +12,9 @@
 //! attempt that has to connect first, that the request went out
 //! ([`Tap::request_sent`]), then once an answer comes its head
 //! ([`Tap::response_head`]) and its body as it is read ([`Tap::chunk`]), and
-//! what failed if reading it did ([`Tap::attempt_error`]); then, when the
+//! what failed if reading it did ([`Tap::attempt_error`]). A translated
+//! stream also reports each chunk returned to the client ([`Tap::stream_chunk`]);
+//! chunks discarded on drop never reach that hook. Then, when the
 //! call failed, its error ([`Tap::error`]);
 //! and last how it ended ([`Tap::finish`]), once. The executor reports the
 //! attempts, and the manager the error and the end, so a call the manager
@@ -60,6 +62,11 @@ pub trait Tap: Send + Sync {
 
     /// The next part of the attempt's answer body, as it came off the wire.
     fn chunk(&self, _chunk: &Bytes) {}
+
+    /// A translated chunk is being returned to the client by the call's
+    /// stream. Unlike `chunk`, this observes delivery, not an upstream read;
+    /// chunks discarded while a dropped stream drains are never reported.
+    fn stream_chunk(&self, _chunk: &Bytes) {}
 
     /// The attempt failed after its answer's head came, as the executor
     /// saw it: its body couldn't be read, its stream broke off or failed,
@@ -207,6 +214,13 @@ impl Observation {
     pub fn chunk(&self, chunk: &Bytes) {
         for tap in &self.taps {
             tap.chunk(chunk);
+        }
+    }
+
+    /// Gives every tap a translated chunk being returned to the client.
+    pub fn stream_chunk(&self, chunk: &Bytes) {
+        for tap in &self.taps {
+            tap.stream_chunk(chunk);
         }
     }
 

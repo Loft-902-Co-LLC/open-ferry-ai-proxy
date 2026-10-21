@@ -22,6 +22,7 @@
 // (requestedModelAliasFromOptions, generateFromOptions),
 // and sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
 // GenerateFromContext, GenerateEnabled) (v8.0.36, MIT).
+// Gemini/Vertex terminal cancellation follows b12db8c3 (v8.0.38).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The usage reporter: the [`Tap`] that turns each executor call of a
@@ -168,12 +169,13 @@
 //!   its cancellation error (`newClaudeOAuthCancellationError`) only for an
 //!   OAuth credential, and records another credential's read cut off by the
 //!   canceled context as the scanner's error.
-//! - A Gemini or Vertex AI stream dropped once it was answered is a
-//!   success, with the counts it had read. Upstream's is too when the client
-//!   went away after the terminal chunk reached it (v8.0.20) or while the
-//!   executor waited to hand a chunk on, but a failure when the cancel cut
-//!   off a read before the terminal chunk; a dropped stream here can't tell
-//!   those apart.
+//! - A Gemini or Vertex AI stream dropped after a successful translated
+//!   terminal chunk reached the client is a success with its observed counts.
+//!   Dropped before that, it is a 499 failure retaining those counts. A real
+//!   read failure stays a failure even after a terminal chunk and retains
+//!   buffered counts, as upstream v8.0.38 does. Only chunks returned by the
+//!   translated stream count as delivered, never its raw provider finishReason
+//!   or the chunks discarded while a dropped stream drains.
 //! - The image generation tool's model is read from the request as it was
 //!   sent, after the payload rules; upstream reads the body before its
 //!   payload finalizer, so a rule that changes the tool's model changes
@@ -199,6 +201,7 @@ use sha2::{Digest, Sha256};
 
 use super::Inner;
 use super::accounting::{Detail, ensure_token_breakdown_for_provider};
+use super::gemini_terminal::is_terminal_chunk;
 use super::json::{self, Doc};
 use super::observer::{ClientKey, EventCredential, UsageEvent};
 use super::parse::{
@@ -734,6 +737,9 @@ struct Call {
     /// `message_stop`): nothing after it counts. A Codex stream's first
     /// terminal event is held, and the rest don't replace it.
     ended: bool,
+    /// A successful terminal chunk of the translated Gemini/Vertex stream
+    /// reached the client, rather than merely being read or discarded.
+    terminal_delivered: bool,
     /// The request of a Codex call over HTTP, whose terminal event's image
     /// generation tool counts are read; none for any other call.
     image_tool_request: Option<bytes::Bytes>,
@@ -777,6 +783,7 @@ impl Call {
             held: None,
             answered: false,
             ended: false,
+            terminal_delivered: false,
             image_tool_request: None,
             image: None,
         }
@@ -823,6 +830,7 @@ impl Call {
         self.event_stream = false;
         self.answered = false;
         self.ended = false;
+        self.terminal_delivered = false;
         // Only Codex's own executor reports the image generation tool, and
         // not over its WebSocket (upstream's `publishCodexImageToolUsage`).
         self.image_tool_request = (request.provider == "codex"
@@ -1326,6 +1334,10 @@ impl Call {
                 ))
             }
             (Mode::ClaudeStream, _) => self.buffered().map(success),
+            (Mode::GeminiStream, Outcome::Canceled) if !self.terminal_delivered => Some(failure(
+                self.buffered().unwrap_or_default(),
+                Failure::canceled(),
+            )),
             (
                 Mode::GeminiStream | Mode::InteractionsStream | Mode::OpenAiStream,
                 Outcome::Failed,
@@ -1628,6 +1640,15 @@ impl Tap for UsageTap {
 
     fn error(&self, error: &ExecError) {
         self.lock().error = Some(Failure::of(error));
+    }
+
+    fn stream_chunk(&self, chunk: &bytes::Bytes) {
+        if let Some(call) = self.lock().call.as_mut()
+            && call.mode == Mode::GeminiStream
+            && !call.terminal_delivered
+        {
+            call.terminal_delivered = is_terminal_chunk(chunk);
+        }
     }
 
     fn finish(&self, outcome: Outcome) {
