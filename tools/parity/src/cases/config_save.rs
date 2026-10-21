@@ -564,6 +564,13 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             "config-version: 8\napi-keys:\n  vertex: [{keys: [{api-key: dummy}], models: [{name: meta/llama}]}]\n",
             vec![resave(false), resave(true)],
         ),
+        Case::new("plugin-foot-comment-in-archived-section", "", "").with_options(
+            serde_json::from_str::<Value>(include_str!(
+                "testdata/config-save-archived-plugin-comment.json"
+            ))
+            .expect("saved config case")["options"]
+                .clone(),
+        ),
         Case::new("plugin-anchor-line-comment-auth-dir", "", "").with_options(
             serde_json::from_str(include_str!(
                 "testdata/config-save-anchor-line-comment.json"

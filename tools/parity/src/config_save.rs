@@ -69,7 +69,8 @@ pub fn drop_unloadable(go: &mut Value) -> Option<Deviation> {
 /// the comment lines before them exactly are dropped, and only comments
 /// written once in the case's sources (its file and the files it writes
 /// whole; the generator names each comment once), inside a top-level
-/// `plugins` section.
+/// `plugins` section. Archived lines may carry one extra `# ` prefix;
+/// the repeated runs must still match byte for byte, including that prefix.
 pub fn drop_repeated_plugin_comments(case: &Case, go: &mut Value) -> Option<Deviation> {
     let sources: Vec<(&str, Vec<Range<usize>>)> = iter::once(&case.options["file"])
         .chain(
@@ -82,7 +83,13 @@ pub fn drop_repeated_plugin_comments(case: &Case, go: &mut Value) -> Option<Devi
         .filter_map(Value::as_str)
         .map(|text| (text, plugin_sections(text)))
         .collect();
-    let from_plugins = |line: &str| plugin_comment(&sources, line.trim_start());
+    let from_plugins = |line: &str| {
+        let line = line.trim_start();
+        plugin_comment(&sources, line)
+            || line.strip_prefix("# ").is_some_and(|comment| {
+                comment.starts_with('#') && plugin_comment(&sources, comment)
+            })
+    };
     let mut dropped = false;
     for file in go.get_mut("files")?.as_array_mut()? {
         let Some(text) = file.as_str() else {
@@ -233,6 +240,53 @@ mod tests {
             "file": file,
             "steps": [{ "op": "save", "migrate": false }, { "op": "write", "body": body }],
         }))
+    }
+
+    #[test]
+    fn archived_plugin_copies_match_the_saved_seed9_outputs() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "cases/testdata/config-save-archived-plugin-comment.json"
+        ))
+        .unwrap();
+        let case = Case::new("seed9", "", "").with_options(fixture["options"].clone());
+        let mut go = fixture["upstream_output"].clone();
+        let rust = &fixture["open_ferry_output"];
+        assert!(
+            !crate::compare::compare(&go, rust, &[])
+                .differences
+                .is_empty()
+        );
+        assert_eq!(
+            drop_repeated_plugin_comments(&case, &mut go),
+            Some(Deviation::PluginCommentRepeated)
+        );
+        assert!(
+            crate::compare::compare(&go, rust, &[])
+                .differences
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn archived_plugin_rule_preserves_different_prefixes_and_unrelated_comments() {
+        let case = case(
+            "plugins:\n  configs:\n    alpha:\n      tags: [a]\n      # source comment\n",
+            "",
+        );
+        for text in [
+            "# # source comment\n# source comment\n",
+            "# # source comment\n # # source comment\n",
+            "# # unrelated comment\n# # unrelated comment\n",
+        ] {
+            let mut go = json!({"files": [text]});
+            let rust = json!({"files": ["# # source comment\n"]});
+            assert_eq!(drop_repeated_plugin_comments(&case, &mut go), None);
+            assert!(
+                !crate::compare::compare(&go, &rust, &[])
+                    .differences
+                    .is_empty()
+            );
+        }
     }
 
     /// Not upstream's: only a repeated run of comments from a `plugins`
