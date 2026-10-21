@@ -1611,6 +1611,31 @@ describe("draft snapshot regressions", () => {
     expect(state.tree.routing.retry["request-retry"]).toBe(2);
     expect(state.tree.observability.logs.debug).toBe(false);
     expect(state.api.callsTo("PUT", `${V8_CONFIG}/observability/logs/debug`)).toHaveLength(1);
+    // A saved field is already showing its accepted value even if the
+    // invalidated read has not arrived. Editing it again must use that base.
+    await fill(user, screen.getByRole("textbox", { name: "Retries" }), "3");
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    const pending: (() => void)[] = [];
+    let held = true;
+    state.api.use(route("GET", V8_CONFIG, () => {
+      const answer = { json: structuredClone(state.tree), headers: { ETag: state.tag() } };
+      return held && state.tree.routing.retry["request-retry"] === 3
+        ? new Promise((resolve) => { pending.push(() => { resolve(answer); }); }) : answer;
+    }));
+    try {
+      await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+      await screen.findByText("Saved 1 setting. The server uses it from now on.");
+      expect(screen.getByRole("textbox", { name: "Retries" })).toHaveValue("3");
+      await waitFor(() => { expect(pending.length).toBeGreaterThan(0); });
+      fireEvent.change(screen.getByRole("textbox", { name: "Retries" }), { target: { value: "4" } });
+    } finally {
+      held = false;
+      await act(async () => { for (const release of pending) release(); await Promise.resolve(); });
+    }
+    await settingsSave(user, 1);
+    expect(state.tree.routing.retry["request-retry"]).toBe(4);
+
   });
   it.each(["discard", "revert"])("re-baselines Settings after %s, then still refuses a later real conflict", async (action) => {
     const state = versionedServer();
@@ -1674,7 +1699,7 @@ describe("draft snapshot regressions", () => {
       fireEvent.change(editor, { target: { value: `${YAML}# on old rendered text\n` } });
     } finally {
       notifyManager.setScheduler((callback) => { setTimeout(callback, 0); });
-      await act(() => { for (const callback of queued) callback(); });
+      act(() => { for (const callback of queued) callback(); });
       focusManager.setFocused(undefined);
     }
     await user.click(screen.getByRole("button", { name: "Review changes" }));
