@@ -1191,7 +1191,7 @@ describe("config.yaml", () => {
     const reads = state.api.callsTo("GET", CONFIG_YAML).length;
     const latest = `${YAML}# from another form\n`;
     state.yaml = latest;
-    await user.click(screen.getByRole("tab", { name: "Settings", exact: true }));
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
     await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     const review = await screen.findByRole("dialog", { name: "Review the changes" });
