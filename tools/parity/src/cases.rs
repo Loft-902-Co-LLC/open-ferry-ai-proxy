@@ -30,6 +30,10 @@ pub mod to_gemini;
 pub mod ttft;
 pub mod usage;
 
+/// Go may choose a different winner on every run; a matching sample does
+/// not mean this checked-in difference is resolved.
+pub const MAP_ORDER_DEPENDENT: &str = "upstream copies the generation settings in Go's map order, so which of two for the same field wins changes from run to run; the port takes the last listed";
+
 #[derive(Clone)]
 pub struct Case {
     pub name: String,
