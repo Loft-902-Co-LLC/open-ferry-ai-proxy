@@ -148,6 +148,7 @@ export interface ClientKeysCardProps {
   onChanges: (changes: KeyChange[]) => void;
   /** Set once a save answers that the server can't save config.yaml. */
   readOnly: boolean;
+  versioned: boolean;
 }
 
 /**
@@ -155,7 +156,7 @@ export interface ClientKeysCardProps {
  * Adding or deleting one is a change like a setting's edit: it waits for
  * "Review and save".
  */
-export function ClientKeysCard({ keys, changes, onChanges, readOnly }: ClientKeysCardProps) {
+export function ClientKeysCard({ keys, changes, onChanges, readOnly, versioned }: ClientKeysCardProps) {
   const [adding, setAdding] = useState(false);
   // Counts the times the add dialog opened, to mount it afresh each time.
   const [addRound, setAddRound] = useState(0);
@@ -163,7 +164,7 @@ export function ClientKeysCard({ keys, changes, onChanges, readOnly }: ClientKey
   const unsupported = isUnsupportedRoute(keys.error);
   const loaded = keys.data !== undefined;
   const writable = !unsupported && !readOnly && loaded;
-  const rows = keyRows(keysIn(keys.data), changes);
+  const rows = keyRows(keysIn(keys.data), changes, versioned);
 
   return (
     <Card
