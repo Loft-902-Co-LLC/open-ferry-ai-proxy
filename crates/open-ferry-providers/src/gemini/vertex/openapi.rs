@@ -247,7 +247,9 @@ impl VertexExecutor {
                 .unwrap_or_else(|| auth_base_url(auth));
             (base_url(base, &project, &location), token)
         } else {
-            let base = auth_base_url(auth);
+            // Static keys follow vertexAPICreds: only configuration attributes
+            // may override the destination, never credential-file metadata.
+            let base = auth.attribute("base_url").unwrap_or_default().trim();
             if google_host(base) {
                 return Err(StatusError::new(400, "vertex endpoints/openapi on aiplatform.googleapis.com requires service account credentials").into());
             }

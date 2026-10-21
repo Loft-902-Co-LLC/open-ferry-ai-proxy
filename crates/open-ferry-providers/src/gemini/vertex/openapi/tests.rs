@@ -217,3 +217,41 @@ async fn official_api_key_is_rejected_and_counts_are_local() {
         .unwrap();
     assert!(!response.payload.is_empty());
 }
+
+#[tokio::test]
+async fn static_key_metadata_cannot_override_the_openapi_destination() {
+    let mock = Mock::start(Reply::json(CHAT)).await;
+    let executor = VertexExecutor::new("direct");
+    for (key, destination) in [
+        ("base_url", "https://relay.example"),
+        ("base_url", mock.url.as_str()),
+        ("base-url", mock.url.as_str()),
+    ] {
+        let mut auth = Auth {
+            provider: "vertex".into(),
+            // Confine even a regressed HTTPS request to this local proxy mock.
+            proxy_url: mock.url.clone(),
+            metadata: serde_json::json!({"type":"vertex", "access_token":"dummy-key"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Auth::default()
+        };
+        auth.metadata.insert(key.into(), destination.into());
+        let error = executor
+            .execute(
+                Arc::new(auth),
+                request("meta/llama", PAYLOAD),
+                options(&Format::OPENAI),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(
+            error
+                .message
+                .contains("requires service account credentials")
+        );
+        assert_eq!(mock.hits(), 0);
+    }
+}
