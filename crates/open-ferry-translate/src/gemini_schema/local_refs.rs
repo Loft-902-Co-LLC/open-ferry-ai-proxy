@@ -72,6 +72,7 @@ fn inline_with_depth(
         budget_exhausted: false,
         active: HashSet::new(),
         targets: HashMap::new(),
+        lookups: HashMap::new(),
         #[cfg(test)]
         target_size_scans: 0,
     };
@@ -193,7 +194,8 @@ struct Resolver<'a, 'b> {
     budget: &'b mut SchemaCopyBudget,
     budget_exhausted: bool,
     active: HashSet<String>,
-    targets: HashMap<String, Option<(&'a Value, usize, usize, usize)>>,
+    targets: HashMap<*const Value, (usize, usize, usize)>,
+    lookups: HashMap<String, Option<&'a Value>>,
     #[cfg(test)]
     target_size_scans: usize,
 }
@@ -215,23 +217,29 @@ impl<'a> Resolver<'a, '_> {
     // stack and remaining budget. Expanded results are not: caching those would
     // change cycle fallback and per-reference charging.
     fn target(&mut self, reference: &str) -> Option<(&'a Value, usize, usize, usize)> {
-        if let Some(target) = self.targets.get(reference) {
-            return *target;
+        let target = *self
+            .lookups
+            .entry(reference.to_owned())
+            .or_insert_with(|| local_ref(self.root, reference));
+        let target = target?;
+        let identity = std::ptr::from_ref(target);
+        if let Some(&(bytes, depth, nodes)) = self.targets.get(&identity) {
+            return Some((target, bytes, depth, nodes));
         }
-        let target = local_ref(self.root, reference).map(|target| {
-            #[cfg(test)]
-            {
-                self.target_size_scans += 1;
-            }
-            (
-                target,
-                expansion_size(target, false),
-                structural_depth(target),
-                node_count(target, 100_000, true),
-            )
-        });
-        self.targets.insert(reference.to_owned(), target);
-        target
+        #[cfg(test)]
+        {
+            self.target_size_scans += 1;
+        }
+        let bytes = expansion_size(target, false);
+        // An unaffordable target is never copied: do not scan the rest of it
+        // again for its depth or node count after the size walk stopped.
+        let (depth, nodes) = if bytes <= COPY_BYTES {
+            (structural_depth(target), node_count(target, 100_000, true))
+        } else {
+            (0, 0)
+        };
+        self.targets.insert(identity, (bytes, depth, nodes));
+        Some((target, bytes, depth, nodes))
     }
 
     fn root(&mut self) -> Value {
@@ -424,54 +432,90 @@ fn local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
 // Conservative encoding/json sizes, including HTML and U+2028/U+2029 escaping.
 // Like upstream, containers and booleans may overestimate by a byte.
 fn encoded_string_size(value: &str) -> usize {
-    2 + value
-        .chars()
-        .map(|c| match c {
+    let mut size = 2usize;
+    for c in value.chars() {
+        size += match c {
             '\n' | '\r' | '\t' | '"' | '\\' => 2,
             '\0'..='\u{1f}' | '<' | '>' | '&' | '\u{2028}' | '\u{2029}' => 6,
             _ => c.len_utf8(),
-        })
-        .sum::<usize>()
+        };
+        if size > COPY_BYTES {
+            return COPY_BYTES + 1;
+        }
+    }
+    size
 }
 
+#[cfg(test)]
+thread_local! { static SIZE_NODES_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn expansion_size(value: &Value, name_map: bool) -> usize {
+    #[cfg(test)]
+    SIZE_NODES_VISITED.with(|n| n.set(n.get() + 1));
     let size = match value {
         Value::Null => 4,
         Value::Bool(_) => 5,
         Value::Number(n) => n.as_str().len(),
         Value::String(s) => encoded_string_size(s),
-        Value::Array(values) => values.iter().fold(2usize, |size, value| {
-            size.saturating_add(expansion_size(value, false) + 1)
-                .min(COPY_BYTES + 1)
-        }),
-        Value::Object(map) => map.iter().fold(2usize, |size, (key, value)| {
-            if !name_map && matches!(key.as_str(), "$defs" | "definitions") {
-                return size;
+        Value::Array(values) => {
+            let mut size = 2usize;
+            for value in values {
+                size = size.saturating_add(expansion_size(value, false) + 1);
+                if size > COPY_BYTES {
+                    return COPY_BYTES + 1;
+                }
             }
-            let child = if !name_map && is_literal_value_keyword(key) {
-                literal_size(value)
-            } else {
-                expansion_size(
-                    value,
-                    !name_map && NAME_MAP_KEYWORDS.contains(&key.as_str()),
-                )
-            };
-            size.saturating_add(encoded_string_size(key) + child + 2)
-                .min(COPY_BYTES + 1)
-        }),
+            size
+        }
+        Value::Object(map) => {
+            let mut size = 2usize;
+            for (key, value) in map {
+                if !name_map && matches!(key.as_str(), "$defs" | "definitions") {
+                    continue;
+                }
+                let child = if !name_map && is_literal_value_keyword(key) {
+                    literal_size(value)
+                } else {
+                    expansion_size(
+                        value,
+                        !name_map && NAME_MAP_KEYWORDS.contains(&key.as_str()),
+                    )
+                };
+                size = size.saturating_add(encoded_string_size(key) + child + 2);
+                if size > COPY_BYTES {
+                    return COPY_BYTES + 1;
+                }
+            }
+            size
+        }
     };
     size.min(COPY_BYTES + 1)
 }
 
 fn literal_size(value: &Value) -> usize {
+    #[cfg(test)]
+    SIZE_NODES_VISITED.with(|n| n.set(n.get() + 1));
     match value {
-        Value::Array(values) => values.iter().fold(2usize, |n, v| {
-            n.saturating_add(literal_size(v) + 1).min(COPY_BYTES + 1)
-        }),
-        Value::Object(map) => map.iter().fold(2usize, |n, (key, value)| {
-            n.saturating_add(encoded_string_size(key) + literal_size(value) + 2)
-                .min(COPY_BYTES + 1)
-        }),
+        Value::Array(values) => {
+            let mut size = 2usize;
+            for value in values {
+                size = size.saturating_add(literal_size(value) + 1);
+                if size > COPY_BYTES {
+                    return COPY_BYTES + 1;
+                }
+            }
+            size
+        }
+        Value::Object(map) => {
+            let mut size = 2usize;
+            for (key, value) in map {
+                size = size.saturating_add(encoded_string_size(key) + literal_size(value) + 2);
+                if size > COPY_BYTES {
+                    return COPY_BYTES + 1;
+                }
+            }
+            size
+        }
         _ => expansion_size(value, false),
     }
 }

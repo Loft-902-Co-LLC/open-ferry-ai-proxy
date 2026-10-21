@@ -218,6 +218,7 @@ fn repeated_references_lookup_and_size_the_target_once_but_each_spends_budget() 
         budget_exhausted: false,
         active: HashSet::new(),
         targets: HashMap::new(),
+        lookups: HashMap::new(),
         target_size_scans: 0,
     };
     let out = resolver.root();
@@ -240,6 +241,61 @@ fn no_ref_fast_path_retains_definitions_for_the_later_cleaning_passes() {
     let mut schema = schema;
     schema["example"] = json!("$ref");
     assert!(inline_for_clean(&schema).get("$defs").is_none());
+}
+
+#[test]
+fn aliased_array_pointer_spellings_size_one_target_once() {
+    let mut target = json!({"type":"string","description":"x".repeat(32*1024)});
+    for _ in 0..4 {
+        target = json!([target]);
+    }
+    let aliases = ["0", "00", "+0", "-0"];
+    let properties: Map<_, _> = (0..256)
+        .map(|i| {
+            let pointer = (0..4)
+                .map(|shift| aliases[(i >> (2 * shift)) & 3])
+                .collect::<Vec<_>>()
+                .join("/");
+            (
+                format!("p{i}"),
+                json!({"$ref":format!("#/$defs/S/{pointer}")}),
+            )
+        })
+        .collect();
+    let root = json!({"properties":properties,"$defs":{"S":target}});
+    let mut budget = SchemaCopyBudget::default();
+    let mut resolver = Resolver {
+        root: &root,
+        remaining: COPY_BYTES,
+        max_depth: MAX_OUTPUT_DEPTH,
+        depth_exhausted: false,
+        budget: &mut budget,
+        budget_exhausted: false,
+        active: HashSet::new(),
+        targets: HashMap::new(),
+        lookups: HashMap::new(),
+        target_size_scans: 0,
+    };
+    let out = resolver.root();
+    assert_eq!(resolver.target_size_scans, 1);
+    assert_eq!(resolver.targets.len(), 1);
+    assert_eq!(resolver.lookups.len(), 256);
+    assert_eq!(out["properties"].as_object().unwrap().len(), 256);
+}
+
+#[test]
+fn size_scans_stop_before_unaffordable_schema_and_literal_tails() {
+    let value = json!({"description":"x".repeat(COPY_BYTES), "tail":vec![Value::Null;100_000]});
+    SIZE_NODES_VISITED.with(|n| n.set(0));
+    assert_eq!(expansion_size(&value, false), COPY_BYTES + 1);
+    SIZE_NODES_VISITED.with(|n| assert!(n.get() <= 3));
+    SIZE_NODES_VISITED.with(|n| n.set(0));
+    assert_eq!(literal_size(&value), COPY_BYTES + 1);
+    SIZE_NODES_VISITED.with(|n| assert!(n.get() <= 4));
+    let array = json!(["x".repeat(COPY_BYTES), value]);
+    SIZE_NODES_VISITED.with(|n| n.set(0));
+    assert_eq!(literal_size(&array), COPY_BYTES + 1);
+    SIZE_NODES_VISITED.with(|n| assert!(n.get() <= 4));
 }
 
 pub(crate) fn nested_reference_chain(links: usize, levels: usize) -> Value {
