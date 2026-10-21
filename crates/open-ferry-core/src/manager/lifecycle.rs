@@ -6,7 +6,7 @@
 // sdk/cliproxy/auth/conductor_cooldown.go,
 // ReconcileRegistryModelStates in sdk/cliproxy/auth/conductor_selection.go,
 // and lockAuthMutation in sdk/cliproxy/auth/conductor_persistence.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Adding, changing and removing credentials and executors, recording call
@@ -221,7 +221,10 @@ enum UpdateMode<'a> {
     /// An edit of the live credential, made under the state lock. The
     /// closure fails with `Err(())` after it kept its own error, and says
     /// with `Ok(false)` that nothing changed.
-    Edit(&'a mut dyn FnMut(&mut Auth) -> Result<bool, ()>),
+    Edit {
+        edit: &'a mut dyn FnMut(&mut Auth) -> Result<bool, ()>,
+        expected_epoch: u64,
+    },
     /// The credential the refresh started from, and its epoch then.
     Refresh {
         base: &'a Auth,
@@ -578,7 +581,7 @@ impl Manager {
         id: &str,
         edit: impl FnOnce(&mut Auth) -> Result<bool, E>,
     ) -> Result<Option<Arc<Auth>>, EditError<E>> {
-        self.edit_with(id, edit, Save::Yes)
+        self.edit_with(id, 0, edit, Save::Yes)
     }
 
     /// [`edit`](Self::edit) without saving, for a change that came from the
@@ -588,12 +591,26 @@ impl Manager {
         id: &str,
         edit: impl FnOnce(&mut Auth) -> Result<bool, E>,
     ) -> Result<Option<Arc<Auth>>, EditError<E>> {
-        self.edit_with(id, edit, Save::No)
+        self.edit_with(id, 0, edit, Save::No)
+    }
+
+    /// Edits the current record only if it still belongs to the registration
+    /// selected by the caller (upstream's `Modify`). A zero epoch is unfenced;
+    /// an older epoch fails before the closure runs or anything is saved.
+    /// Same-registration refreshes and concurrent field edits are preserved.
+    pub fn edit_at_epoch<E>(
+        &self,
+        id: &str,
+        expected_epoch: u64,
+        edit: impl FnOnce(&mut Auth) -> Result<bool, E>,
+    ) -> Result<Option<Arc<Auth>>, EditError<E>> {
+        self.edit_with(id, expected_epoch, edit, Save::Yes)
     }
 
     fn edit_with<E>(
         &self,
         id: &str,
+        expected_epoch: u64,
         edit: impl FnOnce(&mut Auth) -> Result<bool, E>,
         save: Save,
     ) -> Result<Option<Arc<Auth>>, EditError<E>> {
@@ -607,7 +624,14 @@ impl Manager {
             id: id.to_owned(),
             ..Auth::default()
         };
-        let result = self.update_internal(UpdateMode::Edit(&mut apply), placeholder, save);
+        let result = self.update_internal(
+            UpdateMode::Edit {
+                edit: &mut apply,
+                expected_epoch,
+            },
+            placeholder,
+            save,
+        );
         if let Some(err) = rejected {
             return Err(EditError::Rejected(err));
         }
@@ -1299,7 +1323,16 @@ impl Manager {
                     0
                 }
             }
-            UpdateMode::Edit(edit) => {
+            UpdateMode::Edit {
+                edit,
+                expected_epoch,
+            } => {
+                if expected_epoch != 0 && expected_epoch < live_epoch {
+                    return Err(ManagerError::Other(format!(
+                        "update auth {}: stale registration epoch {expected_epoch} < {live_epoch}",
+                        auth.id
+                    )));
+                }
                 let mut edited = Auth::clone(&existing_auth);
                 match edit(&mut edited) {
                     Err(()) => return Err(ManagerError::Other("edit refused".to_owned())),

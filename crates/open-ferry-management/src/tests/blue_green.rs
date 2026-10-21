@@ -1074,8 +1074,7 @@ async fn bad_requests_are_answered_whatever_the_gate_is() {
     assert_eq!(open.len(), closed.len());
     for (index, (open, closed)) in open.iter().zip(&closed).enumerate() {
         assert_ne!(open.status, StatusCode::SERVICE_UNAVAILABLE, "{index}");
-        // An invalid credential file is a 500 as the port answers it, as
-        // upstream does.
+        // Invalid credential-file input remains a client error with the gate closed.
         assert!(open.status.as_u16() >= 400, "{index}: {}", open.body);
         assert_eq!(closed.status, open.status, "{index}: {}", closed.body);
         assert_eq!(closed.body, open.body, "{index}");
@@ -1114,6 +1113,36 @@ fn held_edits(
     api.router = router(state.clone());
     api.state = state;
     (Arc::new(api), reached, release)
+}
+
+// Ported from auth_files_patch_fields_test.go (v8.0.36): selection must not
+// authorize changing a replacement registration, even under the same file ID.
+#[tokio::test]
+async fn status_and_fields_reject_reregistration_after_lookup() {
+    for (path, body) in [
+        (STATUS, r#"{"name":"a.json","disabled":true}"#),
+        (FIELDS, r#"{"name":"a.json","note":"old-account-edit"}"#),
+    ] {
+        let dir = AuthDir::new();
+        let (api, mut reached, release) = held_edits(&dir);
+        api.register(credential(&dir, "a.json", r#"{"type":"codex"}"#));
+        let request = tokio::spawn({
+            let api = Arc::clone(&api);
+            async move { patch(&api, path, body).await }
+        });
+        reached.recv().await.unwrap();
+        let replacement = credential(&dir, "a.json", r#"{"type":"codex","note":"replacement"}"#);
+        api.manager.register(replacement).unwrap();
+        release.send(()).unwrap();
+        let answer = request.await.unwrap();
+        assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(answer.body.contains("stale registration epoch"));
+        let current = api.manager.get("a.json").unwrap();
+        assert!(!current.disabled);
+        assert_eq!(current.metadata["note"], "replacement");
+        assert!(api.sync.calls().is_empty());
+        assert_eq!(dir.read_json("a.json")["note"], "replacement");
+    }
 }
 
 // C3-2: a status or fields change is made on the credential as it is when

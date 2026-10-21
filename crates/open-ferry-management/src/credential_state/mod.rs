@@ -294,7 +294,7 @@ async fn status_owned(
     let held = state.clone();
     let updated = match run_blocking(move || {
         held.before_edit();
-        manager.edit(&id, |auth| {
+        manager.edit_at_epoch(&id, target.registration_epoch, |auth| {
             apply_disabled_state(auth, disabled);
             Ok::<_, String>(true)
         })
@@ -893,7 +893,7 @@ async fn fields_owned(
     let held = state.clone();
     let updated = match run_blocking(move || {
         held.before_edit();
-        manager.edit(&id, |auth| {
+        manager.edit_at_epoch(&id, target.registration_epoch, |auth| {
             normalize_credential_metadata(&mut auth.metadata);
             if !apply_fields(auth, fields, request_retry)? {
                 return Err("no fields to update".to_owned());

@@ -495,7 +495,7 @@ Deviations, each also noted in its module:
 
 - **Fields are applied in body order**, and the first bad one is reported. Upstream walks a Go map, so with two bad fields the one it reports varies, as does which of two headers that trim to the same name wins.
 
-- **A field change holds the credential lock**, as a status change does; upstream takes none. A change to a credential removed meanwhile answers 404 `auth file not found`, where upstream hands its stale copy to the hook and registers it again.
+- **A field change holds the credential lock**, as a status change does; upstream serializes edits per credential in its manager. Both refuse a removed credential with 404 `auth file not found` and reject an older registration epoch before editing. Here edits still hold the whole manager lock and publish before saving, as described above.
 
 - **Lookups take the first credential by ID** when two match a name; upstream takes whichever its map yields first. A refresh body that fails to decode answers 400 `invalid request body` without Go's decoder error after it. A refresh's query value that isn't UTF-8 has each bad byte read as U+FFFD.
 
