@@ -1,7 +1,8 @@
 """Exercise a real user or machine service, update, rollback and uninstall.
 
 Run with python -I run.py WORK. No test flags, alternate updater or timer seams.
-Only diagnostics/ is safe to upload; config, init output and keys never are.
+Only diagnostics/ is safe to upload; config and keys never are.
+Failed init output is shown only after redaction and checks for remaining keys.
 """
 
 import argparse
@@ -355,6 +356,7 @@ class Qualification:
         self.load = None
         self.installed_service = False
         self.runner_adjustments = []
+        self.runner_restorations = []
         self.fault_confirmed = False
         self.env = dict(os.environ)
         self.env.pop("OPEN_FERRY_SELF_UPDATE", None)
@@ -382,7 +384,10 @@ class Qualification:
             self.exe = Path("/usr/local/bin/open-ferry")
             self.data = Path("/var/lib/open-ferry")
         else:
-            self.config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "open-ferry/config.yaml"
+            config_home = Path(os.environ.get("XDG_CONFIG_HOME", ""))
+            if not config_home.is_absolute():
+                config_home = Path.home() / ".config"
+            self.config = config_home / "open-ferry/config.yaml"
             self.exe = Path.home() / ".local/bin/open-ferry"
             self.data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "open-ferry"
         # claude-cli is unrelated user data. Never move, delete or write in it.
@@ -580,18 +585,26 @@ class Qualification:
                 self.runner_adjustments.append(adjustment)
                 record(f"Runner directory {path}: {adjustment['from']} -> {adjustment['to']}")
 
-    def restore_runner_directories(self):
+    def restore_runner_directories(self, cleanup_failures=()):
         for adjustment in reversed(getattr(self, "runner_adjustments", [])):
             path = adjustment["path"]
+            if cleanup_failures:
+                reason = "cleanup failed: " + ", ".join(cleanup_failures) + "; permissions remain protected"
+                self.runner_restorations.append({"path": path, "status": "skipped", "reason": reason})
+                record(f"Runner directory restore skipped for {path}: {reason}")
+                continue
             try:
                 metadata = os.lstat(path)
                 require(stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == 0,
                         "directory is no longer a root-owned real directory; repair its permissions manually")
                 os.chmod(path, int(adjustment["from"], 8))
+                self.runner_restorations.append({"path": path, "status": "restored"})
                 record(f"Restored runner directory {path}: {adjustment['to']} -> {adjustment['from']}")
             except Exception as error:
                 # A mode restoration failure must not hide the lifecycle result.
-                record(f"Runner directory restore failed for {path}: {type(error).__name__}: {error}")
+                detail = f"{type(error).__name__}: {error}"
+                self.runner_restorations.append({"path": path, "status": "failed", "error": detail})
+                record(f"Runner directory restore failed for {path}: {detail}")
 
     def prerequisites(self):
         self.prepare_runner_directories()
@@ -656,8 +669,8 @@ class Qualification:
         self.root_auth_dirs = []
 
     def show_failed_install(self):
-        # init prints keys only after writing config. A dangling link or an
-        # unreadable/incomplete config cannot establish that output is safe.
+        # Register config keys first, then check the cleaned output independently:
+        # an installer may write its config elsewhere or remove it on failure.
         failure = WORK / "private-command-failure.txt"
         if not failure.is_file():
             return False
@@ -681,14 +694,25 @@ class Qualification:
                 record("Installer output withheld: its config exists but all keys couldn't be read")
                 return False
             SECRETS.extend([management, *clients])
-        record("Installer output:\n" + failure.read_text(encoding="utf-8"))
+        output = clean(failure.read_text(encoding="utf-8"))
+        labelled_keys = [match[1].strip() for line in output.splitlines()
+                         if (match := re.fullmatch(r"\s*(?:Client|Management) key:\s*(.*)", line))]
+        # 32 random bytes encode to 43 unpadded base64url characters; the
+        # final character has two zero pad bits. Hex management keys cannot
+        # be distinguished from SHA-256 digests, so rely on their labels.
+        client_key = r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048](?![A-Za-z0-9_-])"
+        if any(value != "[redacted]" for value in labelled_keys) or re.search(client_key, output):
+            record("Installer output withheld: cleaned output may still contain init keys")
+            return False
+        record("Installer output:\n" + output)
         return True
 
     def install(self, base):
         if not self.published:
             self.env["OPEN_FERRY_INSTALL_BASE_URL"] = base
             self.env["OPEN_FERRY_UPDATE_BASE_URL"] = base
-        record("Installing candidate A with the release install script (init output withheld)")
+        record("Installing candidate A with the release install script "
+               "(failed init output shown only after redaction and key checks)")
         installer_dir = WORK / "published" / self.a if self.published else Path.cwd()
         if self.os == "Windows":
             args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -938,6 +962,7 @@ class Qualification:
                                     for path, count in requests.items()),
                             f"{self.candidates['fault']} control requested a B asset before mirror shutdown")
 
+            cleanup_failures = []
             for phase, cleanup in (("root authentication cleanup", self.remove_root_auth),
                                    ("load cleanup", finish_load), ("diagnostics", self.logs),
                                    ("service cleanup", remove_service), ("mirror cleanup", stop_mirror)):
@@ -945,8 +970,9 @@ class Qualification:
                     cleanup()
                 except Exception as error:
                     failures.append((phase, error))
+                    cleanup_failures.append(phase)
                     record(f"{phase} failed: {type(error).__name__}: {error}")
-            self.restore_runner_directories()  # Last: uninstall must run with protected directories.
+            self.restore_runner_directories(cleanup_failures)  # Last, only after successful cleanup.
             if failures:
                 raise QualificationFailure(failures) from failures[0][1]
 
@@ -979,6 +1005,7 @@ def main():
         result.update(qualification.candidates)
         result["phase"] = "lifecycle"
         result["runner_adjustments"] = qualification.runner_adjustments
+        result["runner_restorations"] = qualification.runner_restorations
         qualification.run()
         result["passed"] = True
         if qualification.candidates["fault"] in SIGNATURE_ERRORS:
