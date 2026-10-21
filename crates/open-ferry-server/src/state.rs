@@ -27,6 +27,7 @@ pub struct AppState {
 }
 
 struct Inner {
+    ingress: crate::ingress::Ingress,
     settings: RwLock<Arc<Settings>>,
     dispatcher: Arc<dyn Dispatcher>,
     catalog: Arc<dyn ModelCatalog>,
@@ -78,6 +79,7 @@ impl AppState {
         let trusted_proxies = TrustedProxies::new(&config.trusted_proxies);
         Self {
             inner: Arc::new(Inner {
+                ingress: crate::ingress::Ingress::new(config.ingress.clone(), config.body_limit),
                 settings: RwLock::new(Arc::new(Settings::new(config))),
                 dispatcher,
                 catalog,
@@ -100,6 +102,9 @@ impl AppState {
 
     /// Replaces the config. Requests that have started keep the old one.
     pub fn set_config(&self, config: ServerConfig) {
+        self.inner
+            .ingress
+            .reconfigure(config.ingress.clone(), config.body_limit);
         let settings = Arc::new(Settings::new(config));
         *self
             .inner
@@ -116,6 +121,10 @@ impl AppState {
                 .read()
                 .unwrap_or_else(PoisonError::into_inner),
         )
+    }
+
+    pub(crate) fn ingress(&self) -> &crate::ingress::Ingress {
+        &self.inner.ingress
     }
 
     /// The dispatcher, for a future that outlives the request.
