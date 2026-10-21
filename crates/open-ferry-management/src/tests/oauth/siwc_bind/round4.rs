@@ -231,6 +231,7 @@ async fn round4_worker_cap_survives_cancelled_session_churn() {
     let outcome = api.state.oauth_sessions().store().get(&second).unwrap();
     release.send(()).unwrap();
     wait_for_bind_task(&api).await;
+    settled(&api).await;
     assert_eq!(
         spawned_while_paused, 1,
         "a cancelled session freed a live thread's permit"
