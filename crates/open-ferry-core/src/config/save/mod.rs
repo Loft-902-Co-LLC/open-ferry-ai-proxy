@@ -626,6 +626,11 @@ pub(crate) fn render_nested_scalar(
         }
         node = next;
     }
+    if let Some(root) = doc.content.first_mut()
+        && let Some(configs) = yaml_path_mut(root, "plugins.configs")
+    {
+        protect_plugin_block_scalars(configs);
+    }
     Ok(normalize_comment_indentation(&marshal_config(&doc)?))
 }
 
@@ -783,6 +788,22 @@ mod tests {
         assert_eq!(
             normalize_comment_indentation(&marshal_config(&doc).unwrap()),
             b"tags:\n  - >- # own\n    a\n"
+        );
+    }
+
+    #[test]
+    fn nested_updates_preserve_retained_plugin_block_scalars() {
+        let source = b"plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\ndebug: false\n";
+        let actual = render_nested_scalar(
+            source,
+            &["models", "catalog"],
+            "https://catalog.example/models.json",
+        )
+        .unwrap();
+        assert_eq!(actual, b"plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n");
+        assert_eq!(
+            Config::parse(&actual).unwrap().models.catalog,
+            "https://catalog.example/models.json"
         );
     }
 
