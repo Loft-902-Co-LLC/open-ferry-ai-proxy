@@ -1585,7 +1585,7 @@ async fn remote_compaction_preserves_client_number_spelling() {
     let mock = Mock::start(Reply::sse(
         "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Summary\"}]}]}}\n\n",
     )).await;
-    let payload = r#"{"temperature":1E0,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history","client_number":1E20}]},{"type":"compaction_trigger"}]}"#;
+    let payload = r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history","client_number":1E20,"client_scale":1E0}]},{"type":"compaction_trigger"}]}"#;
     executor()
         .execute(
             api_key_auth(&mock.url),
@@ -1595,7 +1595,7 @@ async fn remote_compaction_preserves_client_number_spelling() {
         .await
         .unwrap();
     let sent = mock.last();
-    assert!(sent.body.contains("\"temperature\":1E0"), "{}", sent.body);
+    assert!(sent.body.contains("\"client_scale\":1E0"), "{}", sent.body);
     assert!(
         sent.body.contains("\"client_number\":1E20"),
         "{}",
