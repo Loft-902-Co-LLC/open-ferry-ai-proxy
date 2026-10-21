@@ -850,7 +850,8 @@ pub(crate) fn translate_request_for_auth(
             config,
             auth,
             &request.model,
-            &options.metadata.requested_model,
+            &options.metadata.route_model,
+            options.metadata.model_config.as_deref(),
         ),
     )?;
     Ok(body)

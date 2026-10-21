@@ -203,6 +203,52 @@ async fn selected_cli_entry_enforces_configured_thinking_levels() {
 }
 
 #[tokio::test]
+async fn auto_route_uses_the_selected_cli_snapshot() {
+    use open_ferry_core::exec::Dispatcher as _;
+    use open_ferry_core::manager::{Manager, Settings};
+    use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
+    use std::sync::Arc;
+    let fixture = Fixture::new(&success(&["Hi"]));
+    let mut entry = fixture.entry();
+    entry.models = vec![open_ferry_core::config::ClaudeModel {
+        name: MODEL.into(),
+        alias: "fast".into(),
+        thinking: Some(open_ferry_core::config::ThinkingSupport {
+            levels: vec!["low".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    let mut config = open_ferry_core::config::Config::default();
+    config.claude_cli = vec![entry.clone()];
+    let registry = Arc::new(ModelRegistry::new());
+    let manager = Manager::new(Settings::from(&config), registry.clone(), None);
+    let mut auth = (*auth(&entry)).clone();
+    auth.status = open_ferry_core::auth::Status::Active;
+    registry.register_auth(&auth, &RegistrationRules::from(&config));
+    manager.register(auth).unwrap();
+    // The executor deliberately has a different snapshot: the picked alias
+    // and capability config must come from the manager's one routing snapshot.
+    manager.register_executor(Arc::new(
+        fixture
+            .executor()
+            .with_config(Arc::new(open_ferry_core::config::Config::default())),
+    ));
+    let mut opts = options(Format::OPENAI, false);
+    opts.metadata.requested_model = "auto".into();
+    let mut req = request(
+        json!({"model":"auto", "messages":[{"role":"user","content":"hi"}], "reasoning_effort":"high"}),
+    );
+    req.model = "fast".into();
+    manager
+        .execute(&["claude-cli".into()], req, opts)
+        .await
+        .unwrap();
+    let argv = strings(&fixture.record()["argv"]);
+    assert_eq!(argv[argv.len() - 2..], ["--effort", "low"]);
+}
+
+#[tokio::test]
 async fn sends_one_composed_user_line_that_never_leads_with_a_slash() {
     let fixture = Fixture::new(&success(&["Hi"]));
     execute(

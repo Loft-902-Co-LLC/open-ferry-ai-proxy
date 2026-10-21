@@ -6,9 +6,11 @@
 //! adaptive effort. [`crate::thinking`] reads and checks the setting.
 //!
 //! Deviations from upstream:
-//! - The executor resolves configured API-key capabilities from its config
-//!   snapshot and selected auth, rather than metadata set by the manager.
-//!   Unbound attempts retain registry lookup, including UserDefined handling.
+//! - The manager carries the pre-rewrite route and its immutable Claude config
+//!   snapshot; the executor resolves the selected definition from it instead
+//!   of receiving a precompiled ModelInfo. Direct calls use executor config.
+//!   Unbound attempts retain registry lookup, including UserDefined handling
+//!   and upstream's last-registration behavior.
 
 use open_ferry_core::exec::ExecError;
 #[cfg(test)]

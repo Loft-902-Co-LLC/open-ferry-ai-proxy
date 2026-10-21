@@ -22,9 +22,10 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
+pub(crate) use super::api_key_config::{config_index, resolve_api_key_config};
 use super::credential::{KIND_API_KEY, SOURCE_CONFIG, attribute, auth_kind, auth_source_kind};
 use super::settings::{ApiKeyEntry, ModelAlias, OpenAiCompat, Settings};
-use super::text::{atoi, canonical_model_key, equal_fold, go_lower, parse_suffix};
+use super::text::{canonical_model_key, equal_fold, go_lower, parse_suffix};
 use crate::auth::Auth;
 pub(crate) use crate::auth::compat::openai_compatible_provider_key;
 use crate::auth::json::{decode_field, fold_values};
@@ -871,56 +872,6 @@ fn execution_alias_pool_model(auth: &Auth, requested_model: &str, alias: &AliasR
     requested_model.to_owned()
 }
 
-/// The config entry of an API-key credential (upstream's
-/// `resolveAPIKeyConfig`): its `config_index` entry, else one with its key
-/// and base URL, prefix and proxy, else one with its key and base URL, else
-/// one with its key.
-pub(crate) fn resolve_api_key_config<'a>(
-    entries: &'a [ApiKeyEntry],
-    auth: &Auth,
-) -> Option<&'a ApiKeyEntry> {
-    if entries.is_empty() {
-        return None;
-    }
-    let attr_key = attribute(auth, "api_key");
-    let attr_base = attribute(auth, "base_url");
-    let matches_credentials = |entry: &ApiKeyEntry| {
-        let cfg_key = entry.api_key.trim();
-        let cfg_base = entry.base_url.trim();
-        if !attr_key.is_empty() && !attr_base.is_empty() {
-            return equal_fold(cfg_key, &attr_key) && equal_fold(cfg_base, &attr_base);
-        }
-        if !attr_key.is_empty() {
-            return equal_fold(cfg_key, &attr_key)
-                && (cfg_base.is_empty() || equal_fold(cfg_base, &attr_base));
-        }
-        !attr_base.is_empty() && equal_fold(cfg_base, &attr_base)
-    };
-    if auth_source_kind(auth) == SOURCE_CONFIG
-        && let Some(entry) = config_index(auth).and_then(|index| entries.get(index))
-        && matches_credentials(entry)
-    {
-        return Some(entry);
-    }
-    let found = entries.iter().find(|entry| {
-        matches_credentials(entry)
-            && equal_fold(entry.prefix.trim(), auth.prefix.trim())
-            && equal_fold(entry.proxy_url.trim(), auth.proxy_url.trim())
-    });
-    if found.is_some() {
-        return found;
-    }
-    if let Some(entry) = entries.iter().find(|entry| matches_credentials(entry)) {
-        return Some(entry);
-    }
-    if !attr_key.is_empty() {
-        return entries
-            .iter()
-            .find(|entry| equal_fold(entry.api_key.trim(), &attr_key));
-    }
-    None
-}
-
 /// open-ferry's `claude-cli` provider, which upstream doesn't have.
 const CLAUDE_CLI: &str = "claude-cli";
 
@@ -932,13 +883,6 @@ fn resolve_claude_cli_config<'a>(settings: &'a Settings, auth: &Auth) -> Option<
         return None;
     }
     config_index(auth).and_then(|index| settings.api_key_entries(CLAUDE_CLI).get(index))
-}
-
-/// The credential's `config_index` attribute, when it is a valid index.
-pub(crate) fn config_index(auth: &Auth) -> Option<usize> {
-    let raw = auth.attributes.get("config_index")?;
-    let index = atoi(raw.trim())?;
-    usize::try_from(index).ok()
 }
 
 /// The OpenAI-compatible provider of a credential (upstream's
