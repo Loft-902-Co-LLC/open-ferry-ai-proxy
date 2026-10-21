@@ -1,10 +1,10 @@
 // Ported from CLIProxyAPI internal/client/codex/models/models.go
 // (BuildResponseForClientWithToolCapabilities, MarshalCompact,
 // buildCodexClientModelsWithToolCapabilities and what they call) and
-// apply_patch.go (applyCodexClientApplyPatchCapability) (v8.0.32, MIT).
+// apply_patch.go (applyCodexClientApplyPatchCapability) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! The model list Codex clients fetch: `GET /v1/models?client_version=…`.
+//! The model list Codex clients fetch: `GET /v1/models?client_version=â€¦`.
 //!
 //! Each available model gets an entry made from a template in the Codex
 //! client catalog ([`crate::registry::codex_client`]): its own when the
@@ -666,6 +666,12 @@ fn apply_max_tokens(entry: &mut Map<String, Value>, model: &ModelInfo) {
 /// rejects a list without these keys, so they stay, as `null`
 /// (`nullCodexClientRequiredOptions`).
 fn null_required_options(entry: &mut Map<String, Value>) {
+    entry.insert("tool_mode".into(), Value::from("direct"));
+    entry.insert("use_responses_lite".into(), Value::Bool(false));
+    entry.insert(
+        "supports_reasoning_effort_updates".into(),
+        Value::Bool(false),
+    );
     for key in ["apply_patch_tool_type", "upgrade", "availability_nux"] {
         entry.insert(key.into(), Value::Null);
     }

@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/client/codex/models/models_test.go and
-//! web_search_capability_test.go (v8.0.32, MIT).
+//! web_search_capability_test.go (v8.0.36, MIT).
 //!
 //! Upstream's model maps become [`ModelInfo`]s, and tests that register
 //! models in upstream's global registry register them in a registry of their
@@ -945,11 +945,11 @@ fn marshal_compact_escapes_as_go_does() {
     let value = json!({
         "z": 1,
         "a": {"y": [true, null, 2.5], "b": "x"},
-        "s": "<>&\u{7f}\"\\/\u{8}\u{c}\n\r\t\u{1}\u{1f}\u{2028}\u{2029}é",
+        "s": "<>&\u{7f}\"\\/\u{8}\u{c}\n\r\t\u{1}\u{1f}\u{2028}\u{2029}ÃƒÂ©",
     });
     let backslash = '\\';
     let want = format!(
-        r#"{{"a":{{"b":"x","y":[true,null,2.5]}},"s":"<>&{del}{b}"{b}{b}/{b}b{b}f{b}n{b}r{b}t{b}u0001{b}u001f{b}u2028{b}u2029é","z":1}}"#,
+        r#"{{"a":{{"b":"x","y":[true,null,2.5]}},"s":"<>&{del}{b}"{b}{b}/{b}b{b}f{b}n{b}r{b}t{b}u0001{b}u001f{b}u2028{b}u2029ÃƒÂ©","z":1}}"#,
         del = '\u{7f}',
         b = backslash,
     );
@@ -1107,4 +1107,49 @@ fn models_without_a_template_use_the_first_entry_when_gpt_5_5_is_absent() {
     assert_eq!(built.as_array().unwrap().len(), 1);
     assert_eq!(built[0]["slug"], "third-party-model");
     assert_eq!(built[0]["supports_parallel_tool_calls"], true);
+}
+
+#[test]
+fn non_codex_and_synthesized_models_disable_codex_only_modes() {
+    for providers in [
+        vec!["claude".to_owned()],
+        vec!["codex".to_owned(), "xai".to_owned()],
+        vec![],
+    ] {
+        let lookup = |_: &str| providers.clone();
+        let entries = build(
+            &ModelRegistry::new(),
+            &[model("gpt-5.5"), model("new-partner-model")],
+            Some(&lookup),
+            false,
+            "",
+        );
+        for entry in entries {
+            assert_eq!(entry["tool_mode"], "direct");
+            assert_eq!(entry["use_responses_lite"], false);
+            assert_eq!(entry["supports_reasoning_effort_updates"], false);
+        }
+    }
+    let lookup = |_: &str| vec!["codex".to_owned()];
+    let baseline = build_plain(&[model("gpt-5.5")], false, "");
+    let entries = build(
+        &ModelRegistry::new(),
+        &[model("gpt-5.5"), model("new-partner-model")],
+        Some(&lookup),
+        false,
+        "",
+    );
+    for entry in entries {
+        if entry["slug"] == "gpt-5.5" {
+            for key in [
+                "tool_mode",
+                "use_responses_lite",
+                "supports_reasoning_effort_updates",
+            ] {
+                assert_eq!(entry.get(key), baseline[0].get(key));
+            }
+        } else {
+            assert_eq!(entry["tool_mode"], "direct");
+        }
+    }
 }
