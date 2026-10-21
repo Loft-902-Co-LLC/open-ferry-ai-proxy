@@ -304,12 +304,14 @@ impl MetaExecutor {
             return Err(Self::failure(response, &secrets).await);
         }
         let response_headers = response.headers().clone();
+        let original =
+            open_ferry_translate::json::ResponseRequestData::new(&prepared.original_bytes);
         let translator = Registry::global().response_stream(
             &Format::CODEX,
             &prepared.response_format,
             &ResponseContext {
                 model: &request.model,
-                original_request: (&prepared.original).into(),
+                original_request: original.as_request(),
                 request: &prepared.body,
             },
         );
