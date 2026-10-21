@@ -1039,7 +1039,10 @@ impl Translator {
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
-                    original_request: original.as_ref().into(),
+                    original_request: open_ferry_translate::json::ResponseRequest::from_bytes(
+                        case.request.as_bytes(),
+                        original.as_ref(),
+                    ),
                     request: &translated,
                 };
                 let mut stream = Registry::global().response_stream(&from, &to, &context);
@@ -1071,7 +1074,10 @@ impl Translator {
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
-                    original_request: original.as_ref().into(),
+                    original_request: open_ferry_translate::json::ResponseRequest::from_bytes(
+                        case.request.as_bytes(),
+                        original.as_ref(),
+                    ),
                     request: &translated,
                 };
                 let body = case
