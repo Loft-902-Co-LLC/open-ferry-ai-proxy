@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_request.go
-// (v8.0.36, MIT), with the user turn checks.
+// (v8.0.38, MIT), with the user turn checks.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions request → Codex request.
@@ -75,7 +75,10 @@ pub fn convert_openai_chat_completions_request_to_codex(
     if let Some(tier) = service_tier(request.get("service_tier")) {
         out.insert("service_tier".into(), tier.into());
     }
-    out.insert("parallel_tool_calls".into(), true.into());
+    out.insert(
+        "parallel_tool_calls".into(),
+        (request.get("parallel_tool_calls") != Some(&Value::Bool(false))).into(),
+    );
     // Reasoning summaries are opt-in on the Responses API, so only the effort is set.
     out.insert("include".into(), json!(["reasoning.encrypted_content"]));
     out.insert("model".into(), model_name.into());

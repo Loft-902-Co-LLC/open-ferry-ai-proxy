@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_request.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → Codex request.
@@ -64,7 +64,9 @@ pub fn convert_openai_responses_request_to_codex(_model: &str, mut request: Valu
     }
     require(fields, "stream", Value::Bool(true));
     require(fields, "store", Value::Bool(false));
-    require(fields, "parallel_tool_calls", Value::Bool(true));
+    if fields.get("parallel_tool_calls") != Some(&Value::Bool(false)) {
+        require(fields, "parallel_tool_calls", Value::Bool(true));
+    }
     require_include(fields);
     normalize_service_tier(fields);
     for key in UNSUPPORTED_FIELDS {

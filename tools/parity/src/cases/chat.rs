@@ -291,6 +291,27 @@ pub fn requests() -> Vec<Case> {
             json!({ "reasoning_effort": effort }).to_string(),
         ));
     }
+
+    for (name, value) in [
+        ("false", Some(json!(false))),
+        ("true", Some(json!(true))),
+        ("null", Some(Value::Null)),
+        ("omitted", None),
+        ("string", Some(json!("false"))),
+        ("number", Some(json!(0))),
+        ("array", Some(json!([]))),
+        ("object", Some(json!({}))),
+    ] {
+        let mut request = json!({"messages":[{"role":"user","content":"hello"}],"input":"hello"});
+        if let Some(value) = value {
+            request["parallel_tool_calls"] = value;
+        }
+        cases.push(Case::new(
+            format!("parallel-tool-calls-{name}"),
+            "gpt-5.6",
+            request.to_string(),
+        ));
+    }
     cases
 }
 
