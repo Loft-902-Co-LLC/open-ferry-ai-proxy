@@ -81,7 +81,7 @@ fn convert(
     input.extend(convert_system(request.get("system")));
     if let Some(Value::Array(messages)) = request.get("messages") {
         let replay = SignatureReplay {
-            target: Provider::from_model_name(base_model_name(model_name)),
+            target: Provider::from_model_name(base_model_name(crate::common::codex_replay_signature::resolve_target(model_name, request))),
             preserve_unknown: preserve_unknown_signatures,
         };
         let mut builder = InputBuilder::new(&tool_names, replay);

@@ -93,6 +93,11 @@ fn invalid_encrypted_content(content: &Value) -> Option<String> {
 /// `encrypted_content` isn't a string with the shape of xAI's. When it drops
 /// any, summary-only reasoning items join the one before.
 pub(crate) fn sanitize_input_encrypted_content(body: &mut Value) {
+    sanitize_input_encrypted_content_for_base_url(body, "")
+}
+
+pub(crate) fn sanitize_input_encrypted_content_for_base_url(body: &mut Value, base: &str) {
+    let allow_suffix = crate::codex::reasoning::is_openrouter_url(base);
     let Some(Value::Array(input)) = body.get_mut("input") else {
         return;
     };
@@ -103,6 +108,10 @@ pub(crate) fn sanitize_input_encrypted_content(body: &mut Value) {
         if item_type != REASONING && item_type != "compaction" {
             input.push(item);
             continue;
+        }
+        if !allow_suffix && let Some(raw) = item.get("encrypted_content").and_then(Value::as_str) {
+            let canonical = crate::codex::reasoning::canonical_signature(raw).to_owned();
+            if canonical != raw && open_ferry_translate::signature::is_valid_grok_encrypted_content(raw) { item["encrypted_content"] = canonical.into(); }
         }
         let Some(reason) = item
             .get("encrypted_content")

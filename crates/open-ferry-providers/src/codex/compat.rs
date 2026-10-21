@@ -457,7 +457,7 @@ fn translate_envelope(
     stream: bool,
     mut payload: Value,
 ) -> (Value, Option<UnsupportedPartError>) {
-    let base = base_model(&request.model);
+    let base = super::reasoning::resolve_target_model(base_model(&request.model), &options.metadata.requested_model);
     let source = &options.source_format;
     if kind == Kind::CountTokens
         && *source == Format::OPENAI_RESPONSE

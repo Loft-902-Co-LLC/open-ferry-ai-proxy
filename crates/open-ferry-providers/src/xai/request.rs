@@ -329,12 +329,15 @@ pub(crate) fn prepare(
         options.original_request.clone()
     };
     let original = parse_object(&original_payload);
+    let target = crate::codex::reasoning::resolve_target_model(&base, &options.metadata.requested_model);
+    let signature_target = if open_ferry_translate::signature::Provider::from_model_name(target) == open_ferry_translate::signature::Provider::Grok { target } else { "grok" };
     let (mut original_translated, _) =
-        translate(config, options, &to, &base, original.clone(), stream);
+        translate(config, options, &to, signature_target, original.clone(), stream);
+    set_string_if_different(&mut original_translated, "model", &base);
     preserve_output_controls(&mut original_translated, &original, from);
     let payload = parse_object(&request.payload);
     // Only the body is sent, so only its translation can refuse the request.
-    let (mut body, refusal) = translate(config, options, &to, &base, payload.clone(), stream);
+    let (mut body, refusal) = translate(config, options, &to, signature_target, payload.clone(), stream);
     if let Some(refusal) = refusal {
         return Err(refusal.into());
     }
@@ -410,7 +413,7 @@ pub(crate) fn prepare(
         tools::alias_client_web_search_input(&mut body, &web_search_alias, &namespace_tools);
     }
     reasoning::normalize_input_reasoning_items(&mut body);
-    reasoning::sanitize_input_encrypted_content(&mut body);
+    reasoning::sanitize_input_encrypted_content_for_base_url(&mut body, context.auth.map(base_url).unwrap_or_default());
 
     normalize_instructions(&mut body, false);
     // Chat Completions takes `stop`; xAI's Responses API doesn't.

@@ -66,7 +66,7 @@ use super::client::USER_AGENT;
 use super::compat;
 use super::ext::{self, Turn};
 use super::input_ids::sanitize_input_item_ids;
-use crate::codex::reasoning::{sanitize_reasoning_for_target, resolve_target_model};
+use crate::codex::reasoning::{sanitize_reasoning_for_destination, resolve_target_model};
 use super::thinking;
 use super::tool_schema::normalize_tool_schemas;
 use crate::custom_headers;
@@ -532,10 +532,11 @@ pub(crate) fn prepare_body(
             turn: Turn::default(),
         });
     }
-    sanitize_reasoning_for_target(&mut body, compat::is_compat(context, request, options), resolve_target_model(base, &options.metadata.requested_model));
+
     normalize_parallel_tool_calls(&mut body, &options.headers);
     normalize_tool_schemas(&mut body);
     let turn = ext::prepare(kind, context, request, options, &mut body);
+    sanitize_reasoning_for_destination(&mut body, compat::is_compat(context, request, options), resolve_target_model(base, &options.metadata.requested_model), context.auth.and_then(|auth| auth.attribute("base_url")).unwrap_or_default());
 
     let translated = body.clone();
     if let Some(key) = client_prompt_cache_key(&options.source_format, &payload) {

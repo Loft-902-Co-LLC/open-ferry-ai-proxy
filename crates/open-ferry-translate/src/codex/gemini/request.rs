@@ -39,7 +39,7 @@ pub fn convert_gemini_request_to_codex(model_name: &str, request: &Value) -> Val
         let mut call_ids = CallIds::default();
         let mut seen_signatures = HashSet::new();
         for content in contents {
-            push_content(&mut input, content, &short_names, &mut call_ids, model_name, &mut seen_signatures);
+            push_content(&mut input, content, &short_names, &mut call_ids, crate::common::codex_replay_signature::resolve_target(model_name, request), &mut seen_signatures);
         }
     }
 
@@ -133,16 +133,20 @@ fn push_content(
     let Some(Value::Array(parts)) = content.get("parts") else {
         return;
     };
+    let mut pending_summary = Vec::new();
     for part in parts {
         if role == "assistant" {
             let raw = ["thoughtSignature", "thought_signature"].iter().map(|key| str_of(part.get(*key))).find(|s| !s.trim().is_empty()).unwrap_or_default();
             if let Some(sig) = super::signature::for_target(model, &raw)
                 && seen.insert(sig.clone()) {
-                    let mut summary = Vec::new();
+                    let mut summary = std::mem::take(&mut pending_summary);
                     let text = str_of(part.get("text"));
-                    if is_thought(part) && !text.trim().is_empty() { summary.push(serde_json::json!({"type":"summary_text","text":text.trim()})); }
+                    if is_thought(part) && !text.is_empty() { summary.push(serde_json::json!({"type":"summary_text","text":text})); }
                     input.push(serde_json::json!({"type":"reasoning","encrypted_content":sig,"summary":summary}));
-                }
+                } else if raw.is_empty() && is_thought(part) {
+                    let text = str_of(part.get("text"));
+                    if !text.is_empty() { pending_summary.push(serde_json::json!({"type":"summary_text","text":text})); }
+                } else { pending_summary.clear(); }
         }
         if is_thought(part) {
             continue;

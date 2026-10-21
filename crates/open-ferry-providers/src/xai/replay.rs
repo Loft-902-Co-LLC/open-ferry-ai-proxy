@@ -273,7 +273,7 @@ fn input_has_encrypted_content(input: &[Value], encrypted_content: &str) -> bool
         && input.iter().any(|item| {
             str_at(item, "type").trim() == "reasoning"
                 && matches!(item.get("encrypted_content"), Some(Value::String(own))
-                    if own == encrypted_content)
+                    if crate::codex::reasoning::canonical_signature(own) == crate::codex::reasoning::canonical_signature(encrypted_content))
         })
 }
 

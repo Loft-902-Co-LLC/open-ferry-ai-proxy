@@ -255,7 +255,7 @@ fn input_has_valid_reasoning(input: &[Value]) -> bool {
     input.iter().any(|item| {
         str_at(item, "type").trim() == "reasoning"
             && matches!(item.get("encrypted_content"), Some(Value::String(encrypted))
-                if inspect_gpt_reasoning_signature(encrypted).is_ok() || open_ferry_translate::signature::is_valid_meta_reasoning_signature(encrypted))
+                if inspect_gpt_reasoning_signature(super::reasoning::canonical_signature(encrypted)).is_ok() || open_ferry_translate::signature::is_valid_meta_reasoning_signature(super::reasoning::canonical_signature(encrypted)) || open_ferry_translate::signature::is_valid_grok_encrypted_content(super::reasoning::canonical_signature(encrypted)))
     })
 }
 
@@ -446,7 +446,7 @@ fn filter_turn_items<'a>(input: &[Value], items: &[&'a Value]) -> Vec<&'a Value>
     for item in input {
         match str_at(item, "type").trim() {
             "reasoning" => {
-                let encrypted = trimmed(item, "encrypted_content");
+                let encrypted = super::reasoning::canonical_signature(str_at(item, "encrypted_content"));
                 if !encrypted.is_empty() {
                     reasoning.insert(encrypted);
                 }
@@ -463,7 +463,7 @@ fn filter_turn_items<'a>(input: &[Value], items: &[&'a Value]) -> Vec<&'a Value>
     for &item in items {
         match str_at(item, "type").trim() {
             "reasoning" => {
-                if reasoning.contains(&trimmed(item, "encrypted_content")) {
+                if reasoning.contains(super::reasoning::canonical_signature(str_at(item, "encrypted_content"))) {
                     continue;
                 }
             }

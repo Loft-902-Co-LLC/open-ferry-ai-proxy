@@ -49,3 +49,17 @@ fn stream_preserves_calls_images_and_empty_delta_signature() {
     assert_eq!(signature::decode(parts[0]["thoughtSignature"].as_str().unwrap()), sig());
     assert!(parts[2].get("inlineData").is_some());
 }
+
+#[test]
+fn done_only_summary_and_late_signature_replay_together_through_alias() {
+    let mut stream = CodexToGeminiStream::new("deployment", &Value::Null);
+    let chunks = send(&mut stream, json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"r","encrypted_content":sig(),"summary":[{"text":"first"},{"text":"second"}]}}));
+    assert_eq!(chunks[0]["candidates"][0]["content"]["parts"].as_array().unwrap().len(), 2);
+    let terminal = send(&mut stream, json!({"type":"response.completed","response":{}}));
+    let parts: Vec<_> = chunks.iter().chain(terminal.iter()).flat_map(|c| c["candidates"][0]["content"]["parts"].as_array().unwrap().iter().cloned()).collect();
+    let request = json!({"model":"muse-spark","contents":[{"role":"model","parts":parts}]});
+    let out = convert_gemini_request_to_codex("deployment", &request);
+    assert_eq!(out["model"], "deployment");
+    assert_eq!(out["input"][0]["summary"], json!([{"type":"summary_text","text":"first"},{"type":"summary_text","text":"second"}]));
+    assert_eq!(out["input"][0]["encrypted_content"], sig());
+}

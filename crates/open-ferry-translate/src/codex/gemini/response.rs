@@ -40,6 +40,8 @@ pub struct CodexToGeminiStream {
     pending_function_calls: Vec<Value>,
     pending_signature: String,
     seen_reasoning: HashSet<[u8; 32]>,
+    has_reasoning_delta: bool,
+    streamed_reasoning: HashSet<String>,
     has_output_text_delta: bool,
     /// The SHA-256 of the last image sent for each image item, so the same
     /// image isn't sent twice.
@@ -58,6 +60,8 @@ impl CodexToGeminiStream {
             pending_function_calls: Vec::new(),
             pending_signature: String::new(),
             seen_reasoning: HashSet::new(),
+            has_reasoning_delta: false,
+            streamed_reasoning: HashSet::new(),
             has_output_text_delta: false,
             last_image_hash_by_id: HashMap::new(),
             tool_names: reverse_tool_names(original_request),
@@ -127,14 +131,23 @@ impl CodexToGeminiStream {
                     }
                     "reasoning" => {
                         let sig = str_of(item.get("encrypted_content")).trim().to_owned();
-                        if sig.is_empty() { return Vec::new(); }
-                        let key: [u8; 32] = Sha256::digest(format!("{}\0{sig}", str_of(item.get("id"))).as_bytes()).into();
-                        if !self.seen_reasoning.insert(key) { return Vec::new(); }
-                        let previous = std::mem::replace(&mut self.pending_signature, sig);
-                        if previous.is_empty() { return Vec::new(); }
-                        let mut part = serde_json::json!({"thought":true,"text":""});
-                        super::signature::set(&mut part, &previous);
-                        *parts_mut(&mut template) = vec![part];
+                        let id = str_of(item.get("id")).trim().to_owned();
+                        let had_delta = if !id.is_empty() && !self.streamed_reasoning.is_empty() { self.streamed_reasoning.contains(&id) } else { self.has_reasoning_delta };
+                        self.has_reasoning_delta = false;
+                        let texts = if had_delta { Vec::new() } else { reasoning_texts(item) };
+                        if sig.is_empty() && texts.is_empty() { return Vec::new(); }
+                        if !sig.is_empty() {
+                            let key: [u8; 32] = Sha256::digest(format!("{id}\0{sig}").as_bytes()).into();
+                            if !self.seen_reasoning.insert(key) { return Vec::new(); }
+                        }
+                        let mut parts = Vec::new();
+                        if !self.pending_signature.is_empty() && !sig.is_empty() {
+                            let mut part = serde_json::json!({"thought":true,"text":""}); self.attach_signature(&mut part); parts.push(part);
+                        }
+                        parts.extend(texts.into_iter().map(|text| serde_json::json!({"thought":true,"text":text})));
+                        if !sig.is_empty() { self.pending_signature = sig; }
+                        if parts.is_empty() { return Vec::new(); }
+                        *parts_mut(&mut template) = parts;
                         return self.flush(template);
                     }
                     "function_call" => {
@@ -171,6 +184,8 @@ impl CodexToGeminiStream {
                 self.pending_function_calls.clear();
                 self.pending_signature.clear();
                 self.seen_reasoning.clear();
+                self.has_reasoning_delta = false;
+                self.streamed_reasoning.clear();
                 self.has_output_text_delta = false;
                 let model = str_of(path(&event, "response.model")).into_owned();
                 let id = str_of(path(&event, "response.id")).into_owned();
@@ -178,10 +193,22 @@ impl CodexToGeminiStream {
                 template["responseId"] = id.clone().into();
                 self.response_id = id;
             }
-            "response.reasoning_summary_text.delta" => {
-                let text = str_of(event.get("delta")).into_owned();
-                *parts_mut(&mut template) =
-                    vec![object([("thought", true.into()), ("text", text.into())])];
+            "response.output_item.added" if str_of(path(&event, "item.type")) == "reasoning" => {
+                self.has_reasoning_delta = false;
+                if self.pending_signature.is_empty() { return Vec::new(); }
+                let mut part = serde_json::json!({"thought":true,"text":""}); self.attach_signature(&mut part);
+                *parts_mut(&mut template) = vec![part];
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                self.has_reasoning_delta = true;
+                let id = str_of(event.get("item_id")).trim().to_owned();
+                if !id.is_empty() { self.streamed_reasoning.insert(id); }
+                let mut parts = Vec::new();
+                if !self.pending_signature.is_empty() {
+                    let mut part = serde_json::json!({"thought":true,"text":""}); self.attach_signature(&mut part); parts.push(part);
+                }
+                parts.push(serde_json::json!({"thought":true,"text":str_of(event.get("delta"))}));
+                *parts_mut(&mut template) = parts;
             }
             "response.output_text.delta" => {
                 self.has_output_text_delta = true;
@@ -297,19 +324,12 @@ pub fn convert_codex_response_to_gemini_non_stream(
         match str_of(item.get("type")).as_ref() {
             "reasoning" => {
                 let sig = str_of(item.get("encrypted_content")).trim().to_owned();
-                let mut texts = Vec::new();
-                if let Some(summary) = item.get("summary").and_then(Value::as_array) {
-                    texts.extend(summary.iter().map(|p| str_of(p.get("text")).into_owned()).filter(|t| !t.is_empty()));
-                }
-                match item.get("content") {
-                    Some(Value::Array(content)) => texts.extend(content.iter().filter(|p| str_of(p.get("type")) == "reasoning_text").map(|p| str_of(p.get("text")).into_owned()).filter(|t| !t.is_empty())),
-                    Some(Value::String(text)) if !text.is_empty() => texts.push(text.clone()),
-                    _ => {}
-                }
+                let mut texts = reasoning_texts(item);
                 if texts.is_empty() && !sig.is_empty() { texts.push(String::new()); }
+                let last = texts.len().saturating_sub(1);
                 for (i, text) in texts.into_iter().enumerate() {
                     let mut part = object([("text", text.into()), ("thought", true.into())]);
-                    if i == 0 { super::signature::set(&mut part, &sig); }
+                    if i == last { super::signature::set(&mut part, &sig); }
                     parts.push(part);
                 }
             }
@@ -458,3 +478,16 @@ fn set_usage(template: &mut Value, response: &Value) {
 
 #[cfg(test)]
 mod tests;
+
+fn reasoning_texts(item: &Value) -> Vec<String> {
+                let mut texts = Vec::new();
+                if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+                    texts.extend(summary.iter().map(|p| str_of(p.get("text")).into_owned()).filter(|t| !t.is_empty()));
+                }
+                match item.get("content") {
+                    Some(Value::Array(content)) => texts.extend(content.iter().filter(|p| str_of(p.get("type")) == "reasoning_text").map(|p| str_of(p.get("text")).into_owned()).filter(|t| !t.is_empty())),
+                    Some(Value::String(text)) if !text.is_empty() => texts.push(text.clone()),
+                    _ => {}
+                }
+    texts
+}

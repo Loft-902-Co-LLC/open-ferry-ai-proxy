@@ -60,6 +60,7 @@ pub struct CodexToInteractionsStream {
     created_at: i64,
     has_output_text: bool,
     has_thought_summary: bool,
+    streamed_summary_items: HashSet<String>,
     function_call_name: String,
     function_call_id: String,
     seen_reasoning: HashSet<[u8; 32]>,
@@ -81,6 +82,7 @@ impl CodexToInteractionsStream {
             created_at: 0,
             has_output_text: false,
             has_thought_summary: false,
+            streamed_summary_items: HashSet::new(),
             function_call_name: String::new(),
             function_call_id: String::new(),
             seen_reasoning: HashSet::new(),
@@ -134,6 +136,8 @@ impl CodexToInteractionsStream {
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 self.start(&mut out, event.get("response"));
                 self.ensure_step(&mut out, THOUGHT, None);
+                let id = str_of(event.get("item_id")).trim().to_owned();
+                if !id.is_empty() { self.streamed_summary_items.insert(id); }
                 self.thought_delta(&mut out, &str_of(event.get("delta")));
             }
             "response.function_call_arguments.delta" => {
@@ -272,7 +276,9 @@ impl CodexToInteractionsStream {
                 let key: [u8; 32] = Sha256::digest(format!("{}\0{sig}", str_of(field("id"))).as_bytes()).into();
                 if !sig.is_empty() && self.seen_reasoning.contains(&key) { return; }
                 let text = item.map(reasoning_text).unwrap_or_default();
-                if !text.is_empty() && !self.has_thought_summary {
+                let id = str_of(field("id")).trim().to_owned();
+                let had_summary = if !id.is_empty() && !self.streamed_summary_items.is_empty() { self.streamed_summary_items.contains(&id) } else { self.has_thought_summary };
+                if !text.is_empty() && !had_summary {
                     self.ensure_step(out, THOUGHT, item);
                     self.thought_delta(out, &text);
                 }
@@ -364,9 +370,11 @@ impl CodexToInteractionsStream {
 
     /// `appendCodexInteractionsStepStop`: closes the open step, if any.
     fn step_stop(&mut self, out: &mut String) {
+        let was_thought = self.step == Some(THOUGHT);
         if self.step.take().is_none() {
             return;
         }
+        if was_thought { self.has_thought_summary = false; }
         push_event(
             out,
             "step.stop",

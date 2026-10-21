@@ -296,12 +296,15 @@ pub(super) fn prepare_for_base_url(
         options.original_request.clone()
     };
     let original = parse_object(&original_bytes);
+    let resolved = crate::codex::reasoning::resolve_target_model(base, &options.metadata.requested_model);
+    let target = if open_ferry_translate::signature::Provider::from_model_name(resolved) == open_ferry_translate::signature::Provider::Meta { resolved.to_owned() } else { format!("muse-{base}") };
     // Only the body is sent, so only its translation can refuse the request.
-    let (original_translated, _) = translate(config, options, base, original.clone(), stream);
+    let (mut original_translated, _) = translate(config, options, &target, original.clone(), stream);
+    set_string_if_different(&mut original_translated, "model", base);
     let (mut body, refusal) = translate(
         config,
         options,
-        base,
+        &target,
         parse_object(&request.payload),
         stream,
     );

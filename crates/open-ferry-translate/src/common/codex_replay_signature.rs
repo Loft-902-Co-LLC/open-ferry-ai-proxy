@@ -18,3 +18,9 @@ pub(crate) fn for_provider(target: Provider, raw: &str) -> Option<String> {
     }
     (target == Provider::Grok && is_valid_grok_encrypted_content(&raw)).then(|| raw.to_owned())
 }
+
+pub(crate) fn resolve_target<'a>(model: &'a str, request: &'a serde_json::Value) -> &'a str {
+    if Provider::from_model_name(base_model_name(model)) != Provider::Unknown { return model; }
+    let raw = request.get("model").and_then(serde_json::Value::as_str).unwrap_or_default().trim();
+    if matches!(Provider::from_model_name(base_model_name(raw)), Provider::Meta | Provider::Grok | Provider::Gpt) { raw } else { model }
+}

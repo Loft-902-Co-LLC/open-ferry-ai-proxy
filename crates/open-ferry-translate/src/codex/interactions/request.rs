@@ -146,6 +146,7 @@ pub fn convert_interactions_request_to_codex(
     let mut out = object([
         ("model", model_name.into()),
         ("instructions", "".into()),
+        ("store", false.into()),
         ("input", Value::Array(Vec::new())),
     ]);
     if stream || request.get("stream").is_some_and(bool_of) {
@@ -154,7 +155,7 @@ pub fn convert_interactions_request_to_codex(
     copy_system(&mut out, request);
     copy_generation_config(&mut out, request);
     let mut items = Vec::new();
-    let refusal = push_input(&mut items, request.get("input"), model_name);
+    let refusal = push_input(&mut items, request.get("input"), crate::common::codex_replay_signature::resolve_target(model_name, request));
     if !items.is_empty() {
         set_path(&mut out, "input", Value::Array(items));
     }
@@ -264,6 +265,7 @@ fn reasoning_summary(config: &Value) -> Option<&'static str> {
 /// for the first run of user content left with nothing to send.
 fn push_input(items: &mut Vec<Value>, input: Option<&Value>, model: &str) -> Option<UnsupportedPartError> {
     let mut run = UserRun::default();
+    let mut seen = std::collections::HashSet::new();
     match input {
         None => return None,
         Some(Value::String(text)) => {
@@ -272,17 +274,17 @@ fn push_input(items: &mut Vec<Value>, input: Option<&Value>, model: &str) -> Opt
         }
         Some(Value::Array(steps)) => {
             for step in steps {
-                push_step(items, step, "user", &mut run, model);
+                push_step(items, step, "user", &mut run, model, &mut seen);
             }
         }
         Some(input) => match input.get("steps") {
             Some(Value::Array(steps)) => {
                 let role = step_role(input, "user");
                 for step in steps {
-                    push_step(items, step, role, &mut run, model);
+                    push_step(items, step, role, &mut run, model, &mut seen);
                 }
             }
-            _ => push_step(items, input, "user", &mut run, model),
+            _ => push_step(items, input, "user", &mut run, model, &mut seen),
         },
     }
     run.end();
@@ -291,7 +293,7 @@ fn push_input(items: &mut Vec<Value>, input: Option<&Value>, model: &str) -> Opt
 
 /// `appendInteractionsStepToCodex`. A tool result keeps the open user turn
 /// alive; a call, the model's output and a thought close it.
-fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut UserRun, model: &str) {
+fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut UserRun, model: &str, seen: &mut std::collections::HashSet<String>) {
     if let Value::String(text) = step {
         push_role_text(items, role, text, run);
         return;
@@ -299,7 +301,7 @@ fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut
     if let Some(Value::Array(steps)) = step.get("steps") {
         let role = step_role(step, role);
         for nested in steps {
-            push_step(items, nested, role, run, model);
+            push_step(items, nested, role, run, model, seen);
         }
         return;
     }
@@ -320,7 +322,7 @@ fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut
         "thought" | "reasoning" => {
             run.end();
             if let Some(item) = thought(step, model)
-                && !items.iter().any(|existing| existing["type"] == "reasoning" && existing["encrypted_content"] == item["encrypted_content"]) { items.push(item); }
+                && seen.insert(item["encrypted_content"].as_str().unwrap_or_default().to_owned()) { items.push(item); }
         }
         // `user_input`, `message`, no type, and any other.
         _ => {

@@ -170,23 +170,32 @@ pub(super) fn sanitize_input_ids(body: &mut Value) {
     let Some(Value::Array(items)) = body.get_mut("input") else {
         return;
     };
-    for item in items {
-        if json::str_at(item, "type") == "function_call" {
-            if !json::exists(item, "id")
-                && let Some(call_id) = json::get(item, "call_id")
+    for mut item in std::mem::take(items) {
+        if json::str_at(&item, "type") == "thought" {
+            use open_ferry_translate::signature::{compatible_signature_for_provider, Provider, is_gemini_thought_signature_bypass};
+            let sig = ["signature", "thought_signature", "thoughtSignature"].iter().map(|k| json::str_of(item.get(*k))).find(|s| !s.trim().is_empty()).unwrap_or_default();
+            let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig).filter(|s| !is_gemini_thought_signature_bypass(s)) else { continue; };
+            item["signature"] = sig.into();
+            for key in ["id", "content", "text", "thought_signature", "thoughtSignature"] { json::delete(&mut item, key); }
+            items.push(item); continue;
+        }
+        if json::str_at(&item, "type") == "function_call" {
+            if !json::exists(&item, "id")
+                && let Some(call_id) = json::get(&item, "call_id")
             {
                 let call_id = json::str_of(Some(call_id));
-                json::set(item, "id", Value::String(call_id));
+                json::set(&mut item, "id", Value::String(call_id));
             }
-            json::delete(item, "call_id");
+            json::delete(&mut item, "call_id");
         } else {
-            json::delete(item, "id");
+            json::delete(&mut item, "id");
         }
         if let Some(Value::Array(parts)) = item.get_mut("content") {
             for part in parts {
                 json::delete(part, "id");
             }
         }
+        items.push(item);
     }
 }
 

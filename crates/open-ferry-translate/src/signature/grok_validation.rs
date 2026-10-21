@@ -113,6 +113,7 @@ pub fn inspect_grok_encrypted_content(raw: &str) -> Result<GrokEncryptedContentI
     let decoded = RAW_STD
         .decode(sig)
         .map_err(|err| error!("invalid Grok encrypted_content: base64 decode failed: {err}"))?;
+    if decoded.starts_with(b"cpa-codex-gemini-carrier-v1:") { return Err(error!("invalid Grok encrypted_content: carries Gemini Codex thoughtSignature carrier")); }
     if decoded.len() < MIN_GROK_ENCRYPTED_CONTENT_DECODED_LEN {
         return Err(error!(
             "invalid Grok encrypted_content: decoded payload too short ({} bytes)",

@@ -238,16 +238,18 @@ impl OpenAiCompatExecutor {
             (Format::OPENAI, "/chat/completions", options.stream)
         };
         let base = base_model(&request.model);
+        let signature_target = crate::codex::reasoning::resolve_target_model(base, requested_model(request, options));
         let payload = parse_object(&request.payload);
         let mut prepared = payload.clone();
         compat::before_translation(Some(&self.config), options, &to, &mut prepared);
         let mut body = Registry::global().translate_request_checked(
             &options.source_format,
             &to,
-            base,
+            signature_target,
             prepared,
             translate_stream,
         )?;
+        set_string_if_different(&mut body, "model", base);
         self.apply_thinking(&mut body, request, options, &to)?;
 
         let compat = self.compat_config(auth);
@@ -266,7 +268,7 @@ impl OpenAiCompatExecutor {
             set_bool_if_different(&mut body, "stream_options.include_usage", true);
         } else if compact {
             delete(&mut body, "stream");
-            crate::codex::reasoning::sanitize_reasoning_for_target(&mut body, false, crate::codex::reasoning::resolve_target_model(base, requested));
+            crate::codex::reasoning::sanitize_reasoning_for_destination(&mut body, true, crate::codex::reasoning::resolve_target_model(base, requested), base_url);
         }
         // The rules see the body as it is sent.
         let target = payload::Target {
