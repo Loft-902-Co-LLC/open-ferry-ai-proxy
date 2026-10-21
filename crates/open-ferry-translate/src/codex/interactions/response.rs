@@ -278,6 +278,7 @@ impl CodexToInteractionsStream {
                 let key: [u8; 32] =
                     Sha256::digest(format!("{}\0{sig}", str_of(field("id"))).as_bytes()).into();
                 if !sig.is_empty() && self.seen_reasoning.contains(&key) {
+                    self.step_stop(out);
                     return;
                 }
                 let text = item.map(reasoning_text).unwrap_or_default();

@@ -3,8 +3,8 @@
 // (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
-// All ten tests of interactions_codex_test.go are ported whole, and all of
-// interactions_codex_uri_test.go. Upstream's URI tests go through the
+// The original ten interactions_codex_test.go tests and the v8.0.36
+// signature cases are ported, along with interactions_codex_uri_test.go. Upstream's URI tests go through the
 // registry; ours call the translator and check that the registry gives the
 // same refusal. Changed:
 // TestSetInteractionsCodexRawIfDifferentReusesMatchingValue checks that the
@@ -822,4 +822,215 @@ fn user_turns_in_detail() {
         "audio",
     );
     require_sent(envelope(r#"{"model":"m","input":"just text"}"#));
+}
+
+fn signature_stream(events: &[Value]) -> Vec<(String, Value)> {
+    let mut stream = CodexToInteractionsStream::new("codex-test");
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&stream.translate_line(event.to_string().as_bytes()));
+    }
+    frames(&out)
+}
+
+// A duplicate done still closes the thought opened by its added event.
+#[test]
+fn duplicate_reasoning_done_closes_step_before_next_reasoning() {
+    let item = json!({"type":"reasoning","id":"r1","encrypted_content":"synthetic-signature","summary":[{"type":"summary_text","text":"first"}]});
+    let frames = signature_stream(&[
+        json!({"type":"response.output_item.done","item":item}),
+        json!({"type":"response.output_item.added","item":item}),
+        json!({"type":"response.output_item.done","item":item}),
+        json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"r2","summary":[{"type":"summary_text","text":"second"}]}}),
+    ]);
+    let steps: Vec<_> = frames
+        .iter()
+        .filter(|(name, _)| name == "step.start" || name == "step.stop")
+        .map(|(name, data)| (name.as_str(), data["index"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            ("step.start", 0),
+            ("step.stop", 0),
+            ("step.start", 1),
+            ("step.stop", 1),
+            ("step.start", 2),
+            ("step.stop", 2)
+        ]
+    );
+    let deltas: Vec<_> = frames
+        .iter()
+        .filter(|(name, _)| name == "step.delta")
+        .map(|(_, data)| data)
+        .collect();
+    assert_eq!(deltas.len(), 3);
+    assert_eq!(deltas[0]["delta"]["content"]["text"], "first");
+    assert_eq!(deltas[1]["delta"]["signature"], "synthetic-signature");
+    assert_eq!(deltas[2]["delta"]["content"]["text"], "second");
+    assert_eq!(deltas[2]["index"], 2);
+}
+
+// TestConvertCodexResponseToInteractionsStream_ReasoningSignature, including
+// a model-output step between a streamed summary and its late signature.
+#[test]
+fn thought_summary_and_late_signature_survive_intervening_output() {
+    let frames = signature_stream(&[
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"r1","delta":"first summary"}),
+        json!({"type":"response.output_text.delta","delta":"answer"}),
+        json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"r1","encrypted_content":"synthetic-signature","summary":[{"type":"summary_text","text":"first summary"}]}}),
+        json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"r1","encrypted_content":"synthetic-signature","summary":[{"type":"summary_text","text":"first summary"}]}}),
+        json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"r2","summary":[{"type":"summary_text","text":"done-only summary"}]}}),
+    ]);
+    let starts: Vec<_> = frames
+        .iter()
+        .filter(|(name, _)| name == "step.start")
+        .map(|(_, data)| {
+            (
+                data["index"].as_u64().unwrap(),
+                data["step"]["type"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            (0, "thought"),
+            (1, "model_output"),
+            (2, "thought"),
+            (3, "thought")
+        ]
+    );
+    let deltas: Vec<_> = frames
+        .iter()
+        .filter(|(name, _)| name == "step.delta")
+        .map(|(_, data)| data)
+        .collect();
+    assert_eq!(deltas.len(), 4);
+    assert_eq!(deltas[0]["delta"]["content"]["text"], "first summary");
+    assert_eq!(deltas[1]["delta"], json!({"type":"text","text":"answer"}));
+    assert_eq!(
+        deltas[2]["delta"],
+        json!({"type":"thought_signature","signature":"synthetic-signature"})
+    );
+    assert_eq!(deltas[3]["delta"]["content"]["text"], "done-only summary");
+    assert_eq!(deltas[2]["index"], 2);
+    assert_eq!(deltas[3]["index"], 3);
+}
+
+// TestConvertCodexResponseToInteractionsNonStream_ReasoningSignature.
+#[test]
+fn whole_response_preserves_native_and_routed_signatures_and_drops_empty_thoughts() {
+    let signature = format!("Q-PaDgE{}", "A".repeat(1419));
+    let routed = format!("{signature}.Router123");
+    let response = json!({"type":"response.completed","response":{"id":"r","output":[
+        {"type":"reasoning","encrypted_content":signature,"summary":[{"type":"summary_text","text":"thinking hard"}]},
+        {"type":"reasoning","encrypted_content":routed,"summary":[]},
+        {"type":"reasoning","summary":[]}
+    ]}});
+    let out = convert_codex_response_to_interactions_non_stream("codex-test", &response);
+    assert_eq!(out["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(out["steps"][0]["signature"], signature);
+    assert_eq!(out["steps"][0]["content"][0]["text"], "thinking hard");
+    assert_eq!(out["steps"][1]["signature"], routed);
+    assert!(out["steps"][1].get("content").is_none());
+}
+
+// TestConvertInteractionsRequestToCodex_ThoughtSignatureTargetMismatch and
+// ThoughtSignatureVariants, extended with a matching Grok item as a control.
+#[test]
+fn grok_target_rejects_foreign_thought_signatures() {
+    use base64::{
+        Engine as _,
+        engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+    };
+    let meta = format!("Q-PaDgE{}", "A".repeat(1419));
+    let mut bytes = vec![0; 89];
+    bytes[0] = 0x80;
+    for (i, byte) in bytes.iter_mut().enumerate().skip(9) {
+        *byte = i as u8;
+    }
+    let gpt = URL_SAFE_NO_PAD.encode(bytes);
+    let grok = STANDARD_NO_PAD.encode((0..255).collect::<Vec<u8>>());
+    let out = convert_interactions_request_to_codex(
+        "grok-4",
+        &json!({"input":[
+            {"type":"thought","signature":meta,"id":"foreign-meta","text":"drop meta"},
+            {"type":"thought","signature":format!("gpt#{gpt}"),"id":"foreign-gpt","text":"drop gpt"},
+            {"type":"thought","signature":grok,"text":"keep grok"}
+        ]}),
+        false,
+    );
+    assert_eq!(out["input"].as_array().unwrap().len(), 1);
+    assert_eq!(out["input"][0]["encrypted_content"], grok);
+    assert_eq!(out["input"][0]["summary"][0]["text"], "keep grok");
+    assert!(out["input"][0].get("id").is_none());
+    let prefixed = convert_interactions_request_to_codex(
+        "gpt-5",
+        &json!({"input":[{"type":"thought","signature":format!("gpt#{gpt}")}]}),
+        false,
+    );
+    assert_eq!(prefixed["input"][0]["encrypted_content"], gpt);
+}
+
+// TestConvertInteractionsRequestToCodex_DropsEmptyThoughtSteps and
+// IncludeEncryptedContent: empty/unsigned thoughts do not disturb other steps.
+#[test]
+fn empty_thoughts_preserve_neighbor_order_and_include_is_idempotent() {
+    for include in [
+        json!([]),
+        json!(["other"]),
+        json!(["reasoning.encrypted_content"]),
+    ] {
+        let out = convert_interactions_request_to_codex(
+            "muse-spark",
+            &json!({"include":include,"input":[
+                {"type":"user_input","content":[{"type":"text","text":"hi"}]},
+                {"type":"thought"}, {"type":"thought","text":"unsigned"},
+                {"type":"function_call","name":"lookup","call_id":"c","arguments":{}}
+            ]}),
+            false,
+        );
+        assert_eq!(out["input"].as_array().unwrap().len(), 2);
+        assert_eq!(out["input"][0]["type"], "message");
+        assert_eq!(out["input"][1]["type"], "function_call");
+        assert_eq!(
+            out["include"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|value| **value == "reasoning.encrypted_content")
+                .count(),
+            1
+        );
+        if include.as_array().unwrap().contains(&json!("other")) {
+            assert_eq!(out["include"][0], "other");
+        }
+    }
+}
+
+// TestConvertInteractionsRequestToCodex_RestoresThoughtSignature.
+#[test]
+fn thought_replay_preserves_native_and_routed_meta_on_namespaced_targets() {
+    let native = format!("Q-PaDgE{}", "A".repeat(1419));
+    for (model, signature) in [
+        ("muse-spark-1.3", native.clone()),
+        ("meta/muse-wonder", native.clone()),
+        ("meta/muse-wonder", format!("{native}.Router123")),
+    ] {
+        let out = convert_interactions_request_to_codex(
+            model,
+            &json!({"model":model,"input":[{"type":"thought","signature":signature,"content":[{"type":"text","text":"thinking"}]}]}),
+            false,
+        );
+        assert_eq!(out["input"][0]["encrypted_content"], signature);
+        assert_eq!(out["input"][0]["summary"][0]["text"], "thinking");
+        assert!(out["input"][0].get("content").is_none());
+    }
+    let out = convert_interactions_request_to_codex(
+        "muse-spark",
+        &json!({"input":[{"type":"thought","signature":native},{"type":"thought","signature":native}]}),
+        false,
+    );
+    assert_eq!(out["input"].as_array().unwrap().len(), 1);
 }
