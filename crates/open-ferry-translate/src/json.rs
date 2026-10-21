@@ -19,6 +19,17 @@ pub use response_request::ResponseRequest;
 pub(crate) mod lenient;
 pub(crate) mod raw;
 
+/// A top-level field of the first object, read like gjson even when the
+/// object is truncated or has trailing data. Duplicate keys take the first
+/// value. A preceding scalar or array does not expose a later object's fields.
+pub fn first_string_field(bytes: &[u8], key: &str) -> Option<String> {
+    let text = std::str::from_utf8(go::trim_space(bytes)).ok()?;
+    if !text.starts_with('{') {
+        return None;
+    }
+    lenient::get(text, key).map(lenient::Found::into_string)
+}
+
 /// gjson `String()`: strings as-is, missing/null as `""`, other scalars as text,
 /// objects and arrays as JSON (compact here; gjson returns the client's raw bytes).
 pub(crate) fn str_of(value: Option<&Value>) -> Cow<'_, str> {
