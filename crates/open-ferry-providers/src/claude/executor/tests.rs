@@ -2948,3 +2948,118 @@ async fn context_window_chat_is_http_400_and_refusal_remains_successful() {
         assert_eq!(mock.requests().len(), 1);
     }
 }
+
+// Upstream TestClaudeExecutorPauseTurnContinuationRestoresFinishedSearchAndKeepsPausedOne:
+// this needs both p36-claude's cache and p36-translate's paused search history.
+#[tokio::test]
+async fn paused_search_continuation_restores_finished_results_without_completing_the_pause() {
+    async fn run(
+        executor: &ClaudeExecutor,
+        auth: Arc<Auth>,
+        stream: bool,
+        input: Vec<Value>,
+    ) -> Value {
+        let payload = Bytes::from(
+            json!({"model":"claude-opus-5-5","stream":stream,
+                "tools":[{"type":"web_search"}],"input":input})
+            .to_string(),
+        );
+        let mut opts = options(Format::OPENAI_RESPONSE);
+        opts.response_format = Format::OPENAI_RESPONSE;
+        opts.stream = stream;
+        opts.original_request = payload.clone();
+        opts.metadata.execution_session_id = Some(format!("p36-pause-cache-{stream}"));
+        let request = Request {
+            model: "claude-opus-5-5".into(),
+            payload,
+        };
+        if !stream {
+            let response = executor.execute(auth, request, opts).await.unwrap();
+            return serde_json::from_slice(&response.payload).unwrap();
+        }
+        let response = executor.execute_stream(auth, request, opts).await.unwrap();
+        let mut terminal = None;
+        for chunk in response.chunks.collect::<Vec<_>>().await {
+            let chunk = chunk.unwrap();
+            for line in std::str::from_utf8(&chunk).unwrap().lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let event: Value = serde_json::from_str(data).unwrap();
+                    if event["type"] == "response.completed" {
+                        terminal = Some(event["response"].clone());
+                    }
+                }
+            }
+        }
+        terminal.expect("pause_turn must produce a completed Responses envelope")
+    }
+
+    let events = [
+        json!({"type":"message_start","message":{"id":"msg_p36_pause","type":"message","model":"claude-opus-5-5","role":"assistant","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_done","name":"web_search","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"done query\"}"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_done","content":[{"type":"web_search_result","url":"https://example.com/d","title":"D","encrypted_content":"P36_CACHED_DONE"}]}}),
+        json!({"type":"content_block_stop","index":1}),
+        json!({"type":"content_block_start","index":2,"content_block":{"type":"server_tool_use","id":"srvtoolu_paused","name":"web_search","input":{}}}),
+        json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"paused query\"}"}}),
+        json!({"type":"content_block_stop","index":2}),
+        json!({"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":3}}),
+        json!({"type":"message_stop"}),
+    ];
+    let paused = events
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect::<String>();
+    let config = Arc::new(
+        Config::parse(
+            "client: {codex: {web-search-result-cache: {enabled: true, ttl: 30m, limit: 1024}}}",
+        )
+        .unwrap(),
+    );
+    for stream in [false, true] {
+        let mock = Mock::start(Reply::sse(&paused)).await;
+        let executor = mock.executor().with_config(config.clone());
+        let mut auth = (*api_key_auth()).clone();
+        auth.id = format!("p36-pause-cache-credential-{stream}");
+        let auth = Arc::new(auth);
+        let user = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"research"}]});
+        let first = run(&executor, auth.clone(), stream, vec![user.clone()]).await;
+        assert_eq!(first["end_turn"], false, "{first}");
+        let mut history = vec![user];
+        for mut item in first["output"].as_array().unwrap().clone() {
+            if item["type"] == "web_search_call" {
+                item.as_object_mut().unwrap().remove("results");
+            }
+            history.push(item);
+        }
+        run(&executor, auth, stream, history).await;
+        assert_eq!(mock.requests().len(), 2);
+        let sent = mock.last().json();
+        let last = sent["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["role"], "assistant", "{sent}");
+        let blocks = last["content"].as_array().unwrap();
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "server_tool_use",
+                "web_search_tool_result",
+                "server_tool_use"
+            ],
+            "{sent}"
+        );
+        assert_eq!(
+            blocks[1]["content"][0]["encrypted_content"],
+            "P36_CACHED_DONE"
+        );
+        assert_eq!(blocks[2]["id"], "srvtoolu_paused");
+        assert_eq!(blocks[2]["input"]["query"], "paused query");
+    }
+}
