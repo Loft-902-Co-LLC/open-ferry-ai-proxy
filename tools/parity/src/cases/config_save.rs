@@ -263,7 +263,7 @@ proxy-url: "http://proxy.example:3128"
 "request-retry": 3
 api-keys:
   - 'single ''quoted'''
-  - "double \"quoted\" Ã©"
+  - "double \"quoted\" é"
   - plain key
   - |
     literal

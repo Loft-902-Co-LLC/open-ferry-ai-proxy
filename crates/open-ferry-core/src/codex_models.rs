@@ -4,7 +4,7 @@
 // apply_patch.go (applyCodexClientApplyPatchCapability) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! The model list Codex clients fetch: `GET /v1/models?client_version=â€¦`.
+//! The model list Codex clients fetch: `GET /v1/models?client_version=…`.
 //!
 //! Each available model gets an entry made from a template in the Codex
 //! client catalog ([`crate::registry::codex_client`]): its own when the

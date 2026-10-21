@@ -945,11 +945,11 @@ fn marshal_compact_escapes_as_go_does() {
     let value = json!({
         "z": 1,
         "a": {"y": [true, null, 2.5], "b": "x"},
-        "s": "<>&\u{7f}\"\\/\u{8}\u{c}\n\r\t\u{1}\u{1f}\u{2028}\u{2029}ÃƒÂ©",
+        "s": "<>&\u{7f}\"\\/\u{8}\u{c}\n\r\t\u{1}\u{1f}\u{2028}\u{2029}é",
     });
     let backslash = '\\';
     let want = format!(
-        r#"{{"a":{{"b":"x","y":[true,null,2.5]}},"s":"<>&{del}{b}"{b}{b}/{b}b{b}f{b}n{b}r{b}t{b}u0001{b}u001f{b}u2028{b}u2029ÃƒÂ©","z":1}}"#,
+        r#"{{"a":{{"b":"x","y":[true,null,2.5]}},"s":"<>&{del}{b}"{b}{b}/{b}b{b}f{b}n{b}r{b}t{b}u0001{b}u001f{b}u2028{b}u2029é","z":1}}"#,
         del = '\u{7f}',
         b = backslash,
     );
