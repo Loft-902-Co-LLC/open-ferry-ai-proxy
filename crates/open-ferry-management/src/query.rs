@@ -52,6 +52,14 @@ impl Query {
             .map(|(_, value)| value.as_slice())
     }
 
+    /// How many times a query key occurs, for strict SIWC callback checks.
+    pub(crate) fn count(&self, name: &str) -> usize {
+        self.params
+            .iter()
+            .filter(|(key, _)| key == name.as_bytes())
+            .count()
+    }
+
     /// The first value of `name`, or empty (gin's `Query`).
     pub(crate) fn value(&self, name: &str) -> &[u8] {
         self.get(name).unwrap_or_default()

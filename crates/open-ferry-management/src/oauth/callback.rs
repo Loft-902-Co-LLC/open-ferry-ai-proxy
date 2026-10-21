@@ -86,6 +86,7 @@ const FLOW_FAILED: &str = "oauth flow failed";
 /// quote it.
 #[derive(Default)]
 struct CallbackRequest {
+    conflicting: bool,
     provider: String,
     redirect_url: String,
     client_id: String,
@@ -150,6 +151,7 @@ pub(super) async fn get(
 ) -> Response {
     let query = Query::parse(query.as_deref());
     let request = CallbackRequest {
+        conflicting: ["provider", "state", "code", "client_id", "error"].iter().any(|key| query.count(key) > 1),
         provider: text(query.value("provider")),
         code: text(query.value("code")),
         client_id: text(query.value("client_id")),
@@ -168,50 +170,42 @@ fn handle(state: &ManagementState, request: CallbackRequest) -> Response {
     let mut client_id = request.client_id.trim().to_owned();
 
     let redirect = request.redirect_url.trim();
-    if !redirect.is_empty() {
-        let parsed = open_ferry_providers::oauth::parse_oauth_callback(redirect)
-            .ok()
-            .flatten();
-        let selected_state = if oauth_state.is_empty() {
-            parsed.as_ref().map_or("", |p| p.state.as_str())
-        } else {
-            &oauth_state
-        };
-        if state.oauth_sessions().store().is_bind(selected_state) {
-            match open_ferry_providers::oauth::parse_oauth_callback(redirect) {
-                Ok(Some(parsed)) => {
-                    if oauth_state.is_empty() {
-                        oauth_state = parsed.state;
-                    }
-                    if code.is_empty() {
-                        code = parsed.code;
-                    }
-                    if error.is_empty() {
-                        error = parsed.error;
-                    }
-                    if client_id.is_empty() {
-                        client_id = parsed.client_id;
-                    }
+    let parsed_query = if redirect.is_empty() { None } else {
+        match redirect_query(redirect) {
+            Some(query) => Some(query),
+            None => return failure(StatusCode::BAD_REQUEST, "invalid redirect_url"),
+        }
+    };
+    if oauth_state.is_empty() && let Some(query) = &parsed_query {
+        oauth_state = text(query.value("state"));
+    }
+    let binding = state.oauth_sessions().store().bind_redirect(&oauth_state);
+    if let Some(expected) = binding {
+        if request.conflicting { return failure(StatusCode::BAD_REQUEST, "conflicting callback parameters"); }
+        if let Some(query) = &parsed_query {
+            let parsed = reqwest::Url::parse(redirect).ok();
+            let expected = reqwest::Url::parse(&expected).ok();
+            if !parsed.as_ref().zip(expected.as_ref()).is_some_and(|(url, expected)|
+                url.scheme() == expected.scheme() && url.host_str() == expected.host_str()
+                    && url.port() == expected.port() && url.path() == expected.path()
+                    && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()) {
+                return failure(StatusCode::BAD_REQUEST, "unexpected SIWC callback URL");
+            }
+            for (key, selected) in [("state", &mut oauth_state), ("code", &mut code), ("client_id", &mut client_id), ("error", &mut error)] {
+                let value = text(query.value(key));
+                if query.count(key) > 1 || (!value.is_empty() && !selected.is_empty() && value != *selected) {
+                    return failure(StatusCode::BAD_REQUEST, "conflicting callback parameters");
                 }
-                _ => return failure(StatusCode::BAD_REQUEST, "invalid redirect_url"),
-            }
-        } else {
-            let Some(query) = redirect_query(redirect) else {
-                return failure(StatusCode::BAD_REQUEST, "invalid redirect_url");
-            };
-            if oauth_state.is_empty() {
-                oauth_state = text(query.value("state"));
-            }
-            if code.is_empty() {
-                code = text(query.value("code"));
-            }
-            if error.is_empty() {
-                error = first_non_empty(&[query.value("error"), query.value("error_description")]);
-            }
-            if client_id.is_empty() {
-                client_id = text(query.value("client_id"));
+                if selected.is_empty() { *selected = value; }
             }
         }
+        if error.is_empty() && (code.is_empty() || client_id.is_empty()) {
+            return failure(StatusCode::BAD_REQUEST, "SIWC callback requires code and client_id");
+        }
+    } else if let Some(query) = &parsed_query {
+        if code.is_empty() { code = text(query.value("code")); }
+        if error.is_empty() { error = first_non_empty(&[query.value("error"), query.value("error_description")]); }
+        if client_id.is_empty() { client_id = text(query.value("client_id")); }
     }
 
     if oauth_state.is_empty() {

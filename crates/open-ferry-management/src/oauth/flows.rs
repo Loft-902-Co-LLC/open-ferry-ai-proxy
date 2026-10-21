@@ -2,7 +2,7 @@
 // auth_files_provider_oauth.go (RequestAnthropicToken, RequestCodexToken,
 // CancelAuthSession, GetAuthStatus), auth_files_v8.go (StartOAuthV8) and
 // auth_files_oauth_callback.go (isWebUIRequest, managementCallbackURL)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Starting a Claude or Codex login, and following it: the routes that
@@ -154,6 +154,7 @@ pub(super) async fn auth_url(
                 );
             }
             let name = lossy(query.value("name"));
+            let _mutation = state.credential_lock().lock().await;
             match super::siwc_bind::prepare(&state, &name).await {
                 Ok(bind) => start_with_bind(&state, Provider::Codex, &query, Some(bind)).await,
                 Err(_) => json::error(StatusCode::BAD_REQUEST, "invalid SIWC bind target"),
@@ -161,6 +162,29 @@ pub(super) async fn auth_url(
         }
         "codex" => start(&state, Provider::Codex, &query).await,
         _ => json::error(StatusCode::NOT_FOUND, "provider_not_found"),
+    }
+}
+
+/// `POST /v8/management/oauth/siwc/bind`, without a server-side callback listener.
+pub(super) async fn siwc_bind(State(state): State<ManagementState>, body: axum::body::Body) -> Response {
+    let body = match crate::bind::read_body(body).await { Ok(body) => body, Err(response) => return response };
+    let value = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => return json::error(StatusCode::BAD_REQUEST, "invalid request body"),
+    };
+    let Some(name) = value.get("name").and_then(serde_json::Value::as_str) else {
+        return json::error(StatusCode::BAD_REQUEST, "name is required");
+    };
+    let name = name.trim();
+    if name.is_empty() { return json::error(StatusCode::BAD_REQUEST, "name is required"); }
+    if state.credential_store().is_err() { return json::error(StatusCode::SERVICE_UNAVAILABLE, "credential store unavailable"); }
+    let _mutation = state.credential_lock().lock().await;
+    if !state.manager().list().iter().any(|a| a.id == name || a.file_name == name) {
+        return json::error(StatusCode::NOT_FOUND, "auth file not found");
+    }
+    match super::siwc_bind::prepare(&state, name).await {
+        Ok(bind) => start_with_bind(&state, Provider::Codex, &Query::default(), Some(bind)).await,
+        Err(_) => json::error(StatusCode::BAD_REQUEST, "invalid SIWC bind target"),
     }
 }
 
@@ -209,9 +233,12 @@ async fn start_with_bind(
     let Some(registration) = sessions.store().register(&oauth_state, provider.name()) else {
         return json::error(StatusCode::TOO_MANY_REQUESTS, "too many oauth sessions");
     };
-    if matches!(client, Client::Siwc(_)) {
-        sessions.store().mark_bind(&oauth_state);
+    if let Client::Siwc(bind) = &client
+        && !sessions.store().mark_bind_target(&oauth_state, bind.target.name(), &redirect) {
+        sessions.store().release(&oauth_state, registration.id);
+        return json::error(StatusCode::CONFLICT, "a SIWC binding is already pending for this credential");
     }
+    let is_bind = matches!(client, Client::Siwc(_));
     // From here, a login that doesn't start drops its session.
     let login = Login {
         client,
@@ -250,14 +277,11 @@ async fn start_with_bind(
     if !sessions.spawn(run(state.clone(), login, registration, forwarder)) {
         return json::error(StatusCode::SERVICE_UNAVAILABLE, "server shutting down");
     }
-    json::response(
-        StatusCode::OK,
-        &Json::map([
-            ("status", Json::Str("ok".into())),
-            ("url", Json::Str(url)),
-            ("state", Json::Str(oauth_state)),
-        ]),
-    )
+    let mut response = vec![
+        ("status", Json::Str("ok".into())), ("url", Json::Str(url)), ("state", Json::Str(oauth_state)),
+    ];
+    if is_bind { response.extend([("flow", Json::Str("siwc_bind".into())), ("expires_in", Json::Int(300))]); }
+    json::response(StatusCode::OK, &Json::Struct(response))
 }
 
 /// Whether the login was started from the web UI: `is_webui` is `1`,
@@ -432,7 +456,7 @@ async fn run(
     let provider = login.client.provider();
     let callback = tokio::select! {
         callback = callback => callback,
-        () = tokio::time::sleep(sessions.wait_timeout()) => {
+        () = tokio::time::sleep(if matches!(login.client, Client::Siwc(_)) { sessions.wait_timeout().min(Duration::from_secs(300)) } else { sessions.wait_timeout() }) => {
             tracing::error!("Timed out waiting for the {provider} OAuth callback");
             store.set_error(&login.state, "Timeout waiting for OAuth callback");
             return;

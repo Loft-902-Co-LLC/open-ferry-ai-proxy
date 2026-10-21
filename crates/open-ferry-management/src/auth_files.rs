@@ -5,7 +5,7 @@
 // isPersistentAuthFailure, isModelStateBlocked,
 // reconcileAuthFileCooldownState, quotaObservationPayloadForProvider,
 // quotaObservationPayload, modelQuotaObservationPayload, authWeightValue, authWebsocketsValue, authProjectID,
-// extractCodexIDTokenClaims, authEmail, isRuntimeOnlyAuth) (v8.0.32, MIT).
+// extractCodexIDTokenClaims, authEmail, isRuntimeOnlyAuth) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v0/management/auth-files` (also `/v8/management/credentials`):
@@ -580,6 +580,23 @@ fn entry_fields(auth: &Auth, now: Timestamp, v8: bool) -> Option<Entry> {
     }
     if let Some(retry) = auth.request_retry_override() {
         set("request_retry", Json::Int(retry));
+    }
+    if v8 && provider.eq_ignore_ascii_case("codex") {
+        set(
+            "siwc_bind_supported",
+            Json::Bool(crate::oauth::siwc_bind::eligible(auth)),
+        );
+        set("use_siwc", Json::Bool(auth.use_siwc()));
+        let bound = ["access_token", "refresh_token", "client_id"]
+            .iter()
+            .all(|key| !auth.siwc_token_field(key).trim().is_empty());
+        set("siwc_bound", Json::Bool(bound));
+        if let Some(expiry) = auth.siwc_expiration_time() {
+            set(
+                "siwc_expires_at",
+                Json::Str(expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            );
+        }
     }
     Some(entry)
 }

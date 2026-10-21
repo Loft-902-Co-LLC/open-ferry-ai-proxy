@@ -5,7 +5,7 @@
 // requestedAuthFileNamesForDelete, uniqueAuthFileNames,
 // deleteAuthFileByName, findAuthForDelete, authIDForPath), auth_files.go
 // (isUnsafeAuthFileName) and auth_files_fields.go (removeAuth,
-// removeAuthsForPath, deleteTokenRecord) (v8.0.32, MIT), with gin-gonic/gin
+// removeAuthsForPath, deleteTokenRecord) (v8.0.36, MIT), with gin-gonic/gin
 // v1.10.1 context.go (ContentType, QueryArray, MultipartForm) (MIT) and
 // Go's mime/multipart formdata.go (ReadForm) and multipart.go (FormName,
 // FileName, parseContentDisposition), mime/mediatype.go (ParseMediaType,
@@ -438,6 +438,7 @@ async fn write_auth_file(
     let file = name.to_owned();
     let contents = data.clone();
     let guard = state.credential_lock().lock().await;
+    let mutation = state.clone();
     let written = run_blocking(move || {
         let path = files
             .file_path(&file)
@@ -449,6 +450,10 @@ async fn write_auth_file(
                 path.display()
             )));
         }
+        mutation
+            .oauth_sessions()
+            .store()
+            .invalidate_bind_target(&file);
         files
             .write_file(&file, &contents)
             .map_err(|error| Failure::internal(format!("failed to write file: {error}")))
@@ -598,6 +603,7 @@ async fn delete_all(state: &ManagementState, store: &CredentialStore) -> Respons
     for name in names {
         let files = Arc::clone(&store.files);
         let guard = state.credential_lock().lock().await;
+        state.oauth_sessions().store().invalidate_bind_target(&name);
         // As upstream, a file that can't be removed is passed over.
         let Ok(path) = run_blocking(move || files.remove_file(&name)).await else {
             continue;
@@ -654,6 +660,10 @@ async fn delete_one(
     }
     let files = Arc::clone(&store.files);
     let guard = state.credential_lock().lock().await;
+    state
+        .oauth_sessions()
+        .store()
+        .invalidate_bind_target(&file_name);
     let removed = match run_blocking(move || files.remove_file(&file_name)).await {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {

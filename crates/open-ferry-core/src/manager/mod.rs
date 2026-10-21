@@ -92,6 +92,7 @@ mod rewrite;
 mod scoped;
 mod select;
 mod settings;
+mod siwc_bind;
 mod summary;
 mod text;
 mod websocket;

@@ -33,7 +33,7 @@ mod callback;
 mod flows;
 mod forwarder;
 pub(crate) mod sessions;
-mod siwc_bind;
+pub(crate) mod siwc_bind;
 
 use std::fmt;
 use std::future::Future;
@@ -317,6 +317,7 @@ pub(crate) fn routes() -> Vec<Route> {
         ),
         Route::key("/v0/management/codex-auth-url", get(flows::codex_auth_url)),
         Route::key("/v8/management/oauth/auth-url", get(flows::auth_url)),
+        Route::key("/v8/management/oauth/siwc/bind", axum::routing::post(flows::siwc_bind)),
         Route::key("/v0/management/get-auth-status", get(flows::status)),
         Route::key("/v8/management/oauth/status", get(flows::status)),
         Route::key("/v0/management/oauth-session", delete(flows::cancel)),

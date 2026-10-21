@@ -4,7 +4,7 @@
 // GetOAuthSessionDetails, guardOAuthSessionPendingForSave,
 // oauthSessionErrorWithCause, ValidateOAuthState, NormalizeOAuthProvider,
 // NormalizeOAuthCallbackProvider, NormalizePluginOAuthCallbackProvider,
-// WriteOAuthCallbackFileForPendingSession) (v8.0.32, MIT).
+// WriteOAuthCallbackFileForPendingSession) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OAuth login sessions, each under the `state` its login sent to the
@@ -169,6 +169,8 @@ struct Inner {
 struct Entry {
     session: Session,
     bind: bool,
+    bind_target: String,
+    bind_redirect: String,
     committing: bool,
     /// Where the session's callback goes, until one has gone or the session
     /// stops being pending. Dropping it wakes the waiting login.
@@ -257,6 +259,8 @@ impl Store {
             state.to_owned(),
             Entry {
                 bind: false,
+                bind_target: String::new(),
+                bind_redirect: String::new(),
                 committing: false,
                 session,
                 callback: Some(sender),
@@ -339,9 +343,52 @@ impl Store {
         self.get(state).filter(|session| !session.completed)
     }
 
+    #[cfg(test)]
     pub(super) fn mark_bind(&self, state: &str) {
         if let Some(entry) = self.lock().sessions.get_mut(state) {
             entry.bind = true;
+        }
+    }
+
+    pub(super) fn mark_bind_target(&self, state: &str, target: &str, redirect: &str) -> bool {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        inner.purge(now);
+        if inner.sessions.iter().any(|(key, entry)| {
+            key != state && entry.bind_target == target && entry.session.is_pending()
+        }) {
+            return false;
+        }
+        let Some(entry) = inner.sessions.get_mut(state) else {
+            return false;
+        };
+        entry.bind = true;
+        entry.bind_target = target.to_owned();
+        entry.bind_redirect = redirect.to_owned();
+        entry.session.expires_at = later(now, Duration::from_secs(300));
+        true
+    }
+
+    pub(super) fn bind_redirect(&self, state: &str) -> Option<String> {
+        self.lock()
+            .sessions
+            .get(state)
+            .filter(|entry| entry.bind)
+            .map(|entry| entry.bind_redirect.clone())
+    }
+
+    pub(crate) fn invalidate_bind_target(&self, target: &str) {
+        let mut inner = self.lock();
+        let expiry = later(Instant::now(), inner.completed_ttl);
+        for entry in inner
+            .sessions
+            .values_mut()
+            .filter(|e| e.bind_target == target && e.session.is_pending() && !e.committing)
+        {
+            entry.session.status = "SIWC binding target changed; start a new binding".to_owned();
+            entry.session.expires_at = expiry;
+            entry.callback = None;
+            entry.changes.send_replace(());
         }
     }
 
@@ -431,7 +478,7 @@ impl Store {
         let mut inner = self.lock();
         inner.purge(Instant::now());
         let entry = inner.sessions.get_mut(state).ok_or(NotPending)?;
-        if !pending_for(&entry.session, provider) {
+        if !pending_for(&entry.session, provider) || (entry.bind && entry.callback.is_none()) {
             return Err(NotPending);
         }
         // A login that stopped waiting has already ended the session or
