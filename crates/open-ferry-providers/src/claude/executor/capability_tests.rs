@@ -191,6 +191,15 @@ async fn exact_and_nested_route_suffixes_keep_first_capability_per_key() {
 
 #[tokio::test]
 async fn capabilities_use_the_alias_snapshot_during_either_reload_order() {
+    check_alias_snapshot_during_either_reload_order(false).await;
+}
+
+#[tokio::test]
+async fn streaming_capabilities_use_the_alias_snapshot_during_either_reload_order() {
+    check_alias_snapshot_during_either_reload_order(true).await;
+}
+
+async fn check_alias_snapshot_during_either_reload_order(streaming: bool) {
     for settings_first in [false, true] {
         let mock = Mock::start(Reply::sse(SSE)).await;
         let config = |name: &str, level: &str| {
@@ -203,7 +212,24 @@ async fn capabilities_use_the_alias_snapshot_during_either_reload_order() {
         } else {
             manager.register_executor(Arc::new(mock.executor().with_config(Arc::new(next))));
         }
-        call(&manager, "configured-api", "fast", json!({"model":"auto", "messages":[{"role":"user", "content":"hi"}], "reasoning_effort":"high"}), Format::OPENAI).await;
+        if streaming {
+            let mut opts = options(Format::OPENAI);
+            opts.metadata.requested_model = "auto".into();
+            opts.metadata.pinned_auth_id = Some("configured-api".into());
+            let request = Request { model: "fast".into(), payload: Bytes::from(json!({"model":"auto", "messages":[{"role":"user", "content":"hi"}], "reasoning_effort":"high"}).to_string()) };
+            for chunk in manager
+                .execute_stream(&["claude".into()], request, opts)
+                .await
+                .unwrap()
+                .chunks
+                .collect::<Vec<_>>()
+                .await
+            {
+                chunk.unwrap();
+            }
+        } else {
+            call(&manager, "configured-api", "fast", json!({"model":"auto", "messages":[{"role":"user", "content":"hi"}], "reasoning_effort":"high"}), Format::OPENAI).await;
+        }
         let wire = mock.last().json();
         assert_eq!(
             wire["model"],
@@ -229,12 +255,12 @@ async fn auto_route_capabilities_reach_streaming_and_token_counts() {
             Reply::json(r#"{"input_tokens":99}"#)
         })
         .await;
-        let config = Config::parse(format!("claude-api-key: [{{api-key: {API_KEY}, models: [{{name: custom-claude, alias: fast, thinking: {{levels: [low]}}}}]}}]")).unwrap();
+        let config = Config::parse(format!("claude-api-key: [{{api-key: {API_KEY}, models: [{{name: custom-claude, alias: fast, thinking: {{levels: [low]}}}}, {{name: custom-claude, alias: deep, thinking: {{levels: [high]}}}}]}}]")).unwrap();
         let manager = manager(&mock, config, false);
         let mut opts = options(Format::OPENAI);
         opts.metadata.requested_model = "auto".into();
         opts.metadata.pinned_auth_id = Some("configured-api".into());
-        let request = Request { model: "fast".into(), payload: Bytes::from(json!({"model":"auto", "messages":[{"role":"user", "content":"hi"}], "reasoning_effort":"high"}).to_string()) };
+        let request = Request { model: "deep".into(), payload: Bytes::from(json!({"model":"auto", "messages":[{"role":"user", "content":"hi"}], "reasoning_effort":"high"}).to_string()) };
         if streaming {
             for chunk in manager
                 .execute_stream(&["claude".into()], request, opts)
@@ -252,6 +278,6 @@ async fn auto_route_capabilities_reach_streaming_and_token_counts() {
                 .await
                 .unwrap();
         }
-        assert_eq!(mock.last().json()["output_config"]["effort"], "low");
+        assert_eq!(mock.last().json()["output_config"]["effort"], "high");
     }
 }
