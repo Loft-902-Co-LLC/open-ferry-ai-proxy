@@ -30,3 +30,26 @@ fn config_with(set: impl FnOnce(&mut crate::config::Config)) -> crate::config::C
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
 }
+
+#[test]
+fn ingress_limits_each_have_a_reload_change_line() {
+    let old = crate::config::Config::default();
+    let mut new = old.clone();
+    new.ingress_limits.max_connections = 7;
+    new.ingress_limits.header_timeout_seconds = 7;
+    new.ingress_limits.tls_handshake_timeout_seconds = 7;
+    new.ingress_limits.idle_timeout_seconds = 7;
+    new.ingress_limits.body_idle_timeout_seconds = 7;
+    new.ingress_limits.body_total_timeout_seconds = 7;
+    new.ingress_limits.buffered_body_bytes = 7;
+    new.ingress_limits.write_stall_timeout_seconds = 7;
+    let changes = super::build_change_details(&old, &new);
+    expect_contains(&changes, "ingress-limits.max-connections: 0 -> 7");
+    expect_contains(&changes, "ingress-limits.header-timeout-seconds: 0 -> 7");
+    expect_contains(&changes, "ingress-limits.tls-handshake-timeout-seconds: 0 -> 7");
+    expect_contains(&changes, "ingress-limits.idle-timeout-seconds: 0 -> 7");
+    expect_contains(&changes, "ingress-limits.body-idle-timeout-seconds: 0 -> 7");
+    expect_contains(&changes, "ingress-limits.body-total-timeout-seconds: 0 -> 7");
+    expect_contains(&changes, "ingress-limits.buffered-body-bytes: 0 -> 7");
+    expect_contains(&changes, "ingress-limits.write-stall-timeout-seconds: 0 -> 7");
+}
