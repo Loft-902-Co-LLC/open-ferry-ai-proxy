@@ -245,6 +245,24 @@ interface ConfigFileProps {
   onUnsavedChange?: ((unsaved: boolean) => void) | undefined;
 }
 
+/** Describe the open draft's save rules, even if the server changes provenance. */
+function RecoveryNotice({ base, latest }: { base: ConfigRead<string>; latest: ConfigRead<string> }) {
+  if (base.recovery !== null && latest.recovery === null) {
+    return <Alert tone="warn" live title="Recovery draft: config.yaml can be read again">
+      <p>Save will refuse this recovery draft because the server can read the file again. Discard to start from the current file.</p>
+    </Alert>;
+  }
+  if (latest.recovery !== null) {
+    return <Alert tone="warn" live title={base.recovery === null ? "The server can't use config.yaml right now" : "Recovery mode: the server can't use config.yaml"}>
+      <p>{base.recovery === null
+        ? "This draft was opened from a working file, so Save will refuse. Discard to start from the current file."
+        : "The server is still running its last good config. Saving replaces the whole file without version checks. Copy your edits before reloading if the file changes meanwhile."}</p>
+      {latest.recovery.detail !== null && <p>{latest.recovery.detail}</p>}
+    </Alert>;
+  }
+  return null;
+}
+
 /** The file, in an editor, once loaded. */
 function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: ConfigFileProps) {
   const client = useQueryClient();
@@ -317,6 +335,7 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
 
   return (
     <div className="space-y-3">
+      <RecoveryNotice base={edited ? base : initial} latest={initial} />
       {saved && !edited && !readAfterSaveFailed && (
         <Alert tone="ok" live>
           <p>Saved config.yaml. The server uses it from now on.</p>
@@ -466,12 +485,6 @@ export function ConfigFileEditor({
         </>
       ) : (
         <>
-          {file.data.recovery !== null && (
-            <Alert tone="warn" live title="Recovery mode: the server can't use config.yaml">
-              <p>The server is still running its last good config. Saving replaces the whole file without version checks. Copy your edits before reloading if the file changes meanwhile.</p>
-              {file.data.recovery.detail !== null && <p>{file.data.recovery.detail}</p>}
-            </Alert>
-          )}
           <p className="text-muted">
             <Code>Ctrl</Code>+<Code>F</Code> (<Code>⌘</Code>+<Code>F</Code> on a Mac) searches.{" "}
             <Code>Tab</Code> leaves the editor, so indent with spaces.

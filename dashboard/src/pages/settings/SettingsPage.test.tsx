@@ -1716,20 +1716,33 @@ describe("draft snapshot regressions", () => {
 });
 
 describe("recovery snapshot regressions", () => {
-  it("never sends a versioned review draft raw when a background read enters recovery", async () => {
+  it("never sends a versioned review draft raw and describes its guarded provenance", async () => {
     const state = versionedServer();
     const { user } = await openSettings();
     fireEvent.change(await openFile(user), { target: { value: `${YAML}# guarded draft\n` } });
     await user.click(screen.getByRole("button", { name: "Review changes" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    const rawReads = state.api.callsTo("GET", CONFIG_YAML).length;
     state.broken("invalid v8 layout");
+    state.state.yaml = "broken: [\n";
+    // Older implementations probe the YAML route, not the root route.
+    state.api.use(route("GET", "/v8/management/config.yaml", {
+      status: 500, json: { error: "invalid_config", message: "invalid v8 layout" },
+    }));
     await refetchOnFocus();
-    await screen.findByText(/Recovery mode:/);
+    await waitFor(() => { expect(state.api.callsTo("GET", CONFIG_YAML).length).toBeGreaterThan(rawReads); });
     await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
-    expect(await within(dialog).findByText("The stored config.yaml has become unusable")).toBeVisible();
-    expect(dialog).toHaveTextContent("Nothing was saved");
+    await waitFor(() => {
+      expect(screen.queryByText("Saved config.yaml. The server uses it from now on.") !== null ||
+        within(dialog).queryByText("The stored config.yaml has become unusable") !== null).toBe(true);
+    });
+    // The historical raw-send mutant must reach and fail this assertion.
     expect(state.api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
     expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toEqual([]);
+    expect(within(dialog).getByText("The stored config.yaml has become unusable")).toBeVisible();
+    expect(dialog).toHaveTextContent("Nothing was saved");
+    expect(screen.getByText(/This draft was opened from a working file/)).toBeVisible();
+    expect(screen.queryByText(/Saving replaces the whole file without version checks/)).not.toBeInTheDocument();
   });
   it.each(["invalid v8 layout", "config file is empty"])("explains unusable stored YAML accurately: %s", async (detail) => {
     const state = versionedServer();
@@ -1986,5 +1999,24 @@ describe("saved Settings review baselines", () => {
       expect(state.tree.routing.retry["request-retry"]).toBe(4);
       expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual(['"1"', '"2"']);
     });
+  });
+});
+
+describe("recovery draft provenance", () => {
+  it("keeps the recovery-draft warning after a background read sees a repaired file", async () => {
+    const state = versionedServer();
+    state.broken("file is empty");
+    const { user } = renderApp("/settings?tab=file");
+    await user.click(await screen.findByRole("button", { name: "Show config.yaml" }));
+    const editor = await screen.findByRole("textbox", { name: "config.yaml" });
+    fireEvent.change(editor, { target: { value: `${YAML}# recovery draft\n` } });
+    state.broken(null);
+    state.external(false, 2);
+    await refetchOnFocus();
+    expect(screen.getByText("Recovery draft: config.yaml can be read again")).toBeVisible();
+    expect(screen.getByText(/Save will refuse this recovery draft/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    expect(await screen.findByText("config.yaml can be read again")).toBeVisible();
+    expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 });
