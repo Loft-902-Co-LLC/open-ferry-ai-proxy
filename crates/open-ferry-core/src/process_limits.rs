@@ -18,19 +18,65 @@ pub fn restore_in_child(command: &mut std::process::Command) {
     let _ = command;
 }
 
+#[cfg(any(unix,test))]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+struct Limit { soft:u64, hard:u64 }
+
+// Syscall injection seam; initially preserves f080f73f's child policy verbatim.
+#[cfg(any(unix,test))]
+fn restore_with(original: Limit, _get: impl FnOnce()->Result<Limit,i32>, set: impl FnOnce(Limit)->Result<(),i32>) -> std::io::Result<()> {
+    set(original).map_err(std::io::Error::from_raw_os_error)
+}
+
 #[cfg(unix)]
 fn set_child_limit(command: &mut std::process::Command, limit: libc::rlimit) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: the post-fork closure allocates nothing and invokes only the
-    // libc resource-limit syscall, before the helper's image is executed.
+    let original=Limit {soft:limit.rlim_cur,hard:limit.rlim_max};
+    // SAFETY: callbacks perform only resource-limit syscalls and errno reads;
+    // the post-fork path allocates nothing and acquires no lock.
     unsafe {
-        command.pre_exec(move || {
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
+        command.pre_exec(move || restore_with(original,|| {
+            let mut current=libc::rlimit {rlim_cur:0,rlim_max:0};
+            if libc::getrlimit(libc::RLIMIT_NOFILE,&mut current)==0 { Ok(Limit {soft:current.rlim_cur,hard:current.rlim_max}) }
+            else { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL)) }
+        },|next| {
+            let next=libc::rlimit {rlim_cur:next.soft,rlim_max:next.hard};
+            if libc::setrlimit(libc::RLIMIT_NOFILE,&next)==0 {Ok(())}
+            else {Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EINVAL))}
+        }));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use std::cell::Cell;
+    #[test]
+    fn a_child_keeps_its_inherited_hard_limit_after_a_later_reduction() {
+        let original=Limit {soft:256,hard:1024};
+        let inherited=Limit {soft:512,hard:512};
+        let observed=Cell::new(None);
+        let result=restore_with(original,||Ok(inherited),|next| {
+            observed.set(Some(next));
+            if next.hard>inherited.hard {Err(1)} else {Ok(())}
         });
+        assert!(result.is_ok(),"hard-limit reduction prevented exec");
+        assert_eq!(observed.get(),Some(Limit {soft:256,hard:512}));
+    }
+    #[test]
+    fn a_child_never_raises_a_soft_limit_lowered_after_listener_start() {
+        let original=Limit {soft:256,hard:1024};
+        let inherited=Limit {soft:128,hard:1024};
+        let observed=Cell::new(None);
+        restore_with(original,||Ok(inherited),|next| {observed.set(Some(next));Ok(())}).unwrap();
+        assert_eq!(observed.get(),Some(inherited),"child restored a stale higher soft limit");
+    }
+    #[test]
+    fn failed_child_limit_syscalls_do_not_prevent_exec() {
+        let original=Limit {soft:256,hard:1024};
+        for get in [Ok(Limit {soft:512,hard:1024}),Err(1)] {
+            assert!(restore_with(original,||get,|_|Err(1)).is_ok(),"resource-limit failure escaped pre_exec");
+        }
     }
 }
 
