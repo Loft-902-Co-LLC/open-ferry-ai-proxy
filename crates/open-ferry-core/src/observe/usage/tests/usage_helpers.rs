@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/usage_helpers_test.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the parsers of upstream answers' token counts, the stream
@@ -43,6 +43,68 @@ use super::super::parse::{
 use super::super::record_json::Record;
 use super::super::ttft::Ttft;
 use super::support::{ClientCall, Harness, auth, bool_at, int_at, str_field};
+
+// TestParseOpenAIUsageFlatReasoningDialect, plus flat-only/envelope and precedence.
+#[test]
+fn openai_flat_reasoning_dialect() {
+    let input = br#"{"usage":{"prompt_tokens":241114,"total_tokens":242270,"completion_tokens":1156,"prompt_tokens_details":{"cached_tokens":240896},"reasoning_tokens":530}}"#;
+    let detail = parse_openai_usage(input);
+    assert_eq!(
+        (
+            detail.input_tokens,
+            detail.output_tokens,
+            detail.total_tokens
+        ),
+        (241114, 1156, 242270)
+    );
+    assert_eq!(
+        (
+            detail.cached_tokens,
+            detail.cache_read_tokens,
+            detail.reasoning_tokens
+        ),
+        (240896, 240896, 530)
+    );
+    for (usage, want) in [
+        (serde_json::json!({"reasoning_tokens":4}), 4),
+        (
+            serde_json::json!({"reasoning_tokens":4,"completion_tokens_details":{"reasoning_tokens":2},"output_tokens_details":{"reasoning_tokens":3}}),
+            2,
+        ),
+        (
+            serde_json::json!({"reasoning_tokens":4,"output_tokens_details":{"reasoning_tokens":3}}),
+            3,
+        ),
+        (
+            serde_json::json!({"reasoning_tokens":4,"completion_tokens_details":{"reasoning_tokens":0}}),
+            0,
+        ),
+        (
+            serde_json::json!({"reasoning_tokens":4,"output_tokens_details":{"reasoning_tokens":0}}),
+            0,
+        ),
+    ] {
+        let body = serde_json::json!({"usage":usage});
+        assert_eq!(
+            parse_openai_usage(body.to_string().as_bytes()).reasoning_tokens,
+            want
+        );
+        let stream = format!("data: {body}");
+        assert_eq!(
+            parse_openai_stream_usage(stream.as_bytes())
+                .unwrap()
+                .reasoning_tokens,
+            want
+        );
+        let envelope = serde_json::json!({"response":{"usage":usage}});
+        assert_eq!(
+            parse_codex_usage(envelope.to_string().as_bytes())
+                .unwrap()
+                .reasoning_tokens,
+            want
+        );
+    }
+}
 use crate::exec::{ErrorKind, ExecError, Format};
 use crate::observe::{AttemptKind, Outcome};
 
