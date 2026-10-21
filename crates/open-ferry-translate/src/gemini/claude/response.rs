@@ -564,12 +564,15 @@ pub fn convert_gemini_response_to_claude_non_stream_with_translated(
                     }
                     _ => json!({}),
                 };
-                blocks.blocks.push(json!({
+                let mut block = json!({
                     "type": "tool_use",
                     "id": sanitize_tool_id(&format!("{upstream_name}-{tool_id}")),
                     "name": client_name,
-                    "input": input,
-                }));
+                });
+                // json! serializes Value expressions again, which respells
+                // exponent numbers. Keep the already-read argument values.
+                block["input"] = input;
+                blocks.blocks.push(block);
                 continue;
             }
             // Visible text.

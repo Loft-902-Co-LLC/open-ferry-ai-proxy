@@ -13,8 +13,9 @@ use super::*;
 // Not upstream's: the partial JSON must keep Gemini's number spelling.
 #[test]
 fn tool_arguments_keep_number_text() {
+    let body = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"n":1E+2,"nested":[1e2,-0]}}}]}}]}"#;
     let mut translator = GeminiToClaudeStream::new(&json!({}));
-    let out = translator.translate(br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"n":1E+2,"nested":[1e2,-0]}}}]}}]}"#);
+    let out = translator.translate(body);
     let delta = out
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
@@ -23,6 +24,12 @@ fn tool_arguments_keep_number_text() {
         .unwrap();
     assert_eq!(
         delta["delta"]["partial_json"],
+        r#"{"n":1E+2,"nested":[1e2,-0]}"#
+    );
+    let response = crate::json::exact::from_slice(body).unwrap();
+    let out = convert_gemini_response_to_claude_non_stream(&json!({}), &response);
+    assert_eq!(
+        out["content"][0]["input"].to_string(),
         r#"{"n":1E+2,"nested":[1e2,-0]}"#
     );
 }
