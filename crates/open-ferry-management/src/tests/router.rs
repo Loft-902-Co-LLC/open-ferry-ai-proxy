@@ -56,6 +56,19 @@ async fn a_wrong_management_key_never_reads_or_reserves_an_upload() {
 }
 
 #[tokio::test]
+async fn management_uploads_do_not_inherit_the_proxy_body_limit() {
+    use axum::body::Bytes;
+    use open_ferry_server::config::IngressConfig;
+    use open_ferry_server::ingress::Ingress;
+    use tower::ServiceExt;
+    let api = Api::new();
+    let router = router_from(api.state.clone(), vec![Route::key("/v0/management/test-body", post(|body: Bytes| async move { body }))]);
+    let ingress = Ingress::new(IngressConfig::default(), 1);
+    let response = ingress.install(router).oneshot(keyed(Method::POST, "/v0/management/test-body", "abcd")).await.unwrap();
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
 async fn unported_paths_answer_an_empty_404() {
     let api = Api::new();
     for (method, path) in [
