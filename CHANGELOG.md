@@ -6,10 +6,14 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 ## [Unreleased]
 
-The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.32.
+The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.36.
 
 ### Added
 
+- **Meta Responses remote compaction v2**, with sealed CPA summary capsules, replay and local token counting.
+- **Claude web search result caching for Responses sessions**, opt-in and isolated by session, caller and selected credential, with entry limits, sliding expiry and invalidation when its settings change.
+- **Meta Muse reasoning-envelope recognition and replay** through Gemini and Interactions clients.
+- **Management model definitions fall back to sorted available registry models**, including configured OpenAI-compatible provider channels.
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
 - **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, its calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing login is a 401; the usual token is never sent in its place. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
@@ -54,6 +58,11 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Changed
 
+- **Ported from CLIProxyAPI v8.0.36**, up from v8.0.32. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8032-to-v8036-left-out). The SIWC/routing group is still pending its final reviewed integration.
+- **Refresh outer Codex credentials 96 hours before nominal expiry.** Rejected unexpired JWTs and stream 401s recover in the background while sibling models remain blocked; SIWC keeps its independent five-minute lead.
+- **Configured Claude and claude-cli attempts use the selected credential's thinking capabilities and routing snapshot.** Claude also uses model-specific disable modes, adaptive-only fallbacks and dated/context family capabilities.
+- **xAI forwards the real downstream User-Agent**, with open-ferry as its default.
+- **Paused Claude web-search history uses linear passes**, and Gemini schema-size work is shared across pointer aliases.
 - **Ported from CLIProxyAPI v8.0.32**, up from v8.0.27. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8027-to-v8032-left-out). It brings:
   - **Closed HTTP/2 connections are retried as transient drops**: a call that meets a connection the peer closed fails over to another try and no longer counts against the credential. A recorded `tls handshake timeout` message alone no longer counts as a transient failure.
   - **A model's own cooldown stays beneath a credential-wide quota cooldown**: when the credential's quota runs out, the model's cooldown is kept and comes back when the credential's ends. It is saved with `save-cooldown-status`. A success from a call dispatched before a cooldown no longer clears it.
@@ -89,6 +98,25 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
+- **Detect truncated Claude streams**, including Gemini, Vertex and OpenAI-compatible streams serving Claude; retain observed usage and emit one bounded, correctly framed terminal error.
+- **Filter private Meta subscription usage telemetry** from streamed and collected replies, Responses SSE and WebSocket forwarding.
+- **Preserve reasoning usage and first-token timing:** map both nested Chat Completions reasoning dialects to nonstream Responses, recognize flat SGLang reasoning counts, and count completed reasoning text as effective output.
+- **Initialize and finalize empty Claude and claude-cli Responses patch streams** as upstream does.
+- **Credential-file model exclusions override provider-global OAuth rules.** Clearing them resumes the latest globals without replacing runtime tokens; malformed existing lists load leniently while uploads and field patches reject invalid rules before saving.
+- **Credential field/status edits reject replacement registrations**, retain concurrent refreshes and field edits, and return 404 for config-sourced file fields.
+- **Replay routed reasoning only to matching model families**, keeping OpenRouter suffixes private to OpenRouter, including destinations with a trailing DNS dot.
+- **Preserve SDK-safe Gemini thought signatures**, streamed function-call ordering and done-only summaries, including function-call signatures carried through OpenAI Chat Completions.
+- **Close duplicate Interactions reasoning steps** before subsequent thoughts and preserve late signatures across intervening output.
+- **Reconcile replayed Codex web-search history with hosted-tool declarations**, including Responses Lite; align token-count preparation and generated web-search/image tool order with upstream.
+- **Preserve signed Claude thinking history when thinking is omitted**, respecting forced tool choice and final payload rules.
+- **Honor usable Retry-After for explicit Claude per-minute limits**, including case-folded fields and overwritten malformed Unicode values.
+- **Bind Claude and claude-cli thinking to the routed model and matching config snapshot**, including auto, prefixes and suffixed aliases; preserve exact-before-base and first-match configured capability precedence.
+- **Skip JSON parsing for marker-free Claude cache traffic** and avoid full-store scans during cache lookup and eviction.
+- **Preserve nested Gemini tool fields referenced through local JSON Schema definitions**, leave literal defaults/examples intact, and strip unsupported contentMediaType, contentEncoding, readOnly and writeOnly annotations while retaining same-named properties.
+- **Bound Gemini local-reference expansion and decoded schema paths** across a request to prevent stack/memory exhaustion; avoid depth-dependent memory amplification during schema repair and argument re-cleaning.
+- **Preserve Claude tool_use stops and parallel tool calls** from providers that omit stream indexes.
+- **Map Claude refusals and context-window exhaustion correctly**, retaining failed Responses output/usage and avoiding duplicate terminal stream errors.
+- **Preserve paused Claude server searches and continuations**, and honor Responses parallel_tool_calls=false for effective tools.
 - Machine-wide installs and later machine commands on Windows work when run from the built-in Administrator account (for example on cloud Windows Server VMs), including when new objects default to the installing account as owner.
 
 ## [0.0.2] - 2026-10-20
