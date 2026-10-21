@@ -185,9 +185,20 @@ async fn patch_pair(fields: bool, patch_first: bool) {
         api.state.oauth_sessions().overrides().bind_before_file = None;
         edit_pause.resume();
         resume_bind.send(()).unwrap();
+        // The outer joint deadline owns this wait; the ordinary OAuth helper
+        // has its own shorter timeout, which would hide that deadline.
+        let completed_bind = async {
+            loop {
+                let outcome = api.state.oauth_sessions().store().get(&session).unwrap();
+                assert!(outcome.status.is_empty(), "bind failed: {}", outcome.status);
+                if outcome.completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
         let result = tokio::time::timeout(PAIR_BOUND, async {
-            let (response, (), joined) =
-                tokio::join!(&mut patch, completed(&api, &session), joining);
+            let (response, (), joined) = tokio::join!(&mut patch, completed_bind, joining);
             joined.unwrap();
             response.expect(StatusCode::OK);
         })
