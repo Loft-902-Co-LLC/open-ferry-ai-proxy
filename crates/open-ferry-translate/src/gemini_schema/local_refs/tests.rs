@@ -5,6 +5,69 @@ use super::*;
 use crate::gemini_schema::{SchemaCopyBudget, clean_json_schema_for_gemini_json_schema};
 use serde_json::json;
 
+// Only the measuring thread counts allocations, so parallel tests cannot affect
+// the root-transfer regression. The unusual size identifies its literal string.
+mod sibling_allocations {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub(super) const BYTES: usize = 4093;
+
+    thread_local! {
+        static MEASUREMENT: Cell<(bool, usize)> = const { Cell::new((false, 0)) };
+    }
+
+    struct Allocator;
+
+    fn record(bytes: usize) {
+        if bytes == BYTES {
+            let _ = MEASUREMENT.try_with(|state| {
+                let (enabled, count) = state.get();
+                if enabled {
+                    state.set((true, count + 1));
+                }
+            });
+        }
+    }
+
+    unsafe impl GlobalAlloc for Allocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            record(size);
+            unsafe { System.realloc(pointer, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Allocator = Allocator;
+
+    pub(super) fn measure<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                MEASUREMENT.with(|state| state.set((false, 0)));
+            }
+        }
+
+        MEASUREMENT.with(|state| {
+            assert!(!state.get().0);
+            state.set((true, 0));
+        });
+        let _reset = Reset;
+        let result = operation();
+        let count = MEASUREMENT.with(|state| state.get().1);
+        (result, count)
+    }
+}
+
 fn clean(schema: &Value) -> Value {
     clean_json_schema_for_gemini_json_schema(schema, &mut SchemaCopyBudget::default())
 }
@@ -427,12 +490,13 @@ fn under_allowance_shared_budget_matches_unlimited_request_budget() {
 
 #[test]
 fn root_fallback_preserves_resolved_siblings_without_copying_them() {
+    let literal = "x".repeat(sibling_allocations::BYTES);
     let root = json!({"$ref":"#/$defs/Large","title":"kept",
-        "properties":{"v":{"$ref":"#/$defs/S"}},"default":{"note":"x".repeat(4096)},
+        "properties":{"v":{"$ref":"#/$defs/S"}},"default":{"note":literal},
         "$defs":{"S":{"type":"string"},"Large":{"type":"object","nullable":true,
             "description":"target","default":"x".repeat(COPY_BYTES + 1)}}});
     let expected = json!({"type":"object","nullable":true,"description":"target (See: Large)",
-        "title":"kept","properties":{"v":{"type":"string"}},"default":{"note":"x".repeat(4096)}});
+        "title":"kept","properties":{"v":{"type":"string"}},"default":{"note":literal}});
     let mut budget = SchemaCopyBudget::default();
     let mut resolver = Resolver {
         root: &root,
@@ -446,21 +510,13 @@ fn root_fallback_preserves_resolved_siblings_without_copying_them() {
         lookups: HashMap::new(),
         target_size_scans: 0,
     };
-    assert_eq!(resolver.root().to_string(), expected.to_string());
-
-    let mut siblings = resolver.entries(root.as_object().unwrap(), 1);
-    siblings.shift_remove("$ref");
-    let allocation = siblings["default"]["note"].as_str().unwrap().as_ptr();
-    let out = Value::Object(resolver.fallback(
-        FallbackSiblings::Resolved(siblings),
-        &root["$defs"]["Large"],
-        "#/$defs/Large",
-        0,
-    ));
+    let (out, copies) = sibling_allocations::measure(|| resolver.root());
     assert_eq!(out.to_string(), expected.to_string());
+    // entries() copies the source literal once. Re-resolving the sibling map or
+    // cloning it before fallback would allocate a second copy of this string.
     assert_eq!(
-        out["default"]["note"].as_str().unwrap().as_ptr(),
-        allocation
+        copies, 1,
+        "root fallback must transfer the already-resolved literal allocation"
     );
 }
 
