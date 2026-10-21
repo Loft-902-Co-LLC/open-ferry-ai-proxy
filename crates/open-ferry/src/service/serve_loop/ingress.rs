@@ -242,7 +242,6 @@ impl Traffic {
 
     fn written(&self, bytes: &[u8]) {
         let mut state = self.state();
-        state.write_pending = None;
         if state.protocol == Protocol::Http2 {
             let mut frames = std::mem::take(&mut state.write_frames);
             frames.feed(bytes, false, &mut state, self.config.header_timeout);
@@ -255,14 +254,25 @@ impl Traffic {
         self.changed.notify_one();
     }
 
+    pub(super) fn established(&self, started: Instant) {
+        let mut state = self.state();
+        state.first_head = self.config.header_timeout.map(|duration| started + duration);
+        state.idle_since = Some(started);
+        state.write_pending = None;
+    }
+
+    fn socket_written(&self, count: usize) {
+        if count == 0 { return; }
+        let mut state = self.state();
+        if state.write_pending.take().is_some() { self.changed.notify_one(); }
+    }
+
     fn pending_write(&self, pending: bool) {
         let mut state = self.state();
-        if pending {
-            state.write_pending.get_or_insert_with(Instant::now);
-        } else {
-            state.write_pending = None;
-        }
-        self.changed.notify_one();
+        let was_pending = state.write_pending.is_some();
+        if pending { state.write_pending.get_or_insert_with(Instant::now); }
+        else { state.write_pending = None; }
+        if was_pending != pending { self.changed.notify_one(); }
     }
 
     fn due(&self) -> Option<(Instant, &'static str, Option<u64>)> {
@@ -615,31 +625,62 @@ impl<T: AsyncRead + Unpin> AsyncRead for Guarded<T> {
 }
 
 impl<T: AsyncWrite + Unpin> AsyncWrite for Guarded<T> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bytes: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
-        if let Poll::Ready(Ok(count)) = result {
-            this.traffic.written(&bytes[..count]);
-        } else {
-            this.traffic.pending_write(result.is_pending());
+        if let Poll::Ready(Ok(count)) = result { this.traffic.written(&bytes[..count]); }
+        result
+    }
+    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, slices: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write_vectored(cx, slices);
+        if let Poll::Ready(Ok(mut count)) = result {
+            for slice in slices {
+                let used = count.min(slice.len());
+                this.traffic.written(&slice[..used]);
+                count -= used;
+                if count == 0 { break; }
+            }
         }
         result
     }
-    // The default vectored write delegates here, keeping frame observation exact.
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn is_write_vectored(&self) -> bool { self.inner.is_write_vectored() }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.get_mut().inner).poll_flush(cx) }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.get_mut().inner).poll_shutdown(cx) }
+}
+
+/// Observes only the TCP transport, below TLS encryption and buffering.
+/// Plaintext frame observation stays in Guarded, above TLS.
+pub(super) struct SocketIo<T> { pub(super) inner: T, pub(super) traffic: Arc<Traffic> }
+impl<T: AsyncRead + Unpin> AsyncRead for SocketIo<T> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buffer: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buffer)
+    }
+}
+impl<T: AsyncWrite + Unpin> AsyncWrite for SocketIo<T> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_flush(cx);
-        this.traffic.pending_write(result.is_pending());
+        let result = Pin::new(&mut this.inner).poll_write(cx, bytes);
+        match result {
+            Poll::Ready(Ok(count)) => this.traffic.socket_written(count),
+            Poll::Pending => this.traffic.pending_write(true),
+            Poll::Ready(Err(_)) => this.traffic.pending_write(false),
+        }
         result
     }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, slices: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        Pin::new(&mut this.inner).poll_shutdown(cx)
+        let result = Pin::new(&mut this.inner).poll_write_vectored(cx, slices);
+        match result {
+            Poll::Ready(Ok(count)) => this.traffic.socket_written(count),
+            Poll::Pending => this.traffic.pending_write(true),
+            Poll::Ready(Err(_)) => this.traffic.pending_write(false),
+        }
+        result
     }
+    fn is_write_vectored(&self) -> bool { self.inner.is_write_vectored() }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.get_mut().inner).poll_flush(cx) }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> { Pin::new(&mut self.get_mut().inner).poll_shutdown(cx) }
 }
 
 #[cfg(test)]

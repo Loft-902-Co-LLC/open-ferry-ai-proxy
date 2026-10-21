@@ -85,7 +85,7 @@ use tokio_rustls::TlsAcceptor;
 use tower_service::Service;
 
 mod ingress;
-use ingress::{Admission, AdmissionGuard, Flight, Guarded, ResponseBody, StreamExecutor, Traffic};
+use ingress::{Admission, AdmissionGuard, Flight, Guarded, ResponseBody, SocketIo, StreamExecutor, Traffic};
 use open_ferry_server::config::IngressConfig;
 use open_ferry_server::ingress::Ingress;
 
@@ -982,6 +982,8 @@ fn spawn_connection(
     super::send_at_once(&stream);
     let mut mode = shared.mode.subscribe();
     let shared = shared.clone();
+    let traffic = Traffic::new(limits.clone(), ingress.clone(), accepted_at);
+    let stream = SocketIo { inner: stream, traffic: traffic.clone() };
     tokio::spawn(async move {
         let _task = task;
         match acceptor {
@@ -992,7 +994,7 @@ fn spawn_connection(
                     app,
                     core,
                     mode,
-                    (ingress, limits, accepted_at),
+                    (ingress, limits, accepted_at, traffic),
                 )
                 .await
             }
@@ -1015,7 +1017,12 @@ fn spawn_connection(
                         tracing::debug!("closing {peer}: no handshake within the first-request deadline");
                         None
                     }
-                    stream = crate::tls::handshake(&acceptor, stream, peer) => stream,
+                    stream = async {
+                        match acceptor.accept(stream).await {
+                            Ok(stream) => Some(stream),
+                            Err(error) => { tracing::debug!(%error, "inbound TLS handshake failed"); None }
+                        }
+                    } => stream,
                 };
                 if let Some(stream) = stream {
                     serve_connection(
@@ -1024,7 +1031,7 @@ fn spawn_connection(
                         app,
                         core,
                         mode,
-                        (ingress, limits, tokio::time::Instant::now()),
+                        (ingress, limits, tokio::time::Instant::now(), traffic),
                     )
                     .await;
                 }
@@ -1064,11 +1071,11 @@ async fn serve_connection<I>(
     app: Router,
     core: Arc<ConnCore>,
     mut mode: watch::Receiver<Mode>,
-    settings: (Ingress, IngressConfig, tokio::time::Instant),
+    settings: (Ingress, IngressConfig, tokio::time::Instant, Arc<Traffic>),
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (ingress, limits, started_at) = settings;
+    let (ingress, limits, started_at, traffic) = settings;
     if limits
         .header_timeout
         .is_some_and(|duration| started_at + duration <= tokio::time::Instant::now())
@@ -1077,7 +1084,7 @@ async fn serve_connection<I>(
         core.cut();
         return;
     }
-    let traffic = Traffic::new(limits, ingress, started_at);
+    traffic.established(started_at);
     let _ = core.traffic.set(traffic.clone());
     tokio::spawn(ingress::watch_traffic(
         Arc::downgrade(&core),
