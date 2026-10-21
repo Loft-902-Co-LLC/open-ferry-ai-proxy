@@ -843,6 +843,21 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
         )
         .known_difference(PLUGINS_REWRITTEN),
     ];
+    for fixture in
+        serde_json::from_str::<Vec<Value>>(crate::config_save::LOSSY_PLUGIN_FIXTURES).unwrap()
+    {
+        cases.push(
+            Case::new(
+                &format!(
+                    "plugin-value-preserved-{}",
+                    fixture["case"].as_str().unwrap()
+                ),
+                "",
+                "",
+            )
+            .with_options(fixture["options"].clone()),
+        );
+    }
     if let Ok(example) = fs::read_to_string(upstream.join("config.example.yaml")) {
         let keys = uncomment_api_keys(&example);
         cases.extend([

@@ -22,6 +22,9 @@ pub struct SuiteResult {
     pub equivalent: usize,
     pub known: usize,
     pub different: usize,
+    /// Cases whose source plugin scalar survives our write but upstream
+    /// loses into a comment; counted separately within equivalent cases.
+    pub upstream_lossy_plugins: usize,
 }
 
 /// What the run compared against, and how its random cases were made.
@@ -71,6 +74,12 @@ pub fn render(run: &RunInfo<'_>, suites: &[SuiteResult]) -> String {
         thousands(total(|s| s.equivalent)),
         thousands(total(|s| s.known)),
         thousands(total(|s| s.different)),
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Upstream lossy plugin re-encode: {} cases (included in Equivalent).",
+        thousands(total(|s| s.upstream_lossy_plugins))
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "<details>");
@@ -151,6 +160,7 @@ mod tests {
             equivalent: 1,
             known: 0,
             different,
+            upstream_lossy_plugins: 1,
         }
     }
 
@@ -179,6 +189,9 @@ mod tests {
         assert!(text.contains("| Claude → Codex request | 5,040 | 5,039 | 1 | 0 | 0 |\n"));
         assert!(text.contains("| Config file writes | 1,200 | 1,197 | 1 | 0 | 2 |\n"));
         assert!(text.ends_with("</details>\n"));
+        assert!(
+            text.contains("Upstream lossy plugin re-encode: 2 cases (included in Equivalent).")
+        );
     }
 
     // Not upstream's: only the marked block changes, and a new file gets one.

@@ -42,6 +42,9 @@ pub enum Deviation {
     /// Upstream wrote a comment from a plugin's settings twice, the copies
     /// one after the other; we write it once.
     PluginCommentRepeated,
+    /// Upstream lost a source plugin scalar into a comment; our complete
+    /// plugin value and its comments are retained, with all other bytes equal.
+    UpstreamLossyPluginReencode,
     /// Our reload log has a change line for a setting upstream reloads
     /// without one; upstream logs nothing for it.
     UnloggedChangeLine,
@@ -61,6 +64,7 @@ impl Deviation {
             Self::CompactCallIdSource => "call ID derived from compact JSON",
             Self::UnloadableWrite => "unloadable file refused, not written",
             Self::PluginCommentRepeated => "plugin comment written once, not twice",
+            Self::UpstreamLossyPluginReencode => "upstream lossy plugin re-encode",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
     }
