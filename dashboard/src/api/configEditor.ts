@@ -276,8 +276,8 @@ export class ConfigEditor {
       throw new Error("The server omitted the config version. Reload before saving.");
     }
     const base = this.dirty ? this.base : fresh;
-    const conflicts = paths.filter((path) => !same(
-      valueAt((this.drafts.get(path) ?? (this.explicitDrafts ? fresh : base))?.tree, path),
+    const conflicts = paths.filter((path) => (this.explicitDrafts && !this.drafts.has(path)) || !same(
+      valueAt((this.drafts.get(path) ?? base)?.tree, path),
       valueAt(fresh.tree, path),
     )).map(fieldName);
     if (conflicts.length > 0) throw new ConfigConflict(conflicts);

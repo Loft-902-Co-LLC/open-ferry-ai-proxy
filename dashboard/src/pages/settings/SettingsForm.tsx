@@ -1,5 +1,5 @@
 import type { UseQueryResult } from "@tanstack/react-query";
-import { useCallback, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { useForm, useWatch, type FieldErrors, type Resolver } from "react-hook-form";
 
 import { UPDATE_MODES, UPDATE_MODE_LABELS, type UpdateMode } from "../../api/update";
@@ -79,6 +79,16 @@ export function useSettingsForm(config: unknown, facts: ServerFacts | undefined)
     resetOptions: { keepDirtyValues: true },
   });
   const current = useWatch({ control: form.control });
+  const { dirtyFields } = form.formState;
+  // Semantic equality releases a draft. Clear RHF's dirty flag at the
+  // same boundary, so a later refetch cannot leave an unbound old value.
+  useEffect(() => {
+    for (const id of SETTING_IDS) {
+      if (dirtyFields[id] === true && !isEdited(current[id], loaded[id])) {
+        form.resetField(id, { defaultValue: formValueOf(loaded[id]) });
+      }
+    }
+  }, [current, loaded, dirtyFields, form]);
   const unsaved = SETTING_IDS.filter((id) => isEdited(current[id], loaded[id]));
   const problems = useMemo(() => loadedProblems(loaded, facts), [loaded, facts]);
 
