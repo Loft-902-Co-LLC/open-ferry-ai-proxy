@@ -19,26 +19,44 @@ impl Filter {
         let mut out = Vec::new();
         let trimmed = trim_space(&line);
         if let Some(event) = trimmed.strip_prefix(b"event:") {
-            if let Some(pending) = self.pending_event.take() { out.push(pending); }
+            if let Some(pending) = self.pending_event.take() {
+                out.push(pending);
+            }
             self.filtering = trim_space(event) == b"response.subscription_usage";
             self.skip_blank = self.filtering;
-            if !self.filtering { self.pending_event = Some(line); }
+            if !self.filtering {
+                self.pending_event = Some(line);
+            }
             return out;
         }
         let Some(data) = trimmed.strip_prefix(b"data:") else {
             if trimmed.is_empty() {
                 self.filtering = false;
-                if std::mem::take(&mut self.skip_blank) { return out; }
+                if std::mem::take(&mut self.skip_blank) {
+                    return out;
+                }
             }
-            if self.filtering { return out; }
+            if self.filtering {
+                return out;
+            }
             self.skip_blank = false;
-            if let Some(pending) = self.pending_event.take() { out.push(pending); }
+            if let Some(pending) = self.pending_event.take() {
+                out.push(pending);
+            }
             out.push(line);
             return out;
         };
         let event = serde_json::from_slice::<Value>(trim_space(data)).ok();
-        let kind = event.as_ref().and_then(|event| event["type"].as_str()).unwrap_or_default();
-        if kind == "response.subscription_usage" || (kind.is_empty() && event.as_ref().is_some_and(|event| event["subscription"].is_object())) {
+        let kind = event
+            .as_ref()
+            .and_then(|event| event["type"].as_str())
+            .unwrap_or_default();
+        if kind == "response.subscription_usage"
+            || (kind.is_empty()
+                && event
+                    .as_ref()
+                    .is_some_and(|event| event["subscription"].is_object()))
+        {
             self.pending_event = None;
             self.filtering = false;
             self.skip_blank = true;
@@ -46,18 +64,24 @@ impl Filter {
         }
         if self.filtering && kind.is_empty() {
             self.pending_event = None;
-            if event.is_some() { self.filtering = false; }
+            if event.is_some() {
+                self.filtering = false;
+            }
             self.skip_blank = true;
             return out;
         }
         self.filtering = false;
         self.skip_blank = false;
-        if let Some(pending) = self.pending_event.take() { out.push(pending); }
+        if let Some(pending) = self.pending_event.take() {
+            out.push(pending);
+        }
         out.push(line);
         out
     }
 
-    pub(super) fn finish(&mut self) -> Option<Vec<u8>> { self.pending_event.take() }
+    pub(super) fn finish(&mut self) -> Option<Vec<u8>> {
+        self.pending_event.take()
+    }
 }
 
 #[cfg(test)]
@@ -78,10 +102,17 @@ mod tests {
             let mut filter = Filter::default();
             let mut output = Vec::new();
             for line in input.split_terminator('\n') {
-                for line in filter.line(line.as_bytes().to_vec()) { output.extend(line); output.push(b'\n'); }
+                for line in filter.line(line.as_bytes().to_vec()) {
+                    output.extend(line);
+                    output.push(b'\n');
+                }
             }
             assert!(filter.finish().is_none());
-            assert_eq!(String::from_utf8(output).unwrap(), public.repeat(2), "{private}");
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                public.repeat(2),
+                "{private}"
+            );
         }
     }
 }

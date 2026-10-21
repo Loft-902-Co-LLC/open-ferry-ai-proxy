@@ -145,7 +145,9 @@ impl State {
         match self.reader.next_line().await {
             Some(Ok(line)) => {
                 let line = self.redact(line);
-                for line in self.telemetry.line(line) { self.line(line).await?; }
+                for line in self.telemetry.line(line) {
+                    self.line(line).await?;
+                }
                 Ok(())
             }
             Some(Err(error)) => self.end(Some(error)).await,
@@ -241,7 +243,9 @@ impl State {
     /// is the stream's last chunk.
     async fn end(&mut self, read_error: Option<LineError>) -> Result<(), ExecError> {
         self.finished = true;
-        if let Some(line) = self.telemetry.finish() { self.emit(&line).await?; }
+        if let Some(line) = self.telemetry.finish() {
+            self.emit(&line).await?;
+        }
         let (frames, bridge_error) = self.apply_patch.finish_stream();
         let mut chunks = Vec::new();
         for frame in frames {

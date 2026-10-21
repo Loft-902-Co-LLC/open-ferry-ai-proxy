@@ -103,7 +103,10 @@ pub(super) fn translate_completed(
 ) -> Result<Vec<u8>, StatusError> {
     let mut items = OutputItems::default();
     let mut filter = super::telemetry::Filter::default();
-    for line in data.split(|&byte| byte == b'\n').flat_map(|line| filter.line(line.to_vec())) {
+    for line in data
+        .split(|&byte| byte == b'\n')
+        .flat_map(|line| filter.line(line.to_vec()))
+    {
         let Some(rest) = trim_space(&line).strip_prefix(b"data:") else {
             continue;
         };
