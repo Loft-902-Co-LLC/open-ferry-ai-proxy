@@ -21,6 +21,8 @@ use bytes::Bytes;
 /// The most bytes of one body the request log keeps (upstream's
 /// `maxDeferredErrorRequestBodyBytes`).
 pub const CAPTURE_LIMIT: usize = 32 << 20;
+/// Request-side capture and rendering bound; response/attempt limits are separate.
+pub const REQUEST_CAPTURE_LIMIT: usize = 64 << 10;
 
 /// The part of the client's body a handler reads, kept for the log of a
 /// request that fails, as the handler reads it (upstream's
@@ -37,11 +39,17 @@ struct Deferred {
     bytes_read: u64,
     saw_eof: bool,
     truncated: bool,
+    limit: usize,
 }
 
 impl DeferredCapture {
     /// A capture for a body of `content_length` bytes, `None` when unknown.
     pub fn new(content_length: Option<u64>) -> Self {
+        Self::with_limit(content_length, CAPTURE_LIMIT)
+    }
+
+    /// A bounded prefix for callers that must never read ahead of authentication.
+    pub fn with_limit(content_length: Option<u64>, limit: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Deferred {
                 captured: Vec::new(),
@@ -49,6 +57,7 @@ impl DeferredCapture {
                 bytes_read: 0,
                 saw_eof: false,
                 truncated: false,
+                limit: limit.min(CAPTURE_LIMIT),
             })),
         }
     }
@@ -58,7 +67,7 @@ impl DeferredCapture {
     pub fn record(&self, chunk: &[u8]) {
         let mut deferred = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         deferred.bytes_read = deferred.bytes_read.saturating_add(chunk.len() as u64);
-        let room = CAPTURE_LIMIT.saturating_sub(deferred.captured.len());
+        let room = deferred.limit.saturating_sub(deferred.captured.len());
         if chunk.len() > room {
             deferred.truncated = true;
         }
@@ -76,13 +85,17 @@ impl DeferredCapture {
 
     /// What was kept, and the markers saying what is missing (upstream's
     /// `Bytes` and `statusMarker`).
-    pub(crate) fn snapshot(&self) -> (Vec<u8>, String) {
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> (Vec<u8>, String) { self.snapshot_prefix(CAPTURE_LIMIT) }
+
+    pub(crate) fn snapshot_prefix(&self, limit: usize) -> (Vec<u8>, String) {
         let deferred = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let len = deferred.captured.len().min(limit);
         let mut markers = Vec::new();
-        if deferred.truncated {
+        if deferred.truncated || deferred.captured.len() > len {
             markers.push(format!(
                 "[REQUEST BODY TRUNCATED: captured first {} bytes]",
-                deferred.captured.len()
+                len
             ));
         }
         let complete = deferred.saw_eof
@@ -101,7 +114,7 @@ impl DeferredCapture {
                 ),
             });
         }
-        (deferred.captured.clone(), markers.join("\n"))
+        (deferred.captured[..len].to_vec(), markers.join("\n"))
     }
 }
 

@@ -37,8 +37,8 @@ use chrono::{DateTime, Local};
 use http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 
 use super::attempts::Attempts;
-use super::body_source::CAPTURE_LIMIT;
-use super::format::{self, DECODE_LIMIT, Sections};
+use super::body_source::REQUEST_CAPTURE_LIMIT;
+use super::format::{self, Sections};
 use super::names::{create_unique_log_file, error_filename, filename};
 use super::{Answer, ApiError, Downstream, RequestBody};
 use crate::observe::redact::{Policy, Secrets};
@@ -284,7 +284,7 @@ fn log_secrets(entry: &Entry) -> Secrets {
 /// The client's body as the log shows it: decoded as its first
 /// `Content-Encoding` says, with markers saying what is missing (upstream's
 /// `captureRequestInfo` and `extractRequestBody`).
-fn request_body(downstream: &Downstream) -> Vec<u8> {
+pub(super) fn request_body(downstream: &Downstream) -> Vec<u8> {
     let encoding = downstream
         .headers
         .get(CONTENT_ENCODING)
@@ -293,21 +293,22 @@ fn request_body(downstream: &Downstream) -> Vec<u8> {
     match &downstream.body {
         RequestBody::None => Vec::new(),
         RequestBody::Captured { raw, truncated } => {
-            let mut body = format::decode_request_body(raw, &encoding, DECODE_LIMIT).into_owned();
-            if *truncated {
+            let len = raw.len().min(REQUEST_CAPTURE_LIMIT);
+            let mut body = format::decode_request_body(&raw[..len], &encoding, REQUEST_CAPTURE_LIMIT).into_owned();
+            if *truncated || len < raw.len() {
                 push_marker(
                     &mut body,
                     &format!(
                         "[REQUEST BODY TRUNCATED: captured first {} bytes]",
-                        raw.len()
+                        len
                     ),
                 );
             }
             body
         }
         RequestBody::Deferred(capture) => {
-            let (raw, marker) = capture.snapshot();
-            let mut body = format::decode_request_body(&raw, &encoding, CAPTURE_LIMIT).into_owned();
+            let (raw, marker) = capture.snapshot_prefix(REQUEST_CAPTURE_LIMIT);
+            let mut body = format::decode_request_body(&raw, &encoding, REQUEST_CAPTURE_LIMIT).into_owned();
             if !marker.is_empty() {
                 push_marker(&mut body, &marker);
             }
