@@ -1252,6 +1252,7 @@ mod tests {
         let case = Case::new("resolved-marker", "", "{}")
             .known_difference("unrelated text mentioning map order");
         let evaluated = Evaluated {
+            outcome: Outcome::Identical,
             go_output: "{}".into(),
             go_value: Some(json!({})),
             rust_output: Ok(json!({})),
@@ -1273,7 +1274,7 @@ mod tests {
             .flat_map(|(_, cases, _)| cases)
             .find(|case| case.name == "settings-for-the-same-field")
             .expect("the ambiguous generation-settings fixture is still covered");
-        assert!(case.known_difference.unwrap().contains("map order"));
+        assert_eq!(case.known_difference, Some(cases::MAP_ORDER_DEPENDENT));
         let dir = std::env::temp_dir().join(format!("parity-map-order-{}", std::process::id()));
         let mut tally = Tally::default();
         for outcome in [
