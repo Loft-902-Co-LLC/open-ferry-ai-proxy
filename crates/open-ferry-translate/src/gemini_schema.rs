@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/util/gemini_schema.go (CleanJSONSchemaForGeminiJSONSchema and the
 // passes it runs, sanitizeObjectProperties among them) and internal/util/translator.go
-// (Walk) (v8.0.32, MIT).
+// (Walk) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Making a JSON Schema fit for a Gemini function declaration's
@@ -432,7 +432,7 @@ impl<'a> CopyTarget<'a> {
 /// Keywords Gemini rejects, removed wherever they are a keyword rather than a
 /// name. Upstream's list also has `additionalProperties`, which this cleaner
 /// keeps.
-const UNSUPPORTED_KEYWORDS: [&str; 30] = [
+const UNSUPPORTED_KEYWORDS: [&str; 32] = [
     "$schema",
     "$defs",
     "definitions",
@@ -463,6 +463,8 @@ const UNSUPPORTED_KEYWORDS: [&str; 30] = [
     "unevaluatedProperties",
     "unevaluatedItems",
     "contentSchema",
+    "contentMediaType",
+    "contentEncoding",
 ];
 
 /// Keywords whose value maps names chosen by the schema's author to

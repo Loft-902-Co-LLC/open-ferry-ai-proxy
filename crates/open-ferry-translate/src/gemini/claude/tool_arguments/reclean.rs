@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/gemini_schema.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/util/gemini_schema.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Structural projection of the wrapped re-clean used by the argument cleaner.
@@ -35,7 +35,7 @@ const NAME_MAPS: [&str; 5] = [
     "definitions",
 ];
 const REPAIR_CONTAINERS: &str = "properties patternProperties additionalProperties items prefixItems $defs definitions dependentSchemas dependentRequired dependencies if then else not contains propertyNames unevaluatedProperties unevaluatedItems contentSchema additionalItems default const example examples discriminator xml externalDocs enumDescriptions enumTitles";
-const REMOVED: &str = "minLength maxLength exclusiveMinimum exclusiveMaximum pattern minItems maxItems uniqueItems contains format default examples minimum maximum multipleOf $schema $defs definitions const $ref $id id additionalProperties $anchor $vocabulary $dynamicRef $dynamicAnchor propertyNames patternProperties dependentRequired dependentSchemas dependencies if then else $comment enumDescriptions enumTitles prefill deprecated encrypted discriminator additionalItems unevaluatedProperties unevaluatedItems contentSchema not";
+const REMOVED: &str = "minLength maxLength exclusiveMinimum exclusiveMaximum pattern minItems maxItems uniqueItems contains format default examples minimum maximum multipleOf $schema $defs definitions const $ref $id id additionalProperties $anchor $vocabulary $dynamicRef $dynamicAnchor propertyNames patternProperties dependentRequired dependentSchemas dependencies if then else $comment enumDescriptions enumTitles prefill deprecated encrypted discriminator additionalItems unevaluatedProperties unevaluatedItems contentSchema contentMediaType contentEncoding not";
 
 fn string_required(schema: &Value) -> Vec<String> {
     array(schema, "required")

@@ -2569,3 +2569,28 @@ fn gemini_duplicate_append_names_still_charge_both_copies() {
     assert!(cost.bytes >= branch.to_string().len());
     assert!(cost.nodes >= copy_cost(&branch).unwrap().nodes);
 }
+
+#[test]
+fn removes_content_annotations_but_keeps_same_named_properties_issue6699() {
+    let out = clean_schema(&json!({
+        "type":"object", "contentMediaType":"application/json", "contentEncoding":"utf-8",
+        "properties": {
+            "value":{"anyOf":[{"type":"object","properties":{}},
+                {"type":"string","contentMediaType":"application/json","contentEncoding":"base64"}]},
+            "directPayload":{"type":"string","contentMediaType":"application/json","contentEncoding":"base64"},
+            "contentMediaType":{"type":"string","contentMediaType":"text/plain"},
+            "contentEncoding":{"type":"string","contentEncoding":"base64"}
+        }
+    }));
+    for node in [&out, &out["properties"]["value"]["anyOf"][1],
+        &out["properties"]["directPayload"], &out["properties"]["contentMediaType"],
+        &out["properties"]["contentEncoding"]] {
+        assert!(node.get("contentMediaType").is_none(), "{out}");
+        assert!(node.get("contentEncoding").is_none(), "{out}");
+    }
+    assert_eq!(out["properties"]["value"]["anyOf"].as_array().unwrap().len(), 2);
+    assert_eq!(out["properties"]["value"]["anyOf"][1]["type"], "string");
+    for name in ["contentMediaType", "contentEncoding"] {
+        assert_eq!(out["properties"][name]["type"], "string");
+    }
+}
