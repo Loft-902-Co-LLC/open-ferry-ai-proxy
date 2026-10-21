@@ -489,6 +489,14 @@ pub fn streams() -> Vec<Case> {
         cases.push(through(argument_number_text(), "gemini", client, json!({})));
     }
     cases.push(unfinished_function_closures());
+    let mut repeated_id = unfinished_function_closures();
+    repeated_id.name = "unfinished-function-closures-repeated-id".into();
+    for event in &mut repeated_id.events {
+        *event = event
+            .replace("toolu_01QcQ6A0DtMoeC7WXtBsKK", "same")
+            .replace("toolu_01vaa1rUy0HLq3MPLMV7fh", "same");
+    }
+    cases.push(repeated_id);
     let mut buffered = unfinished_function_closures();
     buffered.name = "unfinished-buffered-function-closures".into();
     buffered.events.insert(6, r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#.into());
