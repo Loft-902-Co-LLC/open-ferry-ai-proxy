@@ -46,25 +46,27 @@ async fn authentication_precedes_body_polling_and_budget_reservation() {
     );
     let router = crate::router(state.clone());
     let polls = Arc::new(AtomicUsize::new(0));
+    let mut tasks = Vec::new();
     for _ in 0..4 {
         let count = polls.clone();
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/v1/chat/completions")
-                    .header(header::CONTENT_LENGTH, "67108864")
-                    .body(Body::from_stream(stream::once(async move {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Ok::<_, std::io::Error>(Bytes::new())
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 401);
-        assert_eq!(state.ingress().reserved_body_bytes(), 0);
+        let body = Body::from_stream(stream::poll_fn(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
+        }));
+        tasks.push(tokio::spawn(router.clone().oneshot(Request::post("/v1/chat/completions")
+            .header(header::CONTENT_LENGTH, "4").body(body).unwrap())));
     }
+    settle().await;
+    assert_eq!(state.ingress().reserved_body_bytes(), 0);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
+    for task in tasks {
+        assert!(task.is_finished());
+        assert_eq!(task.await.unwrap().unwrap().status(), 401);
+    }
+    let response = router.oneshot(Request::post("/v1/chat/completions")
+        .header(header::AUTHORIZATION, "Bearer client-secret")
+        .header(header::CONTENT_LENGTH, "4").body(Body::from("abcd")).unwrap()).await.unwrap();
+    assert_ne!(response.status(), 503, "unauthenticated uploads consumed the authenticated budget");
 }
 
 #[tokio::test]
@@ -337,31 +339,35 @@ async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_three_bodies() 
 
 #[tokio::test]
 async fn a_multipart_body_at_the_limit_fits_the_budget_floor() {
-    let ingress = Ingress::new(
-        IngressConfig {
-            buffered_body_bytes: Some(16),
-            ..IngressConfig::default()
-        },
-        16,
-    );
-    let response = app(&ingress)
-        .oneshot(
-            Request::post("/")
-                .header(header::CONTENT_LENGTH, "16")
-                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
-                .body(Body::from("0123456789abcdef"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+    let dispatcher = FakeDispatcher::new(vec![]);
+    // Exercise the configured default budget with the body limit raised to it.
+    // Input chunks are static; only the admitted 256 MiB buffer is allocated.
+    let limit = 256 << 20;
+    let state = state(ServerConfig { body_limit: limit, ..ServerConfig::default() }, FakeCatalog::new(), &dispatcher);
+    let ingress = state.ingress().clone();
+    let handler = post(|bytes: Bytes| async move {
+        assert_eq!(bytes.len(), 256 << 20);
+        assert!(open_ferry_core::multipart::Reader::new(bytes, "x").read_form(256 << 20).is_ok());
+        "accepted"
+    }).layer(axum::middleware::from_fn_with_state(state, crate::auth::require_key));
+    let router = ingress.install(Router::new().route("/", handler));
+    let prefix = Bytes::from_static(b"--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\n");
+    let suffix = Bytes::from_static(b"\r\n--x--\r\n");
+    const CHUNK: &[u8] = &[b'x'; 16 << 10];
+    let payload = limit - prefix.len() - suffix.len();
+    let input = std::iter::once(prefix)
+        .chain((0..payload / CHUNK.len()).map(|_| Bytes::from_static(CHUNK)))
+        .chain(std::iter::once(Bytes::from_static(&CHUNK[..payload % CHUNK.len()])))
+        .chain(std::iter::once(suffix));
+    let response = router.oneshot(Request::post("/")
+        .header(header::CONTENT_LENGTH, limit.to_string())
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
+        .body(Body::from_stream(stream::iter(input.map(Ok::<_, std::io::Error>)))).unwrap()).await.unwrap();
     assert_eq!(response.status(), 200);
-    drop(response);
     assert_eq!(ingress.budget.used(), 0);
-    let raised = Ingress::new(IngressConfig::default(), 256 << 20);
-    assert_eq!(
-        raised.budget.0.lock().unwrap().limit,
-        Some(MANAGEMENT_RESERVE + 3 * (256 << 20))
-    );
+    assert_eq!(ingress.budget.0.lock().unwrap().limit, Some(MANAGEMENT_RESERVE + 3 * limit));
 }
 
 #[test]
