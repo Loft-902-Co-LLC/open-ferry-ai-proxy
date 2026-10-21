@@ -6,8 +6,9 @@ use futures_util::{FutureExt, future::FusedFuture};
 use std::sync::atomic::AtomicBool;
 
 const BOUND: Duration = Duration::from_millis(800);
-// Completion includes the one-second retry backoff. Withdrawal still uses BOUND.
-const PAIR_BOUND: Duration = Duration::from_secs(3);
+// Completion includes real file persistence and retry backoff; withdrawal has
+// its separate 800 ms bound.
+const PAIR_BOUND: Duration = Duration::from_secs(12);
 
 pub(super) struct Pause {
     armed: Arc<AtomicBool>,
@@ -140,6 +141,12 @@ async fn patch_pair(fields: bool, patch_first: bool) {
         edit_pause.arm();
         let active = shared_holder(&api, &holder_pause).await;
         let waiting = watch_admission(&api);
+        let (resume_bind, resumed_bind) = std::sync::mpsc::channel();
+        let drained = Arc::new((
+            tokio::sync::Notify::new(),
+            std::sync::Mutex::new(resumed_bind),
+        ));
+        api.state.oauth_sessions().overrides().bind_before_file = Some(drained.clone());
         if !patch_first {
             deliver(&api, &session, "codex", issued());
             tokio::time::timeout(Duration::from_secs(2), waiting.notified())
@@ -170,7 +177,14 @@ async fn patch_pair(fields: bool, patch_first: bool) {
         }
         holder_pause.resume();
         let joining = tokio::task::spawn_blocking(move || active.join().unwrap());
+        // Establish the cycle precondition: R has drained while PATCH still
+        // owns M. PATCH cannot finish its shared mutation until R withdraws.
+        tokio::time::timeout(PAIR_BOUND, drained.0.notified())
+            .await
+            .unwrap();
+        api.state.oauth_sessions().overrides().bind_before_file = None;
         edit_pause.resume();
+        resume_bind.send(()).unwrap();
         let result = tokio::time::timeout(PAIR_BOUND, async {
             let (response, (), joined) =
                 tokio::join!(&mut patch, completed(&api, &session), joining);
