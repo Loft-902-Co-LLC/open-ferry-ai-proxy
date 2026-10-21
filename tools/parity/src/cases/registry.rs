@@ -488,6 +488,7 @@ pub fn streams() -> Vec<Case> {
     for client in ["openai", "claude"] {
         cases.push(through(argument_number_text(), "gemini", client, json!({})));
     }
+    cases.push(unfinished_function_closures());
     cases
 }
 
@@ -589,4 +590,29 @@ fn null_original_request() -> Case {
     case.translated_request =
         r###"{"input":"hi","request":[{"model":"gpt-5"}],"model":"\u00a0"}"###.to_owned();
     case.with_options(json!({"from":"gemini", "to":"openai-response"}))
+}
+
+// Promoted from seed 5/random 5000: message_stop closes two unfinished calls.
+fn unfinished_function_closures() -> Case {
+    let mut case = Case::response(
+        "unfinished-function-closures",
+        r###""###,
+        vec![
+            r###"data: {"type":"message_start","message":{"id":"msg_zo4pmAlZAXC4","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"stop_reason":null,"usage":{"cache_creation_input_tokens":null}}}"###.to_owned(),
+            r###"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"###.to_owned(),
+            r###"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 　x-anthropic-billing-header: unicode spaces"}}"###.to_owned(),
+            r###"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}"###.to_owned(),
+            r###"data: {"type":"content_block_stop","index":0}"###.to_owned(),
+            r###"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01QcQ6A0DtMoeC7WXtBsKK","name":"","input":{}}}"###.to_owned(),
+            r###" data: {"type":"content_block_stop","index":1}"###.to_owned(),
+            r###"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_01vaa1rUy0HLq3MPLMV7fh","name":"Read","input":{}}}"###.to_owned(),
+            r###"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"café 🚀\",\"n\":1"}}"###.to_owned(),
+            r###"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":".50}"}}"###.to_owned(),
+            r###"data: {"type":"content_block_stop","index":2}"###.to_owned(),
+            r###"data: {"type":"message_delta","delta":{"stop_reason":"sensitive"},"usage":{"input_tokens":23310,"output_tokens":41537,"cache_creation_input_tokens":-7}}"###.to_owned(),
+            r###"data: {"type":"message_stop"}"###.to_owned(),
+        ],
+    );
+    case.model = r###"claude-sonnet-4-5-20250929"###.to_owned();
+    case.with_options(json!({"from":"claude", "to":"openai-response"}))
 }

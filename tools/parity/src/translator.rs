@@ -1,6 +1,8 @@
 //! The translators under test, run on our side, and how to read each one's
 //! output as JSON so ours and upstream's can be compared.
 
+mod claude_closures;
+
 use std::cell::OnceCell;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1763,6 +1765,7 @@ impl Translator {
             }
             Self::ClaudeResponsesStream => {
                 let mut frames = sse_frames(&text);
+                claude_closures::normalize(&mut frames);
                 for frame in frames.as_array_mut().into_iter().flatten() {
                     if let Some(response) = frame.pointer_mut("/data/response") {
                         mask_time_now(response, "created_at");
@@ -2029,7 +2032,24 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
             chunks.len().into()
         }
     };
-    let shapes: Vec<Value> = events.iter().map(|chunks| shape(chunks)).collect();
+    let shapes: Vec<Value> = events
+        .iter()
+        .enumerate()
+        .map(|(i, chunks)| {
+            if matches!(native, Some(Translator::ClaudeResponsesStream))
+                && case.events.get(i).is_some_and(|event| {
+                    event
+                        .strip_prefix("data: ")
+                        .and_then(|text| exact::from_str(text).ok())
+                        .is_some_and(|event| event["type"] == "message_stop")
+                })
+                && let Some(shape) = claude_closures::chunk_shape(chunks)
+            {
+                return shape;
+            }
+            shape(chunks)
+        })
+        .collect();
     value.as_array_mut()?.push(json!({ "registry": {
         "chunks": shapes,
         "finish": shape(&finish),
