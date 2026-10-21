@@ -453,7 +453,7 @@ test("saves every setting through its own route", async () => {
 
   const saved: [RegExp, string][] = [
     [/^ *proxy-url: "?https:\/\/127\.0\.0\.1:9"?$/m, "the new proxy"],
-    [/^routing:\n(?: +.*\n)*? +strategy: "?fill-first"?$/m, "routing.strategy: fill-first"],
+    [/^routing:\n(?: [^\n]*\n)*? +strategy: "?fill-first"?$/m, "routing.strategy: fill-first"],
     [/^ *request-retry: 4\b/m, "request-retry: 4"],
     [/^ *max-retry-credentials: 2$/m, "max-retry-credentials: 2"],
     [/^ *max-retry-interval: 7$/m, "max-retry-interval: 7"],
