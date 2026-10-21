@@ -136,8 +136,8 @@ function Install-OpenFerry {
     }
     # Emit the small native wrapper in memory: Add-Type can invoke a compiler
     # using the account's TEMP on PowerShell 5.1, even in an elevated terminal.
-    if (-not ('OpenFerryInstallerNative' -as [type])) {
-        $name = [Reflection.AssemblyName]::new('OpenFerryInstallerNative')
+    if (-not ('OpenFerryInstallerNativeV2' -as [type])) {
+        $name = [Reflection.AssemblyName]::new('OpenFerryInstallerNativeV2')
         if ($PSVersionTable.PSEdition -eq 'Core') {
             $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($name, 'Run')
         } else {
@@ -153,9 +153,16 @@ function Install-OpenFerry {
             @('CloseHandle', 'kernel32.dll', [type[]]@([IntPtr]))
         )
         foreach ($method in $methods) {
-            $native = $type.DefinePInvokeMethod($method[0], $method[1], 'Public, Static, PinvokeImpl',
-                'Standard', [bool], $method[2], 'Winapi', 'Unicode')
+            $native = $type.DefineMethod($method[0], 'Public, Static, PinvokeImpl', [bool], $method[2])
             $native.SetImplementationFlags('PreserveSig')
+            $dllImport = [Runtime.InteropServices.DllImportAttribute]
+            $attribute = [Reflection.Emit.CustomAttributeBuilder]::new(
+                $dllImport.GetConstructor([type[]]@([string])), [object[]]@($method[1]),
+                [Reflection.FieldInfo[]]@($dllImport.GetField('SetLastError'), $dllImport.GetField('CharSet'),
+                    $dllImport.GetField('CallingConvention'), $dllImport.GetField('ExactSpelling')),
+                [object[]]@($true, [Runtime.InteropServices.CharSet]::Unicode,
+                    [Runtime.InteropServices.CallingConvention]::Winapi, $true))
+            $native.SetCustomAttribute($attribute)
         }
         $null = $type.CreateType()
     }
@@ -169,17 +176,17 @@ function Install-OpenFerry {
     [Runtime.InteropServices.Marshal]::WriteIntPtr($tokenOut, [IntPtr]::Zero)
     try {
         # -1 is GetCurrentProcess's pseudo-handle; TOKEN_QUERY is 8.
-        if (-not [OpenFerryInstallerNative]::OpenProcessToken([IntPtr](-1), 8, $tokenOut)) {
+        if (-not [OpenFerryInstallerNativeV2]::OpenProcessToken([IntPtr](-1), 8, $tokenOut)) {
             throw 'Could not open this process''s token.'
         }
         $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
-        if (-not [OpenFerryInstallerNative]::GetTokenInformation($token, 20, $elevation, 4, $size)) {
+        if (-not [OpenFerryInstallerNativeV2]::GetTokenInformation($token, 20, $elevation, 4, $size)) {
             throw 'Could not read whether this process is elevated.'
         }
         $reallyPrivileged = [Runtime.InteropServices.Marshal]::ReadInt32($elevation) -ne 0 -or $identity.User.Value -eq 'S-1-5-18'
     } finally {
         $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
-        if ($token -ne [IntPtr]::Zero) { $null = [OpenFerryInstallerNative]::CloseHandle($token) }
+        if ($token -ne [IntPtr]::Zero) { $null = [OpenFerryInstallerNativeV2]::CloseHandle($token) }
         [Runtime.InteropServices.Marshal]::FreeHGlobal($tokenOut)
         [Runtime.InteropServices.Marshal]::FreeHGlobal($size)
         [Runtime.InteropServices.Marshal]::FreeHGlobal($elevation)
@@ -250,39 +257,108 @@ function Install-OpenFerry {
     if (-not $System -and $privileged) {
         throw 'an account install must not run as administrator. Run it in a terminal not opened as administrator, or install open-ferry for the whole machine with `install.ps1 -System`.'
     }
+    function Get-OwnerTokenBuffer([IntPtr]$Token, [uint32]$Kind) {
+        $size = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
+        $buffer = [IntPtr]::Zero
+        try {
+            [Runtime.InteropServices.Marshal]::WriteInt32($size, 0)
+            $null = [OpenFerryInstallerNativeV2]::GetTokenInformation($Token, $Kind, [IntPtr]::Zero, 0, $size)
+            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            $length = [Runtime.InteropServices.Marshal]::ReadInt32($size)
+            if ($errorCode -ne 122 -or $length -le 0) {
+                throw "Could not size owner-setup token information (Win32 error $errorCode); refusing the machine install."
+            }
+            $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal($length)
+            if (-not [OpenFerryInstallerNativeV2]::GetTokenInformation($Token, $Kind, $buffer, $length, $size)) {
+                throw "Could not read owner-setup token information (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())); refusing the machine install."
+            }
+            $result = $buffer
+            $buffer = [IntPtr]::Zero
+            return $result
+        } finally {
+            if ($buffer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer) }
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($size)
+        }
+    }
+    function Test-AdminOwnerEligible([IntPtr]$Groups) {
+        # TOKEN_GROUPS starts with a DWORD, then pointer-aligned SID_AND_ATTRIBUTES.
+        $count = [Runtime.InteropServices.Marshal]::ReadInt32($Groups)
+        $stride = 2 * [IntPtr]::Size
+        for ($index = 0; $index -lt $count; $index++) {
+            $entry = [IntPtr]::Add($Groups, [IntPtr]::Size + $index * $stride)
+            $sid = [Security.Principal.SecurityIdentifier]::new([Runtime.InteropServices.Marshal]::ReadIntPtr($entry))
+            $attributes = [Runtime.InteropServices.Marshal]::ReadInt32($entry, [IntPtr]::Size)
+            # SE_GROUP_ENABLED (4) and SE_GROUP_OWNER (8) must both be present.
+            if ($sid.Value -eq 'S-1-5-32-544' -and ($attributes -band 12) -eq 12) { return $true }
+        }
+        return $false
+    }
     function Initialize-AdminOwner {
-        # An elevated token can default to the account SID (notably RID 500).
-        # Set the primary token's creation owner before any staging or child
-        # process: install-self and init must create machine-owned files too.
-        $admin = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-        $bytes = [byte[]]::new($admin.BinaryLength)
-        $admin.GetBinaryForm($bytes, 0)
-        $sid = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
-        $owner = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
+        # Elevation alone does not imply an owner-eligible Administrators group.
+        # Keep the query handle read-only until the group check succeeds.
+        $token = [IntPtr]::Zero
+        $groups = [IntPtr]::Zero
+        $originalOwner = [IntPtr]::Zero
+        $sid = [IntPtr]::Zero
+        $owner = [IntPtr]::Zero
+        $keepState = $false
         $tokenOut = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
         [Runtime.InteropServices.Marshal]::WriteIntPtr($tokenOut, [IntPtr]::Zero)
         try {
+            if (-not [OpenFerryInstallerNativeV2]::OpenProcessToken([IntPtr](-1), 8, $tokenOut)) {
+                throw "Could not open the owner-setup process token (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())); refusing the machine install."
+            }
+            $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
+            $groups = Get-OwnerTokenBuffer $token 2 # TokenGroups
+            if (-not (Test-AdminOwnerEligible $groups)) { return $null }
+            $null = [OpenFerryInstallerNativeV2]::CloseHandle($token)
+            $token = [IntPtr]::Zero
+            # TOKEN_QUERY | TOKEN_ADJUST_DEFAULT; TokenOwner is 4.
+            if (-not [OpenFerryInstallerNativeV2]::OpenProcessToken([IntPtr](-1), 0x88, $tokenOut)) {
+                throw "Could not open the elevated process token to set its default owner (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())); refusing the machine install."
+            }
+            $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
+            # This buffer owns the original SID too; keep it live until restoration.
+            $originalOwner = Get-OwnerTokenBuffer $token 4
+            $admin = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+            $bytes = [byte[]]::new($admin.BinaryLength)
+            $admin.GetBinaryForm($bytes, 0)
+            $sid = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+            $owner = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
             [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $sid, $bytes.Length)
             [Runtime.InteropServices.Marshal]::WriteIntPtr($owner, $sid)
-            # TOKEN_ADJUST_DEFAULT is 0x80; TokenOwner is 4. Windows requires
-            # Administrators to be an owner-eligible group in this token.
-            if (-not [OpenFerryInstallerNative]::OpenProcessToken([IntPtr](-1), 0x80, $tokenOut)) {
-                throw 'Could not open the elevated process token to set its default owner; refusing the machine install.'
+            $state = @{ Token = $token; OwnerBuffer = $originalOwner }
+            if (-not [OpenFerryInstallerNativeV2]::SetTokenInformation($token, 4, $owner, [IntPtr]::Size)) {
+                throw "Could not set the elevated process default owner to Administrators (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())); refusing the machine install."
             }
-            $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
-            if (-not [OpenFerryInstallerNative]::SetTokenInformation($token, 4, $owner, [IntPtr]::Size)) {
-                throw 'Could not set the elevated process default owner to Administrators; refusing the machine install.'
-            }
+            $keepState = $true
+            return $state
         } finally {
-            $token = [Runtime.InteropServices.Marshal]::ReadIntPtr($tokenOut)
-            if ($token -ne [IntPtr]::Zero) { $null = [OpenFerryInstallerNative]::CloseHandle($token) }
+            if (-not $keepState) {
+                if ($token -ne [IntPtr]::Zero) { $null = [OpenFerryInstallerNativeV2]::CloseHandle($token) }
+                if ($originalOwner -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($originalOwner) }
+            }
             [Runtime.InteropServices.Marshal]::FreeHGlobal($tokenOut)
-            [Runtime.InteropServices.Marshal]::FreeHGlobal($owner)
-            [Runtime.InteropServices.Marshal]::FreeHGlobal($sid)
+            if ($groups -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($groups) }
+            if ($owner -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($owner) }
+            if ($sid -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($sid) }
         }
     }
+    function Restore-AdminOwner($State) {
+        try {
+            if (-not [OpenFerryInstallerNativeV2]::SetTokenInformation($State.Token, 4, $State.OwnerBuffer, [IntPtr]::Size)) {
+                throw "Could not restore the process default owner (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))."
+            }
+        } finally {
+            $null = [OpenFerryInstallerNativeV2]::CloseHandle($State.Token)
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($State.OwnerBuffer)
+        }
+    }
+    $ownerState = $null
+    # Keep the changed owner for all staging and children, even install-self/init.
+    try {
     if ($hardened -and $reallyPrivileged -and $testSid -ne 'S-1-5-18') {
-        Initialize-AdminOwner
+        $ownerState = Initialize-AdminOwner
     }
     # A 32-bit PowerShell on 64-bit Windows sees x86 here and the machine's
     # architecture in PROCESSOR_ARCHITEW6432.
@@ -510,7 +586,7 @@ function Install-OpenFerry {
             [Runtime.InteropServices.Marshal]::WriteInt32($attributes, 0, $length)
             [Runtime.InteropServices.Marshal]::WriteIntPtr($attributes, $pointerOffset, $descriptor)
             [Runtime.InteropServices.Marshal]::WriteInt32($attributes, 2 * $pointerOffset, 0)
-            if (-not [OpenFerryInstallerNative]::CreateDirectoryW($Path, $attributes)) {
+            if (-not [OpenFerryInstallerNativeV2]::CreateDirectoryW($Path, $attributes)) {
                 throw "Couldn't create a new protected directory at $Path"
             }
         } finally {
@@ -542,7 +618,7 @@ function Install-OpenFerry {
     # Create-new, including if another process races us; never adopt a directory.
     if ($privileged) {
         New-ProtectedDirectory $tmp
-    } elseif (-not [OpenFerryInstallerNative]::CreateDirectoryW($tmp, [IntPtr]::Zero)) {
+    } elseif (-not [OpenFerryInstallerNativeV2]::CreateDirectoryW($tmp, [IntPtr]::Zero)) {
         throw "Couldn't create a new staging directory at $tmp"
     }
     try {
@@ -938,6 +1014,14 @@ function Install-OpenFerry {
         }
     }
     if ($switchFailed) { throw $switchFailed }
+    } finally {
+        if ($null -ne $ownerState) {
+            try { Restore-AdminOwner $ownerState } catch {
+                # Restoration must not replace the install's own result or exception.
+                Write-Warning "Installer owner restoration failed: $($_.Exception.Message)" -WarningAction Continue
+            }
+        }
+    }
 }
 
 try {

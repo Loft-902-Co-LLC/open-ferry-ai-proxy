@@ -23,8 +23,8 @@ use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetTokenInformation,
     OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SetTokenInformation,
-    TOKEN_ADJUST_DEFAULT, TOKEN_ELEVATION, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenElevation,
-    TokenOwner, TokenUser,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+    TokenElevation, TokenGroups, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -44,6 +44,9 @@ pub(crate) const SID_ADMINISTRATORS: &str = "S-1-5-32-544";
 const SID_TRUSTED_INSTALLER: &str =
     "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 const SID_CREATOR_OWNER: &str = "S-1-3-0";
+// TOKEN_GROUPS attributes from winnt.h.
+const SE_GROUP_ENABLED: u32 = 0x4;
+const SE_GROUP_OWNER: u32 = 0x8;
 
 /// The protected DACL of a system service's data directory: full control for SYSTEM and
 /// Administrators, inherited by what is created inside.
@@ -52,7 +55,8 @@ const SYSTEM_DATA_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 /// Makes objects created by an elevated administrator belong to Administrators,
 /// including when the token defaults to the account itself (for example RID 500).
 /// Call at process startup, before creating files or starting threads/children.
-/// SYSTEM and unelevated tokens are left unchanged. This changes creation defaults,
+/// SYSTEM, unelevated tokens and tokens without an eligible Administrators group
+/// are left unchanged. This changes creation defaults,
 /// never the trust rules or the owner of an existing object.
 pub fn initialize_admin_owner() -> io::Result<()> {
     if current_user_sid()? == SID_SYSTEM {
@@ -83,16 +87,76 @@ pub fn initialize_admin_owner() -> io::Result<()> {
     if elevation.TokenIsElevated == 0 {
         return Ok(());
     }
-    let mut writable: HANDLE = ptr::null_mut();
-    // Request adjustment only after proving elevation; user installs need no such access.
-    // SAFETY: the process pseudo-handle and the out-pointer are valid.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &mut writable) } == 0 {
+    with_eligible_admin_owner(token.as_raw_handle(), || {
+        let mut writable: HANDLE = ptr::null_mut();
+        // Request adjustment only after proving eligibility; other tokens need no such access.
+        // SAFETY: the process pseudo-handle and the out-pointer are valid.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &mut writable) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the freshly opened handle has no other owner.
+        let writable = unsafe { OwnedHandle::from_raw_handle(writable) };
+        let descriptor = SecurityDescriptor::from_sddl("O:BA")?;
+        set_default_owner(writable.as_raw_handle(), &descriptor)
+    })
+}
+
+fn with_eligible_admin_owner(
+    token: HANDLE,
+    adjust: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    if !token_has_admin_owner(token)? {
+        return Ok(());
+    }
+    adjust()
+}
+
+fn admin_owner_eligible<'a>(groups: impl IntoIterator<Item = (&'a str, u32)>) -> bool {
+    groups.into_iter().any(|(sid, attributes)| {
+        sid == SID_ADMINISTRATORS
+            && attributes & (SE_GROUP_ENABLED | SE_GROUP_OWNER) == SE_GROUP_ENABLED | SE_GROUP_OWNER
+    })
+}
+
+fn token_has_admin_owner(token: HANDLE) -> io::Result<bool> {
+    let mut needed = 0;
+    // SAFETY: a null buffer asks for the size of this token's groups.
+    unsafe { GetTokenInformation(token, TokenGroups, ptr::null_mut(), 0, &mut needed) };
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
+        return Err(error);
+    }
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+    // SAFETY: the aligned buffer has at least `needed` bytes and remains live.
+    if unsafe {
+        GetTokenInformation(
+            token,
+            TokenGroups,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: the freshly opened handle has no other owner.
-    let writable = unsafe { OwnedHandle::from_raw_handle(writable) };
-    let descriptor = SecurityDescriptor::from_sddl("O:BA")?;
-    set_default_owner(writable.as_raw_handle(), &descriptor)
+    let groups = buffer.as_ptr().cast::<TOKEN_GROUPS>();
+    // SAFETY: the successful query returned the counted, aligned array and all
+    // SID pointers inside our still-live buffer, including the flexible tail.
+    let groups = unsafe {
+        std::slice::from_raw_parts((*groups).Groups.as_ptr(), (*groups).GroupCount as usize)
+    };
+    let groups = groups
+        .iter()
+        .map(|group| sid_to_string(group.Sid).map(|sid| (sid, group.Attributes)))
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(admin_owner_eligible(
+        groups
+            .iter()
+            .map(|(sid, attributes)| (sid.as_str(), *attributes)),
+    ))
 }
 
 fn set_default_owner(token: HANDLE, descriptor: &SecurityDescriptor) -> io::Result<()> {
@@ -697,6 +761,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn admin_owner_requires_an_enabled_owner_eligible_administrators_group() {
+        let eligible = SE_GROUP_ENABLED | SE_GROUP_OWNER;
+        assert!(admin_owner_eligible([(SID_ADMINISTRATORS, eligible)]));
+        assert!(!admin_owner_eligible([]));
+        assert!(!admin_owner_eligible([(SID_SYSTEM, eligible)]));
+        assert!(!admin_owner_eligible([(
+            SID_ADMINISTRATORS,
+            SE_GROUP_ENABLED
+        )]));
+        assert!(!admin_owner_eligible([(
+            SID_ADMINISTRATORS,
+            SE_GROUP_OWNER
+        )]));
+    }
+
+    #[test]
+    fn a_restricted_token_without_enabled_administrators_skips_owner_adjustment() {
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, GetSecurityDescriptorOwner, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE,
+        };
+
+        let mut token = ptr::null_mut();
+        // SAFETY: valid process pseudo-handle and out-pointer.
+        assert_ne!(
+            unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                    &mut token,
+                )
+            },
+            0
+        );
+        // SAFETY: the fresh handle has no other owner.
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let descriptor = SecurityDescriptor::from_sddl("O:BA").unwrap();
+        let mut admin = ptr::null_mut();
+        let mut defaulted = 0;
+        // SAFETY: descriptor and output pointers remain live.
+        assert_ne!(
+            unsafe { GetSecurityDescriptorOwner(descriptor.as_ptr(), &mut admin, &mut defaulted) },
+            0
+        );
+        let disabled = SID_AND_ATTRIBUTES {
+            Sid: admin,
+            Attributes: 0,
+        };
+        let mut restricted = ptr::null_mut();
+        // SAFETY: all pointers and their counts match; Windows copies the SID.
+        assert_ne!(
+            unsafe {
+                CreateRestrictedToken(
+                    token.as_raw_handle(),
+                    0,
+                    1,
+                    &disabled,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    &mut restricted,
+                )
+            },
+            0
+        );
+        // SAFETY: the fresh handle has no other owner.
+        let restricted = unsafe { OwnedHandle::from_raw_handle(restricted) };
+        with_eligible_admin_owner(restricted.as_raw_handle(), || {
+            panic!("ineligible token attempted owner adjustment")
+        })
+        .unwrap();
+    }
+
+    fn assert_one_test(output: &std::process::Output) {
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+            "child must run exactly one test: {stdout}"
+        );
+    }
+
+    #[test]
+    fn exact_owner_child_must_not_pass_when_its_test_name_drifts() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "no_such_owner_regression_test"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(std::panic::catch_unwind(|| assert_one_test(&output)).is_err());
+    }
+
+    #[test]
     fn admin_owner_setup_and_children_create_trusted_machine_objects() {
         // Changing a primary token affects every thread: isolate this test from
         // the rest of the harness, including when cargo runs tests in parallel.
@@ -718,7 +877,7 @@ mod tests {
                 .env(CHILD, "1")
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "{output:?}");
+            assert_one_test(&output);
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
             return;
         }
@@ -779,8 +938,16 @@ mod tests {
             },
             0
         );
-        if me == SID_SYSTEM || elevation.TokenIsElevated == 0 {
+        if me == SID_SYSTEM
+            || elevation.TokenIsElevated == 0
+            || !token_has_admin_owner(token.as_raw_handle()).unwrap()
+        {
             assert_eq!(default_owner(), before);
+            assert_ne!(
+                std::env::var("OPEN_FERRY_REQUIRE_ELEVATED_OWNER_TESTS").as_deref(),
+                Ok("1"),
+                "CI requires an elevated non-SYSTEM token with an owner-eligible Administrators group"
+            );
             eprintln!(
                 "owner creation assertions skipped: requires an elevated non-SYSTEM token; default owner unchanged"
             );
@@ -815,7 +982,7 @@ mod tests {
             .env(WRITE_CHILD, &directory)
             .output()
             .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        assert_one_test(&output);
         for path in [
             &directory,
             &file,

@@ -3315,15 +3315,7 @@ class PowerShell7Tests(InstallPs1Cases, Case):
 
 @unittest.skipUnless(WINDOWS, "Windows elevation guard")
 class InstallerPrivilegeGuardTests(unittest.TestCase):
-    def test_native_owner_method_compiles_without_running_the_installer(self):
-        source = read_text(INSTALL_PS1)
-        start = source.index("    if (-not ('OpenFerryInstallerNative' -as [type])) {")
-        end = source.index("    # Same rule as scope::Host", start)
-        command = source[start:end] + "\n" + (
-            "$method = [OpenFerryInstallerNative].GetMethod('SetTokenInformation'); "
-            "if ($null -eq $method -or $method.ReturnType -ne [bool] -or "
-            "$method.GetParameters().Count -ne 4) { throw 'Invalid owner P/Invoke' }"
-        )
+    def run_powershells(self, command):
         shells = [shell for shell in (POWERSHELL, PWSH) if shell]
         if not shells:
             self.skipTest("no Windows PowerShell")
@@ -3335,14 +3327,116 @@ class InstallerPrivilegeGuardTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_native_owner_method_survives_a_stale_installer_type_and_captures_errors(self):
+        source = read_text(INSTALL_PS1)
+        start = source.index("    if (-not ('OpenFerryInstallerNativeV2' -as [type])) {")
+        end = source.index("    # Same rule as scope::Host", start)
+        # Reproduce an older installer already loaded in the caller's session.
+        command = "Add-Type 'public static class OpenFerryInstallerNative { public static bool GetTokenInformation() { return false; } }';\n" + source[start:end] + r"""
+$ErrorActionPreference = 'Stop'
+$method = [OpenFerryInstallerNativeV2].GetMethod('SetTokenInformation')
+if ($null -eq $method -or $method.ReturnType -ne [bool] -or
+    $method.GetParameters().Count -ne 4) { throw 'Invalid owner P/Invoke' }
+foreach ($method in [OpenFerryInstallerNativeV2].GetMethods()) {
+    $attribute = $method.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false)
+    if ($attribute.Count -and -not $attribute[0].SetLastError) { throw 'Missing SetLastError' }
+}
+if ([OpenFerryInstallerNativeV2]::SetTokenInformation([IntPtr]::Zero, 4, [IntPtr]::Zero, 0)) {
+    throw 'An invalid token unexpectedly succeeded'
+}
+if ([Runtime.InteropServices.Marshal]::GetLastWin32Error() -ne 6) { throw 'Missing Win32 error' }
+"""
+        self.run_powershells(command)
+
     def test_real_machine_owner_is_initialized_before_creating_staging_or_children(self):
         source = read_text(INSTALL_PS1).replace("\r\n", "\n")
-        guard = "if ($hardened -and $reallyPrivileged -and $testSid -ne 'S-1-5-18') {\n        Initialize-AdminOwner\n    }"
+        guard = "if ($hardened -and $reallyPrivileged -and $testSid -ne 'S-1-5-18') {\n        $ownerState = Initialize-AdminOwner\n    }"
         owner = source.index(guard)
         self.assertLess(source.index("an account install must not run as administrator"), owner)
         self.assertLess(owner, source.index("Initialize-InstallDirectory $InstallDir"))
         self.assertLess(owner, source.index("[System.IO.FileMode]::CreateNew"))
         self.assertLess(owner, source.index("[System.Diagnostics.Process]::Start($info)"))
+        setup = source[source.index("    function Initialize-AdminOwner {"):owner]
+        self.assertLess(setup.index("Test-AdminOwnerEligible $groups"), setup.index("0x88, $tokenOut"))
+        self.assertLess(setup.index("$originalOwner = Get-OwnerTokenBuffer $token 4"),
+                        setup.index("::SetTokenInformation($token, 4"))
+
+    def test_owner_restoration_finally_covers_staging_and_all_children(self):
+        path = INSTALL_PS1.replace("'", "''")
+        self.run_powershells(r"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('__INSTALL__', [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Installer did not parse' }
+$function = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Install-OpenFerry'
+}, $true)
+$outer = @($function.Body.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.TryStatementAst] -and
+    $_.Body.Extent.Text.Contains('$ownerState = Initialize-AdminOwner')
+})
+if ($outer.Count -ne 1 -or $null -eq $outer[0].Finally) { throw 'Missing owner lifetime try/finally' }
+$body = $outer[0].Body.Extent.Text
+foreach ($required in @('Initialize-InstallDirectory $InstallDir', '[System.IO.FileMode]::CreateNew',
+    '[System.Diagnostics.Process]::Start($info)', 'Invoke-Native { & $exe @initArgs }',
+    'Invoke-Native { & $exe update', 'if ($switchFailed) { throw $switchFailed }')) {
+    if (-not $body.Contains($required)) { throw "Owner lifetime does not cover $required" }
+}
+$cleanup = $outer[0].Finally.Extent.Text
+$cleanup = $cleanup.Substring(1, $cleanup.Length - 2)
+if (-not $cleanup.Contains('Restore-AdminOwner $ownerState')) { throw 'Missing restore' }
+# Exercise the actual cleanup block with harmless mocks, never an installer/token change.
+foreach ($installFails in @($false, $true)) {
+    foreach ($restoreFails in @($false, $true)) {
+        $events = [Collections.Generic.List[string]]::new()
+        function Restore-AdminOwner($State) {
+            $events.Add('restore')
+            if ($restoreFails) { throw 'synthetic restore failure' }
+        }
+        $ownerState = @{ Token = 'synthetic' }
+        $WarningPreference = 'Stop'
+        $result = 'success'
+        try {
+            try { if ($installFails) { throw 'synthetic install failure' } }
+            finally { & ([scriptblock]::Create($cleanup)) }
+        } catch { $result = $_.Exception.Message }
+        if ($events.Count -ne 1) { throw 'Owner not restored exactly once' }
+        $expected = 'success'
+        if ($installFails) { $expected = 'synthetic install failure' }
+        if ($result -ne $expected) { throw 'Restoration masked the install result' }
+    }
+}
+""".replace("__INSTALL__", path))
+
+    def test_installer_admin_owner_eligibility_uses_enabled_and_owner_flags(self):
+        source = read_text(INSTALL_PS1)
+        start = source.index("    function Test-AdminOwnerEligible(")
+        end = source.index("    function Initialize-AdminOwner {", start)
+        self.run_powershells(source[start:end] + r"""
+$ErrorActionPreference = 'Stop'
+foreach ($case in @(@('S-1-5-32-544', 12, $true), @('S-1-5-18', 12, $false),
+    @('S-1-5-32-544', 4, $false), @('S-1-5-32-544', 8, $false), @('', 0, $false))) {
+    $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal(3 * [IntPtr]::Size)
+    $sidBuffer = [IntPtr]::Zero
+    try {
+        [Runtime.InteropServices.Marshal]::WriteInt32($buffer, 0)
+        if ($case[0]) {
+            $sid = [Security.Principal.SecurityIdentifier]::new($case[0])
+            $bytes = [byte[]]::new($sid.BinaryLength)
+            $sid.GetBinaryForm($bytes, 0)
+            $sidBuffer = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+            [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $sidBuffer, $bytes.Length)
+            [Runtime.InteropServices.Marshal]::WriteInt32($buffer, 1)
+            [Runtime.InteropServices.Marshal]::WriteIntPtr($buffer, [IntPtr]::Size, $sidBuffer)
+            [Runtime.InteropServices.Marshal]::WriteInt32($buffer, 2 * [IntPtr]::Size, $case[1])
+        }
+        if ((Test-AdminOwnerEligible $buffer) -ne $case[2]) { throw 'Incorrect owner eligibility' }
+    } finally {
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer)
+        if ($sidBuffer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($sidBuffer) }
+    }
+}
+""")
 
     def test_elevated_runners_skip_every_installer_seam(self):
         from unittest.mock import patch
