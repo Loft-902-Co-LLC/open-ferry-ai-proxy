@@ -86,6 +86,21 @@ impl Affinity {
         }
     }
 
+    /// Affinity with a smaller cache for selector-level eviction tests.
+    #[cfg(test)]
+    pub(crate) fn with_capacity(ttl: Duration, subagents: bool, max_entries: usize) -> Self {
+        let ttl = if ttl.is_zero() {
+            Duration::from_secs(60 * 60)
+        } else {
+            ttl
+        };
+        Self {
+            cache: SessionCache::with_capacity(ttl, max_entries),
+            subagents,
+            rebind_on_quota_only: false,
+        }
+    }
+
     /// Whether transient failovers preserve the binding.
     pub(super) fn rebind_on_quota_only(&self) -> bool {
         self.rebind_on_quota_only
