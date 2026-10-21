@@ -101,6 +101,20 @@ fn v8_normalization_preserves_scalar_and_single_quoted_key_styles() {
     assert!(out.contains("map: {}"), "{out}");
 }
 
+// A dashboard YAML save may consist only of a new trailing comment. The
+// replacement's document comments must replace the old document's too.
+#[test]
+fn whole_yaml_put_keeps_the_replacement_document_comments() {
+    let out = rendered(
+        "config-version: 8\nserver: {port: 18517}\n\n# old footer\n",
+        &put_yaml("# new heading\nconfig-version: 8\nserver: {port: 18517}\n\n# new footer\n"),
+    )
+    .expect("put yaml");
+    assert!(out.contains("# new heading"));
+    assert!(out.contains("# new footer"));
+    assert!(!out.contains("# old footer"));
+}
+
 /// A `method` edit of the keys of `path` split on `/` (the whole config
 /// when empty), with the JSON `body`.
 fn edit(method: V8Method, path: &str, body: &str) -> V8Edit {
