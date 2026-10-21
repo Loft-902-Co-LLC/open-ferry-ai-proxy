@@ -74,7 +74,7 @@ use super::v8 as loader_v8;
 use super::yaml as loader_yaml;
 use super::yaml3::compose::{self, YamlError};
 use super::yaml3::encode;
-use super::yaml3::{Kind, MAP_TAG, NULL_TAG, STR_TAG};
+use super::yaml3::{Kind, MAP_TAG, NULL_TAG, STR_TAG, Style};
 
 // The tree operations the v8 config edits ([`super::v8_edit`]) build on.
 pub(crate) use super::yaml3::Node;
@@ -546,12 +546,40 @@ pub(crate) fn render_preserving_comments(
         }
     }
     merge::normalize_collection_node_styles(root);
+    if let Some(configs) = yaml_path_mut(root, "plugins.configs") {
+        protect_plugin_block_scalars(configs);
+    }
 
     let mut out = normalize_comment_indentation(&marshal_config(&original)?);
     if migrating {
         out = normalize_config_layout(&out, true)?.0;
     }
     Ok(out)
+}
+
+/// Keep retained plugin data out of NormalizeCommentIndentation's way.
+/// yaml.v3 emits continuation lines of a block scalar's line comment into
+/// its body. Re-reading that changes the value; left-aligning the comment
+/// can also strand the body's remaining lines. Quoting that scalar keeps
+/// its value and every comment, without rebuilding the plugin subtree.
+fn protect_plugin_block_scalars(node: &mut Node) {
+    if node.kind == Kind::Scalar
+        && node.style.has(Style::LITERAL | Style::FOLDED)
+        && (node.line_comment.contains('\n')
+            || node
+                .value
+                .lines()
+                .any(|line| line.trim_start().starts_with('#')))
+    {
+        node.style = if node.style.has(Style::TAGGED) {
+            Style::TAGGED | Style::DOUBLE_QUOTED
+        } else {
+            Style::DOUBLE_QUOTED
+        };
+    }
+    for child in &mut node.content {
+        protect_plugin_block_scalars(child);
+    }
 }
 
 /// The bytes [`update_nested_scalar`] writes for the file `data`.
@@ -637,6 +665,124 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).unwrap(),
             fixture["expected"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_plugin_scalars_and_comments_survive_saving() {
+        let fixtures: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../testdata/plugin-lossy-reencode-save.json"))
+                .unwrap();
+        fn data(node: &Node) -> serde_json::Value {
+            serde_json::json!([
+                format!("{:?}", node.kind),
+                node.tag,
+                node.value,
+                node.content.iter().map(data).collect::<Vec<_>>()
+            ])
+        }
+        fn comments(node: &Node, out: &mut Vec<String>) {
+            for comment in [&node.head_comment, &node.line_comment, &node.foot_comment] {
+                out.extend(comment.lines().map(str::to_owned));
+            }
+            for child in &node.content {
+                comments(child, out);
+            }
+        }
+        fn settings(mut cfg: Config) -> Config {
+            // A migration records OAuth scope on reload; it also sorts map
+            // entries. Neither changes the configured values being checked.
+            cfg.oauth_only_fields.clear();
+            for rules in [
+                &mut cfg.payload.default,
+                &mut cfg.payload.default_raw,
+                &mut cfg.payload.r#override,
+                &mut cfg.payload.override_raw,
+            ] {
+                for rule in rules {
+                    rule.params.sort_by(|a, b| a.0.cmp(&b.0));
+                }
+            }
+            cfg
+        }
+        for case in &fixtures {
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            let source = case["options"]["file"].as_str().unwrap();
+            fs::write(&path, source).unwrap();
+            let original = expand_config_aliases(&root(source.as_bytes())).unwrap();
+            let plugin = yaml_path(&original, "plugins.configs").unwrap();
+            let mut plugin_comments = Vec::new();
+            comments(plugin, &mut plugin_comments);
+            let mut outputs = Vec::new();
+            for step in case["options"]["steps"].as_array().unwrap() {
+                let before = fs::read_to_string(&path).unwrap();
+                let mut cfg = Config::parse(step["config"].as_str().unwrap_or(&before)).unwrap();
+                match step["op"].as_str().unwrap() {
+                    "save" => save_preserving_comments(
+                        &path,
+                        &cfg,
+                        step["migrate"].as_bool().unwrap_or(false),
+                    )
+                    .unwrap(),
+                    "nested" => {
+                        assert_eq!(step["keys"], serde_json::json!(["models", "catalog"]));
+                        let value = step["value"].as_str().unwrap();
+                        update_nested_scalar(&path, &["models", "catalog"], value).unwrap();
+                        cfg.models.catalog = value.to_owned();
+                    }
+                    op => panic!("unexpected fixture step {op}"),
+                }
+                let actual = fs::read_to_string(&path).unwrap();
+                assert_eq!(settings(Config::parse(&actual).unwrap()), settings(cfg));
+                let saved = root(actual.as_bytes());
+                assert_eq!(
+                    data(yaml_path(&saved, "plugins.configs").unwrap()),
+                    data(plugin)
+                );
+                for comment in &plugin_comments {
+                    let occurrences = actual
+                        .match_indices(comment)
+                        .filter(|(at, _)| {
+                            actual
+                                .get(at + comment.len()..)
+                                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
+                        })
+                        .count();
+                    assert_eq!(occurrences, 1, "{}: {comment}", case["case"]);
+                }
+                outputs.push(actual);
+            }
+            assert_eq!(
+                serde_json::json!({"files":outputs}),
+                case["open_ferry_output"]
+            );
+        }
+    }
+
+    #[test]
+    fn retained_plugin_block_scalar_encoding_preserves_data_and_comments() {
+        for style in [">-", "|-"] {
+            let source = format!("tags: &s # moved\n  - {style} # own\n    a\n  - b\n");
+            let mut doc = unmarshal(source.as_bytes()).unwrap();
+            doc.content[0] = expand_config_aliases(&doc.content[0]).unwrap();
+            protect_plugin_block_scalars(&mut doc);
+            assert_eq!(
+                normalize_comment_indentation(&marshal_config(&doc).unwrap()),
+                b"tags:\n  - \"a\" # moved\n# own\n  - b\n"
+            );
+        }
+        let mut doc = unmarshal(b"tags:\n  - |- # own\n    # data\n    a\n").unwrap();
+        protect_plugin_block_scalars(&mut doc);
+        assert_eq!(
+            normalize_comment_indentation(&marshal_config(&doc).unwrap()),
+            b"tags:\n  - \"# data\\na\" # own\n"
+        );
+        let mut doc = unmarshal(b"tags:\n  - >- # own\n    a\n").unwrap();
+        protect_plugin_block_scalars(&mut doc);
+        assert_eq!(
+            normalize_comment_indentation(&marshal_config(&doc).unwrap()),
+            b"tags:\n  - >- # own\n    a\n"
         );
     }
 
