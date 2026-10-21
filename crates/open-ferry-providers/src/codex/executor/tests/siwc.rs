@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth_test.go,
 // codex_executor_compact_test.go and
-// codex_executor_siwc_configuration_update_test.go (v8.0.32, MIT).
+// codex_executor_siwc_configuration_update_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use open_ferry_core::auth::codex_refresh::CodexPersistIntent;
@@ -512,7 +512,7 @@ async fn siwc_refresh_selective_dual_forced_and_disabled() {
 }
 
 #[tokio::test]
-async fn siwc_unexpired_unauthorized_refreshes_both_partitions_through_manager() {
+async fn siwc_unexpired_unauthorized_refreshes_only_rejected_partition_through_manager() {
     use open_ferry_core::exec::Dispatcher;
     use open_ferry_core::manager::{Manager, Settings};
     use open_ferry_core::models::ModelInfo;
@@ -585,15 +585,10 @@ async fn siwc_unexpired_unauthorized_refreshes_both_partitions_through_manager()
     .unwrap();
     server.abort();
     result.unwrap();
-    assert_eq!(outer.requests().len(), 1);
+    // A rejected SIWC bearer is due even with future expiry. The healthy
+    // outer partition must not be rotated by that rejection.
+    assert!(outer.requests().is_empty());
     assert_eq!(siwc.requests().len(), 1);
-    assert!(
-        outer
-            .last()
-            .body
-            .contains("refresh_token=outer-mock-refresh")
-    );
-    assert!(!outer.last().body.contains("+outer-mock-refresh"));
     let sent = seen.lock().unwrap();
     assert_eq!(sent.len(), 2);
     assert!(
@@ -608,9 +603,10 @@ async fn siwc_unexpired_unauthorized_refreshes_both_partitions_through_manager()
     );
     let updated = manager.get("unexpired-siwc-401").unwrap();
     assert_eq!(updated.siwc_token_field("access_token"), "new-siwc-access");
+    assert_eq!(updated.metadata_str("access_token"), Some("outer-unused"));
     assert_eq!(
-        updated.metadata_str("access_token"),
-        Some("new-mock-access-token")
+        updated.metadata_str("refresh_token"),
+        Some("  outer-mock-refresh  ")
     );
     assert!(updated.codex_refresh_failure.is_none());
 }

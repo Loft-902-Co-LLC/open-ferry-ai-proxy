@@ -2870,6 +2870,7 @@ impl Manager {
         let gate = self.mutation_gate();
         let now = self.now();
         let mut model_key = canonical_model_key(&result.model);
+        let schedule_unauthorized_refresh;
         let (snapshot, _epoch, generation, discard_epoch, pending) = {
             let mut guard = self.lock();
             let state = &mut *guard;
@@ -2890,6 +2891,7 @@ impl Manager {
                 }
             }
             let auth = Arc::make_mut(&mut entry.auth);
+            let was_terminal = has_unauthorized_auth_failure(auth);
             count_result(auth, result, now);
             // open-ferry's cap on long quota rests (see `quota_check`).
             let rests = state.quota_checks.live_rests(&auth.id, &model_key, now);
@@ -2905,6 +2907,8 @@ impl Manager {
                 rests,
             );
             let cap = state.settings.quota_check_after;
+            schedule_unauthorized_refresh =
+                super::refresh::schedule_unauthorized_refresh(auth, result, now, was_terminal);
             state
                 .quota_checks
                 .after_result(cap, auth, result, &model_key, now, stale);
@@ -2924,6 +2928,9 @@ impl Manager {
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
         self.publish_error_event(result, &snapshot);
+        if schedule_unauthorized_refresh {
+            self.queue_refresh_reschedule(&result.auth_id);
+        }
         true
     }
 
