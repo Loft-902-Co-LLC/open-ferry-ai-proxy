@@ -4,7 +4,7 @@ Both legacy and v8 YAML layouts are accepted. The v8 management API edits the v8
 
 | v8 path | Legacy path | Default and meaning |
 |---|---|---|
-| `server.max-request-body-bytes` | `max-request-body-bytes` | Integer, `0`. A positive value is the most bytes a request body may have, before and after decoding, and a larger one receives HTTP 413; it also bounds each Responses WebSocket message. A value <= 0 keeps open-ferry's default of 64 MiB, where upstream has no limit. |
+| `server.max-request-body-bytes` | `max-request-body-bytes` | Integer, `0`. A positive value is the most bytes a proxy request body may have, before and after decoding, and a larger one receives HTTP 413; it also bounds each Responses WebSocket message. A value <= 0 keeps open-ferry's default of 64 MiB, where upstream has no limit. |
 | `routing.session-affinity-rebind-on` | Same | String, effective default `any`. `quota` preserves the binding across transient failovers. See [routing](routing.md). |
 | `requests.streaming.send-keepalive-before-ft` | `streaming.send-keepalive-before-ft` | Boolean, `false`. Sends SSE heartbeats before the first token only when `keepalive-seconds` is positive. |
 | `upstream.claude.tool-search` | `claude.tool-search` | Boolean, `false`. Enables Codex client `tool_search` on Claude Responses routes. Official Anthropic credentials and trusted custom endpoints use native `defer_loading` and `tool_reference`; other credentials use the plain translation. The catalog advertises search only when every credential serving a Claude model supports native search. |
@@ -12,87 +12,99 @@ Both legacy and v8 YAML layouts are accepted. The v8 management API edits the v8
 | `api-keys.vertex[].keys[].interactions` | `vertex-api-key[].interactions` | Optional boolean, unset/false keeps the Gemini bridge. `true` sends Interactions requests to `/v1beta1/interactions` (streams add `?alt=sse`). Service-account credential JSON uses `interactions` at the root; opted-in accounts call `/v1beta1/projects/{project}/locations/global/interactions`, including accounts configured for a regional location, as upstream does. Explicit false remains explicit through a save. |
 | `oauth.providers.codex.signin-with-chatgpt-identifier` | `codex.signin-with-chatgpt-identifier` | String, empty. Accepted for configuration compatibility only: trimmed and saved; changes are reported without the value. It has no runtime effect. open-ferry always identifies itself as `open-ferry`. |
 
+These other switches' configuration contract is available for the v8.0.32 sync. Runtime behavior is wired by the corresponding provider and server changes.
+
 The compatibility-only `signin-with-chatgpt-identifier` has no runtime effect and warns once per load when set, without logging its value.
 
 ## Ingress limits (open-ferry additions)
 
 `server.ingress-limits` in v8, or top-level `ingress-limits` in legacy YAML,
-protects both the proxy and `management.separate-address`. Their defaults are the
-same; the buffered-byte budget is shared. Each field is an integer. Unset or `0`
-keeps its default, and `-1` (any negative value) disables that guard. Positive
-durations are seconds, capped at one year. These are additions to open-ferry;
-CLIProxyAPI's main Go HTTP server sets no such timeouts.
+protects both listeners. Each field is an integer: unset or `0` keeps its
+configured default; any negative value disables that guard. Positive timeout
+values are seconds (at most one year). Each worker has its own accounting.
 
-| Field | Default | Behavior |
-|---|---|---|
-| `max-connections` | OS-derived; 1024 on Windows | Concurrent accepted sockets per listener, including TLS handshakes and upgrades. At capacity, accepts wait and the kernel backlog queues clients. No excess socket is registered or duplicated. Capacity recovers when an IO owner closes. |
-| `header-timeout-seconds` | 30 | A complete first head is due after accept, or after TLS succeeds. HTTP/1 keep-alive counts from the preceding response's last bytes; therefore its effective idle wait is the smaller of this and `idle-timeout-seconds`. HTTP/2 also bounds each HEADERS/CONTINUATION block without resetting on fragments. |
-| `tls-handshake-timeout-seconds` | 10 | Inbound TLS only, independent of the compatibility-only outbound `requests.tls-handshake-timeout-seconds`. |
-| `idle-timeout-seconds` | 120 | No request/response in flight. HTTP/2 with no open streams sends graceful GOAWAY; CONNECT remains open until both stream halves finish. |
-| `body-idle-timeout-seconds` | 60 | A body with no new bytes gets 408 and closes. Empty data frames do not count as progress. |
-| `body-total-timeout-seconds` | 900 | Maximum whole upload time. This bounds clients trickling just faster than the progress timeout; it never limits the subsequent response or an upgraded stream. |
-| `buffered-body-bytes` | 268435456 (256 MiB) | Raw and decoded request-body storage across both listeners. A positive budget is at least the effective per-request body limit (64 MiB by default). |
-| `write-stall-timeout-seconds` | 120 | Output bytes waiting without progress, including HTTP/2 flow-control stalls. A producer waiting on its upstream has no pending output and no write-stall timer. |
+| Key | Configured default | Meaning |
+|---|---:|---|
+| `max-connections` | OS-derived | Per listener, including TLS and upgrades. At capacity, accepts wait in the kernel backlog; no extra socket is registered or duplicated. |
+| `header-timeout-seconds` | 30 | Complete first head after accept or TLS completion. H1 keepalive starts at the last response bytes, so its idle gap is the smaller of this and the idle timeout. H2 also limits each HEADERS/CONTINUATION block. |
+| `tls-handshake-timeout-seconds` | 10 | Inbound TLS, separate from the outbound compatibility setting. |
+| `idle-timeout-seconds` | 120 | No accepted request or upgraded H2 task remains. An idle H2 peer gets graceful GOAWAY. |
+| `body-idle-timeout-seconds` | 60 | No new upload bytes: 408 and close/drain. Empty DATA does not count as progress. |
+| `body-total-timeout-seconds` | 900 | Whole upload, preventing an indefinitely trickling body. It does not limit normal response streaming or upgrades. |
+| `buffered-body-bytes` | 268435456 (256 MiB) | Aggregate authenticated request storage, subject to the floor and management reserve below. |
+| `write-stall-timeout-seconds` | 120 | Pending output without progress. H2 resets only a stalled response stream with CANCEL while connection-level flow-control or TCP stalls close the connection. |
 
-On Unix, startup tries to raise `RLIMIT_NOFILE`'s soft limit to its hard limit.
-From the resulting soft limit, half (at least 256 descriptors) is reserved for
-files, credentials and upstream sockets. The remainder is divided by four: two
-listeners and two handles per accepted connection. The result is at least one
-and at most 8192 per listener. Windows has no corresponding Winsock process
-descriptor limit; the fallback handle envelope is 8192, giving 1024 per listener.
-An explicit positive `max-connections` overrides this calculation.
+On Unix, startup tries to raise the soft descriptor limit within the hard limit.
+macOS clamps to `kern.maxfilesperproc`, falling back to OPEN_MAX (10240), and
+retries a rejected target once at that lower ceiling. The cap reserves half the
+limit (at least 256 descriptors), divides the remainder by four for two listeners
+and two handles, and has a floor of max(limit / 8, 16) and a ceiling of 8192.
+Windows uses an 8192-handle envelope, yielding the unchanged 1024 per listener.
+A failed raise warns once with the fallback cap. Helper processes restore the
+original soft limit before exec; accepted sockets are not inherited by helpers.
 
-Bodies reserve declared `Content-Length` before reading, including before an
-`Expect: 100-continue` body. Chunked bodies reserve as bytes arrive. Exhaustion
-returns 503 with `Retry-After: 1`. Upload timeouts return 408. The JSON shape is
-the server's pre-handler error shape, `{"error":"message"}`. HTTP/1 responses
-close the connection; HTTP/2 starts GOAWAY, allowing other already-open streams
-to finish. Reservations follow byte owners through handlers, decoding, logging
-and logging replay, and are released on errors, disconnect, cancellation and
-unwind. Logging shares admitted bytes rather than copying them. Parsed JSON,
-translations, response bodies and protocol buffers are not part of this raw and
-decoded request-body budget. Raw oversized bodies are rejected before routing
-or logging, using the same pre-handler 413 shape as declared oversized bodies.
-Multipart uploads reserve two additional raw body lengths for parser input and
-collected field copies, before any declared body is read. Admission therefore
-requires room for three body lengths in total. Reservations are retained through the
-response so extractors that copy input cannot release accounting prematurely;
-log-owned byte clones may keep it longer while queued for writing.
-Decoded input is retained through the response as well, so replacing it with
-parsed or translated input cannot evade the decoded-byte charge.
-Management multipart writes already finish as gate-owned tasks after a client
-disconnects; their raw input and parser allowance stay charged until that work
-finishes too. Ordinary request cancellation drops its reservations immediately.
+Authentication runs before any body reservation or read, using the route's
+existing client-key or management-key check. Missing/wrong credentials keep their
+existing 401/403; keyless proxy setups still use the budget. Full request logging
+also waits for a body consumer. Only the OAuth callback routes accept bodies
+without a key: `/v0/management/oauth-callback`, `/v8/management/oauth/callback`,
+`/anthropic/callback` and `/codex/callback` have a fixed 64 KiB bound outside the
+shared pool. The GET pages use their query; health and unknown routes do not read
+bodies. OPTIONS answers without reading one.
 
-An idle HTTP/2 connection gets five seconds to finish the GOAWAY ping exchange
-before its socket is cut if it still has no open streams. This prevents a peer
-that ignores the graceful exchange from holding an admission slot indefinitely.
-Streams admitted during the GOAWAY round trip are allowed to finish.
+The effective aggregate budget is max(configured budget, 3 * proxy body limit +
+96 MiB). The 96 MiB reserve fits one maximum 32 MiB management multipart upload
+(raw input plus two parser copies), even while proxy storage fills its share.
+Management may use otherwise free aggregate capacity; proxy storage cannot use
+that reserve. With the default 64 MiB proxy limit, the configured 256 MiB default
+therefore has an effective 288 MiB floor, including 96 MiB for management. Raising
+the proxy limit to 256 MiB gives an 864 MiB floor. Management retains its handler
+bounds (16 MiB normally, 32 MiB for uploads) on either listener, independently of
+`max-request-body-bytes`; dashboard API handlers retain their 64 KiB bound. This
+also keeps management reachable when proxy uploads exhaust their allowance.
 
-Reload changes admission capacity immediately, without evicting existing
-connections; new connections snapshot the new transport deadlines. Each upload
-snapshots its body deadlines and per-request bound. Budget changes affect all
-subsequent reservations, including growth of an existing chunked/decoded body.
-Existing bytes remain charged; reducing the cap below current usage blocks
-growth/admission until enough owners release their bytes. A reload never creates
-a fresh accounting pool. Both listeners share rate-limited warnings, with guard
-names and counts, never request data, headers or keys.
+Declared lengths reserve before the first body poll, including 100-continue.
+Chunked input grows its reservation while reading. Exhaustion answers 503 with
+Retry-After: 1. Declared oversize answers the flat pre-handler 413 after auth;
+chunked oversize is replayed as a body-read error so each handler keeps its
+upstream 413 shape. Recoverable H2 size/budget errors do not drain the connection.
+Timeouts use the existing flat error shape and request connection closure.
 
-SSE responses may run indefinitely, including silence while awaiting upstream
-data, while they remain in flight. WebSockets over HTTP/1 upgrade and HTTP/2
-extended CONNECT have no header, upload or idle cutoff once upgraded. Their
-sockets still occupy admission capacity, their existing per-message body bound
-still applies, the TCP/TLS write guard remains active, and blue-green `cut` still closes
-them. The existing Responses keep-alive/ping behavior is unchanged; no new ping
-or mandatory maximum WebSocket lifetime is introduced. A quiet upgraded socket
-may therefore occupy one admission slot until the peer leaves or the service
-cuts it.
-HTTP/2 WebSocket stream flow control may likewise retain a slot while its peer
-does not consume data; the normal HTTP/2 response-body delivery watchdog applies
-to HTTP responses, including SSE. WebSocket message size and admission bound
-the upgraded transport without adding a new protocol-level ping or idle cutoff.
+Multipart reserves two extra body lengths. Raw owners and decoding allocations
+stay charged while the handler uses them; temporary holds are released when it
+returns, including for SSE. Bytes retained by the response itself stay charged
+until their last owner disappears. Existing owned management writes retain their
+allowance while finishing after a disconnect. Zstd windows over min(body limit,
+8 MiB) are refused before allocation; decoder working storage is reserved before
+expansion and output is drained in fixed chunks. Parsed objects, translations,
+responses, protocol buffers and log rendering are outside this payload budget.
+Request logging instead captures and renders at most a marked 64 KiB prefix;
+compressed expansion over the rendering bound is omitted with a size note.
 
-These other switches' configuration contract is available for the v8.0.32 sync. Runtime behavior is wired by the corresponding provider and server changes.
+Reload updates admission immediately without eviction, and changes the shared
+budget without discarding existing charges. Each upload carries its original
+size/deadline snapshot through downstream readers and decoding. New connections
+snapshot transport deadlines. Lowering a budget blocks growth until owners free
+space. Warnings contain only static guard names and counts, rate-limited per guard.
+
+Only pending output starts the write timer: upstream silence while an SSE
+producer waits does not. Progress on one H2 stream never masks another's stall,
+and queued chunks of one progressing stream share its clock. TCP progress is
+observed below TLS, including flushes that write bytes while returning Pending.
+
+During GOAWAY, incomplete-header deadlines remain armed. An idle peer gets five
+seconds to complete the exchange. The drain also has an absolute bound of five
+seconds plus the upload total deadline (or upload idle deadline, or 900 seconds
+when both are disabled), even if streams continue arriving. With defaults that
+bound is 905 seconds. Accepted protocol task lifetimes, including H2 CONNECT,
+determine activity; late DATA cannot invent an open stream.
+
+SSE responses otherwise have no maximum duration. H1 WebSockets and H2 extended
+CONNECT leave header/upload/idle timers once upgraded. They retain admission,
+the TCP write guard, existing frame/message bounds (64 MiB default), a bounded
+16-item input queue, existing optional ping handling, and blue-green cut. A quiet
+upgrade or an H2 WebSocket blocked by its stream window can retain a slot; the
+HTTP response-stream watchdog does not impose a new WebSocket ping or lifetime.
 
 The v8.0.32 contract also carries these settings for compatibility. open-ferry ignores them because it does not impersonate clients or cloak Claude requests.
 

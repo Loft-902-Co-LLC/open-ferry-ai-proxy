@@ -59,8 +59,11 @@ server:
   #   idle-timeout-seconds: 120          # HTTP/2 with no open streams sends GOAWAY
   #   body-idle-timeout-seconds: 60      # No incoming body bytes: 408 and close
   #   body-total-timeout-seconds: 900    # Whole upload, never the response stream
-  #   buffered-body-bytes: 268435456     # Shared 256 MiB, at least one body's limit
-  #   write-stall-timeout-seconds: 120   # Pending output without delivery progress
+  #   buffered-body-bytes: 268435456     # 256 MiB configured; effective floor described below
+  #   write-stall-timeout-seconds: 120   # Per-stream progress; TCP stalls close
+  # Effective budget >= 3 * proxy body limit + 96 MiB reserved for management.
+  # Defaults therefore use a 288 MiB floor; the configured default remains 256 MiB.
+  # Authentication precedes body reads; management retains its own 16/32 MiB bounds.
 
   # Token for requests to GitHub's API: the management API's check for the latest release.
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
