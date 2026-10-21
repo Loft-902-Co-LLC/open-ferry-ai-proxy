@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/thinking/strip.go and
-// provider/claude/apply.go (v8.0.36, MIT).
+// provider/claude/apply.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request going to Claude: a token budget, or an
@@ -621,5 +621,81 @@ mod adaptive_tests {
             assert_eq!(body["thinking"], json!({"type": "adaptive"}));
             assert!(body.get("output_config").is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod standalone_effort_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn omitted_thinking_preserves_native_defaults_before_capability_checks() {
+        let source = json!({"max_tokens":32768,"output_config":{"effort":"high"}});
+        let models = [
+            Some(lookup("claude-opus-4-6").expect("adaptive model")),
+            Some(lookup("claude-sonnet-4-5-20250929").expect("budget model")),
+            None,
+            Some(Model {
+                id: "plain".into(),
+                model_type: String::new(),
+                thinking: None,
+                user_defined: false,
+                max_completion_tokens: 32768,
+                support_configuration_update: false,
+            }),
+        ];
+        for model in models {
+            let mut body = source.clone();
+            let route = shared::Route {
+                model: "native-claude",
+                from: "claude",
+                to: "claude",
+                provider: "claude",
+            };
+            shared::apply_with_model::<Claude>(
+                &mut body,
+                &Body::Json(source.clone()),
+                route,
+                model.clone(),
+            )
+            .unwrap();
+            assert_eq!(body, source);
+            if model.as_ref().is_some_and(|model| model.thinking.is_none()) {
+                continue;
+            }
+            let mut body = source.clone();
+            shared::apply_with_model::<Claude>(
+                &mut body,
+                &Body::Json(source.clone()),
+                shared::Route {
+                    model: "native-claude(low)",
+                    ..route
+                },
+                model,
+            )
+            .unwrap();
+            assert!(body.get("thinking").is_some(), "{body}");
+        }
+    }
+
+    #[test]
+    fn native_standalone_effort_still_applies_explicit_summary() {
+        let source = json!({"output_config":{"effort":"high"},"thinking":{"type":"adaptive","display":"summarized"}});
+        let mut body = json!({"output_config":{"effort":"high"}});
+        shared::apply_with_model::<Claude>(
+            &mut body,
+            &Body::Json(source),
+            shared::Route {
+                model: "claude-opus-4-6",
+                from: "claude",
+                to: "claude",
+                provider: "claude",
+            },
+            Some(lookup("claude-opus-4-6").expect("adaptive model")),
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert_eq!(body["output_config"]["effort"], "high");
     }
 }
