@@ -4,6 +4,7 @@
 // helps/apply_patch.go (EndApplyPatchStream, StopApplyPatchStream) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
 // (v8.0.36, MIT).
+// Buffered usage on read failure follows b12db8c3 (v8.0.38).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Gemini or Vertex AI SSE stream, read a line at a time and translated
@@ -226,8 +227,9 @@ impl State {
         if let Some(error) = error {
             tracing::debug!("{}: stream read failed: {error}", self.setup.name);
             self.reader.report(&error);
-            self.pending
-                .push_back(Err(ExecError::new(ErrorKind::Upstream, error.to_string())));
+            self.pending.push_back(Err(
+                ExecError::new(ErrorKind::Upstream, error.to_string()).with_usage_kept()
+            ));
             return;
         }
         if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {

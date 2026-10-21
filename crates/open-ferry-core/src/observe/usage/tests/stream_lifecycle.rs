@@ -296,6 +296,9 @@ fn a_vertex_stream_canceled_after_its_terminal_chunk_is_not_failed() {
         driver.chunk(&format!(
             "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"hello\"}}]}},\"finishReason\":\"{finish}\"}}],\"usageMetadata\":{{\"promptTokenCount\":10,\"candidatesTokenCount\":5,\"totalTokenCount\":15}},\"modelVersion\":\"gemini-3.7-flash\",\"responseId\":\"vertex-terminal-disconnect\"}}\n\n"
         ));
+        driver.tap.stream_chunk(&Bytes::from_static(
+            b"data: {\"type\":\"response.completed\"}\n\n",
+        ));
         driver.finish(Outcome::Canceled);
         let record = harness.record();
         assert!(!bool_at(&record, "/failed"), "{finish}: {record}");

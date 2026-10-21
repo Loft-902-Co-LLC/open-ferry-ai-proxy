@@ -54,6 +54,7 @@
 
 mod accounting;
 mod error_events;
+mod gemini_terminal;
 pub(crate) mod json;
 mod observer;
 mod parse;

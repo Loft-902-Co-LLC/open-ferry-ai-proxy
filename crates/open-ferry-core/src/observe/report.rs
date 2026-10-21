@@ -147,7 +147,11 @@ impl Stream for ObservedChunks {
         let this = &mut *self;
         let item = ready!(this.inner.as_mut().poll_next(cx));
         match &item {
-            Some(Ok(_)) => {}
+            Some(Ok(chunk)) => {
+                if let Some(observation) = &this.report.observation {
+                    observation.stream_chunk(chunk);
+                }
+            }
             Some(Err(error)) => this.report.fail(error),
             None => this.report.end(Outcome::Completed),
         }
@@ -390,6 +394,32 @@ mod tests {
         assert!(response.chunks.next().await.unwrap().is_ok());
         drop(response);
         assert_eq!(recorder.take(), ["Canceled"]);
+    }
+
+    // Not upstream's: the delivery tap sees only chunks returned to the
+    // client, never the ready chunks discarded when the stream is dropped.
+    #[tokio::test]
+    async fn reports_delivered_chunks_without_reporting_discarded_chunks() {
+        #[derive(Default)]
+        struct Delivered(Mutex<Vec<Bytes>>);
+
+        impl Tap for Delivered {
+            fn stream_chunk(&self, chunk: &Bytes) {
+                self.0.lock().unwrap().push(chunk.clone());
+            }
+        }
+
+        let delivered = Arc::new(Delivered::default());
+        let observation = Arc::new(Observation::new(
+            Arc::new(RequestContext::new(Method::POST, "/test".into())),
+            vec![delivered.clone()],
+        ));
+        let mut response = CallReport::observing(Some(&observation))
+            .stream(Ok(chunks(vec![ok(), Ok(Bytes::from_static(b"terminal"))])))
+            .unwrap();
+        assert_eq!(response.chunks.next().await.unwrap().unwrap(), "a");
+        drop(response);
+        assert_eq!(*delivered.0.lock().unwrap(), [Bytes::from_static(b"a")]);
     }
 
     /// A stream with one chunk ready, that panics when polled after it.

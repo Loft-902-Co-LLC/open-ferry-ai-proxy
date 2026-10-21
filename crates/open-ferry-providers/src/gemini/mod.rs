@@ -71,6 +71,8 @@ mod malformed_tests;
 mod sse;
 mod stream;
 #[cfg(test)]
+mod terminal_disconnect_tests;
+#[cfg(test)]
 mod terminal_tests;
 #[cfg(test)]
 pub(crate) mod testing;
