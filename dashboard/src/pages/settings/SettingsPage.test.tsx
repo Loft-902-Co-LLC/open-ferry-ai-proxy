@@ -1,3 +1,5 @@
+import { apiRequest } from "../../api/client";
+import { ConfigEditor } from "../../api/configEditor";
 import { focusManager, notifyManager } from "@tanstack/react-query";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -247,8 +249,10 @@ function expectNothingUnsaved() {
     return screen.findByRole("textbox", { name: "config.yaml" });
   }
 
+let focusTime = 0;
 async function refetchOnFocus() {
-  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10_000);
+  focusTime = Math.max(Date.now(), focusTime) + 10_000;
+  const clock = vi.spyOn(Date, "now").mockReturnValue(focusTime);
   try {
     await act(async () => {
       focusManager.setFocused(false);
@@ -1866,5 +1870,73 @@ describe("review and reload baseline edges", () => {
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     expect(await screen.findByText("The config changed since this page loaded")).toBeVisible();
     expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+});
+
+describe("Settings convergence safety", () => {
+  async function attemptSave(user: ReturnType<typeof renderApp>["user"]) {
+    const review = screen.queryByRole("button", { name: "Review and save" });
+    if (review === null) return;
+    await user.click(review);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Review the changes" }) !== null ||
+        screen.queryByText("The config changed since this page loaded") !== null).toBe(true);
+    });
+    const dialog = screen.queryByRole("dialog", { name: "Review the changes" });
+    if (dialog !== null) {
+      await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+      await screen.findByText("Saved 1 setting. The server uses it from now on.");
+    }
+  }
+  it.each([
+    { name: "convergence", initial: 1, typed: "5", converged: 5, tag: '"3"' },
+    { name: "01 against 1", initial: 1, typed: "01", converged: null, tag: '"2"' },
+    { name: "5 with trailing space", initial: 5, typed: "5 ", converged: null, tag: '"3"' },
+  ])("preserves a newer server value after $name, then binds a deliberate edit", async ({ initial, typed, converged, tag }) => {
+    const state = versionedServer();
+    if (initial === 5) state.external(false, 5);
+    const { user } = await openSettings();
+    fireEvent.change(screen.getByRole("textbox", { name: "Retries" }), { target: { value: typed } });
+    if (converged !== null) { state.external(false, converged); await refetchOnFocus(); }
+    state.external(false, 7);
+    await refetchOnFocus();
+    await attemptSave(user);
+    // This is the safety assertion: an automatic stale draft must not
+    // overwrite 7 with a freshly obtained If-Match.
+    expect(state.tree.routing.retry["request-retry"]).toBe(7);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual([]);
+    fireEvent.change(screen.getByRole("textbox", { name: "Retries" }), { target: { value: "8" } });
+    await attemptSave(user);
+    expect(state.tree.routing.retry["request-retry"]).toBe(8);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual([tag]);
+  });
+  it("re-syncs a semantically clean dirty field so the next refetch is shown", async () => {
+    const state = versionedServer();
+    await openSettings();
+    fireEvent.change(screen.getByRole("textbox", { name: "Retries" }), { target: { value: "5" } });
+    state.external(false, 5);
+    await refetchOnFocus();
+    state.external(false, 7);
+    await refetchOnFocus();
+    expect(screen.getByRole("textbox", { name: "Retries" })).toHaveValue("7");
+    expectNothingUnsaved();
+    expect(state.tree.routing.retry["request-retry"]).toBe(7);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`)).toEqual([]);
+  });
+  it("refuses a real conflicting draft and also fails closed if its snapshot is missing", async () => {
+    const state = versionedServer();
+    const editor = new ConfigEditor(<T,>(path: string, request = {}) => apiRequest<T>("unit-key", path, request));
+    const path = `${MANAGEMENT}/request-retry`;
+    editor.bindDraft(path, await editor.readValue(CONFIG));
+    editor.retainDrafts([path]);
+    state.external(false, 7);
+    // Control: an ordinary draft of 5 against 1 is still refused after 7.
+    await expect(editor.call(path, { method: "PATCH", json: { value: 5 } })).rejects.toMatchObject({ fields: ["Retries"] });
+    editor.retainDrafts([]);
+    // Safety backstop: losing the snapshot must not turn that refusal
+    // into a fresh-If-Match overwrite.
+    await expect(editor.call(path, { method: "PATCH", json: { value: 5 } })).rejects.toMatchObject({ fields: ["Retries"] });
+    expect(state.tree.routing.retry["request-retry"]).toBe(7);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual([]);
   });
 });
