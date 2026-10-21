@@ -3,7 +3,7 @@
 // and the response tests in noop_optimization_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
-// All tests are ported. The tests after them are new; their expected output
+// All upstream tests are ported. Tests without an upstream name are new; their expected output
 // comes from upstream, with the time and counter in tool call IDs masked.
 
 use serde_json::{Value, json};

@@ -63,10 +63,9 @@
 //!   `null`. Upstream writes `+Inf` or `NaN`, which isn't JSON.
 //! - Names cut to 64 bytes start at a character boundary (see
 //!   [`super::tools::cap`]).
-//! - A client's request that is JSON `null` counts as missing, so the
-//!   translated request supplies the tools and the repeated fields. Upstream
-//!   takes `null` as the request. The server routes no such request, since it
-//!   names no model.
+//! - The legacy bare-`&Value` API reserves `Null` for unavailable input.
+//!   Pass parsed `Option<&Value>` to preserve valid JSON `null`, as upstream
+//!   does when selecting the tools and repeated fields.
 
 use std::collections::HashMap;
 use std::error::Error;
