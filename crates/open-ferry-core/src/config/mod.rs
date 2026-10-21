@@ -89,6 +89,8 @@ mod decode;
 pub mod diff;
 mod duration;
 mod image_generation;
+#[cfg(test)]
+mod ingress_tests;
 mod layout;
 mod load;
 mod management_address;
@@ -126,10 +128,11 @@ pub use types::{
     ClaudeCli, ClaudeCliSystemPrompt, ClaudeConfig, ClaudeHeaderDefaults, ClaudeKey, ClaudeModel,
     ClientConfig, CodexClientConfig, CodexConfig, CodexHeaderDefaults, CodexKey, CodexModel,
     Config, DEFAULT_AUTH_DIR, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel,
-    OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey,
-    OpenAiCompatibilityModel, QuotaExceeded, RemoteManagement, RequestScopedErrorRule,
-    RoutingConfig, RoutingQuota, RoutingStrategy, SelfUpdate, SelfUpdateMode, StreamingConfig,
-    ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel, XaiConfig,
+    IngressLimits, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility,
+    OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, QuotaExceeded, RemoteManagement,
+    RequestScopedErrorRule, RoutingConfig, RoutingQuota, RoutingStrategy, SelfUpdate,
+    SelfUpdateMode, StreamingConfig, ThinkingSupport, TlsConfig, VertexCompatKey,
+    VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, ReadGuard, WatchError, WatchEvent, next_revision};

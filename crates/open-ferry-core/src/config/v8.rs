@@ -42,6 +42,38 @@ pub(crate) const MAX_CREDENTIAL_WEIGHT: i64 = 1_000_000;
 /// field order.
 pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     ("max-request-body-bytes", "server.max-request-body-bytes"),
+    (
+        "ingress-limits.max-connections",
+        "server.ingress-limits.max-connections",
+    ),
+    (
+        "ingress-limits.header-timeout-seconds",
+        "server.ingress-limits.header-timeout-seconds",
+    ),
+    (
+        "ingress-limits.tls-handshake-timeout-seconds",
+        "server.ingress-limits.tls-handshake-timeout-seconds",
+    ),
+    (
+        "ingress-limits.idle-timeout-seconds",
+        "server.ingress-limits.idle-timeout-seconds",
+    ),
+    (
+        "ingress-limits.body-idle-timeout-seconds",
+        "server.ingress-limits.body-idle-timeout-seconds",
+    ),
+    (
+        "ingress-limits.body-total-timeout-seconds",
+        "server.ingress-limits.body-total-timeout-seconds",
+    ),
+    (
+        "ingress-limits.buffered-body-bytes",
+        "server.ingress-limits.buffered-body-bytes",
+    ),
+    (
+        "ingress-limits.write-stall-timeout-seconds",
+        "server.ingress-limits.write-stall-timeout-seconds",
+    ),
     ("proxy-url", "requests.proxy-url"),
     (
         "tls-handshake-timeout-seconds",

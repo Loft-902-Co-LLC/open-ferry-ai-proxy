@@ -39,6 +39,30 @@ use super::image_generation::DisableImageGeneration;
 use super::model_catalogs::CatalogSources;
 use super::payload::PayloadConfig;
 
+/// open-ferry additions. Zero or unset keeps each runtime default; a negative
+/// value disables that guard. Durations are seconds, clamped to one year.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.IngressLimits", rename_all = "kebab-case")]
+pub struct IngressLimits {
+    /// Concurrent sockets per listener; default derived from RLIMIT_NOFILE.
+    pub max_connections: i64,
+    /// Complete request head: 30 seconds.
+    pub header_timeout_seconds: i64,
+    /// Inbound TLS handshake: 10 seconds (not the upstream TLS setting).
+    pub tls_handshake_timeout_seconds: i64,
+    /// No requests or upgraded streams: 120 seconds.
+    pub idle_timeout_seconds: i64,
+    /// No incoming body bytes: 60 seconds.
+    pub body_idle_timeout_seconds: i64,
+    /// Entire upload: 900 seconds; response streams are excluded.
+    pub body_total_timeout_seconds: i64,
+    /// Raw and decoded body storage across both listeners: 256 MiB, at least
+    /// the effective per-request body limit.
+    pub buffered_body_bytes: i64,
+    /// Outbound bytes waiting without delivery progress: 120 seconds.
+    pub write_stall_timeout_seconds: i64,
+}
+
 /// The auth directory used when `auth-dir` is unset.
 pub const DEFAULT_AUTH_DIR: &str = "~/.cli-proxy-api";
 
@@ -55,6 +79,8 @@ pub struct Config {
     /// Most bytes an incoming HTTP request body may hold; `<= 0` disables
     /// the limit.
     pub max_request_body_bytes: i64,
+    /// open-ferry's inbound resource limits, under `server` in v8.
+    pub ingress_limits: IngressLimits,
     /// Client-facing compatibility behavior.
     pub client: ClientConfig,
     /// An optional proxy for outbound requests.
@@ -197,6 +223,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_request_body_bytes: 0,
+            ingress_limits: IngressLimits::default(),
             models: CatalogSources::default(),
             client: ClientConfig::default(),
             proxy_url: String::new(),
@@ -293,6 +320,7 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("max_request_body_bytes", &self.max_request_body_bytes)
+            .field("ingress_limits", &self.ingress_limits)
             .field("models", &self.models)
             .field("client", &self.client)
             .field("proxy_url", &Redacted(&self.proxy_url))
