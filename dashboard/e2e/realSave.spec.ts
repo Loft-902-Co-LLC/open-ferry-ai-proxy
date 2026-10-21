@@ -815,13 +815,13 @@ test("repairs a broken on-disk config while the server keeps its last good confi
   const good = file();
   writeFileSync(configPath, `${good}\nbroken: [\n`);
   await page.goto(`${APP}settings`);
-  await expect(page.getByText("config.yaml doesn't parse").first()).toBeVisible();
+  await expect(page.getByText("The server can't use config.yaml").first()).toBeVisible();
   await expect(page.getByText("The server failed (HTTP 500)")).toHaveCount(0);
   await expect.poll(async () => (await management<Record<string, unknown>>("GET", "config"))["request-retry"],
     { message: "the last good configuration remains active" }).toBe(8);
   await page.getByRole("link", { name: "YAML editor" }).first().click();
   await page.getByRole("button", { name: "Show config.yaml" }).click();
-  await expect(page.getByText("Recovery mode: config.yaml doesn't parse")).toBeVisible();
+  await expect(page.getByText("Recovery mode: the server can't use config.yaml")).toBeVisible();
   const editor = page.getByRole("textbox", { name: "config.yaml" });
   await editor.click();
   await page.keyboard.press("ControlOrMeta+A");
