@@ -74,7 +74,7 @@ export interface KeyRow {
 }
 
 /** The server's keys, then the new ones, each marked with what saving does to it. */
-export function keyRows(saved: readonly string[], changes: readonly KeyChange[]): KeyRow[] {
+export function keyRows(saved: readonly string[], changes: readonly KeyChange[], versioned = false): KeyRow[] {
   const effective = effectiveKeyChanges(saved, changes);
   const deleting = new Map<string, number>();
   for (const change of changes) {
@@ -90,7 +90,7 @@ export function keyRows(saved: readonly string[], changes: readonly KeyChange[])
     deleting.set(key, left - 1);
     return { key, state: "deleted" };
   });
-  for (const [key, count] of deleting) {
+  if (versioned) for (const [key, count] of deleting) {
     for (let i = 0; i < count; i++) rows.push({ key, state: "missing" });
   }
   for (const change of effective) {

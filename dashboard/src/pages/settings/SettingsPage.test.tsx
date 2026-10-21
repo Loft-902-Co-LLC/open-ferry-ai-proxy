@@ -2201,3 +2201,17 @@ describe("focused Settings drafts", () => {
     expectNothingUnsaved();
   });
 });
+
+
+it("drops an unversioned stale deletion row when the bar no longer counts it", async () => {
+  const state = server();
+  const { user } = await openSettings();
+  await user.click(screen.getByRole("button", { name: /^Delete the client key.*0001/ }));
+  expect(screen.getByText("1 unsaved change.")).toBeVisible();
+  state.keys = [KEY_B];
+  await refetchOnFocus();
+  expectNothingUnsaved();
+  expect(screen.queryByText("Already removed on the server")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Undo deleting/ })).not.toBeInTheDocument();
+  expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+});

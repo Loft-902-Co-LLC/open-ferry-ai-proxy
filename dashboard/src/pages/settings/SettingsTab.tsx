@@ -342,6 +342,7 @@ function SettingsEditor({
             setKeyChanges(editor.editor.versioned ? next : effectiveKeyChanges(savedKeys, next));
           }}
           readOnly={keysReadOnly}
+          versioned={editor.editor.versioned}
         />
         {settingsUnsupported ? (
           <Alert tone="info" title="Settings can't be changed here">
