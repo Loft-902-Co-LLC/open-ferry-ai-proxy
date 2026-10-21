@@ -50,6 +50,8 @@
 //!   that are maps with keys that aren't all strings compare equal.
 //! - The decode checks allow 256 levels of nesting, as the loader does
 //!   (see the `config::yaml` module).
+//! - A whole YAML PUT keeps the replacement document's head and foot
+//!   comments too, rather than only its root node's comments.
 //! - Those of [`validate_v8_config`].
 
 mod known;
@@ -278,16 +280,17 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
     let before = root.clone();
     let parts: Vec<&str> = edit.path.iter().map(String::as_str).collect();
     project_v8_config_aliases(root, &parts.join("."));
-    if edit.method == V8Method::Delete {
+    let replacement = if edit.method == V8Method::Delete {
         if parts.is_empty() {
             return Err(V8EditError::CannotDeleteConfig);
         }
         if !delete_config_v8_path(root, &parts) {
             return Err(V8EditError::NotFound);
         }
+        None
     } else {
-        apply_body(root, &parts, edit)?;
-    }
+        Some(apply_body(root, &parts, edit)?)
+    };
     normalize_v8_config_aliases(root).map_err(V8EditError::InvalidConfig)?;
     if !edit.yaml && edit.method != V8Method::Delete {
         preserve_v8_turn_secrets(root, &before);
@@ -299,6 +302,17 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
     }
     strip_auth_indexes_from_root(root);
     save::normalize_collection_node_styles(root);
+    // A whole YAML replacement owns the document comments as well as the
+    // root. In particular, yaml.v3 attaches a trailing comment to the
+    // document; copying only Content[0] silently discards that edit.
+    if edit.yaml
+        && edit.method == V8Method::Put
+        && parts.is_empty()
+        && let Some(replacement) = replacement
+    {
+        doc.head_comment = replacement.head_comment;
+        doc.foot_comment = replacement.foot_comment;
+    }
     let data = marshal(&doc).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
     let config =
         Config::parse(&data).map_err(|error| V8EditError::Unprocessable(error.to_string()))?;
@@ -309,13 +323,13 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
 }
 
 /// A `PUT` or `PATCH`: reads the body and puts it at the path.
-fn apply_body(root: &mut Node, parts: &[&str], edit: &V8Edit) -> Result<(), V8EditError> {
+fn apply_body(root: &mut Node, parts: &[&str], edit: &V8Edit) -> Result<Node, V8EditError> {
     if !edit.yaml && !json_valid(&edit.body) {
         return Err(V8EditError::InvalidJson);
     }
     let mut update = unmarshal(&edit.body).map_err(|_| V8EditError::InvalidBody)?;
     strip_auth_indexes_from_update(parts, &mut update);
-    let Some(mut value) = update.content.into_iter().next() else {
+    let Some(mut value) = std::mem::take(&mut update.content).into_iter().next() else {
         return Err(V8EditError::InvalidBody);
     };
     if parts.is_empty() {
@@ -354,7 +368,7 @@ fn apply_body(root: &mut Node, parts: &[&str], edit: &V8Edit) -> Result<(), V8Ed
         }
         *dst = value;
     }
-    Ok(())
+    Ok(update)
 }
 
 /// Gives `node` the comments of `from` (which loses them).
