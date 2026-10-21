@@ -489,6 +489,13 @@ pub fn streams() -> Vec<Case> {
         cases.push(through(argument_number_text(), "gemini", client, json!({})));
     }
     cases.push(unfinished_function_closures());
+    let mut buffered = unfinished_function_closures();
+    buffered.name = "unfinished-buffered-function-closures".into();
+    buffered.events.insert(6, r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#.into());
+    cases.push(buffered.clone());
+    buffered.name = "unfinished-buffered-closures-data-without-space".into();
+    *buffered.events.last_mut().unwrap() = r#"data:{"type":"message_stop"}"#.into();
+    cases.push(buffered);
     cases
 }
 
@@ -593,6 +600,8 @@ fn null_original_request() -> Case {
 }
 
 // Promoted from seed 5/random 5000: message_stop closes two unfinished calls.
+// Without normalization, Go's map order only exposes this intermittently.
+// Deterministic evidence: claude_closures::tests::buffered_deltas_custom_and_search_closures_match_every_map_order.
 fn unfinished_function_closures() -> Case {
     let mut case = Case::response(
         "unfinished-function-closures",
