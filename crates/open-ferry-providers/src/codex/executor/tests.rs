@@ -2681,3 +2681,48 @@ async fn invalid_split_event_stays_invalid() {
     );
     assert!(error.is_some());
 }
+
+// Ported from codex_executor_claude_effort_test.go (v8.0.38, MIT).
+#[tokio::test]
+async fn claude_standalone_effort_survives_final_payload_preparation() {
+    for (rules, expected) in [
+        ("{}", Some("high")),
+        (
+            "payload:\n  override:\n    - models:\n        - name: gpt-5.5\n          protocol: codex\n      params:\n        reasoning.effort: low\n",
+            Some("low"),
+        ),
+        (
+            "payload:\n  filter:\n    - models:\n        - name: gpt-5.5\n          protocol: codex\n      params:\n        - reasoning.effort\n",
+            None,
+        ),
+    ] {
+        for stream in [false, true] {
+            let mock = Mock::start(Reply::sse(COMPLETED_WITH_USAGE)).await;
+            let config = Config::parse(rules).unwrap();
+            let executor = executor().with_config(Arc::new(config));
+            let request = request(
+                "gpt-5.5",
+                r#"{"max_tokens":256,"messages":[{"role":"user","content":"OK"}],"output_config":{"effort":" HIGH "}}"#,
+            );
+            if stream {
+                let response = executor
+                    .execute_stream(api_key_auth(&mock.url), request, stream_options("claude"))
+                    .await
+                    .unwrap();
+                let (_, error) = collect(response).await;
+                assert!(error.is_none(), "{error:?}");
+            } else {
+                executor
+                    .execute(api_key_auth(&mock.url), request, options("claude"))
+                    .await
+                    .unwrap();
+            }
+            let body = mock.last().json();
+            assert_eq!(
+                get(&body, "reasoning.effort").and_then(Value::as_str),
+                expected,
+                "stream={stream}, body={body}"
+            );
+        }
+    }
+}

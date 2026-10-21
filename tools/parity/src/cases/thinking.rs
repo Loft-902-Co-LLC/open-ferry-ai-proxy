@@ -148,7 +148,7 @@ pub fn codex() -> Vec<Case> {
     let responses = "openai-response";
     let hi = json!({ "model": "gpt", "input": "hi" });
     let low = json!({ "input": "hi", "reasoning": { "effort": "low" } });
-    vec![
+    let mut cases = vec![
         case(
             "suffix-level",
             "gpt-5.5(high)",
@@ -462,12 +462,14 @@ pub fn codex() -> Vec<Case> {
             " CODEX ",
             gpt_5_5(),
         ),
-    ]
+    ];
+    cases.extend(standalone_claude_effort_cases("codex"));
+    cases
 }
 
 pub fn openai() -> Vec<Case> {
     let messages = json!({ "model": "gpt", "messages": [] });
-    vec![
+    let mut cases = vec![
         case(
             "suffix-level",
             "gpt-5.5(high)",
@@ -638,5 +640,49 @@ pub fn openai() -> Vec<Case> {
             " OpenRouter ",
             gpt_5_5(),
         ),
-    ]
+    ];
+    cases.extend(standalone_claude_effort_cases("openai"));
+    cases
+}
+
+fn standalone_claude_effort_cases(to: &str) -> Vec<Case> {
+    let mut cases = Vec::new();
+    for (name, source) in [
+        ("high", json!({"output_config":{"effort":"high"}})),
+        ("normalized", json!({"output_config":{"effort":" HIGH "}})),
+        ("missing", json!({})),
+        ("blank", json!({"output_config":{"effort":" \t "}})),
+        ("non-string", json!({"output_config":{"effort":123}})),
+        (
+            "disabled",
+            json!({"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}),
+        ),
+        (
+            "budget",
+            json!({"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}),
+        ),
+        (
+            "null-thinking",
+            json!({"thinking":null,"output_config":{"effort":"high"}}),
+        ),
+    ] {
+        for suffix in ["", "(low)"] {
+            let body = if to == "codex" {
+                json!({"reasoning":{"effort":"medium"}})
+            } else {
+                json!({"reasoning_effort":"medium"})
+            };
+            cases.push(case(
+                &format!("claude-standalone-{name}{suffix}"),
+                &format!("gpt-5.5{suffix}"),
+                &body,
+                &source.to_string(),
+                "claude",
+                to,
+                to,
+                gpt_5_5(),
+            ));
+        }
+    }
+    cases
 }

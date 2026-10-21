@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → Codex (OpenAI Responses) request.
@@ -573,8 +573,18 @@ fn convert_tool_choice(
 
 /// Claude thinking settings → Responses `reasoning.effort`.
 fn reasoning_effort(request: &Value) -> String {
+    let effort = request
+        .get("output_config")
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        .map(|effort| go::to_lower(effort.trim()))
+        .filter(|effort| !effort.is_empty());
     let Some(thinking @ Value::Object(_)) = request.get("thinking") else {
-        return DEFAULT_REASONING_EFFORT.into();
+        return if request.get("thinking").is_none() {
+            effort.unwrap_or_else(|| DEFAULT_REASONING_EFFORT.into())
+        } else {
+            DEFAULT_REASONING_EFFORT.into()
+        };
     };
     let level = match &*str_of(thinking.get("type")) {
         "enabled" => thinking
@@ -582,12 +592,6 @@ fn reasoning_effort(request: &Value) -> String {
             .and_then(|budget| budget_to_level(int_of(budget))),
         "adaptive" | "auto" => {
             // Adaptive thinking may carry an explicit effort (Claude 4.6+).
-            let effort = request
-                .get("output_config")
-                .and_then(|config| config.get("effort"))
-                .and_then(Value::as_str)
-                .map(|effort| go::to_lower(effort.trim()))
-                .filter(|effort| !effort.is_empty());
             return effort.unwrap_or_else(|| LEVEL_XHIGH.into());
         }
         "disabled" => budget_to_level(0),

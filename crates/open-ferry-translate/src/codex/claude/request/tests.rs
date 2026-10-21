@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request_test.go,
-// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.36, MIT), and
-// codex_claude_user_turn_test.go (v8.0.36, MIT).
+// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.38, MIT), and
+// codex_claude_user_turn_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
@@ -1710,4 +1710,42 @@ fn user_turns_in_detail() {
         "https://example.test/a.png",
         "{body}"
     );
+}
+
+#[test]
+fn standalone_claude_effort_preserves_translation_defaults_and_precedence() {
+    for (request, expected) in [
+        (json!({"output_config":{"effort":" HIGH "}}), "high"),
+        (json!({"output_config":{"effort":"low"}}), "low"),
+        (json!({"output_config":{"effort":"none"}}), "none"),
+        (json!({"output_config":{"effort":"auto"}}), "auto"),
+        (json!({"output_config":{"effort":" \t "}}), "medium"),
+        (json!({"output_config":{"effort":false}}), "medium"),
+        (json!({"output_config":{"effort":null}}), "medium"),
+        (
+            json!({"thinking":null,"output_config":{"effort":"high"}}),
+            "medium",
+        ),
+        (
+            json!({"thinking":{},"output_config":{"effort":"high"}}),
+            "medium",
+        ),
+        (
+            json!({"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}),
+            "none",
+        ),
+        (
+            json!({"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}),
+            "medium",
+        ),
+    ] {
+        for compat in [false, true] {
+            let out = if compat {
+                convert_claude_request_to_codex_with_compat("gpt-5.5", &request)
+            } else {
+                convert_claude_request_to_codex("gpt-5.5", &request)
+            };
+            assert_eq!(out["reasoning"]["effort"], expected, "{request}");
+        }
+    }
 }

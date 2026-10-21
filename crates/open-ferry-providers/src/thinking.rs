@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/thinking/apply.go, validate.go, suffix.go,
 // configuration_update.go, configuration_update_test.go, and
 // internal/runtime/executor/helps/model_capabilities.go and thinking.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request, whatever provider it goes to.
@@ -406,6 +406,14 @@ fn apply<T: Target>(
         return Ok(());
     }
 
+    if from == "claude" && T::NAME == "claude" && suffix.is_none() && body.get("thinking").is_none()
+    {
+        // Native effort is independent of activation. Let Claude keep its own
+        // thinking default, unless the caller explicitly asks for a summary.
+        T::apply_summary(body, base, &provider, summary);
+        return Ok(());
+    }
+
     let plan = Plan {
         base,
         suffix,
@@ -674,7 +682,7 @@ fn budget_config(value: i64) -> Config {
 }
 
 /// `extractClaudeConfig`. A disabled type wins over a budget, and a budget
-/// over an effort. Adaptive thinking counts only with an effort; enabled
+/// over an effort. Omitted or adaptive thinking counts only with an effort; enabled
 /// thinking with neither means auto.
 pub(crate) fn claude_config(body: &Value) -> Config {
     let kind = json::str_at(body, "thinking.type");
@@ -686,7 +694,7 @@ pub(crate) fn claude_config(body: &Value) -> Config {
     if kind == "disabled" {
         return Config::none();
     }
-    if kind == "adaptive" || kind == "auto" {
+    if body.get("thinking").is_none() || kind == "adaptive" || kind == "auto" {
         return effort().map_or_else(Config::unset, effort_config);
     }
     if let Some(budget) = json::get(body, "thinking.budget_tokens") {
@@ -1523,6 +1531,118 @@ mod adaptive_fallback_tests {
             let validated =
                 validate(Config::none(), &model, &support, "claude", "claude", false).unwrap();
             assert_eq!(validated, Config::level("low"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod standalone_effort_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn shared_claude_parser_accepts_only_explicit_standalone_effort() {
+        for (body, expected) in [
+            (
+                json!({"output_config":{"effort":" HIGH "}}),
+                Config::level("high"),
+            ),
+            (
+                json!({"output_config":{"effort":"low"}}),
+                Config::level("low"),
+            ),
+            (json!({"output_config":{"effort":"none"}}), Config::none()),
+            (json!({"output_config":{"effort":"auto"}}), Config::auto()),
+            (json!({}), Config::unset()),
+            (json!({"output_config":{"effort":""}}), Config::unset()),
+            (json!({"output_config":{"effort":" \t "}}), Config::unset()),
+            (json!({"output_config":{"effort":123}}), Config::unset()),
+            (json!({"output_config":{"effort":null}}), Config::unset()),
+            (
+                json!({"thinking":null,"output_config":{"effort":"high"}}),
+                Config::unset(),
+            ),
+            (
+                json!({"thinking":{},"output_config":{"effort":"high"}}),
+                Config::unset(),
+            ),
+            (
+                json!({"thinking":{"type":"unknown"},"output_config":{"effort":"high"}}),
+                Config::unset(),
+            ),
+            (
+                json!({"thinking":{"type":"disabled","budget_tokens":8192},"output_config":{"effort":"high"}}),
+                Config::none(),
+            ),
+            (
+                json!({"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}),
+                Config::budget(8192),
+            ),
+            (
+                json!({"thinking":{"type":"enabled"},"output_config":{"effort":"high"}}),
+                Config::level("high"),
+            ),
+        ] {
+            assert_eq!(extract_config(&body, "claude"), expected, "{body}");
+        }
+    }
+
+    #[test]
+    fn standalone_claude_effort_reaches_codex_and_openai_targets_with_suffix_priority() {
+        use open_ferry_core::models::ModelInfo;
+        let info = ModelInfo {
+            id: "gpt-5.5".into(),
+            thinking: Some(ThinkingSupport {
+                levels: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for (source, suffix, expected) in [
+            (json!({"output_config":{"effort":" HIGH "}}), "", "high"),
+            (json!({"output_config":{"effort":"high"}}), "(low)", "low"),
+            (
+                json!({"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}),
+                "",
+                "low",
+            ),
+            (
+                json!({"thinking":{"type":"disabled"},"output_config":{"effort":"low"}}),
+                "(high)",
+                "high",
+            ),
+            (
+                json!({"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}),
+                "",
+                "medium",
+            ),
+        ] {
+            let model = format!("gpt-5.5{suffix}");
+            let source = source.to_string();
+            let mut codex = json!({"reasoning":{"effort":"medium"}});
+            crate::codex::thinking::apply_with_model_info(
+                &mut codex,
+                source.as_bytes(),
+                &model,
+                "claude",
+                "codex",
+                "codex",
+                Some(info.clone()),
+            )
+            .unwrap();
+            assert_eq!(codex["reasoning"]["effort"], expected);
+            let mut openai = json!({"reasoning_effort":"medium"});
+            crate::openai_compat::thinking::apply_with_model_info(
+                &mut openai,
+                source.as_bytes(),
+                &model,
+                "claude",
+                "openai",
+                "openai",
+                Some(info.clone()),
+            )
+            .unwrap();
+            assert_eq!(openai["reasoning_effort"], expected);
         }
     }
 }

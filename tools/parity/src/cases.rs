@@ -136,7 +136,7 @@ pub fn hand_written() -> Vec<Case> {
     );
     let large_image = "A".repeat(2 << 20);
 
-    vec![
+    let mut cases = vec![
         Case::new(
             "minimal",
             "gpt-5",
@@ -226,7 +226,28 @@ pub fn hand_written() -> Vec<Case> {
             "grok-4",
             with_thinking_signature(GROK_SIGNATURE),
         ),
-    ]
+    ];
+    for (name, fields) in [
+        ("high", json!({"output_config":{"effort":" HIGH "}})),
+        ("low", json!({"output_config":{"effort":"low"}})),
+        ("blank", json!({"output_config":{"effort":" "}})),
+        ("non-string", json!({"output_config":{"effort":123}})),
+        (
+            "disabled",
+            json!({"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}),
+        ),
+        (
+            "budget",
+            json!({"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}),
+        ),
+    ] {
+        cases.push(Case::new(
+            format!("standalone-effort-{name}"),
+            "gpt-5.5",
+            fields.to_string(),
+        ));
+    }
+    cases
 }
 
 /// A request declaring a short tool, one whose name Codex sees shortened, and
