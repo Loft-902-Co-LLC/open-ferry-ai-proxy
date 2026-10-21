@@ -147,7 +147,7 @@ function SettingsEditor({
   /** Marks `saved` as saved: the form and the key list take them as the server's. */
   const settleSaved = (saved: readonly PendingChange[]) => {
     const accepted = editor.editor.acceptedValue<unknown>(CONFIG);
-    if (accepted !== undefined) {
+    if (saved.length > 0 && accepted !== undefined) {
       // Publish the acknowledged values/version together before clearing
       // RHF's draft, even while the background read is pending.
       client.setQueryData([CONFIG, "config-draft", editor.scope], accepted);

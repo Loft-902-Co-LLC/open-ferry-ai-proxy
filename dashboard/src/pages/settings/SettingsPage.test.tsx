@@ -2060,3 +2060,84 @@ describe("stale pending key deletion", () => {
     expect(state.tree.access["api-keys"]).toEqual([KEY_B]);
   });
 });
+
+
+describe("save-batch accepted publication", () => {
+  it("preserves a draft after the first write fails and settles only this batch after a partial save", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    const retryPath = `${V8_CONFIG}/routing/retry/request-retry`;
+    const debugPath = `${V8_CONFIG}/observability/logs/debug`;
+    const retries = screen.getByRole("textbox", { name: "Retries" });
+    const debug = screen.getByRole("checkbox", { name: "Debug logging" });
+    fireEvent.change(retries, { target: { value: "3" } });
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    let dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    await screen.findByText("Saved 1 setting. The server uses it from now on.");
+    await waitFor(expectNothingUnsaved);
+    state.external(true, 9);
+    await refetchOnFocus();
+    expect(retries).toHaveValue("9");
+    expect(debug).toBeChecked();
+    fireEvent.change(retries, { target: { value: "3" } });
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    const pending: (() => void)[] = [];
+    let held = true;
+    const answerFetch = globalThis.fetch;
+    // Query reads carry a signal; save preflights do not. Hold the query
+    // notifications without blocking either write's own guarded read.
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const answer = await answerFetch(input, init);
+      if (held && init?.signal !== undefined && String(input).endsWith(V8_CONFIG)) {
+        return new Promise<Response>((resolve) => { pending.push(() => { resolve(answer); }); });
+      }
+      return answer;
+    });
+    const release = async () => {
+      held = false;
+      await act(async () => { for (const done of pending.splice(0)) done(); await Promise.resolve(); });
+    };
+    try {
+      state.api.use(route("PUT", retryPath, { status: 503 }));
+      await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+      await waitFor(() => { expect(pending.length).toBeGreaterThan(0); });
+      expect(retries).toHaveValue("3");
+      expect(debug).toBeChecked();
+      expect(screen.getByText("1 unsaved change.")).toBeVisible();
+      expect(screen.queryByText("No unsaved changes.")).not.toBeInTheDocument();
+      expect(state.tree.routing.retry["request-retry"]).toBe(9);
+      expect(state.tree.observability.logs.debug).toBe(true);
+      await release();
+      await within(dialog).findByText("The server failed (HTTP 503)");
+      await user.click(within(dialog).getByRole("button", { name: "Close" }));
+      expect(retries).toHaveValue("3");
+      expect(screen.getByText("1 unsaved change.")).toBeVisible();
+
+      // The next batch accepts Retries, then fails Debug. Publish that
+      // batch's accepted pair and keep only the failed Debug draft dirty.
+      await user.click(debug);
+      state.api.use(
+        route("PUT", retryPath, (request) => {
+          if (request.headers.get("if-match") !== state.tag()) return { status: 412 };
+          state.external(true, Number(request.json()));
+          return { json: {}, headers: { ETag: state.tag() } };
+        }),
+        route("PUT", debugPath, { status: 503 }),
+      );
+      await user.click(screen.getByRole("button", { name: "Review and save" }));
+      dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+      held = true;
+      await user.click(within(dialog).getByRole("button", { name: "Save 2 settings" }));
+      await waitFor(() => { expect(state.api.callsTo("PUT", debugPath)).toHaveLength(1); });
+      await waitFor(() => { expect(screen.getByText("1 unsaved change.")).toBeVisible(); });
+      expect(retries).toHaveValue("3");
+      expect(debug).not.toBeChecked();
+      expect(state.tree.routing.retry["request-retry"]).toBe(3);
+      expect(state.tree.observability.logs.debug).toBe(true);
+      expect(state.api.callsTo("PUT", retryPath).map((call) => call.headers.get("if-match"))).toEqual(['"1"', '"3"', '"3"']);
+      expect(state.api.callsTo("PUT", debugPath)[0]?.headers.get("if-match")).toBe('"4"');
+    } finally { await release(); }
+  });
+});
