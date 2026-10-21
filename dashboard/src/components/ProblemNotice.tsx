@@ -118,7 +118,7 @@ export function explainProblem(problem: CallProblem): Explanation {
     case "broken-config":
       return {
         tone: "warn",
-        title: "config.yaml doesn't parse",
+        title: "The server can't use config.yaml",
         body: <>
           <p>The server is still running its last good config. Open the <Link to="/settings?tab=file">YAML editor</Link> to repair the file.</p>
           {problem.message !== null && <p>{problem.message}</p>}

@@ -6,7 +6,7 @@ import { Suspense, lazy, useEffect, useId, useState } from "react";
 import { callProblem, saveProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
 import { useConfigEditor } from "../../api/hooks";
-import { ConfigEditor, type ConfigRead } from "../../api/configEditor";
+import { ConfigEditor, RecoveryEnded, StoredConfigUnusable, type ConfigRead } from "../../api/configEditor";
 import { CONFIG_YAML } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Button } from "../../components/Button";
@@ -53,6 +53,13 @@ function SaveProblem({ error, draft, onReload }: { error: unknown; draft: string
         <p>{line !== null && `Check line ${String(line)}. `}{error.detail} Nothing was saved.</p>
       </Alert>
     );
+  }
+  if (error instanceof RecoveryEnded || error instanceof StoredConfigUnusable) {
+    return <Alert tone="warn" live title={error instanceof RecoveryEnded ? "config.yaml can be read again" : "The stored config.yaml has become unusable"}>
+      <p>{error.message}</p>
+      {error instanceof StoredConfigUnusable && error.detail !== null && <p>{error.detail}</p>}
+      <Button onClick={onReload}>Reload latest config</Button>
+    </Alert>;
   }
   if (isApiError(error) && error.code === "invalid_config") {
     return (
@@ -447,7 +454,7 @@ export function ConfigFileEditor({
       ) : (
         <>
           {file.data.recovery !== null && (
-            <Alert tone="warn" live title="Recovery mode: config.yaml doesn't parse">
+            <Alert tone="warn" live title="Recovery mode: the server can't use config.yaml">
               <p>The server is still running its last good config. Saving replaces the whole file without version checks. Copy your edits before reloading if the file changes meanwhile.</p>
               {file.data.recovery.detail !== null && <p>{file.data.recovery.detail}</p>}
             </Alert>
