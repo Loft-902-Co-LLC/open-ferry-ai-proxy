@@ -74,7 +74,9 @@ use axum::extract::connect_info::ConnectInfo;
 use hyper::StatusCode;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::TokioIo;
+#[cfg(test)]
+use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use socket2::{SockRef, Socket};
 use std::net::Shutdown;
