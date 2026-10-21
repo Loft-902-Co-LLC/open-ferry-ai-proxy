@@ -156,7 +156,9 @@ struct State {
     read_frames: Frames,
     write_frames: Frames,
     write_pending: Option<Instant>,
-    deliveries: HashMap<u64, Instant>,
+    deliveries: HashMap<u64, StreamProgress>,
+    protocol_tasks: usize,
+    send_window: i64,
     next_delivery: u64,
     draining: bool,
     draining_since: Option<Instant>,
@@ -188,6 +190,8 @@ impl Traffic {
                 write_frames: Frames::default(),
                 write_pending: None,
                 deliveries: HashMap::new(),
+                protocol_tasks: 0,
+                send_window: 65535,
                 next_delivery: 0,
                 draining: false,
                 draining_since: None,
@@ -264,50 +268,39 @@ impl Traffic {
         self.changed.notify_one();
     }
 
-    fn due(&self) -> Option<(Instant, &'static str)> {
+    fn due(&self) -> Option<(Instant, &'static str, Option<u64>)> {
         let state = self.state();
-        let mut due = Vec::with_capacity(5);
-        if state.active == 0
-            && state.streams.is_empty()
-            && let Some(started) = state.draining_since
-        {
-            due.push((
-                state.idle_since.unwrap_or(started).max(started) + GOAWAY_GRACE,
-                "GOAWAY completion",
-            ));
+        let mut due = None;
+        let mut consider = |at, guard, stream| {
+            if due.is_none_or(|(earlier, _, _)| at < earlier) { due = Some((at, guard, stream)); }
+        };
+        if state.active == 0 && state.streams.is_empty()
+            && let Some(started) = state.draining_since {
+            consider(state.idle_since.unwrap_or(started).max(started) + GOAWAY_GRACE, "GOAWAY completion", None);
         }
         if !state.draining {
             if state.protocol != Protocol::Http1 || !state.upgraded {
-                due.extend(state.first_head.map(|at| (at, "request headers")));
+                if let Some(at) = state.first_head { consider(at, "request headers", None); }
             }
-            due.extend(state.partial_head.map(|at| (at, "request headers")));
-            if let Some(idle) = state
-                .idle_since
-                .filter(|_| state.active == 0 && state.streams.is_empty())
-                && (state.protocol != Protocol::Http1 || !state.upgraded)
-            {
-                if let Some(duration) = self.config.idle_timeout {
-                    due.push((idle + duration, "idle connection"));
-                }
-                if state.protocol == Protocol::Http1
-                    && let Some(duration) = self.config.header_timeout
-                {
-                    due.push((idle + duration, "request headers"));
+            if let Some(at) = state.partial_head { consider(at, "request headers", None); }
+            if let Some(idle) = state.idle_since.filter(|_| state.active == 0 && state.streams.is_empty())
+                && (state.protocol != Protocol::Http1 || !state.upgraded) {
+                if let Some(duration) = self.config.idle_timeout { consider(idle + duration, "idle connection", None); }
+                if state.protocol == Protocol::Http1 && let Some(duration) = self.config.header_timeout {
+                    consider(idle + duration, "request headers", None);
                 }
             }
         }
         if let Some(duration) = self.config.write_stall_timeout {
-            if let Some(at) = state.write_pending {
-                due.push((at + duration, "response write progress"));
+            if let Some(at) = state.write_pending { consider(at + duration, "response write progress", None); }
+            for (&id, progress) in &state.deliveries {
+                if progress.pending != 0 && !progress.reset {
+                    let stream = (state.protocol == Protocol::Http2 && state.send_window > 0).then_some(id);
+                    consider(progress.progressed + duration, "response write progress", stream);
+                }
             }
-            due.extend(
-                state
-                    .deliveries
-                    .values()
-                    .map(|at| (*at + duration, "response write progress")),
-            );
         }
-        due.into_iter().min_by_key(|(at, _)| *at)
+        due
     }
 
     pub(super) fn wake(&self) {
@@ -321,7 +314,7 @@ impl Traffic {
 
     #[cfg(test)]
     pub(super) fn has_pending_delivery(&self) -> bool {
-        !self.state().deliveries.is_empty()
+        self.state().deliveries.values().any(|progress| progress.pending != 0)
     }
 }
 
@@ -333,6 +326,8 @@ struct Frames {
     head: [u8; 9],
     used: usize,
     remaining: usize,
+    payload: [u8; 4],
+    payload_used: usize,
 }
 
 impl Frames {
@@ -360,6 +355,9 @@ impl Frames {
                     | usize::from(self.head[2]);
             }
             let len = self.remaining.min(bytes.len());
+            let keep = len.min(4 - self.payload_used);
+            self.payload[self.payload_used..self.payload_used + keep].copy_from_slice(&bytes[..keep]);
+            self.payload_used += keep;
             bytes = &bytes[len..];
             self.remaining -= len;
             if self.remaining != 0 {
@@ -368,6 +366,12 @@ impl Frames {
             let kind = self.head[3];
             let flags = self.head[4];
             let stream = u32::from_be_bytes(self.head[5..9].try_into().unwrap()) & 0x7fff_ffff;
+            if incoming && kind == 8 && stream == 0 && self.payload_used == 4 {
+                state.send_window = state.send_window.saturating_add(i64::from(u32::from_be_bytes(self.payload) & 0x7fff_ffff));
+            } else if !incoming && kind == 0 {
+                let length = (usize::from(self.head[0]) << 16) | (usize::from(self.head[1]) << 8) | usize::from(self.head[2]);
+                state.send_window -= length as i64;
+            }
             if incoming && matches!(kind, 1 | 9) && flags & 4 != 0 {
                 state.partial_head = None;
             }
@@ -392,6 +396,7 @@ impl Frames {
                 Traffic::idle(state);
             }
             self.used = 0;
+            self.payload_used = 0;
         }
     }
 }
@@ -407,15 +412,23 @@ pub(super) async fn watch_traffic(core: Weak<ConnCore>, traffic: Arc<Traffic>) {
             () = changed => {}
             () = async {
                 match deadline {
-                    Some((at, _)) => tokio::time::sleep_until(at).await,
+                    Some((at, _, _)) => tokio::time::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
             } => {
                 // Recheck after the wake: progress at the same instant wins.
-                if let Some((_, guard)) = traffic.due().filter(|(at, _)| *at <= Instant::now()) {
+                if let Some((_, guard, stream)) = traffic.due().filter(|(at, _, _)| *at <= Instant::now()) {
                     traffic.ingress.warn(guard);
                     let Some(core) = core.upgrade() else { return; };
                     let mut state = traffic.state();
+                    if let Some(id) = stream
+                        && let Some(progress) = state.deliveries.get_mut(&id)
+                        && let Some(cancel) = progress.cancel.clone() {
+                        progress.reset = true;
+                        drop(state);
+                        cancel.cancel();
+                        continue;
+                    }
                     if guard == "idle connection" && state.protocol == Protocol::Http2 {
                         state.draining = true;
                         state.draining_since = Some(Instant::now());
@@ -430,35 +443,95 @@ pub(super) async fn watch_traffic(core: Weak<ConnCore>, traffic: Arc<Traffic>) {
 
 /// Active through the last response data, rather than through just the service
 /// future. Waiting for an upstream/SSE producer therefore never looks idle.
-pub(super) struct Flight(Arc<Traffic>);
+struct StreamProgress {
+    pending: usize,
+    progressed: Instant,
+    cancel: Option<Arc<TaskCancel>>,
+    reset: bool,
+}
 
+#[derive(Default)]
+struct TaskCancel { cancelled: AtomicBool, wake: Notify }
+impl TaskCancel {
+    fn cancel(&self) { self.cancelled.store(true, Ordering::Release); self.wake.notify_one(); }
+    async fn cancelled(&self) {
+        let notified = self.wake.notified();
+        if !self.cancelled.load(Ordering::Acquire) { notified.await; }
+    }
+}
+
+tokio::task_local! { static STREAM_TASK: Arc<TaskCancel>; }
+
+/// Hyper's H2 request and upgrade tasks have independent cancellation scopes.
+/// Dropping a request task drops its h2 send handle, which sends RST_STREAM/CANCEL.
+#[derive(Clone)]
+pub(super) struct StreamExecutor(pub(super) Arc<Traffic>);
+impl<F> hyper::rt::Executor<F> for StreamExecutor
+where F: Future + Send + 'static, F::Output: Send + 'static {
+    fn execute(&self, future: F) {
+        let cancel = Arc::new(TaskCancel::default());
+        let task = ProtocolTask::new(self.0.clone());
+        tokio::spawn(STREAM_TASK.scope(cancel.clone(), async move {
+            let _task = task;
+            tokio::select! { biased; () = cancel.cancelled() => {}, _ = future => {} }
+        }));
+    }
+}
+
+struct ProtocolTask(Arc<Traffic>);
+impl ProtocolTask {
+    fn new(traffic: Arc<Traffic>) -> Self {
+        { let mut state = traffic.state(); state.protocol_tasks += 1; state.idle_since = None; }
+        traffic.changed.notify_one();
+        Self(traffic)
+    }
+}
+impl Drop for ProtocolTask {
+    fn drop(&mut self) {
+        let mut state = self.0.state();
+        state.protocol_tasks -= 1;
+        Traffic::idle(&mut state);
+        self.0.changed.notify_one();
+    }
+}
+
+pub(super) struct Flight { traffic: Arc<Traffic>, id: u64 }
 impl Flight {
     pub(super) fn close_after_response(&self) {
-        let mut state = self.0.state();
+        let mut state = self.traffic.state();
         state.draining = true;
-        state.draining_since = Some(Instant::now());
-        self.0.idle_expired.store(true, Ordering::Release);
-        self.0.idle_wake.notify_one();
+        state.draining_since.get_or_insert_with(Instant::now);
+        self.traffic.idle_expired.store(true, Ordering::Release);
+        self.traffic.idle_wake.notify_one();
+        self.traffic.changed.notify_one();
     }
-
+    pub(super) fn bind_task(&self) {
+        if let Ok(cancel) = STREAM_TASK.try_with(Arc::clone) {
+            self.traffic.state().deliveries.get_mut(&self.id).unwrap().cancel = Some(cancel);
+        }
+    }
     pub(super) fn new(traffic: Arc<Traffic>) -> Arc<Self> {
-        {
+        let id = {
             let mut state = traffic.state();
             state.active += 1;
             state.idle_since = None;
             state.first_head = None;
-        }
+            let id = state.next_delivery;
+            state.next_delivery = state.next_delivery.wrapping_add(1);
+            state.deliveries.insert(id, StreamProgress { pending: 0, progressed: Instant::now(), cancel: None, reset: false });
+            id
+        };
         traffic.changed.notify_one();
-        Arc::new(Self(traffic))
+        Arc::new(Self { traffic, id })
     }
 }
-
 impl Drop for Flight {
     fn drop(&mut self) {
-        let mut state = self.0.state();
+        let mut state = self.traffic.state();
+        state.deliveries.remove(&self.id);
         state.active -= 1;
         Traffic::idle(&mut state);
-        self.0.changed.notify_one();
+        self.traffic.changed.notify_one();
     }
 }
 
@@ -503,49 +576,39 @@ impl HttpBody for ResponseBody {
 pub(super) struct Delivery {
     bytes: Bytes,
     flight: Arc<Flight>,
-    id: u64,
 }
-
 impl Delivery {
     fn new(bytes: Bytes, flight: Arc<Flight>) -> Self {
-        let mut state = flight.0.state();
-        let id = state.next_delivery;
-        state.next_delivery = state.next_delivery.wrapping_add(1);
         if !bytes.is_empty() {
-            state.deliveries.insert(id, Instant::now());
+            let mut state = flight.traffic.state();
+            let progress = state.deliveries.get_mut(&flight.id).unwrap();
+            let starting = progress.pending == 0;
+            if starting { progress.progressed = Instant::now(); }
+            progress.pending = progress.pending.saturating_add(bytes.len());
+            if starting { flight.traffic.changed.notify_one(); }
         }
-        drop(state);
-        flight.0.changed.notify_one();
-        Self { bytes, flight, id }
+        Self { bytes, flight }
+    }
+    fn consumed(&self, count: usize, made_progress: bool) {
+        if count == 0 { return; }
+        let mut state = self.flight.traffic.state();
+        let progress = state.deliveries.get_mut(&self.flight.id).unwrap();
+        progress.pending = progress.pending.saturating_sub(count);
+        if made_progress { progress.progressed = Instant::now(); }
+        // Extending an armed deadline needs no wake: its old timer rechecks.
+        if progress.pending == 0 { self.flight.traffic.changed.notify_one(); }
     }
 }
-
 impl Buf for Delivery {
-    fn remaining(&self) -> usize {
-        self.bytes.remaining()
-    }
-    fn chunk(&self) -> &[u8] {
-        self.bytes.chunk()
-    }
+    fn remaining(&self) -> usize { self.bytes.remaining() }
+    fn chunk(&self) -> &[u8] { self.bytes.chunk() }
     fn advance(&mut self, count: usize) {
         self.bytes.advance(count);
-        if count > 0 {
-            let mut state = self.flight.0.state();
-            if self.bytes.is_empty() {
-                state.deliveries.remove(&self.id);
-            } else {
-                state.deliveries.insert(self.id, Instant::now());
-            }
-            self.flight.0.changed.notify_one();
-        }
+        self.consumed(count, true);
     }
 }
-
 impl Drop for Delivery {
-    fn drop(&mut self) {
-        self.flight.0.state().deliveries.remove(&self.id);
-        self.flight.0.changed.notify_one();
-    }
+    fn drop(&mut self) { self.consumed(self.bytes.len(), false); }
 }
 
 pub(super) struct Guarded<T> {

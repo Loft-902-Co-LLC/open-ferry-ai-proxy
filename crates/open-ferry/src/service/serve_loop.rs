@@ -85,7 +85,7 @@ use tokio_rustls::TlsAcceptor;
 use tower_service::Service;
 
 mod ingress;
-use ingress::{Admission, AdmissionGuard, Flight, Guarded, ResponseBody, Traffic};
+use ingress::{Admission, AdmissionGuard, Flight, Guarded, ResponseBody, StreamExecutor, Traffic};
 use open_ferry_server::config::IngressConfig;
 use open_ferry_server::ingress::Ingress;
 
@@ -1109,6 +1109,7 @@ async fn serve_connection<I>(
             request.extensions_mut().insert(ConnectInfo(peer));
             let core = core.clone();
             async move {
+                flight.bind_task();
                 std::future::poll_fn(|cx| {
                     Service::<hyper::Request<Body>>::poll_ready(&mut router, cx)
                 })
@@ -1143,7 +1144,7 @@ async fn serve_connection<I>(
             }
         })
     };
-    let mut builder = Builder::new(TokioExecutor::new());
+    let mut builder = Builder::new(StreamExecutor(traffic.clone()));
     // The transport watcher covers detection, the first head and keep-alive
     // gaps without resetting on trickled bytes, for both HTTP versions.
     builder.http1().header_read_timeout(None);
