@@ -245,6 +245,7 @@ The comparison (`src/compare.rs`) walks both outputs. Every suite reads each num
   - *made-up user ID left out*: upstream filled a Claude request's `metadata.user_id` for a client that sent none, and we don't. Upstream's ID is removed before comparing;
   - *createTime written in UTC*: a Gemini response's `createTime`, from a Codex response's `created_at`, is the same instant, written by upstream in the server's zone and by us in UTC;
   - *call ID derived from compact JSON*: a Chat Completions request translated from Gemini holds call IDs derived from a request whose text isn't compact, which are masked (see above).
+  - *upstream lossy plugin re-encode*: Go replaced a source plugin string with an empty scalar and folded its text into an adjacent source comment. This class is counted separately in the summary, within Equivalent. It requires Rust's complete `plugins.configs` values to equal the source, each involved source comment to occur once, the scalar-to-comment changes to be inside that subtree, and every other output byte to match. Changed values, comments, prefixes or bytes outside that shape stay Different; comment-only losses are not automatically accepted.
 - **known**: a hand-written case marked with `known_difference`, such as behaviour not ported yet.
 - **different**: anything else. Failing cases are written to `target/parity/failures/<translator>/` (such as `claude-request` or `responses-stream`) with the input and both outputs.
 

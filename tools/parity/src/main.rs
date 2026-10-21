@@ -692,6 +692,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             equivalent: tally.equivalent,
             known: tally.known.len(),
             different: tally.different,
+            upstream_lossy_plugins: tally
+                .deviations
+                .get(&Deviation::UpstreamLossyPluginReencode)
+                .copied()
+                .unwrap_or_default(),
         });
     }
     if let Some(path) = &args.summary {
@@ -973,6 +978,12 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
         filtered = Some(Ok(rust));
     }
     let compared: &Result<Value, String> = filtered.as_ref().unwrap_or(&rust_output);
+    if translator == Translator::ConfigSave
+        && let (Some(go), Ok(rust)) = (&mut go_value, compared)
+        && let Some(loss) = config_save::repair_lossy_plugin_reencode(case, go, rust)
+    {
+        omitted.push(loss);
+    }
 
     let outcome = match (&go_value, compared) {
         (Some(go), Ok(rust)) => {
