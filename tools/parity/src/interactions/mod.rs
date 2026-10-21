@@ -186,6 +186,24 @@ pub fn suites(seed: u64, random: usize) -> Vec<Suite> {
     each_family!(suites(seed, random))
 }
 
+/// Build random cases only for the selected suites, retaining the complete
+/// catalog so the caller can reject unknown names.
+pub fn selected_suites(
+    seed: u64,
+    random: usize,
+    wanted: &impl Fn(Translator) -> bool,
+) -> Vec<Suite> {
+    let mut suites = suites(seed, 0);
+    for (translator, _, generated) in &mut suites {
+        if wanted(*translator)
+            && let Translator::Interactions(kind) = *translator
+        {
+            *generated = dispatch!(kind, kind => kind.generate(seed, random));
+        }
+    }
+    suites
+}
+
 /// The families' hand-written registry request cases, each list with the
 /// pair it is sent through.
 pub fn registry_requests() -> Vec<(Pair, Vec<Case>)> {

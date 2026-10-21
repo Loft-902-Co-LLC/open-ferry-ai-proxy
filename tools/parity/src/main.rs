@@ -46,6 +46,8 @@ usage: open-ferry-parity --upstream <CLIProxyAPI checkout> [options]
 options:
   --random <n>   random cases to generate per translator (default 5000)
   --seed <n>     seed for the random cases (default 1)
+  --suite <name> run only this suite (directory slug); repeat to select several
+                 (default: all suites; unknown names are errors)
   --show <n>     kinds of difference to print (default 10)
   --go <path>    Go binary (default: go on PATH)
   --live <url>   instead, send a few requests through a running CLIProxyAPI;
@@ -67,6 +69,7 @@ struct Args {
     live: Option<String>,
     model: Option<String>,
     summary: Option<PathBuf>,
+    suites: BTreeSet<String>,
 }
 
 impl Args {
@@ -81,6 +84,7 @@ impl Args {
             live: None,
             model: None,
             summary: None,
+            suites: BTreeSet::new(),
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -93,6 +97,9 @@ impl Args {
                 "--live" => parsed.live = Some(value()?),
                 "--model" => parsed.model = Some(value()?),
                 "--summary" => parsed.summary = Some(value()?.into()),
+                "--suite" => {
+                    parsed.suites.insert(value()?);
+                }
                 "-h" | "--help" => return Err(String::new()),
                 _ => return Err(format!("unknown argument {flag}")),
             }
@@ -132,6 +139,508 @@ fn main() -> ExitCode {
     }
 }
 
+type Suite = (Translator, Vec<Case>, Vec<Case>);
+
+fn selected_suites(args: &Args) -> Result<Vec<Suite>, String> {
+    let seed = args.seed;
+    let random = args.random;
+    let wanted =
+        |translator: Translator| args.suites.is_empty() || args.suites.contains(translator.slug());
+    macro_rules! suite {
+        ($translator:expr, $handwritten:expr, $random:expr $(,)?) => {{
+            let translator = $translator;
+            if wanted(translator) {
+                (translator, $handwritten, $random)
+            } else {
+                (translator, Vec::new(), Vec::new())
+            }
+        }};
+    }
+    macro_rules! events {
+        ($stream:ident, $final:ident, $generate:expr) => {
+            if wanted(Translator::$stream) || wanted(Translator::$final) {
+                $generate
+            } else {
+                (Vec::new(), Vec::new())
+            }
+        };
+    }
+    let (streams, finals) = events!(Stream, NonStream, generate::response::cases(seed, random));
+    let (responses_streams, responses_finals) = events!(
+        ResponsesStream,
+        ResponsesNonStream,
+        generate::responses::event_cases(seed, random)
+    );
+    let (chat_streams, chat_finals) = events!(
+        ChatStream,
+        ChatNonStream,
+        generate::chat::event_cases(seed, random)
+    );
+    let (claude_chat_streams, claude_chat_finals) = events!(
+        ClaudeChatStream,
+        ClaudeChatNonStream,
+        generate::claude_chat::event_cases(seed, random)
+    );
+    let (claude_responses_streams, claude_responses_finals) = events!(
+        ClaudeResponsesStream,
+        ClaudeResponsesNonStream,
+        generate::claude_responses::event_cases(seed, random)
+    );
+    let (openai_responses_streams, openai_responses_finals) = events!(
+        OpenAIResponsesStream,
+        OpenAIResponsesNonStream,
+        generate::openai_responses::event_cases(seed, random)
+    );
+    let (openai_claude_streams, openai_claude_finals) = events!(
+        OpenAIClaudeStream,
+        OpenAIClaudeNonStream,
+        generate::openai_claude::event_cases(seed, random)
+    );
+    let (openai_chat_streams, openai_chat_finals) = events!(
+        OpenAIChatStream,
+        OpenAIChatNonStream,
+        generate::openai_chat::event_cases(seed, random)
+    );
+    let (codex_gemini_streams, codex_gemini_finals) = events!(
+        CodexGeminiStream,
+        CodexGeminiNonStream,
+        generate::gemini::codex_event_cases(seed, random)
+    );
+    let (claude_gemini_streams, claude_gemini_finals) = events!(
+        ClaudeGeminiStream,
+        ClaudeGeminiNonStream,
+        generate::gemini::claude_event_cases(seed, random)
+    );
+    let (openai_gemini_streams, openai_gemini_finals) = events!(
+        OpenAIGeminiStream,
+        OpenAIGeminiNonStream,
+        generate::gemini::openai_event_cases(seed, random)
+    );
+    let (registry_streams, registry_finals) = events!(
+        RegistryStream,
+        RegistryNonStream,
+        generate::registry::response_cases(seed, random)
+    );
+    let (gemini_streams, gemini_finals) = events!(
+        GeminiGeminiStream,
+        GeminiGeminiNonStream,
+        generate::to_gemini::event_cases(seed, random)
+    );
+    let (gemini_claude_streams, gemini_claude_finals) = events!(
+        GeminiClaudeStream,
+        GeminiClaudeNonStream,
+        generate::to_gemini::claude_event_cases(seed, random)
+    );
+    let (gemini_chat_streams, gemini_chat_finals) = events!(
+        GeminiChatStream,
+        GeminiChatNonStream,
+        generate::to_gemini::chat_event_cases(seed, random)
+    );
+    let (gemini_responses_streams, gemini_responses_finals) = events!(
+        GeminiResponsesStream,
+        GeminiResponsesNonStream,
+        generate::gemini_responses::event_cases(seed, random)
+    );
+    let mut suites = vec![
+        suite!(
+            Translator::Request,
+            cases::hand_written(),
+            generate::cases(seed, random),
+        ),
+        suite!(Translator::Stream, cases::hand_written_streams(), streams),
+        suite!(Translator::NonStream, cases::hand_written_finals(), finals),
+        suite!(
+            Translator::ResponsesRequest,
+            cases::responses::requests(),
+            generate::responses::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::ResponsesStream,
+            cases::responses::streams(),
+            responses_streams,
+        ),
+        suite!(
+            Translator::ResponsesNonStream,
+            cases::responses::finals(),
+            responses_finals,
+        ),
+        suite!(
+            Translator::ChatRequest,
+            cases::chat::requests(),
+            generate::chat::request_cases(seed, random),
+        ),
+        suite!(Translator::ChatStream, cases::chat::streams(), chat_streams),
+        suite!(
+            Translator::ChatNonStream,
+            cases::chat::finals(),
+            chat_finals,
+        ),
+        suite!(
+            Translator::RequestCompat,
+            cases::hand_written(),
+            generate::cases(seed, random),
+        ),
+        suite!(
+            Translator::ClaudeChatRequest,
+            cases::claude_chat::requests(),
+            generate::claude_chat::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::ClaudeChatRequestCompat,
+            cases::claude_chat::requests(),
+            generate::claude_chat::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::ClaudeChatStream,
+            cases::claude_chat::streams(),
+            claude_chat_streams,
+        ),
+        suite!(
+            Translator::ClaudeChatNonStream,
+            cases::claude_chat::finals(),
+            claude_chat_finals
+                .into_iter()
+                .chain(generate::claude_chat::native_cases(seed, random / 2))
+                .collect(),
+        ),
+        suite!(
+            Translator::ClaudeResponsesRequest,
+            cases::claude_responses::requests(),
+            generate::claude_responses::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::ClaudeResponsesRequestCompat,
+            cases::claude_responses::requests(),
+            generate::claude_responses::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::ClaudeResponsesStream,
+            cases::claude_responses::streams(),
+            claude_responses_streams,
+        ),
+        suite!(
+            Translator::ClaudeResponsesNonStream,
+            cases::claude_responses::finals(),
+            claude_responses_finals
+                .into_iter()
+                .chain(generate::claude_responses::native_cases(seed, random / 2))
+                .collect(),
+        ),
+        suite!(
+            Translator::OpenAIResponsesRequest,
+            cases::openai_responses::requests(),
+            generate::openai_responses::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::OpenAIResponsesStream,
+            cases::openai_responses::streams(),
+            openai_responses_streams,
+        ),
+        suite!(
+            Translator::OpenAIResponsesNonStream,
+            cases::openai_responses::finals(),
+            openai_responses_finals,
+        ),
+        suite!(
+            Translator::OpenAIClaudeRequest,
+            cases::openai_claude::requests(),
+            generate::openai_claude::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::OpenAIClaudeRequestCompat,
+            cases::openai_claude::requests(),
+            generate::openai_claude::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::OpenAIClaudeStream,
+            cases::openai_claude::streams(),
+            openai_claude_streams,
+        ),
+        suite!(
+            Translator::OpenAIClaudeNonStream,
+            cases::openai_claude::finals(),
+            openai_claude_finals,
+        ),
+        suite!(
+            Translator::OpenAIChatRequest,
+            cases::openai_chat::requests(),
+            generate::openai_chat::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::OpenAIChatStream,
+            cases::openai_chat::streams(),
+            openai_chat_streams,
+        ),
+        suite!(
+            Translator::OpenAIChatNonStream,
+            cases::openai_chat::finals(),
+            openai_chat_finals,
+        ),
+        suite!(
+            Translator::CodexGeminiRequest,
+            cases::gemini::requests(),
+            generate::gemini::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::CodexGeminiStream,
+            cases::gemini::codex_streams(),
+            codex_gemini_streams,
+        ),
+        suite!(
+            Translator::CodexGeminiNonStream,
+            cases::gemini::codex_finals(),
+            codex_gemini_finals,
+        ),
+        suite!(
+            Translator::ClaudeGeminiRequest,
+            cases::gemini::requests(),
+            generate::gemini::request_cases(seed.rotate_left(1), random),
+        ),
+        suite!(
+            Translator::ClaudeGeminiStream,
+            cases::gemini::claude_streams(),
+            claude_gemini_streams,
+        ),
+        suite!(
+            Translator::ClaudeGeminiNonStream,
+            cases::gemini::claude_finals(),
+            claude_gemini_finals,
+        ),
+        suite!(
+            Translator::OpenAIGeminiRequest,
+            cases::gemini::requests(),
+            generate::gemini::request_cases(seed.rotate_left(2), random),
+        ),
+        suite!(
+            Translator::OpenAIGeminiStream,
+            cases::gemini::openai_streams(),
+            openai_gemini_streams,
+        ),
+        suite!(
+            Translator::OpenAIGeminiNonStream,
+            cases::gemini::openai_finals(),
+            openai_gemini_finals,
+        ),
+        suite!(
+            Translator::SignatureInspect,
+            cases::signature::inspect(),
+            generate::signature::inspect_cases(seed, random),
+        ),
+        suite!(
+            Translator::ClaudeMessagesSignatures,
+            cases::signature::claude_messages(),
+            generate::signature::claude_messages_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiSignatures,
+            cases::signature::gemini(),
+            generate::signature::gemini_cases(seed, random),
+        ),
+        suite!(
+            Translator::RegistryRequest,
+            cases::registry::requests(),
+            generate::registry::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::RegistryStream,
+            cases::registry::streams(),
+            registry_streams,
+        ),
+        suite!(
+            Translator::RegistryNonStream,
+            cases::registry::finals(),
+            registry_finals,
+        ),
+        suite!(
+            Translator::RegistryLookup,
+            cases::registry::lookups(),
+            generate::registry::lookup_cases(seed, random),
+        ),
+        suite!(
+            Translator::CompletionsRequest,
+            cases::completions::requests(),
+            generate::completions::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::CompletionsResponse,
+            cases::completions::responses(),
+            generate::completions::response_cases(seed, random),
+        ),
+        suite!(
+            Translator::CompletionsStreamChunk,
+            cases::completions::stream_chunks(),
+            generate::completions::chunk_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiGeminiRequest,
+            cases::to_gemini::gemini_requests(),
+            generate::to_gemini::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiGeminiStream,
+            cases::to_gemini::gemini_streams(),
+            gemini_streams,
+        ),
+        suite!(
+            Translator::GeminiGeminiNonStream,
+            cases::to_gemini::gemini_finals(),
+            gemini_finals,
+        ),
+        suite!(
+            Translator::GeminiClaudeRequest,
+            cases::to_gemini::claude_requests(),
+            generate::to_gemini::claude_request_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiClaudeRequestCompat,
+            cases::to_gemini::claude_requests(),
+            generate::to_gemini::claude_request_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiClaudeStream,
+            cases::to_gemini::claude_streams(),
+            gemini_claude_streams,
+        ),
+        suite!(
+            Translator::GeminiClaudeNonStream,
+            cases::to_gemini::claude_finals(),
+            gemini_claude_finals,
+        ),
+        suite!(
+            Translator::GeminiChatRequest,
+            cases::to_gemini::chat_requests(),
+            generate::to_gemini::chat_request_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiChatStream,
+            cases::to_gemini::chat_streams(),
+            gemini_chat_streams,
+        ),
+        suite!(
+            Translator::GeminiChatNonStream,
+            cases::to_gemini::chat_finals(),
+            gemini_chat_finals,
+        ),
+        suite!(
+            Translator::ThinkingCodex,
+            cases::thinking::codex(),
+            generate::thinking::codex_cases(seed, random),
+        ),
+        suite!(
+            Translator::ThinkingOpenAI,
+            cases::thinking::openai(),
+            generate::thinking::openai_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiResponsesRequest,
+            cases::gemini_responses::requests(),
+            generate::gemini_responses::request_cases(seed, random),
+        ),
+        suite!(
+            Translator::GeminiResponsesStream,
+            cases::gemini_responses::streams(),
+            gemini_responses_streams,
+        ),
+        suite!(
+            Translator::GeminiResponsesNonStream,
+            cases::gemini_responses::finals(),
+            gemini_responses_finals,
+        ),
+        suite!(
+            Translator::CodexModels,
+            cases::codex_models::lists(),
+            generate::codex_models::list_cases(seed, random),
+        ),
+        suite!(
+            Translator::MultiAgentPrepare,
+            cases::multi_agent::prepares(),
+            generate::multi_agent::prepare_cases(seed, random),
+        ),
+        suite!(
+            Translator::MultiAgentOptimize,
+            cases::multi_agent::optimizes(),
+            generate::multi_agent::optimize_cases(seed, random),
+        ),
+        suite!(
+            Translator::MultiAgentInput,
+            cases::multi_agent::inputs(),
+            generate::multi_agent::input_cases(seed, random),
+        ),
+        suite!(
+            Translator::MultiAgentOrphan,
+            cases::multi_agent::orphans(),
+            generate::multi_agent::orphan_cases(seed, random),
+        ),
+        suite!(
+            Translator::MultiAgentRestore,
+            cases::multi_agent::restores(),
+            generate::multi_agent::restore_cases(seed, random),
+        ),
+        suite!(
+            Translator::Payload,
+            cases::payload::applies(),
+            generate::payload::apply_cases(seed, random),
+        ),
+        suite!(
+            Translator::Usage,
+            cases::usage::parses(),
+            generate::usage::parse_cases(seed, random),
+        ),
+        suite!(
+            Translator::Ttft,
+            cases::ttft::token_events(),
+            generate::ttft::token_event_cases(seed, random),
+        ),
+        suite!(
+            Translator::SessionInfo,
+            cases::session::infos(),
+            generate::session::info_cases(seed, random),
+        ),
+        suite!(
+            Translator::SessionDerive,
+            cases::session::derives(),
+            generate::session::derive_cases(seed, random),
+        ),
+        suite!(
+            Translator::ConfigDiff,
+            cases::config_diff::details(),
+            generate::config_diff::detail_cases(seed, random),
+        ),
+        suite!(
+            Translator::ConfigSave,
+            cases::config_save::steps(&args.upstream),
+            generate::config_save::step_cases(seed, random),
+        ),
+        suite!(
+            Translator::QuotaSignals,
+            cases::quota_signals::observations(),
+            generate::quota_signals::observe_cases(seed, random),
+        ),
+    ];
+    // The Gemini Interactions families' suites (see interactions/mod.rs).
+    suites.extend(interactions::selected_suites(seed, random, &wanted));
+
+    filter_suites(&mut suites, &args.suites)?;
+    Ok(suites)
+}
+
+fn filter_suites(suites: &mut Vec<Suite>, names: &BTreeSet<String>) -> Result<(), String> {
+    for name in names {
+        if !suites
+            .iter()
+            .any(|(translator, _, _)| translator.slug() == name)
+        {
+            return Err(format!(
+                "unknown suite {name:?}; use a suite directory slug"
+            ));
+        }
+    }
+    if !names.is_empty() {
+        suites.retain(|(translator, _, _)| names.contains(translator.slug()));
+    }
+    Ok(())
+}
+
 /// Returns whether every case matched upstream, allowing documented deviations.
 fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let work_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -141,418 +650,13 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         .join("target")
         .join("parity");
     fs::create_dir_all(&work_dir)?;
+    let suites = selected_suites(args)?;
     let upstream = Upstream::build(&args.upstream, &args.go, &work_dir)?;
     if let (Some(url), Some(model)) = (&args.live, &args.model) {
         return run_live(url, model, &upstream, &work_dir);
     }
 
     let failures_dir = fresh_dir(&work_dir.join("failures"))?;
-    let (seed, random) = (args.seed, args.random);
-    let (streams, finals) = generate::response::cases(seed, random);
-    let (responses_streams, responses_finals) = generate::responses::event_cases(seed, random);
-    let (chat_streams, chat_finals) = generate::chat::event_cases(seed, random);
-    let (claude_chat_streams, claude_chat_finals) =
-        generate::claude_chat::event_cases(seed, random);
-    let (claude_responses_streams, claude_responses_finals) =
-        generate::claude_responses::event_cases(seed, random);
-    let (openai_responses_streams, openai_responses_finals) =
-        generate::openai_responses::event_cases(seed, random);
-    let (openai_claude_streams, openai_claude_finals) =
-        generate::openai_claude::event_cases(seed, random);
-    let (openai_chat_streams, openai_chat_finals) =
-        generate::openai_chat::event_cases(seed, random);
-    let (codex_gemini_streams, codex_gemini_finals) =
-        generate::gemini::codex_event_cases(seed, random);
-    let (claude_gemini_streams, claude_gemini_finals) =
-        generate::gemini::claude_event_cases(seed, random);
-    let (openai_gemini_streams, openai_gemini_finals) =
-        generate::gemini::openai_event_cases(seed, random);
-    let (registry_streams, registry_finals) = generate::registry::response_cases(seed, random);
-    let (gemini_streams, gemini_finals) = generate::to_gemini::event_cases(seed, random);
-    let (gemini_claude_streams, gemini_claude_finals) =
-        generate::to_gemini::claude_event_cases(seed, random);
-    let (gemini_chat_streams, gemini_chat_finals) =
-        generate::to_gemini::chat_event_cases(seed, random);
-    let (gemini_responses_streams, gemini_responses_finals) =
-        generate::gemini_responses::event_cases(seed, random);
-    let mut suites = vec![
-        (
-            Translator::Request,
-            cases::hand_written(),
-            generate::cases(seed, random),
-        ),
-        (Translator::Stream, cases::hand_written_streams(), streams),
-        (Translator::NonStream, cases::hand_written_finals(), finals),
-        (
-            Translator::ResponsesRequest,
-            cases::responses::requests(),
-            generate::responses::request_cases(seed, random),
-        ),
-        (
-            Translator::ResponsesStream,
-            cases::responses::streams(),
-            responses_streams,
-        ),
-        (
-            Translator::ResponsesNonStream,
-            cases::responses::finals(),
-            responses_finals,
-        ),
-        (
-            Translator::ChatRequest,
-            cases::chat::requests(),
-            generate::chat::request_cases(seed, random),
-        ),
-        (Translator::ChatStream, cases::chat::streams(), chat_streams),
-        (
-            Translator::ChatNonStream,
-            cases::chat::finals(),
-            chat_finals,
-        ),
-        (
-            Translator::RequestCompat,
-            cases::hand_written(),
-            generate::cases(seed, random),
-        ),
-        (
-            Translator::ClaudeChatRequest,
-            cases::claude_chat::requests(),
-            generate::claude_chat::request_cases(seed, random),
-        ),
-        (
-            Translator::ClaudeChatRequestCompat,
-            cases::claude_chat::requests(),
-            generate::claude_chat::request_cases(seed, random),
-        ),
-        (
-            Translator::ClaudeChatStream,
-            cases::claude_chat::streams(),
-            claude_chat_streams,
-        ),
-        (
-            Translator::ClaudeChatNonStream,
-            cases::claude_chat::finals(),
-            claude_chat_finals
-                .into_iter()
-                .chain(generate::claude_chat::native_cases(seed, random / 2))
-                .collect(),
-        ),
-        (
-            Translator::ClaudeResponsesRequest,
-            cases::claude_responses::requests(),
-            generate::claude_responses::request_cases(seed, random),
-        ),
-        (
-            Translator::ClaudeResponsesRequestCompat,
-            cases::claude_responses::requests(),
-            generate::claude_responses::request_cases(seed, random),
-        ),
-        (
-            Translator::ClaudeResponsesStream,
-            cases::claude_responses::streams(),
-            claude_responses_streams,
-        ),
-        (
-            Translator::ClaudeResponsesNonStream,
-            cases::claude_responses::finals(),
-            claude_responses_finals
-                .into_iter()
-                .chain(generate::claude_responses::native_cases(seed, random / 2))
-                .collect(),
-        ),
-        (
-            Translator::OpenAIResponsesRequest,
-            cases::openai_responses::requests(),
-            generate::openai_responses::request_cases(seed, random),
-        ),
-        (
-            Translator::OpenAIResponsesStream,
-            cases::openai_responses::streams(),
-            openai_responses_streams,
-        ),
-        (
-            Translator::OpenAIResponsesNonStream,
-            cases::openai_responses::finals(),
-            openai_responses_finals,
-        ),
-        (
-            Translator::OpenAIClaudeRequest,
-            cases::openai_claude::requests(),
-            generate::openai_claude::request_cases(seed, random),
-        ),
-        (
-            Translator::OpenAIClaudeRequestCompat,
-            cases::openai_claude::requests(),
-            generate::openai_claude::request_cases(seed, random),
-        ),
-        (
-            Translator::OpenAIClaudeStream,
-            cases::openai_claude::streams(),
-            openai_claude_streams,
-        ),
-        (
-            Translator::OpenAIClaudeNonStream,
-            cases::openai_claude::finals(),
-            openai_claude_finals,
-        ),
-        (
-            Translator::OpenAIChatRequest,
-            cases::openai_chat::requests(),
-            generate::openai_chat::request_cases(seed, random),
-        ),
-        (
-            Translator::OpenAIChatStream,
-            cases::openai_chat::streams(),
-            openai_chat_streams,
-        ),
-        (
-            Translator::OpenAIChatNonStream,
-            cases::openai_chat::finals(),
-            openai_chat_finals,
-        ),
-        (
-            Translator::CodexGeminiRequest,
-            cases::gemini::requests(),
-            generate::gemini::request_cases(seed, random),
-        ),
-        (
-            Translator::CodexGeminiStream,
-            cases::gemini::codex_streams(),
-            codex_gemini_streams,
-        ),
-        (
-            Translator::CodexGeminiNonStream,
-            cases::gemini::codex_finals(),
-            codex_gemini_finals,
-        ),
-        (
-            Translator::ClaudeGeminiRequest,
-            cases::gemini::requests(),
-            generate::gemini::request_cases(seed.rotate_left(1), random),
-        ),
-        (
-            Translator::ClaudeGeminiStream,
-            cases::gemini::claude_streams(),
-            claude_gemini_streams,
-        ),
-        (
-            Translator::ClaudeGeminiNonStream,
-            cases::gemini::claude_finals(),
-            claude_gemini_finals,
-        ),
-        (
-            Translator::OpenAIGeminiRequest,
-            cases::gemini::requests(),
-            generate::gemini::request_cases(seed.rotate_left(2), random),
-        ),
-        (
-            Translator::OpenAIGeminiStream,
-            cases::gemini::openai_streams(),
-            openai_gemini_streams,
-        ),
-        (
-            Translator::OpenAIGeminiNonStream,
-            cases::gemini::openai_finals(),
-            openai_gemini_finals,
-        ),
-        (
-            Translator::SignatureInspect,
-            cases::signature::inspect(),
-            generate::signature::inspect_cases(seed, random),
-        ),
-        (
-            Translator::ClaudeMessagesSignatures,
-            cases::signature::claude_messages(),
-            generate::signature::claude_messages_cases(seed, random),
-        ),
-        (
-            Translator::GeminiSignatures,
-            cases::signature::gemini(),
-            generate::signature::gemini_cases(seed, random),
-        ),
-        (
-            Translator::RegistryRequest,
-            cases::registry::requests(),
-            generate::registry::request_cases(seed, random),
-        ),
-        (
-            Translator::RegistryStream,
-            cases::registry::streams(),
-            registry_streams,
-        ),
-        (
-            Translator::RegistryNonStream,
-            cases::registry::finals(),
-            registry_finals,
-        ),
-        (
-            Translator::RegistryLookup,
-            cases::registry::lookups(),
-            generate::registry::lookup_cases(seed, random),
-        ),
-        (
-            Translator::CompletionsRequest,
-            cases::completions::requests(),
-            generate::completions::request_cases(seed, random),
-        ),
-        (
-            Translator::CompletionsResponse,
-            cases::completions::responses(),
-            generate::completions::response_cases(seed, random),
-        ),
-        (
-            Translator::CompletionsStreamChunk,
-            cases::completions::stream_chunks(),
-            generate::completions::chunk_cases(seed, random),
-        ),
-        (
-            Translator::GeminiGeminiRequest,
-            cases::to_gemini::gemini_requests(),
-            generate::to_gemini::request_cases(seed, random),
-        ),
-        (
-            Translator::GeminiGeminiStream,
-            cases::to_gemini::gemini_streams(),
-            gemini_streams,
-        ),
-        (
-            Translator::GeminiGeminiNonStream,
-            cases::to_gemini::gemini_finals(),
-            gemini_finals,
-        ),
-        (
-            Translator::GeminiClaudeRequest,
-            cases::to_gemini::claude_requests(),
-            generate::to_gemini::claude_request_cases(seed, random),
-        ),
-        (
-            Translator::GeminiClaudeRequestCompat,
-            cases::to_gemini::claude_requests(),
-            generate::to_gemini::claude_request_cases(seed, random),
-        ),
-        (
-            Translator::GeminiClaudeStream,
-            cases::to_gemini::claude_streams(),
-            gemini_claude_streams,
-        ),
-        (
-            Translator::GeminiClaudeNonStream,
-            cases::to_gemini::claude_finals(),
-            gemini_claude_finals,
-        ),
-        (
-            Translator::GeminiChatRequest,
-            cases::to_gemini::chat_requests(),
-            generate::to_gemini::chat_request_cases(seed, random),
-        ),
-        (
-            Translator::GeminiChatStream,
-            cases::to_gemini::chat_streams(),
-            gemini_chat_streams,
-        ),
-        (
-            Translator::GeminiChatNonStream,
-            cases::to_gemini::chat_finals(),
-            gemini_chat_finals,
-        ),
-        (
-            Translator::ThinkingCodex,
-            cases::thinking::codex(),
-            generate::thinking::codex_cases(seed, random),
-        ),
-        (
-            Translator::ThinkingOpenAI,
-            cases::thinking::openai(),
-            generate::thinking::openai_cases(seed, random),
-        ),
-        (
-            Translator::GeminiResponsesRequest,
-            cases::gemini_responses::requests(),
-            generate::gemini_responses::request_cases(seed, random),
-        ),
-        (
-            Translator::GeminiResponsesStream,
-            cases::gemini_responses::streams(),
-            gemini_responses_streams,
-        ),
-        (
-            Translator::GeminiResponsesNonStream,
-            cases::gemini_responses::finals(),
-            gemini_responses_finals,
-        ),
-        (
-            Translator::CodexModels,
-            cases::codex_models::lists(),
-            generate::codex_models::list_cases(seed, random),
-        ),
-        (
-            Translator::MultiAgentPrepare,
-            cases::multi_agent::prepares(),
-            generate::multi_agent::prepare_cases(seed, random),
-        ),
-        (
-            Translator::MultiAgentOptimize,
-            cases::multi_agent::optimizes(),
-            generate::multi_agent::optimize_cases(seed, random),
-        ),
-        (
-            Translator::MultiAgentInput,
-            cases::multi_agent::inputs(),
-            generate::multi_agent::input_cases(seed, random),
-        ),
-        (
-            Translator::MultiAgentOrphan,
-            cases::multi_agent::orphans(),
-            generate::multi_agent::orphan_cases(seed, random),
-        ),
-        (
-            Translator::MultiAgentRestore,
-            cases::multi_agent::restores(),
-            generate::multi_agent::restore_cases(seed, random),
-        ),
-        (
-            Translator::Payload,
-            cases::payload::applies(),
-            generate::payload::apply_cases(seed, random),
-        ),
-        (
-            Translator::Usage,
-            cases::usage::parses(),
-            generate::usage::parse_cases(seed, random),
-        ),
-        (
-            Translator::Ttft,
-            cases::ttft::token_events(),
-            generate::ttft::token_event_cases(seed, random),
-        ),
-        (
-            Translator::SessionInfo,
-            cases::session::infos(),
-            generate::session::info_cases(seed, random),
-        ),
-        (
-            Translator::SessionDerive,
-            cases::session::derives(),
-            generate::session::derive_cases(seed, random),
-        ),
-        (
-            Translator::ConfigDiff,
-            cases::config_diff::details(),
-            generate::config_diff::detail_cases(seed, random),
-        ),
-        (
-            Translator::ConfigSave,
-            cases::config_save::steps(&args.upstream),
-            generate::config_save::step_cases(seed, random),
-        ),
-        (
-            Translator::QuotaSignals,
-            cases::quota_signals::observations(),
-            generate::quota_signals::observe_cases(seed, random),
-        ),
-    ];
-    // The Gemini Interactions families' suites (see interactions/mod.rs).
-    suites.extend(interactions::suites(seed, random));
 
     println!("open-ferry parity");
     println!(
@@ -1071,6 +1175,77 @@ fn clip(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suite_filter_is_repeatable_defaults_to_all_and_rejects_unknown_names() {
+        let parse = |flags: &[&str]| {
+            Args::parse(
+                ["--upstream", "."]
+                    .into_iter()
+                    .chain(flags.iter().copied())
+                    .map(str::to_owned),
+            )
+            .unwrap()
+        };
+        let catalog = || {
+            vec![
+                (Translator::ConfigSave, Vec::new(), Vec::new()),
+                (Translator::ConfigDiff, Vec::new(), Vec::new()),
+                (Translator::Usage, Vec::new(), Vec::new()),
+            ]
+        };
+        let mut all = catalog();
+        filter_suites(&mut all, &parse(&[]).suites).unwrap();
+        assert_eq!(all.len(), 3);
+        let selected = parse(&[
+            "--suite",
+            "config-save",
+            "--suite",
+            "usage",
+            "--suite",
+            "config-save",
+        ]);
+        let mut suites = catalog();
+        filter_suites(&mut suites, &selected.suites).unwrap();
+        assert_eq!(
+            suites
+                .iter()
+                .map(|(translator, _, _)| translator.slug())
+                .collect::<Vec<_>>(),
+            ["config-save", "usage"]
+        );
+        let mut unknown = catalog();
+        assert_eq!(
+            filter_suites(&mut unknown, &parse(&["--suite", "config-sav"]).suites),
+            Err("unknown suite \"config-sav\"; use a suite directory slug".into())
+        );
+        assert_eq!(unknown.len(), 3);
+        assert!(
+            Args::parse(
+                ["--upstream", ".", "--suite"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_suite_generates_its_cases_and_validates_the_real_catalog() {
+        let mut args = Args::parse(
+            ["--upstream", ".", "--suite", "config-save", "--random", "2"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        let suites = selected_suites(&args).unwrap();
+        assert_eq!(suites.len(), 1);
+        assert_eq!(suites[0].0.slug(), "config-save");
+        assert!(!suites[0].1.is_empty());
+        assert_eq!(suites[0].2.len(), 2);
+        args.suites.insert("unknown-suite".into());
+        assert!(selected_suites(&args).is_err());
+    }
 
     // Go iterates a map of aliases that overwrite the same destination key.
     // It can match or differ from Rust's stable order with the same seed; the
