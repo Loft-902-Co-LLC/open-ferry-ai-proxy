@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/claude/openai_claude_response_test.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // All 42 tests are ported. Table-driven tests run their cases in a loop
@@ -1127,4 +1127,96 @@ fn extract_openai_usage() {
         assert_eq!(got.cached, cached, "{name}: cached");
         assert_eq!(got.cache_write, cache_write, "{name}: cache write");
     }
+}
+
+#[test]
+fn non_stream_tools_preserve_tool_use_except_length_and_content_filter() {
+    for reason in [
+        None,
+        Some(Value::Null),
+        Some(json!("stop")),
+        Some(json!("length")),
+        Some(json!("content_filter")),
+    ] {
+        for tools in [
+            json!([]),
+            json!([{"id":"call_1","function":{"name":"weather","arguments":"{}"}}]),
+        ] {
+            let mut choice = json!({"message":{"tool_calls":tools}});
+            if let Some(reason) = &reason {
+                choice["finish_reason"] = reason.clone();
+            }
+            let response = json!({"choices":[choice]});
+            let expected = match reason.as_ref().and_then(Value::as_str) {
+                Some("length") => "max_tokens",
+                Some("content_filter") => "end_turn",
+                _ if !tools.as_array().unwrap().is_empty() => "tool_use",
+                _ => "end_turn",
+            };
+            let out = convert_openai_response_to_claude_non_stream(&Value::Null, &response);
+            assert_eq!(out["stop_reason"], expected);
+            let out = chunk_message(&response);
+            if reason.is_none() && tools.as_array().unwrap().is_empty() {
+                assert!(out["stop_reason"].is_null());
+            } else {
+                assert_eq!(out["stop_reason"], expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn omitted_indexes_track_parallel_calls_and_fragmented_arguments() {
+    for fragmented in [false, true] {
+        let mut stream = OpenAIToClaudeStream::new(&json!({"stream":true}));
+        let mut events = Vec::new();
+        for (id, city) in [("call_paris", "Paris"), ("call_tokyo", "Tokyo")] {
+            let arguments = if fragmented {
+                "{\"city\":".to_owned()
+            } else {
+                json!({"city":city}).to_string()
+            };
+            let chunk = json!({"choices":[{"delta":{"tool_calls":[{"id":id,"function":{"name":"weather","arguments":arguments}}]}}]});
+            events.extend(stream.translate_line(format!("data: {chunk}").as_bytes()));
+            if fragmented {
+                let chunk = json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":format!("\"{city}\"}}")}}]}}]});
+                events.extend(stream.translate_line(format!("data: {chunk}").as_bytes()));
+            }
+        }
+        events
+            .extend(stream.translate_line(
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}",
+            ));
+        events.extend(stream.translate_line(b"data: [DONE]"));
+        let events: Vec<_> = events.iter().filter_map(|raw| parse_event(raw)).collect();
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|e| e.payload["content_block"]["type"] == "tool_use")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0].payload["content_block"]["id"], "call_paris");
+        assert_eq!(starts[1].payload["content_block"]["id"], "call_tokyo");
+        let args: Vec<_> = events
+            .iter()
+            .filter_map(|e| e.payload["delta"]["partial_json"].as_str())
+            .map(|s| serde_json::from_str::<Value>(s).unwrap())
+            .collect();
+        assert_eq!(args, vec![json!({"city":"Paris"}), json!({"city":"Tokyo"})]);
+        assert_eq!(count_by_type(&events, "content_block_stop"), 2);
+        assert_eq!(
+            first_message_delta(&events)["delta"]["stop_reason"],
+            "tool_use"
+        );
+    }
+}
+
+#[test]
+fn explicit_index_never_replaces_started_tool_id() {
+    let mut stream = OpenAIToClaudeStream::new(&json!({"stream":true}));
+    let mut events = Vec::new();
+    for id in ["first", "replacement"] {
+        let chunk = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":id,"function":{"name":"T","arguments":""}}]}}]});
+        events.extend(stream.translate_line(format!("data: {chunk}").as_bytes()));
+    }
+    assert_eq!(stream.tool_calls[&0].id, "first");
 }
