@@ -202,7 +202,13 @@ impl SearchHistory {
             history.boundary_after[index] = boundary;
             if is_turn_boundary(item) {
                 boundary = true;
-                next_by_id.clear();
+                #[cfg(test)]
+                {
+                    history.scan_steps += next_by_id.capacity();
+                }
+                // Release capacity too: repeated small turns must not keep
+                // clearing the allocation left by a much larger turn.
+                next_by_id = Default::default();
                 continue;
             }
             if str_of(item.get("type")) == "web_search_call" {
@@ -466,6 +472,29 @@ mod tests {
                 assert!(history.skip.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn indexed_search_history_releases_large_tables_at_turn_boundaries() {
+        let mut items = Vec::new();
+        for _ in 0..2_000 {
+            items.push(json!({"type":"message","role":"user"}));
+            items.push(json!({"type":"web_search_call","id":"small","status":"in_progress"}));
+        }
+        // The reverse scan sees the large turn before the many small turns.
+        items.extend((0..2_000).map(
+            |i| json!({"type":"web_search_call","id":format!("large{i}"),"status":"in_progress"}),
+        ));
+        let borrowed: Vec<_> = items.iter().map(std::borrow::Cow::Borrowed).collect();
+        let history = SearchHistory::scan(&borrowed);
+        assert!(
+            history.scan_steps <= 4 * items.len(),
+            "{} work units for {} items",
+            history.scan_steps,
+            items.len()
+        );
+        assert!(history.skip.is_empty());
+        assert!(history.paused_query.is_empty());
     }
 
     #[test]
