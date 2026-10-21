@@ -171,7 +171,7 @@ jobs:
           extra=()
           if [ -n "$QUALIFY_PUBLISHED" ]; then extra+=(--published "$QUALIFY_PUBLISHED"); fi
           if [ "$RUNNER_OS" = Linux ] && [ "$FORM" = machine ]; then
-            sudo -H --preserve-env=GH_TOKEN,QUALIFY_FAULT "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
+            sudo -H --preserve-env=GH_TOKEN,QUALIFY_FAULT,GITHUB_ACTIONS,RUNNER_ENVIRONMENT "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
           else
             "$QUALIFY_PYTHON" -I .github/scripts/qualify/run.py "$RUNNER_TEMP/open-ferry-qualification" --form "$FORM" "${extra[@]}"
           fi
