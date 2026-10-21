@@ -11,6 +11,7 @@ use chrono::Utc;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::{ExecError, Format, Options, Request, Response};
 use open_ferry_core::observe::usage::{parse_codex_usage, parse_openai_usage};
+use open_ferry_translate::json::exact;
 use serde_json::{Value, json};
 
 use super::MetaExecutor;
@@ -120,9 +121,8 @@ impl MetaExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        let mut payload: Value =
-            serde_json::from_slice(&compaction::summary_payload(request, options))
-                .expect("summary object");
+        let mut payload: Value = exact::from_slice(&compaction::summary_payload(request, options))
+            .expect("summary object");
         // Claude preserves tools to satisfy its tool-result pairing rules;
         // Responses summary requests remove both tool declarations as upstream does.
         for field in ["tools", "additional_tools"] {

@@ -1581,6 +1581,29 @@ async fn subscription_telemetry_never_reaches_clients() {
 // TestMetaExecutor*Compaction*: summary request, capsule replay, stream usage,
 // foreign capsule removal, original-request triggers and invalid summaries.
 #[tokio::test]
+async fn remote_compaction_preserves_client_number_spelling() {
+    let mock = Mock::start(Reply::sse(
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Summary\"}]}]}}\n\n",
+    )).await;
+    let payload = r#"{"temperature":1E0,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history","client_number":1E20}]},{"type":"compaction_trigger"}]}"#;
+    executor()
+        .execute(
+            api_key_auth(&mock.url),
+            request("muse-spark-1.3", payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap();
+    let sent = mock.last();
+    assert!(sent.body.contains("\"temperature\":1E0"), "{}", sent.body);
+    assert!(
+        sent.body.contains("\"client_number\":1E20"),
+        "{}",
+        sent.body
+    );
+}
+
+#[tokio::test]
 async fn remote_compaction_seals_and_replays_summary_with_usage() {
     let summary = json!({"id":"summary", "object":"response", "status":"completed",
         "output":[{"type":"reasoning","summary":[{"text":"private"}]},{"type":"message","status":"completed","content":[{"type":"text","text":"Task progress."},{"type":"output_text","text":"Next steps."}]}],
