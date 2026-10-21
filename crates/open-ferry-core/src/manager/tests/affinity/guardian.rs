@@ -182,8 +182,19 @@ fn parent_credential() {
 // plugin-only; credential invalidation, failure and expiry use our own APIs.
 #[test]
 fn parent_lifecycle() {
-    for action in ["read_only", "expired", "auth_invalidated", "failed"] {
-        let mut pool = pool("codex", Affinity::new(MINUTE, true));
+    for action in [
+        "read_only",
+        "expired",
+        "auth_invalidated",
+        "failed",
+        "evicted",
+    ] {
+        let affinity = if action == "evicted" {
+            Affinity::with_capacity(MINUTE, true, 1)
+        } else {
+            Affinity::new(MINUTE, true)
+        };
+        let mut pool = pool("codex", affinity);
         let parent = guardian("main-thread", "");
         pool.pick("codex", "parent-model", &parent, &[AB[1]]);
         pool.now += TimeDelta::seconds(40);
@@ -191,6 +202,10 @@ fn parent_lifecycle() {
             "expired" => pool.now += TimeDelta::seconds(20),
             "auth_invalidated" => pool.affinity.invalidate_auth(AB[1]),
             "failed" => pool.on_result(&parent, &failed(AB[1], "parent-model"), "codex"),
+            "evicted" => {
+                pool.pick("codex", "other-model", &guardian("unrelated", ""), &[AB[0]]);
+                assert_eq!(pool.bound("codex::codex:main-thread::parent-model"), None);
+            }
             _ => {}
         }
         let child = guardian("review-thread", "main-thread");
@@ -310,6 +325,33 @@ fn parent_cache_hit_becomes_the_latest_selection() {
     );
 }
 
+// Pins the upstream provider-scope guard even for a deliberately broad pool.
+#[test]
+fn direct_route_parent_provider_stays_in_scope() {
+    let mut pool = pool("codex", Affinity::new(MINUTE, true));
+    pool.put(Auth {
+        provider: "openai".into(),
+        ..cred("auth-c")
+    });
+    pool.pick(
+        "mixed",
+        "parent-model",
+        &guardian("main-thread", ""),
+        &["auth-c"],
+    );
+    // Production direct-route policy already filters foreign credentials;
+    // this deliberately broad pool pins the selector's upstream scope guard.
+    assert_eq!(
+        pool.pick(
+            "codex",
+            "review-model",
+            &guardian("review", "main-thread"),
+            &[AB[0], "auth-c"]
+        ),
+        AB[0]
+    );
+}
+
 // TestSessionAffinityGuardianSchedulingProvider, for served providers only.
 #[test]
 fn scheduling_provider() {
@@ -406,6 +448,56 @@ fn quota_preserved_parent_does_not_record_a_selection() {
         ),
         AB[0]
     );
+}
+
+// Preserved failover through a conversation alias must not select the prompt key.
+#[test]
+fn quota_preserved_fallback_key_does_not_record_a_selection() {
+    let affinity = Affinity::for_settings(&Settings {
+        session_affinity: true,
+        session_affinity_rebind_on: "quota".into(),
+        ..Settings::default()
+    })
+    .unwrap();
+    let mut pool = pool("codex", affinity);
+    let mut fresh = (*pool.auths[AB[1]].auth).clone();
+    fresh.attributes.insert("priority".into(), "1".into());
+    pool.put(fresh);
+    let conversation = body(r#"{"conversation":"conversation"}"#);
+    assert_eq!(pool.pick("codex", "model", &conversation, &[AB[0]]), AB[0]);
+    let original = (*pool.auths[AB[0]].auth).clone();
+    let mut blocked = original.clone();
+    blocked.model_states.insert(
+        "model".into(),
+        ModelState {
+            unavailable: true,
+            next_retry_after: Some(pool.now + TimeDelta::hours(1)),
+            last_error: Some(AuthError {
+                http_status: 503,
+                ..AuthError::default()
+            }),
+            ..ModelState::default()
+        },
+    );
+    pool.put(blocked);
+    let prompt = body(r#"{"prompt_cache_key":"prompt","conversation":"conversation"}"#);
+    assert_eq!(pool.bound("codex::pck:prompt::model"), None);
+    assert_eq!(pool.pick("codex", "model", &prompt, &AB), AB[1]);
+    assert_eq!(
+        pool.bound("codex::pck:prompt::model").as_deref(),
+        Some(AB[0])
+    );
+    assert_eq!(
+        pool.bound("codex::conv:conversation::model").as_deref(),
+        Some(AB[0])
+    );
+    pool.put(original);
+    let child = session(
+        &[("X-Openai-Subagent", "guardian")],
+        r#"{"prompt_cache_key":"review","parent_session_id":"prompt"}"#,
+    );
+    assert_eq!(child.fallback(), "pck:prompt");
+    assert_eq!(pool.pick("codex", "review-model", &child, &AB), AB[1]);
 }
 
 // TestSessionAffinityQuotaPreservedBindingAddsConversationAlias.

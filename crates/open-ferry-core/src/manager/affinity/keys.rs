@@ -1,8 +1,8 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/selector.go
 // (extractConversationAlias, extractExplicitSessionIDs, extractSessionIDs,
 // extractMessageHashIDs, computeSessionHash, truncateString,
-// extractMessageContent, extractResponsesAPIContent and isSubagentSession)
-// and isGuardianRequest, and isHierarchyParent in home_session_alias.go
+// extractMessageContent, extractResponsesAPIContent, isSubagentSession
+// and isGuardianRequest) and isHierarchyParent in home_session_alias.go
 // (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
