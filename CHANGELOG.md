@@ -8,10 +8,6 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.32.
 
-### Fixed
-
-- Machine-wide installs and later machine commands on Windows work when run from the built-in Administrator account (for example on cloud Windows Server VMs), including when new objects default to the installing account as owner.
-
 ### Added
 
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
@@ -90,6 +86,10 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   - **Claude**: `prompt_cache_options.mode: "explicit"` keeps only the client's own cache breakpoints, and `prompt_cache_options` is never sent to Claude.
   - **Translation fixes**: Claude document blocks for Gemini, Gemini's camelCase `systemInstruction`, refusal finish reasons and signed visible text for Claude clients, object types in Gemini schemas, a Codex web search's sources for Claude clients, encrypted reasoning of an unknown format kept in Codex compat mode, and a Responses stream that ends cleanly after its finish reason completed without `[DONE]`.
   - **Usage**: an answer whose `apply_patch` call fails keeps the usage it read, and a Vertex AI stream that ends after its last chunk counts as a success.
+
+### Fixed
+
+- Machine-wide installs and later machine commands on Windows work when run from the built-in Administrator account (for example on cloud Windows Server VMs), including when new objects default to the installing account as owner.
 
 ## [0.0.2] - 2026-10-20
 

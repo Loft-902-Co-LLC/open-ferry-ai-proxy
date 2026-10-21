@@ -135,6 +135,8 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     timeout-minutes: 75
+    env:
+      OPEN_FERRY_REQUIRE_ELEVATED_OWNER_TESTS: "1"
     steps: *tests-steps
 
   # What the release workflow ships carries none of the blue-green test
@@ -377,6 +379,8 @@ jobs:
     strategy: *blue-green-shards
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      OPEN_FERRY_REQUIRE_ELEVATED_OWNER_TESTS: "1"
     steps: *blue-green-steps
 
   blue-green-tests-macos:
@@ -739,7 +743,7 @@ jobs:
               $process.WaitForExit()
               $captured = $stdout.GetAwaiter().GetResult() + "`n" + $stderr.GetAwaiter().GetResult()
               foreach ($line in $captured.Split("`n")) {
-                if ($line -match '^(Runner SID:|Installed owner |Service owner |Published install-self|Standalone published init|Service and machine)') {
+                if ($line -match '^(Runner SID:|Installed owner |Installer restored|Service owner |Published install-self|Standalone published init|Service and machine)') {
                   Write-Host $line
                 }
               }
@@ -806,6 +810,28 @@ jobs:
             throw 'Expected fresh machine install directories'
           }
           try {
+            # Call the real function with an invalid version: it fails after
+            # owner setup but before downloads or directory creation. This also
+            # models the caller-owned session used by irm | iex.
+            $tokens = $null; $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD 'install.ps1'), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw 'Installer did not parse' }
+            $function = $ast.Find({ param($node)
+              $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Install-OpenFerry'
+            }, $true)
+            . ([scriptblock]::Create($function.Extent.Text))
+            try {
+              Install-OpenFerry -System $true -NoMigrate $true -Version 'invalid' -InstallDir $install -ConfigPath $config
+              throw 'Expected installer version rejection'
+            } catch {
+              if ($_.Exception.Message -notlike 'Not a version:*') { throw 'Unexpected failed-install probe result' }
+            }
+            [IO.File]::WriteAllText($probe, 'after failed installer')
+            try {
+              if ((Owner $probe) -ne $identity.User.Value) { throw 'Failed installer did not restore the caller default owner' }
+              Write-Host 'Installer restored the caller object-creator default owner after failure.'
+            } finally { Remove-Item -LiteralPath $probe -Force }
             # Capture init's generated keys; never print or upload its output.
             $output = & .\install.ps1 -System -NoMigrate -Version 0.0.2 -InstallDir $install -ConfigPath $config *>&1
             if ($LASTEXITCODE -ne 0) { throw "Installer failed: $($output | Select-String 'install.ps1: error:')" }
@@ -818,6 +844,14 @@ jobs:
               if ($owner -ne 'S-1-5-32-544') { throw "Unexpected owner of $path" }
             }
             Write-Host 'Published install-self and init inherited the Administrators default owner.'
+            [IO.File]::WriteAllText($probe, 'after installer')
+            try {
+              if ((Owner $probe) -ne $identity.User.Value) { throw 'Installer did not restore the caller default owner' }
+              Write-Host 'Installer restored the caller object-creator default owner.'
+            } finally { Remove-Item -LiteralPath $probe -Force }
+            # The pinned old binary has no startup hook. Normalize this separate
+            # service invocation explicitly after checking installer restoration.
+            [RunnerOwner]::SetOwner('S-1-5-32-544')
             $output = & $exe service install -system -config $config 2>&1
             if ($LASTEXITCODE -ne 0) { throw "Service install failed: $output" }
             & $exe service status -system
@@ -847,11 +881,14 @@ jobs:
               }
             }
           } finally {
+            $uninstallFailed = $false
             if (Get-Service -Name open-ferry -ErrorAction SilentlyContinue) {
-              & $exe service uninstall -system
-              if ($LASTEXITCODE -ne 0) { throw 'Service uninstall failed' }
+              try {
+                & $exe service uninstall -system
+                $uninstallFailed = $LASTEXITCODE -ne 0
+              } catch { $uninstallFailed = $true }
             }
-            if (Get-Service -Name open-ferry -ErrorAction SilentlyContinue) { throw 'Service registration remains' }
+            $serviceRemains = $null -ne (Get-Service -Name open-ferry -ErrorAction SilentlyContinue)
             foreach ($root in @($install, $data)) {
               if ([IO.Path]::GetFullPath($root) -notin 'C:\Program Files\open-ferry', 'C:\ProgramData\open-ferry') {
                 throw 'Unexpected cleanup target'
@@ -859,6 +896,8 @@ jobs:
               if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
               if (Test-Path -LiteralPath $root) { throw "Cleanup left $root" }
             }
+            if ($uninstallFailed) { throw 'Service uninstall failed' }
+            if ($serviceRemains) { throw 'Service registration remains' }
             Write-Host 'Service and machine install directories removed.'
           }
 
