@@ -435,9 +435,35 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
 }
 
 /// The generated tree: `cfg` as upstream marshals it, read back.
-fn generated_root(cfg: &Config) -> Result<Node, SaveError> {
-    let value = generate::legacy_config(cfg)
+fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, SaveError> {
+    let mut value = generate::legacy_config(cfg)
         .map_err(|error| SaveError::new(SaveErrorKind::Unwritable, error.0))?;
+    // Go marshals each plugin's decoded yaml.Node before merging. Besides
+    // preserving its contents, this matters for yaml.v3's pending comments:
+    // a line comment on a plugin mapping's key can survive its value's own
+    // comment and attach to the following auth-dir scalar. Feed the same
+    // nodes through our yaml.v3 encoder.
+    if let Some(configs) = plugin_configs.filter(|node| node.kind == Kind::Mapping)
+        && let encode::Value::Struct(fields) = &mut value
+        && let Some(plugins) = fields.iter_mut().find(|field| field.key == "plugins")
+        && let encode::Value::Struct(fields) = &mut plugins.value
+        && let Some(field) = fields.iter_mut().find(|field| field.key == "configs")
+    {
+        field.value = encode::Value::Map(
+            configs
+                .content
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[key, value]| {
+                    (
+                        encode::Value::str(&key.value),
+                        encode::Value::Node(value.clone()),
+                    )
+                })
+                .collect(),
+        );
+    }
     let rendered = encode::marshal(&value)?;
     let generated = compose::unmarshal(&rendered)?;
     if generated.kind != Kind::Document {
@@ -482,7 +508,7 @@ pub(crate) fn render_preserving_comments(
     *first = flat;
     let root = first;
     let migrating = migrate_v8 || is_v8_config_layout(&layout)?;
-    let generated = generated_root(cfg)?;
+    let generated = generated_root(cfg, yaml_path(&layout, "plugins.configs"))?;
 
     // Keep obsolete roots until a v8 migration can keep them as comments.
     if !migrating {
@@ -588,6 +614,27 @@ mod tests {
         yaml_path(root, path).map(|node| node.value.as_str())
     }
 
+    #[test]
+    fn plugin_mapping_line_comment_reaches_generated_auth_dir() {
+        // The exact final save from config-save/random-6-2628, including
+        // upstream's complete expected file. A reduced document can flush
+        // the pending comment differently and miss this regression.
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/plugin-anchor-comment-save.json"))
+                .unwrap();
+        let cfg = Config::parse(fixture["config"].as_str().unwrap()).expect("config");
+        let output = render_preserving_comments(
+            fixture["file"].as_str().unwrap().as_bytes(),
+            &cfg,
+            fixture["migrate"].as_bool().unwrap(),
+        )
+        .expect("save");
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            fixture["expected"].as_str().unwrap()
+        );
+    }
+
     /// Checks that `data` is a valid v8 config (upstream's
     /// `ValidateV8Config`).
     fn assert_valid_v8(data: &[u8]) {
@@ -604,7 +651,7 @@ mod tests {
         cfg.routing.session_affinity_ttl = "1h".into();
         cfg.routing.session_affinity_subagents = Some(false);
         cfg.routing.session_affinity_rebind_on = "quota".into();
-        let generated = generated_root(&cfg).expect("generate");
+        let generated = generated_root(&cfg, None).expect("generate");
         let routing = yaml_path(&generated, "routing").expect("routing");
         let keys: Vec<_> = routing
             .content
