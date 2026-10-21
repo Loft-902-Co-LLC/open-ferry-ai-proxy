@@ -238,6 +238,10 @@ function SettingsEditor({
 
   const save = useMutation({
     mutationFn: async (toSave: readonly PendingChange[]) => {
+      // Review can stay open while another writer changes the file. Check
+      // every field again before starting the batch, then guard each write.
+      await editor.checkChanges(toSave.map((pending) => pending.kind === "key"
+        ? API_KEYS : saveCall(pending.change.id, pending.change.after).path));
       const saved: PendingChange[] = [];
       for (const pending of toSave) {
         try {

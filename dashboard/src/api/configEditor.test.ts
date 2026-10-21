@@ -109,6 +109,26 @@ describe("a form's config version", () => {
     }
   });
 
+  it("keeps the established guard if a YAML read omits its ETag", async () => {
+    const api = mockApi(
+      route("GET", V8_CONFIG, { json: {}, headers: { ETag: '"base"' } }),
+      route("GET", "/v8/management/config.yaml", { text: "debug: false" }),
+      route("PUT", "/v8/management/config.yaml", { json: {}, headers: { ETag: '"saved"' } }),
+    );
+    const form = editor();
+    await expect(form.call(CONFIG_YAML)).rejects.toThrow("The server omitted the config version");
+    await form.call(CONFIG_YAML, { method: "PUT", body: "debug: true" });
+    expect(api.callsTo("PUT", "/v8/management/config.yaml")[0]?.headers.get("if-match")).toBe('"base"');
+    expect(api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
+  });
+
+  it.each([undefined, '"base"'])("refuses an unmapped writer with version %s", async (etag) => {
+    const api = mockApi(route("GET", V8_CONFIG, { json: {}, headers: etag === undefined ? {} : { ETag: etag } }));
+    await expect(editor().call(`${MANAGEMENT}/unknown-setting`, { method: "PUT", json: true }))
+      .rejects.toThrow("This config write has no versioned route.");
+    expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+
   it("uses disk values when the file watcher has not updated the legacy reads", async () => {
     const api = mockApi(
       route("GET", V8_CONFIG, { json: {

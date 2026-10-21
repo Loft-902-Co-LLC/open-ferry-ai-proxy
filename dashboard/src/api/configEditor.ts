@@ -171,13 +171,13 @@ export class ConfigEditor {
     return this.base.etag;
   };
   private adopt(snapshot: Snapshot): void {
+    if (this.versioned && snapshot.etag === undefined) {
+      throw new Error("The server omitted the config version. Reload before saving.");
+    }
     if (!this.dirty || this.base === undefined) this.base = snapshot;
   }
   private async read(signal?: AbortSignal): Promise<Snapshot> {
     const fresh = await this.store.read(signal);
-    if (this.versioned && fresh.etag === undefined) {
-      throw new Error("The server omitted the config version. Reload before saving.");
-    }
     this.adopt(fresh);
     return fresh;
   }
@@ -322,6 +322,7 @@ export class ConfigEditor {
     if (writing && path === API_KEYS && !["DELETE", "PATCH", "PUT"].includes(request.method ?? "")) {
       throw new Error("This config write has no versioned route.");
     }
+    if (writing) this.paths(path);
     if (!this.versioned) {
       const answer = await this.response<T>(path, request);
       if (writing) this.store.changed();

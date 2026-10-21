@@ -217,6 +217,26 @@ describe("the settings form", () => {
     expect(api.unhandled).toEqual([]);
   });
 
+  it("rechecks every drafted field after review before starting any batch write", async () => {
+    const state = server();
+    state.v8.routing = { retry: { "request-retry": 1 } };
+    const logs = { debug: false };
+    state.v8.observability = { logs };
+    let etag = '"base"';
+    state.api.use(route("GET", V8_CONFIG, () => ({ json: state.v8, headers: { ETag: etag } })));
+    const { user } = await openSettings();
+    await fill(user, screen.getByRole("textbox", { name: "Retries" }), "2");
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    logs.debug = true;
+    etag = '"another-writer"';
+    await user.click(within(dialog).getByRole("button", { name: "Save 2 settings" }));
+    expect(await within(dialog).findByText("The config changed since this page loaded")).toBeVisible();
+    expect(dialog).toHaveTextContent("observability.logs.debug");
+    expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+
   it("brings the save bar up with the first change, clear of the field changed", async () => {
     server();
     const { user } = await openSettings();
