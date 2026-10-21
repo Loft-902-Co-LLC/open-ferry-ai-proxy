@@ -4,6 +4,8 @@
 
 use std::env;
 use std::fs;
+use std::iter;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,6 +54,115 @@ pub fn drop_unloadable(go: &mut Value) -> Option<Deviation> {
     files.pop();
     *go = json!({ "error": message, "files": files });
     Some(Deviation::UnloadableWrite)
+}
+
+/// Upstream's output as ours would be where upstream wrote a comment from a
+/// plugin's settings twice, the copies one after the other: the second
+/// copy of each such run of comment lines is dropped.
+///
+/// Upstream replaces `plugins.configs` with the subtree it re-encoded from
+/// each plugin's decoded node (`replacePluginConfigsSubtree`), which
+/// carries the plugin's comments, some attached to other nodes than in the
+/// file; `preserveV8Comments` then puts the file's comment back where it
+/// was, so the comment is written twice. open-ferry keeps the file's
+/// `plugins.configs`, so it writes the comment once. Only lines that repeat
+/// the comment lines before them exactly are dropped, and only comments
+/// written once in the case's sources (its file and the files it writes
+/// whole; the generator names each comment once), inside a top-level
+/// `plugins` section.
+pub fn drop_repeated_plugin_comments(case: &Case, go: &mut Value) -> Option<Deviation> {
+    let sources: Vec<(&str, Vec<Range<usize>>)> = iter::once(&case.options["file"])
+        .chain(
+            case.options["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|step| &step["body"]),
+        )
+        .filter_map(Value::as_str)
+        .map(|text| (text, plugin_sections(text)))
+        .collect();
+    let from_plugins = |line: &str| plugin_comment(&sources, line.trim_start());
+    let mut dropped = false;
+    for file in go.get_mut("files")?.as_array_mut()? {
+        let Some(text) = file.as_str() else {
+            continue;
+        };
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+        let mut index = 0;
+        while let Some(rest) = lines.get(index..) {
+            if rest.is_empty() {
+                break;
+            }
+            let comments = rest
+                .iter()
+                .take_while(|line| line.trim_start().starts_with('#'))
+                .count();
+            let repeated = (1..=comments / 2).find(|&len| {
+                let (run, again) = (rest.get(..len), rest.get(len..2 * len));
+                run == again && run.is_some_and(|run| run.iter().all(|line| from_plugins(line)))
+            });
+            let len = repeated.unwrap_or(1);
+            kept.extend(rest.iter().take(len));
+            index += len + repeated.unwrap_or(0);
+        }
+        if kept.len() < lines.len() {
+            *file = Value::String(kept.join("\n"));
+            dropped = true;
+        }
+    }
+    dropped.then_some(Deviation::PluginCommentRepeated)
+}
+
+/// The byte ranges of `text`'s top-level `plugins` sections, each from its
+/// key's line to the next line at column 0 that isn't a comment.
+fn plugin_sections(text: &str) -> Vec<Range<usize>> {
+    let mut sections = Vec::new();
+    let mut start = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let top_level = !line.starts_with(|c: char| c.is_whitespace() || c == '#');
+        if top_level {
+            if let Some(from) = start.take() {
+                sections.push(from..offset);
+            }
+            if is_plugins_key(line) {
+                start = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    sections.extend(start.map(|from| from..offset));
+    sections
+}
+
+/// Whether `line` starts the key `plugins`, plain or quoted.
+fn is_plugins_key(line: &str) -> bool {
+    let quote = line.chars().next().filter(|c| matches!(c, '"' | '\''));
+    let rest = quote.map_or(Some(line), |quote| line.strip_prefix(quote));
+    let rest = rest.and_then(|rest| rest.strip_prefix("plugins"));
+    let rest = match quote {
+        Some(quote) => rest.and_then(|rest| rest.strip_prefix(quote)),
+        None => rest,
+    };
+    rest.is_some_and(|rest| rest.trim_start_matches([' ', '\t']).starts_with(':'))
+}
+
+/// Whether `comment` (a comment's text, from its `#`) is written once in
+/// the sources, at the end of a line, inside a `plugins` section.
+fn plugin_comment(sources: &[(&str, Vec<Range<usize>>)], comment: &str) -> bool {
+    let mut found = sources.iter().flat_map(|(text, sections)| {
+        text.match_indices(comment)
+            .filter(|(at, _)| {
+                let before = text.get(..*at).unwrap_or_default();
+                let after = text.get(at + comment.len()..).unwrap_or_default();
+                (before.is_empty() || before.ends_with([' ', '\t', '\n']))
+                    && (after.is_empty() || after.starts_with(['\n', '\r']))
+            })
+            .map(|(at, _)| sections.iter().any(|section| section.contains(&at)))
+    });
+    found.next() == Some(true) && found.next().is_none()
 }
 
 /// Runs one step on the file at `path`, and returns why it failed.
@@ -106,5 +217,48 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::drop_repeated_plugin_comments;
+    use crate::cases::Case;
+    use crate::compare::Deviation;
+
+    fn case(file: &str, body: &str) -> Case {
+        Case::new("plugins", "", "").with_options(json!({
+            "file": file,
+            "steps": [{ "op": "save", "migrate": false }, { "op": "write", "body": body }],
+        }))
+    }
+
+    /// Not upstream's: only a repeated run of comments from a `plugins`
+    /// section, in the case's file or a file it writes, loses its copy.
+    #[test]
+    fn drops_only_a_repeated_plugin_comment() {
+        let case = case(
+            "port: 8317\n\"plugins\":\n  configs:\n    beta:\n      tags: [a] # c1\n#   c2 with words\npprof:\n  # c3\n  enable: true\n",
+            "plugins:\n  configs:\n    beta:\n      # c4\n      # c5\n      enabled: true\n",
+        );
+        let mut go = json!({ "files": [
+            "a: 1\n# c1\n# c1\n#   c2 with words\n#   c2 with words\n# c3\n# c3\n",
+            "  # c4\n  # c5\n  # c4\n  # c5\n# c4\n  # c4\n",
+        ] });
+        assert_eq!(
+            drop_repeated_plugin_comments(&case, &mut go),
+            Some(Deviation::PluginCommentRepeated)
+        );
+        assert_eq!(
+            go,
+            json!({ "files": [
+                "a: 1\n# c1\n#   c2 with words\n# c3\n# c3\n",
+                "  # c4\n  # c5\n# c4\n  # c4\n",
+            ] })
+        );
+        let mut alone = json!({ "files": ["# c1\nport: 1\n# c1\n# c10\n# c10\n"] });
+        assert_eq!(drop_repeated_plugin_comments(&case, &mut alone), None);
     }
 }

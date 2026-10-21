@@ -520,7 +520,6 @@ pub(crate) fn render_preserving_comments(
     for key in OAUTH_MAPS {
         merge::prune_mapping_to_generated_keys(root, &generated, key);
     }
-    merge::replace_plugin_configs_subtree(root, &generated);
     merge::prune_routing_quota(root, &generated);
     merge::prune_mapping_to_generated_keys(root, &generated, "self-update");
     merge::merge_mapping_preserve(root, &generated, &mut Vec::new());
@@ -622,24 +621,6 @@ mod tests {
         // the pending comment differently and miss this regression.
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../testdata/plugin-anchor-comment-save.json"))
-                .unwrap();
-        let cfg = Config::parse(fixture["config"].as_str().unwrap()).expect("config");
-        let output = render_preserving_comments(
-            fixture["file"].as_str().unwrap().as_bytes(),
-            &cfg,
-            fixture["migrate"].as_bool().unwrap(),
-        )
-        .expect("save");
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            fixture["expected"].as_str().unwrap()
-        );
-    }
-
-    #[test]
-    fn plugin_foot_comments_follow_reencoded_nodes_and_restored_keys() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../testdata/plugin-foot-comment-save.json"))
                 .unwrap();
         let cfg = Config::parse(fixture["config"].as_str().unwrap()).expect("config");
         let output = render_preserving_comments(

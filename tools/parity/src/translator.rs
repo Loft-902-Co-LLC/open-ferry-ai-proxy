@@ -1600,7 +1600,8 @@ impl Translator {
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Vec<Deviation> {
         if self == Self::ConfigSave {
             let unloadable = config_save::drop_unloadable(go);
-            return unloadable.into_iter().collect();
+            let repeated = config_save::drop_repeated_plugin_comments(case, go);
+            return unloadable.into_iter().chain(repeated).collect();
         }
         self.drop_one_omission(case, go).into_iter().collect()
     }
