@@ -8,7 +8,7 @@
 // collectXAINamespaceToolRefs, normalizeXAIInputCustomToolCalls) and
 // xai_executor_response.go (xaiRequestHasNativeXSearch,
 // collectXAIClientDeclaredToolKeys, normalizeXAIInputNamespaceToolCalls)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The tools of a request, reshaped for Grok.

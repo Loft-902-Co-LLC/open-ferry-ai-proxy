@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/common/parts.go (UnsupportedPartError,
 // UserTurnDrops, UserRun, IsInteractionsInstructionStep, InteractionsAttachmentType,
-// GeminiPartIsSendable, CountSendableGeminiParts, IsHTTPURL) (v8.0.32, MIT).
+// GeminiPartIsSendable, CountSendableGeminiParts, IsHTTPURL) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a translator does with a content part it can't send: the rest of the

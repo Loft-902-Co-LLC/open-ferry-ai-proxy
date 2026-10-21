@@ -2,7 +2,7 @@
 // SetRetentionSeconds, Enqueue, EnqueueError, PopOldest, SubscribeUsage,
 // SubscribeErrors, NotifyUsageRefresh, publishToSubscribers, subscribe,
 // pruneLocked) and usage_toggle.go (SetUsageStatisticsEnabled,
-// UsageStatisticsEnabled) (v8.0.32, MIT).
+// UsageStatisticsEnabled) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The usage queue: the usage records waiting for the management API to

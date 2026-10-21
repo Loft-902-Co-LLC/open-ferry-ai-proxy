@@ -4,7 +4,7 @@
 // internal/clienterror/client_error.go and
 // sdk/cliproxy/executor/websocket.go (UpstreamWebsocketReplayRequiredError,
 // NewUpstreamWebsocketReplayRequiredError), with the UnsupportedPartError
-// conversion and an error that keeps the answer's usage (v8.0.32, MIT).
+// conversion and an error that keeps the answer's usage (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::fmt;

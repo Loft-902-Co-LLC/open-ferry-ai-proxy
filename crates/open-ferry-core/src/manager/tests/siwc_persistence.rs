@@ -1,4 +1,4 @@
-// Regression tests for SIWC persistence and credential identity (v8.0.32).
+// Regression tests for SIWC persistence and credential identity (v8.0.36).
 use super::support::*;
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::credential_lock::credential_lock_path;

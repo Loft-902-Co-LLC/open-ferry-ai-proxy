@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/tui/app.go (Run, RunWithBaseURL) and
-// cmd/server/main.go (the embedded server's readiness check) (v8.0.32,
+// cmd/server/main.go (the embedded server's readiness check) (v8.0.36,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

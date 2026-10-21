@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/cmd/siwc_bind.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/cmd/siwc_bind.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Explicit SIWC binding, without replacing outer Codex tokens or settings.

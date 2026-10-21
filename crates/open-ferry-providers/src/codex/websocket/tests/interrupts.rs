@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_websockets_interrupt_test.go,
 // codex_websockets_late_interrupt_test.go, codex_websockets_executor_store_test.go
-// and codex_stream_bootstrap_buffering_test.go (v8.0.32, MIT).
+// and codex_stream_bootstrap_buffering_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_responses_interrupt_test.go
-// and openai_responses_late_interrupt_test.go (v8.0.32, MIT).
+// and openai_responses_late_interrupt_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

@@ -1,6 +1,6 @@
 // Ported from IsRequestFault, IsItemNotPersisted, hasModelNotFoundErrorBody,
 // hasAuthenticationErrorBody and hasRequestFaultBody in CLIProxyAPI
-// internal/clienterror/client_error.go (v8.0.32, MIT).
+// internal/clienterror/client_error.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Whether an upstream failure is the client request's fault, which only the

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/refresh_patch_test.go,
-// siwc_auth_test.go and sdk/auth/filestore_codex_refresh_test.go (v8.0.32, MIT).
+// siwc_auth_test.go and sdk/auth/filestore_codex_refresh_test.go (v8.0.36, MIT).
 use super::*;
 use crate::auth::{AuthStore, FileStore};
 use serde_json::json;

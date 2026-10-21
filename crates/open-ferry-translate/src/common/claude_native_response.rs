@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/claude_native_response.go
-// (ClaudeMessagesJSONToSSE) (v8.0.32, MIT).
+// (ClaudeMessagesJSONToSSE) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A whole Claude Messages response, as the events of a stream that build it.

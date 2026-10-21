@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor_tool_search_test.go,
 // claude_executor_tool_search_disabled_test.go, helps/responses_tool_search_test.go
-// and helps/claude_tool_search_model_test.go (v8.0.32, MIT).
+// and helps/claude_tool_search_model_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

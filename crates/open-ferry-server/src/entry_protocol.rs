@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/api/handlers/handlers_routing.go
 // (preferExecutionProvider, adjustExecutionProvidersForEntryProtocol,
 // supportsNativeInteractionsEntryProtocol and excludeExecutionProvider)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which of a model's providers a call may use, given the format the client

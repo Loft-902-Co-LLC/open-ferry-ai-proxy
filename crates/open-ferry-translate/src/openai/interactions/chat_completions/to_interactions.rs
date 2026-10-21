@@ -2,7 +2,7 @@
 // (ConvertOpenAIRequestToInteractions) and interactions_openai_response.go
 // (ConvertOpenAIResponseToInteractions, ConvertOpenAIResponseToInteractionsNonStream)
 // and the user turn refusal (openAIChatPartType, isOpenAIChatAttachmentType)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Into Interactions: a Chat Completions request becomes an Interactions
