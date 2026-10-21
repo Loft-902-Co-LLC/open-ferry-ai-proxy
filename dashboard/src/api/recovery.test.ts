@@ -21,22 +21,21 @@ describe("recovery read and write transitions", () => {
   }
   it("leaves recovery on the next successful versioned GET and guards the next PUT", async () => {
     const { api, editor, repair } = state();
-    await editor.call(CONFIG_YAML);
+    await editor.readValue(CONFIG_YAML);
     expect(editor.recovery).not.toBeNull();
     repair();
-    expect(await editor.call(CONFIG_YAML)).toBe("# versioned text");
+    const base = await editor.readValue(CONFIG_YAML);
+    expect(base.data).toBe("# versioned text");
     expect(editor.recovery).toBeNull();
-    editor.setDirty(true);
-    await editor.call(CONFIG_YAML, { method: "PUT", body: "# next draft" });
+    await editor.saveYaml(base, { method: "PUT", body: "# next draft" });
     expect(api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
     expect(api.callsTo("PUT", "/v8/management/config.yaml")[0]?.headers.get("if-match")).toBe('"repaired"');
   });
   it("re-probes a raw draft and refuses raw PUT once another client repairs the file", async () => {
     const { api, editor, repair } = state();
-    await editor.call(CONFIG_YAML);
-    editor.setDirty(true);
+    const base = await editor.readValue(CONFIG_YAML);
     repair();
-    await expect(editor.call(CONFIG_YAML, { method: "PUT", body: "# stale raw draft" }))
+    await expect(editor.saveYaml(base, { method: "PUT", body: "# stale raw draft" }))
       .rejects.toThrow("The file can be read again. Reload to edit it with version checks.");
     expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });

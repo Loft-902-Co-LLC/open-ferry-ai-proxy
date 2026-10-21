@@ -181,7 +181,6 @@ export class ConfigEditor {
   private explicitDrafts = false;
   private drafts = new Map<string, Snapshot>();
   private accepted: Snapshot | undefined;
-  private yamlBase: ConfigRead<unknown> | undefined;
   recovery: ApiError | null = null;
   readonly store: ConfigStore;
 
@@ -428,17 +427,7 @@ export class ConfigEditor {
 
 
   readonly call = async <T>(path: string, request: ApiRequest = {}): Promise<T> => {
-    if (path === CONFIG_YAML) {
-      if (request.method === undefined || request.method === "GET") {
-        const fresh = await this.readValue<T>(path, request.signal);
-        if (!this.dirty || this.yamlBase === undefined) this.yamlBase = fresh;
-        if (fresh.recovery === null) this.adopt(fresh);
-        return fresh.data;
-      }
-      if (request.method !== "PUT") throw new Error("This config write has no versioned route.");
-      if (this.yamlBase === undefined) await this.ready();
-      return await this.saveYaml(this.yamlBase ?? { tree: this.base?.tree, etag: this.base?.etag, data: undefined, recovery: null }, request) as T;
-    }
+    if (path === CONFIG_YAML) throw new Error("Use readValue and saveYaml to keep the YAML draft paired with its snapshot.");
     return this.perform<T>(path, request);
   };
 
