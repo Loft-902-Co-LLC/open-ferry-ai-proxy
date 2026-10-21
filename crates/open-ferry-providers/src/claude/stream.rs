@@ -59,20 +59,6 @@ pub(crate) fn apply_patch_error() -> ExecError {
     ExecError::upstream(502, APPLY_PATCH_ERROR_MESSAGE)
 }
 
-/// The JSON of a `data:` line, if it has valid JSON.
-#[cfg(test)]
-fn data_event(line: &[u8]) -> Option<Value> {
-    let data = trim_space(line).strip_prefix(b"data:")?;
-    serde_json::from_slice(trim_space(data)).ok()
-}
-
-/// The `type` of a `data:` line's event, if it has valid JSON; a
-/// `message_stop` ends a reply (`observeClaudeStreamLine`).
-#[cfg(test)]
-fn event_type(line: &[u8]) -> Option<String> {
-    data_event(line).map(|event| str_at(&event, "type"))
-}
-
 /// A 502 for a stream that doesn't hold a complete reply.
 fn bad_stream(message: impl Into<String>) -> ExecError {
     ExecError::upstream(502, message)
@@ -409,25 +395,92 @@ mod tests {
         }
     }
 
-    #[test]
-    fn spots_message_stop() {
-        let is_message_stop =
-            |line: &[u8]| event_type(line).is_some_and(|kind| kind == "message_stop");
-        assert!(is_message_stop(b" data: {\"type\":\"message_stop\"} "));
-        assert!(is_message_stop(b"data:{\"type\":\"message_stop\"}"));
-        assert!(!is_message_stop(b"event: message_stop"));
-        assert!(!is_message_stop(b"data: {\"type\":\"message_delta\"}"));
-        assert!(!is_message_stop(b"data: message_stop"));
+    async fn forward_chunks(chunks: &[&'static [u8]]) -> Vec<Result<Bytes, ExecError>> {
+        let chunks = chunks.to_vec();
+        let app = axum::Router::new().fallback(move || {
+            let chunks = chunks.clone();
+            async move {
+                axum::body::Body::from_stream(futures_util::stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Ok::<_, std::io::Error>(Bytes::from_static(chunk))),
+                ))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let chunks = forward(
+            response,
+            StreamSetup {
+                translator: None,
+                responses: false,
+                fast: false,
+                status: 200,
+                secrets: Secrets::new(),
+            },
+        )
+        .collect()
+        .await;
+        server.abort();
+        chunks
     }
 
-    #[test]
-    fn spots_error_events() {
-        assert_eq!(
-            event_type(b"data: {\"type\":\"error\",\"error\":{}}").as_deref(),
-            Some("error")
-        );
-        assert_eq!(event_type(b"event: error"), None);
-        assert_eq!(event_type(b"data: {nope"), None);
-        assert_eq!(event_type(b"data: {}").as_deref(), Some(""));
+    #[tokio::test]
+    async fn spots_message_stop() {
+        for (body, complete) in [
+            (
+                &[b" data: {\"type\":\"message_stop\"} ".as_slice()][..],
+                true,
+            ),
+            (&[b"data:{\"type\":\"message_stop\"}".as_slice()][..], true),
+            (&[b"event: message_stop".as_slice()][..], false),
+            (
+                &[b"data: {\"type\":\"message_delta\"}".as_slice()][..],
+                false,
+            ),
+            (&[b"data: message_stop".as_slice()][..], false),
+            (
+                &[
+                    b"event: message_stop\n".as_slice(),
+                    b"data: {\"type\":\"message_stop\"}\n".as_slice(),
+                    b"\n".as_slice(),
+                ][..],
+                true,
+            ),
+        ] {
+            let chunks = forward_chunks(body).await;
+            assert_eq!(chunks.iter().all(Result::is_ok), complete, "{body:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn spots_error_events() {
+        for (body, is_error) in [
+            (b"data: {\"type\":\"error\",\"error\":{}}".as_slice(), true),
+            (b"event: error".as_slice(), false),
+            (b"data: {nope".as_slice(), false),
+            (b"data: {}".as_slice(), false),
+        ] {
+            let chunks = forward_chunks(&[body]).await;
+            let error = chunks
+                .iter()
+                .find_map(|chunk| chunk.as_ref().err())
+                .unwrap();
+            assert_eq!(error.status, 502);
+            assert_eq!(
+                error.message.contains("before message_stop"),
+                !is_error,
+                "{body:?}"
+            );
+        }
     }
 }
