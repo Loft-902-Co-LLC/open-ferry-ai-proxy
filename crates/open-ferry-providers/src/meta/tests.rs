@@ -779,7 +779,7 @@ async fn error_events_end_the_call() {
         (r#"{"type":"error","error":{"code":"bad"}}"#, 502, false),
     ] {
         let sse = format!(
-            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\"}}}}\n\ndata: {event}\n\n{}",
+            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\"}}}}\n\nevent: error\ndata: {event}\n\n{}",
             ok_stream("never read")
         );
         let mock = Mock::start(Reply::sse(&sse)).await;
@@ -809,6 +809,7 @@ async fn error_events_end_the_call() {
         assert_eq!(error.status, status, "{event}");
         assert_eq!(error.message, event);
         assert!(text.contains("response.created"), "{text}");
+        assert!(!text.contains("event: error"), "{text}");
         assert!(!text.contains("never read"), "{text}");
     }
 }

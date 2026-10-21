@@ -72,6 +72,10 @@ impl Filter {
         }
         self.filtering = false;
         self.skip_blank = false;
+        if matches!(kind, "error" | "response.failed") {
+            // stream_event_error publishes the failure before emitting a held header.
+            self.pending_event = None;
+        }
         if let Some(pending) = self.pending_event.take() {
             out.push(pending);
         }
@@ -87,6 +91,19 @@ impl Filter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drops_a_held_header_before_an_error_payload() {
+        for kind in ["error", "response.failed"] {
+            let mut filter = Filter::default();
+            assert!(filter.line(b"event: error".to_vec()).is_empty());
+            let data =
+                format!("data: {{\"type\":\"{kind}\",\"error\":{{\"message\":\"failed\"}}}}")
+                    .into_bytes();
+            assert_eq!(filter.line(data.clone()), vec![data]);
+            assert!(filter.finish().is_none());
+        }
+    }
 
     #[test]
     fn filters_all_subscription_forms_without_eating_adjacent_output() {
