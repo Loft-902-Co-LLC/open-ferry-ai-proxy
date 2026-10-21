@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_response_test.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // All 44 tests are ported, with the response-side test of
@@ -23,6 +23,42 @@ use serde_json::Value;
 
 use super::super::tools::cap;
 use super::*;
+
+// TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_MapsCompletionTokensDetailsReasoningTokens.
+#[test]
+fn non_stream_reasoning_usage_accepts_both_dialects_with_responses_precedence() {
+    for (details, expected) in [
+        (
+            serde_json::json!({"completion_tokens_details":{"reasoning_tokens":60}}),
+            60,
+        ),
+        (
+            serde_json::json!({"output_tokens_details":{"reasoning_tokens":45}}),
+            45,
+        ),
+        (
+            serde_json::json!({"output_tokens_details":{"reasoning_tokens":45},"completion_tokens_details":{"reasoning_tokens":60}}),
+            45,
+        ),
+        (
+            serde_json::json!({"output_tokens_details":{"reasoning_tokens":0},"completion_tokens_details":{"reasoning_tokens":60}}),
+            0,
+        ),
+    ] {
+        let mut usage = details;
+        usage["prompt_tokens"] = 9.into();
+        usage["completion_tokens"] = 99.into();
+        usage["total_tokens"] = 108.into();
+        let root = serde_json::json!({"id":"chat-reasoning","created":1773896263,"choices":[{"message":{"content":"pong"},"finish_reason":"stop"}],"usage":usage});
+        let (response, error) = non_stream(&Value::Null, &Value::Null, root.to_string().as_bytes());
+        assert!(error.is_none());
+        assert_eq!(
+            response["usage"]["output_tokens_details"]["reasoning_tokens"],
+            expected
+        );
+        assert_eq!(response["usage"]["input_tokens"], 9);
+    }
+}
 
 fn parse(text: &str) -> Value {
     serde_json::from_str(text).expect("valid JSON")
