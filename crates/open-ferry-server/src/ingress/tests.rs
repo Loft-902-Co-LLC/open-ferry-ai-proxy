@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 fn ingress(limit: usize) -> Ingress {
-    Ingress::new(
+    let ingress = Ingress::new(
         IngressConfig {
             buffered_body_bytes: Some(limit),
             body_idle_timeout: Some(Duration::from_secs(5)),
@@ -15,7 +15,10 @@ fn ingress(limit: usize) -> Ingress {
             ..IngressConfig::default()
         },
         limit,
-    )
+    );
+    // Isolate exhaustion tests from the production multipart floor.
+    ingress.budget.set_limit(Some(limit));
+    ingress
 }
 
 fn app(ingress: &Ingress) -> Router {
@@ -207,10 +210,10 @@ async fn trickled_body_still_has_a_total_deadline() {
 }
 
 #[tokio::test]
-async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_one_body() {
-    let ingress = ingress(16);
+async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_three_bodies() {
+    let ingress = ingress(32);
     let mut buffer = BudgetBuffer::new(Some(ingress.budget.clone()));
-    buffer.push(b"abcdefghijkl").unwrap();
+    buffer.push(&[0; 28]).unwrap();
     let bytes = buffer.finish();
     ingress.reconfigure(
         IngressConfig {
@@ -219,13 +222,32 @@ async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_one_body() {
         },
         8,
     );
-    assert_eq!(ingress.budget.0.lock().unwrap().limit, Some(8));
+    assert_eq!(ingress.budget.0.lock().unwrap().limit, Some(24));
     let mut other = BudgetBuffer::new(Some(ingress.budget.clone()));
     assert!(other.push(b"x").is_err());
     drop(bytes);
     other.push(b"x").unwrap();
     drop(other);
     assert_eq!(ingress.budget.used(), 0);
+}
+
+#[tokio::test]
+async fn a_multipart_body_at_the_limit_fits_the_budget_floor() {
+    let ingress = Ingress::new(
+        IngressConfig { buffered_body_bytes: Some(16), ..IngressConfig::default() },
+        16,
+    );
+    let response = app(&ingress).oneshot(
+        Request::post("/")
+            .header(header::CONTENT_LENGTH, "16")
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
+            .body(Body::from("0123456789abcdef")).unwrap()
+    ).await.unwrap();
+    assert_eq!(response.status(), 200);
+    drop(response);
+    assert_eq!(ingress.budget.used(), 0);
+    let raised = Ingress::new(IngressConfig::default(), 256 << 20);
+    assert_eq!(raised.budget.0.lock().unwrap().limit, Some(3 * (256 << 20)));
 }
 
 #[tokio::test]
