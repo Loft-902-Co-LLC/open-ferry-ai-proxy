@@ -388,7 +388,9 @@ export class ConfigEditor {
             const group = record(groups[i]);
             const keys: unknown[] = Array.isArray(group.keys) ? group.keys : [];
             if (index >= place && index < place + keys.length) {
-              groups[i] = { ...group, keys: keys.filter((_, at) => at !== index - place) };
+              const remaining = keys.filter((_, at) => at !== index - place);
+              if (remaining.length === 0) groups.splice(i, 1);
+              else groups[i] = { ...group, keys: remaining };
               break;
             }
             place += keys.length;
@@ -402,7 +404,24 @@ export class ConfigEditor {
           const key = writable(next.at(-1));
           const baseUrl = key["base-url"];
           delete key["base-url"];
-          groups.push({ ...(baseUrl === undefined ? {} : { "base-url": baseUrl }), keys: [key] });
+          // A legacy flat entry carried all its routing fields with it.
+          // Join only when the new entry explicitly supplied every shared
+          // field, so it cannot inherit someone else's headers or models.
+          const at = groups.findIndex((item) => {
+            const group = record(item);
+            return same(group["base-url"] ?? "", baseUrl ?? "") &&
+              Object.entries(group).every(([name, value]) => name === "keys" || name === "base-url" ||
+                (Object.hasOwn(key, name) && same(value, key[name])));
+          });
+          if (at < 0) {
+            groups.push({ ...(baseUrl === undefined ? {} : { "base-url": baseUrl }), keys: [key] });
+          } else {
+            const group = record(groups[at]);
+            for (const name of Object.keys(group)) {
+              if (name !== "keys") delete key[name];
+            }
+            groups[at] = { ...group, keys: [...(Array.isArray(group.keys) ? group.keys : []), key] };
+          }
         }
         target = `${V8_CONFIG}/api-keys/${family}`;
         value = groups;
