@@ -380,3 +380,21 @@ describe("paired YAML API only", () => {
     expect(api.calls).toEqual([]);
   });
 });
+
+
+describe("a session that starts without versions", () => {
+  it.each(["unversioned", "unsupported"])("refreshes the cached first %s read after v8 starts returning versions", async (initial) => {
+    const api = mockApi(route("GET", V8_CONFIG, initial === "unsupported" ? { status: 404 } : { json: {} }));
+    const store = new ConfigStore(<T,>(path: string, request = {}) => apiRequest<T>("unit-key", path, request));
+    const first = new ConfigEditor(store);
+    await expect(first.ready()).resolves.toBeUndefined();
+    api.use(route("GET", V8_CONFIG, { json: { routing: { retry: { "request-retry": 9 } } }, headers: { ETag: '"2"' } }));
+    await new ConfigEditor(store).readValue(CONFIG);
+    const later = new ConfigEditor(store);
+    await expect(later.ready()).resolves.toBe('"2"');
+    await expect(later.ready()).resolves.toBe('"2"');
+    await expect(first.ready()).resolves.toBe('"2"');
+    expect(await later.call(CONFIG)).toMatchObject({ "request-retry": 9 });
+    expect(api.callsTo("GET", V8_CONFIG)).toHaveLength(4);
+  });
+});
