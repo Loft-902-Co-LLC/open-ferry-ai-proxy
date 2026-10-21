@@ -16,6 +16,7 @@ import {
   PREFERENCES,
   PREFERENCE_LABELS,
   SETTING_IDS,
+  SETTINGS,
   STRATEGIES,
   STRATEGY_LABELS,
   formValueOf,
@@ -360,7 +361,7 @@ export function SettingsForm({ id, settings, facts, onSubmit, onDraft }: Setting
           {...form.register("loggingToFile")}
         />
         <CheckboxField
-          label="Debug logging"
+          label={SETTINGS.debug.label}
           hint={
             <Hint>
               Adds the server&apos;s detailed debug messages to its log, for looking into a

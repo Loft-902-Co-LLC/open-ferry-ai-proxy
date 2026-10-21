@@ -298,7 +298,7 @@ describe("the settings form", () => {
     etag = '"another-writer"';
     await user.click(within(dialog).getByRole("button", { name: "Save 2 settings" }));
     expect(await within(dialog).findByText("The config changed since this page loaded")).toBeVisible();
-    expect(dialog).toHaveTextContent("observability.logs.debug");
+    expect(dialog).toHaveTextContent("Changed fields: Debug logging");
     expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 
