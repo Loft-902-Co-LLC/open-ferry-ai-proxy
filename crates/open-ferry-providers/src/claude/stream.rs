@@ -44,7 +44,7 @@ use serde_json::Value;
 
 use super::ratelimit::{plain_error, wrap_fast};
 use super::usage::ensure_responses_usage_details;
-pub use crate::codex::stream::MAX_LINE;
+pub(crate) use crate::codex::stream::MAX_LINE;
 use crate::codex::stream::{LineError, LineReader};
 use crate::json::str_at;
 use crate::redact::{Policy, Secrets};

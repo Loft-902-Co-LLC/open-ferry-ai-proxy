@@ -47,4 +47,3 @@ mod tool_call_ids;
 pub(crate) mod usage;
 
 pub use executor::ClaudeExecutor;
-pub use stream::MAX_LINE;

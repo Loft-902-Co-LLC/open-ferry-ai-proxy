@@ -14,8 +14,7 @@ use axum::extract::State;
 use axum::response::Response;
 use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, stream};
-use open_ferry_core::exec::Format;
-use open_ferry_providers::claude::MAX_LINE;
+use open_ferry_core::exec::{Format, MAX_STREAM_LINE as MAX_LINE};
 use serde_json::Value;
 
 use super::{gjson_string, parse_body};
