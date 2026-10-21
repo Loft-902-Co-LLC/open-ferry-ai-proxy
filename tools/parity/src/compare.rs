@@ -39,6 +39,9 @@ pub enum Deviation {
     /// Upstream wrote a config file its own `LoadConfig` refuses; we refuse
     /// that write, with our loader's message about the same bytes.
     UnloadableWrite,
+    /// Upstream wrote a comment from a plugin's settings twice, the copies
+    /// one after the other; we write it once.
+    PluginCommentRepeated,
     /// Our reload log has a change line for a setting upstream reloads
     /// without one; upstream logs nothing for it.
     UnloggedChangeLine,
@@ -57,6 +60,7 @@ impl Deviation {
             Self::UtcCreateTime => "createTime written in UTC",
             Self::CompactCallIdSource => "call ID derived from compact JSON",
             Self::UnloadableWrite => "unloadable file refused, not written",
+            Self::PluginCommentRepeated => "plugin comment written once, not twice",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
     }
