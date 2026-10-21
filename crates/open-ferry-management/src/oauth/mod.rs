@@ -29,6 +29,7 @@
 //!   neither are their callback pages (`/antigravity/callback`,
 //!   `/devin/callback`, `/callback`).
 
+mod bind_workers;
 mod callback;
 mod flows;
 mod forwarder;
@@ -108,6 +109,7 @@ pub(crate) struct Sessions {
     store: Store,
     forwarders: Forwarders,
     logins: Mutex<Logins>,
+    pub(super) bind_workers: std::sync::Arc<bind_workers::BindWorkers>,
     #[cfg(test)]
     overrides: Mutex<Overrides>,
 }
@@ -153,10 +155,14 @@ pub(crate) struct Overrides {
     pub(crate) bind_admission_times: Option<BindAdmissionTimes>,
     /// Pause after the last session fence, before writing.
     pub(crate) bind_before_write: Option<BindWritePause>,
+    /// Pause a live worker in filesystem work before the final session fence.
+    pub(crate) bind_before_file: Option<BindWritePause>,
+    pub(crate) bind_worker_starts: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    pub(crate) bind_shutdown_grace: Option<Duration>,
 }
 
 #[cfg(test)]
-type BindWritePause = std::sync::Arc<(
+pub(crate) type BindWritePause = std::sync::Arc<(
     tokio::sync::Notify,
     std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 )>;
@@ -177,6 +183,9 @@ impl Default for Overrides {
             bind_admission_wait: None,
             bind_after_sync: None,
             bind_before_write: None,
+            bind_before_file: None,
+            bind_worker_starts: None,
+            bind_shutdown_grace: None,
             bind_drain_budget: None,
             bind_admission_times: None,
             bind_worker_finished: None,
@@ -185,6 +194,26 @@ impl Default for Overrides {
 }
 
 impl Sessions {
+    fn try_bind_worker(&self) -> std::io::Result<bind_workers::Worker> {
+        let logins = self.logins();
+        if logins.shut_down {
+            return Err(std::io::Error::other("SIWC bind session ended"));
+        }
+        self.bind_workers.try_worker()
+    }
+
+    fn admit_bind(&self, session: &str, registration: u64) -> bool {
+        let logins = self.logins();
+        !logins.shut_down && self.store.admit_bind(session, registration)
+    }
+
+    /// Serialize collector registration with the shutdown cutoff. Its guard
+    /// lasts through session finalization, not merely the worker's result.
+    fn bind_completion(&self) -> Option<bind_workers::Completion> {
+        let logins = self.logins();
+        (!logins.shut_down).then(|| self.bind_workers.completion())
+    }
+
     pub(super) fn is_shut_down(&self) -> bool {
         self.logins().shut_down
     }
@@ -219,15 +248,29 @@ impl Sessions {
         true
     }
 
-    /// Stops every login and waits for their tasks to end; no login starts
-    /// after this. A login stopped here stops its forwarder and frees its
-    /// session as when it ends otherwise.
+    /// Refuses new logins and gives bind workers and session finalization ten
+    /// seconds to settle before aborting login tasks. A post-fence collector
+    /// survives that abort if the grace expires; process exit can still end it.
     pub(crate) async fn shutdown(&self) {
         let mut tasks = {
             let mut logins = self.logins();
             logins.shut_down = true;
             std::mem::take(&mut logins.tasks)
         };
+        let grace = bind_workers::SHUTDOWN_GRACE;
+        #[cfg(test)]
+        let grace = self.overrides().bind_shutdown_grace.unwrap_or(grace);
+        if tokio::time::timeout(grace, self.bind_workers.idle())
+            .await
+            .is_err()
+        {
+            let (workers, completions) = self.bind_workers.counts();
+            tracing::warn!(
+                workers,
+                completions,
+                "SIWC bind shutdown grace expired; workers may still be writing"
+            );
+        }
         tasks.shutdown().await;
     }
 

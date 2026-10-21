@@ -443,6 +443,13 @@ impl Store {
             .is_some_and(|entry| pending_for(&entry.session, provider))
     }
 
+    pub(super) fn is_committing(&self, state: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(state)
+            .is_some_and(|entry| entry.committing)
+    }
+
     #[cfg(test)]
     pub(crate) fn expire_bind_for_test(&self, state: &str) {
         let mut inner = self.lock();

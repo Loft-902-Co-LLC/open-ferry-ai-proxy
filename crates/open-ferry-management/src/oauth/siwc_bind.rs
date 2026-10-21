@@ -155,7 +155,7 @@ pub(super) async fn save(
     session: String,
     registration: u64,
     lifeline: &mut Lifeline,
-) -> io::Result<()> {
+) -> io::Result<SaveOutcome> {
     use open_ferry_core::manager::{SIWC_BIND_DRAIN_TIMEOUT, SiwcBindDrain};
     if tokens.access_token.trim().is_empty()
         || tokens.refresh_token.trim().is_empty()
@@ -175,15 +175,18 @@ pub(super) async fn save(
     let mut work = Box::pin(run_bind_worker(state, move || {
         let manager = checking.manager();
         let turn = manager.siwc_bind_turn(&target.registered.id);
-        let mut timeouts = 0u32;
+        let mut failures = 0u32;
         loop {
             if cancelled.load(Ordering::Acquire) {
                 return Err(invalid());
             }
+            let mut file_busy = false;
+            let mut attempted = false;
             let attempt = (|| -> io::Result<Option<Saved>> {
                 let Some(mut reservation) = turn.reserve_siwc_bind() else {
                     return Ok(None);
                 };
+                attempted = true;
                 #[cfg(test)]
                 if let Some(times) = checking
                     .oauth_sessions()
@@ -210,17 +213,27 @@ pub(super) async fn save(
                     .bind_drain_budget
                     .unwrap_or(budget);
                 match reservation.wait_drained(&cancelled, budget) {
-                    SiwcBindDrain::Ready => timeouts = 0,
-                    SiwcBindDrain::TimedOut => {
-                        timeouts = timeouts.saturating_add(1);
-                        return Ok(None);
-                    }
-                    SiwcBindDrain::Interrupted => {
-                        timeouts = 0;
-                        return Ok(None);
-                    }
+                    SiwcBindDrain::Ready => {}
+                    SiwcBindDrain::TimedOut | SiwcBindDrain::Interrupted => return Ok(None),
+                }
+                #[cfg(test)]
+                let before_file = checking
+                    .oauth_sessions()
+                    .overrides()
+                    .bind_before_file
+                    .clone();
+                #[cfg(test)]
+                if let Some(pause) = before_file {
+                    pause.0.notify_one();
+                    pause
+                        .1
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
                 }
                 let Some(guard) = try_acquire_credential_lock(&target.path)? else {
+                    file_busy = true;
                     #[cfg(test)]
                     if let Some(signal) =
                         checking.oauth_sessions().overrides().bind_lock_wait.clone()
@@ -248,10 +261,8 @@ pub(super) async fn save(
                             }
                             target.identity.check(disk, id)?;
                             if cancelled.load(Ordering::Acquire)
-                                || checking.oauth_sessions().is_shut_down()
                                 || !checking
                                     .oauth_sessions()
-                                    .store()
                                     .admit_bind(&checking_session, registration)
                             {
                                 return Err(io::Error::other("SIWC bind session ended"));
@@ -292,15 +303,20 @@ pub(super) async fn save(
             if let Some(saved) = attempt {
                 return Ok((saved, target));
             }
+            if attempted {
+                failures = failures.saturating_add(1);
+            }
             let jitter = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos()
                 % 21;
-            if !turn.wait_retry(
-                drain_backoff(timeouts) + std::time::Duration::from_millis(u64::from(jitter)),
-                &cancelled,
-            ) {
+            let backoff =
+                drain_backoff(failures) + std::time::Duration::from_millis(u64::from(jitter));
+            if file_busy {
+                turn.defer_file_retry(backoff);
+            }
+            if !turn.wait_retry(backoff, &cancelled) {
                 return Err(invalid());
             }
         }
@@ -334,9 +350,16 @@ pub(super) async fn save(
     }
     drop(guard);
     drop(management_guard);
-    synced
-        .await
-        .map_err(|_| io::Error::other("SIWC credential sync failed"))
+    Ok(match synced.await {
+        Ok(()) => SaveOutcome::Synchronized,
+        Err(_) => SaveOutcome::RuntimeSyncUnavailable,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SaveOutcome {
+    Synchronized,
+    RuntimeSyncUnavailable,
 }
 
 fn drain_backoff(timeouts: u32) -> std::time::Duration {
@@ -349,6 +372,9 @@ async fn run_bind_worker<T: Send + 'static>(
     _state: &ManagementState,
     work: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
+    // Refuse immediately before spawning, without a turn or reservation.
+    // Session cancellation cannot return this permit: only worker exit does.
+    let permit = _state.oauth_sessions().try_bind_worker()?;
     let operation = open_ferry_core::gate::Operation::current();
     #[cfg(test)]
     let finished = _state
@@ -356,10 +382,21 @@ async fn run_bind_worker<T: Send + 'static>(
         .overrides()
         .bind_worker_finished
         .clone();
+    #[cfg(test)]
+    let starts = _state
+        .oauth_sessions()
+        .overrides()
+        .bind_worker_starts
+        .clone();
     let (send, receive) = tokio::sync::oneshot::channel();
     let thread = std::thread::Builder::new()
         .name("siwc-bind".into())
         .spawn(move || {
+            let _permit = permit;
+            #[cfg(test)]
+            if let Some(starts) = starts {
+                starts.fetch_add(1, Ordering::AcqRel);
+            }
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match operation {
                     Some(operation) => operation.scope_blocking(work),
@@ -415,6 +452,7 @@ pub(crate) async fn save_for_test(state: &ManagementState, session: &str) -> io:
         &mut registration.lifeline,
     )
     .await
+    .map(|_| ())
 }
 
 impl Drop for CancelOnDrop {

@@ -19,7 +19,8 @@
 //! Cancelling the session stops its login at once, wherever it is, except
 //! while it saves: a login cancelled before its exchange sends no token
 //! request, and one cancelled during it drops the request and saves
-//! nothing. When the service shuts down, every login stops. However a
+//! nothing. Shutdown stops logins after a bounded grace for saving binds.
+//! A post-fence bind collector can outlive that grace. However a
 //! login ends, its forwarder stops, and its session is dropped unless the
 //! login completed or failed it.
 //!
@@ -49,9 +50,10 @@
 //! - The exchange, until the credential is made, has 60 seconds: past
 //!   that, the session fails with `Timeout exchanging authorization code
 //!   for tokens`. Upstream's has no deadline.
-//! - When the service shuts down, the logins stop and drop their sessions,
-//!   and a login can't start after that: it answers 503 `{"error":"server
-//!   shutting down"}`. Upstream's logins run until the process exits.
+//! - When the service shuts down, saving SIWC binds have a ten-second grace
+//!   before ordinary login owners stop. Post-fence collectors survive that
+//!   abort while the process stays alive. New logins answer 503
+//!   `{"error":"server shutting down"}`. Upstream's logins run until exit.
 //! - A failed exchange is logged with a fixed message and the token
 //!   endpoint's status, where upstream logs the error, which quotes the
 //!   endpoint's answer, and so may hold the code. A Codex session's status
@@ -518,6 +520,8 @@ async fn run(
         store.set_error(&login.state, crate::config_write::SWITCHING);
         return;
     };
+    let bind =
+        matches!(login.client, Client::Siwc(_)).then(|| (state.clone(), login.state.clone()));
     let work = complete(state.clone(), login, callback, lifeline);
     let Ok(task) = gate.spawn(&operation, work) else {
         return;
@@ -525,18 +529,31 @@ async fn run(
     drop(operation);
     // A login stopped here (shut down, or its session replaced) stops its
     // task, as when the exchange and the save ran in this one.
-    let mut task = StopOnDrop(task);
-    if let Err(error) = (&mut task.0).await {
+    let mut task = StopOnDrop { task, bind };
+    if let Err(error) = (&mut task.task).await {
         tracing::error!("The {provider} login's task failed: {error}");
     }
 }
 
-/// A task that is aborted when this is dropped.
-struct StopOnDrop(tokio::task::JoinHandle<()>);
+/// Abort with the login owner, except a post-fence bind during shutdown.
+struct StopOnDrop {
+    task: tokio::task::JoinHandle<()>,
+    bind: Option<(ManagementState, String)>,
+}
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        // After the bounded shutdown grace, a committed bind's collector
+        // remains gate-owned. If the process stays alive, it can still finish.
+        // The shutdown cutoff and admit_bind use the same login mutex, so no
+        // new final fence can pass after this check during shutdown.
+        if self.bind.as_ref().is_some_and(|(state, session)| {
+            state.oauth_sessions().is_shut_down()
+                && state.oauth_sessions().store().is_committing(session)
+        }) {
+            return;
+        }
+        self.task.abort();
     }
 }
 
@@ -586,10 +603,21 @@ async fn complete(
         return;
     }
     let is_bind = matches!(login.client, Client::Siwc(_));
+    // Shutdown keeps the production JoinSet/StopOnDrop ownership chain alive
+    // until this guard drops, after the session has its durable outcome.
+    let _completion = if is_bind {
+        let Some(completion) = sessions.bind_completion() else {
+            return;
+        };
+        Some(completion)
+    } else {
+        None
+    };
     let saved = match (record, login.client) {
         (Credential::Login(record), Client::Claude(_) | Client::Codex(_)) => {
             save_token_record(&state, *record)
                 .await
+                .map(|path| (path, true))
                 .map_err(|error| error.to_string())
         }
         (Credential::Bind(tokens), Client::Siwc(bind)) => super::siwc_bind::save(
@@ -601,8 +629,16 @@ async fn complete(
             &mut lifeline,
         )
         .await
-        .map(|()| String::new())
+        .map(|outcome| {
+            (
+                String::new(),
+                outcome == super::siwc_bind::SaveOutcome::Synchronized,
+            )
+        })
         .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return "SIWC bind workers are busy; start a new binding".to_owned();
+            }
             format!(
                 "SIWC binding failed ({:?}, OS {:?})",
                 error.kind(),
@@ -612,9 +648,15 @@ async fn complete(
         _ => Err("OAuth credential kind mismatch".to_owned()),
     };
     match saved {
-        Ok(path) => {
+        Ok((path, synchronized)) => {
             if is_bind {
-                tracing::info!("SIWC credential bound and synchronized");
+                if synchronized {
+                    tracing::info!("SIWC credential bound and synchronized");
+                } else {
+                    tracing::warn!(
+                        "SIWC binding saved, runtime sync unavailable; the saved credential will load on restart"
+                    );
+                }
             } else {
                 tracing::info!(
                     "{provider} authentication successful; credential saved as {}",
@@ -625,7 +667,14 @@ async fn complete(
         }
         Err(error) => {
             tracing::error!("{SAVE_FAILED}: {error}");
-            store.set_error(&login.state, SAVE_FAILED);
+            store.set_error(
+                &login.state,
+                if error == "SIWC bind workers are busy; start a new binding" {
+                    &error
+                } else {
+                    SAVE_FAILED
+                },
+            );
         }
     }
 }

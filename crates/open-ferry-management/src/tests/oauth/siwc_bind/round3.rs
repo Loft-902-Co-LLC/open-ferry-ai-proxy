@@ -46,7 +46,8 @@ async fn round3_shutdown_during_write_reports_the_durable_outcome() {
     tokio::time::timeout(Duration::from_secs(2), pause.0.notified())
         .await
         .unwrap();
-    api.state.oauth_sessions().shutdown().await;
+    let state = api.state.clone();
+    let shutdown = tokio::spawn(async move { state.shutdown().await });
     tokio::time::sleep(Duration::from_millis(60)).await;
     release.send(()).unwrap();
     let result = tokio::time::timeout(Duration::from_secs(2), saving)
@@ -63,4 +64,5 @@ async fn round3_shutdown_during_write_reports_the_durable_outcome() {
         "durable commit was reported as failed at shutdown"
     );
     assert_eq!(api.sync.calls().len(), 1);
+    shutdown.await.unwrap();
 }

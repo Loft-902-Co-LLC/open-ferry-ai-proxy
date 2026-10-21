@@ -8,6 +8,7 @@ use open_ferry_core::auth::AuthStore as _;
 mod admission;
 mod mutation_identity;
 mod round3;
+mod round4;
 mod route_parity;
 
 const START: &str =

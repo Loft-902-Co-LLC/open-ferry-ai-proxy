@@ -450,6 +450,9 @@ struct FakeSync {
     manager: Manager,
     calls: Mutex<Vec<SyncCall>>,
     stopped: AtomicBool,
+    completed_commands: AtomicUsize,
+    adopted_commands: AtomicUsize,
+    completed_pause: Mutex<Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>>,
     /// The state whose credential lock each call checks, once watched.
     watched: OnceLock<ManagementState>,
     /// For each call made while watched: whether the credential lock was
@@ -463,6 +466,9 @@ impl FakeSync {
             manager,
             calls: Mutex::new(Vec::new()),
             stopped: AtomicBool::new(false),
+            completed_commands: AtomicUsize::new(0),
+            adopted_commands: AtomicUsize::new(0),
+            completed_pause: Mutex::new(None),
             watched: OnceLock::new(),
             lock_held: Mutex::new(Vec::new()),
         }
@@ -554,6 +560,46 @@ impl FakeSync {
 }
 
 impl CredentialSync for FakeSync {
+    fn completed_token_command(
+        &self,
+        auth: Auth,
+        file: Option<AuthFile>,
+        command: open_ferry_core::manager::CompletedTokenCommand,
+    ) -> SyncFuture<'_> {
+        self.completed_commands.fetch_add(1, Ordering::SeqCst);
+        let call = file.map_or_else(
+            || SyncCall::Upsert(Box::new(auth.clone())),
+            SyncCall::FileWritten,
+        );
+        let applying = self.call(call);
+        let pause = self.completed_pause.lock().unwrap().clone();
+        // Exercise a genuinely closed receiver, as SyncSender::send does:
+        // failed enqueue drops the one-use command without adopting it.
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        if self.stopped.load(Ordering::SeqCst) {
+            receiver.close();
+        }
+        Box::pin(async move {
+            sender.send(command).await.map_err(|_| SyncError::Stopped)?;
+            let command = receiver.recv().await.ok_or(SyncError::Stopped)?;
+            if let Some(pause) = pause {
+                pause.0.notify_one();
+                pause.1.notified().await;
+            }
+            applying.await?;
+            self.manager
+                .run_persistence(move |manager| {
+                    manager
+                        .adopt_completed_token_command(&auth, command)
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+            self.adopted_commands.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
     fn upsert(&self, auth: Auth) -> SyncFuture<'_> {
         self.call(SyncCall::Upsert(Box::new(auth)))
     }
