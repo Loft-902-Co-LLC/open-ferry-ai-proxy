@@ -347,10 +347,10 @@ impl Traffic {
                 None,
             );
         }
-        if state.protocol != Protocol::Http1 || !state.upgraded {
-            if let Some(at) = state.first_head {
-                consider(at, "request headers", None);
-            }
+        if (state.protocol != Protocol::Http1 || !state.upgraded)
+            && let Some(at) = state.first_head
+        {
+            consider(at, "request headers", None);
         }
         if let Some(at) = state.partial_head {
             consider(at, "request headers", None);
@@ -363,20 +363,19 @@ impl Traffic {
                 .unwrap_or(Duration::from_secs(900));
             consider(started + GOAWAY_GRACE + body_grace, "drain deadline", None);
         }
-        if !state.draining {
-            if let Some(idle) = state
+        if !state.draining
+            && let Some(idle) = state
                 .idle_since
                 .filter(|_| state.active == 0 && state.protocol_tasks == 0)
-                && (state.protocol != Protocol::Http1 || !state.upgraded)
+            && (state.protocol != Protocol::Http1 || !state.upgraded)
+        {
+            if let Some(duration) = self.config.idle_timeout {
+                consider(idle + duration, "idle connection", None);
+            }
+            if state.protocol == Protocol::Http1
+                && let Some(duration) = self.config.header_timeout
             {
-                if let Some(duration) = self.config.idle_timeout {
-                    consider(idle + duration, "idle connection", None);
-                }
-                if state.protocol == Protocol::Http1
-                    && let Some(duration) = self.config.header_timeout
-                {
-                    consider(idle + duration, "request headers", None);
-                }
+                consider(idle + duration, "request headers", None);
             }
         }
         if let Some(duration) = self.config.write_stall_timeout {
@@ -426,7 +425,7 @@ impl Traffic {
     }
 }
 
-/// Only frame headers (nine bytes), lengths and stream lifecycle bits are kept.
+/// Only frame headers (nine bytes), lengths and window updates are kept.
 /// HPACK decoding/validation belongs to hyper. A HEADERS/CONTINUATION block gets
 /// one deadline, never reset by trickled fragments or unrelated HTTP/2 frames.
 #[derive(Default)]
