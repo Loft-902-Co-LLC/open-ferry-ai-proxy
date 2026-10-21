@@ -36,8 +36,7 @@ use crate::json::{bool_of, int_of, object, str_of};
 use crate::registry::UnsupportedPartError;
 use crate::schema::{MAP_KEYWORDS, VALUE_KEYWORDS, has_unsupported_unicode_property_escape};
 use crate::signature::{
-    BlockKind, Provider, compatible_signature_for_provider, detect_signature_provider_for_block,
-    is_valid_grok_encrypted_content,
+    BlockKind, Provider, detect_signature_provider_for_block,
 };
 use crate::thinking::{LEVEL_XHIGH, base_model_name, budget_to_level};
 
@@ -82,8 +81,7 @@ fn convert(
     input.extend(convert_system(request.get("system")));
     if let Some(Value::Array(messages)) = request.get("messages") {
         let replay = SignatureReplay {
-            grok_target: go::to_lower(base_model_name(model_name).trim()).contains("grok"),
-            meta_target: Provider::from_model_name(base_model_name(model_name)) == Provider::Meta,
+            target: Provider::from_model_name(base_model_name(model_name)),
             preserve_unknown: preserve_unknown_signatures,
         };
         let mut builder = InputBuilder::new(&tool_names, replay);
@@ -203,34 +201,16 @@ struct InputBuilder<'a> {
 /// Which thinking signatures are replayed as reasoning `encrypted_content`.
 #[derive(Clone, Copy)]
 struct SignatureReplay {
-    /// The target is an xAI model, which gets its own `encrypted_content` back.
-    grok_target: bool,
-    meta_target: bool,
-    /// Also replay signatures that are blank or in no known format.
+    target: Provider,
     preserve_unknown: bool,
 }
 
 impl SignatureReplay {
-    /// The `encrypted_content` to replay for a thinking block's `signature`.
     fn encrypted_content(self, signature: Option<&Value>) -> Option<String> {
         let raw = str_of(signature);
-        if let Some(signature) = compatible_signature_for_provider(Provider::Gpt, &raw) {
-            return Some(signature);
-        }
-        if self.meta_target && crate::signature::is_valid_meta_reasoning_signature(&raw) {
-            return Some(raw.trim().to_owned());
-        }
-        if self.preserve_unknown
-            && (raw.trim().is_empty()
-                || matches!(signature, Some(Value::String(_)))
-                    && detect_signature_provider_for_block(&raw, BlockKind::ClaudeThinking)
-                        == Provider::Unknown)
-        {
-            return Some(raw.into_owned());
-        }
-        // xAI's ciphertext has no envelope, so only an xAI target model makes
-        // a value plausibly its own.
-        (self.grok_target && is_valid_grok_encrypted_content(&raw)).then(|| raw.into_owned())
+        if let Some(signature) = crate::common::codex_replay_signature::for_provider(self.target, &raw) { return Some(signature); }
+        if self.preserve_unknown && (raw.trim().is_empty() || matches!(signature, Some(Value::String(_))) && detect_signature_provider_for_block(&raw, BlockKind::ClaudeThinking) == Provider::Unknown) { return Some(raw.into_owned()); }
+        None
     }
 }
 
@@ -798,8 +778,7 @@ mod meta_replay_tests {
         let sig = format!("Q-PaDgE{}", "A".repeat(1419));
         for target in [false, true] {
             let policy = SignatureReplay {
-                grok_target: false,
-                meta_target: target,
+                target: if target { Provider::Meta } else { Provider::Gpt },
                 preserve_unknown: false,
             };
             assert_eq!(

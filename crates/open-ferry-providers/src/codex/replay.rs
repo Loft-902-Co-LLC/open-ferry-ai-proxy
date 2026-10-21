@@ -255,7 +255,7 @@ fn input_has_valid_reasoning(input: &[Value]) -> bool {
     input.iter().any(|item| {
         str_at(item, "type").trim() == "reasoning"
             && matches!(item.get("encrypted_content"), Some(Value::String(encrypted))
-                if inspect_gpt_reasoning_signature(encrypted).is_ok())
+                if inspect_gpt_reasoning_signature(encrypted).is_ok() || open_ferry_translate::signature::is_valid_meta_reasoning_signature(encrypted))
     })
 }
 

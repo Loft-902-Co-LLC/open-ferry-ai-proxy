@@ -20,10 +20,11 @@ pub const MIN_GROK_ENCRYPTED_CONTENT_DECODED_LEN: usize = 32;
 pub const MIN_GROK_ENCRYPTED_CONTENT_ENTROPY_RATIO: f64 = 0.85;
 
 /// The sizes of a well-formed Grok `encrypted_content`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GrokEncryptedContentInfo {
     pub raw_len: usize,
     pub decoded_len: usize,
+    pub router_suffix: String,
 }
 
 /// `IsValidGrokEncryptedContent`.
@@ -58,16 +59,17 @@ pub fn inspect_grok_encrypted_content(raw: &str) -> Result<GrokEncryptedContentI
             "invalid Grok encrypted_content: expected unpadded standard base64"
         ));
     }
+    if split_signature_provider_prefix(sig).is_some() { return Err(error!("invalid Grok encrypted_content: carries another provider's cache prefix")); }
+    let full_len = sig.len();
+    let (sig, router_suffix) = match sig.split_once('.') {
+        Some((head, tail)) => {
+            if !super::meta_validation::valid_router_suffix(tail) { return Err(error!("invalid Grok encrypted_content: router suffix must be 1-128 alphanumeric characters")); }
+            (head, tail)
+        }
+        None => (sig, ""),
+    };
     if let Some((index, c)) = first_invalid_base64_char(sig, b"+/") {
-        return Err(error!(
-            "invalid Grok encrypted_content: contains non-base64 character U+{:04X} at byte {index}",
-            u32::from(c)
-        ));
-    }
-    if split_signature_provider_prefix(sig).is_some() {
-        return Err(error!(
-            "invalid Grok encrypted_content: carries another provider's cache prefix"
-        ));
+        return Err(error!("invalid Grok encrypted_content: contains non-base64 character U+{:04X} at byte {index}", u32::from(c)));
     }
     // Only a few first characters can start a self-describing envelope, which
     // skips these probes for most real xAI ciphertext. Claude CAIS drops its
@@ -79,6 +81,7 @@ pub fn inspect_grok_encrypted_content(raw: &str) -> Result<GrokEncryptedContentI
                 "Grok encrypted_content looks like GPT/Codex reasoning signature"
             ));
         }
+        if super::is_valid_meta_reasoning_signature(sig) { return Err(error!("Grok encrypted_content looks like Meta reasoning signature")); }
         if is_valid_claude_thinking_signature(sig, ClaudeValidationOptions::STRICT) {
             return Err(error!(
                 "Grok encrypted_content looks like Claude thinking signature"
@@ -123,7 +126,8 @@ pub fn inspect_grok_encrypted_content(raw: &str) -> Result<GrokEncryptedContentI
         ));
     }
     Ok(GrokEncryptedContentInfo {
-        raw_len: sig.len(),
+        raw_len: full_len,
+        router_suffix: router_suffix.to_owned(),
         decoded_len: decoded.len(),
     })
 }
@@ -151,4 +155,18 @@ pub(super) fn byte_entropy_ratio(buf: &[u8]) -> f64 {
         return 0.0;
     }
     entropy / go::log2(max_symbols as f64)
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+    #[test]
+    fn validates_native_entropy_before_reporting_suffix() {
+        let native = STANDARD_NO_PAD.encode((0..255).collect::<Vec<u8>>());
+        let info = inspect_grok_encrypted_content(&format!("{native}.Router123")).unwrap();
+        assert_eq!(info.router_suffix, "Router123");
+        assert_eq!(info.raw_len, native.len() + 10);
+        assert!(inspect_grok_encrypted_content(&format!("{}.Router123", STANDARD_NO_PAD.encode([0; 255]))).is_err());
+    }
 }

@@ -66,7 +66,7 @@ use super::client::USER_AGENT;
 use super::compat;
 use super::ext::{self, Turn};
 use super::input_ids::sanitize_input_item_ids;
-use super::reasoning::sanitize_reasoning;
+use crate::codex::reasoning::{sanitize_reasoning_for_target, resolve_target_model};
 use super::thinking;
 use super::tool_schema::normalize_tool_schemas;
 use crate::custom_headers;
@@ -532,7 +532,7 @@ pub(crate) fn prepare_body(
             turn: Turn::default(),
         });
     }
-    sanitize_reasoning(&mut body, compat::is_compat(context, request, options));
+    sanitize_reasoning_for_target(&mut body, compat::is_compat(context, request, options), resolve_target_model(base, &options.metadata.requested_model));
     normalize_parallel_tool_calls(&mut body, &options.headers);
     normalize_tool_schemas(&mut body);
     let turn = ext::prepare(kind, context, request, options, &mut body);

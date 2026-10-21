@@ -55,7 +55,7 @@ use super::tools::sanitize_web_search_tools;
 use crate::apply_patch_responses;
 use crate::codex::client::USER_AGENT;
 use crate::codex::compat;
-use crate::codex::reasoning::sanitize_reasoning_for_meta;
+use crate::codex::reasoning::sanitize_reasoning_for_meta_base_url;
 use crate::codex::request::{
     base_model, ensure_header, normalize_instructions, parse_object, response_format,
     set_bool_if_different, set_string_if_different,
@@ -278,6 +278,17 @@ pub(super) fn prepare(
     options: &Options,
     stream: bool,
 ) -> Result<Prepared, ExecError> {
+    prepare_for_base_url(config, models, request, options, stream, "")
+}
+
+pub(super) fn prepare_for_base_url(
+    config: Option<&Config>,
+    models: Option<&dyn ModelCatalog>,
+    request: &Request,
+    options: &Options,
+    stream: bool,
+    base_url: &str,
+) -> Result<Prepared, ExecError> {
     let base = base_model(&request.model);
     let original_bytes = if options.original_request.is_empty() {
         request.payload.clone()
@@ -324,7 +335,7 @@ pub(super) fn prepare(
     apply_patch_responses::normalize_request(&mut body, Some(&original))
         .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
     normalize_instructions(&mut body, false);
-    sanitize_reasoning_for_meta(&mut body);
+    sanitize_reasoning_for_meta_base_url(&mut body, base_url);
     sanitize_web_search_tools(&mut body);
     let user_agent = header_value(
         options

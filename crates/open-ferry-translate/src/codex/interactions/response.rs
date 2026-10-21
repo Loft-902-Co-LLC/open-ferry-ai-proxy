@@ -59,6 +59,7 @@ pub struct CodexToInteractionsStream {
     model: String,
     created_at: i64,
     has_output_text: bool,
+    has_thought_summary: bool,
     function_call_name: String,
     function_call_id: String,
     seen_reasoning: HashSet<[u8; 32]>,
@@ -79,6 +80,7 @@ impl CodexToInteractionsStream {
             model: model.to_owned(),
             created_at: 0,
             has_output_text: false,
+            has_thought_summary: false,
             function_call_name: String::new(),
             function_call_id: String::new(),
             seen_reasoning: HashSet::new(),
@@ -266,8 +268,11 @@ impl CodexToInteractionsStream {
                 self.step_stop(out);
             }
             "reasoning" => {
+                let sig = str_of(field("encrypted_content")).trim().to_owned();
+                let key: [u8; 32] = Sha256::digest(format!("{}\0{sig}", str_of(field("id"))).as_bytes()).into();
+                if !sig.is_empty() && self.seen_reasoning.contains(&key) { return; }
                 let text = item.map(reasoning_text).unwrap_or_default();
-                if !text.is_empty() {
+                if !text.is_empty() && !self.has_thought_summary {
                     self.ensure_step(out, THOUGHT, item);
                     self.thought_delta(out, &text);
                 }
@@ -326,6 +331,7 @@ impl CodexToInteractionsStream {
         self.step_index = self.next_step_index;
         self.next_step_index += 1;
         self.step = Some(kind);
+        if kind == THOUGHT { self.has_thought_summary = false; }
         let mut step = Map::new();
         step.insert("type".into(), kind.into());
         if kind == FUNCTION_CALL {
@@ -378,7 +384,8 @@ impl CodexToInteractionsStream {
         );
     }
 
-    fn thought_delta(&self, out: &mut String, text: &str) {
+    fn thought_delta(&mut self, out: &mut String, text: &str) {
+        self.has_thought_summary = true;
         let content = object([("text", text.into()), ("type", "text".into())]);
         self.delta(
             out,

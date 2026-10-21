@@ -366,7 +366,7 @@ fn normalize_reasoning(item: &Value) -> Option<Value> {
     let Some(Value::String(encrypted)) = item.get("encrypted_content") else {
         return None;
     };
-    if encrypted.trim() != encrypted || inspect_gpt_reasoning_signature(encrypted).is_err() {
+    if encrypted.trim() != encrypted || (inspect_gpt_reasoning_signature(encrypted).is_err() && !open_ferry_translate::signature::is_valid_meta_reasoning_signature(encrypted)) {
         return None;
     }
     let mut reasoning = Map::new();

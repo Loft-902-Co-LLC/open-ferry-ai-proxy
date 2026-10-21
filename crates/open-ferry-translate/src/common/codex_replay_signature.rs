@@ -7,6 +7,10 @@ pub(crate) fn for_target(model: &str, raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() { return None; }
     let target = Provider::from_model_name(base_model_name(model));
+    for_provider(target, raw)
+}
+
+pub(crate) fn for_provider(target: Provider, raw: &str) -> Option<String> {
     let effective = if target == Provider::Unknown { Provider::Gpt } else { target };
     let detected = detect_signature_provider(&raw);
     if detected != Provider::Unknown {

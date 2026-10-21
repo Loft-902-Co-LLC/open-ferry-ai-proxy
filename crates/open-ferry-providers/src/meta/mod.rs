@@ -207,12 +207,13 @@ impl MetaExecutor {
     ) -> Result<Response, ExecError> {
         refuse_compact(options)?;
         let creds = Self::credentials(auth)?;
-        let mut prepared = prepare(
+        let mut prepared = request::prepare_for_base_url(
             self.config.as_deref(),
             self.models.as_deref(),
             request,
             options,
             true,
+            &creds.base_url,
         )?;
         let headers = build_headers(auth, &creds.token, &options.headers)?;
         let (response, secrets) = self
@@ -262,12 +263,13 @@ impl MetaExecutor {
     ) -> Result<StreamResponse, ExecError> {
         refuse_compact(&options)?;
         let creds = Self::credentials(auth)?;
-        let prepared = prepare(
+        let prepared = request::prepare_for_base_url(
             self.config.as_deref(),
             self.models.as_deref(),
             &request,
             &options,
             true,
+            &creds.base_url,
         )?;
         let headers = build_headers(auth, &creds.token, &options.headers)?;
         let (response, secrets) = self

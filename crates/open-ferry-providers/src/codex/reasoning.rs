@@ -29,19 +29,36 @@ use crate::json::{bool_of, get, str_at, str_of};
 /// (`sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat`). With
 /// `is_compat`, a third-party Responses model's cleartext reasoning and IDs
 /// are kept. Returns whether anything changed.
+#[cfg(test)]
 pub(crate) fn sanitize_reasoning(body: &mut Value, is_compat: bool) -> bool {
-    let target = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let keep_meta = if Provider::from_model_name(target) == Provider::Meta { 2 } else { 0 };
-    sanitize_reasoning_with_options(body, is_compat, is_compat, keep_meta)
+    let target = body.get("model").and_then(Value::as_str).unwrap_or_default().to_owned();
+    sanitize_reasoning_for_target(body, is_compat, &target)
 }
 
-/// Keeps foreign-format encrypted reasoning for Meta, while applying the
-/// usual Responses content and orphan-ID rules.
+pub(crate) fn resolve_target_model<'a>(base: &'a str, requested: &'a str) -> &'a str {
+    if Provider::from_model_name(base) != Provider::Unknown { base } else {
+        let requested = super::request::base_model(requested);
+        if Provider::from_model_name(requested) != Provider::Unknown { requested } else { base }
+    }
+}
+
+pub(crate) fn sanitize_reasoning_for_target(body: &mut Value, is_compat: bool, target: &str) -> bool {
+    let policy = if Provider::from_model_name(target) == Provider::Meta { 2 } else { 0 };
+    sanitize_reasoning_with_options(body, is_compat, is_compat, policy, Provider::from_model_name(target))
+}
+
+#[cfg(test)]
 pub(crate) fn sanitize_reasoning_for_meta(body: &mut Value) -> bool {
-    sanitize_reasoning_with_options(body, false, true, 1)
+    sanitize_reasoning_for_meta_base_url(body, "")
+}
+
+pub(crate) fn sanitize_reasoning_for_meta_base_url(body: &mut Value, base: &str) -> bool {
+    sanitize_reasoning_with_options(body, false, true, if native_meta_url(base) { 1 } else { 2 }, Provider::Meta)
+}
+
+fn native_meta_url(base: &str) -> bool {
+    url::Url::parse(base.trim()).ok().and_then(|u| u.host_str().map(str::to_owned))
+        .is_none_or(|host| host.is_empty() || host == "api.meta.ai" || host.ends_with(".meta.ai"))
 }
 
 fn sanitize_reasoning_with_options(
@@ -49,6 +66,7 @@ fn sanitize_reasoning_with_options(
     is_compat: bool,
     keep_foreign: bool,
     keep_meta: u8,
+    target: Provider,
 ) -> bool {
     // Codex doesn't persist items with store off, so a reasoning ID without
     // usable encrypted content would be looked up and fail.
@@ -64,7 +82,7 @@ fn sanitize_reasoning_with_options(
         let Value::Object(item) = item else {
             continue;
         };
-        changed |= sanitize_item(item, index, strip_ids, is_compat, keep_foreign, keep_meta);
+        changed |= sanitize_item(item, index, strip_ids, is_compat, keep_foreign, keep_meta, target);
     }
     changed
 }
@@ -76,6 +94,7 @@ fn sanitize_item(
     is_compat: bool,
     keep_foreign: bool,
     keep_meta: u8,
+    target: Provider,
 ) -> bool {
     let mut changed = false;
     let has_content = matches!(item.get("content"), Some(Value::Array(parts)) if !parts.is_empty());
@@ -115,9 +134,12 @@ fn sanitize_item(
         Value::String(raw) => inspect_gpt_reasoning_signature(raw)
             .err()
             .filter(|_| {
-                !keep_foreign
-                    || raw.is_empty()
-                    || detect_signature_provider(raw) != Provider::Unknown
+                let matching = match target {
+                    Provider::Grok => open_ferry_translate::signature::is_valid_grok_encrypted_content(raw),
+                    Provider::Gemini | Provider::Claude | Provider::Kimi | Provider::Swe => open_ferry_translate::signature::compatible_signature_for_provider(target, raw).is_some(),
+                    _ => false,
+                };
+                !matching && (!keep_foreign || raw.is_empty() || detect_signature_provider(raw) != Provider::Unknown)
             })
             .map(|error| error.to_string()),
         Value::Null => Some("encrypted_content is null".to_owned()),

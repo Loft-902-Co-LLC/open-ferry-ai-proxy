@@ -89,7 +89,7 @@ use super::tool_results::{normalize_tool_results_text_only, should_normalize_too
 use crate::apply_patch_responses;
 use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_body_prefix};
 use crate::codex::compat;
-use crate::codex::reasoning::sanitize_reasoning;
+
 use crate::codex::request::{
     base_model, original_request, parse_object, response_format, set_bool_if_different,
     set_string_if_different,
@@ -266,7 +266,7 @@ impl OpenAiCompatExecutor {
             set_bool_if_different(&mut body, "stream_options.include_usage", true);
         } else if compact {
             delete(&mut body, "stream");
-            sanitize_reasoning(&mut body, false);
+            crate::codex::reasoning::sanitize_reasoning_for_target(&mut body, false, crate::codex::reasoning::resolve_target_model(base, requested));
         }
         // The rules see the body as it is sent.
         let target = payload::Target {

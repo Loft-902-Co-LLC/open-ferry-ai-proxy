@@ -162,7 +162,7 @@ impl Provider {
             Provider::Kimi
         } else if has("grok") {
             Provider::Grok
-        } else if starts("muse-") || has("/muse-") {
+        } else if is_meta_muse_model_name(lower) {
             Provider::Meta
         } else if has("swe-") {
             Provider::Swe
@@ -615,3 +615,21 @@ fn is_recognized_gemini_provider_signature(raw: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+fn is_meta_muse_model_name(lower: &str) -> bool {
+    if lower == "muse" || lower.starts_with("muse-") || lower.starts_with("muse_") || lower.ends_with("/muse") || lower.contains("/muse-") || lower.contains("/muse_") { return true; }
+    ["meta-muse", "meta_muse"].iter().any(|prefix| lower.find(prefix).is_some_and(|i| {
+        let rest = &lower[i + prefix.len()..];
+        rest.is_empty() || rest.starts_with(['-', '_', '.', ':'])
+    }))
+}
+
+#[cfg(test)]
+mod muse_model_tests {
+    use super::*;
+    #[test]
+    fn namespaced_and_bounded_muse_names() {
+        for model in ["muse", "muse_spark", "meta-muse-1", "meta_muse.1", "openai-compatible/muse-spark", "openai:muse_spark"] { assert_eq!(Provider::from_model_name(model), Provider::Meta, "{model}"); }
+        for model in ["museum", "amuse", "meta-museum"] { assert_eq!(Provider::from_model_name(model), Provider::Unknown); }
+    }
+}
