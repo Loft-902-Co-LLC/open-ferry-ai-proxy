@@ -243,6 +243,7 @@ impl XaiExecutor {
         )?;
         compact::shape_body(&mut prepared.body, &request.payload);
         prepared.finalize(self.context(auth).config, request, options);
+        // Upstream sanitizes before finalizePayload; sanitize after rules so overrides cannot bypass destination checks.
         crate::xai::reasoning::sanitize_input_encrypted_content_for_base_url(
             &mut prepared.body,
             crate::xai::request::base_url(auth),
