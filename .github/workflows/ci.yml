@@ -723,6 +723,41 @@ jobs:
           if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             throw 'Expected an elevated runner'
           }
+          # Hosted images vary in their initial token owner. Reproduce the
+          # object-creator policy explicitly, without changing machine policy.
+          Add-Type @'
+          using System;
+          using System.ComponentModel;
+          using System.Runtime.InteropServices;
+          using System.Security.Principal;
+          public static class RunnerOwner {
+            [DllImport("advapi32.dll", SetLastError = true)]
+            static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+            [DllImport("advapi32.dll", SetLastError = true)]
+            static extern bool SetTokenInformation(IntPtr token, uint kind, IntPtr value, uint size);
+            [DllImport("kernel32.dll")]
+            static extern bool CloseHandle(IntPtr handle);
+            public static void SetOwner(string sidText) {
+              var sid = new SecurityIdentifier(sidText);
+              var bytes = new byte[sid.BinaryLength];
+              sid.GetBinaryForm(bytes, 0);
+              var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+              var owner = Marshal.AllocHGlobal(IntPtr.Size);
+              IntPtr token = IntPtr.Zero;
+              try {
+                Marshal.WriteIntPtr(owner, pinned.AddrOfPinnedObject());
+                if (!OpenProcessToken(new IntPtr(-1), 0x80, out token) ||
+                    !SetTokenInformation(token, 4, owner, (uint)IntPtr.Size))
+                  throw new Win32Exception(Marshal.GetLastWin32Error());
+              } finally {
+                if (token != IntPtr.Zero) CloseHandle(token);
+                Marshal.FreeHGlobal(owner);
+                pinned.Free();
+              }
+            }
+          }
+          '@
+          [RunnerOwner]::SetOwner($identity.User.Value)
           $install = 'C:\Program Files\open-ferry'
           $data = 'C:\ProgramData\open-ferry'
           $exe = Join-Path $install 'open-ferry.exe'
@@ -764,6 +799,20 @@ jobs:
                 # The service itself runs as SYSTEM and creates its own runtime files.
                 if ($owner -notin 'S-1-5-32-544', 'S-1-5-18') { throw "Unexpected owner of $($entry.FullName)" }
               }
+            }
+            # A later invocation of the old release has no Rust startup fix.
+            # Restore the original default to model a fresh elevated terminal.
+            $legacyConfig = Join-Path $data 'old-owner-probe.yaml'
+            try {
+              [RunnerOwner]::SetOwner($identity.User.Value)
+              $output = & $exe init -system -config $legacyConfig 2>&1
+              if ($LASTEXITCODE -ne 0) { throw 'Standalone published init probe failed' }
+              $owner = Owner $legacyConfig
+              Write-Host "Standalone published init with object-creator token made owner $owner"
+              if ($owner -ne $identity.User.Value) { throw 'Expected old binary to retain the account default owner' }
+            } finally {
+              [RunnerOwner]::SetOwner('S-1-5-32-544')
+              if (Test-Path -LiteralPath $legacyConfig) { Remove-Item -LiteralPath $legacyConfig -Force }
             }
           } finally {
             if (Get-Service -Name open-ferry -ErrorAction SilentlyContinue) {
