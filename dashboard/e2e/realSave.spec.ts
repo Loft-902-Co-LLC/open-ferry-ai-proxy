@@ -321,6 +321,7 @@ test("reviews a second YAML edit after legacy migration without leaving the edit
   await pasteSecret("\n# second YAML edit after normalization\n");
   await page.getByRole("button", { name: "Review changes" }).click();
   const review = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(review).toBeVisible();
   await expect(review.getByText("config.yaml changed on the server since you opened it")).toHaveCount(0);
   await review.getByRole("button", { name: "Save config.yaml" }).click();
   await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
@@ -610,6 +611,7 @@ test("names a same-field Settings conflict and reloads only that form", async ()
   await expectEditorShows("# YAML draft survives a sibling reload", "the other form's unsaved draft");
   await page.getByRole("button", { name: "Review changes" }).click();
   const yamlReview = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(yamlReview).toBeVisible();
   await expect(yamlReview.getByText("config.yaml changed on the server since you opened it")).toHaveCount(0);
   const written = page.waitForResponse((response) => new URL(response.url()).pathname === "/v8/management/config.yaml" && response.request().method() === "PUT");
   await yamlReview.getByRole("button", { name: "Save config.yaml" }).click();
