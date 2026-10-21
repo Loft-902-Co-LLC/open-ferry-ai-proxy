@@ -888,7 +888,8 @@ mod per_minute_tests {
         let reset = rate_limit_reset_for_error(headers, body, now).unwrap();
         assert!(
             (seconds + 1..=seconds + 30).contains(&reset.as_secs()),
-            "{reset:?}"
+            "{reset:?}; body={:?}",
+            String::from_utf8_lossy(body)
         );
         assert_eq!(*headers, before);
     }
@@ -951,6 +952,26 @@ mod per_minute_tests {
         ] {
             assert_range(&headers(now), raw.as_bytes(), now, 4 * 3600);
         }
+    }
+
+    #[test]
+    fn ignored_invalid_unicode_keys_keep_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for ignored in [r#""x\ud800":1"#, r#""x\udc00":1"#] {
+            let raw = format!(
+                r#"{{"error":{{"type":"rate_limit_error","message":{},{ignored}}},{ignored}}}"#,
+                json!(MESSAGE)
+            );
+            assert_range(&headers(now), raw.as_bytes(), now, 30);
+        }
+        let mut raw = format!(
+            r#"{{"error":{{"type":"rate_limit_error","message":{},"x"#,
+            json!(MESSAGE)
+        )
+        .into_bytes();
+        raw.push(0xff);
+        raw.extend_from_slice(b"\":1}}");
+        assert_range(&headers(now), &raw, now, 30);
     }
 
     #[test]

@@ -8,6 +8,43 @@ use std::fmt;
 
 use open_ferry_translate::go::equal_fold;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+
+enum Key {
+    Error,
+    Type,
+    Message,
+    Other,
+}
+
+impl<'de> Deserialize<'de> for Key {
+    fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+        impl Visitor<'_> for KeyVisitor {
+            type Value = Key;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON key")
+            }
+            fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Key, E> {
+                // Go replaces invalid Unicode with U+FFFD. None of our three
+                // field names can match a key containing that replacement.
+                let Ok(key) = std::str::from_utf8(bytes) else {
+                    return Ok(Key::Other);
+                };
+                Ok(if equal_fold(key, "error") {
+                    Key::Error
+                } else if equal_fold(key, "type") {
+                    Key::Type
+                } else if equal_fold(key, "message") {
+                    Key::Message
+                } else {
+                    Key::Other
+                })
+            }
+        }
+        decoder.deserialize_bytes(KeyVisitor)
+    }
+}
 
 #[derive(Default)]
 struct Body {
@@ -40,17 +77,17 @@ impl<'de> Visitor<'de> for Decode<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        while let Some(key) = map.next_key::<String>()? {
-            if self.envelope && equal_fold(&key, "error") {
+        while let Some(key) = map.next_key::<Key>()? {
+            if self.envelope && matches!(key, Key::Error) {
                 map.next_value_seed(Decode {
                     body: self.body,
                     envelope: false,
                 })?;
-            } else if !self.envelope && equal_fold(&key, "type") {
+            } else if !self.envelope && matches!(key, Key::Type) {
                 if let Some(value) = map.next_value::<Option<String>>()? {
                     self.body.error_type = value;
                 }
-            } else if !self.envelope && equal_fold(&key, "message") {
+            } else if !self.envelope && matches!(key, Key::Message) {
                 if let Some(value) = map.next_value::<Option<String>>()? {
                     self.body.message = value;
                 }
