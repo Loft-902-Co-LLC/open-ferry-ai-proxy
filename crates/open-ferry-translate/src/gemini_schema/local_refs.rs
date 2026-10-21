@@ -46,8 +46,9 @@ fn inline_with_depth(
     if structural_depth(schema) > max_depth {
         return (Value::Object(depth_hint(schema)), true);
     }
-    // Upstream skips this pass entirely unless its JSON contains the exact
-    // $ref token. Without one, later passes still see definition containers.
+    // Upstream checks raw JSON for the exact token. We receive parsed Values:
+    // escaped spellings of $ref are indistinguishable here and also inline.
+    // Without a parsed token, later passes still see definition containers.
     if !contains_ref_token(schema) {
         return (schema.clone(), false);
     }

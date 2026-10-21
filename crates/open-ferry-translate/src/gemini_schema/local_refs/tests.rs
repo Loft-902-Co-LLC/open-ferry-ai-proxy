@@ -244,6 +244,16 @@ fn no_ref_fast_path_retains_definitions_for_the_later_cleaning_passes() {
 }
 
 #[test]
+fn escaped_reference_keys_inline_after_the_request_has_been_parsed() {
+    let escaped: Value=serde_json::from_str(r##"{"type":"object","properties":{"p":{"\u0024ref":"#/$defs/S"}},"$defs":{"S":{"type":"string"}}}"##).unwrap();
+    let literal = json!({"type":"object","properties":{"p":{"$ref":"#/$defs/S"}},"$defs":{"S":{"type":"string"}}});
+    assert_eq!(escaped, literal);
+    assert_eq!(clean(&escaped), clean(&literal));
+    assert_eq!(clean(&escaped)["properties"]["p"]["type"], "string");
+    // Go's raw-token fast path instead yields object + "See: S" for the escape.
+}
+
+#[test]
 fn aliased_array_pointer_spellings_size_one_target_once() {
     let mut target = json!({"type":"string","description":"x".repeat(32*1024)});
     for _ in 0..4 {
