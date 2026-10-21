@@ -4,6 +4,8 @@ import { ApiError, isApiError, isUnsupportedRoute, type ApiRequest, type ApiResp
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "./management";
 import { AUTH_FILE_STATUS, type Credential, type StatusAnswer } from "./credentials";
 
+import { CONFIG_FIELDS } from "./configFields";
+
 type ResponseCall = <T>(path: string, request?: ApiRequest) => Promise<ApiResponse<T>>;
 
 const V8_YAML = "/v8/management/config.yaml";
@@ -99,6 +101,9 @@ export class StoredConfigUnusable extends Error {
 interface Change { path: string; value: unknown }
 
 const FIELD_NAMES: Record<string, string> = {
+  ...Object.fromEntries(Object.values(CONFIG_FIELDS).map(({ path, label }) => [
+    path.startsWith(`${V8_CONFIG}/`) ? path.slice(V8_CONFIG.length + 1) : SETTINGS[path.slice(MANAGEMENT.length + 1)], label,
+  ])),
   "routing/retry/request-retry": "Retries",
   "access/api-keys": "Client API keys",
   "api-keys": "Provider API keys",
@@ -266,16 +271,16 @@ export class ConfigEditor {
     this.adopt(fresh);
     return fresh;
   }
-  private async forWrite(paths: readonly string[], wholeFile = false, fromRead = false): Promise<Snapshot> {
+  private async forWrite(paths: readonly string[]): Promise<Snapshot> {
     const fresh = await this.store.read();
     if (this.versioned && fresh.etag === undefined) {
       throw new Error("The server omitted the config version. Reload before saving.");
     }
-    // A whole-list payload is built from a prior read even in a one-click
-    // form. Its re-read must not bless changes made after that payload.
-    const base = this.dirty || wholeFile || fromRead ? this.base : fresh;
-    const conflicts = wholeFile ? (base?.etag !== fresh.etag ? ["config.yaml"] : []) :
-      paths.filter((path) => !same(valueAt((this.drafts.get(path) ?? (this.explicitDrafts ? fresh : base))?.tree, path), valueAt(fresh.tree, path))).map(fieldName);
+    const base = this.dirty ? this.base : fresh;
+    const conflicts = paths.filter((path) => !same(
+      valueAt((this.drafts.get(path) ?? (this.explicitDrafts ? fresh : base))?.tree, path),
+      valueAt(fresh.tree, path),
+    )).map(fieldName);
     if (conflicts.length > 0) throw new ConfigConflict(conflicts);
     return fresh;
   }
@@ -402,23 +407,21 @@ export class ConfigEditor {
   };
 
   private async perform<T>(path: string, request: ApiRequest): Promise<T> {
-    await this.ready();
     const writing = request.method !== undefined && request.method !== "GET";
-    if (writing && path === API_KEYS && !["DELETE", "PATCH", "PUT"].includes(request.method ?? "")) {
-      throw new Error("This config write has no versioned route.");
+    if (writing) {
+      this.paths(path);
+      const setting = SETTINGS[path.slice(MANAGEMENT.length + 1)];
+      const allowed = path === API_KEYS ? ["DELETE", "PATCH"] : PROVIDER_LIST.test(path) ? ["DELETE", "PUT"]
+        : setting !== undefined && path.startsWith(`${MANAGEMENT}/`) ? ["PATCH", "PUT"] : ["PUT"];
+      if (!allowed.includes(request.method ?? "")) throw new Error("This config write has no versioned route.");
     }
-    if (writing) this.paths(path);
+    await this.ready();
     if (!this.versioned) {
       const answer = await this.response<T>(path, request);
       if (writing) this.store.changed();
       return answer.data;
     }
     if (!writing) {
-      if (path === CONFIG_YAML) {
-        const answer = await this.response<T>(V8_YAML, request);
-        this.adopt({ tree: this.base?.tree, etag: answer.headers.get("etag") ?? undefined });
-        return answer.data;
-      }
       if (path === CONFIG || path === API_KEYS || PROVIDER_LIST.test(path) || path === V8_CONFIG) {
         const fresh = await this.read(request.signal);
         return (path === V8_CONFIG ? fresh.tree : formValues(fresh.tree, path)) as T;
@@ -426,13 +429,11 @@ export class ConfigEditor {
       return (await this.response<T>(path, request)).data;
     }
     const locations = this.paths(path);
-    const fresh = await this.forWrite(locations, path === CONFIG_YAML, path === API_KEYS && request.method === "PUT");
+    const fresh = await this.forWrite(locations);
     let target = path;
     let change = request;
     let value: unknown = request.json;
-    if (path === CONFIG_YAML) {
-      target = V8_YAML;
-    } else if (path.startsWith(`${MANAGEMENT}/`)) {
+    if (path.startsWith(`${MANAGEMENT}/`)) {
       const setting = SETTINGS[path.slice(MANAGEMENT.length + 1)];
       if (setting !== undefined) {
         target = `${V8_CONFIG}/${setting}`;
@@ -456,7 +457,7 @@ export class ConfigEditor {
           else keys[at] = key;
         }
         target = `${V8_CONFIG}/access/api-keys`;
-        value = request.method === "PUT" ? request.json : keys;
+        value = keys;
         change = { method: "PUT", json: value };
       } else if (PROVIDER_LIST.test(path)) {
         const family = PROVIDER_LIST.exec(path)?.[1] ?? "";
@@ -517,6 +518,6 @@ export class ConfigEditor {
         change = { method: "PUT", json: value };
       }
     }
-    return this.send<T>(target, change, fresh, path === CONFIG_YAML ? [] : [{ path: locations[0] ?? "", value }]);
+    return this.send<T>(target, change, fresh, [{ path: locations[0] ?? "", value }]);
   }
 }

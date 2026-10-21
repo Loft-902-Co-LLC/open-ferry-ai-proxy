@@ -92,15 +92,15 @@ describe("a form's config version", () => {
       route("GET", CONFIG_YAML, { text: "debug: false" }),
       route("GET", "/v8/management/config.yaml", { text: "debug: false", headers }),
       route("GET", API_KEYS, { json: { "api-keys": ["unit-client"] } }),
-      route("PUT", API_KEYS, { json: {} }),
+      route("PATCH", API_KEYS, { json: {} }),
       ...[CONFIG_YAML, "/v8/management/config.yaml", `${V8_CONFIG}/access/api-keys`, `${MANAGEMENT}/gemini-api-key`, `${V8_CONFIG}/api-keys/gemini`].map((path) => route("PUT", path, { json: {}, headers })),
     );
     const form = editor();
     await form.call(CONFIG_YAML);
     await form.call(CONFIG_YAML, { method: "PUT", body: "debug: true" });
-    await form.call(API_KEYS, { method: "PUT", json: ["unit-client"] });
+    await form.call(API_KEYS, { method: "PATCH", json: { old: "unit-client", new: "unit-client" } });
     await form.call(`${MANAGEMENT}/gemini-api-key`, { method: "PUT", json: [{ "api-key": "unit-provider" }] });
-    const writes = api.calls.filter((call) => call.method === "PUT");
+    const writes = api.calls.filter((call) => call.method !== "GET");
     expect(writes.map((call) => call.url.pathname)).toEqual(etag === undefined
       ? [CONFIG_YAML, API_KEYS, `${MANAGEMENT}/gemini-api-key`]
       : ["/v8/management/config.yaml", `${V8_CONFIG}/access/api-keys`, `${V8_CONFIG}/api-keys/gemini`]);
@@ -135,20 +135,14 @@ describe("a form's config version", () => {
       .toEqual(['"1"', '"2"']);
   });
 
-  it("refuses a whole client-key payload raced after a clean one-click form's read", async () => {
-    let keys = ["unit-original"];
-    let etag = '"base"';
-    const api = mockApi(route("GET", V8_CONFIG, () => ({
-      json: { access: { "api-keys": keys } }, headers: { ETag: etag },
-    })));
+  it.each([undefined, '"base"'])("rejects unused whole-list client-key PUT with version %s", async (etag) => {
+    const api = mockApi(route("GET", V8_CONFIG, {
+      json: { access: { "api-keys": ["unit-original"] } }, headers: etag === undefined ? {} : { ETag: etag },
+    }), route("GET", API_KEYS, { json: { "api-keys": ["unit-original"] } }));
     const form = editor();
     await form.call(API_KEYS);
-    keys = [...keys, "unit-other-writer"];
-    etag = '"other"';
-    for (let attempt = 0; attempt < 2; attempt++) {
-      await expect(form.call(API_KEYS, { method: "PUT", json: ["unit-replacement"] }))
-        .rejects.toMatchObject({ fields: ["Client API keys"] });
-    }
+    await expect(form.call(API_KEYS, { method: "PUT", json: ["unit-replacement"] }))
+      .rejects.toThrow("This config write has no versioned route.");
     expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 
@@ -357,5 +351,19 @@ describe("a form's config version", () => {
     }
     expect(api.callsTo("PUT", RETRY)).toHaveLength(2);
     expect(api.callsTo("PUT", RETRY).every((call) => call.headers.get("if-match") === '"base"')).toBe(true);
+  });
+});
+
+describe("explicit config method mapping", () => {
+  it.each([undefined, '"base"'])("rejects unsupported setting and provider methods with version %s", async (etag) => {
+    const api = mockApi(route("GET", V8_CONFIG, { json: {}, headers: etag === undefined ? {} : { ETag: etag } }));
+    for (const [path, method] of [
+      [`${MANAGEMENT}/debug`, "DELETE"], [`${MANAGEMENT}/debug`, "POST"],
+      [`${MANAGEMENT}/gemini-api-key`, "PATCH"], [`${MANAGEMENT}/gemini-api-key`, "POST"],
+      [`${V8_CONFIG}/routing/quota/prefer`, "DELETE"],
+    ] as const) {
+      await expect(editor().call(path, { method })).rejects.toThrow("This config write has no versioned route.");
+    }
+    expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 });
