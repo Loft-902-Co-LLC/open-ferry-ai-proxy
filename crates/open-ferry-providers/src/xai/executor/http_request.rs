@@ -88,7 +88,7 @@ impl XaiExecutor {
         if let Some(conversation) = conversation {
             headers.insert(HeaderName::from_static(CONV_ID_HEADER), conversation);
         }
-        headers.insert(header::USER_AGENT, HeaderValue::from_static(USER_AGENT));
+        crate::xai::request::ensure_user_agent(&mut headers, &client_headers);
         let attempt = Attempt {
             observation: observation
                 .as_ref()

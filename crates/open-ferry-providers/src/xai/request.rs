@@ -540,7 +540,7 @@ pub(crate) fn build_headers(
     custom_headers::apply(&mut headers, &auth.attributes, client, PROVIDER);
     strip_forbidden_headers(&mut headers);
     set_session_header(&mut headers, session_id)?;
-    headers.insert(header::USER_AGENT, HeaderValue::from_static(USER_AGENT));
+    ensure_user_agent(&mut headers, client);
     Ok(headers)
 }
 
@@ -581,3 +581,10 @@ fn set_session_header(headers: &mut HeaderMap, session_id: &str) -> Result<(), E
 
 #[cfg(test)]
 mod tests;
+
+/// Preserve the real caller's identity, falling back to open-ferry's own agent.
+pub(crate) fn ensure_user_agent(headers: &mut HeaderMap, client: &HeaderMap) {
+    if headers.get(header::USER_AGENT).is_some_and(|v| !v.as_bytes().iter().all(u8::is_ascii_whitespace)) { return; }
+    let agent = client.get(header::USER_AGENT).filter(|v| !v.as_bytes().iter().all(u8::is_ascii_whitespace)).cloned().unwrap_or_else(|| HeaderValue::from_static(USER_AGENT));
+    headers.insert(header::USER_AGENT, agent);
+}
