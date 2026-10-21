@@ -96,8 +96,8 @@ describe("a form's config version", () => {
       ...[CONFIG_YAML, "/v8/management/config.yaml", `${V8_CONFIG}/access/api-keys`, `${MANAGEMENT}/gemini-api-key`, `${V8_CONFIG}/api-keys/gemini`].map((path) => route("PUT", path, { json: {}, headers })),
     );
     const form = editor();
-    await form.call(CONFIG_YAML);
-    await form.call(CONFIG_YAML, { method: "PUT", body: "debug: true" });
+    const base = await form.readValue(CONFIG_YAML);
+    await form.saveYaml(base, { method: "PUT", body: "debug: true" });
     await form.call(API_KEYS, { method: "PATCH", json: { old: "unit-client", new: "unit-client" } });
     await form.call(`${MANAGEMENT}/gemini-api-key`, { method: "PUT", json: [{ "api-key": "unit-provider" }] });
     const writes = api.calls.filter((call) => call.method !== "GET");
@@ -124,13 +124,10 @@ describe("a form's config version", () => {
       }),
     );
     const form = editor();
-    await form.call(CONFIG_YAML);
-    form.setDirty(true);
-    await form.call(CONFIG_YAML, { method: "PUT", body: "routing: {retry: {request-retry: 2}}\n" });
-    form.setDirty(false);
-    await form.call(CONFIG_YAML);
-    form.setDirty(true);
-    await form.call(CONFIG_YAML, { method: "PUT", body: `${text}# another edit\n` });
+    const base = await form.readValue(CONFIG_YAML);
+    await form.saveYaml(base, { method: "PUT", body: "routing: {retry: {request-retry: 2}}\n" });
+    const stored = await form.readValue(CONFIG_YAML);
+    await form.saveYaml(stored, { method: "PUT", body: `${text}# another edit\n` });
     expect(api.callsTo("PUT", "/v8/management/config.yaml").map((call) => call.headers.get("if-match")))
       .toEqual(['"1"', '"2"']);
   });
@@ -153,8 +150,10 @@ describe("a form's config version", () => {
       route("PUT", "/v8/management/config.yaml", { json: {}, headers: { ETag: '"saved"' } }),
     );
     const form = editor();
-    await expect(form.call(CONFIG_YAML)).rejects.toThrow("The server omitted the config version");
-    await form.call(CONFIG_YAML, { method: "PUT", body: "debug: true" });
+    await expect(form.readValue(CONFIG_YAML)).rejects.toThrow("The server omitted the config version");
+    api.use(route("GET", "/v8/management/config.yaml", { text: "debug: false", headers: { ETag: '\"base\"' } }));
+    const base = await form.readValue(CONFIG_YAML);
+    await form.saveYaml(base, { method: "PUT", body: "debug: true" });
     expect(api.callsTo("PUT", "/v8/management/config.yaml")[0]?.headers.get("if-match")).toBe('"base"');
     expect(api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
   });
@@ -365,5 +364,19 @@ describe("explicit config method mapping", () => {
       await expect(editor().call(path, { method })).rejects.toThrow("This config write has no versioned route.");
     }
     expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+});
+
+
+describe("paired YAML API only", () => {
+  it.each(["GET", "PUT"] as const)("rejects an unpaired YAML %s through the generic adapter", async (method) => {
+    const api = mockApi(
+      route("GET", V8_CONFIG, { json: {}, headers: { ETag: '\"base\"' } }),
+      route("GET", "/v8/management/config.yaml", { text: "debug: false", headers: { ETag: '\"base\"' } }),
+      route("PUT", "/v8/management/config.yaml", { json: {} }),
+    );
+    await expect(editor().call(CONFIG_YAML, { method, ...(method === "PUT" ? { body: "debug: true" } : {}) }))
+      .rejects.toThrow("Use readValue and saveYaml to keep the YAML draft paired with its snapshot.");
+    expect(api.calls).toEqual([]);
   });
 });
