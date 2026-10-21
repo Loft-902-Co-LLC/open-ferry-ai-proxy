@@ -43,8 +43,8 @@
 //! - A whole response's `output` lists the items at the indexes the steps
 //!   used, from 0 up; upstream also tries every index below the largest one
 //!   used, which only ever finds those.
-//! - The request is read once, when the stream is made, and a `null`
-//!   request counts as none.
+//! - The request is read once, when the stream is made. Byte callers preserve
+//!   any nonempty original, including invalid JSON, as upstream does.
 //! - A tool input error says the arguments were invalid in fewer words than
 //!   upstream's: [`InputError`](crate::apply_patch::input::InputError)'s.
 //! - Upstream's `FunctionCallIndexes`, which nothing reads, is not kept.

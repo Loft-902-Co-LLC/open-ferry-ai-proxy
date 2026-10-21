@@ -138,7 +138,10 @@ impl Family for Kind {
             Self::ToResponsesStream | Self::ToolInputError => {
                 let mut stream = InteractionsToOpenAIResponsesStream::new(
                     &case.model,
-                    exact::from_str(&case.request).ok().as_ref(),
+                    open_ferry_translate::json::ResponseRequest::from_bytes(
+                        case.request.as_bytes(),
+                        exact::from_str(&case.request).ok().as_ref(),
+                    ),
                     &request_json(&case.translated_request),
                 );
                 let events: String = case
@@ -157,7 +160,10 @@ impl Family for Kind {
             Self::ToResponsesNonStream => {
                 convert_interactions_response_to_openai_responses_non_stream(
                     &case.model,
-                    exact::from_str(&case.request).ok().as_ref(),
+                    open_ferry_translate::json::ResponseRequest::from_bytes(
+                        case.request.as_bytes(),
+                        exact::from_str(&case.request).ok().as_ref(),
+                    ),
                     &request_json(&case.translated_request),
                     body,
                 )

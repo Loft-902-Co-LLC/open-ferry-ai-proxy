@@ -27,6 +27,7 @@
 
 mod bridge;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
@@ -46,10 +47,21 @@ use super::read::{read, sse_payload};
 use crate::apply_patch::input::{CallState, InputError, failure};
 use crate::common::interactions_usage::interactions_usage;
 use crate::common::request_model_name;
-use crate::common::responses::pick_request;
+
 use crate::common::sse::push_event;
 use crate::go;
 use crate::responses_tools::{ToolIdentity, unwrap_responses_custom_tool_input};
+
+fn identity_request<'a>(
+    original: impl Into<crate::json::ResponseRequest<'a>>,
+    request: &'a Value,
+) -> Cow<'a, Value> {
+    let original = original.into();
+    if let Some(raw) = original.raw().filter(|raw| !raw.is_empty()) {
+        return Cow::Owned(super::read::read(raw).0.unwrap_or(Value::Null));
+    }
+    Cow::Borrowed(original.parsed().unwrap_or(request))
+}
 
 /// The SSE frames one event gives, a chunk each.
 pub(super) type Events = Vec<String>;
@@ -178,8 +190,10 @@ impl InteractionsToOpenAIResponsesStream {
     }
 
     /// A stream for a response from `model`, to the client's
-    /// `original_request`, sent upstream as `request`. `Null` stands for
-    /// either being absent.
+    /// `original_request`, sent upstream as `request`. Upstream selects any
+    /// nonempty original bytes, valid or not. Use `ResponseRequest::from_bytes`
+    /// to preserve that distinction; bare `&Value::Null` retains its legacy
+    /// meaning of absent, while `Some(&Value::Null)` is present JSON null.
     pub fn new<'r>(
         model: &str,
         original_request: impl Into<crate::json::ResponseRequest<'r>>,
@@ -187,7 +201,7 @@ impl InteractionsToOpenAIResponsesStream {
     ) -> Self {
         let original_source = original_request.into();
         let original_request = original_source.value();
-        let identities = identity_map(pick_request(original_source, request));
+        let identities = identity_map(Some(&identity_request(original_source, request)));
         let patch_bridge = identities.values().any(|identity| identity.apply_patch);
         let created_model = request_model_name(original_request, request).unwrap_or(model);
         Self {
@@ -1314,7 +1328,7 @@ pub(super) fn non_stream<'r>(
     set(&mut out, "id", first_non_empty([&id, &nested_id]));
     set(&mut out, "model", response_model(model, root));
     let steps = get(root, "steps").or_else(|| get(root, "interaction.steps"));
-    let identities = identity_map(pick_request(original_request, request));
+    let identities = identity_map(Some(&identity_request(original_request, request)));
     let patch_enabled = identities.values().any(|identity| identity.apply_patch);
     let (status, nested_status) = (text(root, "status"), text(root, "interaction.status"));
     let status = first_non_empty([&status, &nested_status]);
@@ -1422,5 +1436,31 @@ fn step_to_output(step: &Value, identities: &HashMap<String, ToolIdentity>) -> O
             Some(item)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod request_selection_tests {
+    use super::*;
+    use crate::json::ResponseRequest;
+
+    #[test]
+    fn invalid_nonempty_original_suppresses_translated_tool_identities() {
+        let translated = serde_json::json!({"tools":[{"type":"custom","name":"apply_patch"}]});
+        let invalid = ResponseRequest::from_bytes(b"not JSON", None);
+        let absent = ResponseRequest::from_bytes(b"", None);
+        let stream = InteractionsToOpenAIResponsesStream::new("m", invalid, &translated);
+        assert!(stream.identities.is_empty());
+        let stream = InteractionsToOpenAIResponsesStream::new("m", absent, &translated);
+        assert!(!stream.identities.is_empty());
+        assert!(identity_request(invalid, &translated).is_null());
+        assert_eq!(identity_request(absent, &translated).as_ref(), &translated);
+        // gjson also reads fields from a nonempty, invalid JSON prefix.
+        let partial = ResponseRequest::from_bytes(
+            br#"{"tools":[{"type":"custom","name":"apply_patch"}]"#,
+            None,
+        );
+        let stream = InteractionsToOpenAIResponsesStream::new("m", partial, &translated);
+        assert!(!stream.identities.is_empty());
     }
 }
