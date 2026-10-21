@@ -11,7 +11,7 @@
 // TranslateRequestEnvelopeWithCodexMultiAgentV2), and
 // sdk/cliproxy/auth/api_key_model_capabilities.go (CodexAPIKeyModelIsCompat)
 // with conductor_models.go (resolveAPIKeyConfig), and the translation errors
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex clients' requests, and compatibility models, around translation.
@@ -457,7 +457,10 @@ fn translate_envelope(
     stream: bool,
     mut payload: Value,
 ) -> (Value, Option<UnsupportedPartError>) {
-    let base = super::reasoning::resolve_target_model(base_model(&request.model), &options.metadata.requested_model);
+    let base = super::reasoning::resolve_target_model(
+        base_model(&request.model),
+        &options.metadata.requested_model,
+    );
     let source = &options.source_format;
     if kind == Kind::CountTokens
         && *source == Format::OPENAI_RESPONSE

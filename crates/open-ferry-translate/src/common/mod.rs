@@ -1,12 +1,12 @@
-// Ported from CLIProxyAPI internal/translator/common/request.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/translator/common/request.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers shared by translators of every format.
 
 pub(crate) mod cache_control;
-pub(crate) mod codex_replay_signature;
 pub(crate) mod claude;
 pub(crate) mod claude_native_response;
+pub(crate) mod codex_replay_signature;
 pub(crate) mod file_data;
 pub(crate) mod gemini;
 pub(crate) mod gemini_response;

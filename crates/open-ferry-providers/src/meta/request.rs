@@ -3,7 +3,7 @@
 // applyMetaAPIHeaders) and meta_test.go (TestMetaExecutor_MetaCredsResolution,
 // TestMetaExecutor_PreservesPreviousResponseID, and the
 // ClientIdHeader_Issue6117 tests, inverted), with the translation errors
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a Meta call is made of: the credential's token and base URL, the
@@ -16,7 +16,7 @@
 //! `client_metadata`. `previous_response_id` is kept, unlike for Codex. A
 //! custom `apply_patch` tool is declared as a function (see
 //! [`crate::apply_patch_responses`]), `instructions` is filled in, and
-//! reasoning items (keeping foreign encrypted content), `web_search` tools
+//! reasoning items (keeping only compatible Meta envelopes), `web_search` tools
 //! and a Codex client's tool parameter types are made fit for Meta. The
 //! payload rules apply last, to the body
 //! as it is sent, so a field a rule writes is sent even if it is one of
@@ -296,10 +296,18 @@ pub(super) fn prepare_for_base_url(
         options.original_request.clone()
     };
     let original = parse_object(&original_bytes);
-    let resolved = crate::codex::reasoning::resolve_target_model(base, &options.metadata.requested_model);
-    let target = if open_ferry_translate::signature::Provider::from_model_name(resolved) == open_ferry_translate::signature::Provider::Meta { resolved.to_owned() } else { format!("muse-{base}") };
+    let resolved =
+        crate::codex::reasoning::resolve_target_model(base, &options.metadata.requested_model);
+    let target = if open_ferry_translate::signature::Provider::from_model_name(resolved)
+        == open_ferry_translate::signature::Provider::Meta
+    {
+        resolved.to_owned()
+    } else {
+        format!("muse-{base}")
+    };
     // Only the body is sent, so only its translation can refuse the request.
-    let (mut original_translated, _) = translate(config, options, &target, original.clone(), stream);
+    let (mut original_translated, _) =
+        translate(config, options, &target, original.clone(), stream);
     set_string_if_different(&mut original_translated, "model", base);
     let (mut body, refusal) = translate(
         config,
@@ -708,8 +716,8 @@ mod tests {
     }
 
     #[test]
-    fn prepare_preserves_foreign_reasoning_without_enabling_compat() {
-        let foreign = "opaque-encrypted-reasoning-token-xyz";
+    fn prepare_keeps_only_meta_reasoning_without_enabling_compat() {
+        let foreign = format!("Q-PaDgE{}", "A".repeat(1419));
         let claude = crate::gemini::testing::CLAUDE_SIGNATURE;
         let payload = json!({"store":false,"input":[
             {"type":"reasoning","id":"rs_foreign","encrypted_content":foreign,"content":[{"type":"reasoning_text","text":"thinking"}],"summary":[]},

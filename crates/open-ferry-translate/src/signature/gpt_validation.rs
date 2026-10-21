@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/gpt_validation.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/signature/gpt_validation.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! GPT and Codex reasoning `encrypted_content`.
@@ -44,7 +44,11 @@ pub fn inspect_gpt_reasoning_signature(raw: &str) -> Result<GptReasoningSignatur
     }
     let (sig, router_suffix) = match sig.split_once('.') {
         Some((head, tail)) => {
-            if !super::meta_validation::valid_router_suffix(tail) { return Err(error!("invalid GPT reasoning signature: router suffix must be 1-128 alphanumeric characters")); }
+            if !super::meta_validation::valid_router_suffix(tail) {
+                return Err(error!(
+                    "invalid GPT reasoning signature: router suffix must be 1-128 alphanumeric characters"
+                ));
+            }
             (head, tail)
         }
         None => (sig, ""),
@@ -91,9 +95,17 @@ mod router_tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     #[test]
     fn validates_native_envelope_before_reporting_suffix() {
-        let mut bytes = vec![0; 73]; bytes[0] = 0x80;
+        let mut bytes = vec![0; 73];
+        bytes[0] = 0x80;
         let native = URL_SAFE_NO_PAD.encode(bytes);
-        assert_eq!(inspect_gpt_reasoning_signature(&format!("{native}.Router123")).unwrap().router_suffix, "Router123");
-        for suffix in ["", "a.b", "x_y", &"A".repeat(129)] { assert!(inspect_gpt_reasoning_signature(&format!("{native}.{suffix}")).is_err()); }
+        assert_eq!(
+            inspect_gpt_reasoning_signature(&format!("{native}.Router123"))
+                .unwrap()
+                .router_suffix,
+            "Router123"
+        );
+        for suffix in ["", "a.b", "x_y", &"A".repeat(129)] {
+            assert!(inspect_gpt_reasoning_signature(&format!("{native}.{suffix}")).is_err());
+        }
     }
 }

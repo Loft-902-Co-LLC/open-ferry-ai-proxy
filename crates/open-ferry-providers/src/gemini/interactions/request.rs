@@ -4,7 +4,7 @@
 // geminiInteractionsPayloadConfigSource, geminiInteractionsPayloadConfigInput,
 // geminiInteractionsSameByteSlice, applyGeminiInteractionsRevisionHeader,
 // applyGeminiInteractionsRequestHeaders), with the translation errors
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body and headers of a native Interactions call, and its answer.
@@ -172,12 +172,31 @@ pub(super) fn sanitize_input_ids(body: &mut Value) {
     };
     for mut item in std::mem::take(items) {
         if json::str_at(&item, "type") == "thought" {
-            use open_ferry_translate::signature::{compatible_signature_for_provider, Provider, is_gemini_thought_signature_bypass};
-            let sig = ["signature", "thought_signature", "thoughtSignature"].iter().map(|k| json::str_of(item.get(*k))).find(|s| !s.trim().is_empty()).unwrap_or_default();
-            let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig).filter(|s| !is_gemini_thought_signature_bypass(s)) else { continue; };
+            use open_ferry_translate::signature::{
+                Provider, compatible_signature_for_provider, is_gemini_thought_signature_bypass,
+            };
+            let sig = ["signature", "thought_signature", "thoughtSignature"]
+                .iter()
+                .map(|k| json::str_of(item.get(*k)))
+                .find(|s| !s.trim().is_empty())
+                .unwrap_or_default();
+            let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig)
+                .filter(|s| !is_gemini_thought_signature_bypass(s))
+            else {
+                continue;
+            };
             item["signature"] = sig.into();
-            for key in ["id", "content", "text", "thought_signature", "thoughtSignature"] { json::delete(&mut item, key); }
-            items.push(item); continue;
+            for key in [
+                "id",
+                "content",
+                "text",
+                "thought_signature",
+                "thoughtSignature",
+            ] {
+                json::delete(&mut item, key);
+            }
+            items.push(item);
+            continue;
         }
         if json::str_at(&item, "type") == "function_call" {
             if !json::exists(&item, "id")
@@ -254,3 +273,28 @@ pub(in crate::gemini) fn translate_answer(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod signature_filter_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn official_interactions_accepts_only_signed_native_gemini_thoughts() {
+        let gemini = "EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==";
+        let mut body = json!({"input":[
+            {"type":"thought","thought_signature":format!("google#{gemini}"),"id":"drop","content":[{"text":"drop"}],"text":"drop","keep":1},
+            {"type":"thought","text":"unsigned"},
+            {"type":"thought","signature":"skip_thought_signature_validator"},
+            {"type":"thought","signature":"corrupt"},
+            {"type":"function_call","call_id":"keep","content":[{"id":"drop","text":"keep"}]}
+        ]});
+        sanitize_input_ids(&mut body);
+        assert_eq!(body["input"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            body["input"][0],
+            json!({"type":"thought","signature":gemini,"keep":1})
+        );
+        assert_eq!(body["input"][1]["id"], "keep");
+        assert!(body["input"][1]["content"][0].get("id").is_none());
+    }
+}

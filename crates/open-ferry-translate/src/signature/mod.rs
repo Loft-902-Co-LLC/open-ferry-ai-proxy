@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature (v8.0.32, MIT); this file from
+// Ported from CLIProxyAPI internal/signature (v8.0.36, MIT); this file from
 // provider_compatibility.go. https://github.com/router-for-me/CLIProxyAPI
 
 //! Reasoning-signature validation and replay decisions.
@@ -137,9 +137,15 @@ impl Provider {
     /// be replayed to `model`.
     pub fn from_model_name(model: &str) -> Self {
         let lower = crate::go::to_lower(model.trim());
-        let candidate = lower.rsplit(['/', ':']).next().filter(|s| !s.is_empty()).unwrap_or(&lower);
+        let candidate = lower
+            .rsplit(['/', ':'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&lower);
         let family = Self::from_model_value(candidate);
-        if family != Self::Unknown { return family; }
+        if family != Self::Unknown {
+            return family;
+        }
         Self::from_model_value(&lower)
     }
 
@@ -617,11 +623,21 @@ fn is_recognized_gemini_provider_signature(raw: &str) -> bool {
 pub(crate) mod tests;
 
 fn is_meta_muse_model_name(lower: &str) -> bool {
-    if lower == "muse" || lower.starts_with("muse-") || lower.starts_with("muse_") || lower.ends_with("/muse") || lower.contains("/muse-") || lower.contains("/muse_") { return true; }
-    ["meta-muse", "meta_muse"].iter().any(|prefix| lower.find(prefix).is_some_and(|i| {
-        let rest = &lower[i + prefix.len()..];
-        rest.is_empty() || rest.starts_with(['-', '_', '.', ':'])
-    }))
+    if lower == "muse"
+        || lower.starts_with("muse-")
+        || lower.starts_with("muse_")
+        || lower.ends_with("/muse")
+        || lower.contains("/muse-")
+        || lower.contains("/muse_")
+    {
+        return true;
+    }
+    ["meta-muse", "meta_muse"].iter().any(|prefix| {
+        lower.find(prefix).is_some_and(|i| {
+            let rest = &lower[i + prefix.len()..];
+            rest.is_empty() || rest.starts_with(['-', '_', '.', ':'])
+        })
+    })
 }
 
 #[cfg(test)]
@@ -629,7 +645,18 @@ mod muse_model_tests {
     use super::*;
     #[test]
     fn namespaced_and_bounded_muse_names() {
-        for model in ["muse", "muse_spark", "meta-muse-1", "meta_muse.1", "openai-compatible/muse-spark", "openai:muse_spark"] { assert_eq!(Provider::from_model_name(model), Provider::Meta, "{model}"); }
-        for model in ["museum", "amuse", "meta-museum"] { assert_eq!(Provider::from_model_name(model), Provider::Unknown); }
+        for model in [
+            "muse",
+            "muse_spark",
+            "meta-muse-1",
+            "meta_muse.1",
+            "openai-compatible/muse-spark",
+            "openai:muse_spark",
+        ] {
+            assert_eq!(Provider::from_model_name(model), Provider::Meta, "{model}");
+        }
+        for model in ["museum", "amuse", "meta-museum"] {
+            assert_eq!(Provider::from_model_name(model), Provider::Unknown);
+        }
     }
 }

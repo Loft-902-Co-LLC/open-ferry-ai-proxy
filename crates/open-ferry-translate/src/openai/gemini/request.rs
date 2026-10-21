@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_request.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_request.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini `generateContent` request → OpenAI Chat Completions request.
@@ -196,7 +196,10 @@ fn convert_messages(request: &Value) -> Vec<Value> {
                 }
                 if let Some(call) = part.get("functionCall") {
                     let mut tool_call = pending.call(call, message_index, part_index);
-                    if let Some(sig) = function_call_thought_signature(part) { tool_call["extra_content"] = serde_json::json!({"google":{"thought_signature":sig}}); }
+                    if let Some(sig) = function_call_thought_signature(part) {
+                        tool_call["extra_content"] =
+                            serde_json::json!({"google":{"thought_signature":sig}});
+                    }
                     tool_calls.push(tool_call);
                 }
                 if let Some(response) = part.get("functionResponse") {
@@ -485,5 +488,15 @@ fn tool_choice(config: &Value) -> Option<Value> {
 mod tests;
 
 fn function_call_thought_signature(part: &Value) -> Option<String> {
-    ["thoughtSignature", "thought_signature", "functionCall.thoughtSignature", "functionCall.thought_signature", "extra_content.google.thought_signature"].iter().filter_map(|key| crate::json::path(part, key)).map(|v| str_of(Some(v)).into_owned()).find(|s| !s.is_empty())
+    [
+        "thoughtSignature",
+        "thought_signature",
+        "functionCall.thoughtSignature",
+        "functionCall.thought_signature",
+        "extra_content.google.thought_signature",
+    ]
+    .iter()
+    .filter_map(|key| crate::json::path(part, key))
+    .map(|v| str_of(Some(v)).into_owned())
+    .find(|s| !s.is_empty())
 }

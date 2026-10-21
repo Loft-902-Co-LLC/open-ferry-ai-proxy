@@ -1,8 +1,8 @@
 //! Gemini `generateContent` clients talking to a Codex upstream.
 
 mod request;
-mod signature;
 mod response;
+mod signature;
 
 pub use request::convert_gemini_request_to_codex;
 pub use response::{

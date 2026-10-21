@@ -24,6 +24,7 @@ pub mod registry;
 pub mod responses;
 pub mod session;
 pub mod signature;
+pub mod signature_relay;
 pub mod thinking;
 pub mod to_gemini;
 pub mod ttft;

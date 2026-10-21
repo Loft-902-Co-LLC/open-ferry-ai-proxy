@@ -2,7 +2,7 @@
 // (OpenAICompatExecutor: Execute, ExecuteStream, CountTokens, Refresh,
 // applyPromptCacheKey, resolveCredentials, resolveCompatConfig),
 // helps/payload_helpers.go (PayloadRequestedModel) and
-// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.32, MIT).
+// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`OpenAiCompatExecutor`], which calls a provider configured under
@@ -238,7 +238,8 @@ impl OpenAiCompatExecutor {
             (Format::OPENAI, "/chat/completions", options.stream)
         };
         let base = base_model(&request.model);
-        let signature_target = crate::codex::reasoning::resolve_target_model(base, requested_model(request, options));
+        let signature_target =
+            crate::codex::reasoning::resolve_target_model(base, requested_model(request, options));
         let payload = parse_object(&request.payload);
         let mut prepared = payload.clone();
         compat::before_translation(Some(&self.config), options, &to, &mut prepared);
@@ -268,7 +269,12 @@ impl OpenAiCompatExecutor {
             set_bool_if_different(&mut body, "stream_options.include_usage", true);
         } else if compact {
             delete(&mut body, "stream");
-            crate::codex::reasoning::sanitize_reasoning_for_destination(&mut body, true, crate::codex::reasoning::resolve_target_model(base, requested), base_url);
+            crate::codex::reasoning::sanitize_reasoning_for_destination(
+                &mut body,
+                true,
+                crate::codex::reasoning::resolve_target_model(base, requested),
+                base_url,
+            );
         }
         // The rules see the body as it is sent.
         let target = payload::Target {

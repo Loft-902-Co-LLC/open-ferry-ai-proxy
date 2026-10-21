@@ -1493,7 +1493,8 @@ fn drops_invalid_compaction_item() {
 #[test]
 fn real_user_agents_survive_and_custom_identity_cannot_override_them() {
     let mut auth = Auth::default();
-    auth.attributes.insert("header:User-Agent".into(), "pretend-client".into());
+    auth.attributes
+        .insert("header:User-Agent".into(), "pretend-client".into());
     let mut client = HeaderMap::new();
     client.insert("user-agent", HeaderValue::from_static("real-client/1"));
     for stream in [false, true] {
@@ -1503,7 +1504,7 @@ fn real_user_agents_survive_and_custom_identity_cannot_override_them() {
     let mut outgoing = HeaderMap::new();
     outgoing.insert("user-agent", HeaderValue::from_static("outgoing-client/2"));
     ensure_user_agent(&mut outgoing, &client);
-    assert_eq!(outgoing["user-agent"], "outgoing-client/2");
+    assert_eq!(outgoing["user-agent"], "real-client/1");
     outgoing.insert("user-agent", HeaderValue::from_static(" "));
     ensure_user_agent(&mut outgoing, &HeaderMap::new());
     assert_eq!(outgoing["user-agent"], USER_AGENT);

@@ -41,22 +41,32 @@ pub fn inspect_meta_reasoning_signature(raw: &str) -> Result<MetaReasoningSignat
     let (sig, suffix) = match sig.split_once('.') {
         Some((head, tail)) => {
             if !valid_router_suffix(tail) {
-                return Err(error!("invalid Meta reasoning signature: router suffix must be 1-128 alphanumeric characters"));
+                return Err(error!(
+                    "invalid Meta reasoning signature: router suffix must be 1-128 alphanumeric characters"
+                ));
             }
             (head, tail)
         }
         None => (sig, ""),
     };
     if sig.len() % 4 == 1 {
-        return Err(error!("invalid Meta reasoning signature: base64url length {} cannot decode", sig.len()));
+        return Err(error!(
+            "invalid Meta reasoning signature: base64url length {} cannot decode",
+            sig.len()
+        ));
     }
     let decoded_len = sig.len() / 4 * 3 + (sig.len() % 4).saturating_sub(1);
     let payload_len = decoded_len as isize - 45;
     if payload_len < 1024 || !(payload_len as usize).is_power_of_two() {
-        return Err(error!("invalid Meta reasoning signature: payload length {payload_len} is not a power-of-two bucket"));
+        return Err(error!(
+            "invalid Meta reasoning signature: payload length {payload_len} is not a power-of-two bucket"
+        ));
     }
     if let Some((index, c)) = first_invalid_base64_char(sig, b"-_") {
-        return Err(error!("invalid Meta reasoning signature: contains non-base64url character U+{:04X} at byte {index}", u32::from(c)));
+        return Err(error!(
+            "invalid Meta reasoning signature: contains non-base64url character U+{:04X} at byte {index}",
+            u32::from(c)
+        ));
     }
     let decoded = RAW_URL
         .strict()
@@ -88,6 +98,10 @@ pub fn inspect_meta_reasoning_signature(raw: &str) -> Result<MetaReasoningSignat
         payload_len,
         bucket_exponent: payload_len.ilog2() as usize - 10,
     })
+}
+
+pub(super) fn valid_router_suffix(suffix: &str) -> bool {
+    !suffix.is_empty() && suffix.len() <= 128 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]
@@ -129,7 +143,12 @@ mod tests {
     fn router_suffix_is_bounded_and_native_shape_is_still_checked() {
         let native = format!("Q-PaDgE{}", "A".repeat(1419));
         for suffix in ["A", "Router123", &"x".repeat(128)] {
-            assert_eq!(inspect_meta_reasoning_signature(&format!("{native}.{suffix}")).unwrap().router_suffix, suffix);
+            assert_eq!(
+                inspect_meta_reasoning_signature(&format!("{native}.{suffix}"))
+                    .unwrap()
+                    .router_suffix,
+                suffix
+            );
         }
         for suffix in ["", "a.b", "a-b", "a_b", "é", &"x".repeat(129)] {
             assert!(inspect_meta_reasoning_signature(&format!("{native}.{suffix}")).is_err());
@@ -151,8 +170,4 @@ mod tests {
         sig.push('B');
         assert!(inspect_meta_reasoning_signature(&sig).is_err());
     }
-}
-
-pub(super) fn valid_router_suffix(suffix: &str) -> bool {
-    !suffix.is_empty() && suffix.len() <= 128 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
 }

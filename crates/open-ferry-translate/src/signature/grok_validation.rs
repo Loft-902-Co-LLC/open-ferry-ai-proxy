@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/grok_validation.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/signature/grok_validation.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI Grok reasoning and compaction `encrypted_content`.
@@ -59,17 +59,28 @@ pub fn inspect_grok_encrypted_content(raw: &str) -> Result<GrokEncryptedContentI
             "invalid Grok encrypted_content: expected unpadded standard base64"
         ));
     }
-    if split_signature_provider_prefix(sig).is_some() { return Err(error!("invalid Grok encrypted_content: carries another provider's cache prefix")); }
+    if split_signature_provider_prefix(sig).is_some() {
+        return Err(error!(
+            "invalid Grok encrypted_content: carries another provider's cache prefix"
+        ));
+    }
     let full_len = sig.len();
     let (sig, router_suffix) = match sig.split_once('.') {
         Some((head, tail)) => {
-            if !super::meta_validation::valid_router_suffix(tail) { return Err(error!("invalid Grok encrypted_content: router suffix must be 1-128 alphanumeric characters")); }
+            if !super::meta_validation::valid_router_suffix(tail) {
+                return Err(error!(
+                    "invalid Grok encrypted_content: router suffix must be 1-128 alphanumeric characters"
+                ));
+            }
             (head, tail)
         }
         None => (sig, ""),
     };
     if let Some((index, c)) = first_invalid_base64_char(sig, b"+/") {
-        return Err(error!("invalid Grok encrypted_content: contains non-base64 character U+{:04X} at byte {index}", u32::from(c)));
+        return Err(error!(
+            "invalid Grok encrypted_content: contains non-base64 character U+{:04X} at byte {index}",
+            u32::from(c)
+        ));
     }
     // Only a few first characters can start a self-describing envelope, which
     // skips these probes for most real xAI ciphertext. Claude CAIS drops its
@@ -81,7 +92,11 @@ pub fn inspect_grok_encrypted_content(raw: &str) -> Result<GrokEncryptedContentI
                 "Grok encrypted_content looks like GPT/Codex reasoning signature"
             ));
         }
-        if super::is_valid_meta_reasoning_signature(sig) { return Err(error!("Grok encrypted_content looks like Meta reasoning signature")); }
+        if super::is_valid_meta_reasoning_signature(sig) {
+            return Err(error!(
+                "Grok encrypted_content looks like Meta reasoning signature"
+            ));
+        }
         if is_valid_claude_thinking_signature(sig, ClaudeValidationOptions::STRICT) {
             return Err(error!(
                 "Grok encrypted_content looks like Claude thinking signature"
@@ -113,7 +128,11 @@ pub fn inspect_grok_encrypted_content(raw: &str) -> Result<GrokEncryptedContentI
     let decoded = RAW_STD
         .decode(sig)
         .map_err(|err| error!("invalid Grok encrypted_content: base64 decode failed: {err}"))?;
-    if decoded.starts_with(b"cpa-codex-gemini-carrier-v1:") { return Err(error!("invalid Grok encrypted_content: carries Gemini Codex thoughtSignature carrier")); }
+    if decoded.starts_with(b"cpa-codex-gemini-carrier-v1:") {
+        return Err(error!(
+            "invalid Grok encrypted_content: carries Gemini Codex thoughtSignature carrier"
+        ));
+    }
     if decoded.len() < MIN_GROK_ENCRYPTED_CONTENT_DECODED_LEN {
         return Err(error!(
             "invalid Grok encrypted_content: decoded payload too short ({} bytes)",
@@ -168,6 +187,12 @@ mod router_tests {
         let info = inspect_grok_encrypted_content(&format!("{native}.Router123")).unwrap();
         assert_eq!(info.router_suffix, "Router123");
         assert_eq!(info.raw_len, native.len() + 10);
-        assert!(inspect_grok_encrypted_content(&format!("{}.Router123", STANDARD_NO_PAD.encode([0; 255]))).is_err());
+        assert!(
+            inspect_grok_encrypted_content(&format!(
+                "{}.Router123",
+                STANDARD_NO_PAD.encode([0; 255])
+            ))
+            .is_err()
+        );
     }
 }

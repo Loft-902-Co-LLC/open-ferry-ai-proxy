@@ -14,9 +14,10 @@ pub(super) fn decode(raw: &str) -> String {
     let raw = raw.trim();
     if let Ok(bytes) = crate::go::base64::STD.decode(raw)
         && let Ok(text) = String::from_utf8(bytes)
-        && let Some(sig) = text.strip_prefix(MAGIC) {
-            return sig.trim().to_owned();
-        }
+        && let Some(sig) = text.strip_prefix(MAGIC)
+    {
+        return sig.trim().to_owned();
+    }
     raw.to_owned()
 }
 

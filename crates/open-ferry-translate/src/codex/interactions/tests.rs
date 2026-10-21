@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions/interactions_codex_test.go
-// and noop_optimization_test.go (v8.0.32, MIT), and interactions_codex_uri_test.go
-// (v8.0.32, MIT).
+// and noop_optimization_test.go (v8.0.36, MIT), and interactions_codex_uri_test.go
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All ten tests of interactions_codex_test.go are ported whole, and all of
@@ -90,10 +90,9 @@ fn request_with_tool_messages_direct() {
     );
     assert_eq!(at(&out, "instructions"), "be brief", "{out}");
     assert_eq!(at(&out, "input.0.content.0.text"), "hi", "{out}");
-    assert_eq!(at(&out, "input.1.type"), "reasoning", "{out}");
-    assert_eq!(at(&out, "input.2.type"), "function_call", "{out}");
-    assert_eq!(at(&out, "input.2.call_id"), "call_1", "{out}");
-    assert_eq!(at(&out, "input.3.type"), "function_call_output", "{out}");
+    assert_eq!(at(&out, "input.1.type"), "function_call", "{out}");
+    assert_eq!(at(&out, "input.1.call_id"), "call_1", "{out}");
+    assert_eq!(at(&out, "input.2.type"), "function_call_output", "{out}");
     assert_eq!(at(&out, "tools.0.name"), "lookup", "{out}");
     assert!(
         out.get("contents").is_none() && out.get("systemInstruction").is_none(),
@@ -251,7 +250,7 @@ fn unchanged_input_is_passed_through() {
     );
     assert_eq!(
         out.to_string(),
-        r#"{"model":"codex-test","instructions":"","input":[],"tool_choice":"auto"}"#
+        r#"{"model":"codex-test","instructions":"","store":false,"input":[],"tool_choice":"auto","include":["reasoning.encrypted_content"]}"#
     );
 }
 
@@ -292,6 +291,7 @@ fn request_converts_every_part_kind() {
     let want = json!({
         "model": "codex-test",
         "instructions": "a\nb",
+        "store": false,
         "input": [
             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "said"}]},
             {"type": "message", "role": "user", "content": [{"type": "input_image", "image_url": "https://x/i.png"}]},
@@ -302,14 +302,13 @@ fn request_converts_every_part_kind() {
             {"type": "message", "role": "user", "content": [{"type": "input_file", "file_url": "gs://b/d", "filename": "document.csv"}]},
             {"type": "message", "role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "T2dn", "format": "opus"}}]},
             {"type": "message", "role": "user", "content": [{"type": "input_image", "image_url": "gs://b/i"}]},
-            {"type": "function_call_output", "call_id": "call_2", "output": "[1,2]"},
-            {"type": "reasoning", "content": "hmm", "id": "7"}
+            {"type": "function_call_output", "call_id": "call_2", "output": "[1,2]"}
         ],
         "reasoning": {"effort": "low", "summary": "auto"},
         "max_output_tokens": 64,
         "text": {"verbosity": "low"},
         "service_tier": "priority",
-        "store": false
+        "include": ["reasoning.encrypted_content"]
     });
     assert_eq!(out.to_string(), want.to_string());
 }

@@ -5,7 +5,7 @@
 // codex_websockets_stream.go (prepareCodexWebsocketStream), and
 // codex_websockets_connection.go (buildCodexResponsesWebsocketURL,
 // buildCodexWebsocketRequestBody, frameCodexWebsocketRequestBody,
-// normalizeCodexWebsocketParallelToolCalls) (v8.0.32, MIT).
+// normalizeCodexWebsocketParallelToolCalls) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `response.create` message, URL and handshake headers of a WebSocket
@@ -68,7 +68,7 @@ use crate::codex::client::USER_AGENT;
 use crate::codex::compat;
 use crate::codex::ext::{self, Turn};
 use crate::codex::input_ids::sanitize_input_item_ids;
-use crate::codex::reasoning::{sanitize_reasoning_for_destination, resolve_target_model};
+use crate::codex::reasoning::{resolve_target_model, sanitize_reasoning_for_destination};
 use crate::codex::request::{
     Context, Kind, RESPONSES_LITE_HEADER, base_model, client_prompt_cache_key, credentials,
     endpoint, ensure_header, ensure_image_generation_tool, format_is, is_native, is_responses_lite,
@@ -173,7 +173,14 @@ pub(super) fn prepare(
     normalize_tool_schemas(&mut body);
     let conflict = multi_agent_v2::has_namespace_conflict(&body);
     let turn = ext::prepare(kind, context, request, options, &mut body);
-    sanitize_reasoning_for_destination(&mut body, compat::is_compat(context, request, options), resolve_target_model(base, &options.metadata.requested_model), auth.attribute("base_url").filter(|v| !v.trim().is_empty()).unwrap_or(default_base));
+    sanitize_reasoning_for_destination(
+        &mut body,
+        compat::is_compat(context, request, options),
+        resolve_target_model(base, &options.metadata.requested_model),
+        auth.attribute("base_url")
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or(default_base),
+    );
     let optimize = turn.multi_agent_v2_optimized();
 
     let url = websocket_url(&endpoint(auth, default_base, false))?;

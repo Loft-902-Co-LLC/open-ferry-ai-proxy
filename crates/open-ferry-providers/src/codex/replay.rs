@@ -3,7 +3,7 @@
 // codexReasoningReplaySessionKey, insertCodexReasoningReplayTurns,
 // cacheCodexReasoningReplayFromCompleted,
 // clearCodexReasoningReplayOnInvalidSignature and their helpers)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reasoning replay for Claude clients.
@@ -446,7 +446,9 @@ fn filter_turn_items<'a>(input: &[Value], items: &[&'a Value]) -> Vec<&'a Value>
     for item in input {
         match str_at(item, "type").trim() {
             "reasoning" => {
-                let encrypted = super::reasoning::canonical_signature(str_at(item, "encrypted_content"));
+                let encrypted =
+                    super::reasoning::canonical_signature(&str_at(item, "encrypted_content"))
+                        .to_owned();
                 if !encrypted.is_empty() {
                     reasoning.insert(encrypted);
                 }
@@ -463,7 +465,10 @@ fn filter_turn_items<'a>(input: &[Value], items: &[&'a Value]) -> Vec<&'a Value>
     for &item in items {
         match str_at(item, "type").trim() {
             "reasoning" => {
-                if reasoning.contains(super::reasoning::canonical_signature(str_at(item, "encrypted_content"))) {
+                if reasoning.contains(super::reasoning::canonical_signature(&str_at(
+                    item,
+                    "encrypted_content",
+                ))) {
                     continue;
                 }
             }
@@ -819,3 +824,16 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod canonical_signature_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn prefixed_and_router_forms_do_not_duplicate_saved_reasoning() {
+        let native = super::super::reasoning::tests::valid_signature();
+        let cached = json!({"type":"reasoning","encrypted_content":format!("{native}.Router123")});
+        let input = vec![json!({"type":"reasoning","encrypted_content":format!("gpt#{native}")})];
+        assert!(filter_turn_items(&input, &[&cached]).is_empty());
+    }
+}

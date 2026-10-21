@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → Codex (OpenAI Responses) request.
@@ -35,9 +35,7 @@ use crate::go;
 use crate::json::{bool_of, int_of, object, str_of};
 use crate::registry::UnsupportedPartError;
 use crate::schema::{MAP_KEYWORDS, VALUE_KEYWORDS, has_unsupported_unicode_property_escape};
-use crate::signature::{
-    BlockKind, Provider, detect_signature_provider_for_block,
-};
+use crate::signature::{BlockKind, Provider, detect_signature_provider_for_block};
 use crate::thinking::{LEVEL_XHIGH, base_model_name, budget_to_level};
 
 /// The Responses API limit on function names and call IDs.
@@ -81,7 +79,9 @@ fn convert(
     input.extend(convert_system(request.get("system")));
     if let Some(Value::Array(messages)) = request.get("messages") {
         let replay = SignatureReplay {
-            target: Provider::from_model_name(base_model_name(crate::common::codex_replay_signature::resolve_target(model_name, request))),
+            target: Provider::from_model_name(base_model_name(
+                crate::common::codex_replay_signature::resolve_target(model_name, request),
+            )),
             preserve_unknown: preserve_unknown_signatures,
         };
         let mut builder = InputBuilder::new(&tool_names, replay);
@@ -208,8 +208,19 @@ struct SignatureReplay {
 impl SignatureReplay {
     fn encrypted_content(self, signature: Option<&Value>) -> Option<String> {
         let raw = str_of(signature);
-        if let Some(signature) = crate::common::codex_replay_signature::for_provider(self.target, &raw) { return Some(signature); }
-        if self.preserve_unknown && (raw.trim().is_empty() || matches!(signature, Some(Value::String(_))) && detect_signature_provider_for_block(&raw, BlockKind::ClaudeThinking) == Provider::Unknown) { return Some(raw.into_owned()); }
+        if let Some(signature) =
+            crate::common::codex_replay_signature::for_provider(self.target, &raw)
+        {
+            return Some(signature);
+        }
+        if self.preserve_unknown
+            && (raw.trim().is_empty()
+                || matches!(signature, Some(Value::String(_)))
+                    && detect_signature_provider_for_block(&raw, BlockKind::ClaudeThinking)
+                        == Provider::Unknown)
+        {
+            return Some(raw.into_owned());
+        }
         None
     }
 }
@@ -773,12 +784,40 @@ mod tests;
 #[cfg(test)]
 mod meta_replay_tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+
+    #[test]
+    fn padded_signatures_are_normalized_before_claude_replay() {
+        for (target, signature) in [
+            (Provider::Meta, format!("Q-PaDgE{}", "A".repeat(1419))),
+            (
+                Provider::Grok,
+                STANDARD_NO_PAD.encode((0..255).collect::<Vec<u8>>()),
+            ),
+        ] {
+            let policy = SignatureReplay {
+                target,
+                preserve_unknown: false,
+            };
+            let padded = Value::String(format!(" \t\u{a0}{signature}\n"));
+            assert_eq!(policy.encrypted_content(Some(&padded)), Some(signature));
+            assert_eq!(
+                policy.encrypted_content(Some(&Value::String(" \t".into()))),
+                None
+            );
+        }
+    }
+
     #[test]
     fn only_meta_targets_restore_native_thinking() {
         let sig = format!("Q-PaDgE{}", "A".repeat(1419));
         for target in [false, true] {
             let policy = SignatureReplay {
-                target: if target { Provider::Meta } else { Provider::Gpt },
+                target: if target {
+                    Provider::Meta
+                } else {
+                    Provider::Gpt
+                },
                 preserve_unknown: false,
             };
             assert_eq!(
