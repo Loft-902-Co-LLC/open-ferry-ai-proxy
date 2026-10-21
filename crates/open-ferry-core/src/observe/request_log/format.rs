@@ -455,7 +455,9 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<(Vec<u8>, bool), String
                     return Ok((output, true));
                 }
                 let mut chunk = [0; 16 << 10];
-                let read = decoder.read(&mut chunk).map_err(|error| error.to_string())?;
+                let read = decoder
+                    .read(&mut chunk)
+                    .map_err(|error| error.to_string())?;
                 output.extend_from_slice(&chunk[..read]);
             }
             if decoder.is_finished() {

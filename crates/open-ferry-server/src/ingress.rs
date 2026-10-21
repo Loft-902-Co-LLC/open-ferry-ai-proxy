@@ -392,8 +392,12 @@ pub(crate) fn rejected(status: u16, message: &'static str) -> Response {
         Bytes::from(serde_json::json!({"error": message}).to_string()),
         JSON_UTF8,
     );
-    if status == 408 { response.extensions_mut().insert(IngressRejection); }
-    if status == 503 { response.extensions_mut().insert(BudgetRejection); }
+    if status == 408 {
+        response.extensions_mut().insert(IngressRejection);
+    }
+    if status == 503 {
+        response.extensions_mut().insert(BudgetRejection);
+    }
     response
 }
 

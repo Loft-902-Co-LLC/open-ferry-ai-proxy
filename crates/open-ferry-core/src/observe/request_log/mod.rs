@@ -89,7 +89,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Local, TimeZone};
 use http::HeaderMap;
 
-pub use body_source::{CAPTURE_LIMIT, REQUEST_CAPTURE_LIMIT, DeferredCapture, ResponseCapture};
+pub use body_source::{CAPTURE_LIMIT, DeferredCapture, REQUEST_CAPTURE_LIMIT, ResponseCapture};
 pub use names::{
     LogFileMeta, MAX_SANITIZED, is_error_log_name, log_file_is_newer, parse_log_metadata,
     sanitize_for_filename,

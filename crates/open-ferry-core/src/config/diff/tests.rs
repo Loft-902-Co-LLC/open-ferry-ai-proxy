@@ -46,10 +46,19 @@ fn ingress_limits_each_have_a_reload_change_line() {
     let changes = super::build_change_details(&old, &new);
     expect_contains(&changes, "ingress-limits.max-connections: 0 -> 7");
     expect_contains(&changes, "ingress-limits.header-timeout-seconds: 0 -> 7");
-    expect_contains(&changes, "ingress-limits.tls-handshake-timeout-seconds: 0 -> 7");
+    expect_contains(
+        &changes,
+        "ingress-limits.tls-handshake-timeout-seconds: 0 -> 7",
+    );
     expect_contains(&changes, "ingress-limits.idle-timeout-seconds: 0 -> 7");
     expect_contains(&changes, "ingress-limits.body-idle-timeout-seconds: 0 -> 7");
-    expect_contains(&changes, "ingress-limits.body-total-timeout-seconds: 0 -> 7");
+    expect_contains(
+        &changes,
+        "ingress-limits.body-total-timeout-seconds: 0 -> 7",
+    );
     expect_contains(&changes, "ingress-limits.buffered-body-bytes: 0 -> 7");
-    expect_contains(&changes, "ingress-limits.write-stall-timeout-seconds: 0 -> 7");
+    expect_contains(
+        &changes,
+        "ingress-limits.write-stall-timeout-seconds: 0 -> 7",
+    );
 }

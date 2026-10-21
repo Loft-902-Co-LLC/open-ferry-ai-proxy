@@ -74,9 +74,9 @@ use axum::extract::connect_info::ConnectInfo;
 use hyper::StatusCode;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
 #[cfg(test)]
 use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto::Builder;
 use socket2::{SockRef, Socket};
 use std::net::Shutdown;
@@ -87,7 +87,9 @@ use tokio_rustls::TlsAcceptor;
 use tower_service::Service;
 
 mod ingress;
-use ingress::{Admission, AdmissionGuard, Flight, Guarded, ResponseBody, SocketIo, StreamExecutor, Traffic};
+use ingress::{
+    Admission, AdmissionGuard, Flight, Guarded, ResponseBody, SocketIo, StreamExecutor, Traffic,
+};
 use open_ferry_server::config::IngressConfig;
 use open_ferry_server::ingress::Ingress;
 
@@ -985,7 +987,10 @@ fn spawn_connection(
     let mut mode = shared.mode.subscribe();
     let shared = shared.clone();
     let traffic = Traffic::new(limits.clone(), ingress.clone(), accepted_at);
-    let stream = SocketIo { inner: stream, traffic: traffic.clone() };
+    let stream = SocketIo {
+        inner: stream,
+        traffic: traffic.clone(),
+    };
     tokio::spawn(async move {
         let _task = task;
         match acceptor {

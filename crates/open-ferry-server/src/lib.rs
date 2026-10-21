@@ -75,7 +75,9 @@ mod allocation_probe {
     static ALLOCATOR: Probe = Probe;
     fn record(size: usize) {
         let _ = LARGEST.try_with(|largest| {
-            if let Some(previous) = largest.get() { largest.set(Some(previous.max(size))); }
+            if let Some(previous) = largest.get() {
+                largest.set(Some(previous.max(size)));
+            }
         });
     }
     // SAFETY: every allocation and deallocation is forwarded unchanged to System.
@@ -88,14 +90,20 @@ mod allocation_probe {
             record(layout.size());
             unsafe { System.alloc_zeroed(layout) }
         }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { unsafe { System.dealloc(ptr, layout) } }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
             record(size);
             unsafe { System.realloc(ptr, layout, size) }
         }
     }
-    pub(crate) fn start() { LARGEST.with(|largest| largest.set(Some(0))); }
-    pub(crate) fn finish() -> usize { LARGEST.with(|largest| largest.replace(None).unwrap()) }
+    pub(crate) fn start() {
+        LARGEST.with(|largest| largest.set(Some(0)));
+    }
+    pub(crate) fn finish() -> usize {
+        LARGEST.with(|largest| largest.replace(None).unwrap())
+    }
 }
 
 pub use app::{router, router_with, router_without_proxy};

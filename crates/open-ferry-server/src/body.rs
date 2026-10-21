@@ -78,7 +78,9 @@ pub(crate) async fn read_raw(
         let frame = frame.map_err(|err| {
             let mut source: Option<&dyn std::error::Error> = Some(&err);
             while let Some(error) = source {
-                if error.is::<crate::ingress::BodyTooLarge>() { return invalid_request(413, TOO_LARGE); }
+                if error.is::<crate::ingress::BodyTooLarge>() {
+                    return invalid_request(413, TOO_LARGE);
+                }
                 source = error.source();
             }
             invalid_request(400, &err.to_string())
@@ -173,14 +175,17 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
     // Charge before init or expansion. This covers both ring-buffer allocations
     // during growth, one block's literals/sequences and entropy tables. Decoding
     // one block at a time and draining in fixed stack chunks bounds that scratch.
-    let working_bytes = window.saturating_mul(4)
+    let working_bytes = window
+        .saturating_mul(4)
         .saturating_add(window.min(128 << 10).saturating_mul(20))
         .saturating_add(64 << 10);
-    let _working = crate::ingress::reserve_decoder(working_bytes).map_err(|()| DecodeError::Budget)?;
+    let _working =
+        crate::ingress::reserve_decoder(working_bytes).map_err(|()| DecodeError::Budget)?;
     let mut output = crate::ingress::BudgetBuffer::new(crate::ingress::request_budget());
     while !input.is_empty() {
         match decoder.init(&mut input) {
             Ok(()) => {}
+            Err(FrameDecoderError::WindowSizeTooBig { .. }) => return Err(DecodeError::TooLarge),
             Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
                 length,
                 ..
@@ -202,7 +207,9 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
                 }
                 let mut chunk = [0; 16 << 10];
                 let read = decoder.read(&mut chunk).map_err(|err| failed(&err))?;
-                output.push(&chunk[..read]).map_err(|()| DecodeError::Budget)?;
+                output
+                    .push(&chunk[..read])
+                    .map_err(|()| DecodeError::Budget)?;
             }
             if decoder.is_finished() {
                 break;
@@ -250,8 +257,11 @@ mod tests {
         crate::allocation_probe::start();
         let result = decode_zstd(&frame, 64 << 20);
         let largest = crate::allocation_probe::finish();
-        assert!(matches!(result, Err(DecodeError::Failed(_))));
-        assert!(largest < 1 << 20, "allocated {largest} bytes for a rejected window");
+        assert_eq!(result, Err(DecodeError::TooLarge));
+        assert!(
+            largest < 1 << 20,
+            "allocated {largest} bytes for a rejected window"
+        );
     }
 
     fn zstd_frame(payload: &[u8]) -> Vec<u8> {

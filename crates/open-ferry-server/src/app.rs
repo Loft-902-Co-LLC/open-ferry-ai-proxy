@@ -163,12 +163,10 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), safe_mode))
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
-
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_log::layer,
-        ))
-;
+        ));
     let router = ingress
         .protect(router)
         .layer(middleware::from_fn(access_log::layer))

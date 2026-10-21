@@ -294,21 +294,21 @@ pub(super) fn request_body(downstream: &Downstream) -> Vec<u8> {
         RequestBody::None => Vec::new(),
         RequestBody::Captured { raw, truncated } => {
             let len = raw.len().min(REQUEST_CAPTURE_LIMIT);
-            let mut body = format::decode_request_body(&raw[..len], &encoding, REQUEST_CAPTURE_LIMIT).into_owned();
+            let mut body =
+                format::decode_request_body(&raw[..len], &encoding, REQUEST_CAPTURE_LIMIT)
+                    .into_owned();
             if *truncated || len < raw.len() {
                 push_marker(
                     &mut body,
-                    &format!(
-                        "[REQUEST BODY TRUNCATED: captured first {} bytes]",
-                        len
-                    ),
+                    &format!("[REQUEST BODY TRUNCATED: captured first {} bytes]", len),
                 );
             }
             body
         }
         RequestBody::Deferred(capture) => {
             let (raw, marker) = capture.snapshot_prefix(REQUEST_CAPTURE_LIMIT);
-            let mut body = format::decode_request_body(&raw, &encoding, REQUEST_CAPTURE_LIMIT).into_owned();
+            let mut body =
+                format::decode_request_body(&raw, &encoding, REQUEST_CAPTURE_LIMIT).into_owned();
             if !marker.is_empty() {
                 push_marker(&mut body, &marker);
             }
