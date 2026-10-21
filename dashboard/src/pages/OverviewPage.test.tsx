@@ -838,3 +838,35 @@ describe("config conflict Reload", () => {
     expect(api.callsTo("PUT", `${V8_CONFIG}/access/api-keys`)).toHaveLength(1);
   });
 });
+
+
+describe("one-click config Reload", () => {
+  it("retries Start recording after a 412 and Reload with the current If-Match", async () => {
+    const { api } = setUpServer();
+    let recording = false;
+    let version = 1;
+    const target = `${V8_CONFIG}/observability/usage/usage-statistics-enabled`;
+    api.use(
+      route("GET", USAGE_LEDGER, () => ({ json: ledger({ recording, usage_statistics_enabled: recording }) })),
+      route("GET", V8_CONFIG, () => ({ json: { observability: { usage: { "usage-statistics-enabled": recording } } }, headers: { ETag: `"${String(version)}"` } })),
+      route("PUT", target, (request) => {
+        if (version === 1) { version++; return { status: 412, json: { error: "precondition_failed" } }; }
+        if (request.headers.get("if-match") !== `"${String(version)}"`) return { status: 412 };
+        recording = request.json() === true;
+        version++;
+        return { json: {}, headers: { ETag: `"${String(version)}"` } };
+      }),
+    );
+    const { user } = renderApp("/");
+    await user.click(await screen.findByRole("button", { name: "Start recording" }));
+    await screen.findByText("The config changed since this page loaded");
+    const reload = screen.getByRole("button", { name: "Reload latest config" });
+    await user.click(reload);
+    await waitFor(() => { expect(reload).toBeEnabled(); });
+    const start = screen.getByRole("button", { name: "Start recording" });
+    await user.click(start);
+    await waitFor(() => { expect(start).toBeEnabled(); });
+    expect(api.callsTo("PUT", target).map((call) => call.headers.get("if-match"))).toEqual(['"1"', '"2"']);
+    expect(recording).toBe(true);
+  });
+});

@@ -76,7 +76,7 @@ export function useConfigEditor() {
   const editor = useMemo(() => new ConfigEditor(configStore(client, key)), [client, key]);
   const reload = useCallback(async () => {
     await client.refetchQueries({ predicate: (query) => query.queryKey.includes(scope) }, { throwOnError: true });
-    editor.retainDrafts([]);
+    editor.clearDrafts();
     editor.setDirty(false);
   }, [client, editor, scope]);
   return useMemo(() => ({ editor, call: editor.call, ready: editor.ready,
