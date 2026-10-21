@@ -69,41 +69,36 @@ fn non_object_type(value: Option<&Value>) -> bool {
     }
 }
 fn repair_properties(
-    props: &Map<String, Value>,
+    mut props: Map<String, Value>,
     depth: usize,
 ) -> Option<(Map<String, Value>, Vec<String>)> {
-    let mut out = Map::new();
     let mut promoted = Vec::new();
-    for (name, schema) in props {
-        let mut schema = if schema == &Value::Bool(true) {
-            json!({})
-        } else {
-            schema.clone()
-        };
-        if let Some(map) = schema.as_object_mut() {
+    for (name, schema) in &mut props {
+        if schema == &Value::Bool(true) {
+            *schema = json!({});
+        } else if let Some(map) = schema.as_object_mut() {
             if let Some(Value::Bool(required)) = map.get("required") {
                 if *required {
                     promoted.push(name.clone());
                 }
                 map.shift_remove("required");
             }
-            schema = repair(&schema, depth + 1)?;
+            *schema = repair(std::mem::take(schema), depth + 1)?;
         }
-        out.insert(name.clone(), schema);
     }
     promoted.sort();
-    Some((out, promoted))
+    Some((props, promoted))
 }
-fn repair(schema: &Value, depth: usize) -> Option<Value> {
+fn repair(mut node: Value, depth: usize) -> Option<Value> {
     if depth > 64 {
         return None;
     }
-    let Some(map) = schema.as_object() else {
-        return Some(schema.clone());
-    };
-    let mut node = Value::Object(map.clone());
+    if !node.is_object() {
+        return Some(node);
+    }
     if !non_object_type(node.get("type")) {
-        let bare: Map<_, _> = map
+        let names: Vec<_> = node
+            .as_object()?
             .iter()
             .filter(|(key, value)| {
                 value.is_object()
@@ -112,13 +107,21 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
                         .split_whitespace()
                         .any(|k| k == key.as_str())
             })
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let bare: Map<_, _> = names
+            .into_iter()
+            .map(|name| {
+                let value = node
+                    .as_object_mut()
+                    .expect("object")
+                    .shift_remove(&name)
+                    .expect("collected name");
+                (name, value)
+            })
             .collect();
         if !bare.is_empty() {
-            let (bare, promoted) = repair_properties(&bare, depth)?;
-            for key in bare.keys() {
-                node.as_object_mut()?.shift_remove(key);
-            }
+            let (bare, promoted) = repair_properties(bare, depth)?;
             if let Some(props) = node.get_mut("properties").and_then(Value::as_object_mut) {
                 props.extend(bare);
             } else {
@@ -130,9 +133,9 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
             promote(&mut node, promoted);
         }
     }
-    if let Some(props) = node.get("properties").and_then(Value::as_object) {
-        let (props, promoted) = repair_properties(props, depth)?;
-        node["properties"] = Value::Object(props);
+    if let Some(Value::Object(props)) = node.get_mut("properties") {
+        let (repaired, promoted) = repair_properties(std::mem::take(props), depth)?;
+        *props = repaired;
         if node.get("type").is_none() {
             node["type"] = json!("object");
         }
@@ -167,19 +170,22 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
         "contentSchema",
         "additionalItems",
     ] {
-        if let Some(value) = node.get(key).cloned() {
+        if let Some(value) = node.get_mut(key) {
             if value.is_object() {
-                node[key] = repair(&value, depth + 1)?;
-            } else if value == Value::Bool(true) && key != "additionalProperties" {
-                node[key] = json!({});
-            } else if let Some(values) = value.as_array().filter(|_| key == "items") {
-                node[key] = repair_list(values, depth)?;
+                *value = repair(std::mem::take(value), depth + 1)?;
+            } else if value == &Value::Bool(true) && key != "additionalProperties" {
+                *value = json!({});
+            } else if let Value::Array(values) = value
+                && key == "items"
+            {
+                *value = repair_list(std::mem::take(values), depth)?;
             }
         }
     }
     for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
-        if let Some(values) = node.get(key).and_then(Value::as_array) {
-            node[key] = repair_list(values, depth)?;
+        if let Some(Value::Array(values)) = node.get_mut(key) {
+            let repaired = repair_list(std::mem::take(values), depth)?;
+            node[key] = repaired;
         }
     }
     for key in [
@@ -189,19 +195,20 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
         "dependentSchemas",
         "dependencies",
     ] {
-        if let Some(values) = node.get(key).and_then(Value::as_object) {
+        if let Some(Value::Object(values)) = node.get_mut(key) {
+            let values = std::mem::take(values);
             let out = if key == "patternProperties" {
                 repair_properties(values, depth)?.0
             } else {
                 values
-                    .iter()
-                    .map(|(k, v)| {
+                    .into_iter()
+                    .map(|(key, value)| {
                         Some((
-                            k.clone(),
-                            if v == &Value::Bool(true) {
+                            key,
+                            if value == Value::Bool(true) {
                                 json!({})
                             } else {
-                                repair(v, depth + 1)?
+                                repair(value, depth + 1)?
                             },
                         ))
                     })
@@ -212,12 +219,12 @@ fn repair(schema: &Value, depth: usize) -> Option<Value> {
     }
     Some(node)
 }
-fn repair_list(values: &[Value], depth: usize) -> Option<Value> {
+fn repair_list(values: Vec<Value>, depth: usize) -> Option<Value> {
     Some(Value::Array(
         values
-            .iter()
+            .into_iter()
             .map(|value| {
-                if value == &Value::Bool(true) {
+                if value == Value::Bool(true) {
                     Some(json!({}))
                 } else {
                     repair(value, depth + 1)
@@ -559,16 +566,18 @@ fn placeholders(node: &mut Value, _: bool) {
 }
 
 pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
-    let Some(schema) = repair(schema, 0) else {
+    let Some(schema) = repair(schema.clone(), 0) else {
         return false;
     };
-    let wrapped = json!({"schema":schema});
+    let wrapped = Value::Object(Map::from_iter([("schema".into(), schema)]));
     let Some(inlined) = crate::gemini_schema::local_refs::inline_for_projection(&wrapped) else {
         return false;
     };
+    drop(wrapped);
     let Some(mut projected) = copy_bounded(&inlined, 0, &mut 100_000) else {
         return false;
     };
+    drop(inlined);
     walk(&mut projected, false, reference_hint);
     walk(&mut projected, false, hint_presence);
     walk(&mut projected, false, conditionals);
