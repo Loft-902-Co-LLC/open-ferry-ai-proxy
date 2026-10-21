@@ -141,6 +141,8 @@ pub(crate) struct Overrides {
     pub(crate) page: Option<Duration>,
     /// Notified only after acquiring the bind's credential lock polls Pending.
     pub(crate) bind_lock_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Notified after a busy save releases both locks and reserves a writer.
+    pub(crate) bind_admission_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Holds a persisted bind after revision allocation, before releasing its lock.
     pub(crate) bind_after_sync: Option<std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
 }
@@ -155,6 +157,7 @@ impl Default for Overrides {
             exchange: None,
             page: None,
             bind_lock_wait: None,
+            bind_admission_wait: None,
             bind_after_sync: None,
         }
     }

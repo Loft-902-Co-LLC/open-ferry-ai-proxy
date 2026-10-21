@@ -443,6 +443,14 @@ impl Store {
             .is_some_and(|entry| pending_for(&entry.session, provider))
     }
 
+    #[cfg(test)]
+    pub(crate) fn expire_bind_for_test(&self, state: &str) {
+        let mut inner = self.lock();
+        let entry = inner.sessions.get_mut(state).expect("a bind session");
+        assert!(entry.bind && !entry.committing);
+        entry.session.expires_at = Instant::now();
+    }
+
     /// Drops the session for `state` if it is pending, which stops its
     /// login without saving anything, and returns whether it was
     /// (`Cancel`).

@@ -93,6 +93,8 @@ mod scoped;
 mod select;
 mod settings;
 mod siwc_bind;
+#[doc(hidden)]
+pub use siwc_bind::SiwcBindWaiter;
 mod summary;
 mod text;
 mod websocket;

@@ -1181,3 +1181,221 @@ async fn differently_cased_distinct_upload_preserves_the_other_bind_file() {
     );
     assert!(dir.read_json("account.json").get("use_siwc").is_none());
 }
+
+/// Holds a real shared mutation permit on another credential until released.
+struct ActiveMutation {
+    release: std::sync::mpsc::Sender<()>,
+    task: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ActiveMutation {
+    fn start(api: &Api) -> Self {
+        let manager = api.manager.clone();
+        let id = manager
+            .list()
+            .into_iter()
+            .find(|auth| auth.file_name == "other.json")
+            .unwrap()
+            .id
+            .clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            manager
+                .edit_unsaved(&id, |_| {
+                    started.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok::<_, ()>(false)
+                })
+                .unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        Self {
+            release,
+            task: Some(task),
+        }
+    }
+}
+
+impl Drop for ActiveMutation {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        if let Some(task) = self.task.take() {
+            task.join().unwrap();
+        }
+    }
+}
+
+fn watch_admission(api: &Api) -> Arc<tokio::sync::Notify> {
+    let waiting = Arc::new(tokio::sync::Notify::new());
+    api.state.oauth_sessions().overrides().bind_admission_wait = Some(waiting.clone());
+    waiting
+}
+
+async fn wait_for_bind_task(api: &Api) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while api.state.oauth_sessions().running() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("bind task stopped while admission was busy");
+}
+
+#[tokio::test]
+async fn busy_bind_commits_despite_overlapping_mutations_on_another_credential() {
+    let dir = AuthDir::new();
+    dir.write("codex-bind.json", OUTER);
+    dir.write("other.json", OUTER);
+    let upstream = Upstream::answering(tokens()).await;
+    let api = login_api(&dir, &upstream.url);
+    let session = start_login(&api, START).await;
+    let waiting = watch_admission(&api);
+    let other = api
+        .manager
+        .list()
+        .into_iter()
+        .find(|auth| auth.file_name == "other.json")
+        .unwrap()
+        .id
+        .clone();
+    let active = ActiveMutation::start(&api);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let traffic: Vec<_> = (0..2)
+        .map(|_| {
+            let manager = api.manager.clone();
+            let id = other.clone();
+            let stop = stop.clone();
+            let mutations = mutations.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    manager
+                        .edit_unsaved(&id, |_| {
+                            mutations.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(20));
+                            Ok::<_, ()>(false)
+                        })
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    deliver(&api, &session, "codex", issued());
+    tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+        .await
+        .unwrap();
+    // Both traffic threads can hold shared permits while one waits on the
+    // state mutex. Writer preference must stop their next iterations.
+    drop(active);
+    let result = tokio::time::timeout(Duration::from_secs(2), completed(&api, &session)).await;
+    stop.store(true, Ordering::SeqCst);
+    if result.is_err() {
+        api.state.oauth_sessions().store().cancel(&session);
+    }
+    tokio::task::spawn_blocking(move || {
+        for task in traffic {
+            task.join().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    result.expect("continuous unrelated traffic starved the bind");
+    assert!(mutations.load(Ordering::SeqCst) >= 2);
+    assert_eq!(dir.read_json("codex-bind.json")["use_siwc"], true);
+}
+
+#[tokio::test]
+async fn busy_bind_expiry_cancellation_and_owner_disconnect_release_admission() {
+    for stop in ["expiry", "cancel", "disconnect"] {
+        let (logs, _capture) = Logs::capture();
+        let dir = AuthDir::new();
+        let path = dir.write("codex-bind.json", OUTER);
+        dir.write("other.json", OUTER);
+        let upstream = Upstream::answering(tokens()).await;
+        let api = login_api(&dir, &upstream.url);
+        let session = start_login(&api, START).await;
+        let waiting = watch_admission(&api);
+        let active = ActiveMutation::start(&api);
+        deliver(&api, &session, "codex", issued());
+        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+            .await
+            .unwrap();
+        match stop {
+            "expiry" => api
+                .state
+                .oauth_sessions()
+                .store()
+                .expire_bind_for_test(&session),
+            "cancel" => assert!(api.state.oauth_sessions().store().cancel(&session)),
+            // Aborting the owning login also drops its detached completion.
+            _ => api.state.oauth_sessions().shutdown().await,
+        }
+        wait_for_bind_task(&api).await;
+        if stop == "expiry" {
+            assert!(logs.text().contains("SIWC binding failed (Other, OS None)"));
+            assert!(logs.text().contains("Failed to save authentication tokens"));
+        }
+        assert!(std::fs::read(&path).unwrap() == OUTER.as_bytes());
+        assert!(api.sync.calls().is_empty());
+        drop(active);
+        // A leaked writer reservation would prevent this shared mutation.
+        let manager = api.manager.clone();
+        let (finished, done) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            let id = manager.list()[0].id.clone();
+            manager.edit_unsaved(&id, |_| Ok::<_, ()>(false)).unwrap();
+            finished.send(()).unwrap();
+        });
+        done.recv_timeout(Duration::from_secs(2))
+            .expect("cancelled bind leaked its reservation");
+        task.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn busy_bind_releases_both_locks_for_an_upload() {
+    use open_ferry_core::auth::credential_lock::acquire_credential_lock;
+    let dir = AuthDir::new();
+    let path = dir.write("codex-bind.json", OUTER);
+    dir.write("other.json", OUTER);
+    let upstream = Upstream::answering(tokens()).await;
+    let api = login_api(&dir, &upstream.url);
+    let session = start_login(&api, START).await;
+    let waiting = watch_admission(&api);
+    let active = ActiveMutation::start(&api);
+    deliver(&api, &session, "codex", issued());
+    tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+        .await
+        .unwrap();
+    let mut body: Value = serde_json::from_str(OUTER).unwrap();
+    body["upload_marker"] = json!(true);
+    let body = body.to_string();
+    let mut upload = Box::pin(api.post("/v8/management/credentials?name=codex-bind.json", &body));
+    // Only synchronization waits for the other credential's active mutation.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut upload)
+            .await
+            .is_err()
+    );
+    assert_eq!(dir.read_json("codex-bind.json")["upload_marker"], true);
+    assert!(api.state.credential_lock().try_lock().is_ok());
+    let lock = tokio::time::timeout(Duration::from_millis(200), acquire_credential_lock(&path))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(lock);
+    wait_for_bind_task(&api).await;
+    drop(active);
+    tokio::time::timeout(Duration::from_secs(2), upload)
+        .await
+        .unwrap()
+        .expect(StatusCode::OK);
+    assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+    assert!(
+        !api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(&session, "codex")
+    );
+}

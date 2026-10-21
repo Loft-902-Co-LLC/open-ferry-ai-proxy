@@ -4,12 +4,50 @@
 
 //! Bind admission fences registration mutation through the durable file write.
 //! The existing reload barrier is acquired without waiting while a file lock
-//! is held. Busy callers release their file lock and retry, avoiding inversion
+//! is held. Busy callers release their file lock and queue a writer, avoiding inversion
 //! with ordinary persistence. No manager state mutex is held during file I/O.
 
 use super::{Manager, ReloadGuard, lock};
 use crate::auth::{Auth, AuthKind, AuthSource};
 use std::io;
+
+/// A waiting exclusive bind. Dropping it, including when its async caller is
+/// cancelled, withdraws the writer preference and wakes shared mutations.
+#[doc(hidden)]
+pub struct SiwcBindWaiter {
+    manager: Manager,
+    queued: bool,
+}
+
+impl SiwcBindWaiter {
+    /// Advisory only: the commit rechecks after taking its file/store locks.
+    pub fn is_ready(&self) -> bool {
+        let state = lock(&self.manager.shared.load_gate.state);
+        self.queued && state.0 == 0 && !state.1
+    }
+
+    /// Tries the reserved write after the caller reacquires its file/store
+    /// locks. A busy result retains the reservation for another bounded wait.
+    pub fn try_commit<T>(
+        &mut self,
+        expected: &Auth,
+        commit: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<Option<T>> {
+        self.manager
+            .try_commit_siwc_bind_inner(expected, Some(&mut self.queued), commit)
+    }
+}
+
+impl Drop for SiwcBindWaiter {
+    fn drop(&mut self) {
+        if self.queued {
+            let barrier = &self.manager.shared.load_gate;
+            let mut state = lock(&barrier.state);
+            state.2 -= 1;
+            barrier.changed.notify_all();
+        }
+    }
+}
 
 impl Manager {
     /// Runs a short synchronous SIWC disk commit against its start-time
@@ -21,11 +59,38 @@ impl Manager {
         expected: &Auth,
         commit: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<Option<T>> {
+        self.try_commit_siwc_bind_inner(expected, None, commit)
+    }
+
+    /// Queue only after releasing every credential file and management lock.
+    /// New shared mutation permits then wait behind this bind, as for reloads.
+    #[doc(hidden)]
+    pub fn queue_siwc_bind(&self) -> SiwcBindWaiter {
+        lock(&self.shared.load_gate.state).2 += 1;
+        SiwcBindWaiter {
+            manager: self.clone(),
+            queued: true,
+        }
+    }
+
+    fn try_commit_siwc_bind_inner<T>(
+        &self,
+        expected: &Auth,
+        queued: Option<&mut bool>,
+        commit: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<Option<T>> {
         let barrier = &self.shared.load_gate;
         let gate = {
             let mut state = lock(&barrier.state);
-            if state.0 != 0 || state.1 || state.2 != 0 {
+            if state.0 != 0 || state.1 || (queued.is_none() && state.2 != 0) {
                 return Ok(None);
+            }
+            if let Some(queued) = queued {
+                if !*queued {
+                    return Err(io::Error::other("SIWC bind admission ended"));
+                }
+                state.2 -= 1;
+                *queued = false;
             }
             state.1 = true;
             ReloadGuard {
@@ -138,5 +203,31 @@ mod tests {
             .unwrap();
         task.unwrap().join().unwrap();
         assert!(manager.get(&expected.id).is_none());
+    }
+    #[test]
+    fn waiting_bind_blocks_new_shared_mutations_and_drop_releases_them() {
+        let (manager, _) = setup();
+        let active = manager.mutation_gate();
+        let waiter = manager.queue_siwc_bind();
+        assert!(!waiter.is_ready());
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let changing = manager.clone();
+        let task = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let _gate = changing.mutation_gate();
+            finished.send(()).unwrap();
+        });
+        waiting.recv().unwrap();
+        drop(active);
+        assert!(waiter.is_ready());
+        assert!(
+            done.recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        drop(waiter);
+        done.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        task.join().unwrap();
     }
 }

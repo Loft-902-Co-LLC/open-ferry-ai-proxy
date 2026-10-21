@@ -21,6 +21,7 @@ use open_ferry_providers::oauth::{Pkce, generate_state};
 use serde_json::Value;
 
 use super::mutation_path::BindMutationPath;
+use super::sessions::Lifeline;
 use crate::auth_files::run_blocking;
 use crate::credential_files::is_unsafe_name;
 use crate::state::ManagementState;
@@ -151,6 +152,7 @@ pub(super) async fn save(
     tokens: SiwcTokenData,
     session: String,
     registration: u64,
+    lifeline: &mut Lifeline,
 ) -> io::Result<()> {
     if tokens.access_token.trim().is_empty()
         || tokens.refresh_token.trim().is_empty()
@@ -160,6 +162,7 @@ pub(super) async fn save(
     }
     let store = state.credential_store().map_err(|_| invalid())?;
     let tokens = tokens.to_json();
+    let mut waiting = None;
     loop {
         if state.oauth_sessions().is_shut_down()
             || !state.oauth_sessions().store().is_pending(&session, "codex")
@@ -167,9 +170,9 @@ pub(super) async fn save(
             return Err(invalid());
         }
         #[cfg(not(test))]
-        let guard = acquire_credential_lock(&target.path).await?;
+        let acquire = acquire_credential_lock(&target.path);
         #[cfg(test)]
-        let guard = {
+        let acquire = async {
             use std::future::Future as _;
             let waiting = state.oauth_sessions().overrides().bind_lock_wait.clone();
             let mut acquire = Box::pin(acquire_credential_lock(&target.path));
@@ -184,53 +187,95 @@ pub(super) async fn save(
                 }
                 result
             })
-            .await?
+            .await
+        };
+        let guard = tokio::select! {
+            biased;
+            () = ended(state, &session, lifeline) => return Err(invalid()),
+            acquired = acquire => acquired?,
         };
         let Ok(management_guard) = state.credential_lock().try_lock() else {
             drop(guard);
-            drop(state.credential_lock().lock().await);
+            tokio::select! {
+                biased;
+                () = ended(state, &session, lifeline) => return Err(invalid()),
+                acquired = state.credential_lock().lock() => drop(acquired),
+            }
             continue;
         };
         let files = store.files.clone();
         let checking = state.clone();
-        let session = session.clone();
+        let checking_session = session.clone();
         let tokens = tokens.clone();
-        let (committed, returned, guard) = run_blocking(move || {
-            let committed = checking
-                .manager()
-                .try_commit_siwc_bind(&target.registered, || {
-                    if files.base_dir().canonicalize()? != target.directory
-                        || target.path.canonicalize()? != target.real_path
-                    {
+        let (committed, returned, guard, returned_waiter) = run_blocking(move || {
+            let commit = || {
+                if files.base_dir().canonicalize()? != target.directory
+                    || target.path.canonicalize()? != target.real_path
+                {
+                    return Err(invalid());
+                }
+                files.bind_siwc_locked(&target.record, tokens, &guard, &|disk, id| {
+                    if files.base_dir().canonicalize()? != target.directory {
                         return Err(invalid());
                     }
-                    let record =
-                        files.bind_siwc_locked(&target.record, tokens, &guard, &|disk, id| {
-                            if files.base_dir().canonicalize()? != target.directory {
-                                return Err(invalid());
-                            }
-                            target.identity.check(disk, id)?;
-                            if checking.oauth_sessions().is_shut_down()
-                                || !checking
-                                    .oauth_sessions()
-                                    .store()
-                                    .admit_bind(&session, registration)
-                            {
-                                return Err(io::Error::other("SIWC bind session ended"));
-                            }
-                            Ok(())
-                        })?;
+                    target.identity.check(disk, id)?;
+                    if checking.oauth_sessions().is_shut_down()
+                        || !checking
+                            .oauth_sessions()
+                            .store()
+                            .admit_bind(&checking_session, registration)
+                    {
+                        return Err(io::Error::other("SIWC bind session ended"));
+                    }
+                    Ok(())
+                })
+            };
+            let committed = match waiting.as_mut() {
+                Some(waiter) => open_ferry_core::manager::SiwcBindWaiter::try_commit(
+                    waiter,
+                    &target.registered,
+                    commit,
+                ),
+                None => checking
+                    .manager()
+                    .try_commit_siwc_bind(&target.registered, commit),
+            }?;
+            // The exclusive barrier covers only validation and the durable write.
+            let committed = committed
+                .map(|record| {
                     let data = serde_json::to_vec(&record.metadata).map_err(|_| invalid())?;
-                    Ok((record, data))
-                })?;
-            Ok::<_, io::Error>((committed, target, guard))
+                    Ok::<_, io::Error>((record, data))
+                })
+                .transpose()?;
+            Ok::<_, io::Error>((committed, target, guard, waiting))
         })
         .await?;
         target = returned;
+        waiting = returned_waiter;
         let Some((record, data)) = committed else {
             drop(guard);
             drop(management_guard);
-            tokio::task::yield_now().await;
+            // Register writer preference only after releasing both locks.
+            let waiter = waiting.get_or_insert_with(|| state.manager().queue_siwc_bind());
+            #[cfg(test)]
+            if let Some(signal) = state
+                .oauth_sessions()
+                .overrides()
+                .bind_admission_wait
+                .clone()
+            {
+                signal.notify_one();
+            }
+            loop {
+                tokio::select! {
+                    biased;
+                    () = ended(state, &session, lifeline) => return Err(invalid()),
+                    () = tokio::time::sleep(ADMISSION_BACKOFF) => {},
+                }
+                if waiter.is_ready() {
+                    break;
+                }
+            }
             continue;
         };
         let file = AuthFile {
@@ -255,5 +300,23 @@ pub(super) async fn save(
         return synced
             .await
             .map_err(|_| io::Error::other("SIWC credential sync failed"));
+    }
+}
+
+/// Bound admission polling, and session/owner cancellation while waiting for a
+/// file lock, the management lock, or the manager's writer reservation.
+const ADMISSION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+async fn ended(state: &ManagementState, session: &str, lifeline: &mut Lifeline) {
+    loop {
+        if state.oauth_sessions().is_shut_down()
+            || !state.oauth_sessions().store().is_pending(session, "codex")
+        {
+            return;
+        }
+        tokio::select! {
+            () = lifeline.cut() => return,
+            () = tokio::time::sleep(ADMISSION_BACKOFF) => {},
+        }
     }
 }

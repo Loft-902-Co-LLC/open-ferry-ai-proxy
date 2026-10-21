@@ -598,6 +598,7 @@ async fn complete(
             *tokens,
             login.state.clone(),
             login._lease.id,
+            &mut lifeline,
         )
         .await
         .map(|()| String::new())
