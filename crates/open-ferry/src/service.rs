@@ -1878,12 +1878,7 @@ impl Service {
         self.register_codex_executor();
         self.register_meta_executor();
         self.register_claude_executor();
-        // It sends nothing itself, so takes no proxy.
-        self.manager.register_executor(Arc::new(
-            ClaudeCliExecutor::new()
-                .with_config(Arc::clone(&self.config))
-                .with_spawn_guard(self.claude_guard.clone()),
-        ));
+        self.register_claude_cli_executor();
         self.manager.register_executor(Arc::new(
             GeminiExecutor::new(proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
@@ -1899,6 +1894,16 @@ impl Service {
             VertexExecutor::new(proxy_url)
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _),
+        ));
+    }
+
+    /// The CLI also binds capabilities from the current config snapshot.
+    fn register_claude_cli_executor(&self) {
+        // It sends nothing itself, so takes no proxy.
+        self.manager.register_executor(Arc::new(
+            ClaudeCliExecutor::new()
+                .with_config(Arc::clone(&self.config))
+                .with_spawn_guard(self.claude_guard.clone()),
         ));
     }
 
@@ -3432,6 +3437,7 @@ impl Service {
             // Claude's switch, native key flags and payload rules follow the
             // whole config, alongside the Codex, Meta and xAI executors.
             self.register_claude_executor();
+            self.register_claude_cli_executor();
             self.register_codex_executor();
             self.register_meta_executor();
             self.register_xai_executor();
@@ -8295,6 +8301,43 @@ mod tests {
     /// `config`, from contents these tests don't keep.
     fn config_changed(config: Arc<Config>) -> WatchEvent {
         WatchEvent::ConfigChanged(config, String::new())
+    }
+
+    #[tokio::test]
+    async fn claude_cli_thinking_capabilities_follow_config_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(
+            dir.path(),
+            "claude-cli:\n  - name: test\n    command: nonexistent-claude-for-capability-test\n    models: [{name: claude-opus-4-8, thinking: {levels: [high]}}]\n",
+        );
+        service.claude_guard = Some(claude_cli::SpawnGuard::new(|_, _, _| {
+            Err("this test must never start a process".into())
+        }));
+        let mut config = (*service.config).clone();
+        config.claude_cli[0].models[0]
+            .thinking
+            .as_mut()
+            .unwrap()
+            .levels = vec!["low".into()];
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        let auth = service
+            .manager
+            .list()
+            .into_iter()
+            .find(|auth| auth.provider == "claude-cli")
+            .unwrap();
+        let error = service.manager.executor("claude-cli").unwrap().execute(
+            auth,
+            Request {
+                model: "claude-opus-4-8".into(),
+                payload: br#"{"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}"#.to_vec().into(),
+            },
+            Options::new(open_ferry_core::exec::Format::CLAUDE),
+        ).await.unwrap_err();
+        assert_eq!(
+            error.status, 400,
+            "reloaded capabilities reject high before any spawn: {error:?}"
+        );
     }
 
     // Ported from sdk/cliproxy/service_codex_executor_binding_test.go (v8.0.32).

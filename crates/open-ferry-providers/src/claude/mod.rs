@@ -33,6 +33,7 @@
 //! - Deferred: local token counting for credentials that don't go to
 //!   Anthropic's API (a 501 for now).
 
+mod capabilities;
 mod client;
 mod compaction;
 pub(crate) mod executor;

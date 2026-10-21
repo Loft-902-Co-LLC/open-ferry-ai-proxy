@@ -214,6 +214,36 @@ pub(crate) fn apply_request_to<T: Target>(
     original_request: &Body,
     lookup: impl FnOnce(&str) -> Option<Model>,
 ) -> Result<(), ExecError> {
+    apply_request_inner::<T>(body, route, payload, original_request, lookup, false)
+}
+
+/// Request thinking with an authoritative per-attempt capability snapshot,
+/// retaining the same translated summary/source precedence as an unbound call.
+pub(crate) fn apply_request_with_model<T: Target>(
+    body: &mut Value,
+    route: Route<'_>,
+    payload: &Body,
+    original_request: &Body,
+    model: Model,
+) -> Result<(), ExecError> {
+    apply_request_inner::<T>(
+        body,
+        route,
+        payload,
+        original_request,
+        |_| Some(model),
+        true,
+    )
+}
+
+fn apply_request_inner<T: Target>(
+    body: &mut Value,
+    route: Route<'_>,
+    payload: &Body,
+    original_request: &Body,
+    lookup: impl FnOnce(&str) -> Option<Model>,
+    resolved: bool,
+) -> Result<(), ExecError> {
     let original_source = if original_request.is_empty() {
         payload
     } else {
@@ -225,7 +255,7 @@ pub(crate) fn apply_request_to<T: Target>(
         payload
     };
     let summary = translated_summary(body, payload.json(), original_source.json(), &route);
-    apply::<T>(body, source, route, summary, lookup, false)
+    apply::<T>(body, source, route, summary, lookup, resolved)
 }
 
 /// `ApplyThinkingWithModelInfo`: applies the thinking setting to a `T`

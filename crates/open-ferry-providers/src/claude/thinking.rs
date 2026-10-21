@@ -6,11 +6,9 @@
 //! adaptive effort. [`crate::thinking`] reads and checks the setting.
 //!
 //! Deviations from upstream:
-//! - Executors look up models in their provider registry, then the static
-//!   catalog. The request-scoped resolved credential binding isn't ported.
-//! - Configured registry models with declared thinking capabilities use
-//!   those capabilities even when their listing is marked user-defined, as
-//!   upstream's ResolveModelInfo does. Models without them stay unchecked.
+//! - The executor resolves configured API-key capabilities from its config
+//!   snapshot and selected auth, rather than metadata set by the manager.
+//!   Unbound attempts retain registry lookup, including UserDefined handling.
 
 use open_ferry_core::exec::ExecError;
 #[cfg(test)]
@@ -62,7 +60,7 @@ pub(crate) fn apply_request(
     shared::apply_request::<Claude>(body, model, from, payload, original_request, lookup)
 }
 
-/// Executor lookup, preserving configured capabilities before the static fallback.
+/// Selected-credential capabilities take precedence over registry lookup.
 pub(crate) fn apply_request_with_models(
     body: &mut Value,
     model: &str,
@@ -70,15 +68,24 @@ pub(crate) fn apply_request_with_models(
     payload: &Body,
     original_request: &Body,
     models: Option<&dyn open_ferry_core::models::ModelCatalog>,
+    resolved: Option<open_ferry_core::models::ModelInfo>,
 ) -> Result<(), ExecError> {
+    if let Some(resolved) = resolved {
+        return shared::apply_request_with_model::<Claude>(
+            body,
+            shared::Route {
+                model,
+                from,
+                to: "claude",
+                provider: "claude",
+            },
+            payload,
+            original_request,
+            crate::codex::thinking::thinking_model(resolved),
+        );
+    }
     shared::apply_request::<Claude>(body, model, from, payload, original_request, |id| {
-        let mut info = crate::codex::thinking::lookup(models, id, "claude")?;
-        // Registry listings mark configured aliases user-defined. A declared
-        // capability block is concrete API support, as ResolveModelInfo's is.
-        if info.thinking.is_some() {
-            info.user_defined = false;
-        }
-        Some(info)
+        crate::codex::thinking::lookup(models, id, "claude")
     })
 }
 

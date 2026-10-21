@@ -244,8 +244,9 @@ impl ClaudeExecutor {
     ) -> Result<Prepared, ExecError> {
         let base_model = thinking::parse_suffix(&request.model).0;
         let config = self.config.as_deref();
-        let mut body = translate_request_with_models(
+        let mut body = translate_request_for_auth(
             config,
+            auth,
             request,
             options,
             base_model,
@@ -627,8 +628,9 @@ impl ClaudeExecutor {
         let config = self.config.as_deref();
         // As upstream, a refused part fails the count before the choice of
         // how to count it.
-        let mut body = translate_request_with_models(
+        let mut body = translate_request_for_auth(
             config,
+            auth,
             request,
             options,
             base_model,
@@ -779,6 +781,7 @@ struct Prepared {
 /// The client's request in Claude's format, for `base_model`, with its
 /// thinking setting applied; a 400 instead when the translation refused a
 /// content part Claude can't receive, so the request is never sent.
+#[cfg(test)]
 pub(crate) fn translate_request(
     config: Option<&Config>,
     request: &Request,
@@ -786,11 +789,20 @@ pub(crate) fn translate_request(
     base_model: &str,
     stream: bool,
 ) -> Result<Value, ExecError> {
-    translate_request_with_models(config, request, options, base_model, stream, None)
+    translate_request_for_auth(
+        config,
+        &Auth::default(),
+        request,
+        options,
+        base_model,
+        stream,
+        None,
+    )
 }
 
-fn translate_request_with_models(
+pub(crate) fn translate_request_for_auth(
     config: Option<&Config>,
+    auth: &Auth,
     request: &Request,
     options: &Options,
     base_model: &str,
@@ -829,6 +841,12 @@ fn translate_request_with_models(
         &Body::parse(&request.payload),
         &Body::parse(&options.original_request),
         models,
+        super::capabilities::resolve(
+            config,
+            auth,
+            &request.model,
+            &options.metadata.requested_model,
+        ),
     )?;
     Ok(body)
 }

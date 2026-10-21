@@ -1081,6 +1081,25 @@ fn resolve_thinking(name: &str, configured: Option<&ThinkingSupport>) -> Option<
     known.cloned()
 }
 
+/// A private per-attempt capability snapshot for a configured upstream name
+/// (`modelconfig.ResolveModelInfo`). A configured model is authoritative even
+/// when neither it nor the static catalog declares thinking support.
+pub fn resolve_model_info(
+    name: &str,
+    model_type: &str,
+    configured: Option<&crate::config::ThinkingSupport>,
+) -> ModelInfo {
+    let name = name.trim();
+    let mut info = StaticCatalog::current()
+        .lookup(parse_suffix(name).trim())
+        .unwrap_or_default();
+    info.id = name.to_owned();
+    info.model_type = model_type.trim().to_owned();
+    info.thinking = resolve_thinking(name, configured.map(thinking).as_ref());
+    info.user_defined = false;
+    info
+}
+
 /// `model` without a trailing thinking suffix such as `(high)` (upstream's
 /// `thinking.ParseSuffix`).
 fn parse_suffix(model: &str) -> &str {

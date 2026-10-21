@@ -166,6 +166,43 @@ async fn adaptive_only_model_maps_a_requested_budget_to_cli_effort() {
 }
 
 #[tokio::test]
+async fn selected_cli_entry_enforces_configured_thinking_levels() {
+    let fixture = Fixture::new(&success(&["Hi"]));
+    let mut entry = fixture.entry();
+    entry.models = vec![open_ferry_core::config::ClaudeModel {
+        name: MODEL.into(),
+        thinking: Some(open_ferry_core::config::ThinkingSupport {
+            levels: vec!["low".into(), "medium".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    let mut config = open_ferry_core::config::Config::default();
+    config.claude_cli = vec![entry.clone()];
+    let executor = fixture.executor().with_config(std::sync::Arc::new(config));
+    let mut body = claude_body("Hello");
+    body["thinking"] = json!({"type":"adaptive"});
+    body["output_config"] = json!({"effort":"high"});
+    let error = executor
+        .execute(
+            auth(&entry),
+            request(body.clone()),
+            options(Format::CLAUDE, false),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(fixture.records().is_empty());
+    body["output_config"]["effort"] = json!("medium");
+    executor
+        .execute(auth(&entry), request(body), options(Format::CLAUDE, false))
+        .await
+        .unwrap();
+    let argv = strings(&fixture.record()["argv"]);
+    assert_eq!(argv[argv.len() - 2..], ["--effort", "medium"]);
+}
+
+#[tokio::test]
 async fn sends_one_composed_user_line_that_never_leads_with_a_slash() {
     let fixture = Fixture::new(&success(&["Hi"]));
     execute(
