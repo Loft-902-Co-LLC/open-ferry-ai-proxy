@@ -109,6 +109,23 @@ describe("a form's config version", () => {
     }
   });
 
+  it("refuses a whole client-key payload raced after a clean one-click form's read", async () => {
+    let keys = ["unit-original"];
+    let etag = '"base"';
+    const api = mockApi(route("GET", V8_CONFIG, () => ({
+      json: { access: { "api-keys": keys } }, headers: { ETag: etag },
+    })));
+    const form = editor();
+    await form.call(API_KEYS);
+    keys = [...keys, "unit-other-writer"];
+    etag = '"other"';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(form.call(API_KEYS, { method: "PUT", json: ["unit-replacement"] }))
+        .rejects.toMatchObject({ fields: ["Client API keys"] });
+    }
+    expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+
   it("keeps the established guard if a YAML read omits its ETag", async () => {
     const api = mockApi(
       route("GET", V8_CONFIG, { json: {}, headers: { ETag: '"base"' } }),
