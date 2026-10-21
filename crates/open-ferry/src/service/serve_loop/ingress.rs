@@ -151,8 +151,6 @@ struct State {
     idle_since: Option<Instant>,
     first_head: Option<Instant>,
     partial_head: Option<Instant>,
-    // HTTP/2 streams stay open until BOTH halves end, including CONNECT DATA.
-    streams: HashMap<u32, (bool, bool)>,
     read_frames: Frames,
     write_frames: Frames,
     write_pending: Option<Instant>,
@@ -185,7 +183,6 @@ impl Traffic {
                 idle_since: Some(now),
                 first_head: config.header_timeout.map(|duration| now + duration),
                 partial_head: None,
-                streams: HashMap::new(),
                 read_frames: Frames::default(),
                 write_frames: Frames::default(),
                 write_pending: None,
@@ -216,7 +213,7 @@ impl Traffic {
     }
 
     fn idle(state: &mut State) {
-        if state.active == 0 && state.streams.is_empty() && state.idle_since.is_none() {
+        if state.active == 0 && state.protocol_tasks == 0 && state.idle_since.is_none() {
             state.idle_since = Some(Instant::now());
         }
     }
@@ -274,16 +271,21 @@ impl Traffic {
         let mut consider = |at, guard, stream| {
             if due.is_none_or(|(earlier, _, _)| at < earlier) { due = Some((at, guard, stream)); }
         };
-        if state.active == 0 && state.streams.is_empty()
+        if state.active == 0 && state.protocol_tasks == 0
             && let Some(started) = state.draining_since {
             consider(state.idle_since.unwrap_or(started).max(started) + GOAWAY_GRACE, "GOAWAY completion", None);
         }
+        if state.protocol != Protocol::Http1 || !state.upgraded {
+            if let Some(at) = state.first_head { consider(at, "request headers", None); }
+        }
+        if let Some(at) = state.partial_head { consider(at, "request headers", None); }
+        if let Some(started) = state.draining_since {
+            let body_grace = self.config.body_total_timeout.or(self.config.body_idle_timeout)
+                .unwrap_or(Duration::from_secs(900));
+            consider(started + GOAWAY_GRACE + body_grace, "drain deadline", None);
+        }
         if !state.draining {
-            if state.protocol != Protocol::Http1 || !state.upgraded {
-                if let Some(at) = state.first_head { consider(at, "request headers", None); }
-            }
-            if let Some(at) = state.partial_head { consider(at, "request headers", None); }
-            if let Some(idle) = state.idle_since.filter(|_| state.active == 0 && state.streams.is_empty())
+            if let Some(idle) = state.idle_since.filter(|_| state.active == 0 && state.protocol_tasks == 0)
                 && (state.protocol != Protocol::Http1 || !state.upgraded) {
                 if let Some(duration) = self.config.idle_timeout { consider(idle + duration, "idle connection", None); }
                 if state.protocol == Protocol::Http1 && let Some(duration) = self.config.header_timeout {
@@ -375,26 +377,6 @@ impl Frames {
             if incoming && matches!(kind, 1 | 9) && flags & 4 != 0 {
                 state.partial_head = None;
             }
-            if stream != 0 {
-                if kind == 3 {
-                    state.streams.remove(&stream);
-                } else if matches!(kind, 0 | 1) {
-                    let ends = state.streams.entry(stream).or_default();
-                    if flags & 1 != 0 {
-                        if incoming {
-                            ends.0 = true;
-                        } else {
-                            ends.1 = true;
-                        }
-                    }
-                    if ends.0 && ends.1 {
-                        state.streams.remove(&stream);
-                    } else {
-                        state.idle_since = None;
-                    }
-                }
-                Traffic::idle(state);
-            }
             self.used = 0;
             self.payload_used = 0;
         }
@@ -431,7 +413,7 @@ pub(super) async fn watch_traffic(core: Weak<ConnCore>, traffic: Arc<Traffic>) {
                     }
                     if guard == "idle connection" && state.protocol == Protocol::Http2 {
                         state.draining = true;
-                        state.draining_since = Some(Instant::now());
+                        state.draining_since.get_or_insert_with(Instant::now);
                         traffic.idle_expired.store(true, Ordering::Release);
                         traffic.idle_wake.notify_one();
                     } else { drop(state); core.cut(); return; }
