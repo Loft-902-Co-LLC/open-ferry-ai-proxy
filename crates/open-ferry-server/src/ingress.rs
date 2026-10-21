@@ -648,7 +648,7 @@ impl BudgetBuffer {
             // Bound retained capacity, excluding allocator granularity and the
             // transient old/new overlap during realloc. Grow geometrically,
             // charge the chosen capacity first, then request exactly that size.
-            let capacity = needed.max(self.bytes.capacity().saturating_mul(2)).max(8).min(self.limit);
+            let capacity = needed.max(self.bytes.capacity().saturating_mul(2)).min(self.limit);
             self.reservation.grow_to(capacity)?;
             self.bytes.reserve_exact(capacity - self.bytes.len());
         }
