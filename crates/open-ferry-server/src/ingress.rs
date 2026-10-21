@@ -128,6 +128,9 @@ impl Ingress {
         self.settings.borrow().limits.clone()
     }
 
+    /// Current charged request storage, without inspecting any request data.
+    pub fn reserved_body_bytes(&self) -> usize { self.budget.used() }
+
     /// Waits for a reload, without polling or opening any network connection.
     pub async fn changed(&self) {
         let mut settings = self.settings.subscribe();
@@ -147,16 +150,43 @@ impl Ingress {
     /// Installs the outermost middleware, covering every route and extractor,
     /// including management/dashboard routes supplied by other crates.
     pub fn wrap(&self, router: Router) -> Router {
-        self.probe(self.protect(router))
+        self.probe(self.protect(router.layer(middleware::from_fn_with_state(self.clone(), layer))))
     }
 
     pub(crate) fn protect(&self, router: Router) -> Router {
-        router.layer(middleware::from_fn_with_state(self.clone(), layer))
+        self.install(router)
+    }
+
+    /// Supplies admission to route authentication without reading any body.
+    /// The route's existing successful key check calls `after_auth`.
+    pub fn install(&self, router: Router) -> Router {
+        router.layer(middleware::from_fn_with_state(self.clone(), install))
     }
 
     pub(crate) fn probe(&self, router: Router) -> Router {
         router.layer(middleware::from_fn_with_state(self.clone(), probe))
     }
+}
+
+async fn install(State(ingress): State<Ingress>, mut request: Request, next: Next) -> Response {
+    request.extensions_mut().insert(ingress);
+    next.run(request).await
+}
+
+/// Called only after the route's own authentication has succeeded.
+pub async fn after_auth(request: Request, next: Next) -> Response {
+    match request.extensions().get::<Ingress>().cloned() {
+        Some(ingress) => layer(State(ingress), request, next).await,
+        None => next.run(request).await,
+    }
+}
+
+/// OAuth callbacks accept at most 64 KiB, without using the authenticated pool.
+pub async fn public_request(request: Request, next: Next) -> Response {
+    let mut limits = request.extensions().get::<Ingress>()
+        .map(Ingress::limits).unwrap_or_default();
+    limits.buffered_body_bytes = None;
+    layer(State(Ingress::new(limits, 64 << 10)), request, next).await
 }
 
 #[derive(Default)]
@@ -201,11 +231,6 @@ pub struct IngressProbe;
 /// An ingress rejection that asks HTTP/2 to stop admitting further streams.
 #[derive(Clone)]
 pub struct IngressRejection;
-
-/// The admitted raw bytes. Logging can share them instead of allocating a
-/// second copy, and the lifetime of those clones keeps the reservation alive.
-#[derive(Clone)]
-pub(crate) struct BufferedRequest(pub(crate) Bytes);
 
 async fn probe(State(ingress): State<Ingress>, request: Request, next: Next) -> Response {
     if request.extensions().get::<IngressProbe>().is_some() {
@@ -261,12 +286,11 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
 async fn admitted(
     ingress: Ingress,
     body_limit: usize,
-    mut parts: http::request::Parts,
+    parts: http::request::Parts,
     raw: Bytes,
     parser: Reservation,
     next: Next,
 ) -> Response {
-    parts.extensions.insert(BufferedRequest(raw.clone()));
     // Keep the reservation through downstream extractors, including ones
     // whose collected bytes no longer share the input Bytes owner.
     let scope = RequestScope {
@@ -444,7 +468,6 @@ impl BodyBudget {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).limit = limit;
     }
 
-    #[cfg(test)]
     fn used(&self) -> usize {
         self.0.lock().unwrap().used
     }

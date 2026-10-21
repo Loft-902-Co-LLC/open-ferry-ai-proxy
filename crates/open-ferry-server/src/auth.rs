@@ -109,7 +109,7 @@ pub(crate) async fn require_key(
     };
     drop(settings);
     request.extensions_mut().insert(principal);
-    next.run(request).await
+    crate::ingress::after_auth(request, next).await
 }
 
 /// The 401 for a rejected request.

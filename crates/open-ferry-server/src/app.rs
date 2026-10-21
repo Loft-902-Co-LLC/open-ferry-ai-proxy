@@ -163,18 +163,12 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), safe_mode))
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            logged_body_limit,
-        ))
+
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_log::layer,
         ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            declared_body_limit,
-        ));
+;
     let router = ingress
         .protect(router)
         .layer(middleware::from_fn(access_log::layer))
@@ -183,64 +177,6 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             request_context::layer,
         ));
     ingress.probe(router)
-}
-
-/// Rejects a declared oversized body before it is read, logged or authenticated
-/// (upstream's `maxRequestBodyBytesMiddleware`).
-async fn declared_body_limit(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
-    let length = request
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-    if length.is_some_and(|length| length > limit as u64) {
-        return error_response(
-            413,
-            HeaderMap::new(),
-            Bytes::from_static(br#"{"error":"http: request body too large"}"#),
-            JSON_UTF8,
-        );
-    }
-    next.run(request).await
-}
-
-/// The logger has already read ahead in Full mode. Enforce its bound before
-/// authentication too, including an unauthenticated chunked request. Replay
-/// accepted bytes so the handler still sees exactly the caller's body.
-async fn logged_body_limit(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let full = request_context::of(request.extensions()).is_some_and(|context| {
-        context.request_log().mode() == Some(open_ferry_core::observe::request_log::Mode::Full)
-    });
-    if !full {
-        return next.run(request).await;
-    }
-    let (parts, body) = request.into_parts();
-    match crate::body::read_raw(&parts.headers, body, crate::ingress::body_limit(state.settings().config.body_limit)).await {
-        Ok(raw) => {
-            next.run(Request::from_parts(parts, axum::body::Body::from(raw)))
-                .await
-        }
-        Err(response) if response.status() == StatusCode::PAYLOAD_TOO_LARGE => error_response(
-            413,
-            HeaderMap::new(),
-            Bytes::from_static(br#"{"error":"http: request body too large"}"#),
-            JSON_UTF8,
-        ),
-        Err(mut response) => {
-            // Only an oversized logging read aborts before upstream's CORS.
-            set_cors_headers(response.headers_mut());
-            response
-        }
-    }
 }
 
 /// `routes` alone, without the proxy's: for open-ferry's management

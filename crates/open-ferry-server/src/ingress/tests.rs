@@ -25,6 +25,58 @@ fn app(ingress: &Ingress) -> Router {
     ingress.wrap(Router::new().route("/", post(|bytes: Bytes| async move { bytes })))
 }
 
+#[tokio::test]
+async fn authentication_precedes_body_polling_and_budget_reservation() {
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+    let dispatcher = FakeDispatcher::new(vec![]);
+    let state = state(ServerConfig { api_keys: vec!["client-secret".into()], body_limit: 4,
+        ingress: IngressConfig { buffered_body_bytes: Some(12), ..IngressConfig::default() },
+        ..ServerConfig::default() }, FakeCatalog::new(), &dispatcher);
+    let router = crate::router(state.clone());
+    let polls = Arc::new(AtomicUsize::new(0));
+    for _ in 0..4 {
+        let count = polls.clone();
+        let response = router.clone().oneshot(Request::post("/v1/chat/completions")
+            .header(header::CONTENT_LENGTH, "67108864")
+            .body(Body::from_stream(stream::once(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, std::io::Error>(Bytes::new())
+            }))).unwrap()).await.unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(state.ingress().reserved_body_bytes(), 0);
+    }
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn authenticated_and_keyless_proxy_uploads_enforce_the_budget() {
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+    for keyed in [true, false] {
+        let dispatcher = FakeDispatcher::new(vec![]);
+        let state = state(ServerConfig { api_keys: if keyed { vec!["client-secret".into()] } else { vec![] },
+            body_limit: 4, ingress: IngressConfig { buffered_body_bytes: Some(12), ..IngressConfig::default() },
+            ..ServerConfig::default() }, FakeCatalog::new(), &dispatcher);
+        let router = crate::router(state.clone());
+        let mut tasks = Vec::new();
+        for _ in 0..3 {
+            let started = Arc::new(Notify::new());
+            let mut request = Request::post("/v1/chat/completions").header(header::CONTENT_LENGTH, "4");
+            if keyed { request = request.header(header::AUTHORIZATION, "Bearer client-secret"); }
+            tasks.push(tokio::spawn(router.clone().oneshot(request.body(stalled(started.clone())).unwrap())));
+            started.notified().await;
+        }
+        assert_eq!(state.ingress().reserved_body_bytes(), 12);
+        let mut request = Request::post("/v1/chat/completions").header(header::CONTENT_LENGTH, "4");
+        if keyed { request = request.header(header::AUTHORIZATION, "Bearer client-secret"); }
+        let response = router.oneshot(request.body(Body::from("abcd")).unwrap()).await.unwrap();
+        assert_eq!(response.status(), 503);
+        for task in tasks { task.abort(); let _ = task.await; }
+        assert_eq!(state.ingress().reserved_body_bytes(), 0);
+    }
+}
+
 fn stalled(started: Arc<Notify>) -> Body {
     Body::from_stream(
         stream::once(async move {
