@@ -3336,7 +3336,7 @@ class InstallerPrivilegeGuardTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_real_machine_owner_is_initialized_before_creating_staging_or_children(self):
-        source = read_text(INSTALL_PS1)
+        source = read_text(INSTALL_PS1).replace("\r\n", "\n")
         guard = "if ($hardened -and $reallyPrivileged -and $testSid -ne 'S-1-5-18') {\n        Initialize-AdminOwner\n    }"
         owner = source.index(guard)
         self.assertLess(source.index("an account install must not run as administrator"), owner)
