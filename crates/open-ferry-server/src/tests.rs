@@ -697,7 +697,10 @@ async fn claude_messages() {
                 payload: Bytes::from(zipped),
                 headers: HeaderMap::new(),
             }),
-            Outcome::chunks(&["event: ping\ndata: {}\n\n"]),
+            Outcome::chunks(&[
+                "event: ping\ndata: {}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+            ]),
             Outcome::Stream(
                 HeaderMap::new(),
                 vec![
@@ -722,7 +725,10 @@ async fn claude_messages() {
     let stream = r#"{"model":"claude-sonnet","stream":null}"#;
     let (_, headers, body) = send(&app, authed(Method::POST, "/v1/messages", stream)).await;
     assert_eq!(content_type(&headers), "text/event-stream");
-    assert_eq!(body, "event: ping\ndata: {}\n\n");
+    assert_eq!(
+        body,
+        "event: ping\ndata: {}\n\ndata: {\"type\":\"message_stop\"}\n\n"
+    );
 
     let (_, _, body) = send(&app, authed(Method::POST, "/v1/messages", stream)).await;
     assert_eq!(
@@ -749,6 +755,34 @@ async fn claude_messages() {
     assert!(calls[1].options.stream);
     assert_eq!(calls[3].method, "count_tokens");
     assert_eq!(calls[3].options.response_format, Format::from_static(""));
+}
+
+// TestClaudeMessagesHandlerEmptyStreamClosesWithSSEError and truncated EOF.
+#[tokio::test]
+async fn claude_empty_and_truncated_streams_end_with_one_sse_error() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![
+            Outcome::chunks(&[]),
+            Outcome::chunks(&["event: ping\ndata: {}\n\n"]),
+        ],
+    );
+    for _ in 0..2 {
+        let (status, headers, body) = send(
+            &app,
+            authed(
+                Method::POST,
+                "/v1/messages",
+                r#"{"model":"claude-sonnet","stream":true}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type(&headers), "text/event-stream");
+        assert_eq!(body.matches("event: error\n").count(), 1);
+        assert!(body.contains("upstream stream closed before message_stop"));
+        assert!(body.ends_with("\n\n"));
+    }
 }
 
 // TestClaudeIncompleteStreamError: a 408 is a `timeout_error`, as JSON and
