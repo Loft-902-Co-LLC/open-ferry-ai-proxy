@@ -25,8 +25,12 @@ use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use http::{HeaderMap, header};
 use open_ferry_translate::go;
+use ruzstd::decoding::BlockDecodingStrategy;
+#[cfg(not(test))]
+use ruzstd::decoding::FrameDecoder;
 use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
-use ruzstd::decoding::{BlockDecodingStrategy, FrameDecoder};
+#[cfg(test)]
+use zstd_drop_probe::ObservedDecoder as FrameDecoder;
 
 use crate::errors::{ErrorMessage, invalid_request};
 
@@ -166,6 +170,8 @@ fn decode(raw: &Bytes, encoding: &str, limit: usize) -> Result<Bytes, DecodeErro
     Ok(body)
 }
 
+#[cfg(test)]
+pub(crate) mod zstd_drop_probe;
 mod zstd_limits;
 
 /// Decodes a zstd stream of any number of frames, skipping skippable ones.
@@ -173,10 +179,12 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
     let failed = |err: &dyn std::fmt::Display| {
         DecodeError::Failed(format!("failed to decode zstd request body: {err}"))
     };
+    // Locals drop in reverse order, including on errors and unwind. Keep the
+    // reservation alive until after the decoder frees its history and scratch.
+    let mut working = crate::ingress::reserve_decoder(0).map_err(|()| DecodeError::Budget)?;
     let mut decoder = FrameDecoder::new();
     let window = limit.min(8 << 20);
     decoder.set_max_window_size(window as u64);
-    let mut working = crate::ingress::reserve_decoder(0).map_err(|()| DecodeError::Budget)?;
     let mut output =
         crate::ingress::BudgetBuffer::with_limit(crate::ingress::request_budget(), limit);
     while !input.is_empty() {
@@ -189,7 +197,10 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
                 .map_err(|()| DecodeError::Budget)?;
         }
         match decoder.init(&mut input) {
-            Ok(()) => {}
+            Ok(()) => {
+                #[cfg(test)]
+                zstd_drop_probe::after_init();
+            }
             Err(FrameDecoderError::WindowSizeTooBig { .. }) => return Err(DecodeError::TooLarge),
             Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
                 length,
