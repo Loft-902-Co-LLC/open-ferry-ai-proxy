@@ -299,6 +299,24 @@ export class ConfigEditor {
     await this.ready();
     if (this.versioned && paths.length > 0) await this.forWrite(paths.flatMap((path) => this.paths(path)));
   };
+  /** Key drafts are operations on named keys, never a whole-list payload. */
+  readonly checkKeyTargets = (changes: readonly { kind: "add" | "delete"; key: string }[], keys: readonly string[]) => {
+    if (!this.versioned) return;
+    const left = [...keys];
+    for (const change of changes) {
+      if (change.kind !== "delete") continue;
+      const at = left.indexOf(change.key);
+      if (at < 0) throw new ConfigConflict(["Client API keys"]);
+      left.splice(at, 1);
+    }
+  };
+  readonly checkKeyChanges = async (changes: readonly { kind: "add" | "delete"; key: string }[]) => {
+    await this.ready();
+    if (!this.versioned || changes.length === 0) return;
+    const fresh = await this.forWrite([]);
+    const keys = record(formValues(fresh.tree, API_KEYS))["api-keys"];
+    this.checkKeyTargets(changes, Array.isArray(keys) ? keys as string[] : []);
+  };
   private async send<T>(path: string, request: ApiRequest, fresh: Snapshot, changes: readonly Change[]): Promise<T> {
     const answer = await this.response<T>(path, { ...request, ifMatch: fresh.etag });
     // A failed request never reaches here, never retries, and never adopts
@@ -429,7 +447,7 @@ export class ConfigEditor {
       return (await this.response<T>(path, request)).data;
     }
     const locations = this.paths(path);
-    const fresh = await this.forWrite(locations);
+    const fresh = await this.forWrite(path === API_KEYS ? [] : locations);
     let target = path;
     let change = request;
     let value: unknown = request.json;
