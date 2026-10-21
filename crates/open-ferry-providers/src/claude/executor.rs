@@ -107,6 +107,7 @@ use super::stream::{self, MAX_LINE, StreamSetup, apply_patch_error};
 use super::thinking;
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::usage::ensure_responses_usage_details;
+use super::web_search;
 use crate::codex::compat;
 use crate::json::{self, Body};
 use crate::observe_send::{self, Attempt, BodyTap};
@@ -234,15 +235,28 @@ impl ClaudeExecutor {
     /// The Messages body for Claude, from the client's request.
     fn prepare_messages(
         &self,
+        auth: &Auth,
         request: &Request,
         options: &Options,
-        base_model: &str,
         upstream_stream: bool,
         set_stream: bool,
         summary: bool,
     ) -> Result<Prepared, ExecError> {
+        let base_model = thinking::parse_suffix(&request.model).0;
         let config = self.config.as_deref();
-        let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
+        let mut body = translate_request_for_auth(
+            config,
+            auth,
+            request,
+            options,
+            base_model,
+            upstream_stream,
+            self.models.as_deref(),
+        )?;
+        let web_search = web_search::scope(config, auth, request, options);
+        if let Some(scope) = &web_search {
+            scope.restore(&mut body);
+        }
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);
@@ -286,6 +300,7 @@ impl ClaudeExecutor {
             upstream: body,
             translation,
             extra_betas,
+            web_search,
         })
     }
 
@@ -462,7 +477,7 @@ impl ClaudeExecutor {
         // A client that needs translating gets it from Claude's stream.
         let upstream_stream = format != Format::CLAUDE;
         let prepared =
-            self.prepare_messages(request, options, base_model, upstream_stream, true, summary)?;
+            self.prepare_messages(auth, request, options, upstream_stream, true, summary)?;
         let headers = build_headers(&target, &prepared, auth, options, upstream_stream, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
@@ -499,6 +514,9 @@ impl ClaudeExecutor {
             })?;
         }
 
+        if let Some(scope) = &prepared.web_search {
+            scope.record(&data);
+        }
         let original = original_request(request, options);
         let context = ResponseContext {
             model: &request.model,
@@ -541,7 +559,7 @@ impl ClaudeExecutor {
         let target = self.target(auth);
         let url = format!("{}/v1/messages?beta=true", target.base_url);
         let format = response_format(options);
-        let prepared = self.prepare_messages(request, options, base_model, true, false, false)?;
+        let prepared = self.prepare_messages(auth, request, options, true, false, false)?;
         let headers = build_headers(&target, &prepared, auth, options, true, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
@@ -589,6 +607,7 @@ impl ClaudeExecutor {
                 fast,
                 status,
                 secrets,
+                web_search: prepared.web_search,
             },
         );
         Ok(StreamResponse {
@@ -614,7 +633,19 @@ impl ClaudeExecutor {
         let config = self.config.as_deref();
         // As upstream, a refused part fails the count before the choice of
         // how to count it.
-        let mut body = translate_request(config, request, options, base_model, translate_stream)?;
+        let mut body = translate_request_for_auth(
+            config,
+            auth,
+            request,
+            options,
+            base_model,
+            translate_stream,
+            self.models.as_deref(),
+        )?;
+        let web_search = web_search::scope(config, auth, request, options);
+        if let Some(scope) = &web_search {
+            scope.restore(&mut body);
+        }
         if target.key.trim().is_empty() || !target.first_party {
             return Err(ExecError::upstream(
                 501,
@@ -751,17 +782,40 @@ struct Prepared {
     translation: Value,
     /// The body's `betas`, for the header.
     extra_betas: Vec<String>,
+    /// One credential/session scope shared by restoration and response recording.
+    web_search: Option<web_search::Scope>,
 }
 
 /// The client's request in Claude's format, for `base_model`, with its
 /// thinking setting applied; a 400 instead when the translation refused a
 /// content part Claude can't receive, so the request is never sent.
+#[cfg(test)]
 pub(crate) fn translate_request(
     config: Option<&Config>,
     request: &Request,
     options: &Options,
     base_model: &str,
     stream: bool,
+) -> Result<Value, ExecError> {
+    translate_request_for_auth(
+        config,
+        &Auth::default(),
+        request,
+        options,
+        base_model,
+        stream,
+        None,
+    )
+}
+
+pub(crate) fn translate_request_for_auth(
+    config: Option<&Config>,
+    auth: &Auth,
+    request: &Request,
+    options: &Options,
+    base_model: &str,
+    stream: bool,
+    models: Option<&dyn ModelCatalog>,
 ) -> Result<Value, ExecError> {
     let from = &options.source_format;
     let mut payload = parse_object(&request.payload);
@@ -788,12 +842,20 @@ pub(crate) fn translate_request(
     if json::str_at(&body, "model") != base_model {
         json::set(&mut body, "model", Value::String(base_model.to_owned()));
     }
-    thinking::apply_request(
+    thinking::apply_request_with_models(
         &mut body,
         &request.model,
         from.as_str(),
         &Body::parse(&request.payload),
         &Body::parse(&options.original_request),
+        models,
+        super::capabilities::resolve(
+            config,
+            auth,
+            &request.model,
+            &options.metadata.route_model,
+            options.metadata.model_config.as_deref(),
+        ),
     )?;
     Ok(body)
 }

@@ -183,7 +183,7 @@ fn has_previous_response_id(payload: &[u8]) -> bool {
 /// window or session header. An `execution:` key is the server's and keeps
 /// its form. A client's key without a caller key is disabled rather than
 /// shared by everyone.
-fn isolate_session_key(options: &Options, session_key: &str) -> String {
+pub(crate) fn isolate_session_key(options: &Options, session_key: &str) -> String {
     let session_key = session_key.trim();
     if session_key.is_empty() {
         return String::new();

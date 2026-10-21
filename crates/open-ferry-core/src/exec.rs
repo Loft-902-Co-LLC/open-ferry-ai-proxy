@@ -147,6 +147,10 @@ pub type SelectedAuthCallback = Arc<dyn Fn(&str) + Send + Sync>;
 /// Hints for credential selection, from upstream's metadata keys.
 #[derive(Clone, Default)]
 pub struct Metadata {
+    /// The manager's route before this credential's upstream-name rewrite.
+    pub route_model: String,
+    /// Config captured with that route's aliases, independent of executor reloads.
+    pub model_config: Option<Arc<crate::manager::ClaudeModelConfig>>,
     /// The model as the client named it (`requested_model`).
     pub requested_model: String,
     /// The route, such as `/v1/responses/compact` (`request_path`).
@@ -179,6 +183,8 @@ impl fmt::Debug for Metadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Metadata")
             .field("requested_model", &self.requested_model)
+            .field("route_model", &self.route_model)
+            .field("model_config", &self.model_config.is_some())
             .field("request_path", &self.request_path)
             .field("idempotency_key", &self.idempotency_key)
             .field("auth_selection_model", &self.auth_selection_model)

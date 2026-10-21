@@ -107,6 +107,8 @@ mod sync_contract_tests;
 #[cfg(test)]
 mod testing;
 mod types;
+mod web_search_result_cache;
+pub use web_search_result_cache::CodexWebSearchResultCacheConfig;
 mod v8;
 pub mod v8_edit;
 mod watcher;

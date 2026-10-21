@@ -1010,18 +1010,55 @@ async fn preserved_thinking_injection_requires_signed_block() {
     assert!(body["thinking"].get("block_binding").is_none(), "{body}");
 }
 
-// Ported from TestClaudeExecutor_PreservedThinkingInjectionRequiresThinkingType.
+// Ported from e13bc9a1's omitted-thinking and forced-tool executor cases.
 #[tokio::test]
-async fn preserved_thinking_injection_requires_thinking_type() {
+async fn omitted_thinking_synthesizes_adaptive_binding() {
+    for model in [
+        "claude-haiku-5-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+    ] {
+        for redacted in [false, true] {
+            let mut payload = thinking_replay_payload(model, Value::Null);
+            if redacted {
+                payload["messages"][1]["content"][0] =
+                    json!({"type": "redacted_thinking", "data": "dummy"});
+            }
+            let (body, betas) = capture_claude_request("", false, model, payload).await;
+            assert_eq!(body["thinking"]["type"], "adaptive", "{model}: {body}");
+            assert_eq!(drop_block_behavior(&body), "drop_block", "{model}: {body}");
+            assert!(betas.contains(THINKING_BINDING_BETA_NAME));
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_typeless_thinking_stays_untouched() {
     let model = "claude-haiku-5-5";
-    let (body, _) = capture_claude_request(
-        "",
-        false,
-        model,
-        thinking_replay_payload(model, Value::Null),
-    )
-    .await;
-    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+    for thinking in [Value::Null, json!({})] {
+        let mut payload = thinking_replay_payload(model, Value::Null);
+        payload["thinking"] = thinking.clone();
+        let (body, _) = capture_claude_request("", false, model, payload).await;
+        assert_eq!(body["thinking"], thinking);
+    }
+}
+
+#[tokio::test]
+async fn forced_tool_choice_keeps_thinking_off() {
+    let model = "claude-haiku-5-5";
+    for choice in [
+        json!({"type": "any"}),
+        json!({"type": "tool", "name": "lookup"}),
+    ] {
+        for thinking in [Value::Null, json!({"type": "adaptive"})] {
+            let mut payload = thinking_replay_payload(model, thinking);
+            payload["tools"] = json!([{"name": "lookup", "input_schema": {"type": "object"}}]);
+            payload["tool_choice"] = choice.clone();
+            let (body, _) = capture_claude_request("", false, model, payload).await;
+            assert!(body.get("thinking").is_none(), "{body}");
+        }
+    }
 }
 
 // Ported from TestClaudeExecutor_PreservedThinkingInjectionKeepsCallerError.
@@ -2768,3 +2805,115 @@ async fn initializes_empty_responses_patch_stream_before_finalizing() {
         stream::APPLY_PATCH_ERROR_MESSAGE
     );
 }
+
+fn search_result_content(body: &Value) -> Value {
+    body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .find(|block| block["type"] == "web_search_tool_result")
+        .map(|block| block["content"].clone())
+        .unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn web_search_results_survive_replay_only_for_the_same_credential() {
+    let results = json!([{"type": "web_search_result", "url": "https://example.com/a", "title": "A", "encrypted_content": "dummy-ciphertext"}]);
+    let result_block = json!({"type": "web_search_tool_result", "tool_use_id": "srvtoolu_cached", "content": results});
+    let config = Arc::new(
+        Config::parse(
+            "client: {codex: {web-search-result-cache: {enabled: true, ttl: 30m, limit: 1024}}}",
+        )
+        .unwrap(),
+    );
+    for stream in [false, true] {
+        let reply = if stream {
+            Reply::sse(&SSE.replace("event: message_delta", &format!("event: content_block_start\ndata: {}\n\nevent: message_delta", json!({"type": "content_block_start", "index": 1, "content_block": result_block}))))
+        } else {
+            let mut message: Value = serde_json::from_str(MESSAGE).unwrap();
+            message["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(result_block.clone());
+            Reply::json(&message.to_string())
+        };
+        let mock = Mock::start(reply).await;
+        let executor = mock.executor().with_config(config.clone());
+        let mut auth = (*api_key_auth()).clone();
+        auth.id = format!("cache-credential-a-{stream}");
+        let auth = Arc::new(auth);
+        let mut opts = options(Format::OPENAI_RESPONSE);
+        opts.response_format = Format::CLAUDE;
+        opts.metadata.execution_session_id = Some(format!("web-search-executor-{stream}"));
+        let first = Request {
+            model: "claude-sonnet-5-5".into(),
+            payload: Bytes::from(
+                json!({"input": [{"role": "user", "content": "search"}]}).to_string(),
+            ),
+        };
+        if stream {
+            let response = executor
+                .execute_stream(auth.clone(), first, opts.clone())
+                .await
+                .unwrap();
+            for chunk in response.chunks.collect::<Vec<_>>().await {
+                chunk.unwrap();
+            }
+        } else {
+            executor
+                .execute(auth.clone(), first, opts.clone())
+                .await
+                .unwrap();
+        }
+        let replay = Request {model: "claude-sonnet-5-5".into(), payload: Bytes::from(json!({"input": [
+            {"type": "web_search_call", "id": "ws_srvtoolu_cached", "status": "completed", "action": {"type": "search", "query": "q"}},
+            {"role": "user", "content": "continue"}]}).to_string())};
+        // Preparation is shared by Execute and ExecuteStream; check the actual next wire body.
+        if stream {
+            let response = executor
+                .execute_stream(auth.clone(), replay.clone(), opts.clone())
+                .await
+                .unwrap();
+            for chunk in response.chunks.collect::<Vec<_>>().await {
+                chunk.unwrap();
+            }
+        } else {
+            executor
+                .execute(auth.clone(), replay.clone(), opts.clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            search_result_content(&mock.last().json()),
+            results,
+            "stream={stream}: {}",
+            mock.last().body
+        );
+        let mut other = (*auth).clone();
+        other.id = format!("cache-credential-b-{stream}");
+        let prepared = executor
+            .prepare_messages(&other, &replay, &opts, stream, true, false)
+            .unwrap();
+        assert_eq!(search_result_content(&prepared.upstream), json!([]));
+        let count_mock = Mock::start(Reply::json(r#"{"input_tokens":99}"#)).await;
+        count_mock
+            .executor()
+            .with_config(config.clone())
+            .count_tokens(auth.clone(), replay.clone(), opts.clone())
+            .await
+            .unwrap();
+        assert_eq!(search_result_content(&count_mock.last().json()), results);
+        // User payload rules keep the final word over restored content.
+        let filtered = Arc::new(Config::parse("client: {codex: {web-search-result-cache: {enabled: true}}}\npayload:\n  filter:\n    - models: [{name: claude-sonnet-5-5, protocol: claude}]\n      params: [messages.0.content.1.content]\n").unwrap());
+        let prepared = mock
+            .executor()
+            .with_config(filtered)
+            .prepare_messages(&auth, &replay, &opts, false, true, false)
+            .unwrap();
+        assert_eq!(search_result_content(&prepared.upstream), Value::Null);
+    }
+}
+
+#[path = "capability_tests.rs"]
+mod capability_tests;

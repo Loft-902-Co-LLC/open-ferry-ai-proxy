@@ -160,6 +160,19 @@ static CONFIG_CODEX_CLIENT_CONFIG: Type = Type {
     fields: &[
         ("enable-apply-patch", Field::Leaf),
         ("optimize-multi-agent-v2", Field::Leaf),
+        (
+            "web-search-result-cache",
+            Field::Struct(&CONFIG_CODEX_WEB_SEARCH_RESULT_CACHE),
+        ),
+    ],
+};
+
+static CONFIG_CODEX_WEB_SEARCH_RESULT_CACHE: Type = Type {
+    name: "config.CodexWebSearchResultCacheConfig",
+    fields: &[
+        ("enabled", Field::Leaf),
+        ("ttl", Field::Leaf),
+        ("limit", Field::Leaf),
     ],
 };
 
@@ -663,6 +676,7 @@ static REGISTRY_THINKING_SUPPORT: Type = Type {
     name: "registry.ThinkingSupport",
     fields: &[
         ("dynamic-allowed", Field::Leaf),
+        ("disable-type", Field::Leaf),
         ("levels", Field::Leaf),
         ("max", Field::Leaf),
         ("min", Field::Leaf),

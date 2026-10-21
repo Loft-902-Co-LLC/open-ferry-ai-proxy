@@ -522,6 +522,12 @@ pub(super) fn thinking_json(support: Option<&ThinkingSupport>) -> String {
     if support.dynamic_allowed {
         fields.push("\"dynamic_allowed\":true".to_owned());
     }
+    if !support.disable_type.is_empty() {
+        fields.push(format!(
+            "\"disable_type\":{}",
+            open_ferry_translate::go::json_string(&support.disable_type)
+        ));
+    }
     if !support.levels.is_empty() {
         let levels: Vec<String> = support
             .levels

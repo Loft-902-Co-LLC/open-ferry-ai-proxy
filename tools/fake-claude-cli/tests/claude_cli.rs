@@ -76,7 +76,7 @@ async fn runs_claude_code_with_its_flags_in_both_prompt_modes() {
             ..fixture.entry()
         };
         let mut body = claude_body("Hello");
-        body["model"] = json!("claude-opus-4-8");
+        body["model"] = json!("claude-opus-4-6");
         body["max_tokens"] = json!(4096);
         body["thinking"] = json!({"type": "enabled", "budget_tokens": 2048});
         execute(&fixture, &entry, Format::CLAUDE, body)
@@ -97,7 +97,7 @@ async fn runs_claude_code_with_its_flags_in_both_prompt_modes() {
                 "--verbose",
                 "--include-partial-messages",
                 "--model",
-                "claude-opus-4-8",
+                "claude-opus-4-6",
                 "--tools",
                 "",
                 "--strict-mcp-config",
@@ -146,6 +146,106 @@ async fn runs_claude_code_with_its_flags_in_both_prompt_modes() {
     let argv = strings(&record["argv"]);
     assert_eq!(argv[argv.len() - 2..], ["--effort", "high"]);
     assert_eq!(record["env"].get("MAX_THINKING_TOKENS"), None);
+}
+
+#[tokio::test]
+async fn adaptive_only_model_maps_a_requested_budget_to_cli_effort() {
+    let fixture = Fixture::new(&success(&["Hi"]));
+    let mut body = claude_body("Hello");
+    body["model"] = json!("claude-opus-4-8");
+    body["max_tokens"] = json!(4096);
+    body["thinking"] = json!({"type": "enabled", "budget_tokens": 2048});
+    execute(&fixture, &fixture.entry(), Format::CLAUDE, body)
+        .await
+        .unwrap();
+    let record = fixture.record();
+    let argv = strings(&record["argv"]);
+    assert_eq!(argv[argv.len() - 2..], ["--effort", "medium"]);
+    assert_eq!(record["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "4096");
+    assert_eq!(record["env"].get("MAX_THINKING_TOKENS"), None);
+}
+
+#[tokio::test]
+async fn selected_cli_entry_enforces_configured_thinking_levels() {
+    let fixture = Fixture::new(&success(&["Hi"]));
+    let mut entry = fixture.entry();
+    entry.models = vec![open_ferry_core::config::ClaudeModel {
+        name: MODEL.into(),
+        thinking: Some(open_ferry_core::config::ThinkingSupport {
+            levels: vec!["low".into(), "medium".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    let mut config = open_ferry_core::config::Config::default();
+    config.claude_cli = vec![entry.clone()];
+    let executor = fixture.executor().with_config(std::sync::Arc::new(config));
+    let mut body = claude_body("Hello");
+    body["thinking"] = json!({"type":"adaptive"});
+    body["output_config"] = json!({"effort":"high"});
+    let error = executor
+        .execute(
+            auth(&entry),
+            request(body.clone()),
+            options(Format::CLAUDE, false),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(fixture.records().is_empty());
+    body["output_config"]["effort"] = json!("medium");
+    executor
+        .execute(auth(&entry), request(body), options(Format::CLAUDE, false))
+        .await
+        .unwrap();
+    let argv = strings(&fixture.record()["argv"]);
+    assert_eq!(argv[argv.len() - 2..], ["--effort", "medium"]);
+}
+
+#[tokio::test]
+async fn auto_route_uses_the_selected_cli_snapshot() {
+    use open_ferry_core::exec::Dispatcher as _;
+    use open_ferry_core::manager::{Manager, Settings};
+    use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
+    use std::sync::Arc;
+    let fixture = Fixture::new(&success(&["Hi"]));
+    let mut entry = fixture.entry();
+    entry.models = vec![open_ferry_core::config::ClaudeModel {
+        name: MODEL.into(),
+        alias: "fast".into(),
+        thinking: Some(open_ferry_core::config::ThinkingSupport {
+            levels: vec!["low".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    let mut config = open_ferry_core::config::Config::default();
+    config.claude_cli = vec![entry.clone()];
+    let registry = Arc::new(ModelRegistry::new());
+    let manager = Manager::new(Settings::from(&config), registry.clone(), None);
+    let mut auth = (*auth(&entry)).clone();
+    auth.status = open_ferry_core::auth::Status::Active;
+    registry.register_auth(&auth, &RegistrationRules::from(&config));
+    manager.register(auth).unwrap();
+    // The executor deliberately has a different snapshot: the picked alias
+    // and capability config must come from the manager's one routing snapshot.
+    manager.register_executor(Arc::new(
+        fixture
+            .executor()
+            .with_config(Arc::new(open_ferry_core::config::Config::default())),
+    ));
+    let mut opts = options(Format::OPENAI, false);
+    opts.metadata.requested_model = "auto".into();
+    let mut req = request(
+        json!({"model":"auto", "messages":[{"role":"user","content":"hi"}], "reasoning_effort":"high"}),
+    );
+    req.model = "fast".into();
+    manager
+        .execute(&["claude-cli".into()], req, opts)
+        .await
+        .unwrap();
+    let argv = strings(&fixture.record()["argv"]);
+    assert_eq!(argv[argv.len() - 2..], ["--effort", "low"]);
 }
 
 #[tokio::test]

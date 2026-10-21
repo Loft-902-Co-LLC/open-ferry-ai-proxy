@@ -1255,6 +1255,8 @@ struct Service {
     deferred_config: Option<(Arc<Config>, Option<String>)>,
     #[cfg(test)]
     config_applies: usize,
+    #[cfg(test)]
+    executor_registration_events: std::sync::Mutex<Vec<&'static str>>,
     /// Reads the model catalogs from their sources.
     catalogs: CatalogRuntime,
     /// Where the catalogs say which providers' models changed.
@@ -1451,6 +1453,8 @@ impl Service {
             deferred_config: None,
             #[cfg(test)]
             config_applies: 0,
+            #[cfg(test)]
+            executor_registration_events: std::sync::Mutex::default(),
             catalogs: CatalogRuntime::global().clone(),
             catalog_sender,
             catalog_changes,
@@ -1867,23 +1871,35 @@ impl Service {
     /// claude-cli, Gemini, Vertex AI, and the OpenAI-compatible ones (see
     /// [`Self::register_compat_executors`]).
     fn register_executors(&mut self) {
+        self.configure_claude_web_search_cache();
         self.register_native_executors();
         self.register_compat_executors();
+    }
+
+    fn configure_claude_web_search_cache(&self) {
+        open_ferry_providers::claude::apply_web_search_cache_config(
+            &self.config.client.codex.web_search_result_cache,
+        );
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("cache");
     }
 
     /// Registers the Codex, Meta, Claude, claude-cli, Gemini, Gemini
     /// Interactions, Vertex AI and xAI executors for the current config.
     fn register_native_executors(&self) {
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("native");
         let proxy_url = self.config.proxy_url.clone();
         self.register_codex_executor();
         self.register_meta_executor();
         self.register_claude_executor();
-        // It sends nothing itself, so takes no proxy.
-        self.manager.register_executor(Arc::new(
-            ClaudeCliExecutor::new()
-                .with_config(Arc::clone(&self.config))
-                .with_spawn_guard(self.claude_guard.clone()),
-        ));
+        self.register_claude_cli_executor();
         self.manager.register_executor(Arc::new(
             GeminiExecutor::new(proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
@@ -1902,8 +1918,28 @@ impl Service {
         ));
     }
 
+    /// The CLI also binds capabilities from the current config snapshot.
+    fn register_claude_cli_executor(&self) {
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("claude-cli");
+        // It sends nothing itself, so takes no proxy.
+        self.manager.register_executor(Arc::new(
+            ClaudeCliExecutor::new()
+                .with_config(Arc::clone(&self.config))
+                .with_spawn_guard(self.claude_guard.clone()),
+        ));
+    }
+
     /// Registers Claude and publishes the same snapshot to its model catalog.
     fn register_claude_executor(&self) {
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("claude");
         let executor = Arc::new(
             ClaudeExecutor::new(self.config.proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
@@ -3398,6 +3434,7 @@ impl Service {
         let applied_hash = sha256.clone();
         let previous = std::mem::replace(&mut self.config, config);
         let config = Arc::clone(&self.config);
+        self.configure_claude_web_search_cache();
         self.log_level.set_debug(config.debug);
         if (&previous.host, previous.port, &previous.tls)
             != (&config.host, config.port, &config.tls)
@@ -3432,6 +3469,7 @@ impl Service {
             // Claude's switch, native key flags and payload rules follow the
             // whole config, alongside the Codex, Meta and xAI executors.
             self.register_claude_executor();
+            self.register_claude_cli_executor();
             self.register_codex_executor();
             self.register_meta_executor();
             self.register_xai_executor();
@@ -8301,6 +8339,71 @@ mod tests {
     /// `config`, from contents these tests don't keep.
     fn config_changed(config: Arc<Config>) -> WatchEvent {
         WatchEvent::ConfigChanged(config, String::new())
+    }
+
+    #[test]
+    fn web_search_cache_policy_precedes_executor_registration_at_startup_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "");
+        assert_eq!(
+            *service.executor_registration_events.lock().unwrap(),
+            ["cache", "native", "claude", "claude-cli"]
+        );
+        service.executor_registration_events.lock().unwrap().clear();
+        let mut config = (*service.config).clone();
+        config.client.codex.web_search_result_cache.enabled = true;
+        config.client.codex.web_search_result_cache.ttl = "1s".into();
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        assert_eq!(
+            *service.executor_registration_events.lock().unwrap(),
+            ["cache", "claude", "claude-cli"]
+        );
+        // Also exercise a reload that takes the full native-executor branch.
+        service.executor_registration_events.lock().unwrap().clear();
+        let mut config = (*service.config).clone();
+        config.claude.model_level_cooling = !config.claude.model_level_cooling;
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        assert_eq!(
+            *service.executor_registration_events.lock().unwrap(),
+            ["cache", "native", "claude", "claude-cli"]
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_cli_thinking_capabilities_follow_config_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(
+            dir.path(),
+            "claude-cli:\n  - name: test\n    command: nonexistent-claude-for-capability-test\n    models: [{name: claude-opus-4-8, thinking: {levels: [high]}}]\n",
+        );
+        service.claude_guard = Some(claude_cli::SpawnGuard::new(|_, _, _| {
+            Err("this test must never start a process".into())
+        }));
+        let mut config = (*service.config).clone();
+        config.claude_cli[0].models[0]
+            .thinking
+            .as_mut()
+            .unwrap()
+            .levels = vec!["low".into()];
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        let auth = service
+            .manager
+            .list()
+            .into_iter()
+            .find(|auth| auth.provider == "claude-cli")
+            .unwrap();
+        let error = service.manager.executor("claude-cli").unwrap().execute(
+            auth,
+            Request {
+                model: "claude-opus-4-8".into(),
+                payload: br#"{"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}"#.to_vec().into(),
+            },
+            Options::new(open_ferry_core::exec::Format::CLAUDE),
+        ).await.unwrap_err();
+        assert_eq!(
+            error.status, 400,
+            "reloaded capabilities reject high before any spawn: {error:?}"
+        );
     }
 
     // Ported from sdk/cliproxy/service_codex_executor_binding_test.go (v8.0.32).

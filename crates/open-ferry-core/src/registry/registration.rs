@@ -443,6 +443,7 @@ fn thinking(support: &crate::config::ThinkingSupport) -> ThinkingSupport {
         max: support.max,
         zero_allowed: support.zero_allowed,
         dynamic_allowed: support.dynamic_allowed,
+        disable_type: support.disable_type.clone(),
         levels: support.levels.clone(),
     }
 }
@@ -1046,13 +1047,38 @@ fn build_config_models(
 /// catalog's for its name without a thinking suffix such as `(high)`
 /// (upstream's `modelconfig.ResolveModelInfo`).
 fn resolve_thinking(name: &str, configured: Option<&ThinkingSupport>) -> Option<ThinkingSupport> {
-    if let Some(configured) = configured {
-        return Some(normalize_thinking(configured));
-    }
     let base = parse_suffix(name.trim()).trim();
-    open_ferry_translate::models::ModelCatalog::current()
-        .thinking(base)
-        .cloned()
+    let catalog = open_ferry_translate::models::ModelCatalog::current();
+    let known = catalog.thinking(base);
+    if let Some(configured) = configured {
+        let mut normalized = normalize_thinking(configured);
+        if normalized.disable_type.is_empty()
+            && let Some(known) = known
+        {
+            normalized.disable_type.clone_from(&known.disable_type);
+        }
+        return Some(normalized);
+    }
+    known.cloned()
+}
+
+/// A private per-attempt capability snapshot for a configured upstream name
+/// (`modelconfig.ResolveModelInfo`). A configured model is authoritative even
+/// when neither it nor the static catalog declares thinking support.
+pub fn resolve_model_info(
+    name: &str,
+    model_type: &str,
+    configured: Option<&crate::config::ThinkingSupport>,
+) -> ModelInfo {
+    let name = name.trim();
+    let mut info = StaticCatalog::current()
+        .lookup(parse_suffix(name).trim())
+        .unwrap_or_default();
+    info.id = name.to_owned();
+    info.model_type = model_type.trim().to_owned();
+    info.thinking = resolve_thinking(name, configured.map(thinking).as_ref());
+    info.user_defined = false;
+    info
 }
 
 /// `model` without a trailing thinking suffix such as `(high)` (upstream's

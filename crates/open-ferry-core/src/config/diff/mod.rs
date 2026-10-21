@@ -80,6 +80,19 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         old.client.codex.enable_apply_patch,
         new.client.codex.enable_apply_patch,
     );
+    let a = &old.client.codex.web_search_result_cache;
+    let b = &new.client.codex.web_search_result_cache;
+    changes.flag(
+        "client.codex.web-search-result-cache.enabled",
+        a.enabled,
+        b.enabled,
+    );
+    changes.text("client.codex.web-search-result-cache.ttl", &a.ttl, &b.ttl);
+    changes.int(
+        "client.codex.web-search-result-cache.limit",
+        a.limit,
+        b.limit,
+    );
     changes.int("port", old.port, new.port);
     changes.text("auth-dir", &old.auth_dir, &new.auth_dir);
     changes.flag("debug", old.debug, new.debug);
