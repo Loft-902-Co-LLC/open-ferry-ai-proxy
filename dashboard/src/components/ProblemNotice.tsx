@@ -115,6 +115,15 @@ export function explainProblem(problem: CallProblem): Explanation {
           </p>
         ),
       };
+    case "broken-config":
+      return {
+        tone: "warn",
+        title: "config.yaml doesn't parse",
+        body: <>
+          <p>The server is still running its last good config. Open the <Link to="/settings?tab=file">YAML editor</Link> to repair the file.</p>
+          {problem.message !== null && <p>{problem.message}</p>}
+        </>,
+      };
     case "config-conflict":
       return {
         tone: "warn",

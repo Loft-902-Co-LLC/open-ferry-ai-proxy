@@ -712,6 +712,31 @@ test("refuses stale settings and YAML saves after an on-disk edit", async () => 
   await expectEditorShows("# The dashboard's real-save pass", "the reloaded file");
 });
 
+test("repairs a broken on-disk config while the server keeps its last good config", async () => {
+  const page = the();
+  const good = file();
+  writeFileSync(configPath, `${good}\nbroken: [\n`);
+  await page.goto(`${APP}settings`);
+  await expect(page.getByText("config.yaml doesn't parse").first()).toBeVisible();
+  await expect(page.getByText("The server failed (HTTP 500)")).toHaveCount(0);
+  await expect.poll(async () => (await management<Record<string, unknown>>("GET", "config"))["request-retry"],
+    { message: "the last good configuration remains active" }).toBe(8);
+  await page.getByRole("link", { name: "YAML editor" }).first().click();
+  await page.getByRole("button", { name: "Show config.yaml" }).click();
+  await expect(page.getByText("Recovery mode: config.yaml doesn't parse")).toBeVisible();
+  const editor = page.getByRole("textbox", { name: "config.yaml" });
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await pasteSecret(good.replace(/(request-retry: )8\b/, "$17"));
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  await expect.poll(async () => (await management<Record<string, unknown>>("GET", "config"))["request-retry"],
+    { message: "the repaired configuration reloads" }).toBe(7);
+  expectFile("broken: [", "the invalid syntax", false);
+  await management("PATCH", "request-retry", { value: 8 });
+});
+
 test("restarts on the same config and auth directory with saved settings and credentials", async () => {
   const beforeRestart = file();
   await stopServer();
