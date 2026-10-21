@@ -75,9 +75,10 @@ fn translate(
     prepared: &Prepared,
     event: Vec<u8>,
 ) -> Result<Vec<u8>, StatusError> {
+    let original = open_ferry_translate::json::ResponseRequestData::new(&prepared.original_bytes);
     let context = ResponseContext {
         model: &request.model,
-        original_request: (&prepared.original).into(),
+        original_request: original.as_request(),
         request: &prepared.body,
     };
     Registry::global()

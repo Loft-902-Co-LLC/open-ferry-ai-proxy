@@ -241,8 +241,6 @@ pub(super) struct Prepared {
     pub(super) apply_patch: apply_patch_responses::State,
     /// The format the client gets.
     pub(super) response_format: Format,
-    /// The client's request, for response translators.
-    pub(super) original: Value,
     /// The client's request as it came, for the Claude input estimate.
     pub(super) original_bytes: Bytes,
 }
@@ -374,7 +372,6 @@ pub(super) fn prepare_for_base_url(
         body,
         apply_patch,
         response_format: response_format(options),
-        original,
         original_bytes,
     })
 }

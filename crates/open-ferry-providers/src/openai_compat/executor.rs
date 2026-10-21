@@ -91,8 +91,7 @@ use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_bod
 use crate::codex::compat;
 
 use crate::codex::request::{
-    base_model, original_request, parse_object, response_format, set_bool_if_different,
-    set_string_if_different,
+    base_model, parse_object, response_format, set_bool_if_different, set_string_if_different,
 };
 use crate::codex::stream::MAX_LINE;
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
@@ -454,10 +453,10 @@ impl OpenAiCompatExecutor {
             Cow::Owned(redacted) => redacted,
             Cow::Borrowed(_) => data,
         };
-        let original = original_request(request, options);
+        let original = crate::json::response_request(request, options);
         let context = ResponseContext {
             model: &request.model,
-            original_request: (&original).into(),
+            original_request: original.as_request(),
             request: &prepared.body,
         };
         let out = Registry::global()
@@ -506,17 +505,17 @@ impl OpenAiCompatExecutor {
             .await?;
         let response_headers = response.headers().clone();
 
-        let original = original_request(&request, &options);
+        let original = crate::json::response_request(&request, &options);
         let mut translator = Registry::global().response_stream(
             &Format::OPENAI,
             &format,
             &ResponseContext {
                 model: &request.model,
-                original_request: (&original).into(),
+                original_request: original.as_request(),
                 request: &prepared.body,
             },
         );
-        apply_patch_responses::initialize_stream(&mut translator, &format, &original);
+        apply_patch_responses::initialize_stream(&mut translator, &format, original.value());
         let original_bytes = if options.original_request.is_empty() {
             request.payload.clone()
         } else {

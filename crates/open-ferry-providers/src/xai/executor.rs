@@ -519,12 +519,14 @@ impl XaiExecutor {
             return Err(errors::status_error(status, &body).into());
         }
         let response_headers = response.headers().clone();
+        let original =
+            open_ferry_translate::json::ResponseRequestData::new(&prepared.original_payload);
         let translator = Registry::global().response_stream(
             &prepared.to,
             &prepared.response_format,
             &ResponseContext {
                 model: &request.model,
-                original_request: (&prepared.original).into(),
+                original_request: original.as_request(),
                 request: &prepared.body,
             },
         );
@@ -599,9 +601,10 @@ fn translate_completed(
     request: &Request,
     completed: Vec<u8>,
 ) -> Result<Vec<u8>, ExecError> {
+    let original = open_ferry_translate::json::ResponseRequestData::new(&prepared.original_payload);
     let context = ResponseContext {
         model: &request.model,
-        original_request: (&prepared.original).into(),
+        original_request: original.as_request(),
         request: &prepared.body,
     };
     let out = Registry::global()

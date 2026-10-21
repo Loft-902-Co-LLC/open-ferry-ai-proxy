@@ -104,9 +104,7 @@ use serde_json::Value;
 use self::stream::{Lines, StreamSetup};
 use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_body_prefix};
 use crate::codex::compat;
-use crate::codex::request::{
-    base_model, original_request, parse_object, response_format, set_string_if_different,
-};
+use crate::codex::request::{base_model, parse_object, response_format, set_string_if_different};
 use crate::codex::stream::MAX_LINE;
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
@@ -325,10 +323,10 @@ fn translate_answer(
     data: Vec<u8>,
 ) -> Result<Response, ExecError> {
     let format = response_format(options);
-    let original = original_request(request, options);
+    let original = crate::json::response_request(request, options);
     let context = ResponseContext {
         model: &request.model,
-        original_request: (&original).into(),
+        original_request: original.as_request(),
         request: sent,
     };
     let out = Registry::global()
@@ -362,13 +360,13 @@ fn translate_stream(
 ) -> StreamResponse {
     let headers = response.headers().clone();
     let format = response_format(options);
-    let original = original_request(request, options);
+    let original = crate::json::response_request(request, options);
     let translator = Registry::global().response_stream(
         &Format::GEMINI,
         &format,
         &ResponseContext {
             model: &request.model,
-            original_request: (&original).into(),
+            original_request: original.as_request(),
             request: sent,
         },
     );
