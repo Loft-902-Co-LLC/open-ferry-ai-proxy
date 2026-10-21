@@ -630,9 +630,11 @@ async fn complete(
             match save_token_record(&state, *record).await {
                 Ok(path) => Ok((path, true)),
                 Err(SaveError::Sync { path, .. }) => Ok((path, false)),
-                Err(error) => Err(super::siwc_bind::SaveError::Failed(std::io::Error::other(
-                    error,
-                ))),
+                Err(error) => {
+                    tracing::error!("{SAVE_FAILED}: {error}");
+                    store.set_error(&login.state, SAVE_FAILED);
+                    return;
+                }
             }
         }
         (Credential::Bind(tokens), Client::Siwc(bind)) => super::siwc_bind::save(
@@ -704,7 +706,7 @@ fn bind_error(store: &super::sessions::Store, session: &str, error: super::siwc_
         }
         SaveError::Failed(error) => {
             tracing::error!(
-                "{SAVE_FAILED}: credential save failed ({:?}, OS {:?})",
+                "{SAVE_FAILED}: SIWC binding failed ({:?}, OS {:?})",
                 error.kind(),
                 error.raw_os_error()
             );
