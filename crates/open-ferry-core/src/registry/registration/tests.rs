@@ -1646,12 +1646,12 @@ fn per_auth_aliases_decode_as_go_decodes_them() {
         from_metadata(json!({"model-aliases": [{"NAME": "a", "Alias": "b", "x": 1}]})),
         [alias("a", "b")]
     );
-    // A null canonical key hides the legacy one.
-    assert!(
+    // Each metadata alias source contributes; a null one hides nothing.
+    assert_eq!(
         from_metadata(
             json!({"model_aliases": null, "model-aliases": [{"name": "a", "alias": "b"}]})
-        )
-        .is_empty()
+        ),
+        [alias("a", "b")]
     );
     // A list that doesn't decode counts as none.
     assert!(
@@ -2307,5 +2307,53 @@ fn claude_cli_entries_use_their_entry() {
     assert_eq!(
         id_set(&registered(listed, &rules)),
         BTreeSet::from(["max/opus".to_owned(), "opus".to_owned()])
+    );
+}
+
+#[test]
+fn vertex_declared_openapi_names_and_aliases_are_registered() {
+    let mut credential = auth("sa", "vertex", &[]);
+    credential.metadata = object(json!({
+        "service_account": {"client_email": "dummy@example.test"},
+        "openapi_models": "meta/llama, meta/LLAMA, /leading-slash",
+        "models": [{"name": "qwen/qwen-test", "alias": "partner"}]
+    }));
+    assert_eq!(credential.auth_kind(), Some(AuthKind::OAuth));
+    assert_eq!(
+        credential.account_info(),
+        Some(("oauth", "dummy@example.test"))
+    );
+    let AuthModels::Register { models, .. } =
+        auth_models(&credential, &RegistrationRules::default())
+    else {
+        panic!("unregistered");
+    };
+    let info = models.iter().find(|m| m.id == "meta/llama").unwrap();
+    assert_eq!(info.owned_by, "meta");
+    assert_eq!(
+        models
+            .iter()
+            .find(|m| m.id == "/leading-slash")
+            .unwrap()
+            .owned_by,
+        "google"
+    );
+    assert_eq!(info.metadata_model_id, "meta/llama");
+    assert!(info.user_defined);
+    assert_eq!(
+        info.thinking.as_ref().unwrap().levels,
+        ["low", "medium", "high"]
+    );
+    assert_eq!(
+        models
+            .iter()
+            .filter(|m| m.id.eq_ignore_ascii_case("meta/llama"))
+            .count(),
+        1
+    );
+    assert!(
+        models
+            .iter()
+            .any(|m| m.id == "partner" && m.metadata_model_id == "qwen/qwen-test")
     );
 }

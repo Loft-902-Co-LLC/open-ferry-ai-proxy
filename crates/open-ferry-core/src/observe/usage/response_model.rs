@@ -6,7 +6,7 @@
 // IsModelSubstituted, isDatedModelAlias, isModelDateSuffix,
 // isModelNumericVersionSuffix, isModelDigits) and
 // stream_response_model_observer.go (StreamResponseModelObserver)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model an upstream says it served, read from its answer, and whether
@@ -115,6 +115,10 @@ pub(crate) fn extract_gemini_response_model_event(data: &[u8]) -> (String, bool)
         finish = doc.get("response.candidates.0.finishReason");
     }
     let mut terminal = finish.exists() && !finish.string().is_empty();
+    if !terminal {
+        terminal = doc.get("object").string() == "chat.completion"
+            || !doc.get("choices.0.finish_reason").string().is_empty();
+    }
     if !terminal {
         terminal =
             is_interactions_terminal(&event_type(&doc), &doc.get("interaction.status").string());
@@ -531,4 +535,27 @@ impl StreamResponseModelObserver {
 /// `line` without one trailing carriage return.
 fn trim_cr(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+#[cfg(test)]
+mod vertex_openapi_tests {
+    use super::*;
+    #[test]
+    fn openai_shaped_vertex_answers_are_terminal() {
+        for data in [
+            r#"{"model":"meta/llama","object":"chat.completion"}"#,
+            r#"{"model":"meta/llama","choices":[{"finish_reason":"stop"}]}"#,
+        ] {
+            assert_eq!(
+                extract_gemini_response_model_event(data.as_bytes()),
+                ("meta/llama".to_owned(), true)
+            );
+        }
+        assert_eq!(
+            extract_gemini_response_model_event(
+                br#"{"model":"meta/llama","choices":[{"finish_reason":null}]}"#
+            ),
+            ("meta/llama".to_owned(), false)
+        );
+    }
 }

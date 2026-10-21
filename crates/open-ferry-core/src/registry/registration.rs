@@ -7,7 +7,7 @@
 // internal/config/config_normalization.go, internal/modelconfig/model_info.go,
 // ParseSuffix in internal/thinking/suffix.go, the per-account settings read
 // in internal/watcher/synthesizer/file.go and helpers.go, and the plan claim
-// in internal/auth/codex/jwt_parser.go (v8.0.32, MIT).
+// in internal/auth/codex/jwt_parser.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which models a credential serves, and registering them.
@@ -541,7 +541,7 @@ fn auth_models_gated(
             }
             apply_excluded_models(models, &excluded)
         }
-        // Vertex AI serves the same model names as Gemini.
+        // Vertex starts with Gemini names and adds credential-declared MaaS models.
         "vertex" => {
             let mut models = catalog.vertex_models();
             if let Some(entry) = resolve_config_vertex_key(auth, &rules.vertex_keys) {
@@ -551,6 +551,8 @@ fn auth_models_gated(
                 if kind == AUTH_KIND_API_KEY {
                     excluded.clone_from(&entry.excluded_models);
                 }
+            } else {
+                append_vertex_openapi_models(auth, rules, &mut models);
             }
             apply_excluded_models(models, &excluded)
         }
@@ -1327,14 +1329,13 @@ fn per_auth_aliases(auth: &Auth) -> Vec<ModelAlias> {
                 .ok()
                 .and_then(|value| parse_aliases(&value))
         }
-        None => match auth
-            .metadata
-            .get("model_aliases")
-            .or_else(|| auth.metadata.get("model-aliases"))
-        {
-            None | Some(Value::Null) => None,
-            Some(value) => parse_aliases(value),
-        },
+        None => Some(
+            ["model_aliases", "model-aliases", "models"]
+                .into_iter()
+                .filter_map(|key| auth.metadata.get(key).and_then(parse_aliases))
+                .flatten()
+                .collect(),
+        ),
     };
     sanitize_aliases(parsed.unwrap_or_default())
 }
@@ -1610,4 +1611,53 @@ fn claims_plan_type(token: &str) -> Option<String> {
         }
     }
     Some(plan_type)
+}
+
+/// Credential and alias-declared MaaS names supplement the Vertex catalog.
+fn append_vertex_openapi_models(
+    auth: &Auth,
+    rules: &RegistrationRules,
+    models: &mut Vec<ModelInfo>,
+) {
+    let mut names: Vec<String> = auth
+        .attribute("openapi_models")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    names.extend(crate::auth::metadata::openapi_model_names(&auth.metadata));
+    names.extend(
+        aliases_for_auth(rules, "vertex", per_auth_aliases(auth))
+            .into_iter()
+            .map(|a| a.name),
+    );
+    let mut seen: HashSet<String> = models.iter().map(|m| go::to_lower(m.id.trim())).collect();
+    let now = chrono::Utc::now().timestamp();
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() || !seen.insert(go::to_lower(name)) {
+            continue;
+        }
+        models.push(ModelInfo {
+            id: name.to_owned(),
+            metadata_model_id: name.to_owned(),
+            object: "model".to_owned(),
+            created: now,
+            owned_by: name
+                .split_once('/')
+                .filter(|(publisher, _)| !publisher.trim().is_empty())
+                .map_or("google", |(publisher, _)| publisher.trim())
+                .to_owned(),
+            model_type: "vertex".to_owned(),
+            display_name: name.to_owned(),
+            user_defined: true,
+            thinking: resolve_thinking(name, None).or_else(|| {
+                Some(ThinkingSupport {
+                    levels: vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()],
+                    ..ThinkingSupport::default()
+                })
+            }),
+            ..ModelInfo::default()
+        });
+    }
 }

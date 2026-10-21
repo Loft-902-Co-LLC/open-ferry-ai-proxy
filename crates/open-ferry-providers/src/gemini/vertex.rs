@@ -3,10 +3,10 @@
 // their service-account and API-key variants, isImagenModel,
 // getVertexAction, convertImagenToGeminiResponse, convertToImagenRequest,
 // vertexCreds, vertexAPICreds, vertexBaseURL, vertexAPIKeyModelsURL,
-// vertexAPIVersionSuffix) (v8.0.32, MIT).
+// vertexAPIVersionSuffix) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! [`VertexExecutor`]: calls Gemini models on Vertex AI.
+//! [`VertexExecutor`]: calls Gemini, partner and open models on Vertex AI.
 //!
 //! A credential with an `api_key` attribute, or an `access_token` in its
 //! metadata, calls `{base_url}/v1/publishers/google/models/{model}:{action}`
@@ -18,6 +18,11 @@
 //! `service_account` in its metadata), and calls the endpoint of its
 //! location for its project with a bearer token from that account (see
 //! [`super::token`]).
+//!
+//! Partner/open MaaS names and explicit `openapi` opt-ins use the
+//! `/endpoints/openapi` Chat Completions route, with thinking suffixes kept
+//! during model normalization. Official Google hosts require a service account;
+//! configured third-party hosts may use API keys. See [`openapi`].
 //!
 //! An Interactions client with an explicit `interactions` credential opt-in
 //! calls Vertex's native `/v1beta1/interactions` API instead. Service accounts
@@ -59,6 +64,7 @@ use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
 use serde_json::{Map, Value, json};
 
 mod interactions;
+mod openapi;
 
 use super::stream::Lines;
 use super::token::{ServiceAccount, TokenCache, service_account};
@@ -271,6 +277,13 @@ impl VertexExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         reject_compact(options)?;
+        if openapi::should_execute(auth, &request.model) {
+            let (request, options) = openapi::normalize_request(request, options);
+            let executor = self.openapi_executor(auth).await?;
+            return executor
+                .execute(Arc::new(auth.clone()), request, options)
+                .await;
+        }
         if interactions::should_execute_native(auth, options) {
             return self.execute_interactions(auth, request, options).await;
         }
@@ -319,6 +332,13 @@ impl VertexExecutor {
         options: &Options,
     ) -> Result<StreamResponse, ExecError> {
         reject_compact(options)?;
+        if openapi::should_execute(auth, &request.model) {
+            let (request, options) = openapi::normalize_request(request, options);
+            let executor = self.openapi_executor(auth).await?;
+            return executor
+                .execute_stream(Arc::new(auth.clone()), request, options)
+                .await;
+        }
         if interactions::should_execute_native(auth, options) {
             return self
                 .execute_interactions_stream(auth, request, options)
@@ -371,6 +391,13 @@ impl VertexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
+        if openapi::should_execute(auth, &request.model) {
+            let (request, options) = openapi::normalize_request(request, options);
+            return self
+                .openapi_compat()
+                .count_tokens(Arc::new(auth.clone()), request, options)
+                .await;
+        }
         let target = target(auth)?;
         let base = base_model(&request.model);
         let mut body = translate_request(

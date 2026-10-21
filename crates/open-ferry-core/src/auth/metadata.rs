@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/metadata_keys.go, priority.go,
 // custom_headers.go, MergeExistingAuthMetadata and IsAuthTokenPayloadKey in
-// metadata_merge.go, and the metadata overrides in types.go (v8.0.32, MIT).
+// metadata_merge.go, and the metadata overrides in types.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Settings a credential file carries next to its tokens: legacy key names,
@@ -35,6 +35,8 @@ pub fn canonical_credential_metadata_key(key: &str) -> &str {
         "disable-cooling" => "disable_cooling",
         "excluded-models" => "excluded_models",
         "model-aliases" => "model_aliases",
+        "openapi-location" => "openapi_location",
+        "openapi-models" => "openapi_models",
         "proxy-url" => "proxy_url",
         "request-retry" => "request_retry",
         "request-scoped-errors" => "request_scoped_errors",
@@ -241,6 +243,35 @@ pub(crate) fn parse_int_any(value: &Value) -> Option<i64> {
         }
         _ => None,
     }
+}
+
+/// Model names declared by a Vertex credential, in declaration order.
+pub(crate) fn openapi_model_names(metadata: &Map<String, Value>) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut add = |name: &str| {
+        let name = name.trim();
+        if !name.is_empty() && seen.insert(open_ferry_translate::go::to_lower(name)) {
+            names.push(name.to_owned());
+        }
+    };
+    for key in ["openapi_models", "openapi-models", "models"] {
+        match metadata.get(key) {
+            Some(Value::String(raw)) => raw.split(',').for_each(&mut add),
+            Some(Value::Array(items)) => {
+                for item in items {
+                    if let Some(name) = item
+                        .as_str()
+                        .or_else(|| item.get("name").and_then(Value::as_str))
+                    {
+                        add(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 #[cfg(test)]
