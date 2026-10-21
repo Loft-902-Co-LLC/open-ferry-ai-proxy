@@ -16,8 +16,10 @@ upstream=$(git -C reference/cliproxyapi rev-parse HEAD)
   echo "open-ferry commit: \`$GITHUB_SHA\`"
   echo "CLIProxyAPI commit: \`$upstream\` (gitlink: \`$expected\`)"
   echo "Seed: \`$PARITY_SEED\`; random count per generator: \`$PARITY_RANDOM\`."
-  echo 'Accepted known differences: `Case::known_difference` in `tools/parity/src/cases.rs`, `tools/parity/src/cases/**` and `tools/parity/src/interactions/**/cases.rs`.'
-  echo 'Equivalence rules: `tools/parity/src/compare.rs` and `UPSTREAM.md`.'
+  cat <<'NOTE'
+Accepted known differences: `Case::known_difference` in `tools/parity/src/cases.rs`, `tools/parity/src/cases/**` and `tools/parity/src/interactions/**/cases.rs`.
+Equivalence rules: `tools/parity/src/compare.rs` and `UPSTREAM.md`.
+NOTE
 } | tee target/parity/ci-metadata.md
 cat target/parity/ci-metadata.md >> "$GITHUB_STEP_SUMMARY"
 if [[ -z $expected || $upstream != "$expected" ]]; then
