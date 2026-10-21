@@ -15,8 +15,6 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use futures_util::StreamExt;
 use http::{HeaderMap, HeaderValue, Method, header};
-use http_body::{Frame, SizeHint};
-use std::task::{Context, Poll};
 use tokio::sync::watch;
 use tokio::time::{Instant, Sleep};
 
@@ -263,11 +261,7 @@ async fn admitted(
         rejected: Arc::new(AtomicBool::new(false)),
         decoded: Arc::default(),
     };
-    let hold = HeldRequest {
-        _raw: raw.clone(),
-        _parser: parser,
-        _decoded: scope.decoded.clone(),
-    };
+    let _hold = (raw.clone(), parser);
     let response = REQUEST_INGRESS
         .scope(
             scope.clone(),
@@ -284,47 +278,9 @@ async fn admitted(
     if response.extensions().get::<IngressRejection>().is_some() {
         return response;
     }
-    let (parts, body) = response.into_parts();
-    Response::from_parts(
-        parts,
-        Body::new(HeldBody {
-            inner: body,
-            hold: Some(hold),
-        }),
-    )
-}
-
-struct HeldBody {
-    inner: Body,
-    hold: Option<HeldRequest>,
-}
-
-struct HeldRequest {
-    _raw: Bytes,
-    _parser: Reservation,
-    _decoded: Arc<Mutex<Vec<Bytes>>>,
-}
-
-impl HttpBody for HeldBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
-        let this = self.get_mut();
-        let frame = Pin::new(&mut this.inner).poll_frame(cx);
-        if matches!(frame, Poll::Ready(None | Some(Err(_)))) {
-            this.hold = None;
-        }
-        frame
-    }
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
-    fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
-    }
+    // Only owners actually retained by the response or logger stay charged.
+    // A long SSE response does not extend the handler's temporary allowance.
+    response
 }
 
 /// The shape used by the server's pre-handler body-size rejection.
