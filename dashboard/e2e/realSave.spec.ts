@@ -617,7 +617,7 @@ test("saves config.yaml from its editor after showing the diff", async () => {
   await review.getByRole("button", { name: "Save config.yaml" }).click();
   await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
   expectFile("# Saved from the dashboard's editor", "the comment added in the editor");
-  expectFile(`secret-key: ${managementKey}`, "the management key as it was");
+  expectFile(managementKey, "the original management secret, regardless of YAML quoting");
   expectCommentsKept();
 
   // The screen shows the file as the server now has it, at its end.
