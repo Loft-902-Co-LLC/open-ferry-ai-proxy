@@ -663,6 +663,7 @@ static REGISTRY_THINKING_SUPPORT: Type = Type {
     name: "registry.ThinkingSupport",
     fields: &[
         ("dynamic-allowed", Field::Leaf),
+        ("disable-type", Field::Leaf),
         ("levels", Field::Leaf),
         ("max", Field::Leaf),
         ("min", Field::Leaf),

@@ -833,6 +833,7 @@ fn thinking(thinking: &ThinkingSupport) -> Json {
         thinking.max,
         thinking.zero_allowed,
         thinking.dynamic_allowed,
+        &thinking.disable_type,
         &thinking.levels,
     )
 }
@@ -843,6 +844,7 @@ pub(crate) fn thinking_fields(
     max: i64,
     zero_allowed: bool,
     dynamic_allowed: bool,
+    disable_type: &str,
     levels: &[String],
 ) -> Json {
     Fields::new()
@@ -850,6 +852,7 @@ pub(crate) fn thinking_fields(
         .omit_empty("max", Json::Int(max))
         .omit_empty("zero_allowed", Json::Bool(zero_allowed))
         .omit_empty("dynamic_allowed", Json::Bool(dynamic_allowed))
+        .omit_empty("disable_type", string(disable_type))
         .omit_empty("levels", strings(levels))
         .done()
 }

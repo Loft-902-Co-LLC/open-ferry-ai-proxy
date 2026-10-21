@@ -115,6 +115,11 @@ fn model_info(model: &Value) -> ModelInfo {
                 .unwrap_or_default(),
             zero_allowed: thinking.get("zero_allowed") == Some(&Value::Bool(true)),
             dynamic_allowed: thinking.get("dynamic_allowed") == Some(&Value::Bool(true)),
+            disable_type: thinking
+                .get("disable_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             levels: thinking
                 .get("levels")
                 .and_then(Value::as_array)

@@ -89,6 +89,8 @@ pub struct ThinkingSupport {
     pub zero_allowed: bool,
     /// Whether a budget of -1 lets the model decide.
     pub dynamic_allowed: bool,
+    /// The API thinking type used to disable thinking; empty means `disabled`.
+    pub disable_type: String,
     /// Named effort levels. A model with levels takes one instead of a budget.
     pub levels: Vec<String>,
 }
@@ -116,6 +118,7 @@ pub struct ModelInfo {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelCatalog {
     models: HashMap<String, ModelInfo>,
+    claude: HashMap<String, ModelInfo>,
 }
 
 /// The built-in catalog; empty if it doesn't load.
@@ -152,16 +155,22 @@ impl ModelCatalog {
             _ => Vec::new(),
         };
         let searched: Vec<ModelInfo> = SECTIONS.into_iter().flat_map(section).collect();
-        Ok(Self::from_models(searched, section("meta")))
+        Ok(Self::from_models(
+            searched,
+            section("meta"),
+            section("claude"),
+        ))
     }
 
     /// The catalog of `searched`, the models of each section upstream's
     /// `LookupStaticModelInfo` searches before its built-in Devin models, in
     /// its order, and then `meta`. Where an ID repeats, the first model
     /// stands; a model without an ID is never found, as upstream's isn't.
+    /// `claude` alone supplies family fallback candidates.
     pub fn from_models(
         searched: impl IntoIterator<Item = ModelInfo>,
         meta: impl IntoIterator<Item = ModelInfo>,
+        claude: impl IntoIterator<Item = ModelInfo>,
     ) -> Self {
         let builtin_devin =
             BUILTIN_DEVIN_MODELS
@@ -181,13 +190,23 @@ impl ModelCatalog {
                 models.entry(model.id.clone()).or_insert(model);
             }
         }
-        Self { models }
+        let claude = claude
+            .into_iter()
+            .filter(|model| !model.id.is_empty())
+            .map(|model| (model.id.clone(), model))
+            .collect();
+        Self { models, claude }
     }
 
     /// `LookupModelInfo`: the model with this ID, ignoring surrounding
     /// whitespace.
     pub fn lookup(&self, id: &str) -> Option<&ModelInfo> {
-        self.models.get(id.trim())
+        let id = id.trim();
+        self.models.get(id).or_else(|| {
+            claude_family_model_ids(id)
+                .into_iter()
+                .find_map(|family| self.claude.get(family))
+        })
     }
 
     /// Every model, in no particular order.
@@ -200,6 +219,32 @@ impl ModelCatalog {
     pub fn thinking(&self, id: &str) -> Option<&ThinkingSupport> {
         self.lookup(id)?.thinking.as_ref()
     }
+}
+
+/// Catalog candidates for Claude bracketed and eight-digit dated variants.
+/// Exact IDs must be checked first; malformed suffixes and other providers stay literal.
+pub fn claude_family_model_ids(id: &str) -> Vec<&str> {
+    if !id.starts_with("claude-") {
+        return Vec::new();
+    }
+    let mut ids = Vec::new();
+    let mut base = id;
+    if let Some(open) = base
+        .find('[')
+        .filter(|open| *open > 0 && base.ends_with(']'))
+    {
+        base = &base[..open];
+        ids.push(base);
+    }
+    if base.len() > 9 {
+        let split = base.len() - 9;
+        if base.as_bytes()[split] == b'-'
+            && base.as_bytes()[split + 1..].iter().all(u8::is_ascii_digit)
+        {
+            ids.push(&base[..split]);
+        }
+    }
+    ids
 }
 
 fn model_info(model: &Value) -> Option<ModelInfo> {
@@ -220,6 +265,11 @@ fn model_info(model: &Value) -> Option<ModelInfo> {
                 max: int("max"),
                 zero_allowed: flag("zero_allowed"),
                 dynamic_allowed: flag("dynamic_allowed"),
+                disable_type: thinking
+                    .get("disable_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
                 levels,
             })
         }
@@ -314,5 +364,41 @@ mod tests {
     #[test]
     fn the_current_catalog_starts_as_the_built_in_one() {
         assert_eq!(*ModelCatalog::current(), *ModelCatalog::embedded());
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+    #[test]
+    fn claude_variants_use_family_capabilities_after_exact_lookup() {
+        let catalog = ModelCatalog::embedded();
+        for (id, family) in [
+            ("claude-opus-5-5[1m]", "claude-opus-5-5"),
+            ("claude-opus-5-5-20261001[1m]", "claude-opus-5-5"),
+            ("claude-sonnet-5-5-20261001", "claude-sonnet-5-5"),
+            ("claude-haiku-4-5-20251001[1m]", "claude-haiku-4-5-20251001"),
+        ] {
+            assert_eq!(catalog.lookup(id).unwrap().id, family);
+        }
+        for id in [
+            "claude-unknown-20261001",
+            "claude-opus-5-5-2026",
+            "claude-opus-5-5[1m",
+            "gpt-5[1m]",
+        ] {
+            assert!(catalog.lookup(id).is_none());
+        }
+        assert_eq!(
+            catalog.lookup("claude-haiku-4-5-20251001").unwrap().id,
+            "claude-haiku-4-5-20251001"
+        );
+        assert_eq!(
+            catalog
+                .thinking("claude-sonnet-5-5[1m]")
+                .unwrap()
+                .disable_type,
+            "between_tools"
+        );
     }
 }

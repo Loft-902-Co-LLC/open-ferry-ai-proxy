@@ -1317,6 +1317,8 @@ pub struct ThinkingSupport {
     pub zero_allowed: bool,
     /// Whether a budget of -1 lets the model decide.
     pub dynamic_allowed: bool,
+    /// The API thinking type used to disable thinking; empty means `disabled`.
+    pub disable_type: String,
     /// Named effort levels, when the model uses them.
     pub levels: Vec<String>,
 }

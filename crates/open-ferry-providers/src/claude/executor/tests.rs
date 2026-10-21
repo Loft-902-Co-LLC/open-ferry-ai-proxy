@@ -2723,3 +2723,51 @@ payload:
     // The rule did apply.
     assert_eq!(sent["top_k"], 7, "{sent}");
 }
+
+#[tokio::test]
+async fn registered_claude_disable_type_reaches_the_wire() {
+    struct Models;
+    impl ModelCatalog for Models {
+        fn model_providers(&self, _: &str) -> Vec<String> {
+            vec!["claude".into()]
+        }
+        fn first_available_model(&self) -> Option<String> {
+            None
+        }
+        fn available_models(&self) -> Vec<open_ferry_core::models::ModelInfo> {
+            Vec::new()
+        }
+        fn model_info(&self, model: &str, _: &str) -> Option<open_ferry_core::models::ModelInfo> {
+            Some(open_ferry_core::models::ModelInfo {
+                id: model.into(),
+                model_type: "claude".into(),
+                user_defined: true,
+                thinking: Some(open_ferry_core::models::ThinkingSupport {
+                    zero_allowed: true,
+                    levels: vec!["low".into(), "high".into()],
+                    disable_type: "between_tools".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        }
+    }
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    let executor = mock.executor().with_models(Arc::new(Models));
+    let payload = json!({"model": "custom-claude", "thinking": {"type": "disabled", "display": "summarized", "block_binding": {}}, "messages": [{"role": "user", "content": "hi"}]});
+    executor
+        .execute(
+            api_key_auth(),
+            Request {
+                model: "custom-claude".into(),
+                payload: Bytes::from(payload.to_string()),
+            },
+            options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.last().json()["thinking"],
+        json!({"type": "between_tools"})
+    );
+}

@@ -597,6 +597,7 @@ fn thinking(t: &ThinkingSupport) -> Value {
         .omit_empty("max", Value::Int(t.max))
         .omit_empty("zero-allowed", Value::Bool(t.zero_allowed))
         .omit_empty("dynamic-allowed", Value::Bool(t.dynamic_allowed))
+        .omit_empty("disable-type", s(&t.disable_type))
         .omit_empty("levels", strings(&t.levels))
         .done()
 }

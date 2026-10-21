@@ -242,7 +242,14 @@ impl ClaudeExecutor {
         summary: bool,
     ) -> Result<Prepared, ExecError> {
         let config = self.config.as_deref();
-        let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
+        let mut body = translate_request_with_models(
+            config,
+            request,
+            options,
+            base_model,
+            upstream_stream,
+            self.models.as_deref(),
+        )?;
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);
@@ -611,7 +618,14 @@ impl ClaudeExecutor {
         let config = self.config.as_deref();
         // As upstream, a refused part fails the count before the choice of
         // how to count it.
-        let mut body = translate_request(config, request, options, base_model, translate_stream)?;
+        let mut body = translate_request_with_models(
+            config,
+            request,
+            options,
+            base_model,
+            translate_stream,
+            self.models.as_deref(),
+        )?;
         if target.key.trim().is_empty() || !target.first_party {
             return Err(ExecError::upstream(
                 501,
@@ -760,6 +774,17 @@ pub(crate) fn translate_request(
     base_model: &str,
     stream: bool,
 ) -> Result<Value, ExecError> {
+    translate_request_with_models(config, request, options, base_model, stream, None)
+}
+
+fn translate_request_with_models(
+    config: Option<&Config>,
+    request: &Request,
+    options: &Options,
+    base_model: &str,
+    stream: bool,
+    models: Option<&dyn ModelCatalog>,
+) -> Result<Value, ExecError> {
     let from = &options.source_format;
     let mut payload = parse_object(&request.payload);
     compat::before_translation(config, options, &Format::CLAUDE, &mut payload);
@@ -785,12 +810,13 @@ pub(crate) fn translate_request(
     if json::str_at(&body, "model") != base_model {
         json::set(&mut body, "model", Value::String(base_model.to_owned()));
     }
-    thinking::apply_request(
+    thinking::apply_request_with_models(
         &mut body,
         &request.model,
         from.as_str(),
         &Body::parse(&request.payload),
         &Body::parse(&options.original_request),
+        models,
     )?;
     Ok(body)
 }

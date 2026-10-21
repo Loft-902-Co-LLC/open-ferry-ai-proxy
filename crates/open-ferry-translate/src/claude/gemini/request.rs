@@ -157,6 +157,10 @@ fn apply_generation_config(
         .filter(|levels| !levels.is_empty());
     let supports_max = levels.is_some_and(|levels| has_level(levels, "max"));
     let adaptive = levels.is_some();
+    let dynamic = adaptive
+        && models
+            .thinking(model_name)
+            .is_some_and(|s| s.dynamic_allowed);
 
     let setting = if let Some(level) = thinking
         .get("thinkingLevel")
@@ -166,9 +170,14 @@ fn apply_generation_config(
         match level.as_str() {
             "" => None,
             "none" => Some(Thinking::Disabled),
+            "auto" if dynamic => Some(Thinking::AdaptiveDefault),
             "auto" if !adaptive => Some(Thinking::Enabled(None)),
             _ if adaptive => {
-                let effort = claude_effort(&level, supports_max).map_or(level, str::to_owned);
+                let effort = if levels.is_some_and(|levels| has_level(levels, &level)) {
+                    level
+                } else {
+                    claude_effort(&level, supports_max).map_or(level, str::to_owned)
+                };
                 Some(Thinking::Adaptive(effort))
             }
             _ => level_to_budget(&level).map(|budget| Thinking::Enabled(Some(budget))),
@@ -179,8 +188,13 @@ fn apply_generation_config(
     {
         match int_of(budget) {
             0 => Some(Thinking::Disabled),
+            -1 if dynamic => Some(Thinking::AdaptiveDefault),
             budget if adaptive => budget_to_level(budget).map(|level| {
-                let effort = claude_effort(level, supports_max).unwrap_or(level);
+                let effort = if levels.is_some_and(|levels| has_level(levels, level)) {
+                    level
+                } else {
+                    claude_effort(level, supports_max).unwrap_or(level)
+                };
                 Thinking::Adaptive(effort.to_owned())
             }),
             -1 => Some(Thinking::Enabled(None)),
@@ -203,6 +217,9 @@ fn apply_generation_config(
             }
             out.insert("thinking".into(), thinking.into());
         }
+        Some(Thinking::AdaptiveDefault) => {
+            out.insert("thinking".into(), object([("type", "adaptive".into())]));
+        }
         Some(Thinking::Adaptive(effort)) => {
             out.insert("thinking".into(), object([("type", "adaptive".into())]));
             out.insert("output_config".into(), object([("effort", effort.into())]));
@@ -217,6 +234,7 @@ enum Thinking {
     Enabled(Option<i64>),
     /// Adaptive thinking with an effort.
     Adaptive(String),
+    AdaptiveDefault,
 }
 
 /// gjson `String()` as a JSON string.
@@ -682,3 +700,46 @@ fn tool_choice(config: &Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod adaptive_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn adaptive_dynamic_settings_and_supported_xhigh_are_preserved() {
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8[1m]",
+            "claude-fable-5",
+            "claude-fable-5-1-20261001",
+        ] {
+            for setting in [
+                json!({"thinkingLevel": "auto"}),
+                json!({"thinkingBudget": -1}),
+            ] {
+                let mut out = Map::new();
+                apply_generation_config(
+                    &mut out,
+                    &json!({"thinkingConfig": setting}),
+                    model,
+                    ModelCatalog::embedded(),
+                );
+                assert_eq!(out["thinking"], json!({"type": "adaptive"}));
+                assert!(out.get("output_config").is_none());
+            }
+            for setting in [
+                json!({"thinkingLevel": "xhigh"}),
+                json!({"thinkingBudget": 64000}),
+            ] {
+                let mut out = Map::new();
+                apply_generation_config(
+                    &mut out,
+                    &json!({"thinkingConfig": setting}),
+                    model,
+                    ModelCatalog::embedded(),
+                );
+                assert_eq!(out["output_config"]["effort"], "xhigh");
+            }
+        }
+    }
+}

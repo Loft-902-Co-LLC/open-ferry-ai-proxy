@@ -316,7 +316,11 @@ pub(crate) fn apply_reasoning_effort(
             "auto" => ("adaptive", None),
             _ => {
                 let supports_max = has_level(levels, "max");
-                let mapped = claude_effort(&effort, supports_max).map(str::to_owned);
+                let mapped = if has_level(levels, &effort) {
+                    Some(effort.clone())
+                } else {
+                    claude_effort(&effort, supports_max).map(str::to_owned)
+                };
                 ("adaptive", Some(mapped.unwrap_or(effort)))
             }
         };
@@ -570,5 +574,23 @@ mod tests {
                 "{JSON_SCHEMA_INSTRUCTION}Schema Name: outer\nSchema Description: Desc\nJSON Schema:\n{{\"type\":\"object\"}}{JSON_SCHEMA_INSTRUCTION_END}"
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    #[test]
+    fn explicitly_supported_efforts_survive_family_lookup() {
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8-20261001[1m]",
+            "claude-fable-5",
+            "claude-fable-5-1",
+        ] {
+            let mut out = Map::new();
+            apply_reasoning_effort(&mut out, "xhigh", model, ModelCatalog::embedded());
+            assert_eq!(out["output_config"]["effort"], "xhigh", "{model}");
+        }
     }
 }

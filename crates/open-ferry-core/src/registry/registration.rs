@@ -443,6 +443,7 @@ fn thinking(support: &crate::config::ThinkingSupport) -> ThinkingSupport {
         max: support.max,
         zero_allowed: support.zero_allowed,
         dynamic_allowed: support.dynamic_allowed,
+        disable_type: support.disable_type.clone(),
         levels: support.levels.clone(),
     }
 }
@@ -1065,13 +1066,19 @@ fn build_config_models(
 /// catalog's for its name without a thinking suffix such as `(high)`
 /// (upstream's `modelconfig.ResolveModelInfo`).
 fn resolve_thinking(name: &str, configured: Option<&ThinkingSupport>) -> Option<ThinkingSupport> {
-    if let Some(configured) = configured {
-        return Some(normalize_thinking(configured));
-    }
     let base = parse_suffix(name.trim()).trim();
-    open_ferry_translate::models::ModelCatalog::current()
-        .thinking(base)
-        .cloned()
+    let catalog = open_ferry_translate::models::ModelCatalog::current();
+    let known = catalog.thinking(base);
+    if let Some(configured) = configured {
+        let mut normalized = normalize_thinking(configured);
+        if normalized.disable_type.is_empty()
+            && let Some(known) = known
+        {
+            normalized.disable_type.clone_from(&known.disable_type);
+        }
+        return Some(normalized);
+    }
+    known.cloned()
 }
 
 /// `model` without a trailing thinking suffix such as `(high)` (upstream's

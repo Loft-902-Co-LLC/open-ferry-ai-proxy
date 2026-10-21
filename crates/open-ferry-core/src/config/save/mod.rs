@@ -695,6 +695,39 @@ mod tests {
         assert_eq!(reloaded, cfg);
     }
 
+    #[test]
+    fn thinking_disable_type_survives_both_layouts_and_migration() {
+        for raw in [
+            "claude-api-key: [{api-key: dummy, models: [{name: claude-sonnet-5-5, alias: sonnet, thinking: {levels: [low, none], disable-type: between_tools}}]}]\n",
+            "config-version: 8\napi-keys:\n  claude:\n    - models: [{name: claude-sonnet-5-5, alias: sonnet, thinking: {levels: [low, none], disable-type: between_tools}}]\n      keys: [{api-key: dummy}]\n",
+        ] {
+            let dir = TempDir::new();
+            let file = dir.path().join("config.yaml");
+            fs::write(&file, raw).unwrap();
+            let mut cfg = Config::load(&file).unwrap();
+            assert_eq!(
+                cfg.claude_api_key[0].models[0]
+                    .thinking
+                    .as_ref()
+                    .unwrap()
+                    .disable_type,
+                "between_tools"
+            );
+            for migrate in [false, true] {
+                save_preserving_comments(&file, &cfg, migrate).unwrap();
+                cfg = Config::load(&file).unwrap();
+                assert_eq!(
+                    cfg.claude_api_key[0].models[0]
+                        .thinking
+                        .as_ref()
+                        .unwrap()
+                        .disable_type,
+                    "between_tools"
+                );
+            }
+        }
+    }
+
     // Ports TestV8MovedCommentsSurviveV0Saves (config_v8_comments_test.go).
     #[test]
     fn v8_moved_comments_survive_v0_saves() {

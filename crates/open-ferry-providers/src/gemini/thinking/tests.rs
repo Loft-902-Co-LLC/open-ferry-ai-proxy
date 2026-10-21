@@ -32,6 +32,7 @@ fn support(min: i64, max: i64, levels: &[&str], zero: bool, dynamic: bool) -> Th
         levels: levels.iter().map(|level| (*level).to_owned()).collect(),
         zero_allowed: zero,
         dynamic_allowed: dynamic,
+        disable_type: String::new(),
     }
 }
 
