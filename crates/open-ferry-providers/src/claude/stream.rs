@@ -426,6 +426,7 @@ mod tests {
             response,
             StreamSetup {
                 translator: None,
+                web_search: None,
                 responses: false,
                 fast: false,
                 status: 200,
