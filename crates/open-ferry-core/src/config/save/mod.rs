@@ -449,20 +449,7 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
         && let encode::Value::Struct(fields) = &mut plugins.value
         && let Some(field) = fields.iter_mut().find(|field| field.key == "configs")
     {
-        field.value = encode::Value::Map(
-            configs
-                .content
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|[key, value]| {
-                    (
-                        encode::Value::str(&key.value),
-                        encode::Value::Node(value.clone()),
-                    )
-                })
-                .collect(),
-        );
+        field.value = generated_plugin_configs(configs);
     }
     let rendered = encode::marshal(&value)?;
     let generated = compose::unmarshal(&rendered)?;
@@ -476,6 +463,24 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
         return Err(invalid("expected generated root mapping node"));
     }
     Ok(root)
+}
+
+/// PluginInstanceConfig.MarshalYAML writes a default empty mapping when
+/// yaml.v3 skipped UnmarshalYAML for null; the null node's comments are lost.
+fn generated_plugin_configs(configs: &Node) -> encode::Value {
+    encode::Value::Map(
+        configs
+            .pairs()
+            .map(|(key, value)| {
+                let value = if value.kind == Kind::Scalar && value.tag == NULL_TAG {
+                    Node::mapping()
+                } else {
+                    value.clone()
+                };
+                (encode::Value::str(&key.value), encode::Value::Node(value))
+            })
+            .collect(),
+    )
 }
 
 /// The OAuth maps whose keys follow the settings exactly.
@@ -652,6 +657,51 @@ mod tests {
                 case["migrate"].as_bool().unwrap(),
             )
             .unwrap();
+            assert_eq!(
+                String::from_utf8(actual).unwrap(),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn null_plugins_follow_go_mapping_and_pending_comment_encoding() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../testdata/plugin-null-generated-comments.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let layout =
+                expand_config_aliases(&root(case["file"].as_str().unwrap().as_bytes())).unwrap();
+            let configs = generated_plugin_configs(yaml_path(&layout, "plugins.configs").unwrap());
+            let value = encode::Value::Struct(vec![
+                encode::Field::new(
+                    "plugins",
+                    encode::Value::Struct(vec![encode::Field::new("configs", configs)]),
+                ),
+                encode::Field::new("auth-dir", encode::Value::str("/x")),
+            ]);
+            let actual = String::from_utf8(encode::marshal(&value).unwrap()).unwrap();
+            assert_eq!(actual, case["expected"].as_str().unwrap());
+            // Go defers the pending comment onto zeta's key before the empty
+            // mapping; retaining the null scalar would consume it there.
+            assert!(actual.contains("zeta: # moved\n{}\nauth-dir: /x\n"));
+            assert!(!actual.contains("null comment"));
+        }
+    }
+
+    #[test]
+    fn plugin_alias_comments_match_go_config_decoder_expansion() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../testdata/plugin-alias-comment-save.json"))
+                .unwrap();
+        for case in cases {
+            let cfg = Config::parse(case["config"].as_str().unwrap()).unwrap();
+            let actual =
+                render_preserving_comments(case["file"].as_str().unwrap().as_bytes(), &cfg, false)
+                    .unwrap();
             assert_eq!(
                 String::from_utf8(actual).unwrap(),
                 case["expected"].as_str().unwrap(),
