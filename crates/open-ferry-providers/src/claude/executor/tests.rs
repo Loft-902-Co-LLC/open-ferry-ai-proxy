@@ -1008,18 +1008,55 @@ async fn preserved_thinking_injection_requires_signed_block() {
     assert!(body["thinking"].get("block_binding").is_none(), "{body}");
 }
 
-// Ported from TestClaudeExecutor_PreservedThinkingInjectionRequiresThinkingType.
+// Ported from e13bc9a1's omitted-thinking and forced-tool executor cases.
 #[tokio::test]
-async fn preserved_thinking_injection_requires_thinking_type() {
+async fn omitted_thinking_synthesizes_adaptive_binding() {
+    for model in [
+        "claude-haiku-5-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+    ] {
+        for redacted in [false, true] {
+            let mut payload = thinking_replay_payload(model, Value::Null);
+            if redacted {
+                payload["messages"][1]["content"][0] =
+                    json!({"type": "redacted_thinking", "data": "dummy"});
+            }
+            let (body, betas) = capture_claude_request("", false, model, payload).await;
+            assert_eq!(body["thinking"]["type"], "adaptive", "{model}: {body}");
+            assert_eq!(drop_block_behavior(&body), "drop_block", "{model}: {body}");
+            assert!(betas.contains(THINKING_BINDING_BETA_NAME));
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_typeless_thinking_stays_untouched() {
     let model = "claude-haiku-5-5";
-    let (body, _) = capture_claude_request(
-        "",
-        false,
-        model,
-        thinking_replay_payload(model, Value::Null),
-    )
-    .await;
-    assert!(body["thinking"].get("block_binding").is_none(), "{body}");
+    for thinking in [Value::Null, json!({})] {
+        let mut payload = thinking_replay_payload(model, Value::Null);
+        payload["thinking"] = thinking.clone();
+        let (body, _) = capture_claude_request("", false, model, payload).await;
+        assert_eq!(body["thinking"], thinking);
+    }
+}
+
+#[tokio::test]
+async fn forced_tool_choice_keeps_thinking_off() {
+    let model = "claude-haiku-5-5";
+    for choice in [
+        json!({"type": "any"}),
+        json!({"type": "tool", "name": "lookup"}),
+    ] {
+        for thinking in [Value::Null, json!({"type": "adaptive"})] {
+            let mut payload = thinking_replay_payload(model, thinking);
+            payload["tools"] = json!([{"name": "lookup", "input_schema": {"type": "object"}}]);
+            payload["tool_choice"] = choice.clone();
+            let (body, _) = capture_claude_request("", false, model, payload).await;
+            assert!(body.get("thinking").is_none(), "{body}");
+        }
+    }
 }
 
 // Ported from TestClaudeExecutor_PreservedThinkingInjectionKeepsCallerError.
