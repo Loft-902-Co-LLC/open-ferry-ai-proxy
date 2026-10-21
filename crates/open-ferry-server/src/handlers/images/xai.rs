@@ -37,7 +37,7 @@ const DEFAULT_ASPECT_RATIO: &str = "1:1";
 const DEFAULT_RESOLUTION: &str = "1k";
 
 /// Whether `model` is an xAI image model, alone or after `xai/`, `x-ai/` or
-/// `grok/`, in any case (upstream's `isXAIImagesModel`).
+/// `grok/`, in any case: the built-in-name part of `isXAIImagesModel`.
 pub(super) fn is_model(model: &str) -> bool {
     let (prefix, base) = model_parts(model);
     MODELS.contains(&go::to_lower(base.trim()).as_str())
@@ -63,6 +63,7 @@ fn registered(state: &AppState, model: &str) -> Option<String> {
         })
 }
 
+/// Built-in names or registered xAI prefixes (upstream's `isXAIImagesModel`).
 pub(super) fn is_registered_model(state: &AppState, model: &str) -> bool {
     let (prefix, base) = model_parts(model);
     if !MODELS.contains(&go::to_lower(base.trim()).as_str()) {
