@@ -263,3 +263,28 @@ fn token_count() {
         json!({"totalTokens": 3, "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 3}]})
     );
 }
+
+// Preserve the argument bytes upstream inserts with SetRawBytes.
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    let events = [
+        r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"c","name":"f"}}"#,
+        r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"n\":1E+2}"}}"#,
+        r#"data: {"type":"content_block_stop","index":1}"#,
+    ];
+    let mut stream = ClaudeToGeminiStream::new("m");
+    let chunks: Vec<_> = events
+        .iter()
+        .flat_map(|line| stream.translate_line(line.as_bytes()))
+        .collect();
+    assert_eq!(
+        chunks.last().unwrap()["candidates"][0]["content"]["parts"][0]["functionCall"]["args"]
+            .to_string(),
+        r#"{"n":1E+2}"#
+    );
+    let out = convert_claude_response_to_gemini_non_stream("m", events.join("\n").as_bytes());
+    assert_eq!(
+        out["candidates"][0]["content"]["parts"][0]["functionCall"]["args"].to_string(),
+        r#"{"n":1E+2}"#
+    );
+}

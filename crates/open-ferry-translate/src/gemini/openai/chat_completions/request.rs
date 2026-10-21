@@ -364,7 +364,7 @@ fn convert_assistant(message: &Value, rest: &[Value], contents: &mut Vec<Value>)
             continue;
         }
         let mut function_call = object([("name", Value::String(name.clone()))]);
-        if let Ok(args) = serde_json::from_str::<Value>(&str_of(path(call, "function.arguments"))) {
+        if let Ok(args) = crate::json::exact::from_str(&str_of(path(call, "function.arguments"))) {
             function_call["args"] = args;
         }
         parts.push(object([

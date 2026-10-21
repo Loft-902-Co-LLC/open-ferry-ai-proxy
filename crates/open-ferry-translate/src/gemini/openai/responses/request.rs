@@ -1024,7 +1024,7 @@ enum Arguments {
 fn parse_arguments(arguments: &str) -> Arguments {
     let start = arguments.bytes().position(|b| b > b' ');
     match start.map(|start| (start, arguments.as_bytes()[start])) {
-        Some((start, b'{' | b'[')) => match serde_json::from_str(&arguments[start..]) {
+        Some((start, b'{' | b'[')) => match crate::json::exact::from_str(&arguments[start..]) {
             Ok(value) => Arguments::Container(value),
             Err(_) => Arguments::Invalid,
         },

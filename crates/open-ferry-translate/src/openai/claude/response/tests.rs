@@ -1220,3 +1220,11 @@ fn explicit_index_never_replaces_started_tool_id() {
     }
     assert_eq!(stream.tool_calls[&0].id, "first");
 }
+
+// Preserve the argument bytes upstream inserts with SetRawBytes.
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    let response = json!({"choices":[{"message":{"tool_calls":[{"id":"c","function":{"name":"f","arguments":"{\"n\":1E+2}"}}]}}]});
+    let out = convert_openai_response_to_claude_non_stream(&json!({}), &response);
+    assert_eq!(out["content"][0]["input"].to_string(), r#"{"n":1E+2}"#);
+}

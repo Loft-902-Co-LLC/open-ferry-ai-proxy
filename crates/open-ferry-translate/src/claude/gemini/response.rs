@@ -357,7 +357,7 @@ impl ToolCalls {
         let args = if input.is_empty() {
             None
         } else {
-            serde_json::from_str(&input).ok()
+            crate::json::exact::from_str(&input).ok()
         };
         let mut call = Map::new();
         call.insert("name".into(), name.into());

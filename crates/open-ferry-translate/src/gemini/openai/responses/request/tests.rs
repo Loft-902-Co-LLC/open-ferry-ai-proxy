@@ -4335,3 +4335,14 @@ fn only_user_attachments_are_refused() {
     let (body, err) = convert_checked(&gemini_turn_payload("", &[&spaces]));
     assert_eq!(err, None, "{body}");
 }
+
+// Preserve the argument bytes upstream inserts with SetRawBytes.
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    let part = function_call_part(
+        &json!({"type":"function_call","name":"f","call_id":"c","arguments":"{\"n\":1E+2}"}),
+        "",
+        &HashMap::new(),
+    );
+    assert_eq!(part["functionCall"]["args"].to_string(), r#"{"n":1E+2}"#);
+}

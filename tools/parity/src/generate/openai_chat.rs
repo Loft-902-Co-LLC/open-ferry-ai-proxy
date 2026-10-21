@@ -95,6 +95,7 @@ const MODELS: &[&str] = &[
 /// Function call arguments: objects, other JSON, broken JSON and nothing.
 pub(super) const ARGUMENTS: &[&str] = &[
     r#"{"city":"Paris"}"#,
+    r#"{"n":1E+2,"negative":-0,"tiny":1e-02}"#,
     r#"{"path":"C:\\temp\\a.txt","lines":[1,2]}"#,
     r#"{"q":"café 🚀","n":1.50}"#,
     "{ \"spaced\" : true }",

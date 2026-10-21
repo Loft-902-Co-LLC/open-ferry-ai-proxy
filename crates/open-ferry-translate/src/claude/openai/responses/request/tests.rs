@@ -2981,3 +2981,28 @@ fn item_cache_markers_use_only_final_block_and_yield_to_its_marker() {
         );
     }
 }
+
+// Preserve the argument bytes upstream inserts with SetRawBytes.
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    let out = convert(
+        "m",
+        &json!({"input":[{"type":"function_call","name":"f","call_id":"c","arguments":"{\"n\":1E+2}"}]}),
+    );
+    assert_eq!(
+        out["messages"][0]["content"][0]["input"].to_string(),
+        r#"{"n":1E+2}"#
+    );
+}
+
+#[test]
+fn tool_search_arguments_preserve_uppercase_exponent() {
+    let request = json!({"tools":[{"type":"tool_search"}],"input":[{
+        "type":"tool_search_call","execution":"client","call_id":"c","arguments":"{\"n\":1E+2}"
+    }]});
+    let out = super::convert("m", &request, false, ModelCatalog::embedded(), false, true).0;
+    assert_eq!(
+        out["messages"][0]["content"][0]["input"].to_string(),
+        r#"{"n":1E+2}"#
+    );
+}

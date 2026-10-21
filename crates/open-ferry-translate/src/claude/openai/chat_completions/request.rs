@@ -343,7 +343,7 @@ fn tool_use(call: &Value) -> Value {
     let input = function
         .and_then(|function| function.get("arguments"))
         .map(|arguments| str_of(Some(arguments)))
-        .and_then(|arguments| serde_json::from_str::<Value>(&arguments).ok())
+        .and_then(|arguments| crate::json::exact::from_str(&arguments).ok())
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     object([

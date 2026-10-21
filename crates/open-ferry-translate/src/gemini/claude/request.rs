@@ -289,17 +289,20 @@ fn convert_block(
             let Some(args) = tool_use_args(block.get("input")) else {
                 return;
             };
-            let mut call = json!({
-                "name": sanitize_gemini_function_name(&name),
-                "args": args,
-            });
+            let mut call = object([
+                ("name", sanitize_gemini_function_name(&name).into()),
+                ("args", args),
+            ]);
             if !id.is_empty() {
                 call["id"] = Value::String(id.clone());
             }
-            parts.push(json!({
-                "thoughtSignature": GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR,
-                "functionCall": call,
-            }));
+            parts.push(object([
+                (
+                    "thoughtSignature",
+                    GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR.into(),
+                ),
+                ("functionCall", call),
+            ]));
             if original_role == "assistant" {
                 pending_tool_use_ids.push(id);
             }
@@ -366,7 +369,7 @@ fn base64_inline_data(source: Option<&Value>) -> Option<Value> {
 fn tool_use_args(input: Option<&Value>) -> Option<Value> {
     match input {
         Some(input @ Value::Object(_)) => Some(input.clone()),
-        Some(Value::String(text)) => match serde_json::from_str(text) {
+        Some(Value::String(text)) => match crate::json::exact::from_str(text) {
             Ok(args @ Value::Object(_)) => Some(args),
             _ => None,
         },

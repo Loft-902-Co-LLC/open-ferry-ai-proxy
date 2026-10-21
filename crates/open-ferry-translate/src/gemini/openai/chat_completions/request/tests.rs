@@ -1332,3 +1332,14 @@ fn inline_file_after_history_stays_inline_data() {
         "{body}"
     );
 }
+
+// Preserve the argument bytes upstream inserts with SetRawBytes.
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    let request = json!({"messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{\"n\":1E+2}"}}]},{"role":"tool","tool_call_id":"c","content":"ok"}]});
+    let out = convert_openai_request_to_gemini("m", &request, false);
+    assert_eq!(
+        out["contents"][0]["parts"][0]["functionCall"]["args"].to_string(),
+        r#"{"n":1E+2}"#
+    );
+}
