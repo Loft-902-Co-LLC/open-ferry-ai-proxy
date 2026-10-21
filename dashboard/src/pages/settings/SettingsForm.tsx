@@ -138,6 +138,7 @@ export interface SettingsFormProps {
   facts: UseQueryResult<ServerFacts> | null;
   /** Called when the form is submitted, as by Enter in a field: starts the review. */
   onSubmit: () => void;
+  onDraft: (id: SettingId) => void;
 }
 
 /**
@@ -145,7 +146,7 @@ export interface SettingsFormProps {
  * only the settings changed here, each through its own route, after showing
  * what changes against the server's values as they are just then.
  */
-export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProps) {
+export function SettingsForm({ id, settings, facts, onSubmit, onDraft }: SettingsFormProps) {
   const { form, unsaved, problems } = settings;
   const strategy = useWatch({ control: form.control, name: "routingStrategy" });
   const address = useWatch({ control: form.control, name: "managementAddress" });
@@ -163,6 +164,10 @@ export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProp
       id={id}
       noValidate
       className="space-y-4"
+      onChangeCapture={(event) => {
+        const name = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target.name : "";
+        if (SETTING_IDS.includes(name as SettingId)) onDraft(name as SettingId);
+      }}
       onSubmit={(event) => {
         event.preventDefault();
         onSubmit();

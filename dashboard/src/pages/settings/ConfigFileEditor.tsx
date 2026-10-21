@@ -6,7 +6,7 @@ import { Suspense, lazy, useEffect, useId, useState } from "react";
 import { callProblem, saveProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
 import { useConfigEditor } from "../../api/hooks";
-import { ConfigEditor } from "../../api/configEditor";
+import { ConfigEditor, type ConfigRead } from "../../api/configEditor";
 import { CONFIG_YAML } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Button } from "../../components/Button";
@@ -155,7 +155,7 @@ function DiffView({ lines }: { lines: readonly DiffLine[] }) {
 
 interface Review {
   /** The file on the server just now. */
-  fresh: string;
+  fresh: ConfigRead<string>;
   /** What saving writes. */
   draft: string;
 }
@@ -163,8 +163,7 @@ interface Review {
 interface ReviewDialogProps {
   review: Review | null;
   /** The file as it was when the editor opened it. */
-  base: string;
-  versioned: boolean;
+  base: ConfigRead<string>;
   pending: boolean;
   error: unknown;
   onSave: () => void;
@@ -173,11 +172,11 @@ interface ReviewDialogProps {
 }
 
 /** The diff a save makes against the file as the server has it now. */
-function ReviewDialog({ review, base, versioned, pending, error, onSave, onClose, onReload }: ReviewDialogProps) {
-  const lines = review === null ? [] : diffLines(review.fresh, review.draft);
+function ReviewDialog({ review, base, pending, error, onSave, onClose, onReload }: ReviewDialogProps) {
+  const lines = review === null ? [] : diffLines(review.fresh.data, review.draft);
   const { added, removed } = diffCounts(lines);
-  const same = review !== null && review.fresh === review.draft;
-  const moved = review !== null && review.fresh !== base;
+  const same = review !== null && review.fresh.data === review.draft;
+  const moved = review !== null && (base.etag !== undefined ? review.fresh.etag !== base.etag : review.fresh.data !== base.data);
   return (
     <Dialog
       open={review !== null}
@@ -205,7 +204,7 @@ function ReviewDialog({ review, base, versioned, pending, error, onSave, onClose
       {moved && (
         <Alert tone="warn" title="config.yaml changed on the server since you opened it">
           <p>
-            {versioned
+            {base.etag !== undefined
               ? "Copy your edits and reload the latest file before saving. Version checks refuse this save so it cannot overwrite the changes made meanwhile."
               : "Saving also undoes what changed meanwhile. This save has no version guard. Copy your edits and reload the latest file before saving."}
           </p>
@@ -232,31 +231,29 @@ function ReviewDialog({ review, base, versioned, pending, error, onSave, onClose
 }
 
 interface ConfigFileProps {
-  initial: string;
+  initial: ConfigRead<string>;
   editor: ConfigEditor;
   onReload: () => void;
-  onStored: (text: string) => void;
+  onStored: (text: ConfigRead<string>) => void;
   onUnsavedChange?: ((unsaved: boolean) => void) | undefined;
 }
 
 /** The file, in an editor, once loaded. */
 function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: ConfigFileProps) {
-  const { call } = editor;
   const client = useQueryClient();
   const statusId = useId();
   /** The file as the editor opened it, or as last saved. */
   const [base, setBase] = useState(initial);
-  const [draft, setDraft] = useState(initial);
+  const [draft, setDraft] = useState(initial.data);
   const [seenInitial, setSeenInitial] = useState(initial);
   // Counts the editor's fresh starts; Discard starts it again from `base`.
   const [round, setRound] = useState(0);
   const [review, setReview] = useState<Review | null>(null);
   const [saved, setSaved] = useState(false);
   const [confirmReload, setConfirmReload] = useState(false);
-  const edited = draft !== base;
+  const edited = draft !== base.data;
 
   useEffect(() => {
-    editor.setDirty(edited);
     onUnsavedChange?.(edited);
   }, [edited, editor, onUnsavedChange]);
 
@@ -264,42 +261,34 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
   if (!edited && initial !== seenInitial) {
     setSeenInitial(initial);
     setBase(initial);
-    setDraft(initial);
+    setDraft(initial.data);
     setRound((value) => value + 1);
   }
 
   const read = useMutation({
     mutationFn: async () => {
-      const fresh = await call<unknown>(CONFIG_YAML);
-      if (typeof fresh !== "string") {
+      const fresh = await editor.readValue<unknown>(CONFIG_YAML);
+      if (typeof fresh.data !== "string") {
         throw new NotTextError();
       }
-      return { fresh, draft };
+      return { fresh: fresh as ConfigRead<string>, draft };
     },
     onSuccess: setReview,
   });
   const save = useMutation({
     mutationFn: async (text: string) => {
-      await call<unknown>(CONFIG_YAML, { method: "PUT", body: text, contentType: "application/yaml" });
-      // The server may migrate or normalize YAML. Its stored bytes and
-      // their ETag become the next draft's baseline, never our submission.
-      editor.setDirty(false);
-      try {
-        const stored = await call<unknown>(CONFIG_YAML);
-        if (typeof stored !== "string") throw new NotTextError();
-        return stored;
-      } catch (error) {
-        editor.setDirty(true);
-        throw error;
-      }
+      await editor.saveYaml(base, { method: "PUT", body: text, contentType: "application/yaml" });
+      const stored = await editor.readValue<unknown>(CONFIG_YAML);
+      if (typeof stored.data !== "string") throw new NotTextError();
+      return stored as ConfigRead<string>;
     },
     onSuccess: (stored) => {
-      onStored(stored);
-      setBase(stored);
-      setDraft(stored);
-      setRound((value) => value + 1);
       setReview(null);
       setSaved(true);
+      onStored(stored);
+      setBase(stored);
+      setDraft(stored.data);
+      setRound((value) => value + 1);
     },
     // Every screen reads settings from it.
     onSettled: () => client.invalidateQueries(),
@@ -321,10 +310,9 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
       <Suspense fallback={<Loading>Loading the editor…</Loading>}>
         <YamlEditor
           key={round}
-          initial={base}
+          initial={base.data}
           label="config.yaml"
           onChange={(text) => {
-            editor.setDirty(text !== base);
             setSaved(false);
             setDraft(text);
           }}
@@ -350,7 +338,9 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
           <Button
             disabled={!edited}
             onClick={() => {
-              setDraft(base);
+              setBase(initial);
+              setDraft(initial.data);
+              setSeenInitial(initial);
               setRound((value) => value + 1);
             }}
           >
@@ -374,7 +364,6 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
       <ReviewDialog
         review={review}
         base={base}
-        versioned={editor.versioned}
         pending={save.isPending}
         error={save.error}
         onSave={() => {
@@ -421,13 +410,12 @@ export function ConfigFileEditor({
     queryKey: [CONFIG_YAML, "config-editor", editor.scope],
     enabled: visible,
     queryFn: async () => {
-      const text = await editor.call<unknown>(CONFIG_YAML);
-      if (typeof text !== "string") throw new NotTextError();
-      return text;
+      const snapshot = await editor.editor.readValue<unknown>(CONFIG_YAML);
+      if (typeof snapshot.data !== "string") throw new NotTextError();
+      return snapshot as ConfigRead<string>;
     },
   });
   const reload = async () => {
-    editor.editor.reset();
     const result = await file.refetch();
     if (result.error === null) setRound((value) => value + 1);
   };
@@ -458,10 +446,10 @@ export function ConfigFileEditor({
         </>
       ) : (
         <>
-          {editor.editor.recovery !== null && (
+          {file.data.recovery !== null && (
             <Alert tone="warn" live title="Recovery mode: config.yaml doesn't parse">
               <p>The server is still running its last good config. Saving replaces the whole file without version checks. Copy your edits before reloading if the file changes meanwhile.</p>
-              {editor.editor.recovery.detail !== null && <p>{editor.editor.recovery.detail}</p>}
+              {file.data.recovery.detail !== null && <p>{file.data.recovery.detail}</p>}
             </Alert>
           )}
           <p className="text-muted">

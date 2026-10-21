@@ -81,9 +81,20 @@ function formValues(tree: unknown, path: string): unknown {
 }
 
 
-interface Snapshot {
+export interface Snapshot {
   tree: unknown;
   etag: string | undefined;
+}
+/** Data and the version of that exact read travel through React together. */
+export interface ConfigRead<T> extends Snapshot {
+  data: T;
+  recovery: ApiError | null;
+}
+export class RecoveryEnded extends Error {
+  constructor() { super("The file can be read again. Reload to edit it with version checks."); }
+}
+export class StoredConfigUnusable extends Error {
+  constructor(readonly detail: string | null) { super("The stored config.yaml has become unusable. Nothing was saved. Reload to open the recovery editor."); }
 }
 interface Change { path: string; value: unknown }
 
@@ -156,6 +167,10 @@ export function isBrokenConfig(error: unknown): boolean {
 export class ConfigEditor {
   private base: Snapshot | undefined;
   private dirty = false;
+  private establishedVersion = false;
+  private explicitDrafts = false;
+  private drafts = new Map<string, Snapshot>();
+  private yamlBase: ConfigRead<unknown> | undefined;
   recovery: ApiError | null = null;
   readonly store: ConfigStore;
 
@@ -163,12 +178,81 @@ export class ConfigEditor {
     this.store = store instanceof ConfigStore ? store : new ConfigStore(store);
   }
   private get response(): ResponseCall { return this.store.response; }
-  get versioned(): boolean { return this.base?.etag !== undefined; }
+  get versioned(): boolean { return this.establishedVersion || this.base?.etag !== undefined; }
   readonly setDirty = (dirty: boolean) => { this.dirty = dirty; };
   readonly reset = () => { this.base = undefined; this.dirty = false; this.recovery = null; };
   readonly ready = async () => {
     this.base ??= await this.store.ready();
+    this.establishedVersion ||= this.base.etag !== undefined;
     return this.base.etag;
+  };
+  /** Capture from the event's rendered query value, before RHF changes it. */
+  readonly bindDraft = (path: string, snapshot: Snapshot) => {
+    this.explicitDrafts = true;
+    for (const location of this.paths(path)) if (!this.drafts.has(location)) this.drafts.set(location, snapshot);
+  };
+  readonly retainDrafts = (paths: readonly string[]) => {
+    this.explicitDrafts = true;
+    const keep = new Set(paths.flatMap((path) => this.paths(path)));
+    for (const path of this.drafts.keys()) if (!keep.has(path)) this.drafts.delete(path);
+  };
+  private version(snapshot: Snapshot): void {
+    if (this.versioned && snapshot.etag === undefined) throw new Error("The server omitted the config version. Reload before saving.");
+    this.establishedVersion ||= snapshot.etag !== undefined;
+  }
+  /** No draft baseline is mutated here: the caller renders this single value. */
+  readonly readValue = async <T>(path: string, signal?: AbortSignal): Promise<ConfigRead<T>> => {
+    if (path === CONFIG_YAML && this.recovery !== null) {
+      const answer = await this.response<T>(CONFIG_YAML, { signal });
+      return { data: answer.data, tree: undefined, etag: undefined, recovery: this.recovery };
+    }
+    try {
+      let fresh: Snapshot;
+      try { fresh = await this.store.read(signal); }
+      catch (error) {
+        if (!isUnsupportedRoute(error)) throw error;
+        fresh = { tree: undefined, etag: undefined };
+      }
+      this.version(fresh);
+      let data: unknown;
+      if (fresh.etag === undefined || path === CONFIG_YAML) {
+        const answer = await this.response<T>(fresh.etag !== undefined ? V8_YAML : path, { signal });
+        if (path === CONFIG_YAML && fresh.etag !== undefined) {
+          fresh = { tree: fresh.tree, etag: answer.headers.get("etag") ?? undefined };
+          this.version(fresh);
+        }
+        data = answer.data;
+      } else data = path === V8_CONFIG ? fresh.tree : formValues(fresh.tree, path);
+      if (path === CONFIG_YAML) this.recovery = null;
+      return { ...fresh, data: data as T, recovery: null };
+    } catch (error) {
+      if (path !== CONFIG_YAML || !isApiError(error) || !isBrokenConfig(error)) throw error;
+      const answer = await this.response<T>(CONFIG_YAML, { signal });
+      this.recovery = error;
+      return { data: answer.data, tree: undefined, etag: undefined, recovery: error };
+    }
+  };
+  readonly saveYaml = async (base: ConfigRead<unknown>, request: ApiRequest): Promise<unknown> => {
+    if (this.recovery !== null) {
+      const answer = await this.response(CONFIG_YAML, request);
+      this.recovery = null;
+      this.store.changed();
+      return answer.data;
+    }
+    if (base.etag === undefined) {
+      if (this.versioned) throw new RecoveryEnded();
+      const answer = await this.response(CONFIG_YAML, request);
+      this.store.changed();
+      return answer.data;
+    }
+    let fresh: Snapshot;
+    try { fresh = await this.store.read(); }
+    catch (error) {
+      throw error;
+    }
+    this.version(fresh);
+    if (base.etag !== fresh.etag) throw new ConfigConflict(["config.yaml"]);
+    return this.send(V8_YAML, request, fresh, []);
   };
   private adopt(snapshot: Snapshot): void {
     if (this.versioned && snapshot.etag === undefined) {
@@ -190,7 +274,7 @@ export class ConfigEditor {
     // form. Its re-read must not bless changes made after that payload.
     const base = this.dirty || wholeFile || fromRead ? this.base : fresh;
     const conflicts = wholeFile ? (base?.etag !== fresh.etag ? ["config.yaml"] : []) :
-      paths.filter((path) => !same(valueAt(base?.tree, path), valueAt(fresh.tree, path))).map(fieldName);
+      paths.filter((path) => !same(valueAt((this.drafts.get(path) ?? (this.explicitDrafts ? fresh : base))?.tree, path), valueAt(fresh.tree, path))).map(fieldName);
     if (conflicts.length > 0) throw new ConfigConflict(conflicts);
     return fresh;
   }
@@ -217,6 +301,7 @@ export class ConfigEditor {
       tree: changedTree(this.base?.tree, changes),
       etag: answer.headers.get("etag") ?? fresh.etag,
     };
+    for (const change of changes) this.drafts.delete(change.path);
     this.store.changed();
     return answer.data;
   }
@@ -301,27 +386,21 @@ export class ConfigEditor {
 
 
   readonly call = async <T>(path: string, request: ApiRequest = {}): Promise<T> => {
-    try {
-      return await this.perform<T>(path, request);
-    } catch (error) {
-      if (path !== CONFIG_YAML || (request.method !== undefined && request.method !== "GET") ||
-          !isApiError(error) || !isBrokenConfig(error)) throw error;
-      this.recovery = error;
-      this.base = { tree: undefined, etag: undefined };
-      return (await this.response<T>(CONFIG_YAML, request)).data;
+    if (path === CONFIG_YAML) {
+      if (request.method === undefined || request.method === "GET") {
+        const fresh = await this.readValue<T>(path, request.signal);
+        if (!this.dirty || this.yamlBase === undefined) this.yamlBase = fresh;
+        if (fresh.recovery === null) this.adopt(fresh);
+        return fresh.data;
+      }
+      if (request.method !== "PUT") throw new Error("This config write has no versioned route.");
+      if (this.yamlBase === undefined) await this.ready();
+      return await this.saveYaml(this.yamlBase ?? { ...this.base!, data: undefined, recovery: null }, request) as T;
     }
+    return this.perform<T>(path, request);
   };
 
   private async perform<T>(path: string, request: ApiRequest): Promise<T> {
-    if (this.recovery !== null) {
-      if (path !== CONFIG_YAML) throw this.recovery;
-      const answer = await this.response<T>(CONFIG_YAML, request);
-      if (request.method === "PUT") {
-        this.reset();
-        this.store.changed();
-      }
-      return answer.data;
-    }
     await this.ready();
     const writing = request.method !== undefined && request.method !== "GET";
     if (writing && path === API_KEYS && !["DELETE", "PATCH", "PUT"].includes(request.method ?? "")) {

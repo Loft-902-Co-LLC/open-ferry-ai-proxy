@@ -485,6 +485,44 @@ test("saves every setting through its own route", async () => {
   await expect(form.usage).not.toBeChecked();
 });
 
+test("saves YAML after discarding a draft across a sibling Settings save without reloading", async () => {
+  const page = the();
+  const editor = await openYaml();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await pasteSecret("\n# discarded YAML draft\n");
+  await page.getByRole("tab", { name: "Settings", exact: true }).click();
+  const retries = page.getByRole("textbox", { name: "Retries" });
+  await expect(retries).toHaveValue("4");
+  await retries.fill("5");
+  await page.getByRole("button", { name: "Review and save" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save 1 setting" }).click();
+  await expect(page.getByText("Saved 1 setting. The server uses it from now on.")).toBeVisible();
+  await page.getByRole("tab", { name: "config.yaml" }).click();
+  await page.getByRole("button", { name: "Discard changes" }).click();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  // CodeMirror virtualizes offscreen lines. Its copy handler reads the
+  // selection from the document; this clipboard never reaches the OS.
+  await expect.poll(() => editor.evaluate((element) => {
+    const data = new DataTransfer();
+    element.dispatchEvent(new ClipboardEvent("copy", { clipboardData: data, bubbles: true, cancelable: true }));
+    return /request-retry: 5\b/.test(data.getData("text/plain"));
+  }), { message: "Discard displays the sibling Settings value" }).toBe(true);
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await pasteSecret("\n# YAML edit after sibling Settings save\n");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const review = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(review.getByText("config.yaml changed on the server since you opened it")).toHaveCount(0);
+  await review.getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  expectFile(/^ *request-retry: 5\b/m, "the sibling Settings change");
+  expectFile("# YAML edit after sibling Settings save", "the new YAML draft");
+  expectFile("# discarded YAML draft", "the discarded draft", false);
+  await management("PATCH", "request-retry", { value: 4 });
+});
+
 test("rebases a Settings draft after a different YAML field saves without leaving the page", async () => {
   const page = the();
   await page.goto(`${APP}settings`);

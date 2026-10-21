@@ -1,4 +1,5 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { focusManager, notifyManager } from "@tanstack/react-query";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { readStoredKey } from "../../api/keyStorage";
@@ -149,6 +150,53 @@ function server(
   return state;
 }
 
+/** Versioned disk mock: every write checks the current version, like the server. */
+function versionedServer() {
+  const state = server();
+  const tree = { ...state.v8, routing: { retry: { "request-retry": 1 } },
+    observability: { logs: { debug: false } }, access: { "api-keys": [...state.keys] } };
+  let version = 1;
+  let unavailable = false;
+  let broken: string | null = null;
+  let yamlReadFailed = false;
+  const tag = () => `"${String(version)}"`;
+  const bad = () => ({ status: 500, json: { error: "invalid_config", message: broken } });
+  state.api.use(
+    route("GET", V8_CONFIG, () => unavailable ? { status: 503 } : broken !== null ? bad() : { json: tree, headers: { ETag: tag() } }),
+    route("GET", "/v8/management/config.yaml", () => yamlReadFailed ? { status: 503 } : { text: state.yaml, headers: { ETag: tag() } }),
+    ...["routing/retry/request-retry", "observability/logs/debug", "access/api-keys"].map((path) =>
+      route("PUT", `${V8_CONFIG}/${path}`, (request) => {
+        if (request.headers.get("if-match") !== tag()) return { status: 412, json: { error: "precondition_failed" } };
+        const value = request.json();
+        if (path.includes("request-retry")) tree.routing.retry["request-retry"] = Number(value);
+        else if (path.includes("debug")) tree.observability.logs.debug = value === true;
+        else tree.access["api-keys"] = value as string[];
+        state.yaml = `debug: ${String(tree.observability.logs.debug)}\nrequest-retry: ${String(tree.routing.retry["request-retry"])}\n`;
+        version++;
+        return { json: {}, headers: { ETag: tag() } };
+      })),
+    route("PUT", "/v8/management/config.yaml", (request) => {
+      if (request.headers.get("if-match") !== tag()) return { status: 412, json: { error: "precondition_failed" } };
+      state.yaml = request.body ?? "";
+      tree.observability.logs.debug = /debug: true/.test(state.yaml);
+      tree.routing.retry["request-retry"] = Number(/request-retry: (\d+)/.exec(state.yaml)?.[1] ?? 1);
+      version++;
+      return { json: {}, headers: { ETag: tag() } };
+    }),
+  );
+  return { ...state, tree, tag, state,
+    external: (debug = true, retry = 1) => {
+      tree.observability.logs.debug = debug;
+      tree.routing.retry["request-retry"] = retry;
+      state.yaml = `debug: ${String(debug)}\nrequest-retry: ${String(retry)}\n`;
+      version++;
+    },
+    unavailable: (value: boolean) => { unavailable = value; },
+    broken: (value: string | null) => { broken = value; },
+    yamlReadFailed: (value: boolean) => { yamlReadFailed = value; },
+  };
+}
+
 const WRITER_UNAVAILABLE = { status: 503, json: { error: "config writer unavailable" } };
 
 function patches(api: MockApi) {
@@ -191,6 +239,12 @@ function expectNothingUnsaved() {
   expect(screen.queryByRole("button", { name: "Review and save" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
 }
+
+  async function openFile(user: ReturnType<typeof renderApp>["user"]) {
+    await user.click(screen.getByRole("tab", { name: "config.yaml" }));
+    await user.click(screen.getByRole("button", { name: "Show config.yaml" }));
+    return screen.findByRole("textbox", { name: "config.yaml" });
+  }
 
 loadFirst(() => import("./SettingsPage"));
 
@@ -1137,11 +1191,7 @@ describe("the client keys", () => {
 });
 
 describe("config.yaml", () => {
-  async function openFile(user: ReturnType<typeof renderApp>["user"]) {
-    await user.click(screen.getByRole("tab", { name: "config.yaml" }));
-    await user.click(screen.getByRole("button", { name: "Show config.yaml" }));
-    return screen.findByRole("textbox", { name: "config.yaml" });
-  }
+
 
   it("shows the file only when asked, as it holds keys", async () => {
     const state = server();
@@ -1182,26 +1232,28 @@ describe("config.yaml", () => {
     expect(screen.getByText("No unsaved changes.", { selector: "[role=status]:not([hidden] *)" })).toBeVisible();
   });
 
-  it("follows a sibling refetch once a YAML draft is discarded", async () => {
-    const state = server();
+  it("follows a sibling refetch once a YAML draft is discarded and saves with that version", async () => {
+    const state = versionedServer();
     const { user } = await openSettings();
     const editor = await openFile(user);
-    const draft = `${YAML}# mine\n`;
-    fireEvent.change(editor, { target: { value: draft } });
-    const reads = state.api.callsTo("GET", CONFIG_YAML).length;
-    const latest = `${YAML}# from another form\n`;
-    state.yaml = latest;
+    fireEvent.change(editor, { target: { value: `${YAML}# mine\n` } });
     await user.click(screen.getByRole("tab", { name: "Settings" }));
     await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     const review = await screen.findByRole("dialog", { name: "Review the changes" });
     await user.click(within(review).getByRole("button", { name: "Save 1 setting" }));
     await screen.findByText("Saved 1 setting. The server uses it from now on.");
-    await waitFor(() => { expect(state.api.callsTo("GET", CONFIG_YAML).length).toBeGreaterThan(reads); });
+    const siblingTag = state.tag();
     await user.click(screen.getByRole("tab", { name: "config.yaml" }));
-    expect(editor).toHaveValue(draft);
     await user.click(screen.getByRole("button", { name: "Discard changes" }));
-    expect(screen.getByRole("textbox", { name: "config.yaml" })).toHaveValue(latest);
+    await waitFor(() => { expect(screen.getByRole("textbox", { name: "config.yaml" })).toHaveValue(state.state.yaml); });
+    fireEvent.change(screen.getByRole("textbox", { name: "config.yaml" }), { target: { value: `${state.state.yaml}# next\n` } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    expect(dialog).not.toHaveTextContent("changed on the server since you opened it");
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    await screen.findByText("Saved config.yaml. The server uses it from now on.");
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")[0]?.headers.get("if-match")).toBe(siblingTag);
   });
 
   it("uses stored normalized YAML and its ETag as the next draft baseline", async () => {
@@ -1499,5 +1551,107 @@ describe("leaving with unsaved changes", () => {
     expect(
       screen.queryByRole("dialog", { name: "Sign out without saving?" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+/** These journeys use disk reads and ETags, including hidden sibling forms. */
+describe("draft snapshot regressions", () => {
+  async function yamlSibling(user: ReturnType<typeof renderApp>["user"], text: string) {
+    fireEvent.change(await openFile(user), { target: { value: text } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    await screen.findByText("Saved config.yaml. The server uses it from now on.");
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await waitFor(() => { expect(screen.getByRole("checkbox", { name: "Debug logging" })).toBeChecked(); });
+  }
+  async function settingsSave(user: ReturnType<typeof renderApp>["user"], count: number) {
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: `Save ${String(count)} ${count === 1 ? "setting" : "settings"}` }));
+    await screen.findByText(`Saved ${String(count)} ${count === 1 ? "setting" : "settings"}. The server uses ${count === 1 ? "it" : "them"} from now on.`);
+  }
+  it("bases each Settings path on the sibling value shown when it is first edited", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    await fill(user, screen.getByRole("textbox", { name: "Retries" }), "2");
+    await yamlSibling(user, "debug: true\nrequest-retry: 1\n");
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await settingsSave(user, 2);
+    expect(state.tree.routing.retry["request-retry"]).toBe(2);
+    expect(state.tree.observability.logs.debug).toBe(false);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/observability/logs/debug`)).toHaveLength(1);
+  });
+  it.each(["discard", "revert"])("re-baselines Settings after %s, then still refuses a later real conflict", async (action) => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    await fill(user, screen.getByRole("textbox", { name: "Retries" }), "2");
+    await yamlSibling(user, "debug: true\nrequest-retry: 1\n");
+    if (action === "discard") await user.click(screen.getByRole("button", { name: "Discard" }));
+    else await fill(user, screen.getByRole("textbox", { name: "Retries" }), "1");
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await settingsSave(user, 1);
+    // A newly drafted path must still retain its first edit's value.
+    await fill(user, screen.getByRole("textbox", { name: "Retries" }), "3");
+    state.external(false, 4);
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    expect(await screen.findByText("The config changed since this page loaded")).toBeVisible();
+    expect(screen.getByText(/Changed fields: Retries/)).toBeVisible();
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`)).toEqual([]);
+  });
+  it("keeps a failed YAML Reload dirty with the original refusal and moved warning", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    const editor = await openFile(user);
+    const draft = `${YAML}# mine\n`;
+    fireEvent.change(editor, { target: { value: draft } });
+    state.external();
+    state.unavailable(true);
+    state.yamlReadFailed(true);
+    await user.click(screen.getByRole("button", { name: "Reload" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Discard and reload" }));
+    await screen.findByText("The server failed (HTTP 503)");
+    expect(editor).toHaveValue(draft);
+    expect(screen.getByText("Unsaved changes.")).toBeVisible();
+    state.unavailable(false);
+    state.yamlReadFailed(false);
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    expect(dialog).toHaveTextContent("Version checks refuse this save");
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    expect(await within(dialog).findByText("The config changed since this page loaded")).toBeVisible();
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toEqual([]);
+    expect(state.api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
+  });
+  it("pairs a keystroke with rendered YAML even after an unrendered refetch resolves", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    const editor = await openFile(user);
+    // Keep query notifications pending after the new response has resolved.
+    const queued: (() => void)[] = [];
+    notifyManager.setScheduler((callback) => { queued.push(callback); });
+    try {
+      state.external();
+      focusManager.setFocused(false);
+      // Make all reads stale without a wall-clock sleep.
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now + 10_000);
+      focusManager.setFocused(true);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      clock.mockRestore();
+      expect(state.api.callsTo("GET", "/v8/management/config.yaml").length).toBeGreaterThan(1);
+      expect(editor).toHaveValue(YAML);
+      fireEvent.change(editor, { target: { value: `${YAML}# on old rendered text\n` } });
+    } finally {
+      notifyManager.setScheduler((callback) => { setTimeout(callback, 0); });
+      await act(async () => { for (const callback of queued) callback(); });
+      focusManager.setFocused(undefined);
+    }
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    expect(dialog).toHaveTextContent("Version checks refuse this save");
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    expect(await within(dialog).findByText("The config changed since this page loaded")).toBeVisible();
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toEqual([]);
   });
 });
