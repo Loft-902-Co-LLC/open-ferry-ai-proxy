@@ -568,7 +568,7 @@ fn convert_input(
                     json!({"input": str_of(item.get("input"))})
                 } else {
                     let arguments = str_of(item.get("arguments"));
-                    serde_json::from_str::<Value>(&arguments)
+                    crate::json::exact::from_str(&arguments)
                         .ok()
                         .filter(Value::is_object)
                         .unwrap_or_else(|| json!({}))
@@ -615,14 +615,19 @@ fn convert_input(
                 }
                 let arguments = item.get("arguments").cloned().unwrap_or(Value::Null);
                 let arguments = if let Some(raw) = arguments.as_str() {
-                    serde_json::from_str(raw).unwrap_or(Value::Null)
+                    crate::json::exact::from_str(raw).unwrap_or(Value::Null)
                 } else {
                     arguments
                 };
                 called.insert(raw_id.clone());
-                turns.push_tool_use(json!({"type":"tool_use","id":sanitize_tool_id(&raw_id),
-                    "name":tools.claude_name(tool_search::TYPE),
-                    "input":if arguments.is_object() {arguments} else {json!({})}}));
+                let mut block = json!({"type":"tool_use","id":sanitize_tool_id(&raw_id),
+                    "name":tools.claude_name(tool_search::TYPE)});
+                block["input"] = if arguments.is_object() {
+                    arguments
+                } else {
+                    json!({})
+                };
+                turns.push_tool_use(block);
             }
             "tool_search_output" if tool_search => {
                 let raw_id = str_of(item.get("call_id")).trim().to_owned();

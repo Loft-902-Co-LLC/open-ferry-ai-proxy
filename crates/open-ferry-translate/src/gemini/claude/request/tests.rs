@@ -1053,3 +1053,13 @@ fn user_turns_in_detail() {
         "image",
     );
 }
+
+// Preserve the argument bytes upstream inserts with SetRawBytes.
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    let out = super::convert_claude_request_to_gemini("m", &json!({"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c","name":"f","input":"{\"n\":1E+2}"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":"ok"}]}]}), false, models()).0;
+    assert_eq!(
+        out["contents"][0]["parts"][0]["functionCall"]["args"].to_string(),
+        r#"{"n":1E+2}"#
+    );
+}

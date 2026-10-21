@@ -376,3 +376,11 @@ fn ordinary_input_is_borrowed_during_search_normalization() {
     assert!(std::ptr::eq(normalized.as_ref(), input.as_slice()));
     assert_eq!(normalized.as_ref(), input);
 }
+
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    assert_eq!(
+        super::call_item("c", "completed", r#"{"n":1E+2}"#)["arguments"].to_string(),
+        r#"{"n":1E+2}"#
+    );
+}

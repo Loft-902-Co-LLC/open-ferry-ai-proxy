@@ -744,7 +744,7 @@ fn tool_use_block(call: &Value, names: Option<&ToolNameMap>) -> Value {
     let arguments = fix_json(&str_of(path(call, "function.arguments")));
     let input = Some(arguments)
         .filter(|arguments| raw::valid(arguments))
-        .and_then(|arguments| serde_json::from_str::<Value>(&arguments).ok())
+        .and_then(|arguments| crate::json::exact::from_str(&arguments).ok())
         .filter(Value::is_object)
         .unwrap_or_else(|| Value::Object(Map::new()));
     object([

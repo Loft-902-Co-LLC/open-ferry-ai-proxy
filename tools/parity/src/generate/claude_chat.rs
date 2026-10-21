@@ -106,6 +106,7 @@ const INTEGERS: &[&str] = &["1.5", "2.0", "-0", "1e3", "9007199254740993", "-7",
 /// Tool arguments as Claude streams them, whole or cut short.
 const ARGUMENTS: &[&str] = &[
     r#"{"city":"Paris"}"#,
+    r#"{"n":1E+2,"negative":-0,"tiny":1e-02}"#,
     r#"{"path":"C:\\temp\\a.txt","lines":[1,2]}"#,
     r#"{"q":"café 🚀","n":1.50}"#,
     "{}",

@@ -139,6 +139,7 @@ const NAMESPACES: &[&str] = &[
 /// Function call arguments: objects, other JSON, broken JSON and nothing.
 const ARGUMENTS: &[&str] = &[
     r#"{"city":"Paris"}"#,
+    r#"{"n":1E+2,"negative":-0,"tiny":1e-02}"#,
     r#"{"path":"C:\\temp\\a.txt","lines":[1,2]}"#,
     r#"{"q":"café 🚀","n":1.50}"#,
     "{ \"spaced\" : true }",
@@ -158,6 +159,7 @@ const PATCH: &str = "*** Begin Patch\n*** Add File: hello.txt\n+Hello, world!\n*
 /// tool input wrapped in `input`, and patches.
 const STREAMED_ARGUMENTS: &[&str] = &[
     r#"{"city":"Paris"}"#,
+    r#"{"n":1E+2,"negative":-0,"tiny":1e-02}"#,
     r#"{"q":"café 🚀","n":1.50}"#,
     "{}",
     "",

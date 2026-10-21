@@ -142,7 +142,7 @@ fn discovered_names(tools: Option<&Value>, forward: &HashMap<String, String>) ->
 }
 
 pub(super) fn call_item(call_id: &str, status: &str, arguments: &str) -> Value {
-    let args = serde_json::from_str::<Value>(arguments)
+    let args = crate::json::exact::from_str(arguments)
         .ok()
         .filter(Value::is_object);
     let status = if status == "completed" && args.is_none() {
@@ -150,8 +150,10 @@ pub(super) fn call_item(call_id: &str, status: &str, arguments: &str) -> Value {
     } else {
         status
     };
-    json!({"id":format!("ts_{call_id}"),"type":"tool_search_call","status":status,
-        "execution":"client","call_id":call_id,"arguments":args.unwrap_or_else(|| json!({}))})
+    let mut item = json!({"id":format!("ts_{call_id}"),"type":"tool_search_call","status":status,
+        "execution":"client","call_id":call_id});
+    item["arguments"] = args.unwrap_or_else(|| json!({}));
+    item
 }
 
 #[cfg(test)]

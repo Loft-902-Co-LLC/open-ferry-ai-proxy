@@ -118,13 +118,25 @@ pub(super) fn call_status(status: &'static str, arguments: &str) -> &'static str
 }
 
 fn arguments_object(arguments: &str) -> Option<Value> {
-    serde_json::from_str::<Value>(arguments)
+    crate::json::exact::from_str(arguments)
         .ok()
         .filter(Value::is_object)
 }
 
 pub(super) fn call_item(call_id: &str, status: &str, arguments: &str) -> Value {
-    json!({"id":format!("tsc_{call_id}"),"type":"tool_search_call","status":status,
-        "call_id":call_id,"execution":"client",
-        "arguments":arguments_object(arguments).unwrap_or_else(|| json!({}))})
+    let mut item = json!({"id":format!("tsc_{call_id}"),"type":"tool_search_call","status":status,
+        "call_id":call_id,"execution":"client"});
+    item["arguments"] = arguments_object(arguments).unwrap_or_else(|| json!({}));
+    item
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tool_arguments_preserve_uppercase_exponent() {
+        assert_eq!(
+            super::call_item("c", "completed", r#"{"n":1E+2}"#)["arguments"].to_string(),
+            r#"{"n":1E+2}"#
+        );
+    }
 }

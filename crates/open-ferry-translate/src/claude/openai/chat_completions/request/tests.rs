@@ -1742,3 +1742,14 @@ fn blank_string_messages_with_cache_markers_give_no_blocks() {
         }
     }
 }
+
+// Preserve the argument bytes upstream inserts with SetRawBytes.
+#[test]
+fn tool_arguments_preserve_uppercase_exponent() {
+    let request = json!({"messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{\"n\":1E+2}"}}]},{"role":"tool","tool_call_id":"c","content":"ok"}]});
+    let out = convert("m", &request);
+    assert_eq!(
+        out["messages"][0]["content"][0]["input"].to_string(),
+        r#"{"n":1E+2}"#
+    );
+}
