@@ -109,6 +109,32 @@ describe("a form's config version", () => {
     }
   });
 
+  it("uses the whole-file ETag after its own semantic YAML save", async () => {
+    let version = 1;
+    const tree = { routing: { retry: { "request-retry": 1 } } };
+    let text = "routing: {retry: {request-retry: 1}}\n";
+    const api = mockApi(
+      route("GET", V8_CONFIG, () => ({ json: tree, headers: { ETag: `"${String(version)}"` } })),
+      route("GET", "/v8/management/config.yaml", () => ({ text, headers: { ETag: `"${String(version)}"` } })),
+      route("PUT", "/v8/management/config.yaml", (request) => {
+        tree.routing.retry["request-retry"] = 2;
+        text = request.body ?? "";
+        version++;
+        return { json: {}, headers: { ETag: `"${String(version)}"` } };
+      }),
+    );
+    const form = editor();
+    await form.call(CONFIG_YAML);
+    form.setDirty(true);
+    await form.call(CONFIG_YAML, { method: "PUT", body: "routing: {retry: {request-retry: 2}}\n" });
+    form.setDirty(false);
+    await form.call(CONFIG_YAML);
+    form.setDirty(true);
+    await form.call(CONFIG_YAML, { method: "PUT", body: `${text}# another edit\n` });
+    expect(api.callsTo("PUT", "/v8/management/config.yaml").map((call) => call.headers.get("if-match")))
+      .toEqual(['"1"', '"2"']);
+  });
+
   it("refuses a whole client-key payload raced after a clean one-click form's read", async () => {
     let keys = ["unit-original"];
     let etag = '"base"';

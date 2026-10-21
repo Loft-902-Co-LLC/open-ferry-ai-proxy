@@ -526,6 +526,7 @@ test("names a same-field Settings conflict and reloads only that form", async ()
   await page.getByRole("button", { name: "Review changes" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
   await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  const afterYaml = file();
   await editor.click();
   await page.keyboard.press("ControlOrMeta+End");
   await pasteSecret("\n# YAML draft survives a sibling reload\n");
@@ -536,12 +537,17 @@ test("names a same-field Settings conflict and reloads only that form", async ()
   await expect(page.getByText(/Changed fields: Retries/)).toBeVisible();
   await page.getByRole("button", { name: "Reload latest config" }).click();
   await expect(retries).toHaveValue("9");
+  expect(file() === afterYaml, "a Settings form reload leaves the YAML file byte for byte").toBe(true);
   await page.getByRole("tab", { name: "config.yaml" }).click();
   await editor.click();
   await page.keyboard.press("ControlOrMeta+End");
   await expectEditorShows("# YAML draft survives a sibling reload", "the other form's unsaved draft");
   await page.getByRole("button", { name: "Review changes" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
+  const yamlReview = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(yamlReview.getByText("config.yaml changed on the server since you opened it")).toHaveCount(0);
+  const written = page.waitForResponse((response) => new URL(response.url()).pathname === "/v8/management/config.yaml" && response.request().method() === "PUT");
+  await yamlReview.getByRole("button", { name: "Save config.yaml" }).click();
+  expect((await written).status(), "the YAML save after sibling reload").toBe(200);
   await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
   expectFile("# YAML draft survives a sibling reload", "the YAML draft saved after the Settings reload");
   expectFile(/^ *request-retry: 9\b/m, "the conflicting YAML field kept");
@@ -720,15 +726,22 @@ test("refuses stale settings and YAML saves after an on-disk edit", async () => 
   await page.getByRole("button", { name: "Review and save" }).click();
   const review = page.getByRole("dialog", { name: "Review the changes" });
   await expect(review).toBeVisible();
-  // The disk changes after review's read, before the actual write.
-  writeFileSync(configPath, file().replace(/(request-retry: )4\b/, (_, prefix: string) => `${prefix}8`));
-  await expect.poll(async () => {
-    const config = await management<Record<string, unknown>>("GET", "config");
-    return config["request-retry"];
-  }, { message: "the server loaded the independent on-disk retry change" }).toBe(8);
+  // Hold the actual PUT after all dashboard re-reads, then change disk.
+  // This must exercise the server's If-Match refusal, not a local preflight.
+  const retryWrite = `${ORIGIN}/v8/management/config/routing/retry/request-retry`;
+  await page.route(retryWrite, async (route) => {
+    writeFileSync(configPath, file().replace(/(request-retry: )4\b/, (_, prefix: string) => `${prefix}8`));
+    await expect.poll(async () => (await management<Record<string, unknown>>("GET", "config"))["request-retry"],
+      { message: "the server loaded the independent on-disk retry change" }).toBe(8);
+    await route.continue();
+  });
+  const retryResponse = page.waitForResponse((response) => response.url() === retryWrite && response.request().method() === "PUT");
   await review.getByRole("button", { name: "Save 1 setting" }).click();
+  expect((await retryResponse).status(), "the racing settings save is refused by the server").toBe(412);
+  await page.unroute(retryWrite);
   await expect(review.getByText("The config changed since this page loaded")).toBeVisible();
   await expect(review.getByText(/Unsaved edits will be lost on reload/)).toBeVisible();
+  await expect(review.getByText(/The server refused this save/)).toBeVisible();
   expectFile(/^ *request-retry: 8\b/m, "the on-disk retry value after the refused settings save");
   await review.getByRole("button", { name: "Reload latest config" }).click();
   await expect(retries).toHaveValue("8");
@@ -740,9 +753,19 @@ test("refuses stale settings and YAML saves after an on-disk edit", async () => 
   await page.getByRole("button", { name: "Review changes" }).click();
   const yamlReview = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
   await expect(yamlReview).toBeVisible();
-  writeFileSync(configPath, `${file()}\n# independent disk edit\n`);
-  const onDisk = file();
+  const yamlWrite = `${ORIGIN}/v8/management/config.yaml`;
+  let onDisk = "";
+  await page.route(yamlWrite, async (route) => {
+    if (route.request().method() === "PUT") {
+      writeFileSync(configPath, `${file()}\n# independent disk edit\n`);
+      onDisk = file();
+    }
+    await route.continue();
+  });
+  const yamlResponse = page.waitForResponse((response) => response.url() === yamlWrite && response.request().method() === "PUT");
   await yamlReview.getByRole("button", { name: "Save config.yaml" }).click();
+  expect((await yamlResponse).status(), "the racing YAML save is refused by the server").toBe(412);
+  await page.unroute(yamlWrite);
   await expect(yamlReview.getByText("The config changed since this page loaded")).toBeVisible();
   expect(file() === onDisk, "the refused YAML save leaves every on-disk byte unchanged").toBe(true);
   await yamlReview.getByRole("button", { name: "Reload latest config" }).click();

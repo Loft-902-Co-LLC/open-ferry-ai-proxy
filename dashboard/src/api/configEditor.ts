@@ -189,7 +189,7 @@ export class ConfigEditor {
     // A whole-list payload is built from a prior read even in a one-click
     // form. Its re-read must not bless changes made after that payload.
     const base = this.dirty || wholeFile || fromRead ? this.base : fresh;
-    const conflicts = wholeFile && base?.etag !== fresh.etag ? ["config.yaml"] :
+    const conflicts = wholeFile ? (base?.etag !== fresh.etag ? ["config.yaml"] : []) :
       paths.filter((path) => !same(valueAt(base?.tree, path), valueAt(fresh.tree, path))).map(fieldName);
     if (conflicts.length > 0) throw new ConfigConflict(conflicts);
     return fresh;
