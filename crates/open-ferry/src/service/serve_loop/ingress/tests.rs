@@ -81,6 +81,7 @@ async fn h2_headers_have_one_deadline_and_connect_data_is_not_a_header() {
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     let flight = Flight::new(traffic.clone());
+    let _protocol = ProtocolTask::new(traffic.clone());
     traffic.received(&[0, 0, 3, 1, 0, 0, 0, 0, 1, 1]);
     let due = traffic.due().unwrap().0;
     tokio::time::advance(Duration::from_secs(10)).await;
@@ -100,25 +101,55 @@ async fn h2_headers_have_one_deadline_and_connect_data_is_not_a_header() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn h2_idle_deadline_excludes_open_streams_and_restarts_when_both_end() {
+async fn h2_idle_deadline_uses_accepted_protocol_task_lifetimes() {
     let config = IngressConfig::default();
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     let flight = Flight::new(traffic.clone());
-    traffic.received(&[0, 0, 0, 1, 4, 0, 0, 0, 1]);
+    let protocol = ProtocolTask::new(traffic.clone());
     drop(flight);
     tokio::time::advance(Duration::from_secs(200)).await;
     assert!(traffic.due().is_none());
-    traffic.received(&[0, 0, 0, 0, 1, 0, 0, 0, 1]);
-    assert!(
-        traffic.due().is_none(),
-        "one closed half is still an open stream"
-    );
-    traffic.written(&[0, 0, 0, 1, 5, 0, 0, 0, 1]);
-    assert_eq!(
-        traffic.due().unwrap().0,
-        Instant::now() + Duration::from_secs(120)
-    );
-    tokio::time::advance(Duration::from_secs(121)).await;
+    // Wire DATA, including late data on a reset stream, is never authoritative.
+    traffic.received(&[0, 0, 0, 3, 0, 0, 0, 0, 7]);
+    traffic.received(&[0, 0, 0, 0, 0, 0, 0, 0, 7]);
+    assert!(traffic.due().is_none());
+    drop(protocol);
+    assert_eq!(traffic.due().unwrap().0, Instant::now() + Duration::from_secs(120));
+    traffic.received(&[0, 0, 0, 0, 0, 0, 0, 0, 7]);
+    assert_eq!(traffic.state().protocol_tasks, 0);
+    assert_eq!(traffic.due().unwrap().0, Instant::now() + Duration::from_secs(120));
+}
+
+#[tokio::test(start_paused = true)]
+async fn partial_headers_remain_armed_during_goaway() {
+    let config = IngressConfig { header_timeout: Some(Duration::from_secs(2)), ..IngressConfig::default() };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    let flight = Flight::new(traffic.clone());
+    flight.close_after_response();
+    drop(flight);
+    traffic.received(&[0, 0, 1, 1, 1, 0, 0, 0, 3, 0x82]);
+    assert_eq!(traffic.state().protocol_tasks, 0);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(traffic.due().unwrap().1, "request headers");
     assert!(traffic.due().unwrap().0 <= Instant::now());
+}
+
+#[tokio::test(start_paused = true)]
+async fn draining_has_an_absolute_bound_even_with_an_accepted_stream() {
+    let config = IngressConfig { body_total_timeout: Some(Duration::from_secs(4)), ..IngressConfig::default() };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    let flight = Flight::new(traffic.clone());
+    let _protocol = ProtocolTask::new(traffic.clone());
+    flight.close_after_response();
+    let started = Instant::now();
+    for _ in 0..10 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        flight.close_after_response();
+        traffic.received(&[0, 0, 1, 1, 4, 0, 0, 0, 3, 0x82]);
+    }
+    assert_eq!(traffic.due().unwrap().1, "drain deadline");
+    assert_eq!(traffic.due().unwrap().0, started + Duration::from_secs(9));
 }

@@ -245,6 +245,29 @@ async fn ingress_idle_http2_sends_goaway_and_partial_http2_heads_expire() {
 }
 
 #[tokio::test]
+async fn ingress_partial_headers_cannot_hold_a_draining_h2_connection() {
+    let served = start_limited(limits(), None, None);
+    let mut stream = raw_h2(&served, 65535).await;
+    h2_get(&mut stream, 1, "/").await;
+    loop { if read_h2_packet(&mut stream).await.0 == 0 { break; } }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(4)).await;
+    settle().await;
+    tokio::time::resume();
+    loop { if read_h2_frame(&mut stream).await == 7 { break; } }
+    stream.write_all(&[0, 0, 1, 1, 1, 0, 0, 0, 3, 0x82]).await.unwrap();
+    until(|| traffic(&served).is_some_and(|traffic| traffic.state().partial_head.is_some())).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    settle().await;
+    tokio::time::resume();
+    assert_eq!(served.control.live_count(), 0);
+    drop(stream);
+    within(served.control.release()).await;
+    within(served.server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn ingress_sse_upstream_silence_survives_every_idle_timer() {
     let (send, receive) = tokio::sync::mpsc::unbounded_channel::<axum::body::Bytes>();
     let receive = Arc::new(Mutex::new(Some(receive)));
