@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_request_test.go,
 // gemini_claude_compat_test.go, gemini_claude_user_turn_test.go and
-// internal/util/claude_tool_result_test.go (v8.0.32, MIT).
+// internal/util/claude_tool_result_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All tests are ported. Upstream's tests through the registry call the

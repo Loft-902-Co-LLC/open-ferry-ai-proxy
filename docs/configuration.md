@@ -12,7 +12,7 @@ Both legacy and v8 YAML layouts are accepted. The v8 management API edits the v8
 | `api-keys.vertex[].keys[].interactions` | `vertex-api-key[].interactions` | Optional boolean, unset/false keeps the Gemini bridge. `true` sends Interactions requests to `/v1beta1/interactions` (streams add `?alt=sse`). Service-account credential JSON uses `interactions` at the root; opted-in accounts call `/v1beta1/projects/{project}/locations/global/interactions`, including accounts configured for a regional location, as upstream does. Explicit false remains explicit through a save. |
 | `oauth.providers.codex.signin-with-chatgpt-identifier` | `codex.signin-with-chatgpt-identifier` | String, empty. Accepted for configuration compatibility only: trimmed and saved; changes are reported without the value. It has no runtime effect. open-ferry always identifies itself as `open-ferry`. |
 
-These other switches' configuration contract is available for the v8.0.32 sync. Runtime behavior is wired by the corresponding provider and server changes.
+These other switches' configuration contract is available for the v8.0.36 sync. Runtime behavior is wired by the corresponding provider and server changes.
 
 The compatibility-only `signin-with-chatgpt-identifier` has no runtime effect and warns once per load when set, without logging its value.
 
@@ -130,7 +130,7 @@ the TCP write guard, existing frame/message bounds (64 MiB default), a bounded
 upgrade or an H2 WebSocket blocked by its stream window can retain a slot; the
 HTTP response-stream watchdog does not impose a new WebSocket ping or lifetime.
 
-The v8.0.32 contract also carries these settings for compatibility. open-ferry ignores them because it does not impersonate clients or cloak Claude requests.
+The v8.0.36 contract also carries these settings for compatibility. open-ferry ignores them because it does not impersonate clients or cloak Claude requests.
 
 | v8 path | Legacy path | Default and meaning |
 |---|---|---|

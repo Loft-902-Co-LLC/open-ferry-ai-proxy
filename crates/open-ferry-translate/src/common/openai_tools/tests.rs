@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/openai_tools_test.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

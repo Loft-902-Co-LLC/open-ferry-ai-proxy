@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/selector.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/selector.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Regression coverage for quota-only alias and subagent failover branches.

@@ -2,7 +2,7 @@
 // (ConvertOpenAIRequestToInteractions, ConvertInteractionsResponseToOpenAI,
 // ConvertInteractionsResponseToOpenAINonStream, ConvertInteractionsRequestToOpenAI,
 // ConvertOpenAIResponseToInteractions, ConvertOpenAIResponseToInteractionsNonStream)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Chat Completions clients talking to a Gemini Interactions upstream, and

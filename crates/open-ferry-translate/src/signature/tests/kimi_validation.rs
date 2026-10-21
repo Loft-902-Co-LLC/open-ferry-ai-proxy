@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/kimi_validation_test.go (v8.0.32,
+// Ported from CLIProxyAPI internal/signature/kimi_validation_test.go (v8.0.36,
 // MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

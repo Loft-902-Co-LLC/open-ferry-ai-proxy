@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_tool_search_test.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_tool_search_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::super::test_support::{

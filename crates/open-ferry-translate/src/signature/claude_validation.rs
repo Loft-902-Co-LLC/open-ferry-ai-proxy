@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/claude_validation.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/signature/claude_validation.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude thinking signatures.

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_request.go
-// (v8.0.32, MIT), with the user turn refusal and file and audio parts
+// (v8.0.36, MIT), with the user turn refusal and file and audio parts
 // (responsesInputFileToChatPart, responsesInputAudioToChatPart).
 // https://github.com/router-for-me/CLIProxyAPI
 

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_response.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex events → OpenAI Responses events.

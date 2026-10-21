@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/token_helpers.go
 // (TokenizerForModel, CountOpenAIChatTokens, BuildOpenAIUsageJSON)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Counts an OpenAI Chat Completions request's input tokens locally, with

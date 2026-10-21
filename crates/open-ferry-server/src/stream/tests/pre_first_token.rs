@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/api/handlers/handlers_stream_bootstrap_test.go,
 // claude/code_handlers_error_test.go, gemini/gemini_handlers_stream_error_test.go,
 // openai/openai_handlers_stream_error_test.go and
-// openai/openai_responses_handlers_stream_error_test.go (v8.0.32, MIT).
+// openai/openai_responses_handlers_stream_error_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::sync::atomic::{AtomicBool, Ordering};
