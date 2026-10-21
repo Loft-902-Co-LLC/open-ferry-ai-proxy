@@ -246,3 +246,28 @@ async fn draining_has_an_absolute_bound_even_with_an_accepted_stream() {
     assert_eq!(traffic.due().unwrap().1, "drain deadline");
     assert_eq!(traffic.due().unwrap().0, started + Duration::from_secs(9));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_reset_delivery_keeps_its_reclamation_deadline() {
+    let config = IngressConfig {
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    let flight = Flight::new(traffic.clone());
+    let _queued = Delivery::new(Bytes::from_static(b"queued"), flight.clone());
+    traffic
+        .state()
+        .deliveries
+        .get_mut(&flight.id)
+        .unwrap()
+        .reset = true;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        traffic
+            .due()
+            .is_some_and(|(at, _, stream)| at <= Instant::now() && stream.is_none()),
+        "reset delivery lost its deadline"
+    );
+}

@@ -2504,3 +2504,82 @@ async fn an_unobserved_api_server_panic_sets_the_failure_record() {
 }
 
 mod switch;
+
+// Actual client-key rejection, with an EOS response larger than the stream window.
+async fn queued_unauthorized_h2(rig: &mut Rig) -> TcpStream {
+    let mut socket = TcpStream::connect(rig.main).await.unwrap();
+    socket
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .await
+        .unwrap();
+    socket
+        .write_all(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 1])
+        .await
+        .unwrap();
+    let block = b"\x82\x86\x04\x0a/v1/models\x01\x09localhost";
+    let mut head = vec![0, 0, block.len() as u8, 1, 5, 0, 0, 0, 1];
+    head.extend_from_slice(block);
+    socket.write_all(&head).await.unwrap();
+    loop {
+        let mut header = [0; 9];
+        tokio::time::timeout(WAIT, socket.read_exact(&mut header))
+            .await
+            .unwrap()
+            .unwrap();
+        let len = ((header[0] as usize) << 16) | ((header[1] as usize) << 8) | header[2] as usize;
+        let mut payload = vec![0; len];
+        socket.read_exact(&mut payload).await.unwrap();
+        if header[3] == 0 {
+            assert_eq!(len, 1);
+            break;
+        }
+    }
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    socket
+}
+fn unauthorized_h2_setup() -> Setup {
+    let mut setup = Setup::new(Role::Active);
+    setup.config =
+        "api-keys: ['round-two-client-key']\ningress-limits:\n  write-stall-timeout-seconds: 2\n"
+            .into();
+    setup
+}
+#[tokio::test]
+async fn a_finished_unauthorized_h2_response_is_cut_without_signalling_a_dead_task() {
+    let mut rig = unauthorized_h2_setup().start();
+    rig.fake().recv_active_start().await;
+    let _socket = queued_unauthorized_h2(&mut rig).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(2250)).await;
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    rig.fake().send(Message::Ping).await;
+    assert_eq!(
+        rig.fake().recv_status().await.1,
+        0,
+        "completed 401 kept its slot at the stall deadline"
+    );
+    rig.fake().send(Message::Release).await;
+    assert!(matches!(rig.fake().recv_other().await, Message::Drained));
+    assert!(succeeded(rig.exit().await));
+}
+#[tokio::test]
+async fn release_with_queued_finite_h2_data_sends_drained_within_the_write_bound() {
+    let mut rig = unauthorized_h2_setup().start();
+    rig.fake().recv_active_start().await;
+    let _socket = queued_unauthorized_h2(&mut rig).await;
+    rig.fake().send(Message::Release).await;
+    assert_eq!(rig.fake().recv_status().await.2, "draining");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(4)).await;
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    assert!(matches!(rig.fake().recv_other().await, Message::Drained));
+    assert!(succeeded(rig.exit().await));
+}
