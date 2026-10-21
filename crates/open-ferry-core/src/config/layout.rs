@@ -71,6 +71,7 @@ use super::{ConfigError, ConfigErrorKind};
 /// Legacy sections and their v8 paths, as `(legacy, v8)`, in upstream's
 /// field order (its `v8StructPaths`).
 pub(crate) const V8_STRUCT_PATHS: &[(&str, &str)] = &[
+    ("ingress-limits", "server.ingress-limits"),
     ("claude-code", "upstream.claude"),
     ("streaming", "requests.streaming"),
     ("tls", "server.tls"),
@@ -359,6 +360,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "discovery",
             "github-token",
             "host",
+            "ingress-limits",
             "max-request-body-bytes",
             "port",
             "tls",
@@ -379,6 +381,19 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ),
     ("server.discovery.interfaces", &["exclude", "include"]),
     ("server.tls", &["cert", "enable", "key"]),
+    (
+        "server.ingress-limits",
+        &[
+            "max-connections",
+            "header-timeout-seconds",
+            "tls-handshake-timeout-seconds",
+            "idle-timeout-seconds",
+            "body-idle-timeout-seconds",
+            "body-total-timeout-seconds",
+            "buffered-body-bytes",
+            "write-stall-timeout-seconds",
+        ],
+    ),
     ("upstream", &["claude", "codex", "xai"]),
     (
         "upstream.claude",

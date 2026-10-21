@@ -13,9 +13,55 @@ use open_ferry_core::config::{CodexClientConfig, Config, DisableImageGeneration}
 /// `max-request-body-bytes` isn't positive: 64 MiB.
 pub const DEFAULT_BODY_LIMIT: usize = 64 << 20;
 
+/// Effective open-ferry ingress limits. `None` disables a guard. A connection
+/// limit of `Some(0)` asks the accept loop to derive its OS-specific default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IngressConfig {
+    pub max_connections: Option<usize>,
+    pub header_timeout: Option<Duration>,
+    pub tls_handshake_timeout: Option<Duration>,
+    pub idle_timeout: Option<Duration>,
+    pub body_idle_timeout: Option<Duration>,
+    pub body_total_timeout: Option<Duration>,
+    pub buffered_body_bytes: Option<usize>,
+    pub write_stall_timeout: Option<Duration>,
+}
+
+impl Default for IngressConfig {
+    fn default() -> Self {
+        Self::from(&open_ferry_core::config::IngressLimits::default())
+    }
+}
+
+impl From<&open_ferry_core::config::IngressLimits> for IngressConfig {
+    fn from(config: &open_ferry_core::config::IngressLimits) -> Self {
+        let seconds = |value: i64, default| match value {
+            ..0 => None,
+            0 => Some(Duration::from_secs(default)),
+            value => Some(Duration::from_secs((value as u64).min(365 * 24 * 3600))),
+        };
+        Self {
+            max_connections: usize::try_from(config.max_connections).ok(),
+            header_timeout: seconds(config.header_timeout_seconds, 30),
+            tls_handshake_timeout: seconds(config.tls_handshake_timeout_seconds, 10),
+            idle_timeout: seconds(config.idle_timeout_seconds, 120),
+            body_idle_timeout: seconds(config.body_idle_timeout_seconds, 60),
+            body_total_timeout: seconds(config.body_total_timeout_seconds, 900),
+            buffered_body_bytes: match config.buffered_body_bytes {
+                ..0 => None,
+                0 => Some(256 << 20),
+                value => Some(usize::try_from(value).unwrap_or(usize::MAX)),
+            },
+            write_stall_timeout: seconds(config.write_stall_timeout_seconds, 120),
+        }
+    }
+}
+
 /// Settings for the HTTP layer, from the config file.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
+    /// open-ferry's own `server.ingress-limits` (top-level in legacy files).
+    pub ingress: IngressConfig,
     /// The keys clients must present (`api-keys`). Keys are trimmed, and empty
     /// and repeated ones dropped. With none left, every request is let in.
     pub api_keys: Vec<String>,
@@ -61,6 +107,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            ingress: IngressConfig::default(),
             api_keys: Vec::new(),
             passthrough_headers: false,
             nonstream_keepalive: None,
@@ -105,6 +152,7 @@ impl From<&Config> for ServerConfig {
                 .map(Duration::from_secs)
         };
         Self {
+            ingress: IngressConfig::from(&config.ingress_limits),
             api_keys: config.api_keys.clone(),
             passthrough_headers: config.passthrough_headers,
             nonstream_keepalive: seconds(config.nonstream_keepalive_interval),
@@ -133,6 +181,38 @@ impl From<&Config> for ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ingress_defaults_and_disabling_match_the_documentation() {
+        let defaults = IngressConfig::default();
+        assert_eq!(defaults.header_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(
+            defaults.tls_handshake_timeout,
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(defaults.idle_timeout, Some(Duration::from_secs(120)));
+        assert_eq!(defaults.body_idle_timeout, Some(Duration::from_secs(60)));
+        assert_eq!(defaults.body_total_timeout, Some(Duration::from_secs(900)));
+        assert_eq!(defaults.write_stall_timeout, Some(Duration::from_secs(120)));
+        assert_eq!(defaults.buffered_body_bytes, Some(256 << 20));
+        for prefix in ["ingress-limits: ", "server: {ingress-limits: "] {
+            let suffix = if prefix.starts_with("server") {
+                "}"
+            } else {
+                ""
+            };
+            let config = Config::parse(format!("{prefix}{{max-connections: -1, header-timeout-seconds: -1, tls-handshake-timeout-seconds: -1, idle-timeout-seconds: -1, body-idle-timeout-seconds: -1, body-total-timeout-seconds: -1, buffered-body-bytes: -1, write-stall-timeout-seconds: -1}}{suffix}")).unwrap();
+            let config = ServerConfig::from(&config).ingress;
+            assert_eq!(config.max_connections, None);
+            assert_eq!(config.header_timeout, None);
+            assert_eq!(config.tls_handshake_timeout, None);
+            assert_eq!(config.idle_timeout, None);
+            assert_eq!(config.body_idle_timeout, None);
+            assert_eq!(config.body_total_timeout, None);
+            assert_eq!(config.buffered_body_bytes, None);
+            assert_eq!(config.write_stall_timeout, None);
+        }
+    }
 
     #[test]
     fn reads_the_config_as_upstream_does() {

@@ -484,6 +484,21 @@ static CONFIG_SELF_UPDATE: Type = Type {
     fields: &[("check-every", Field::Leaf), ("mode", Field::Leaf)],
 };
 
+/// open-ferry's inbound limits, independent of upstream request settings.
+static CONFIG_INGRESS_LIMITS: Type = Type {
+    name: "config.IngressLimits",
+    fields: &[
+        ("max-connections", Field::Leaf),
+        ("header-timeout-seconds", Field::Leaf),
+        ("tls-handshake-timeout-seconds", Field::Leaf),
+        ("idle-timeout-seconds", Field::Leaf),
+        ("body-idle-timeout-seconds", Field::Leaf),
+        ("body-total-timeout-seconds", Field::Leaf),
+        ("buffered-body-bytes", Field::Leaf),
+        ("write-stall-timeout-seconds", Field::Leaf),
+    ],
+};
+
 static CONFIG_STREAMING_CONFIG: Type = Type {
     name: "config.StreamingConfig",
     fields: &[
@@ -578,6 +593,7 @@ pub(super) static CONFIG_LEGACY_CONFIG: Type = Type {
         ("github-token", Field::Leaf),
         ("gpt-image-2-base-model", Field::Leaf),
         ("host", Field::Leaf),
+        ("ingress-limits", Field::Struct(&CONFIG_INGRESS_LIMITS)),
         ("interactions-api-key", Field::List(&CONFIG_GEMINI_KEY)),
         ("logging-to-file", Field::Leaf),
         ("logs-max-total-size-mb", Field::Leaf),

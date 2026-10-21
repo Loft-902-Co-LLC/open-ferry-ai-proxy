@@ -128,6 +128,43 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
             Value::Int(cfg.max_request_body_bytes),
         )
         .put(
+            "ingress-limits",
+            Fields::default()
+                .put(
+                    "max-connections",
+                    Value::Int(cfg.ingress_limits.max_connections),
+                )
+                .put(
+                    "header-timeout-seconds",
+                    Value::Int(cfg.ingress_limits.header_timeout_seconds),
+                )
+                .put(
+                    "tls-handshake-timeout-seconds",
+                    Value::Int(cfg.ingress_limits.tls_handshake_timeout_seconds),
+                )
+                .put(
+                    "idle-timeout-seconds",
+                    Value::Int(cfg.ingress_limits.idle_timeout_seconds),
+                )
+                .put(
+                    "body-idle-timeout-seconds",
+                    Value::Int(cfg.ingress_limits.body_idle_timeout_seconds),
+                )
+                .put(
+                    "body-total-timeout-seconds",
+                    Value::Int(cfg.ingress_limits.body_total_timeout_seconds),
+                )
+                .put(
+                    "buffered-body-bytes",
+                    Value::Int(cfg.ingress_limits.buffered_body_bytes),
+                )
+                .put(
+                    "write-stall-timeout-seconds",
+                    Value::Int(cfg.ingress_limits.write_stall_timeout_seconds),
+                )
+                .done(),
+        )
+        .put(
             "client",
             Fields::default()
                 .put(
