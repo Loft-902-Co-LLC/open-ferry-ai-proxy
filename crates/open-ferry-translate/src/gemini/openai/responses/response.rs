@@ -1623,12 +1623,9 @@ impl GeminiToOpenAIResponsesStream {
                 ("response.output_item.done", self.tool_search_status),
             ] {
                 let seq = self.next_seq();
-                push_event(
-                    out,
-                    event,
-                    &json!({"type":event,"sequence_number":seq,"output_index":index,
-                    "item":super::tool_search::call_item(&call_id, status, &args_json)}),
-                );
+                let mut payload = json!({"type":event,"sequence_number":seq,"output_index":index});
+                payload["item"] = super::tool_search::call_item(&call_id, status, &args_json);
+                push_event(out, event, &payload);
             }
             self.calls.insert(
                 index,
