@@ -98,22 +98,11 @@ pub(crate) fn string_at<'v>(value: &'v Value, path: &str) -> Option<&'v str> {
     get(value, path).and_then(Value::as_str)
 }
 
-/// gjson `Int()`. A float out of `i64`'s range saturates.
+/// gjson `Int()`, shared with the translators, including the Go target CPU's
+/// floating-point overflow behavior. Provider usage, indexes and budgets use
+/// the same gjson conversion upstream.
 pub(crate) fn int_of(value: Option<&Value>) -> i64 {
-    match value {
-        Some(Value::Bool(true)) => 1,
-        Some(Value::String(text)) => parse_int(text).unwrap_or(0),
-        Some(Value::Number(number)) => {
-            let text = number.to_string();
-            let float = text.parse::<f64>().unwrap_or(0.0);
-            if float.abs() <= 9_007_199_254_740_991.0 {
-                float as i64
-            } else {
-                parse_int(&text).unwrap_or(float as i64)
-            }
-        }
-        _ => 0,
-    }
+    value.map_or(0, open_ferry_translate::json::int_of)
 }
 
 /// [`int_of`] at `path`.
@@ -281,6 +270,26 @@ fn type_error(value: &Value, field: &str, go_type: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn integer_overflow_uses_the_shared_go_cpu_conversion() {
+        let positive = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+            i64::MIN
+        } else {
+            i64::MAX
+        };
+        for (raw, expected) in [
+            ("1E+400", positive),
+            ("9.223372036854776E+18", positive),
+            ("-1E+400", i64::MIN),
+            ("18446744073709551617", 1),
+        ] {
+            let value = open_ferry_translate::json::exact::from_str(raw).unwrap();
+            assert_eq!(int_of(Some(&value)), expected, "{raw}");
+        }
+        assert_eq!(int_of(None), 0);
+        assert_eq!(int_of(Some(&json!("1.5"))), 0);
+    }
 
     #[test]
     fn reads_like_gjson() {

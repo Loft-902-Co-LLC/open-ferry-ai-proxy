@@ -109,7 +109,7 @@ pub(crate) fn delete_path(value: &mut Value, path: &str) -> bool {
 /// gjson `Int()`, including the target CPU's floating-point overflow rule:
 /// x86 returns the minimum `i64`, while arm64 saturates. Integer text still
 /// goes through gjson's wrapping decimal parser before that fallback.
-pub(crate) fn int_of(value: &Value) -> i64 {
+pub fn int_of(value: &Value) -> i64 {
     match value {
         Value::Bool(true) => 1,
         Value::String(s) => parse_int(s).unwrap_or(0),
