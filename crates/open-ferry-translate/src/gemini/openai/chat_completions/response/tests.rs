@@ -10,6 +10,25 @@ use serde_json::{Value, json};
 
 use super::*;
 
+// Not upstream's: Raw keeps the exponent's spelling inside argument strings.
+#[test]
+fn tool_arguments_keep_number_text() {
+    let body = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"n":1E+2,"nested":[1e2,-0,1E-2]}}}]}}]}"#;
+    let expected = r#"{"n":1E+2,"nested":[1e2,-0,1E-2]}"#;
+    let mut stream = GeminiToOpenAIStream::new(&json!({}));
+    let chunks = stream.translate(body);
+    assert_eq!(
+        chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+        expected
+    );
+    let response = crate::json::exact::from_slice(body).unwrap();
+    let out = convert_gemini_response_to_openai_non_stream(&json!({}), &response);
+    assert_eq!(
+        out["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+        expected
+    );
+}
+
 /// Replaces the time and counter in generated tool call IDs with `ID`.
 fn mask_ids(value: &mut Value) {
     match value {

@@ -28,13 +28,72 @@ fn context<'a>(
 ) -> ResponseContext<'a> {
     ResponseContext {
         model,
-        original_request,
+        original_request: original_request.into(),
         request,
     }
 }
 
 fn parse(chunk: &[u8]) -> Value {
     serde_json::from_slice(chunk).expect("chunk is JSON")
+}
+
+// Not upstream's: every Responses stream sharing pickRequestJSON must keep
+// JSON null distinct from unavailable bytes, through the registry too.
+#[test]
+fn responses_streams_keep_original_request_presence() {
+    let registry = Registry::builtin();
+    let original = Value::Null;
+    let translated = json!({"model":"\u{a0}","instructions":"translated"});
+    for (provider, lines) in [
+        (
+            Format::GEMINI,
+            vec![
+                r#"{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}"#,
+                "[DONE]",
+            ],
+        ),
+        (
+            Format::CLAUDE,
+            vec![
+                r#"data: {"type":"message_start","message":{"id":"m","model":"claude","usage":{"input_tokens":1}}}"#,
+                r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+                r#"data: {"type":"message_stop"}"#,
+            ],
+        ),
+        (
+            Format::OPENAI,
+            vec![
+                r#"data: {"id":"c","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+                "data: [DONE]",
+            ],
+        ),
+    ] {
+        for present in [true, false] {
+            let ctx = ResponseContext {
+                model: "provider-model",
+                original_request: present.then_some(&original).into(),
+                request: &translated,
+            };
+            let mut stream = registry.response_stream(&provider, &Format::OPENAI_RESPONSE, &ctx);
+            let mut chunks: Vec<_> = lines
+                .iter()
+                .flat_map(|line| stream.translate(line.as_bytes()))
+                .collect();
+            chunks.extend(stream.finish());
+            let completed = chunks
+                .iter()
+                .flat_map(|chunk| std::str::from_utf8(chunk).unwrap().lines())
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|event| event["type"] == "response.completed")
+                .unwrap_or_else(|| panic!("{provider} did not complete"));
+            assert_eq!(
+                completed["response"].get("instructions").is_some(),
+                !present,
+                "{provider}, present={present}"
+            );
+        }
+    }
 }
 
 #[test]

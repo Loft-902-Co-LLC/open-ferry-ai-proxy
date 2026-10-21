@@ -309,7 +309,7 @@ impl MetaExecutor {
             &prepared.response_format,
             &ResponseContext {
                 model: &request.model,
-                original_request: &prepared.original,
+                original_request: (&prepared.original).into(),
                 request: &prepared.body,
             },
         );

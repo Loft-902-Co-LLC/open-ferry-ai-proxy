@@ -9,7 +9,7 @@ const PROVIDERS: [Format; 3] = [Format::CODEX, Format::CLAUDE, Format::OPENAI];
 fn context<'a>(model: &'a str, original_request: &'a Value) -> ResponseContext<'a> {
     ResponseContext {
         model,
-        original_request,
+        original_request: original_request.into(),
         request: &Value::Null,
     }
 }

@@ -63,7 +63,7 @@ mod tests {
     fn context(request: &Value) -> ResponseContext<'_> {
         ResponseContext {
             model: "gpt-5-codex",
-            original_request: request,
+            original_request: (request).into(),
             request,
         }
     }

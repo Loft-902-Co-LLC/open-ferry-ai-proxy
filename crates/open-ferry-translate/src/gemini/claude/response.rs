@@ -146,7 +146,7 @@ impl GeminiToClaudeStream {
         if self.malformed() && self.has_final_events {
             return out;
         }
-        let response: Value = serde_json::from_slice(json_start(chunk)).unwrap_or(Value::Null);
+        let response = crate::json::exact::from_slice(json_start(chunk)).unwrap_or(Value::Null);
 
         if !self.has_first_response {
             let mut message = json!({

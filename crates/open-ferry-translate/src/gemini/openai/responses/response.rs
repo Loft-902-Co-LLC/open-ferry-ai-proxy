@@ -484,16 +484,23 @@ impl EvidenceStore {
 impl GeminiToOpenAIResponsesStream {
     /// `model` is the model the request went to, named in `response.created`
     /// when neither request names one. `original_request` is the client's
-    /// Responses request and `request` the translated one; the first that
-    /// isn't `Null` supplies the tool declarations and the fields the final
-    /// event repeats.
-    pub fn new(model: &str, original_request: &Value, request: &Value) -> Self {
-        let picked = pick_request(original_request, request);
+    /// Responses request and `request` the translated one; the first available
+    /// JSON supplies the tool declarations and the fields the final event
+    /// repeats. Pass `Option<&Value>` to distinguish valid JSON `null` from
+    /// unavailable input; a bare `&Value` keeps the null-as-absent convention.
+    pub fn new<'r>(
+        model: &str,
+        original_request: impl Into<crate::json::ResponseRequest<'r>>,
+        request: &'r Value,
+    ) -> Self {
+        let original_source = original_request.into();
+        let original_request = original_source.value();
+        let picked = pick_request(original_source, request);
         let response_model = request_model_name(original_request, request)
             .unwrap_or(model)
             .to_owned();
         let web_search_mode =
-            web_search_stream_mode(model, &response_model, original_request, request);
+            web_search_stream_mode(model, &response_model, original_source, request);
         Self {
             model: model.to_owned(),
             identities: responses_tool_reverse_identity_map(picked.unwrap_or(&Value::Null)),
@@ -1979,9 +1986,9 @@ fn part_signature(part: &Value) -> String {
 /// finish makes it `incomplete`, and with it the message still open after
 /// the last part. `None` if an `apply_patch` call failed, where upstream
 /// returns `nil`.
-pub fn convert_gemini_response_to_openai_responses_non_stream(
-    original_request: &Value,
-    request: &Value,
+pub fn convert_gemini_response_to_openai_responses_non_stream<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> Option<Value> {
     non_stream(original_request, request, response).ok()
@@ -2057,12 +2064,14 @@ impl Gathered {
 
 /// [`convert_gemini_response_to_openai_responses_non_stream`], with the error
 /// upstream keeps in its parameter.
-fn non_stream(
-    original_request: &Value,
-    request: &Value,
+fn non_stream<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     body: &[u8],
 ) -> Result<Value, ToolInputError> {
-    let picked = pick_request(original_request, request);
+    let original_source = original_request.into();
+    let original_request = original_source.value();
+    let picked = pick_request(original_source, request);
     let sanitized_names = sanitized_tool_name_map(original_request);
     let identities = responses_tool_reverse_identity_map(picked.unwrap_or(&Value::Null));
     let body_text = std::str::from_utf8(body).ok();
@@ -2543,12 +2552,14 @@ fn is_upstream_gemini_request(request: &Value) -> bool {
 
 /// `determineWebSearchStreamMode`: whether text should wait for the search
 /// to finish. `request_model` is the model the client named, or `model`.
-fn web_search_stream_mode(
+fn web_search_stream_mode<'r>(
     model: &str,
     request_model: &str,
-    original_request: &Value,
-    request: &Value,
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
 ) -> bool {
+    let original_source = original_request.into();
+    let original_request = original_source.value();
     if !original_request.is_null()
         && !allows_web_search_tool_choice(unwrap_request_root(original_request))
     {
@@ -2563,7 +2574,7 @@ fn web_search_stream_mode(
             return has_effective_google_search_tool(request);
         }
     }
-    pick_request(original_request, request).is_some_and(|picked| {
+    pick_request(original_source, request).is_some_and(|picked| {
         let root = unwrap_request_root(picked);
         has_web_search_tool(root)
             && allows_web_search_tool_choice(root)

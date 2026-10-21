@@ -262,7 +262,7 @@ impl ClaudeCliExecutor {
             let original = original_request(request, options);
             let context = ResponseContext {
                 model: &request.model,
-                original_request: &original,
+                original_request: (&original).into(),
                 request: &translation,
             };
             let mut out = Registry::global()

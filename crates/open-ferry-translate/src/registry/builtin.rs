@@ -55,13 +55,13 @@ pub(super) fn register(registry: &Registry) {
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(CodexToClaude(codex_claude::CodexToClaudeStream::new(
-                    context.original_request,
+                    context.original_request.value(),
                 )))
             })),
             non_stream: Some(Arc::new(|context, body| {
                 let event = parse(body);
                 let response = codex_claude::convert_codex_response_to_claude_non_stream(
-                    context.original_request,
+                    context.original_request.value(),
                     &event,
                 );
                 Some(response.as_ref().map(to_vec).unwrap_or_default())
@@ -84,7 +84,7 @@ pub(super) fn register(registry: &Registry) {
                 Box::new(CodexToChat(
                     codex_chat::CodexToOpenAIChatCompletionsStream::new(
                         context.model,
-                        context.original_request,
+                        context.original_request.value(),
                     ),
                 ))
             })),
@@ -92,7 +92,7 @@ pub(super) fn register(registry: &Registry) {
                 let event = parse(body);
                 let response =
                     codex_chat::convert_codex_response_to_openai_chat_completions_non_stream(
-                        context.original_request,
+                        context.original_request.value(),
                         &event,
                     );
                 Some(response.as_ref().map(to_vec).unwrap_or_default())
@@ -113,7 +113,7 @@ pub(super) fn register(registry: &Registry) {
                 Box::new(CodexToResponses(
                     codex_responses::CodexToOpenAIResponsesStream::new(
                         context.model,
-                        context.original_request,
+                        context.original_request.value(),
                         context.request,
                     ),
                 ))
@@ -199,12 +199,12 @@ pub(super) fn register(registry: &Registry) {
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(OpenAIToClaude(openai_claude::OpenAIToClaudeStream::new(
-                    context.original_request,
+                    context.original_request.value(),
                 )))
             })),
             non_stream: Some(Arc::new(|context, body| {
                 let response = openai_claude::convert_openai_response_to_claude_non_stream(
-                    context.original_request,
+                    context.original_request.value(),
                     &parse(body),
                 );
                 Some(to_vec(&response))
@@ -275,7 +275,7 @@ fn to_vec(value: &Value) -> Vec<u8> {
 /// A provider's response body. One that isn't valid JSON reads as an event
 /// with no fields.
 fn parse(body: &[u8]) -> Value {
-    serde_json::from_slice(body).unwrap_or(Value::Null)
+    crate::json::exact::from_slice(body).unwrap_or(Value::Null)
 }
 
 /// `ConvertCodexResponseToOpenAIResponsesNonStream`, on the body's text so

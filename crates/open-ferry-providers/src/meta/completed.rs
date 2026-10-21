@@ -77,7 +77,7 @@ fn translate(
 ) -> Result<Vec<u8>, StatusError> {
     let context = ResponseContext {
         model: &request.model,
-        original_request: &prepared.original,
+        original_request: (&prepared.original).into(),
         request: &prepared.body,
     };
     Registry::global()

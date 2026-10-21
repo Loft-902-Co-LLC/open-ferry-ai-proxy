@@ -180,8 +180,14 @@ impl InteractionsToOpenAIResponsesStream {
     /// A stream for a response from `model`, to the client's
     /// `original_request`, sent upstream as `request`. `Null` stands for
     /// either being absent.
-    pub fn new(model: &str, original_request: &Value, request: &Value) -> Self {
-        let identities = identity_map(pick_request(original_request, request));
+    pub fn new<'r>(
+        model: &str,
+        original_request: impl Into<crate::json::ResponseRequest<'r>>,
+        request: &'r Value,
+    ) -> Self {
+        let original_source = original_request.into();
+        let original_request = original_source.value();
+        let identities = identity_map(pick_request(original_source, request));
         let patch_bridge = identities.values().any(|identity| identity.apply_patch);
         let created_model = request_model_name(original_request, request).unwrap_or(model);
         Self {
@@ -1278,10 +1284,10 @@ fn set_usage(out: &mut Value, at: &str, usage: Option<&Value>) {
 /// Interactions response as a Responses one, for a request to `model`.
 /// `None` if an `apply_patch` call in it is unusable, or the interaction
 /// failed while the client declared `apply_patch`.
-pub fn convert_interactions_response_to_openai_responses_non_stream(
+pub fn convert_interactions_response_to_openai_responses_non_stream<'r>(
     model: &str,
-    original_request: &Value,
-    request: &Value,
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> Option<Value> {
     non_stream(model, original_request, request, response).ok()
@@ -1289,10 +1295,10 @@ pub fn convert_interactions_response_to_openai_responses_non_stream(
 
 /// [`convert_interactions_response_to_openai_responses_non_stream`], with
 /// why it failed.
-pub(super) fn non_stream(
+pub(super) fn non_stream<'r>(
     model: &str,
-    original_request: &Value,
-    request: &Value,
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> Result<Value, ToolInputError> {
     let (root, _) = read(response);

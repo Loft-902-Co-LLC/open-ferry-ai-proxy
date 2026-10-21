@@ -485,6 +485,9 @@ pub fn streams() -> Vec<Case> {
                 .map(|case| through(case, from, to, json!({}))),
         );
     }
+    for client in ["openai", "claude"] {
+        cases.push(through(argument_number_text(), "gemini", client, json!({})));
+    }
     cases
 }
 
@@ -538,6 +541,10 @@ pub fn finals() -> Vec<Case> {
                 .map(|case| through(case, from, to, json!({}))),
         );
     }
+    for client in ["openai", "claude"] {
+        cases.push(through(argument_number_text(), "gemini", client, json!({})));
+    }
+    cases.push(null_original_request());
     cases
 }
 
@@ -557,4 +564,29 @@ pub fn lookups() -> Vec<Case> {
         }
     }
     cases
+}
+
+// Promoted from seed 5/random 5000; retain the exact saved event text.
+fn argument_number_text() -> Case {
+    let mut case = Case::response(
+        "tool-arguments-uppercase-exponent",
+        r###"{}"###,
+        vec![r###"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"lookup.v2","call_id":"call_6","args":{"city":"tab\tand\rreturn","n":1E+2}},"thoughtSignature":""}]}}],"responseId":"resp_955","modelVersion":"gemini-2.5-flash"}"###.to_owned()],
+    );
+    case.model = r###" Gemini-2.5-Pro "###.to_owned();
+    case
+}
+
+// The original JSON null is valid and takes precedence over the translated
+// request; the non-breaking space is not the cause of this regression.
+fn null_original_request() -> Case {
+    let mut case = Case::response(
+        "null-original-with-nonbreaking-space-translated-model",
+        r###"null"###,
+        vec![r###"{"type":"response.completed","response":{"id":"resp_03FmszSg9LOs","object":"response","model":"gpt-5","status":"completed","output":[{"type":"function_call","id":"fc_tljPure7HPDfQuvj","call_id":"call_YJdjr98P3XA173hZrkSc1dXT","arguments":"\"text\"","status":"completed"},{"type":"function_call","id":"fc_2suTsIoTnWWon4ax","call_id":"toolu_01ABCdef","name":"web_fetch","arguments":"","status":"completed"},{"type":"function_call","id":"fc_pVmCJQ6Rfs677vQY","call_id":"call_Q9LZ4FseOX6i86RhoELKFbvU","name":"web_fetch","arguments":" {\"padded\": true} ","status":"completed"}],"usage":{"input_tokens":0,"output_tokens":4096,"total_tokens":"42"}},"sequence_number":15}"###.to_owned()],
+    );
+    case.model = r###"gpt-5-codex"###.to_owned();
+    case.translated_request =
+        r###"{"input":"hi","request":[{"model":"gpt-5"}],"model":"\u00a0"}"###.to_owned();
+    case.with_options(json!({"from":"gemini", "to":"openai-response"}))
 }

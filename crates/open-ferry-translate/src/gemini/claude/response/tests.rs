@@ -10,6 +10,23 @@ use serde_json::{Value, json};
 
 use super::*;
 
+// Not upstream's: the partial JSON must keep Gemini's number spelling.
+#[test]
+fn tool_arguments_keep_number_text() {
+    let mut translator = GeminiToClaudeStream::new(&json!({}));
+    let out = translator.translate(br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"n":1E+2,"nested":[1e2,-0]}}}]}}]}"#);
+    let delta = out
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|event| event["delta"]["type"] == "input_json_delta")
+        .unwrap();
+    assert_eq!(
+        delta["delta"]["partial_json"],
+        r#"{"n":1E+2,"nested":[1e2,-0]}"#
+    );
+}
+
 /// Feeds `chunks` through one stream and returns what each gave, with the
 /// number at the end of every `tool_use` ID replaced by `N`.
 fn stream(request: &Value, chunks: &[&str]) -> Vec<String> {

@@ -226,20 +226,28 @@ impl Error for ToolInputError {}
 impl ClaudeToOpenAIResponsesStream {
     /// `model` is named in `response.created` when neither request names a
     /// model. `original_request` is the client's Responses request and
-    /// `request` the translated one; the first that isn't `Null` supplies the
-    /// tool declarations and the fields the final event repeats.
-    pub fn new(model: &str, original_request: &Value, request: &Value) -> Self {
+    /// `request` the translated one; the first available JSON supplies the
+    /// tool declarations and the fields the final event repeats. Pass
+    /// `Option<&Value>` to distinguish valid JSON `null` from unavailable input;
+    /// a bare `&Value` keeps the null-as-absent convention.
+    pub fn new<'r>(
+        model: &str,
+        original_request: impl Into<crate::json::ResponseRequest<'r>>,
+        request: &'r Value,
+    ) -> Self {
         Self::with_tool_search(model, original_request, request, false)
     }
 
     /// Starts a response using the switch pinned by request translation.
-    pub fn with_tool_search(
+    pub fn with_tool_search<'r>(
         model: &str,
-        original_request: &Value,
-        request: &Value,
+        original_request: impl Into<crate::json::ResponseRequest<'r>>,
+        request: &'r Value,
         enabled: bool,
     ) -> Self {
-        let picked = pick_request(original_request, request);
+        let original_source = original_request.into();
+        let original_request = original_source.value();
+        let picked = pick_request(original_source, request);
         Self {
             model: request_model_name(original_request, request)
                 .unwrap_or(model)
@@ -1310,9 +1318,9 @@ impl ClaudeToOpenAIResponsesStream {
 /// stream, or a whole Messages response, as one Responses object. Lines up to
 /// the first `message_stop` are read. If an `apply_patch` call's arguments
 /// are invalid, the result is a failed response that says nothing about them.
-pub fn convert_claude_response_to_openai_responses_non_stream(
-    original_request: &Value,
-    request: &Value,
+pub fn convert_claude_response_to_openai_responses_non_stream<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> Value {
     non_stream(original_request, request, response).0
@@ -1321,9 +1329,9 @@ pub fn convert_claude_response_to_openai_responses_non_stream(
 /// [`convert_claude_response_to_openai_responses_non_stream`], or `None` if
 /// an `apply_patch` call failed: upstream's registry returns nothing then,
 /// when its caller passes a parameter to keep the error in.
-pub(crate) fn convert_claude_response_to_openai_responses_non_stream_checked(
-    original_request: &Value,
-    request: &Value,
+pub(crate) fn convert_claude_response_to_openai_responses_non_stream_checked<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> Option<Value> {
     match non_stream(original_request, request, response) {
@@ -1334,9 +1342,9 @@ pub(crate) fn convert_claude_response_to_openai_responses_non_stream_checked(
 
 /// Translates a complete reply with the switch pinned by request translation.
 /// Returns `None` when an apply_patch call failed.
-pub fn convert_claude_response_to_openai_responses_non_stream_with_tool_search(
-    original_request: &Value,
-    request: &Value,
+pub fn convert_claude_response_to_openai_responses_non_stream_with_tool_search<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
     enabled: bool,
 ) -> Option<Value> {
@@ -1363,21 +1371,22 @@ struct OutputItem {
 
 /// [`convert_claude_response_to_openai_responses_non_stream`], and the error
 /// upstream keeps in its state.
-fn non_stream(
-    original_request: &Value,
-    request: &Value,
+fn non_stream<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> (Value, Option<ToolInputError>) {
     non_stream_with_tool_search(original_request, request, response, false)
 }
 
-fn non_stream_with_tool_search(
-    original_request: &Value,
-    request: &Value,
+fn non_stream_with_tool_search<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
     enabled: bool,
 ) -> (Value, Option<ToolInputError>) {
-    let picked = pick_request(original_request, request);
+    let original_source = original_request.into();
+    let picked = pick_request(original_source, request);
     let tools = RequestTools::with_tool_search(picked.unwrap_or(&Value::Null), enabled);
 
     let mut response_id = String::new();

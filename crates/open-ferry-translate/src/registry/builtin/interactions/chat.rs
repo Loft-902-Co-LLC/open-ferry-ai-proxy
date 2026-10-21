@@ -96,7 +96,7 @@ mod tests {
     fn context(original_request: &Value) -> ResponseContext<'_> {
         ResponseContext {
             model: "gpt-test",
-            original_request,
+            original_request: original_request.into(),
             request: &Value::Null,
         }
     }

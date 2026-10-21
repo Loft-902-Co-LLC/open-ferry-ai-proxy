@@ -78,7 +78,7 @@ fn responses_stream(from: &Format, original: &Value) -> ResponseStream {
         &Format::OPENAI_RESPONSE,
         &ResponseContext {
             model: "model",
-            original_request: original,
+            original_request: (original).into(),
             request: original,
         },
     )
@@ -116,7 +116,7 @@ fn translation_error() {
         &Format::OPENAI_RESPONSE,
         &ResponseContext {
             model: "model",
-            original_request: &original,
+            original_request: (&original).into(),
             request: &original,
         },
     );
@@ -177,7 +177,7 @@ fn finalize_optional_canonical_state() {
         &Format::OPENAI_RESPONSE,
         &ResponseContext {
             model: "model",
-            original_request: &original,
+            original_request: (&original).into(),
             request: &original,
         },
     );

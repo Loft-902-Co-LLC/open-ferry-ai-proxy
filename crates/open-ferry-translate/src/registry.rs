@@ -180,8 +180,8 @@ pub type RequestEnvelopeTransform = Arc<dyn Fn(RequestEnvelope) -> RequestEnvelo
 pub struct ResponseContext<'a> {
     /// The model the request was for.
     pub model: &'a str,
-    /// The client's request.
-    pub original_request: &'a Value,
+    /// The client's request, retaining whether its JSON was available and valid.
+    pub original_request: crate::json::ResponseRequest<'a>,
     /// The request sent to the provider.
     pub request: &'a Value,
 }
