@@ -1070,6 +1070,48 @@ fn clip(text: &str) -> String {
 mod tests {
     use super::*;
 
+    // Go iterates a map of aliases that overwrite the same destination key.
+    // It can match or differ from Rust's stable order with the same seed; the
+    // actual checked-in fixture must remain accepted in either outcome.
+    #[test]
+    fn map_order_case_cannot_be_an_unexpected_difference() {
+        let case = interactions::suites(1, 0)
+            .into_iter()
+            .flat_map(|(_, cases, _)| cases)
+            .find(|case| case.name == "settings-for-the-same-field")
+            .expect("the ambiguous generation-settings fixture is still covered");
+        assert!(case.known_difference.unwrap().contains("map order"));
+        let dir = std::env::temp_dir().join(format!("parity-map-order-{}", std::process::id()));
+        let mut tally = Tally::default();
+        for outcome in [
+            Outcome::Identical,
+            Outcome::Equivalent(BTreeSet::new()),
+            Outcome::Different(vec![Difference::whole(
+                "one map order".into(),
+                "another".into(),
+            )]),
+        ] {
+            tally
+                .record(
+                    &case,
+                    Evaluated {
+                        outcome,
+                        go_output: String::new(),
+                        go_value: None,
+                        rust_output: Ok(Value::Null),
+                    },
+                    &dir,
+                )
+                .unwrap();
+        }
+        assert_eq!(tally.identical, 1);
+        assert_eq!(tally.equivalent, 1);
+        assert_eq!(tally.known.len(), 1);
+        assert_eq!(tally.different, 0);
+        assert_eq!(tally.failure_files, 0);
+        assert!(!dir.exists());
+    }
+
     // Not upstream's: an unexpected difference fails the tally and its saved
     // input keeps every Case field needed to make a regression fixture.
     #[test]
