@@ -106,7 +106,7 @@ mod tests {
     fn context<'a>(model: &'a str, original_request: &'a Value) -> ResponseContext<'a> {
         ResponseContext {
             model,
-            original_request,
+            original_request: original_request.into(),
             request: &Value::Null,
         }
     }

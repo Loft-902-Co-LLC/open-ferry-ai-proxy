@@ -14,6 +14,8 @@ use serde_json::{Map, Number, Value};
 use crate::go;
 
 pub mod exact;
+mod response_request;
+pub use response_request::ResponseRequest;
 pub(crate) mod lenient;
 pub(crate) mod raw;
 

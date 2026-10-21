@@ -238,10 +238,18 @@ impl Error for ToolInputError {}
 impl OpenAIToOpenAIResponsesStream {
     /// `model` is named in `response.created` when neither request names a
     /// model. `original_request` is the client's Responses request and
-    /// `request` the translated one; the first that isn't `Null` supplies the
-    /// tool declarations and the fields the final event repeats.
-    pub fn new(model: &str, original_request: &Value, request: &Value) -> Self {
-        let picked = pick_request(original_request, request);
+    /// `request` the translated one; the first available JSON supplies the
+    /// tool declarations and the fields the final event repeats. Pass
+    /// `Option<&Value>` to distinguish valid JSON `null` from unavailable input;
+    /// a bare `&Value` keeps the null-as-absent convention.
+    pub fn new<'r>(
+        model: &str,
+        original_request: impl Into<crate::json::ResponseRequest<'r>>,
+        request: &'r Value,
+    ) -> Self {
+        let original_source = original_request.into();
+        let original_request = original_source.value();
+        let picked = pick_request(original_source, request);
         Self {
             model: request_model_name(original_request, request)
                 .unwrap_or(model)
@@ -1187,9 +1195,9 @@ impl OpenAIToOpenAIResponsesStream {
 /// `apply_patch` call's arguments are invalid, the result is a failed
 /// response that says nothing about them; if a shell call's are, one that
 /// says the action was invalid.
-pub fn convert_openai_chat_completions_response_to_openai_responses_non_stream(
-    original_request: &Value,
-    request: &Value,
+pub fn convert_openai_chat_completions_response_to_openai_responses_non_stream<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> Value {
     non_stream(original_request, request, response).0
@@ -1198,9 +1206,11 @@ pub fn convert_openai_chat_completions_response_to_openai_responses_non_stream(
 /// [`convert_openai_chat_completions_response_to_openai_responses_non_stream`],
 /// or `None` if a tool call's input was invalid: upstream's registry returns
 /// nothing then, when its caller passes a parameter to keep the error in.
-pub(crate) fn convert_openai_chat_completions_response_to_openai_responses_non_stream_checked(
-    original_request: &Value,
-    request: &Value,
+pub(crate) fn convert_openai_chat_completions_response_to_openai_responses_non_stream_checked<
+    'r,
+>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     response: &[u8],
 ) -> Option<Value> {
     match non_stream(original_request, request, response) {
@@ -1213,9 +1223,9 @@ pub(crate) fn convert_openai_chat_completions_response_to_openai_responses_non_s
 /// and the error upstream keeps in its state. The tools come from the
 /// client's request, or else the translated one; the repeated fields come
 /// from the translated request only, as upstream's do.
-fn non_stream(
-    original_request: &Value,
-    request: &Value,
+fn non_stream<'r>(
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
+    request: &'r Value,
     body: &[u8],
 ) -> (Value, Option<ToolInputError>) {
     let tools = ToolNames::new(pick_request(original_request, request).unwrap_or(&Value::Null));

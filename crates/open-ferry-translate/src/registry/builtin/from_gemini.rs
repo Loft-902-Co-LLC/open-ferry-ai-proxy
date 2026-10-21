@@ -23,14 +23,14 @@ pub(super) fn register(registry: &Registry) {
             stream: Some(Arc::new(|context| {
                 Box::new(CodexToGemini(codex_gemini::CodexToGeminiStream::new(
                     context.model,
-                    context.original_request,
+                    context.original_request.value(),
                 )))
             })),
             non_stream: Some(Arc::new(|context, body| {
                 let event = parse(body);
                 let response = codex_gemini::convert_codex_response_to_gemini_non_stream(
                     context.model,
-                    context.original_request,
+                    context.original_request.value(),
                     &event,
                 );
                 Some(response.as_ref().map(to_vec).unwrap_or_default())

@@ -50,14 +50,14 @@ pub(super) fn register(registry: &Registry) {
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(GeminiToClaude(
-                    gemini_claude::GeminiToClaudeStream::new(context.original_request)
+                    gemini_claude::GeminiToClaudeStream::new(context.original_request.value())
                         .with_translated_request(context.request),
                 ))
             })),
             non_stream: Some(Arc::new(|context, body| {
                 let response =
                     gemini_claude::convert_gemini_response_to_claude_non_stream_with_translated(
-                        context.original_request,
+                        context.original_request.value(),
                         context.request,
                         &parse(body),
                     );
@@ -79,12 +79,12 @@ pub(super) fn register(registry: &Registry) {
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(GeminiToChat(gemini_chat::GeminiToOpenAIStream::new(
-                    context.original_request,
+                    context.original_request.value(),
                 )))
             })),
             non_stream: Some(Arc::new(|context, body| {
                 let response = gemini_chat::convert_gemini_response_to_openai_non_stream(
-                    context.original_request,
+                    context.original_request.value(),
                     &parse(body),
                 );
                 Some(to_vec(&response))

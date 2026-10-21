@@ -524,7 +524,7 @@ impl XaiExecutor {
             &prepared.response_format,
             &ResponseContext {
                 model: &request.model,
-                original_request: &prepared.original,
+                original_request: (&prepared.original).into(),
                 request: &prepared.body,
             },
         );
@@ -601,7 +601,7 @@ fn translate_completed(
 ) -> Result<Vec<u8>, ExecError> {
     let context = ResponseContext {
         model: &request.model,
-        original_request: &prepared.original,
+        original_request: (&prepared.original).into(),
         request: &prepared.body,
     };
     let out = Registry::global()

@@ -36,3 +36,24 @@ pub(crate) fn request_model_name<'r>(
         })
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Go's unicode.IsSpace and Rust's is_whitespace both use White_Space.
+    // All 25 code points are blank; U+001C, U+180E, U+200B and U+FEFF aren't.
+    #[test]
+    fn model_names_skip_go_unicode_whitespace() {
+        let fallback = json!({"model":"fallback"});
+        for ch in "\u{9}\u{a}\u{b}\u{c}\u{d} \u{85}\u{a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}".chars() {
+            let original = json!({"model":ch.to_string()});
+            assert_eq!(request_model_name(&original, &fallback), Some("fallback"));
+        }
+        for model in ["\u{1c}", "\u{180e}", "\u{200b}", "\u{feff}", " gpt-5 "] {
+            let original = json!({"model":model});
+            assert_eq!(request_model_name(&original, &fallback), Some(model));
+        }
+    }
+}

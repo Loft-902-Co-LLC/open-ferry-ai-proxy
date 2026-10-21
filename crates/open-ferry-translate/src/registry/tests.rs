@@ -25,7 +25,7 @@ const NO_REQUEST: Value = Value::Null;
 fn context() -> ResponseContext<'static> {
     ResponseContext {
         model: "model",
-        original_request: &NO_REQUEST,
+        original_request: (&NO_REQUEST).into(),
         request: &NO_REQUEST,
     }
 }

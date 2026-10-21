@@ -328,7 +328,7 @@ fn translate_answer(
     let original = original_request(request, options);
     let context = ResponseContext {
         model: &request.model,
-        original_request: &original,
+        original_request: (&original).into(),
         request: sent,
     };
     let out = Registry::global()
@@ -368,7 +368,7 @@ fn translate_stream(
         &format,
         &ResponseContext {
             model: &request.model,
-            original_request: &original,
+            original_request: (&original).into(),
             request: sent,
         },
     );

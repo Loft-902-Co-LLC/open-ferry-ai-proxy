@@ -78,7 +78,7 @@ impl GeminiToOpenAIStream {
         if chunk == b"[DONE]" {
             return Vec::new();
         }
-        let response: Value = serde_json::from_slice(chunk).unwrap_or(Value::Null);
+        let response = crate::json::exact::from_slice(chunk).unwrap_or(Value::Null);
 
         let mut base = json!({
             "id": "",

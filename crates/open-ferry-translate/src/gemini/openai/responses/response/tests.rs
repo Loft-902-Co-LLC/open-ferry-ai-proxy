@@ -26,6 +26,29 @@ use crate::json::exact;
 /// The model Go's signature tests stream from and replay to.
 const MODEL: &str = "gemini-3.6-flash-high";
 
+// Not upstream's: valid JSON null selects an empty original request, not the
+// translated request's fields, regardless of the translated model's spelling.
+#[test]
+fn valid_null_original_does_not_echo_translated_model() {
+    for model in ["\u{a0}", "gpt-5", " ", ""] {
+        let original = Value::Null;
+        let translated = json!({"model":model,"instructions":"translated"});
+        let out = convert_gemini_response_to_openai_responses_non_stream(
+            Some(&original),
+            &translated,
+            b"{}",
+        )
+        .unwrap();
+        assert!(out.get("model").is_none());
+        assert!(out.get("instructions").is_none());
+        let fallback =
+            convert_gemini_response_to_openai_responses_non_stream(None, &translated, b"{}")
+                .unwrap();
+        assert_eq!(fallback["model"], model);
+        assert_eq!(fallback["instructions"], "translated");
+    }
+}
+
 fn parse(json: &str) -> Value {
     serde_json::from_str(json).expect("test JSON is valid")
 }

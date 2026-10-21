@@ -1066,7 +1066,7 @@ fn an_initialized_stream_fails_a_requested_patch_without_a_chunk() {
             &Format::OPENAI_RESPONSE,
             &ResponseContext {
                 model: "m",
-                original_request: original,
+                original_request: (original).into(),
                 request: original,
             },
         )

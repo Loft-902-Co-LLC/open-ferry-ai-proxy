@@ -190,16 +190,17 @@ pub(crate) fn normalize_responses_tool_call_outputs(items: &[Value]) -> Vec<Cow<
     normalized
 }
 
-/// `pickRequestJSON`: the client's request, else the translated one. `Null`
-/// counts as absent, where upstream takes a request that is JSON `null`; the
-/// server routes no such request, since it names no model.
+/// `pickRequestJSON`: the client's valid JSON, including `null`, else the
+/// translated request. A bare `&Value` retains the older null-as-absent API;
+/// callers parsing bytes pass `Option<&Value>` to retain validity.
 pub(crate) fn pick_request<'r>(
-    original_request: &'r Value,
+    original_request: impl Into<crate::json::ResponseRequest<'r>>,
     request: &'r Value,
 ) -> Option<&'r Value> {
-    [original_request, request]
-        .into_iter()
-        .find(|request| !request.is_null())
+    original_request
+        .into()
+        .parsed()
+        .or_else(|| (!request.is_null()).then_some(request))
 }
 
 /// How upstream reads each repeated request field.
@@ -277,6 +278,19 @@ fn float_of(value: &Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Not upstream's: gjson.ValidBytes accepts null; absent/invalid bytes do
+    // not select a request. A translated model's whitespace is irrelevant.
+    #[test]
+    fn valid_null_request_precedes_translated_fields() {
+        let original = Value::Null;
+        for model in ["gpt-5", "\u{a0}", "", " "] {
+            let translated = json!({"model": model, "max_output_tokens": 7});
+            assert_eq!(pick_request(Some(&original), &translated), Some(&original));
+            assert_eq!(pick_request(None, &translated), Some(&translated));
+            assert_eq!(pick_request(&original, &translated), Some(&translated));
+        }
+    }
 
     #[test]
     fn call_ids_prefer_dedicated_fields() {

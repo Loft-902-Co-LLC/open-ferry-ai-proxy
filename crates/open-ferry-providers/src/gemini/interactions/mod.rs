@@ -293,7 +293,7 @@ pub(super) fn translate_stream(
         &format,
         &ResponseContext {
             model: &request.model,
-            original_request: &original,
+            original_request: (&original).into(),
             request: sent,
         },
     );

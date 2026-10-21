@@ -736,7 +736,7 @@ impl Translator {
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let mut stream = ClaudeToOpenAIResponsesStream::new(
                     &case.model,
-                    &request.unwrap_or_default(),
+                    request.as_ref().ok(),
                     &translated,
                 );
                 // The SSE frames for every line, then those for the stream's end,
@@ -770,7 +770,7 @@ impl Translator {
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let mut stream = OpenAIToOpenAIResponsesStream::new(
                     &case.model,
-                    &request.unwrap_or_default(),
+                    request.as_ref().ok(),
                     &translated,
                 );
                 // The SSE frames for every line, then those for the stream's end,
@@ -1033,11 +1033,11 @@ impl Translator {
             }
             Self::RegistryStream => {
                 let (from, to) = registry_formats(case);
-                let original = request.unwrap_or_default();
+                let original = request.ok();
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
-                    original_request: &original,
+                    original_request: original.as_ref().into(),
                     request: &translated,
                 };
                 let mut stream = Registry::global().response_stream(&from, &to, &context);
@@ -1065,11 +1065,11 @@ impl Translator {
             }
             Self::RegistryNonStream => {
                 let (from, to) = registry_formats(case);
-                let original = request.unwrap_or_default();
+                let original = request.ok();
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
-                    original_request: &original,
+                    original_request: original.as_ref().into(),
                     request: &translated,
                 };
                 let body = case
@@ -1101,7 +1101,7 @@ impl Translator {
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
                 let output = convert_claude_response_to_openai_responses_non_stream(
-                    &request.unwrap_or_default(),
+                    request.as_ref().ok(),
                     &translated,
                     body,
                 );
@@ -1151,7 +1151,7 @@ impl Translator {
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let mut stream = GeminiToOpenAIResponsesStream::new(
                     &case.model,
-                    &request.unwrap_or_default(),
+                    request.as_ref().ok(),
                     &translated,
                 );
                 // The SSE frames for every line, then those for the stream's end,
@@ -1170,7 +1170,7 @@ impl Translator {
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
                 let output = convert_gemini_response_to_openai_responses_non_stream(
-                    &request.unwrap_or_default(),
+                    request.as_ref().ok(),
                     &translated,
                     body,
                 );

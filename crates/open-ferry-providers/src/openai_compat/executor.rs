@@ -457,7 +457,7 @@ impl OpenAiCompatExecutor {
         let original = original_request(request, options);
         let context = ResponseContext {
             model: &request.model,
-            original_request: &original,
+            original_request: (&original).into(),
             request: &prepared.body,
         };
         let out = Registry::global()
@@ -512,7 +512,7 @@ impl OpenAiCompatExecutor {
             &format,
             &ResponseContext {
                 model: &request.model,
-                original_request: &original,
+                original_request: (&original).into(),
                 request: &prepared.body,
             },
         );

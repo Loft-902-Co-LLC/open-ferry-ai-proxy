@@ -83,7 +83,7 @@ mod tests {
     fn context<'a>(original_request: &'a Value) -> ResponseContext<'a> {
         ResponseContext {
             model: "gemini-2.5-pro",
-            original_request,
+            original_request: original_request.into(),
             request: &Value::Null,
         }
     }
