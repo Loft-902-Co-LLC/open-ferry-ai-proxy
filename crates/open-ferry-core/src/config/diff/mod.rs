@@ -17,6 +17,7 @@
 //! host (`format_url`), so no user information, path or query.
 //!
 //! Deviations from upstream:
+//! - All eight open-ferry `ingress-limits.*` settings get numeric change lines.
 //! - The compatibility-only `codex.signin-with-chatgpt-identifier` gets
 //!   an `updated` line without either value; upstream has no diff line.
 //! - The new body-limit, pre-first-token keepalive, affinity rebind and

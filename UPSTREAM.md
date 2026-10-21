@@ -265,7 +265,7 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **A request nested 128 or more levels deep is refused.** Upstream forwards a request body of any depth, and its translators read it with gjson, which has no limit. `serde_json` reads at most 127 levels of arrays and objects inside one another, so a deeper body would be read as an empty one, with its model, messages and tools silently dropped before the call. Every route that takes a model's request (Chat Completions, Completions, Responses and its compact form over HTTP, each `response.create` and `response.append` on the Responses WebSocket, Claude Messages and `count_tokens`, Gemini `generateContent`, `streamGenerateContent` and `countTokens`, and Interactions for a model or an `agent`) answers a body of valid JSON that deep with a 400 `invalid_request_error` in its own error format, saying how deep the limit is, before any translator or executor sees it. On the WebSocket the error event goes out before the request is answered or kept, so the session is as it was. The depth is counted by a scan that keeps its nesting on the heap, so a body of any size is safe to check, and every array or object counts, the empty ones too. A body that isn't JSON isn't refused for its depth; the route answers it as it does any other. A body at the limit is converted as before, so a request that a translator makes deeper than the limit is refused when it is called.
 - **A call's quota headers come with its result.** The credential manager keeps the quota headers of each Claude and Codex response, as upstream does, but reads them from the call's result, where upstream's `MarkResult` reads them from a holder in the request's context. A stream's are its headers, with those of the error that ended it over them, as upstream merges an error's into the holder. Devin isn't observed, as it isn't ported, so a `devin` result clears a snapshot that upstream would keep. Codex's `codex.rate_limits` WebSocket events aren't observed: upstream's executor merges each into the call's headers (`ParseCodexQuotaEventHeaders`), and here a WebSocket call is observed by its stream's headers alone. A header value's bytes that aren't UTF-8 are kept as U+FFFD, one for each byte, as Go's JSON encoder writes them.
 - **A credential manager change is in use before it is saved.** A registration, an update or a refresh's result is published at once, then saved to the auth store with the manager's lock released, each credential's saves still in order. Upstream saves a copy first, with its lock released, merges back what the store changed in the copy (`mergeAuthSaveDelta`), and only then publishes. Our store gets a copy it can't change, so there is nothing to merge back. A reload of the store waits for the changes being saved, and changes wait for a reload, as with upstream's reload barrier, but neither wait can be given up, as upstream's contexts allow. There are no per-credential locks: each change is made whole under the manager's lock.
-- **`max-request-body-bytes` always has a limit for proxy bodies.** Unset, zero or negative keeps 64 MiB, where upstream disables its cap. It bounds raw and decoded input and each Responses WebSocket frame/message. Route authentication runs before reservation or reading, so rejected credentials keep their 401/403 without consuming a body, including with request logging on. Authenticated declared oversize gets the flat pre-handler 413; chunked oversize reaches the handler as a size error, preserving its upstream shape. Management uses its own 16/32 MiB handler bounds on either listener, not the proxy limit; OAuth callbacks have a fixed 64 KiB bound outside the shared budget. Management storage has 96 MiB reserved headroom so proxy uploads cannot consume its share. These ordering, callback and headroom rules are open-ferry additions.
+- **`max-request-body-bytes` always has a limit for proxy bodies.** Unset, zero or negative keeps 64 MiB, where upstream disables its cap. It bounds raw and decoded input and each Responses WebSocket frame/message. Route authentication runs before reservation or reading, so rejected credentials keep their 401/403 without consuming a body, including with request logging on. Authenticated declared oversize gets the flat pre-handler 413; chunked oversize reaches the handler as a size error, preserving its upstream shape. Management uses its own 16/32 MiB handler bounds on either listener, not the proxy limit; GET OAuth callbacks do not poll bodies. POST callbacks have a 64 KiB bound and share a separate 2 MiB pool; exhaustion returns 503/Retry-After: 1 before buffering, a load-only deviation. Management storage has 96 MiB headroom that new proxy charges cannot consume; retained proxy charges after a lowering reload can temporarily occupy that headroom. These ordering, callback and headroom rules are open-ferry additions.
 - **A `response.interrupt` for a turn run over HTTP reaches only the turn that was running when it arrived.** The Responses WebSocket first asks the session's Codex connection to take the interrupt. If none does, it goes on to the HTTP turn only when that same turn is still running when the answer comes; upstream checks at delivery, so a turn that started in the meantime gets it there. With no turn to take it, the client gets a 400. The outcome (`handled`, `local_http` or `rejected`) is a debug log line, where upstream adds a WebSocket timeline entry holding a hash of the response ID; the timeline isn't ported (see [Request logs](#request-logs)).
 - **A Gemini tool call's arguments are cleaned against the schemas the client declared.** The `_` placeholder that schema normalization adds to an empty or closed object is taken out of a function call's arguments, whatever route the call came in on (`gemini/claude/tool_arguments.rs`, upstream's `internal/util/translator.go`); the arguments stay compact JSON values. Upstream decides whether the re-cleaned top-level object declares and requires `_` by running its Antigravity request cleaner; that isn't ported, so only the decision is projected (`tool_arguments/reclean.rs`). Differences: two schemas are told apart by compact parsed JSON, which keeps key order but loses whitespace and the spelling of string escapes; cleaning stops after 128 levels of arguments and keeps deeper data; the projection stops past 64 levels, or after 100,000 copied nodes, and then keeps the arguments unchanged, where upstream has neither bound. In four shapes the projection reads a schema as Go's quirks don't: a scalar `required` beside `allOf` or in a required-only union branch is read here (Go's array-only `getStrings` ignores it); a required name holding `|` or a backslash is looked up literally (Go's gjson path can drop it, so a closed object can keep `_` here where Go deletes it); and a property named `type` holding `["null"]` while `required` names `nullable` differs. The scalar-required and literal-`type` shapes never come from our Gemini cleaner.
 - **A Gemini stream whose end translated to a Claude error ends at Gemini's trailing usage chunk**, not at EOF (`open-ferry-providers/src/gemini/stream.rs`). The error is then ready for the manager even when the client has left and Gemini keeps the connection open. Upstream's translator writes the same error, and the stream ends where Gemini ends it.
@@ -677,7 +677,7 @@ Deviations, each also noted in its module:
 - **A compressed body is decoded or left out**, the client's request and the answer alike. A body sent with `gzip`, `deflate`, `br` or `zstd` (stacked encodings too) is decoded, up to a limit. One that can't be decoded, has another encoding, or decodes past the limit is written as a one-line placeholder (`[ENCODED REQUEST BODY OMITTED: ...]`, `[ENCODED RESPONSE BODY OMITTED: ...]`), never as it came, since a secret compressed in it couldn't be scrubbed; a streamed answer too, where it is compressed. Upstream decodes only a request body's `zstd` and an answer's `gzip`, `deflate`, `br` and `zstd`, writes any other body as it came, writes an answer it can't decode as its compressed bytes followed by a `[DECOMPRESSION ERROR: ...]` line, and cuts a body past its limit with a marker.
 - **OAuth callbacks** (a path ending `/callback`) aren't logged, nor is the dashboard API (under `/open-ferry/`), which upstream doesn't have and which, like the management API, carries the management key.
 - **Bodies are kept in memory, up to 32 MiB each**, and a line at the end of the file counts what was left out; upstream spills them to temporary files. The answer is kept as it is sent, and the file written once the request is done, by a writer thread of its own, which nothing waits on. When its queue of 1024 is full a log is dropped, and the drops are warned about at most once a minute.
-- **Request logging captures a bounded prefix without reading before authentication.** Full and errors-only capture keep at most 64 KiB of the authenticated admission read. Rendering copies/decodes at most 64 KiB; larger raw input has a truncation marker and an encoding that exceeds the decoded bound has an omission/size note. Bodies under both bounds keep the existing output. Chunked oversize is request-logged with its per-handler 413 shape; rejected credentials are logged without reading their bodies. This differs from upstream's eager Full-mode read and its 1 MiB read-ahead for errors-only mode. Admission can read more than a handler would have, so errors-only capture describes the admission read, not handler consumption.
+- **Request logging captures a bounded prefix without reading before authentication.** Full and errors-only capture keep at most 64 KiB of the authenticated admission read. Rendering copies/decodes at most 64 KiB; larger raw input has a truncation marker and an encoding that exceeds the decoded bound has an omission/size note. Bodies consumed under both bounds keep the existing output. In Full mode a body never read by admission or the handler (401, unrouted path, early 400 or 405) remains empty plus the incomplete-capture marker; upstream eagerly logs that body. Chunked oversize is request-logged with its per-handler 413 shape; rejected credentials are logged without reading their bodies. This differs from upstream's eager Full-mode read and its 1 MiB read-ahead for errors-only mode. Admission can read more than a handler would have, so errors-only capture describes the admission read, not handler consumption.
 - **An error log has the provider's answers.** With `request-log` off, each attempt but an upstream WebSocket's gets its `=== API RESPONSE n ===` section: the answer's status and headers, its body when the status is an error, and the attempt's `Error:` line. Upstream's executors record no answer with it off, so its error log's `=== API RESPONSE ===` has only the error the handler gave the client, which is the `=== RESPONSE ===` section here, without the provider's status and headers.
 - **The settings are read for each request.** The layer is always installed and checks `commercial-mode` live; upstream installs it only without `commercial-mode`. A request keeps the mode it arrived in.
 - **A client that leaves before the answer's head** is logged with status 499; one that leaves during the body, with what was sent.
@@ -991,30 +991,57 @@ Tests: none are upstream's. They bind 127.0.0.1 on ports the system picks and ch
 The accept loop bounds connections and TLS/header/idle/write phases on both
 listeners; excess sockets remain in the OS backlog. Unix admission derives from
 the effective descriptor allowance, with an Apple ceiling and useful low-limit
-floor; children restore the original allowance. Windows keeps 1024 per listener.
+floor. Only a successful raise installs a helper policy: before exec, best-effort
+restoration lowers the inherited soft limit to min(current soft, original soft),
+keeps the inherited hard limit, and never prevents spawn on a syscall failure.
+Windows keeps 1024 connections per listener.
 
-Bodies are admitted only after the route's existing authentication succeeds.
-Proxy and management use one accounting pool with protected management headroom;
-its floor fits a complete proxy multipart body plus one management upload. The
-configured default is still 256 MiB; the default size/reserve floor is 288 MiB.
-OAuth callbacks have a separate fixed 64 KiB bound. Management keeps its own
-handler limits on either listener rather than inheriting the proxy body setting.
-Raw/decoded temporary holds end with the handler, actual byte owners keep their
-charges, and zstd working storage is bounded and reserved before expansion.
-Logging uses a separately bounded 64 KiB prefix, not an uncharged full-body copy.
+Authenticated proxy and management uploads share accounting, with an effective
+floor max(configured, 3 * proxy body limit + 96 MiB). The configured default is
+256 MiB; the default effective floor is 288 MiB. New proxy charges cannot consume
+management headroom. A lowering reload retains old charges, which can temporarily
+occupy the newly defined headroom until their owners release storage. Management
+keeps its own handler bounds on both listeners. GET OAuth callbacks use queries
+and do not poll bodies, matching v8.0.36 server_routes.go:153-184. POST callback
+bodies are limited to 64 KiB and share a separate process-wide 2 MiB pool. When
+full they get 503 with Retry-After: 1 before buffering; upstream has no equivalent
+aggregate callback guard, so this deviation appears only under load.
 
-Chunked 413s retain each handler's upstream shape. H2 recoverable rejections keep
-the connection; a stalled response gets RST_STREAM/CANCEL, while a connection
-window or TCP stall closes the connection. Progress is per stream, across its
-queued chunks, and socket progress is observed below TLS. Graceful drains retain
-partial-header timers, use accepted protocol tasks rather than inferred streams,
-and have both idle completion grace and an absolute bound.
+Raw/decoded buffer reservations cover retained Vec capacity with explicit
+geometric growth, bounded by the upload limit. This is a capacity bound, excluding
+allocator granularity and transient old/new Vec overlap during realloc, not a
+strict RSS/peak bound. Temporary holds end at handler return; actual Bytes owners
+keep their charges. Zstd windows above min(upload limit, 8 MiB) are refused before
+init. Each frame precharges ring growth/overlap and a window-independent 6 MiB
+scratch allowance; later frames grow but never shrink that allowance. Entropy
+probability headers are checked without allocation before ruzstd's zero-run Vec
+resize. The audited formula and locked 0.9.1 source lines are documented in
+server/src/body/zstd_limits.rs. Output drains through fixed stack chunks and its
+capacity is charged separately. Logging uses a separately bounded 64 KiB prefix.
+Unread Full-mode bodies remain empty with an incomplete marker, unlike upstream.
 
-Upstream's main net/http server has no equivalent ingress deadlines. Ordinary
-SSE and upgraded WebSocket lifetimes remain unlimited, subject to admission,
-existing message/queue bounds, TCP write progress and blue-green cut. See
+Chunked 413s retain upstream handler shapes; recoverable H2 errors do not GOAWAY.
+Live H2 producers can be cancelled with RST_STREAM/CANCEL. A reset attempt retains
+a one-second reclamation deadline; if queued ownership survives, the connection
+is cut. A producer already finished with final DATA queued cannot be cancelled,
+so its stalled connection is cut directly. Per-stream isolation is retained for
+live producers. Connection-window stalls use their own progress clock; an old
+stream deadline cannot turn a momentarily zero connection window into a cut.
+Socket progress remains observed below TLS.
+
+Partial-header timers remain armed during ingress draining. Idle completion has
+a five-second grace, and drains begun by idle expiry or a 408 have an absolute
+five seconds plus body-total (else body-idle, else 900 seconds) bound. After a 408
+on one H2 stream, every remaining stream, including progressing SSE, is cut at
+that bound (905 seconds by default). This absolute bound does not apply to
+blue-green release or stop; their existing graceful behavior remains. Pending
+output is still subject to write-stall reclamation in all control modes.
+
+Upstream's net/http server has no equivalent ingress guards. Ordinary SSE and
+upgraded WebSocket lifetimes otherwise remain unlimited, subject to admission,
+message/queue bounds, TCP write progress and blue-green cut. See
 [configuration](docs/configuration.md#ingress-limits-open-ferry-additions) for
-all defaults, decoding/logging bounds, drain policy, disabling and reload rules.
+defaults, disabling and reload rules.
 
 ## Added in open-ferry: routing by quota
 

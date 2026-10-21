@@ -54,10 +54,15 @@ pub struct IngressLimits {
     pub idle_timeout_seconds: i64,
     /// No incoming body bytes: 60 seconds.
     pub body_idle_timeout_seconds: i64,
-    /// Entire upload: 900 seconds; response streams are excluded.
+    /// Entire upload: 900 seconds; ordinary response streams are excluded.
+    /// A connection draining after idle expiry or a 408 is nevertheless cut
+    /// after 5 seconds plus this deadline, including its other progressing SSE
+    /// streams. That absolute bound does not apply to blue-green release/stop.
     pub body_total_timeout_seconds: i64,
-    /// Raw and decoded body storage across both listeners: 256 MiB, at least
-    /// the effective per-request body limit.
+    /// Configured raw/decoded storage: 256 MiB. Effective aggregate capacity is
+    /// max(configured, 3 * proxy body limit + 96 MiB management headroom).
+    /// A lowering reload retains old charges, which may temporarily use the
+    /// newly defined headroom until those owners release their storage.
     pub buffered_body_bytes: i64,
     /// Outbound bytes waiting without delivery progress: 120 seconds.
     pub write_stall_timeout_seconds: i64,
