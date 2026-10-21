@@ -15,6 +15,7 @@ use axum::response::Response;
 use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, stream};
 use open_ferry_core::exec::Format;
+use open_ferry_providers::claude::MAX_LINE;
 use serde_json::Value;
 
 use super::{gjson_string, parse_body};
@@ -164,8 +165,10 @@ struct ClaudeWriter {
     saw_bare_message: bool,
     trailing_newlines: usize,
     line: Vec<u8>,
+    line_overflow: bool,
     event: String,
     data: Vec<u8>,
+    observation_overflow: bool,
 }
 
 impl Default for ClaudeWriter {
@@ -176,8 +179,10 @@ impl Default for ClaudeWriter {
             saw_bare_message: false,
             trailing_newlines: 2,
             line: Vec::new(),
+            line_overflow: false,
             event: String::new(),
             data: Vec::new(),
+            observation_overflow: false,
         }
     }
 }
@@ -186,18 +191,36 @@ impl ClaudeWriter {
     fn observe_line(&mut self) {
         let line = std::mem::take(&mut self.line);
         let line = open_ferry_translate::go::trim_space(&line);
-        if line.is_empty() {
+        let line_overflow = std::mem::take(&mut self.line_overflow);
+        if line.is_empty() && !line_overflow {
             self.flush_event();
             self.event.clear();
-        } else if let Some(event) = line.strip_prefix(b"event:") {
+            self.observation_overflow = false;
+            return;
+        }
+        if self.observation_overflow {
+            // Only a blank line can resume observation after an oversized event.
+            return;
+        }
+        if let Some(event) = line.strip_prefix(b"event:") {
             self.event = String::from_utf8_lossy(event).trim().to_owned();
         } else if let Some(data) = line.strip_prefix(b"data:") {
-            self.data
-                .extend_from_slice(open_ferry_translate::go::trim_space(data));
-            self.data.push(b'\n');
+            let data = open_ferry_translate::go::trim_space(data);
+            if self.data.len() + data.len() < MAX_LINE {
+                self.data.extend_from_slice(data);
+                self.data.push(b'\n');
+            } else {
+                self.overflow_event();
+            }
         } else {
             self.observe_json(line, false);
         }
+    }
+
+    fn overflow_event(&mut self) {
+        self.observation_overflow = true;
+        self.data.clear();
+        self.event.clear();
     }
 
     fn observe_json(&mut self, data: &[u8], sse: bool) {
@@ -220,7 +243,7 @@ impl ClaudeWriter {
 
     fn flush_event(&mut self) {
         let data = std::mem::take(&mut self.data);
-        if !data.is_empty() {
+        if !self.observation_overflow && !data.is_empty() {
             self.observe_json(&data, true);
         }
     }
@@ -252,8 +275,13 @@ impl StreamWriter for ClaudeWriter {
             }
             if byte == b'\n' {
                 self.observe_line();
-            } else {
-                self.line.push(byte);
+            } else if !self.line_overflow {
+                if self.line.len() < MAX_LINE {
+                    self.line.push(byte);
+                } else {
+                    self.line_overflow = true;
+                    self.overflow_event();
+                }
             }
         }
         out.extend_from_slice(&chunk);
@@ -324,6 +352,72 @@ mod translated_error_tests {
 #[cfg(test)]
 mod truncation_tests {
     use super::*;
+
+    fn forward_unchanged(writer: &mut ClaudeWriter, chunk: &[u8]) {
+        let mut out = BytesMut::new();
+        writer.write_chunk(Bytes::copy_from_slice(chunk), &mut out);
+        assert_eq!(&out[..], chunk);
+        assert!(writer.line.len() <= MAX_LINE);
+        assert!(writer.data.len() <= MAX_LINE);
+    }
+
+    #[test]
+    fn bounds_a_single_line_without_a_newline() {
+        let mut writer = ClaudeWriter::default();
+        forward_unchanged(&mut writer, b"data: {\"type\":\"message_stop\",\"padding\":\"");
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..=MAX_LINE / chunk.len() {
+            forward_unchanged(&mut writer, &chunk);
+        }
+        forward_unchanged(&mut writer, b"\"}");
+        assert_eq!(writer.line.len(), MAX_LINE);
+        assert!(writer.observation_overflow);
+        assert!(writer.close_error().is_some());
+        assert!(!writer.saw_message_stop);
+        assert!(!writer.saw_error_event);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+    }
+
+    #[test]
+    fn bounds_data_lines_without_an_event_boundary() {
+        let mut writer = ClaudeWriter::default();
+        forward_unchanged(&mut writer, b"event: error\ndata: {\"type\":\"error\",\"parts\":[\n");
+        let chunk = format!("data: {}\n", "0,".repeat(32 * 1024));
+        for _ in 0..=MAX_LINE / (chunk.len() - b"data: \n".len()) {
+            forward_unchanged(&mut writer, chunk.as_bytes());
+        }
+        forward_unchanged(&mut writer, b"data: 0]}\n");
+        assert!(writer.observation_overflow);
+        assert!(writer.close_error().is_some());
+        assert!(!writer.saw_error_event);
+        assert!(!writer.saw_message_stop);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+    }
+
+    #[test]
+    fn observes_message_stop_after_an_overflowed_event() {
+        let mut writer = ClaudeWriter::default();
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..=MAX_LINE / chunk.len() {
+            forward_unchanged(&mut writer, &chunk);
+        }
+        forward_unchanged(&mut writer, b"\ndata: {\"type\":\"error\"}\n\n");
+        assert!(!writer.observation_overflow);
+        assert!(!writer.saw_error_event);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+        forward_unchanged(
+            &mut writer,
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        assert!(writer.close_error().is_none());
+        assert!(writer.saw_message_stop);
+        assert!(!writer.saw_error_event);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+    }
 
     // TestClaudeStream* completion, chunk splitting, error deduplication and framing.
     #[test]

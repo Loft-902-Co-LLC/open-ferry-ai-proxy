@@ -77,7 +77,7 @@ use crate::observe_send::{self, BodyTap};
 use crate::redact::Policy;
 
 /// The longest line read, as upstream's scanner allows.
-pub(crate) const MAX_LINE: usize = 52_428_800;
+pub const MAX_LINE: usize = 52_428_800;
 
 /// What a Grok Build client gets for a `keepalive` event.
 const KEEPALIVE_COMMENT: &[u8] = b": keepalive\n\n";
