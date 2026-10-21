@@ -18,8 +18,25 @@ const GOAWAY_GRACE: Duration = Duration::from_secs(5);
 /// then allow two descriptors for each accepted connection. A practical ceiling
 /// also bounds parser/task overhead on hosts with a million-descriptor limit.
 fn cap_from_limit(limit: u64) -> usize {
-    (limit.saturating_sub((limit / 2).max(256)) / 4).clamp(1, 8192) as usize
+    (limit.saturating_sub((limit / 2).max(256)) / 4)
+        .max((limit / 8).max(16))
+        .min(8192) as usize
 }
+
+fn raise_target(hard: u64, ceiling: u64) -> u64 { hard.min(ceiling) }
+
+#[cfg(target_os = "macos")]
+fn descriptor_ceiling() -> u64 {
+    let mut value: libc::c_int = 0;
+    let mut size = std::mem::size_of_val(&value);
+    // SAFETY: sysctl writes only to the sized local integer.
+    let result = unsafe { libc::sysctlbyname(c"kern.maxfilesperproc".as_ptr(),
+        (&mut value as *mut libc::c_int).cast(), &mut size, std::ptr::null_mut(), 0) };
+    if result == 0 && value > 0 { value as u64 } else { 10240 }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn descriptor_ceiling() -> u64 { u64::MAX }
 
 pub(super) fn default_connection_cap() -> usize {
     static CAP: OnceLock<usize> = OnceLock::new();
@@ -35,11 +52,21 @@ pub(super) fn default_connection_cap() -> usize {
             if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
                 if limit.rlim_cur < limit.rlim_max {
                     let raised = libc::rlimit {
-                        rlim_cur: limit.rlim_max,
+                        rlim_cur: raise_target(limit.rlim_max, descriptor_ceiling()),
                         rlim_max: limit.rlim_max,
                     };
-                    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+                    let mut raised = raised;
+                    let mut result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) };
+                    #[cfg(target_os = "macos")]
+                    if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+                        raised.rlim_cur = raised.rlim_cur.min(10240);
+                        result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) };
+                    }
+                    if result == 0 {
                         limit = raised;
+                    } else {
+                        tracing::warn!(cap = cap_from_limit(limit.rlim_cur),
+                            "could not raise open-file limit; using the current limit for admission");
                     }
                 }
                 return cap_from_limit(limit.rlim_cur);
