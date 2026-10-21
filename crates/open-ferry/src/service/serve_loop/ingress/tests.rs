@@ -4,8 +4,22 @@ use super::*;
 fn descriptor_reserve_two_listeners_and_two_handles_are_accounted_for() {
     assert_eq!(cap_from_limit(1024), 128);
     assert_eq!(cap_from_limit(8192), 1024);
-    assert_eq!(cap_from_limit(64), 1);
+    assert_eq!(cap_from_limit(64), 16);
+    assert_eq!(cap_from_limit(256), 32);
     assert_eq!(cap_from_limit(u64::MAX), 8192);
+}
+
+#[test]
+fn apple_descriptor_targets_are_clamped_and_small_limits_have_a_floor() {
+    for (soft, hard, ceiling, target) in [
+        (256, u64::MAX, 10240, 10240),
+        (256, 10240, 10240, 10240),
+        (1024, 524288, u64::MAX, 524288),
+    ] {
+        assert_eq!(raise_target(hard, ceiling), target);
+        assert!(target >= soft);
+        assert!(cap_from_limit(soft) >= (soft / 8).max(16) as usize);
+    }
 }
 
 #[tokio::test(start_paused = true)]
