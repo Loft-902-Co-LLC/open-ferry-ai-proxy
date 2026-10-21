@@ -61,6 +61,21 @@ async fn write_deadline_tracks_delivery_progress_and_not_upstream_silence() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_queued_chunk_does_not_expire_while_its_stream_is_progressing() {
+    let config = IngressConfig { write_stall_timeout: Some(Duration::from_secs(2)), ..IngressConfig::default() };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    let flight = Flight::new(traffic.clone());
+    let mut first = Delivery::new(Bytes::from_static(b"abcdef"), flight.clone());
+    let _second = Delivery::new(Bytes::from_static(b"queued"), flight);
+    for _ in 0..5 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        first.advance(1);
+        assert!(traffic.due().unwrap().0 > Instant::now());
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn h2_headers_have_one_deadline_and_connect_data_is_not_a_header() {
     let config = IngressConfig::default();
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());

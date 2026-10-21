@@ -180,12 +180,17 @@ async fn ingress_cap_is_per_listener_with_shared_controls_and_budget() {
 }
 
 async fn read_h2_frame(stream: &mut TcpStream) -> u8 {
+    read_h2_packet(stream).await.0
+}
+
+async fn read_h2_packet(stream: &mut TcpStream) -> (u8, u8, u32, Vec<u8>) {
     let mut head = [0; 9];
     within(stream.read_exact(&mut head)).await.unwrap();
     let len = (usize::from(head[0]) << 16) | (usize::from(head[1]) << 8) | usize::from(head[2]);
     assert!(len < 1 << 20);
-    within(stream.read_exact(&mut vec![0; len])).await.unwrap();
-    head[3]
+    let mut payload = vec![0; len];
+    within(stream.read_exact(&mut payload)).await.unwrap();
+    (head[3], head[4], u32::from_be_bytes(head[5..9].try_into().unwrap()) & 0x7fff_ffff, payload)
 }
 
 #[tokio::test]
@@ -489,43 +494,123 @@ async fn ingress_body_timeout_answers_408_then_closes_the_socket() {
     within(served.server).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn ingress_http2_flow_control_stall_is_cut_even_when_tcp_is_writable() {
-    let routes = Router::new().route(
-        "/sse",
-        get(|| async {
-            (
-                [("content-type", "text/event-stream")],
-                Body::from_stream(futures_util::stream::repeat_with(|| {
-                    Ok::<_, Infallible>(axum::body::Bytes::from_static(&[b'x'; 64 * 1024]))
-                })),
-            )
-        }),
-    );
-    let served = start_limited(limits(), None, Some(routes));
+async fn raw_h2(served: &Served, window: u32) -> TcpStream {
     let mut stream = connect(served.addr).await;
-    // A raw peer advertises exactly one stream-window byte and NEVER sends
-    // WINDOW_UPDATE. Receiving its first DATA proves the window is exhausted;
-    // no scheduler timing or client's automatic window management is involved.
-    stream.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x06\x04\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x01").await.unwrap();
-    let block = b"\x82\x86\x04\x04/sse\x01\x09localhost";
-    let mut head = vec![0, 0, block.len() as u8, 1, 5, 0, 0, 0, 1];
-    head.extend_from_slice(block);
-    stream.write_all(&head).await.unwrap();
-    let mut saw_data = false;
-    for _ in 0..8 {
-        if read_h2_frame(&mut stream).await == 0 {
-            saw_data = true;
-            break;
-        }
-    }
-    assert!(saw_data);
+    stream.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.unwrap();
+    let mut settings = vec![0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4];
+    settings.extend_from_slice(&window.to_be_bytes());
+    stream.write_all(&settings).await.unwrap();
+    stream
+}
+
+async fn h2_get(stream: &mut TcpStream, id: u32, path: &str) {
+    let mut block = vec![0x82, 0x86, 4, path.len() as u8];
+    block.extend_from_slice(path.as_bytes());
+    block.extend_from_slice(b"\x01\x09localhost");
+    let mut frame = vec![0, 0, block.len() as u8, 1, 5];
+    frame.extend_from_slice(&id.to_be_bytes());
+    frame.extend_from_slice(&block);
+    stream.write_all(&frame).await.unwrap();
+}
+
+async fn h2_window(stream: &mut TcpStream, id: u32, amount: u32) {
+    let mut frame = vec![0, 0, 4, 8, 0];
+    frame.extend_from_slice(&id.to_be_bytes());
+    frame.extend_from_slice(&amount.to_be_bytes());
+    stream.write_all(&frame).await.unwrap();
+}
+
+fn sse_routes() -> Router {
+    Router::new().route("/sse", get(|| async {
+        ([ ("content-type", "text/event-stream") ],
+        Body::from_stream(futures_util::stream::repeat_with(|| {
+            Ok::<_, Infallible>(axum::body::Bytes::from_static(&[b'x'; 64 * 1024]))
+        })))
+    }))
+}
+
+#[tokio::test]
+async fn ingress_h2_resets_only_the_stalled_stream_and_keeps_its_peer_stream() {
+    let gate = Gate::default();
+    let route_gate = gate.clone();
+    let routes = sse_routes().route("/ok", get(move || {
+        let gate = route_gate.clone();
+        async move { gate.started.notify_one(); gate.proceed.notified().await; "ok" }
+    }));
+    let served = start_limited(limits(), None, Some(routes));
+    let mut stream = raw_h2(&served, 1).await;
+    h2_get(&mut stream, 1, "/sse").await;
+    loop { let frame = read_h2_packet(&mut stream).await; if frame.0 == 0 && frame.2 == 1 { break; } }
+    h2_get(&mut stream, 3, "/ok").await;
+    within(gate.started.notified()).await;
     assert!(traffic(&served).unwrap().has_pending_delivery());
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3)).await;
     settle().await;
     tokio::time::resume();
+    assert_eq!(served.control.live_count(), 1);
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        if frame.0 == 3 && frame.2 == 1 {
+            assert_eq!(u32::from_be_bytes(frame.3.try_into().unwrap()), 8, "expected CANCEL");
+            break;
+        }
+    }
+    gate.proceed.notify_one();
+    h2_window(&mut stream, 3, 32).await;
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        if frame.0 == 0 && frame.2 == 3 { assert_eq!(frame.3, b"ok"); assert_ne!(frame.1 & 1, 0); break; }
+    }
+    assert_eq!(served.control.live_count(), 1);
+    drop(stream);
+    until(|| served.control.live_count() == 0).await;
+    within(served.control.release()).await;
+    within(served.server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn ingress_h2_slow_readers_can_progress_for_longer_than_the_deadline() {
+    let served = start_limited(limits(), None, Some(sse_routes()));
+    let mut stream = raw_h2(&served, 1).await;
+    h2_get(&mut stream, 1, "/sse").await;
+    for _ in 0..5 {
+        loop {
+            let frame = read_h2_packet(&mut stream).await;
+            assert_ne!(frame.0, 3, "progressing stream was reset");
+            if frame.0 == 0 && frame.2 == 1 { assert_eq!(frame.3.len(), 1); break; }
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        tokio::time::resume();
+        h2_window(&mut stream, 1, 1).await;
+    }
+    assert_eq!(served.control.live_count(), 1);
+    drop(stream);
+    until(|| served.control.live_count() == 0).await;
+    within(served.control.release()).await;
+    within(served.server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn ingress_h2_connection_window_stall_still_closes_the_connection() {
+    let served = start_limited(limits(), None, Some(sse_routes()));
+    let mut stream = raw_h2(&served, 1 << 20).await;
+    h2_get(&mut stream, 1, "/sse").await;
+    let mut received = 0;
+    while received < 65535 {
+        let frame = read_h2_packet(&mut stream).await;
+        if frame.0 == 0 { received += frame.3.len(); }
+    }
+    assert_eq!(received, 65535);
+    assert_eq!(traffic(&served).unwrap().state().send_window, 0);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    settle().await;
+    tokio::time::resume();
     assert_eq!(served.control.live_count(), 0);
+    drop(stream);
     within(served.control.release()).await;
     within(served.server).await.unwrap().unwrap();
 }
