@@ -60,9 +60,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 - **Ported from CLIProxyAPI v8.0.36**, up from v8.0.32. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8032-to-v8036-left-out). The SIWC/routing group is still pending its final reviewed integration.
 - **Refresh outer Codex credentials 96 hours before nominal expiry.** Rejected unexpired JWTs and stream 401s recover in the background while sibling models remain blocked; SIWC keeps its independent five-minute lead.
-- **Configured Claude and claude-cli attempts use the selected credential's thinking capabilities and routing snapshot.** Claude also uses model-specific disable modes, adaptive-only fallbacks and dated/context family capabilities.
 - **xAI forwards the real downstream User-Agent**, with open-ferry as its default.
-- **Paused Claude web-search history uses linear passes**, and Gemini schema-size work is shared across pointer aliases.
 - **Ported from CLIProxyAPI v8.0.32**, up from v8.0.27. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8027-to-v8032-left-out). It brings:
   - **Closed HTTP/2 connections are retried as transient drops**: a call that meets a connection the peer closed fails over to another try and no longer counts against the credential. A recorded `tls handshake timeout` message alone no longer counts as a transient failure.
   - **A model's own cooldown stays beneath a credential-wide quota cooldown**: when the credential's quota runs out, the model's cooldown is kept and comes back when the credential's ends. It is saved with `save-cooldown-status`. A success from a call dispatched before a cooldown no longer clears it.
@@ -110,8 +108,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Reconcile replayed Codex web-search history with hosted-tool declarations**, including Responses Lite; align token-count preparation and generated web-search/image tool order with upstream.
 - **Preserve signed Claude thinking history when thinking is omitted**, respecting forced tool choice and final payload rules.
 - **Honor usable Retry-After for explicit Claude per-minute limits**, including case-folded fields and overwritten malformed Unicode values.
-- **Bind Claude and claude-cli thinking to the routed model and matching config snapshot**, including auto, prefixes and suffixed aliases; preserve exact-before-base and first-match configured capability precedence.
-- **Skip JSON parsing for marker-free Claude cache traffic** and avoid full-store scans during cache lookup and eviction.
+- **Bind Claude and claude-cli thinking to the routed model and matching config snapshot**, using the selected credential's thinking capabilities and routing snapshot. This includes auto, prefixes and suffixed aliases, and preserves exact-before-base and first-match configured capability precedence. Claude also uses model-specific disable modes, adaptive-only fallbacks and dated/context family capabilities.
 - **Preserve nested Gemini tool fields referenced through local JSON Schema definitions**, leave literal defaults/examples intact, and strip unsupported contentMediaType, contentEncoding, readOnly and writeOnly annotations while retaining same-named properties.
 - **Bound Gemini local-reference expansion and decoded schema paths** across a request to prevent stack/memory exhaustion; avoid depth-dependent memory amplification during schema repair and argument re-cleaning.
 - **Preserve Claude tool_use stops and parallel tool calls** from providers that omit stream indexes.
