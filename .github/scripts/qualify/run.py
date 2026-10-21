@@ -20,6 +20,7 @@ import platform
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -353,6 +354,7 @@ class Qualification:
         self.port = free_port()
         self.load = None
         self.installed_service = False
+        self.runner_adjustments = []
         self.fault_confirmed = False
         self.env = dict(os.environ)
         self.env.pop("OPEN_FERRY_SELF_UPDATE", None)
@@ -552,7 +554,47 @@ class Qualification:
                      and last.get("from") == (self.a if how == "update" else self.b)
                      and last.get("result") == ("switched" if how == "update" else "rolled-back"))))
 
+    def prepare_runner_directories(self):
+        if not (self.published and self.machine and self.os == "Linux"):
+            return
+        hosted = (os.environ.get("GITHUB_ACTIONS") == "true"
+                  and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
+        for path in ("/", "/usr", "/usr/local", "/usr/local/bin"):
+            try:
+                metadata = os.lstat(path)
+            except OSError:
+                raise RuntimeError(f"Linux machine precondition: cannot inspect {path}; "
+                                   "provide an existing root-owned real directory") from None
+            require(stat.S_ISDIR(metadata.st_mode),
+                    f"Linux machine precondition: refusing {path}; use a real directory, not a link or file")
+            require(metadata.st_uid == 0,
+                    f"Linux machine precondition: refusing {path}; make it owned by root")
+            mode = stat.S_IMODE(metadata.st_mode)
+            if mode & 0o022:
+                require(hosted,
+                        f"Linux machine precondition: refusing writable {path}; remove group and other "
+                        "write permission (chmod go-w); automatic changes require a GitHub-hosted runner")
+                protected = mode & ~0o022
+                os.chmod(path, protected)
+                adjustment = {"path": path, "from": f"{mode:04o}", "to": f"{protected:04o}"}
+                self.runner_adjustments.append(adjustment)
+                record(f"Runner directory {path}: {adjustment['from']} -> {adjustment['to']}")
+
+    def restore_runner_directories(self):
+        for adjustment in reversed(getattr(self, "runner_adjustments", [])):
+            path = adjustment["path"]
+            try:
+                metadata = os.lstat(path)
+                require(stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == 0,
+                        "directory is no longer a root-owned real directory; repair its permissions manually")
+                os.chmod(path, int(adjustment["from"], 8))
+                record(f"Restored runner directory {path}: {adjustment['to']} -> {adjustment['from']}")
+            except Exception as error:
+                # A mode restoration failure must not hide the lifecycle result.
+                record(f"Runner directory restore failed for {path}: {type(error).__name__}: {error}")
+
     def prerequisites(self):
+        self.prepare_runner_directories()
         if self.machine:
             if self.os == "Linux":
                 require(not Path("/etc/systemd/system/open-ferry.service").exists(),
@@ -904,6 +946,7 @@ class Qualification:
                 except Exception as error:
                     failures.append((phase, error))
                     record(f"{phase} failed: {type(error).__name__}: {error}")
+            self.restore_runner_directories()  # Last: uninstall must run with protected directories.
             if failures:
                 raise QualificationFailure(failures) from failures[0][1]
 
@@ -935,6 +978,7 @@ def main():
                 "candidate preconditions were prepared for another service form")
         result.update(qualification.candidates)
         result["phase"] = "lifecycle"
+        result["runner_adjustments"] = qualification.runner_adjustments
         qualification.run()
         result["passed"] = True
         if qualification.candidates["fault"] in SIGNATURE_ERRORS:

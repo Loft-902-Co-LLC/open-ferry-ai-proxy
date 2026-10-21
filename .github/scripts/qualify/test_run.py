@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,7 @@ class QualificationControls(unittest.TestCase):
         self.q.data = self.work / "data"
         self.q.load = None
         self.q.installed_service = False
+        self.q.runner_adjustments = []
         self.q.fault_confirmed = False
         self.q.prerequisites = Mock()
         self.q.install = Mock()
@@ -431,7 +433,8 @@ class PublishedPreconditions(unittest.TestCase):
         self.assertLess(real_test, preconditions)
         self.assertIn("test_run.py", steps[real_test]["run"])
         published = next(step for step in steps if step.get("name") == "Qualify the published service")
-        self.assertIn("--preserve-env=GH_TOKEN,QUALIFY_FAULT", published["run"])
+        self.assertIn("--preserve-env=GH_TOKEN,QUALIFY_FAULT,GITHUB_ACTIONS,RUNNER_ENVIRONMENT",
+                      published["run"])
 
     def test_timer_deadline_and_unrequested_switch_are_red(self):
         q = object.__new__(qualification.Qualification)
@@ -712,6 +715,9 @@ class PublishedPreconditions(unittest.TestCase):
 
 
 class RunnerAndInstallerSafety(unittest.TestCase):
+    paths = ("/", "/usr", "/usr/local", "/usr/local/bin")
+    hosted = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -795,6 +801,153 @@ class RunnerAndInstallerSafety(unittest.TestCase):
         self.assertNotIn("stale installer output", self.log() + self.output.getvalue())
         self.assertNotIn("Installer output:\n", self.log())
 
+    def runner(self):
+        q = object.__new__(qualification.Qualification)
+        q.os = "Linux"
+        q.candidates = {"mode": "published", "form": "machine", "fault": "none", "versions": ["0.0.1", "0.0.2"]}
+        q.runner_adjustments = []
+        self.metadata = {path: SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0) for path in self.paths}
+        def lstat(path):
+            value = self.metadata[str(path)]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        self.lstat = self.enterContext(patch.object(qualification.os, "lstat", side_effect=lstat))
+        self.chmod = self.enterContext(patch.object(qualification.os, "chmod"))
+        self.enterContext(patch.dict(os.environ, self.hosted, clear=True))
+        return q
+
+    def test_hosted_writable_directory_is_protected_and_records_all_mode_bits(self):
+        q = self.runner()
+        self.metadata["/usr/local/bin"].st_mode = stat.S_IFDIR | 0o3777
+        q.prepare_runner_directories()
+        self.assertEqual([call.args for call in self.lstat.call_args_list], [(path,) for path in self.paths])
+        self.chmod.assert_called_once_with("/usr/local/bin", 0o3755)
+        self.assertEqual(q.runner_adjustments, [{"path": "/usr/local/bin", "from": "3777", "to": "3755"}])
+        self.assertIn("/usr/local/bin: 3777 -> 3755", self.log())
+
+    def test_hosted_protected_directories_need_no_changes(self):
+        q = self.runner()
+        q.prepare_runner_directories()
+        self.assertEqual(self.lstat.call_count, 4)
+        self.chmod.assert_not_called()
+        self.assertEqual(q.runner_adjustments, [])
+
+    def test_not_hosted_writable_directory_is_refused_before_install_without_chmod(self):
+        q = self.runner()
+        self.metadata["/usr/local/bin"].st_mode |= 0o022
+        q.install, q.logs, q.remove_root_auth = Mock(), Mock(), Mock()
+        q.data, q.load, q.installed_service = self.work / "data", None, False
+        for env in ({}, {"GITHUB_ACTIONS": "true"}, {"RUNNER_ENVIRONMENT": "github-hosted"},
+                    {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"},
+                    {"GITHUB_ACTIONS": "false", "RUNNER_ENVIRONMENT": "github-hosted"}):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True), \
+                    self.assertRaisesRegex(qualification.QualificationFailure, "chmod go-w"):
+                q.run()
+            q.install.assert_not_called()
+            self.chmod.assert_not_called()
+
+    def test_non_root_owner_is_always_refused(self):
+        q = self.runner()
+        for path in self.paths:
+            with self.subTest(path=path):
+                self.metadata[path].st_uid = 1001
+                self.metadata[path].st_mode |= 0o022
+                with self.assertRaisesRegex(RuntimeError, "make it owned by root"):
+                    q.prepare_runner_directories()
+                self.chmod.assert_not_called()
+                self.metadata[path] = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+
+    def test_links_files_and_missing_directories_are_always_refused(self):
+        q = self.runner()
+        for path in self.paths:
+            for value in (SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0),
+                          SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0), FileNotFoundError()):
+                with self.subTest(path=path, value=value):
+                    self.metadata[path] = value
+                    with self.assertRaisesRegex(RuntimeError, "real directory"):
+                        q.prepare_runner_directories()
+                    self.chmod.assert_not_called()
+            self.metadata[path] = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+
+    def test_runner_preparation_is_only_for_published_linux_machine_form(self):
+        q = self.runner()
+        for system, mode, form in (("Linux", "published", "user"), ("Darwin", "published", "machine"),
+                                   ("Windows", "published", "machine"), ("Linux", "throwaway", "machine"),
+                                   ("Linux", "throwaway", "user")):
+            with self.subTest(system=system, mode=mode, form=form):
+                q.os = system
+                q.candidates.update(mode=mode, form=form)
+                q.prepare_runner_directories()
+                q.restore_runner_directories()
+                self.lstat.assert_not_called()
+                self.chmod.assert_not_called()
+
+    def test_modes_restored_after_uninstall_on_success_and_lifecycle_failure(self):
+        q = self.runner()
+        self.metadata["/usr/local/bin"].st_mode |= 0o022
+        for failing, restore_failure in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(failing=failing, restore_failure=restore_failure):
+                q.runner_adjustments = []
+                events = []
+                self.chmod.reset_mock()
+                def chmod(path, mode):
+                    events.append((path, mode))
+                    if restore_failure and mode == 0o777:
+                        raise PermissionError("restore sentinel")
+                self.chmod.side_effect = chmod
+                q.a, q.b = "0.0.1", "0.0.2"
+                q.port, q.client, q.exe, q.env = 12345, "unused-client", self.work / "exe", {}
+                q.config = self.work / "config.yaml"
+                q.data, q.load, q.installed_service = self.work / "data", None, False
+                q.prerequisites = q.prepare_runner_directories
+                def install(base):
+                    events.append("install")
+                    q.installed_service = True
+                    if failing:
+                        raise RuntimeError("lifecycle sentinel")
+                q.install, q.check_after_flip, q.until = install, Mock(), Mock()
+                q.logs = lambda: qualification.write(self.out / "supervisor-worker.log",
+                                                      "automatic switch accepted: 0.0.2\n")
+                def uninstall():
+                    events.append("uninstall")
+                    q.installed_service = False
+                q.uninstall = uninstall
+                with patch.object(qualification, "prepare_published", return_value=q.candidates), \
+                        patch.object(qualification, "Qualification", return_value=q), \
+                        patch.object(qualification, "Load") as load, \
+                        patch.object(qualification, "command", side_effect=[Mock(stdout="open-ferry 0.0.2"),
+                                     Mock(stdout="rollback complete"), Mock(stdout="open-ferry 0.0.1")]), \
+                        patch.object(sys, "argv", ["run.py", str(self.work), "--published", "0.0.1,0.0.2", "--form", "machine"]):
+                    load.return_value.snapshot.return_value = {"counts": {"baseline.requests": 4,
+                                                               "auto.requests": 4, "rollback.requests": 4}}
+                    self.assertEqual(qualification.main(), int(failing), self.log())
+                self.assertEqual(events, [("/usr/local/bin", 0o755), "install", "uninstall", ("/usr/local/bin", 0o777)])
+                result = json.loads((self.out / "result.json").read_text(encoding="utf-8"))
+                self.assertEqual(result["passed"], not failing)
+                self.assertEqual(result["runner_adjustments"],
+                                 [{"path": "/usr/local/bin", "from": "0777", "to": "0755"}])
+                if failing:
+                    self.assertIn("lifecycle sentinel", result["error"])
+                if restore_failure:
+                    self.assertIn("Runner directory restore failed for /usr/local/bin", self.log())
+
+    def test_partial_preparation_is_restored_and_restore_failure_is_best_effort(self):
+        q = self.runner()
+        self.metadata["/usr"].st_mode |= 0o022
+        self.metadata["/usr/local/bin"] = FileNotFoundError()
+        q.install, q.logs, q.remove_root_auth = Mock(), Mock(), Mock()
+        q.data, q.load, q.installed_service = self.work / "data", None, False
+        with self.assertRaisesRegex(qualification.QualificationFailure, "cannot inspect /usr/local/bin"):
+            q.run()
+        q.install.assert_not_called()
+        self.assertEqual([call.args for call in self.chmod.call_args_list], [("/usr", 0o755), ("/usr", 0o777)])
+        q.runner_adjustments.append({"path": "/usr/local", "from": "0777", "to": "0755"})
+        self.chmod.reset_mock()
+        self.chmod.side_effect = [PermissionError("restore denied"), None]
+        q.restore_runner_directories()
+        self.assertEqual([call.args for call in self.chmod.call_args_list], [("/usr/local", 0o777), ("/usr", 0o777)])
+        self.assertIn("Runner directory restore failed for /usr/local: PermissionError: restore denied", self.log())
 
 
 class CandidateSignatures(unittest.TestCase):
