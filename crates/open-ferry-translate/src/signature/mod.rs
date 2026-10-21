@@ -137,6 +137,13 @@ impl Provider {
     /// be replayed to `model`.
     pub fn from_model_name(model: &str) -> Self {
         let lower = crate::go::to_lower(model.trim());
+        let candidate = lower.rsplit(['/', ':']).next().filter(|s| !s.is_empty()).unwrap_or(&lower);
+        let family = Self::from_model_value(candidate);
+        if family != Self::Unknown { return family; }
+        Self::from_model_value(&lower)
+    }
+
+    fn from_model_value(lower: &str) -> Self {
         let has = |needle| lower.contains(needle);
         let starts = |prefix| lower.starts_with(prefix);
         if has("claude") {

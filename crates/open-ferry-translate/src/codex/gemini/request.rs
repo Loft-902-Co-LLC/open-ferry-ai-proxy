@@ -15,7 +15,7 @@
 //!   gjson path, so it misses one under a key holding path syntax other than
 //!   `.`, `*` and `?`, such as `#` or `|`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{Map, Value};
 
@@ -37,8 +37,9 @@ pub fn convert_gemini_request_to_codex(model_name: &str, request: &Value) -> Val
     input.extend(system_message(request));
     if let Some(Value::Array(contents)) = request.get("contents") {
         let mut call_ids = CallIds::default();
+        let mut seen_signatures = HashSet::new();
         for content in contents {
-            push_content(&mut input, content, &short_names, &mut call_ids);
+            push_content(&mut input, content, &short_names, &mut call_ids, model_name, &mut seen_signatures);
         }
     }
 
@@ -122,6 +123,8 @@ fn push_content(
     content: &Value,
     short_names: &HashMap<String, String>,
     call_ids: &mut CallIds,
+    model: &str,
+    seen: &mut HashSet<String>,
 ) {
     let mut role = str_of(content.get("role")).into_owned();
     if role == "model" {
@@ -131,6 +134,16 @@ fn push_content(
         return;
     };
     for part in parts {
+        if role == "assistant" {
+            let raw = ["thoughtSignature", "thought_signature"].iter().map(|key| str_of(part.get(*key))).find(|s| !s.trim().is_empty()).unwrap_or_default();
+            if let Some(sig) = super::signature::for_target(model, &raw)
+                && seen.insert(sig.clone()) {
+                    let mut summary = Vec::new();
+                    let text = str_of(part.get("text"));
+                    if is_thought(part) && !text.trim().is_empty() { summary.push(serde_json::json!({"type":"summary_text","text":text.trim()})); }
+                    input.push(serde_json::json!({"type":"reasoning","encrypted_content":sig,"summary":summary}));
+                }
+        }
         if is_thought(part) {
             continue;
         }

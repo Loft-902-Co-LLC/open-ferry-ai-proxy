@@ -37,17 +37,16 @@ pub fn inspect_meta_reasoning_signature(raw: &str) -> Result<MetaReasoningSignat
             "invalid Meta reasoning signature: expected Q-PaDg prefix"
         ));
     }
-    if let Some((index, c)) = first_invalid_base64_char(sig, b"-_") {
-        return Err(error!(
-            "invalid Meta reasoning signature: contains non-base64url character U+{:04X} at byte {index}",
-            u32::from(c)
-        ));
-    }
     if sig.len() % 4 == 1 {
-        return Err(error!(
-            "invalid Meta reasoning signature: base64url length {} cannot decode",
-            sig.len()
-        ));
+        return Err(error!("invalid Meta reasoning signature: base64url length {} cannot decode", sig.len()));
+    }
+    let decoded_len = sig.len() / 4 * 3 + (sig.len() % 4).saturating_sub(1);
+    let payload_len = decoded_len as isize - 45;
+    if payload_len < 1024 || !(payload_len as usize).is_power_of_two() {
+        return Err(error!("invalid Meta reasoning signature: payload length {payload_len} is not a power-of-two bucket"));
+    }
+    if let Some((index, c)) = first_invalid_base64_char(sig, b"-_") {
+        return Err(error!("invalid Meta reasoning signature: contains non-base64url character U+{:04X} at byte {index}", u32::from(c)));
     }
     let decoded = RAW_URL
         .strict()

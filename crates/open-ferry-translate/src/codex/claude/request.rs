@@ -218,7 +218,7 @@ impl SignatureReplay {
             return Some(signature);
         }
         if self.meta_target && crate::signature::is_valid_meta_reasoning_signature(&raw) {
-            return Some(raw.into_owned());
+            return Some(raw.trim().to_owned());
         }
         if self.preserve_unknown
             && (raw.trim().is_empty()
