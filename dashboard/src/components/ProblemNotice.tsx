@@ -129,7 +129,7 @@ export function explainProblem(problem: CallProblem): Explanation {
         tone: "warn",
         title: "The config changed since this page loaded",
         body: <>
-          <p>{problem.local === true ? "The dashboard stopped this save." : "The server refused this save."}
+          <p>{problem.local === true ? "The dashboard stopped this save before sending it." : "The server refused this save."}
             {problem.fields !== undefined && ` Changed fields: ${problem.fields.join(", ")}.`}
             {" "}Reload this form before saving again. Unsaved edits will be lost on reload;
             copy them first if you want to keep them.</p>
