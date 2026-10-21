@@ -354,6 +354,44 @@ mod tests {
     }
 
     #[test]
+    fn stale_executor_scope_is_rejected_after_global_settings_change() {
+        // cargo test runs unit tests concurrently. Exercise the real global
+        // store in a child harness so other cache tests keep their own policy.
+        const CHILD: &str = "OFP_P36_CACHE_SCOPE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "claude::web_search::tests::stale_executor_scope_is_rejected_after_global_settings_change", "--nocapture"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        let old =
+            Config::parse("client: {codex: {web-search-result-cache: {enabled: true, ttl: 60s}}}")
+                .unwrap();
+        let current =
+            Config::parse("client: {codex: {web-search-result-cache: {enabled: true, ttl: 1s}}}")
+                .unwrap();
+        apply_config(&current.client.codex.web_search_result_cache);
+        let auth = Auth {
+            id: "scope-policy-probe".into(),
+            ..Auth::default()
+        };
+        let request = Request {
+            model: "claude-sonnet-5-5".into(),
+            payload: bytes::Bytes::from_static(b"{}"),
+        };
+        let mut options = Options::new(Format::OPENAI_RESPONSE);
+        options.metadata.execution_session_id = Some("policy-probe".into());
+        assert!(scope(Some(&old), &auth, &request, &options).is_none());
+        assert!(scope(Some(&current), &auth, &request, &options).is_some());
+    }
+
+    #[test]
     fn marker_free_stream_skips_json_parsing_and_recording() {
         let scope = scope_key("marker-free-stream");
         RECORD_PARSES.with(|count| count.set(0));

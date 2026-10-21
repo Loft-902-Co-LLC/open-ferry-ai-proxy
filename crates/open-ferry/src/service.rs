@@ -1255,6 +1255,8 @@ struct Service {
     deferred_config: Option<(Arc<Config>, Option<String>)>,
     #[cfg(test)]
     config_applies: usize,
+    #[cfg(test)]
+    executor_registration_events: std::sync::Mutex<Vec<&'static str>>,
     /// Reads the model catalogs from their sources.
     catalogs: CatalogRuntime,
     /// Where the catalogs say which providers' models changed.
@@ -1451,6 +1453,8 @@ impl Service {
             deferred_config: None,
             #[cfg(test)]
             config_applies: 0,
+            #[cfg(test)]
+            executor_registration_events: std::sync::Mutex::default(),
             catalogs: CatalogRuntime::global().clone(),
             catalog_sender,
             catalog_changes,
@@ -1867,16 +1871,30 @@ impl Service {
     /// claude-cli, Gemini, Vertex AI, and the OpenAI-compatible ones (see
     /// [`Self::register_compat_executors`]).
     fn register_executors(&mut self) {
+        self.configure_claude_web_search_cache();
+        self.register_native_executors();
+        self.register_compat_executors();
+    }
+
+    fn configure_claude_web_search_cache(&self) {
         open_ferry_providers::claude::apply_web_search_cache_config(
             &self.config.client.codex.web_search_result_cache,
         );
-        self.register_native_executors();
-        self.register_compat_executors();
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("cache");
     }
 
     /// Registers the Codex, Meta, Claude, claude-cli, Gemini, Gemini
     /// Interactions, Vertex AI and xAI executors for the current config.
     fn register_native_executors(&self) {
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("native");
         let proxy_url = self.config.proxy_url.clone();
         self.register_codex_executor();
         self.register_meta_executor();
@@ -1902,6 +1920,11 @@ impl Service {
 
     /// The CLI also binds capabilities from the current config snapshot.
     fn register_claude_cli_executor(&self) {
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("claude-cli");
         // It sends nothing itself, so takes no proxy.
         self.manager.register_executor(Arc::new(
             ClaudeCliExecutor::new()
@@ -1912,6 +1935,11 @@ impl Service {
 
     /// Registers Claude and publishes the same snapshot to its model catalog.
     fn register_claude_executor(&self) {
+        #[cfg(test)]
+        self.executor_registration_events
+            .lock()
+            .unwrap()
+            .push("claude");
         let executor = Arc::new(
             ClaudeExecutor::new(self.config.proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
@@ -3406,9 +3434,7 @@ impl Service {
         let applied_hash = sha256.clone();
         let previous = std::mem::replace(&mut self.config, config);
         let config = Arc::clone(&self.config);
-        open_ferry_providers::claude::apply_web_search_cache_config(
-            &config.client.codex.web_search_result_cache,
-        );
+        self.configure_claude_web_search_cache();
         self.log_level.set_debug(config.debug);
         if (&previous.host, previous.port, &previous.tls)
             != (&config.host, config.port, &config.tls)
@@ -8307,6 +8333,34 @@ mod tests {
     /// `config`, from contents these tests don't keep.
     fn config_changed(config: Arc<Config>) -> WatchEvent {
         WatchEvent::ConfigChanged(config, String::new())
+    }
+
+    #[test]
+    fn web_search_cache_policy_precedes_executor_registration_at_startup_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "");
+        assert_eq!(
+            *service.executor_registration_events.lock().unwrap(),
+            ["cache", "native", "claude", "claude-cli"]
+        );
+        service.executor_registration_events.lock().unwrap().clear();
+        let mut config = (*service.config).clone();
+        config.client.codex.web_search_result_cache.enabled = true;
+        config.client.codex.web_search_result_cache.ttl = "1s".into();
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        assert_eq!(
+            *service.executor_registration_events.lock().unwrap(),
+            ["cache", "claude", "claude-cli"]
+        );
+        // Also exercise a reload that takes the full native-executor branch.
+        service.executor_registration_events.lock().unwrap().clear();
+        let mut config = (*service.config).clone();
+        config.claude.model_level_cooling = !config.claude.model_level_cooling;
+        service.apply_config_authorized(Arc::new(config), None, Path::new(""));
+        assert_eq!(
+            *service.executor_registration_events.lock().unwrap(),
+            ["cache", "native", "claude", "claude-cli"]
+        );
     }
 
     #[tokio::test]
