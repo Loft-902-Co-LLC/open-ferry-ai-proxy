@@ -533,6 +533,7 @@ pub(crate) fn prepare_body(
         });
     }
 
+    ensure_web_search_tool_for_history(&mut body, &options.headers);
     normalize_parallel_tool_calls(&mut body, &options.headers);
     normalize_tool_schemas(&mut body);
     let turn = ext::prepare(kind, context, request, options, &mut body);
@@ -1013,5 +1014,39 @@ mod tests {
         set_string_if_different(&mut body, "model", "a");
         set_bool_if_different(&mut body, "stream", true);
         assert_eq!(body, json!({"model": "a", "stream": true}));
+    }
+}
+
+/// Replayed hosted searches need a matching declaration, except on Responses Lite.
+pub(crate) fn ensure_web_search_tool_for_history(body: &mut Value, headers: &HeaderMap) {
+    let Some(input) = body.get("input").and_then(Value::as_array) else { return; };
+    if !input.iter().any(|item| crate::json::str_at(item, "type").trim() == "web_search_call") { return; }
+    if body.get("tools").and_then(Value::as_array).is_some_and(|tools| tools.iter().any(|tool| matches!(crate::json::str_at(tool, "type").trim(), "web_search" | "web_search_preview" | "web_search_preview_2025_03_11"))) { return; }
+    if is_responses_lite(body, headers) {
+        body["input"].as_array_mut().unwrap().retain(|item| crate::json::str_at(item, "type").trim() != "web_search_call");
+    } else if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        tools.push(serde_json::json!({"type":"web_search"}));
+    } else { body["tools"] = serde_json::json!([{"type":"web_search"}]); }
+}
+
+#[cfg(test)]
+mod web_search_history_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn reconciles_search_history_without_changing_other_items() {
+        for declaration in [None, Some("web_search"), Some("web_search_preview"), Some("web_search_preview_2025_03_11")] {
+            for lite in [false, true] {
+                let mut body = json!({"input":[{"type":"web_search_call"},{"type":"message","content":"hi"}],"tools":[{"type":"function","name":"keep"}]});
+                if let Some(tool) = declaration { body["tools"].as_array_mut().unwrap().push(json!({"type":tool})); }
+                let mut headers = HeaderMap::new();
+                if lite { headers.insert("x-openai-internal-codex-responses-lite", http::HeaderValue::from_static("true")); }
+                ensure_web_search_tool_for_history(&mut body, &headers);
+                assert_eq!(body["tools"][0]["name"], "keep");
+                assert_eq!(body["input"].as_array().unwrap().len(), if lite && declaration.is_none() { 1 } else { 2 });
+                assert_eq!(body["tools"].as_array().unwrap().len(), if lite && declaration.is_none() { 1 } else { 2 });
+                let before = body.clone(); ensure_web_search_tool_for_history(&mut body, &headers); assert_eq!(body, before);
+            }
+        }
     }
 }
