@@ -12,16 +12,17 @@
 //!
 //! The channel is the path's, or the `channel` query parameter when the
 //! path's is blank. The answer is `{"channel":<channel>,"models":[...]}`
-//! with the channel in lower case; a channel the catalog doesn't know is
-//! answered with a 400.
+//! with the channel in lower case; a channel with neither catalog definitions
+//! nor available registered models is answered with a 400.
 //!
 //! Deviations from upstream:
 //! - Only the channels open-ferry serves are known: `claude`, `gemini`,
 //!   `gemini-interactions`, `vertex`, `codex` (with the Pro plan's models),
 //!   `xai` (also `x-ai` and `grok`) and `meta` (also `muse`). Upstream also
 //!   knows `aistudio`, `kimi` (also `kimi-ai`, `kimi.ai` and `kimi.com`),
-//!   `antigravity` and `devin`, which are a 400 here. Configured
-//!   OpenAI-compatible provider names use the registry fallback.
+//!   `antigravity` and `devin`. Those native definitions are omitted here;
+//!   these names still use registered models when available. Configured
+//!   OpenAI-compatible provider names also resolve their namespaced registry key.
 //! - A model's `config` isn't written: it holds the client headers upstream
 //!   sends for a model, which open-ferry doesn't send.
 //! - A channel whose `%`-escapes don't decode to UTF-8 is named in the
@@ -33,6 +34,7 @@ use axum::http::Uri;
 use axum::response::Response;
 use axum::routing::get;
 use http::StatusCode;
+use open_ferry_core::auth::compat::openai_compatible_provider_key;
 use open_ferry_core::models::ModelInfo;
 use open_ferry_core::registry::StaticCatalog;
 use open_ferry_translate::go::to_lower;
@@ -98,31 +100,22 @@ async fn definitions(
     )
 }
 
-/// Registry fallback also serves configured OpenAI-compatible provider names,
-/// while deliberately unported providers remain unavailable.
-fn served_channel(channel: &str) -> bool {
-    !matches!(
-        to_lower(channel).as_str(),
-        "aistudio"
-            | "kimi"
-            | "kimi-ai"
-            | "kimi.ai"
-            | "kimi.com"
-            | "antigravity"
-            | "devin"
-            | "gemini-cli"
-            | "home"
-    )
-}
-
+/// Registry fallback accepts both provider keys and configured compatibility
+/// names. Native catalog omissions do not reserve names against registry users.
 pub(crate) fn resolved_models(
     catalog: &StaticCatalog,
     registry: &open_ferry_core::registry::ModelRegistry,
     channel: &str,
 ) -> Vec<ModelInfo> {
     let mut models = channel_models(catalog, channel);
-    if models.is_empty() && served_channel(channel) {
+    if models.is_empty() {
         models = registry.available_models_by_provider(channel);
+        if models.is_empty() {
+            let key = openai_compatible_provider_key(channel);
+            if key != channel {
+                models = registry.available_models_by_provider(&key);
+            }
+        }
         models.sort_by(|a, b| a.id.cmp(&b.id));
     }
     models

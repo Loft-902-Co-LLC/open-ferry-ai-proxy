@@ -4,8 +4,12 @@
 //! Static definitions and the sorted registry fallback for served providers.
 
 use http::{Method, StatusCode};
+use open_ferry_core::auth::synthesizer::{
+    StableIdGenerator, SynthesisContext, synthesize_config_auths,
+};
+use open_ferry_core::config::Config;
 use open_ferry_core::models::ModelInfo;
-use open_ferry_core::registry::StaticCatalog;
+use open_ferry_core::registry::{RegistrationRules, StaticCatalog};
 use serde_json::Value;
 
 use super::{Api, LOCAL, request_from};
@@ -34,13 +38,86 @@ async fn configured_provider_definitions_fall_back_to_sorted_registry_models() {
         assert_eq!(ids(&body), ["a-custom", "z-custom"]);
         assert_eq!(body["models"][0]["display_name"], "Custom a-custom");
     }
-    for channel in ["antigravity", "kimi", "aistudio", "devin", "gemini-cli"] {
-        api.registry.register_client(channel, channel, &models);
+    for channel in [
+        "antigravity",
+        "kimi",
+        "aistudio",
+        "devin",
+        "gemini-cli",
+        "home",
+    ] {
         api.get(&format!("/v0/management/model-definitions/{channel}"))
             .await
             .expect(StatusCode::BAD_REQUEST);
+        api.registry.register_client(channel, channel, &models);
+        let body = api
+            .get(&format!("/v0/management/model-definitions/{channel}"))
+            .await
+            .expect(StatusCode::OK);
+        assert_eq!(ids(&body), ["a-custom", "z-custom"]);
     }
     api.get("/v0/management/model-definitions/unknown")
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+}
+
+// Use the real config synthesizer and registration rules: compat providers
+// register under openai-compatible-<name>, not under their bare config name.
+#[tokio::test]
+async fn compat_provider_named_kimi_lists_its_registered_definitions() {
+    let mut config = super::keyed_config();
+    config.openai_compatibility = Config::parse(
+        r#"openai-compatibility:
+  - name: kimi
+    base-url: https://kimi.example.test/v1
+    api-key-entries:
+      - api-key: dummy-key
+    models:
+      - name: z-upstream
+        alias: z-kimi
+      - name: a-upstream
+        alias: a-kimi
+"#,
+    )
+    .unwrap()
+    .openai_compatibility;
+    let api = Api::with(config.clone(), None);
+    api.get("/v0/management/model-definitions/kimi")
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+    let auths = synthesize_config_auths(
+        &config,
+        &SynthesisContext::new("", chrono::Utc::now()),
+        &mut StableIdGenerator::new(),
+    )
+    .unwrap();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].provider, "openai-compatible-kimi");
+    api.registry
+        .register_auth(&auths[0], &RegistrationRules::from(&config));
+    assert!(api.registry.available_models_by_provider("kimi").is_empty());
+    assert_eq!(
+        api.registry
+            .available_models_by_provider("openai-compatible-kimi")
+            .len(),
+        2
+    );
+    for route in [
+        "/v0/management/model-definitions",
+        "/v8/management/routing/model-definitions",
+    ] {
+        for channel in ["KiMi", "openai-compatible-kimi"] {
+            let body = api
+                .get(&format!("{route}/{channel}"))
+                .await
+                .expect(StatusCode::OK);
+            assert_eq!(body["channel"], channel.to_lowercase());
+            assert_eq!(ids(&body), ["a-kimi", "z-kimi"]);
+            assert_eq!(body["models"][0]["owned_by"], "kimi");
+        }
+    }
+    api.registry.unregister_client(&auths[0].id);
+    api.get("/v0/management/model-definitions/kimi")
         .await
         .expect(StatusCode::BAD_REQUEST);
 }
