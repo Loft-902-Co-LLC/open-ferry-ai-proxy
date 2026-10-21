@@ -96,10 +96,7 @@ async fn unauthenticated_declared_oversize_is_rejected_without_reading() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        body_text(response).await,
-        r#"{"error":"Missing API key"}"#
-    );
+    assert_eq!(body_text(response).await, r#"{"error":"Missing API key"}"#);
 }
 
 #[tokio::test]
@@ -188,7 +185,7 @@ async fn decoded_oversize_is_rejected_with_and_without_logging() {
 }
 
 #[tokio::test]
-async fn logging_rejects_unauthenticated_chunked_oversize() {
+async fn logging_leaves_unauthenticated_chunked_bodies_unread() {
     let scratch = scratch();
     let mut config = Config::default();
     config.request_log = true;
@@ -197,8 +194,8 @@ async fn logging_rejects_unauthenticated_chunked_oversize() {
         ..Observability::default()
     };
     let app = crate::router(state_with_limit(64).with_observability(observability));
-    // internal/api/max_request_body_bytes_test.go:115-129: 1 KiB offered,
-    // no more than limit + 1 bytes read. Single-byte chunks expose over-reading.
+    // Authentication wins even when Full logging is enabled. No offered
+    // byte may be read or charged before a key is accepted.
     let read = Arc::new(AtomicUsize::new(0));
     let counted = read.clone();
     let chunks = stream::iter(0..1024).map(move |_| {
@@ -210,18 +207,12 @@ async fn logging_rejects_unauthenticated_chunked_oversize() {
         .body(Body::from_stream(chunks))
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(read.load(Ordering::SeqCst) <= 65);
-    // internal/api/middleware/request_logging.go:57-60 runs before CORS.
-    assert!(
-        !response
-            .headers()
-            .keys()
-            .any(|name| name.as_str().starts_with("access-control-"))
-    );
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(read.load(Ordering::SeqCst), 0);
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
     assert_eq!(
         body_text(response).await,
-        r#"{"error":"http: request body too large"}"#
+        r#"{"error":"Missing API key"}"#
     );
 }
 
@@ -301,7 +292,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessCapture {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn declared_oversize_is_access_logged_before_authentication() {
+async fn declared_oversize_is_access_logged_after_authentication() {
     use tracing_subscriber::layer::SubscriberExt;
     crate::test_tracing::keep_every_callsite_open();
     let capture = AccessCapture::default();
@@ -309,6 +300,7 @@ async fn declared_oversize_is_access_logged_before_authentication() {
     let _guard = tracing::subscriber::set_default(subscriber);
     let request = Request::post(ROUTES[0])
         .header("content-length", "128")
+        .header("authorization", "Bearer test-key")
         .body(Body::empty())
         .unwrap();
     let response = crate::router(state_with_limit(64))
@@ -342,12 +334,11 @@ async fn logging_read_failures_keep_cors_headers() {
     let app = crate::router(state_with_limit(64).with_observability(observability));
     let chunks = stream::iter([Err::<Bytes, _>(std::io::Error::other("broken body"))]);
     let request = Request::post(ROUTES[0])
+        .header("authorization", "Bearer test-key")
         .body(Body::from_stream(chunks))
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
-    // Our logging read failure answers 400 before auth, with CORS headers.
-    // Upstream request_logging.go:62-65 continues to CORS and auth instead:
-    // 401 without a key, or 204 for OPTIONS.
+    // An authenticated read failure keeps CORS and the body-reader error.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(response.headers()["access-control-allow-origin"], "*");
 }
