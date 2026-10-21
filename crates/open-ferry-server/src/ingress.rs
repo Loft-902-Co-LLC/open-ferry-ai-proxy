@@ -221,7 +221,11 @@ pub async fn public_request(request: Request, next: Next) -> Response {
     static CALLBACK_POOL: std::sync::OnceLock<BodyBudget> = std::sync::OnceLock::new();
     let pool = CALLBACK_POOL.get_or_init(|| {
         let budget = BodyBudget::new(Some(2 << 20));
-        budget.0.lock().unwrap_or_else(PoisonError::into_inner).management_reserve = 0;
+        budget
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .management_reserve = 0;
         budget
     });
     let mut limits = request
@@ -629,12 +633,25 @@ pub(crate) struct BudgetBuffer {
 impl BudgetBuffer {
     #[cfg(test)]
     pub(crate) fn new(budget: Option<BodyBudget>) -> Self {
-        let limit = budget.as_ref().and_then(|budget| budget.0.lock().unwrap_or_else(PoisonError::into_inner).limit).unwrap_or(usize::MAX);
+        let limit = budget
+            .as_ref()
+            .and_then(|budget| {
+                budget
+                    .0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .limit
+            })
+            .unwrap_or(usize::MAX);
         Self::with_limit(budget, body_limit(limit))
     }
 
     pub(crate) fn with_limit(budget: Option<BodyBudget>, limit: usize) -> Self {
-        Self { bytes: Vec::new(), reservation: Reservation { budget, bytes: 0 }, limit }
+        Self {
+            bytes: Vec::new(),
+            reservation: Reservation { budget, bytes: 0 },
+            limit,
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -643,12 +660,16 @@ impl BudgetBuffer {
 
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<(), ()> {
         let needed = self.bytes.len().checked_add(bytes.len()).ok_or(())?;
-        if needed > self.limit { return Err(()); }
+        if needed > self.limit {
+            return Err(());
+        }
         if needed > self.bytes.capacity() {
             // Bound retained capacity, excluding allocator granularity and the
             // transient old/new overlap during realloc. Grow geometrically,
             // charge the chosen capacity first, then request exactly that size.
-            let capacity = needed.max(self.bytes.capacity().saturating_mul(2)).min(self.limit);
+            let capacity = needed
+                .max(self.bytes.capacity().saturating_mul(2))
+                .min(self.limit);
             self.reservation.grow_to(capacity)?;
             self.bytes.reserve_exact(capacity - self.bytes.len());
         }

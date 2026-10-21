@@ -748,107 +748,210 @@ async fn warnings_count_every_guard_hit_but_are_rate_limited() {
 
 #[tokio::test]
 async fn public_get_callbacks_answer_without_polling_the_body() {
-    let ingress=ingress(12);
-    let router=ingress.install(Router::new().route("/codex/callback",axum::routing::get(|| async { "ok" })).layer(axum::middleware::from_fn(public_request)));
-    let polls=Arc::new(AtomicUsize::new(0));
-    let count=polls.clone();
-    let body=Body::from_stream(stream::poll_fn(move |_| {
-        count.fetch_add(1,Ordering::SeqCst);
-        std::task::Poll::<Option<Result<Bytes,std::io::Error>>>::Pending
+    let ingress = ingress(12);
+    let router = ingress.install(
+        Router::new()
+            .route("/codex/callback", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(public_request)),
+    );
+    let polls = Arc::new(AtomicUsize::new(0));
+    let count = polls.clone();
+    let body = Body::from_stream(stream::poll_fn(move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
     }));
-    let task=tokio::spawn(router.oneshot(Request::get("/codex/callback").body(body).unwrap()));
+    let task = tokio::spawn(router.oneshot(Request::get("/codex/callback").body(body).unwrap()));
     settle().await;
-    assert_eq!(polls.load(Ordering::SeqCst),0,"GET callback polled an unused request body");
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        0,
+        "GET callback polled an unused request body"
+    );
     assert!(task.is_finished());
-    assert_eq!(task.await.unwrap().unwrap().status(),200);
-    assert_eq!(ingress.reserved_body_bytes(),0);
+    assert_eq!(task.await.unwrap().unwrap().status(), 200);
+    assert_eq!(ingress.reserved_body_bytes(), 0);
 }
 
 #[tokio::test]
 async fn public_callback_pool_is_bounded_independent_and_released_on_every_exit() {
     use crate::config::ServerConfig;
     use crate::testing::{FakeCatalog, FakeDispatcher, state};
-    let dispatcher=FakeDispatcher::new([]);
-    let state=state(ServerConfig { api_keys: vec!["client-secret".into()], body_limit:12, ingress:IngressConfig {buffered_body_bytes:Some(36),..IngressConfig::default()}, ..ServerConfig::default()},FakeCatalog::new(),&dispatcher);
-    let ingress=state.ingress().clone();
-    let authenticated=crate::router(state);
-    let router=ingress.install(Router::new().route("/oauth/callback",post(|_: Bytes| async { "ok" })).layer(axum::middleware::from_fn(public_request)));
+    let dispatcher = FakeDispatcher::new([]);
+    let state = state(
+        ServerConfig {
+            api_keys: vec!["client-secret".into()],
+            body_limit: 12,
+            ingress: IngressConfig {
+                buffered_body_bytes: Some(36),
+                ..IngressConfig::default()
+            },
+            ..ServerConfig::default()
+        },
+        FakeCatalog::new(),
+        &dispatcher,
+    );
+    let ingress = state.ingress().clone();
+    let authenticated = crate::router(state);
+    let router = ingress.install(
+        Router::new()
+            .route("/oauth/callback", post(|_: Bytes| async { "ok" }))
+            .layer(axum::middleware::from_fn(public_request)),
+    );
     // 2 MiB / 64 KiB = 32 concurrent maximum callback payloads.
-    for exit in ["completion","error","disconnect"] {
-        let mut tasks=Vec::new();
-        let finish=Arc::new(Notify::new());
+    for exit in ["completion", "error", "disconnect"] {
+        let mut tasks = Vec::new();
+        let finish = Arc::new(Notify::new());
         for index in 0..32 {
-            let started=Arc::new(Notify::new());
-            let signal=started.clone();
-            let gate=finish.clone();
-            let body=Body::from_stream(stream::once(async move {
+            let started = Arc::new(Notify::new());
+            let signal = started.clone();
+            let gate = finish.clone();
+            let body = Body::from_stream(stream::once(async move {
                 signal.notify_one();
                 gate.notified().await;
-                if exit=="error" && index==0 { Err(std::io::Error::other("callback read failed")) }
-                else { Ok(Bytes::from_static(b"{}")) }
+                if exit == "error" && index == 0 {
+                    Err(std::io::Error::other("callback read failed"))
+                } else {
+                    Ok(Bytes::from_static(b"{}"))
+                }
             }));
-            tasks.push(tokio::spawn(router.clone().oneshot(Request::post("/oauth/callback").header(header::CONTENT_LENGTH,"65536").body(body).unwrap())));
+            tasks.push(tokio::spawn(
+                router.clone().oneshot(
+                    Request::post("/oauth/callback")
+                        .header(header::CONTENT_LENGTH, "65536")
+                        .body(body)
+                        .unwrap(),
+                ),
+            ));
             started.notified().await;
         }
-        let refused=router.clone().oneshot(Request::post("/oauth/callback").header(header::CONTENT_LENGTH,"65536").body(Body::from("{}")).unwrap()).await.unwrap();
-        assert_eq!(refused.status(),503,"unauthenticated callbacks exceeded their aggregate pool");
-        assert_eq!(ingress.reserved_body_bytes(),0);
-        let mut authenticated_tasks=Vec::new();
+        let refused = router
+            .clone()
+            .oneshot(
+                Request::post("/oauth/callback")
+                    .header(header::CONTENT_LENGTH, "65536")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.status(),
+            503,
+            "unauthenticated callbacks exceeded their aggregate pool"
+        );
+        assert_eq!(ingress.reserved_body_bytes(), 0);
+        let mut authenticated_tasks = Vec::new();
         for _ in 0..3 {
-            let started=Arc::new(Notify::new());
-            authenticated_tasks.push(tokio::spawn(authenticated.clone().oneshot(Request::post("/v1/chat/completions").header(header::AUTHORIZATION,"Bearer client-secret").header(header::CONTENT_LENGTH,"12").body(stalled(started.clone())).unwrap())));
+            let started = Arc::new(Notify::new());
+            authenticated_tasks.push(tokio::spawn(
+                authenticated.clone().oneshot(
+                    Request::post("/v1/chat/completions")
+                        .header(header::AUTHORIZATION, "Bearer client-secret")
+                        .header(header::CONTENT_LENGTH, "12")
+                        .body(stalled(started.clone()))
+                        .unwrap(),
+                ),
+            ));
             started.notified().await;
         }
-        assert_eq!(ingress.reserved_body_bytes(),36,"callbacks reduced authenticated capacity");
-        for task in authenticated_tasks { task.abort(); let _=task.await; }
-        let first=tasks.remove(0);
-        if exit=="disconnect" { first.abort(); let _=first.await; }
-        else { finish.notify_one(); let response=first.await.unwrap().unwrap(); assert_eq!(response.status(),if exit=="error" {400} else {200}); }
-        let next=router.clone().oneshot(Request::post("/oauth/callback").header(header::CONTENT_LENGTH,"65536").body(Body::from("{}")).unwrap()).await.unwrap();
-        assert_eq!(next.status(),200,"callback reservation leaked after {exit}");
-        for task in tasks { task.abort(); let _=task.await; }
+        assert_eq!(
+            ingress.reserved_body_bytes(),
+            36,
+            "callbacks reduced authenticated capacity"
+        );
+        for task in authenticated_tasks {
+            task.abort();
+            let _ = task.await;
+        }
+        let first = tasks.remove(0);
+        if exit == "disconnect" {
+            first.abort();
+            let _ = first.await;
+        } else {
+            finish.notify_one();
+            let response = first.await.unwrap().unwrap();
+            assert_eq!(response.status(), if exit == "error" { 400 } else { 200 });
+        }
+        let next = router
+            .clone()
+            .oneshot(
+                Request::post("/oauth/callback")
+                    .header(header::CONTENT_LENGTH, "65536")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            next.status(),
+            200,
+            "callback reservation leaked after {exit}"
+        );
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
         settle().await;
     }
 }
 
 #[test]
 fn buffer_capacity_is_charged_through_growth_and_finished_ownership() {
-    let ingress=ingress(31);
-    let mut buffer=BudgetBuffer::new(Some(ingress.budget.clone()));
-    for size in [1,7,1,7,1,14] {
-        buffer.push(&vec![b'x';size]).unwrap();
-        assert!(buffer.reservation.bytes>=buffer.bytes.capacity(),"owned capacity {} exceeded charge {}",buffer.bytes.capacity(),buffer.reservation.bytes);
-        assert!(buffer.bytes.capacity()<=31);
+    let ingress = ingress(31);
+    let mut buffer = BudgetBuffer::new(Some(ingress.budget.clone()));
+    for size in [1, 7, 1, 7, 1, 14] {
+        buffer.push(&vec![b'x'; size]).unwrap();
+        assert!(
+            buffer.reservation.bytes >= buffer.bytes.capacity(),
+            "owned capacity {} exceeded charge {}",
+            buffer.bytes.capacity(),
+            buffer.reservation.bytes
+        );
+        assert!(buffer.bytes.capacity() <= 31);
     }
-    let capacity=buffer.bytes.capacity();
-    let bytes=buffer.finish();
-    assert!(ingress.reserved_body_bytes()>=capacity);
-    let clone=bytes.clone();
+    let capacity = buffer.bytes.capacity();
+    let bytes = buffer.finish();
+    assert!(ingress.reserved_body_bytes() >= capacity);
+    let clone = bytes.clone();
     drop(bytes);
-    assert!(ingress.reserved_body_bytes()>=capacity);
+    assert!(ingress.reserved_body_bytes() >= capacity);
     drop(clone);
-    assert_eq!(ingress.reserved_body_bytes(),0);
+    assert_eq!(ingress.reserved_body_bytes(), 0);
 }
 
-async fn measure_zstd(input: Vec<u8>, limit: usize) -> (Result<Bytes,Response>, crate::allocation_probe::Measurements, usize) {
-    let ingress=Ingress::new(IngressConfig::default(),limit);
-    let scope=RequestScope { ingress:ingress.clone(),body_limit:limit,rejected:Arc::new(AtomicBool::new(false)),decoded:Arc::default() };
-    let body=Body::from(input);
-    let mut headers=HeaderMap::new();
-    headers.insert(header::CONTENT_ENCODING,HeaderValue::from_static("zstd"));
-    let (result,stats)=REQUEST_INGRESS.scope(scope,async {
-        crate::allocation_probe::start();
-        let result=crate::body::read_decoded(&headers,body,limit).await;
-        let stats=crate::allocation_probe::finish_stats();
-        (result,stats)
-    }).await;
-    let charged=ingress.budget.0.lock().unwrap().peak;
-    (result,stats,charged)
+async fn measure_zstd(
+    input: Vec<u8>,
+    limit: usize,
+) -> (
+    Result<Bytes, Response>,
+    crate::allocation_probe::Measurements,
+    usize,
+) {
+    let ingress = Ingress::new(IngressConfig::default(), limit);
+    let scope = RequestScope {
+        ingress: ingress.clone(),
+        body_limit: limit,
+        rejected: Arc::new(AtomicBool::new(false)),
+        decoded: Arc::default(),
+    };
+    let body = Body::from(input);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+    let (result, stats) = REQUEST_INGRESS
+        .scope(scope, async {
+            crate::allocation_probe::start();
+            let result = crate::body::read_decoded(&headers, body, limit).await;
+            let stats = crate::allocation_probe::finish_stats();
+            (result, stats)
+        })
+        .await;
+    let charged = ingress.budget.0.lock().unwrap().peak;
+    (result, stats, charged)
 }
 fn rle_zstd_frame(window: u8, blocks: usize, block_size: usize) -> Vec<u8> {
-    let mut frame=vec![0x28,0xb5,0x2f,0xfd,0,window];
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0, window];
     for block in 0..blocks {
-        let header=((block_size as u32)<<3)|2|u32::from(block+1==blocks);
+        let header = ((block_size as u32) << 3) | 2 | u32::from(block + 1 == blocks);
         frame.extend_from_slice(&header.to_le_bytes()[..3]);
         frame.push(b'x');
     }
@@ -856,43 +959,67 @@ fn rle_zstd_frame(window: u8, blocks: usize, block_size: usize) -> Vec<u8> {
 }
 #[tokio::test]
 async fn malformed_zstd_literals_at_a_small_limit_cannot_outallocate_the_precharge() {
-    let frame=vec![0x28,0xb5,0x2f,0xfd,0,0,45,0,0,0xfd,0xff,0xff,b'x',0];
-    let (result,stats,charged)=measure_zstd(frame,1024).await;
+    let frame = vec![
+        0x28, 0xb5, 0x2f, 0xfd, 0, 0, 45, 0, 0, 0xfd, 0xff, 0xff, b'x', 0,
+    ];
+    let (result, stats, charged) = measure_zstd(frame, 1024).await;
     assert!(result.is_err());
     assert!(!stats.overflow);
-    assert!(stats.peak<=charged,"malformed decoder peak {} exceeded reservation {}",stats.peak,charged);
+    assert!(
+        stats.peak <= charged,
+        "malformed decoder peak {} exceeded reservation {}",
+        stats.peak,
+        charged
+    );
 }
 #[tokio::test]
 async fn a_small_zstd_frame_uses_its_own_window_in_the_precharge() {
-    let (result,stats,charged)=measure_zstd(rle_zstd_frame(0x30,1,2048),64<<20).await;
-    assert_eq!(result.unwrap().len(),2048);
+    let (result, stats, charged) = measure_zstd(rle_zstd_frame(0x30, 1, 2048), 64 << 20).await;
+    assert_eq!(result.unwrap().len(), 2048);
     assert!(!stats.overflow);
-    assert!(stats.peak<=charged);
-    assert!(charged<=8<<20,"64 KiB frame window reserved {} bytes",charged);
+    assert!(stats.peak <= charged);
+    assert!(
+        charged <= 8 << 20,
+        "64 KiB frame window reserved {} bytes",
+        charged
+    );
 }
 #[tokio::test]
 async fn an_eight_mib_zstd_frame_has_a_measured_and_tight_allocation_bound() {
-    let (result,stats,charged)=measure_zstd(rle_zstd_frame(0x68,64,128<<10),8<<20).await;
-    assert_eq!(result.unwrap().len(),8<<20);
+    let (result, stats, charged) = measure_zstd(rle_zstd_frame(0x68, 64, 128 << 10), 8 << 20).await;
+    assert_eq!(result.unwrap().len(), 8 << 20);
     assert!(!stats.overflow);
-    assert!(stats.peak<=charged,"decoder plus output peak {} exceeded total reservation {}",stats.peak,charged);
-    assert!(charged<=39<<20,"8 MiB frame plus output reserved {} bytes",charged);
+    assert!(
+        stats.peak <= charged,
+        "decoder plus output peak {} exceeded total reservation {}",
+        stats.peak,
+        charged
+    );
+    assert!(
+        charged <= 39 << 20,
+        "8 MiB frame plus output reserved {} bytes",
+        charged
+    );
 }
 
 #[tokio::test]
 async fn malformed_zstd_probability_runs_are_rejected_before_large_scratch_allocations() {
-    let mut content=vec![0,1,0x80]; // zero literals, one sequence, compressed LL table
-    let mut probabilities=vec![0xff; (128<<10)-3];
+    let mut content = vec![0, 1, 0x80]; // zero literals, one sequence, compressed LL table
+    let mut probabilities = vec![0xff; (128 << 10) - 3];
     // Accuracy 9, followed by probability zero and an overlong zero-symbol run.
-    probabilities[0]=0x14;
-    probabilities[1]=0xe0;
+    probabilities[0] = 0x14;
+    probabilities[1] = 0xe0;
     content.extend_from_slice(&probabilities);
-    let mut frame=vec![0x28,0xb5,0x2f,0xfd,0,0];
-    frame.extend_from_slice(&(((content.len() as u32)<<3)|5).to_le_bytes()[..3]);
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0];
+    frame.extend_from_slice(&(((content.len() as u32) << 3) | 5).to_le_bytes()[..3]);
     frame.extend_from_slice(&content);
-    let (result,stats,charged)=measure_zstd(frame,8<<20).await;
+    let (result, stats, charged) = measure_zstd(frame, 8 << 20).await;
     assert!(result.is_err());
     assert!(!stats.overflow);
-    assert!(stats.peak<=charged);
-    assert!(stats.largest<1<<20,"malformed probability table allocated {} bytes",stats.largest);
+    assert!(stats.peak <= charged);
+    assert!(
+        stats.largest < 1 << 20,
+        "malformed probability table allocated {} bytes",
+        stats.largest
+    );
 }
