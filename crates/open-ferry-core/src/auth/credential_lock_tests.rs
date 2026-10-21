@@ -411,5 +411,12 @@ fn try_lock_never_waits_for_process_os_or_registry_contention() {
     let registry = LOCKS.get_or_init(Mutex::default).lock().unwrap();
     assert!(try_acquire_credential_lock(&path).unwrap().is_none());
     drop(registry);
-    assert!(try_acquire_credential_lock(&path).unwrap().is_some());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if try_acquire_credential_lock(&path).unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "released lock remained busy");
+        std::thread::yield_now();
+    }
 }

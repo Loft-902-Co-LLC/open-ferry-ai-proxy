@@ -312,10 +312,12 @@ fn handle(state: &ManagementState, request: CallbackRequest, v8: bool) -> Respon
     )
 }
 
-/// Compare Go-parsed components before WHATWG URL normalization. Keep the
-/// existing refusal of any fragment, including an empty one.
+/// Compare Go-parsed components before WHATWG URL normalization. Like Go,
+/// accept an empty fragment and refuse a non-empty fragment.
 fn bind_callback_url_matches(supplied: &str, expected: &str) -> bool {
-    !supplied.contains('#')
+    supplied
+        .split_once('#')
+        .is_none_or(|(_, fragment)| fragment.is_empty())
         && crate::go_url::parse(supplied.as_bytes())
             .zip(crate::go_url::parse(expected.as_bytes()))
             .is_some_and(|(url, expected)| {
@@ -514,13 +516,14 @@ mod tests {
             "http://127.1:1455/auth/callback",
             "http://0x7f.0.0.1:1455/auth/callback",
             "http://@127.0.0.1:1455/auth/callback",
-            "http://127.0.0.1:1455/auth/callback#",
+            "http://127.0.0.1:1455/auth/callback#nonempty",
             "http://127.0.0.1:1455/%2e/auth/callback",
         ] {
             assert!(!bind_callback_url_matches(supplied, expected), "{supplied}");
         }
         for supplied in [
             expected,
+            "http://127.0.0.1:1455/auth/callback#",
             "HTTP://127.0.0.1:1455/auth/callback",
             "http://127.0.0.1:1455/%61uth/callback",
         ] {
