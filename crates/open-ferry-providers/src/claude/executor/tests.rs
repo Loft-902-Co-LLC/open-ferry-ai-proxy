@@ -2104,8 +2104,11 @@ async fn error_event_in_a_stream_is_forwarded() {
         .await
         .unwrap();
     let chunks = collect(response).await;
-    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks.len(), 3);
     assert!(text(&chunks[1]).contains("overloaded_error"));
+    let error = chunks[2].as_ref().unwrap_err();
+    assert_eq!(error.status, 502);
+    assert!(error.message.contains("overloaded_error"));
 }
 
 // Not upstream's: an error event in a stream that quotes the key has it
@@ -2132,7 +2135,12 @@ async fn an_error_event_in_a_stream_hides_the_key() {
         )
         .await
         .unwrap();
-    let joined: String = collect(response).await.iter().map(text).collect();
+    let mut chunks = collect(response).await;
+    let failure = chunks.pop().unwrap().unwrap_err();
+    assert_eq!(failure.status, 502);
+    assert!(failure.message.contains("bad key [redacted]"));
+    assert!(!failure.message.contains(API_KEY));
+    let joined: String = chunks.iter().map(text).collect();
     assert_eq!(joined, format!("{start}{}", error("[redacted]")));
 
     let mock = Mock::start(Reply::sse(&format!("{start}{}", error(API_KEY)))).await;
@@ -2145,7 +2153,12 @@ async fn an_error_event_in_a_stream_hides_the_key() {
         )
         .await
         .unwrap();
-    let joined: String = collect(response).await.iter().map(text).collect();
+    let mut chunks = collect(response).await;
+    let failure = chunks.pop().unwrap().unwrap_err();
+    assert_eq!(failure.status, 502);
+    assert!(failure.message.contains("bad key [redacted]"));
+    assert!(!failure.message.contains(API_KEY));
+    let joined: String = chunks.iter().map(text).collect();
     assert!(joined.contains("bad key [redacted]"), "{joined}");
     assert!(!joined.contains(API_KEY), "{joined}");
 }
