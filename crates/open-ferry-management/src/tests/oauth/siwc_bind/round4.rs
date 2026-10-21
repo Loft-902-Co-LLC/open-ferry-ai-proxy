@@ -4,7 +4,7 @@ use super::*;
 // measure signal withdrawal or the drain deadline.
 const SETTLE: Duration = Duration::from_secs(12);
 
-fn pause_write(
+pub(super) fn pause_write(
     api: &Api,
     before_file: bool,
 ) -> (crate::oauth::BindWritePause, std::sync::mpsc::Sender<()>) {
@@ -18,13 +18,13 @@ fn pause_write(
     (pause, release)
 }
 
-async fn entered(pause: &crate::oauth::BindWritePause) {
+pub(super) async fn entered(pause: &crate::oauth::BindWritePause) {
     tokio::time::timeout(SETTLE, pause.0.notified())
         .await
         .unwrap();
 }
 
-async fn settled(api: &Api) {
+pub(super) async fn settled(api: &Api) {
     tokio::time::timeout(SETTLE, async {
         while api.state.oauth_sessions().bind_workers.counts() != (0, 0) {
             tokio::time::sleep(Duration::from_millis(5)).await;

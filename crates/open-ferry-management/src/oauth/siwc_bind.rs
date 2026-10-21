@@ -9,8 +9,8 @@
 use open_ferry_core::manager::CompletedTokenCommand;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use open_ferry_core::auth::codex_refresh::{generate_device_id, validate_device_id};
 use open_ferry_core::auth::credential_lock::try_acquire_credential_lock;
@@ -166,7 +166,7 @@ pub(super) async fn save(
     let store = state.credential_store().map_err(|_| invalid())?;
     let files = store.files.clone();
     let tokens = tokens.to_json();
-    let cancellation = CancelOnDrop(Arc::new(AtomicBool::new(false)));
+    let cancellation = CancelOnDrop(Arc::new(Cancellation::default()));
     let cancelled = cancellation.0.clone();
     let checking = state.clone();
     let checking_session = session.clone();
@@ -190,12 +190,12 @@ pub(super) async fn save(
         }
         let mut failures = 0u32;
         loop {
-            if cancelled.load(Ordering::Acquire) {
-                return Err(cancelled_save(&checking));
+            if cancelled.flag.load(Ordering::Acquire) {
+                return Err(cancelled_save(cancelled.cause()));
             }
             let mut file_busy = false;
             let mut attempted = false;
-            let session_ended = AtomicBool::new(false);
+            let refusal = std::cell::Cell::new(None);
             let attempt = (|| -> io::Result<Option<Saved>> {
                 let Some(mut reservation) = turn.reserve_siwc_bind() else {
                     return Ok(None);
@@ -226,7 +226,7 @@ pub(super) async fn save(
                     .overrides()
                     .bind_drain_budget
                     .unwrap_or(budget);
-                match reservation.wait_drained(&cancelled, budget) {
+                match reservation.wait_drained(&cancelled.flag, budget) {
                     SiwcBindDrain::Ready => {}
                     SiwcBindDrain::TimedOut | SiwcBindDrain::Interrupted => return Ok(None),
                 }
@@ -283,12 +283,15 @@ pub(super) async fn save(
                                 return Err(invalid());
                             }
                             target.identity.check(disk, id)?;
-                            if cancelled.load(Ordering::Acquire)
-                                || !checking
+                            let admitted = if cancelled.flag.load(Ordering::Acquire) {
+                                Err(cancelled.cause())
+                            } else {
+                                checking
                                     .oauth_sessions()
                                     .admit_bind(&checking_session, registration)
-                            {
-                                session_ended.store(true, Ordering::Release);
+                            };
+                            if let Err(cause) = admitted {
+                                refusal.set(Some(cause));
                                 return Err(io::Error::other("SIWC bind session ended"));
                             }
                             #[cfg(any(test, feature = "test-support"))]
@@ -313,7 +316,7 @@ pub(super) async fn save(
                     )
                 };
                 let committed = reservation
-                    .try_commit(&target.registered, &cancelled, commit)?
+                    .try_commit(&target.registered, &cancelled.flag, commit)?
                     .flatten();
                 drop(reservation);
                 match committed {
@@ -325,8 +328,8 @@ pub(super) async fn save(
                 }
             })()
             .map_err(|error| {
-                if session_ended.load(Ordering::Acquire) {
-                    cancelled_save(&checking)
+                if let Some(cause) = refusal.get() {
+                    cancelled_save(cause)
                 } else {
                     SaveError::Failed(error)
                 }
@@ -365,17 +368,21 @@ pub(super) async fn save(
                     }
                 }
             }
-            if !turn.wait_retry(backoff, &cancelled) {
-                return Err(cancelled_save(&checking));
+            if !turn.wait_retry(backoff, &cancelled.flag) {
+                return Err(cancelled_save(cancelled.cause()));
             }
         }
     }));
     let ((record, data, guard, management_guard), returned) = tokio::select! {
         result = &mut work => result,
-        () = ended(state, &session, lifeline) => {
+        cause = ended(state, &session, lifeline) => {
             // A signal cancels admission, but cannot turn an already durable
             // write into SAVE_FAILED or skip its completed-token command.
-            drop(cancellation);
+            cancellation.0.cancel(cause);
+            #[cfg(test)]
+            if let Some(observed) = state.oauth_sessions().overrides().bind_cancel_observed.clone() {
+                observed.notify_one();
+            }
             work.await
         }
     }?;
@@ -409,14 +416,42 @@ pub(super) async fn save(
 pub(super) enum SaveError {
     Busy,
     ShuttingDown,
+    Cancelled(CancelCause),
     Failed(io::Error),
 }
 
-fn cancelled_save(state: &ManagementState) -> SaveError {
-    if state.oauth_sessions().is_shut_down() {
-        SaveError::ShuttingDown
-    } else {
-        SaveError::Failed(invalid())
+fn cancelled_save(cause: CancelCause) -> SaveError {
+    match cause {
+        CancelCause::Shutdown => SaveError::ShuttingDown,
+        other => SaveError::Cancelled(other),
+    }
+}
+
+/// The first observed cause is kept even if shutdown starts during unwind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CancelCause {
+    Shutdown,
+    SessionEnded,
+    LifelineDropped,
+}
+
+#[derive(Default)]
+struct Cancellation {
+    flag: AtomicBool,
+    cause: Mutex<Option<CancelCause>>,
+}
+
+impl Cancellation {
+    fn cancel(&self, cause: CancelCause) {
+        self.cause.lock().unwrap().get_or_insert(cause);
+        self.flag.store(true, Ordering::Release);
+    }
+
+    fn cause(&self) -> CancelCause {
+        self.cause
+            .lock()
+            .unwrap()
+            .expect("cancel cause precedes flag")
     }
 }
 
@@ -496,7 +531,7 @@ async fn run_bind_worker<T: Send + 'static>(
     }
 }
 
-struct CancelOnDrop(Arc<AtomicBool>);
+struct CancelOnDrop(Arc<Cancellation>);
 
 type Saved = (
     Auth,
@@ -541,7 +576,7 @@ pub(crate) async fn save_for_test(state: &ManagementState, session: &str) -> io:
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        self.0.cancel(CancelCause::LifelineDropped);
     }
 }
 
@@ -549,15 +584,17 @@ impl Drop for CancelOnDrop {
 /// Reserved drain waits have their own independent 100 ms thread deadline.
 const ADMISSION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 
-async fn ended(state: &ManagementState, session: &str, lifeline: &mut Lifeline) {
+async fn ended(state: &ManagementState, session: &str, lifeline: &mut Lifeline) -> CancelCause {
     loop {
-        if state.oauth_sessions().is_shut_down()
-            || !state.oauth_sessions().store().is_pending(session, "codex")
-        {
-            return;
+        // An already ended session keeps its own cause when shutdown overlaps.
+        if !state.oauth_sessions().store().is_pending(session, "codex") {
+            return CancelCause::SessionEnded;
+        }
+        if state.oauth_sessions().is_shut_down() {
+            return CancelCause::Shutdown;
         }
         tokio::select! {
-            () = lifeline.cut() => return,
+            () = lifeline.cut() => return CancelCause::LifelineDropped,
             () = tokio::time::sleep(ADMISSION_BACKOFF) => {},
         }
     }

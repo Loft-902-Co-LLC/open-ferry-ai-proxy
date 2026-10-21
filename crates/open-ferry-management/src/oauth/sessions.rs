@@ -280,6 +280,14 @@ impl Store {
     /// when it is empty, unless the session is unknown or completed
     /// (`SetError`). The session then lasts the full time again.
     pub(crate) fn set_error(&self, state: &str, message: &str) {
+        self.fail(state, message, false);
+    }
+
+    pub(super) fn set_pending_error(&self, state: &str, message: &str) {
+        self.fail(state, message, true);
+    }
+
+    fn fail(&self, state: &str, message: &str, only_pending: bool) {
         let state = state.trim();
         let message = match message.trim() {
             "" => "Authentication failed",
@@ -295,7 +303,7 @@ impl Store {
         let Some(entry) = inner.sessions.get_mut(state) else {
             return;
         };
-        if entry.session.completed {
+        if entry.session.completed || (only_pending && !entry.session.is_pending()) {
             return;
         }
         message.clone_into(&mut entry.session.status);

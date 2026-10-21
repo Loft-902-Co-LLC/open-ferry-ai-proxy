@@ -704,6 +704,14 @@ fn bind_error(store: &super::sessions::Store, session: &str, error: super::siwc_
             tracing::info!("SIWC bind cancelled: server shutting down");
             store.set_error(session, "server shutting down");
         }
+        SaveError::Cancelled(cause) => {
+            // Keep the previous non-shutdown diagnostic, and retain a status
+            // already set by target invalidation, expiry or cancellation.
+            tracing::error!("{SAVE_FAILED}: SIWC binding failed (Other, OS None)");
+            if cause == super::siwc_bind::CancelCause::LifelineDropped {
+                store.set_pending_error(session, SAVE_FAILED);
+            }
+        }
         SaveError::Failed(error) => {
             tracing::error!(
                 "{SAVE_FAILED}: SIWC binding failed ({:?}, OS {:?})",

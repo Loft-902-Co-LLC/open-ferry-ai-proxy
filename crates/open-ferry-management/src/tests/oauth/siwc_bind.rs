@@ -10,6 +10,7 @@ mod mutation_identity;
 mod round3;
 mod round4;
 mod round5;
+mod round6;
 mod route_parity;
 
 const START: &str =

@@ -179,6 +179,8 @@ pub(crate) struct Overrides {
     pub(crate) bind_file_misses: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     #[cfg(test)]
     pub(crate) bind_worker_error: Option<std::io::ErrorKind>,
+    #[cfg(test)]
+    pub(crate) bind_cancel_observed: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -220,6 +222,8 @@ impl Default for Overrides {
             #[cfg(test)]
             bind_worker_error: None,
             #[cfg(test)]
+            bind_cancel_observed: None,
+            #[cfg(test)]
             bind_drain_budget: None,
             #[cfg(test)]
             bind_admission_times: None,
@@ -249,9 +253,18 @@ impl Sessions {
         }
     }
 
-    fn admit_bind(&self, session: &str, registration: u64) -> bool {
+    fn admit_bind(&self, session: &str, registration: u64) -> Result<(), siwc_bind::CancelCause> {
+        use siwc_bind::CancelCause;
         let logins = self.logins();
-        !logins.shut_down && self.store.admit_bind(session, registration)
+        if !self.store.is_pending(session, "codex") {
+            Err(CancelCause::SessionEnded)
+        } else if logins.shut_down {
+            Err(CancelCause::Shutdown)
+        } else if !self.store.admit_bind(session, registration) {
+            Err(CancelCause::SessionEnded)
+        } else {
+            Ok(())
+        }
     }
 
     /// Serialize collector registration with the shutdown cutoff. Its guard
