@@ -79,7 +79,7 @@ async fn body_text(response: axum::response::Response) -> String {
 }
 
 #[tokio::test]
-async fn declared_oversize_is_rejected_without_reading_or_authentication() {
+async fn unauthenticated_declared_oversize_is_rejected_without_reading() {
     let polls = Arc::new(AtomicUsize::new(0));
     let read = polls.clone();
     let body = Body::from_stream(stream::once(async move {
@@ -94,16 +94,16 @@ async fn declared_oversize_is_rejected_without_reading_or_authentication() {
         .oneshot(request)
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     assert_eq!(
         body_text(response).await,
-        r#"{"error":"http: request body too large"}"#
+        r#"{"error":"Missing API key"}"#
     );
 }
 
 #[tokio::test]
-async fn every_body_route_rejects_chunked_oversize_in_the_prehandler_shape() {
+async fn every_body_route_rejects_chunked_oversize_in_the_upstream_shape() {
     let app = crate::router(state_with_limit(64));
     for route in ROUTES {
         let chunks = vec![Bytes::from(vec![b'a'; 32]), Bytes::from(vec![b'b'; 33])];
@@ -117,9 +117,29 @@ async fn every_body_route_rejects_chunked_oversize_in_the_prehandler_shape() {
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
         let actual: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
-        // The shared ingress buffer now rejects raw oversize before routing,
-        // as the declared-length check already did, for every body reader.
-        let expected = serde_json::json!({"error": "http: request body too large"});
+        let expected = match *route {
+            // sdk/api/handlers/gemini/interactions_handlers.go:95-98.
+            "/v1beta/interactions" => serde_json::json!({"error": {
+                "message": "http: request body too large", "type": "invalid_request_error"
+            }}),
+            // sdk/api/handlers/openai/openai_videos_handlers.go:585,701-705.
+            "/openai/v1/videos" => {
+                let id = actual["id"].as_str().unwrap();
+                assert!(id.starts_with("video_"), "{actual}");
+                assert_eq!(id.len(), 38);
+                serde_json::json!({"id": id, "object": "video", "status": "failed",
+                    "progress": 0, "model": "grok-imagine-video", "error": {
+                    "code": "invalid_request_error", "message": "Invalid request: http: request body too large"
+                }})
+            }
+            // internal/api/server_routes.go:348-351 (both aliases).
+            "/v1/alpha/search" | "/backend-api/codex/alpha/search" => {
+                serde_json::json!({"error": "Failed to read search request"})
+            }
+            _ => serde_json::json!({"error": {
+                "message": "Invalid request: http: request body too large", "type": "invalid_request_error"
+            }}),
+        };
         assert_eq!(actual, expected, "{route}");
     }
 }

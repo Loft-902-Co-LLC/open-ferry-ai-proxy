@@ -75,7 +75,14 @@ pub(crate) async fn read_raw(
     let mut first = None;
     let mut buffer = BytesMut::new();
     while let Some(frame) = stream.next().await {
-        let frame = frame.map_err(|err| invalid_request(400, &err.to_string()))?;
+        let frame = frame.map_err(|err| {
+            let mut source: Option<&dyn std::error::Error> = Some(&err);
+            while let Some(error) = source {
+                if error.is::<crate::ingress::BodyTooLarge>() { return invalid_request(413, TOO_LARGE); }
+                source = error.source();
+            }
+            invalid_request(400, &err.to_string())
+        })?;
         let len = first.as_ref().map_or(buffer.len(), Bytes::len);
         if frame.len() > limit.saturating_sub(len) {
             return Err(invalid_request(413, TOO_LARGE));
