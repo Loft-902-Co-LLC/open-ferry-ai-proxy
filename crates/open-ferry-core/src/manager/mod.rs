@@ -844,7 +844,7 @@ struct ReloadState {
     waiting_shared: usize,
     bind_reserved: bool,
     next_ticket: u64,
-    tickets: std::collections::VecDeque<u64>,
+    tickets: std::collections::VecDeque<siwc_bind::BindTicket>,
     #[cfg(test)]
     pause_shared: bool,
 }

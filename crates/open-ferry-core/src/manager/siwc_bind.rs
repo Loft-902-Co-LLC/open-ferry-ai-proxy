@@ -43,9 +43,32 @@ pub struct SiwcBindReservation<'a> {
     exclusive: bool,
 }
 
+pub(super) struct BindTicket {
+    number: u64,
+    id: String,
+    not_before: Option<Instant>,
+}
+
+impl super::ReloadState {
+    fn bind_front(&self) -> Option<u64> {
+        let now = Instant::now();
+        self.tickets
+            .iter()
+            .find(|ticket| {
+                ticket.not_before.is_none_or(|deadline| now >= deadline)
+                    && !self
+                        .tickets
+                        .iter()
+                        .any(|older| older.id == ticket.id && older.number < ticket.number)
+            })
+            .map(|ticket| ticket.number)
+    }
+}
+
 impl SiwcBindTurn<'_> {
-    /// Only the oldest global turn may reserve. Parked shared callers enter
-    /// before its next attempt; no newer bind can overtake its FIFO place.
+    /// The oldest ready turn may reserve. A credential-lock miss defers its
+    /// turn for other IDs; turns on that same ID keep their original order.
+    /// Parked shared callers enter before the next reservation.
     pub fn reserve_siwc_bind(&self) -> Option<SiwcBindReservation<'_>> {
         let mut state = match self.manager.shared.load_gate.state.try_lock() {
             Ok(state) => state,
@@ -58,7 +81,7 @@ impl SiwcBindTurn<'_> {
             || state.exclusive
             || state.waiting_exclusive != usize::from(state.bind_reserved)
             || state.waiting_shared != 0
-            || state.tickets.front() != Some(&self.ticket)
+            || state.bind_front() != Some(self.ticket)
         {
             return None;
         }
@@ -68,6 +91,23 @@ impl SiwcBindTurn<'_> {
             turn: self,
             exclusive: false,
         })
+    }
+
+    /// A busy credential yields to other credentials during its backoff.
+    /// Keep its original number so a later turn for the same ID cannot pass it.
+    /// Call only after dropping the reservation and all transaction guards.
+    pub fn defer_file_retry(&self, duration: Duration) {
+        let barrier = &self.manager.shared.load_gate;
+        let mut state = lock(&barrier.state);
+        let index = state
+            .tickets
+            .iter()
+            .position(|ticket| ticket.number == self.ticket)
+            .expect("live bind ticket");
+        let mut ticket = state.tickets.remove(index).expect("live bind ticket");
+        ticket.not_before = Some(Instant::now() + duration);
+        state.tickets.push_back(ticket);
+        barrier.changed.notify_all();
     }
 
     /// Back off with no reservation/locks. Does not occupy Tokio's blocking
@@ -184,7 +224,7 @@ impl Drop for SiwcBindTurn<'_> {
     fn drop(&mut self) {
         let barrier = &self.manager.shared.load_gate;
         let mut state = lock(&barrier.state);
-        state.tickets.retain(|ticket| *ticket != self.ticket);
+        state.tickets.retain(|ticket| ticket.number != self.ticket);
         barrier.changed.notify_all();
     }
 }
@@ -199,7 +239,11 @@ impl Manager {
             .checked_add(1)
             .expect("bind ticket exhausted");
         let ticket = state.next_ticket;
-        state.tickets.push_back(ticket);
+        state.tickets.push_back(BindTicket {
+            number: ticket,
+            id: id.to_owned(),
+            not_before: None,
+        });
         SiwcBindTurn {
             manager: self,
             id: id.to_owned(),
@@ -417,6 +461,30 @@ mod tests {
         assert!(newer.reserve_siwc_bind().is_none());
         drop(older);
         assert!(newer.reserve_siwc_bind().is_some());
+    }
+
+    #[test]
+    fn round4_deferred_file_turn_keeps_same_credential_order() {
+        let (manager, expected) = setup();
+        let older = manager.siwc_bind_turn(&expected.id);
+        let same_id = manager.siwc_bind_turn(&expected.id);
+        let other = manager.siwc_bind_turn("another-credential");
+        older.defer_file_retry(Duration::from_secs(1));
+        assert!(same_id.reserve_siwc_bind().is_none());
+        drop(
+            other
+                .reserve_siwc_bind()
+                .expect("other credential must bypass the deferred head"),
+        );
+        drop(other);
+        older.defer_file_retry(Duration::ZERO);
+        assert!(
+            same_id.reserve_siwc_bind().is_none(),
+            "requeue reversed same-credential order"
+        );
+        drop(older.reserve_siwc_bind().unwrap());
+        drop(older);
+        assert!(same_id.reserve_siwc_bind().is_some());
     }
 
     #[test]
