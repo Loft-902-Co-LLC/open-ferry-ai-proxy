@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request_test.go
-// (v8.0.36, MIT) and claude_openai-responses_user_turn_test.go (v8.0.36, MIT).
+// (v8.0.38, MIT) and claude_openai-responses_user_turn_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::collections::HashMap;
@@ -2806,4 +2806,84 @@ fn incomplete_tool_output_is_error() {
         (&result["content"], &result["is_error"]),
         (&json!("last"), &json!(true))
     );
+}
+
+#[test]
+fn blank_parts_drop_without_moving_cache_ttl_order() {
+    for compat in [false, true] {
+        let request = json!({"input":[
+            {"role":"system","content":"  \n "},
+            {"role":"developer","content":[
+                {"type":"input_text","text":"S1"},
+                {"type":"input_text","text":"","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":"S2","cache_control":{"type":"ephemeral","ttl":"5m"}},
+                {"type":"input_text","text":"S3"}
+            ]},
+            {"role":"system","content":[{"type":"input_text","text":" ","cache_control":{"type":"ephemeral"}}]},
+            {"role":"user","content":[
+                {"type":"input_text","text":"  A  "},
+                {"type":"input_text","text":" \t ","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":"B","cache_control":{"type":"ephemeral","ttl":"5m"}},
+                {"type":"input_text","text":"","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":"C"}
+            ]},
+            {"role":"user","content":" \n "}
+        ]});
+        let (out, error) = if compat {
+            convert_openai_responses_request_to_claude_with_compat(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        } else {
+            convert_openai_responses_request_to_claude(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        };
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(out["system"].as_array().unwrap().len(), 3);
+        assert_eq!(out["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(out["system"][1]["cache_control"]["ttl"], "5m");
+        assert!(out["system"][2].get("cache_control").is_none());
+        assert_eq!(out["messages"].as_array().unwrap().len(), 1);
+        let parts = out["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0]["text"], "  A  ");
+        assert_eq!(parts[0]["cache_control"]["ttl"], "1h");
+        assert_eq!(parts[1]["cache_control"]["ttl"], "5m");
+        assert!(parts[2].get("cache_control").is_none());
+    }
+}
+
+#[test]
+fn array_tool_results_drop_blank_text_without_serializing_it_back() {
+    let blank = json!([{"type":"input_text","text":""},{"type":"input_text","text":" \n "}]);
+    assert_eq!(tool_result_content(Some(&blank)), json!(""));
+    let mixed = json!([{"type":"input_text","text":" "},{"type":"input_text","text":"  keep  "}]);
+    assert_eq!(tool_result_content(Some(&mixed)), json!("  keep  "));
+    let unknown = json!([{"type":"unsupported"}]);
+    assert_eq!(
+        tool_result_content(Some(&unknown)),
+        json!(unknown.to_string())
+    );
+}
+
+#[test]
+fn blank_refusal_moves_its_marker_and_blank_input_gives_no_turn() {
+    let (_, parts, _) = message_parts(&json!({"role":"assistant","content":[
+        {"type":"output_text","text":"kept"},
+        {"type":"refusal","refusal":" \n ","cache_control":{"type":"ephemeral"}}
+    ]}));
+    assert_eq!(
+        parts,
+        vec![json!({"type":"text","text":"kept","cache_control":{"type":"ephemeral"}})]
+    );
+    for text in ["", " \n\t"] {
+        let out = convert("claude-sonnet-4-6", &json!({"input":text}));
+        assert!(out["messages"].as_array().unwrap().is_empty(), "{out}");
+    }
 }

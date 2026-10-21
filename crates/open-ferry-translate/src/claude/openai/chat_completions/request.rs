@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/chat-completions/claude_openai_request.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions request → Claude Messages request.
@@ -250,7 +250,7 @@ fn convert_messages(
 
 fn system_blocks(message: &Value, system: &mut Vec<Value>) {
     match message.get("content") {
-        Some(Value::String(text)) if !text.is_empty() => {
+        Some(Value::String(text)) if !text.trim().is_empty() => {
             let mut block = text_block(text.as_str());
             cache_control::attach_to(&mut block, message);
             system.push(block);
@@ -259,7 +259,12 @@ fn system_blocks(message: &Value, system: &mut Vec<Value>) {
             let start = system.len();
             for part in parts {
                 if str_of(part.get("type")) == "text" {
-                    let mut block = text_block(str_of(part.get("text")));
+                    let text = str_of(part.get("text"));
+                    if text.trim().is_empty() {
+                        cache_control::attach_to_preceding_block(&mut system[start..], part);
+                        continue;
+                    }
+                    let mut block = text_block(text);
                     cache_control::attach_to(&mut block, part);
                     system.push(block);
                 }
@@ -293,12 +298,16 @@ fn message_blocks(
         ]));
     }
     match message.get("content") {
-        Some(Value::String(text)) if !text.is_empty() => blocks.push(text_block(text.as_str())),
+        Some(Value::String(text)) if !text.trim().is_empty() => {
+            blocks.push(text_block(text.as_str()))
+        }
         Some(Value::Array(parts)) => {
             for part in parts {
                 if let Some(mut block) = content_part(part) {
                     cache_control::attach_to(&mut block, part);
                     blocks.push(block);
+                } else if str_of(part.get("type")) == "text" {
+                    cache_control::attach_to_preceding_block(&mut blocks, part);
                 } else if let Some(drops) = drops.as_deref_mut() {
                     let kind = str_of(part.get("type"));
                     if matches!(&*kind, "file" | "input_audio") {
@@ -353,14 +362,26 @@ fn tool_result_content(content: Option<&Value>) -> Value {
         None => "".into(),
         Some(Value::String(text)) => text.as_str().into(),
         Some(Value::Array(parts)) => {
+            let mut dropped_empty_text = false;
             let blocks: Vec<Value> = parts
                 .iter()
-                .filter_map(|part| match part {
-                    Value::String(text) => Some(text_block(text.as_str())),
-                    part => content_part(part),
+                .filter_map(|part| {
+                    let block = match part {
+                        Value::String(text) if !text.trim().is_empty() => {
+                            Some(text_block(text.as_str()))
+                        }
+                        Value::String(_) => None,
+                        part => content_part(part),
+                    };
+                    if block.is_none() && (part.is_string() || str_of(part.get("type")) == "text") {
+                        dropped_empty_text = true;
+                    }
+                    block
                 })
                 .collect();
-            if blocks.is_empty() && !parts.is_empty() {
+            if blocks.is_empty() && dropped_empty_text {
+                "".into()
+            } else if blocks.is_empty() && !parts.is_empty() {
                 content.map(Value::to_string).unwrap_or_default().into()
             } else {
                 blocks.into()
@@ -378,7 +399,10 @@ fn tool_result_content(content: Option<&Value>) -> Value {
 /// file given as a data URL. Other parts have none.
 fn content_part(part: &Value) -> Option<Value> {
     match &*str_of(part.get("type")) {
-        "text" => Some(text_block(str_of(part.get("text")))),
+        "text" => {
+            let text = str_of(part.get("text"));
+            (!text.trim().is_empty()).then(|| text_block(text))
+        }
         "image_url" => image_block(&str_of(path(part, "image_url.url"))),
         "file" => {
             let data = str_of(path(part, "file.file_data"));

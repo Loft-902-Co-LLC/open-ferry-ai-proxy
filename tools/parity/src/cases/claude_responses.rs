@@ -50,6 +50,22 @@ fn items(items: Vec<Value>) -> String {
 pub fn requests() -> Vec<Case> {
     let signature = claude_signature("claude-sonnet-4-6");
     let mut cases = vec![
+        Case::new("blank-middle-cache-markers", "claude-sonnet-4-6", json!({"input":[
+            {"role":"system","content":" \n "},
+            {"role":"developer","content":[
+                {"type":"input_text","text":"S1"},
+                {"type":"input_text","text":"","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":"S2","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]},
+            {"role":"user","content":[
+                {"type":"input_text","text":"  keep  "},
+                {"type":"input_text","text":" \t ","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":"end","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]},
+            {"role":"assistant","content":" \n "},
+            {"role":"user","content":" "}
+        ]}).to_string()),
+
         Case::new(
             "typical-sdk-request",
             "claude-sonnet-4-6",
@@ -590,6 +606,19 @@ pub fn requests() -> Vec<Case> {
                 body.to_string(),
             ));
         }
+    }
+    for (name, output) in [
+        (
+            "blank-tool-text",
+            json!([{"type":"input_text","text":""},{"type":"input_text","text":" \n "}]),
+        ),
+        (
+            "mixed-tool-text",
+            json!([{"type":"input_text","text":" "},{"type":"input_text","text":"  keep  "}]),
+        ),
+    ] {
+        cases.push(Case::new(name, "claude-sonnet-4-6", json!({"input":[{"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call_1","output":output}, {"role":"user","content":"next"}]}).to_string()));
     }
     cases
 }

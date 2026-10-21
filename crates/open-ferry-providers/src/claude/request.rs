@@ -3,7 +3,7 @@
 // helpers, with isExplicitPromptCacheMode and stripPromptCacheOptions),
 // helps/claude_upstream.go, helps/claude_diagnostics.go
 // (ClaudePayloadHas1hTTL) and sdk/cliproxy/auth/classification.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's key and base URL, and the changes a Messages body needs
@@ -372,10 +372,16 @@ pub(crate) fn ensure_cache_control(body: &mut Value) {
 /// `claudePayloadHasCacheableSystem`.
 fn has_cacheable_system(body: &Value) -> bool {
     match body.get("system") {
-        Some(Value::Array(blocks)) => !blocks.is_empty(),
+        Some(Value::Array(blocks)) => blocks.iter().any(system_block_can_host_cache_control),
         Some(Value::String(text)) => !text.trim().is_empty(),
         _ => false,
     }
+}
+
+fn system_block_can_host_cache_control(block: &Value) -> bool {
+    block.is_object()
+        && matches!(json::str_at(block, "type").as_str(), "" | "text")
+        && !json::str_at(block, "text").trim().is_empty()
 }
 
 /// `injectToolsCacheControl`: marks the last tool that isn't deferred, if no
@@ -395,7 +401,7 @@ fn inject_tools_cache_control(body: &mut Value) {
     }
 }
 
-/// `injectSystemCacheControl`: marks the last system block, if none is
+/// `injectSystemCacheControl`: marks the last nonblank system text block, if none is
 /// marked, turning a string system prompt into one text block.
 fn inject_system_cache_control(body: &mut Value) {
     match body.get_mut("system") {
@@ -403,7 +409,10 @@ fn inject_system_cache_control(body: &mut Value) {
             if blocks.iter().any(has_cache_control) {
                 return;
             }
-            if let Some(last) = blocks.last_mut() {
+            if let Some(last) = blocks
+                .iter_mut()
+                .rfind(|block| system_block_can_host_cache_control(block))
+            {
                 json::set(last, "cache_control", cache_marker());
             }
         }
@@ -420,23 +429,34 @@ fn inject_system_cache_control(body: &mut Value) {
     }
 }
 
-/// `claudeMessageEligibleForRollingCache`: a turn that can carry the rolling
-/// breakpoint. An assistant turn ending in thinking can't.
+/// The last block eligible for a rolling breakpoint. Trailing blank text
+/// is ignored, but an assistant ending in thinking still cannot host one.
+fn last_cacheable_message_block(message: &Value) -> Option<usize> {
+    let blocks = message.get("content")?.as_array()?;
+    let assistant = json::str_at(message, "role") == "assistant";
+    for (index, block) in blocks.iter().enumerate().rev() {
+        let kind = json::str_at(block, "type");
+        if kind == "text" && json::str_at(block, "text").trim().is_empty() {
+            continue;
+        }
+        if matches!(kind.as_str(), "thinking" | "redacted_thinking") {
+            if assistant {
+                return None;
+            }
+            continue;
+        }
+        if block.is_object() && !kind.is_empty() {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// `claudeMessageEligibleForRollingCache`.
 fn eligible_for_rolling_cache(message: &Value) -> bool {
     match message.get("content") {
-        Some(Value::String(_)) => true,
-        Some(Value::Array(blocks)) => {
-            if json::str_at(message, "role") != "assistant" {
-                return !blocks.is_empty();
-            }
-            blocks.last().is_some_and(|last| {
-                !matches!(
-                    json::str_at(last, "type").as_str(),
-                    "thinking" | "redacted_thinking"
-                )
-            })
-        }
-        _ => false,
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        _ => last_cacheable_message_block(message).is_some(),
     }
 }
 
@@ -466,6 +486,7 @@ fn inject_messages_cache_control(body: &mut Value) {
         }
     }
 
+    let target = last_cacheable_message_block(&messages[eligible]);
     let Some(content) = messages
         .get_mut(eligible)
         .and_then(|message| message.get_mut("content"))
@@ -476,12 +497,16 @@ fn inject_messages_cache_control(body: &mut Value) {
         if blocks.iter().any(has_cache_control) {
             return;
         }
-        if let Some(last) = blocks.last_mut() {
+        if let Some(last) = target.and_then(|index| blocks.get_mut(index)) {
             json::set(last, "cache_control", cache_marker());
         }
         return;
     }
-    if let Some(block) = content.as_str().map(marked_text_block) {
+    if let Some(block) = content
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .map(marked_text_block)
+    {
         *content = block;
     }
 }
@@ -1207,5 +1232,45 @@ mod tests {
         assert!(!payload_has_1h_ttl(
             &json!({"system": "x", "messages": [{"content": "y"}]})
         ));
+    }
+
+    #[test]
+    fn automatic_cache_markers_skip_blank_and_thinking_blocks() {
+        let mut body = json!({
+            "system":[{"type":"text","text":"keep"},{"type":"text","text":" "},{"type":"thinking","thinking":"hidden"}],
+            "messages":[{"role":"user","content":[{"type":"text","text":"keep"},{"type":"text","text":"\n"},{"type":"thinking"}]}]
+        });
+        ensure_cache_control(&mut body);
+        assert!(has_cache_control(&body["system"][0]));
+        assert!(has_cache_control(&body["messages"][0]["content"][0]));
+        assert_eq!(count_cache_controls(&body), 2);
+        for system in [
+            json!([{"type":"text","text":" "}]),
+            json!([{"type":"thinking"}]),
+            json!([null]),
+            json!(" "),
+        ] {
+            let mut body = json!({"system":system,"tools":[{"name":"read"}],"messages":[{"role":"user","content":" "}]});
+            ensure_cache_control(&mut body);
+            assert!(has_cache_control(&body["tools"][0]));
+            assert_eq!(count_cache_controls(&body), 1);
+        }
+    }
+
+    #[test]
+    fn rolling_cache_skips_empty_turns_and_assistants_ending_in_thinking() {
+        for kind in ["thinking", "redacted_thinking"] {
+            let mut body = json!({"messages":[
+                {"role":"user","content":"earlier"},
+                {"role":"assistant","content":[{"type":"text","text":"answer"},{"type":kind},{"type":"text","text":" "}]},
+                {"role":"user","content":[{"type":"text","text":" "}]}
+            ]});
+            ensure_cache_control(&mut body);
+            assert!(has_cache_control(&body["messages"][0]["content"][0]));
+            assert_eq!(count_cache_controls(&body), 1);
+        }
+        let mut body = json!({"messages":[{"role":"assistant","content":[{"type":"thinking"},{"type":"tool_use","id":"call"},{"type":"text","text":" "}]}]});
+        ensure_cache_control(&mut body);
+        assert!(has_cache_control(&body["messages"][0]["content"][1]));
     }
 }
