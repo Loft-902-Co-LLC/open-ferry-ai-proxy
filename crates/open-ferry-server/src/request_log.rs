@@ -111,7 +111,7 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
     // Authentication runs inside this layer. Capture lazily so a refused
     // request is never polled by logging, including in Full mode.
     let (body, kept) = match plan {
-        Capture::Eager | Capture::Deferred => {
+        Capture::Deferred => {
             let capture = DeferredCapture::with_limit(
                 content_length,
                 open_ferry_core::observe::request_log::REQUEST_CAPTURE_LIMIT,
@@ -180,8 +180,6 @@ pub(crate) fn should_log_path(path: &str) -> bool {
 /// How the client's body is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Capture {
-    /// Read before the handler runs.
-    Eager,
     /// Kept as the handler reads it.
     Deferred,
     /// Not kept.
@@ -190,15 +188,15 @@ pub(crate) enum Capture {
 
 /// How the body of a request logged in `mode`, with `headers` and
 /// `content_length`, is kept (upstream's `shouldCaptureRequestBody` and
-/// `attachDeferredRequestBodyCapture`): read ahead with `request-log` on;
-/// else kept as it is read, unless it is empty or a multipart form.
+/// `attachDeferredRequestBodyCapture`): a bounded lazy prefix in either mode;
+/// error-only capture skips empty and multipart bodies.
 pub(crate) fn capture_plan(
     mode: Mode,
     headers: &HeaderMap,
     content_length: Option<u64>,
 ) -> Capture {
     match mode {
-        Mode::Full => Capture::Eager,
+        Mode::Full => Capture::Deferred,
         Mode::ErrorsOnly => {
             let multipart = headers.get(header::CONTENT_TYPE).is_some_and(|value| {
                 String::from_utf8_lossy(value.as_bytes())

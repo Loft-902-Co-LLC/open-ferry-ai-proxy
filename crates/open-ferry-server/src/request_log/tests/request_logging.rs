@@ -7,9 +7,9 @@
 //!
 //! Changed:
 //! - `TestShouldSkipMethodForRequestLogging` has no nil request.
-//! - `TestShouldCaptureRequestBody` checks how a body is kept: read ahead
-//!   with `request-log` on; else kept as the handler reads it, unless it is
-//!   empty or a multipart form, whatever its size.
+//! - `TestShouldCaptureRequestBody` checks lazy prefix capture in both modes;
+//!   error-only capture skips empty and multipart bodies. Large request logs
+//!   assert the explicit 64 KiB prefix bound instead of upstream full capture.
 //! - `TestDeferredRequestBodyCaptureDoesNotDrainUnreadBody` reads a frame
 //!   rather than a byte.
 //! - `TestRequestLoggingMiddleware_ClientCancellationExclusion`'s canceled
@@ -42,7 +42,7 @@ use bytes::Bytes;
 use futures_util::{StreamExt as _, stream};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use http_body_util::BodyExt as _;
-use open_ferry_core::observe::request_log::{DeferredCapture, Mode};
+use open_ferry_core::observe::request_log::{DeferredCapture, Mode, REQUEST_CAPTURE_LIMIT};
 use open_ferry_core::observe::{AttemptKind, RequestContext};
 use tower::ServiceExt as _;
 
@@ -50,7 +50,6 @@ use super::super::{
     Capture, TeeBody, capture_plan, is_responses_websocket_upgrade, should_log_path, skips_method,
 };
 use super::{Harness, Upstream, post as post_request, send};
-use crate::config::ServerConfig;
 use crate::state::AppState;
 
 fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
@@ -86,7 +85,7 @@ fn should_skip_method_for_request_logging() {
 fn should_capture_request_body() {
     let json = headers(&[("content-type", "application/json")]);
     let multipart = headers(&[("content-type", "multipart/form-data; boundary=abc")]);
-    assert_eq!(capture_plan(Mode::Full, &json, None), Capture::Eager);
+    assert_eq!(capture_plan(Mode::Full, &json, None), Capture::Deferred);
     assert_eq!(
         capture_plan(Mode::ErrorsOnly, &json, Some(2)),
         Capture::Deferred
@@ -178,7 +177,13 @@ async fn request_logging_middleware_captures_large_error_request_and_deferred_ap
         name.starts_with("error-") && name.ends_with(".log"),
         "{name}"
     );
-    assert!(log.contains(&*String::from_utf8_lossy(&expected)));
+    assert!(log.contains(&*String::from_utf8_lossy(
+        &expected[..REQUEST_CAPTURE_LIMIT]
+    )));
+    assert!(!log.contains(&*String::from_utf8_lossy(&expected)));
+    assert!(log.contains(&format!(
+        "[REQUEST BODY TRUNCATED: captured first {REQUEST_CAPTURE_LIMIT} bytes]"
+    )));
     assert!(log.contains("=== API REQUEST 1 ==="));
     assert!(log.contains(upstream_body));
 }
@@ -398,17 +403,11 @@ async fn request_logging_middleware_preserves_full_uuid_and_truncates_filename()
     }
 }
 
-// Not upstream's: with `request-log` on, a body past the server's limit is
-// kept up to the limit, and the handler still sees all of it.
+// Not upstream's: capture is a fixed prefix, independently of body admission.
+// The handler still consumes every byte; logging adds the omitted-size marker.
 #[tokio::test]
-async fn bounds_the_body_read_ahead() {
-    let harness = Harness::with(
-        true,
-        ServerConfig {
-            body_limit: 16,
-            ..ServerConfig::default()
-        },
-    );
+async fn full_logging_captures_a_bounded_prefix_without_limiting_the_handler() {
+    let harness = Harness::new(true);
     let app = harness.app(Router::new().route(
         "/v1/responses",
         post(|request: Request| async move {
@@ -416,22 +415,37 @@ async fn bounds_the_body_read_ahead() {
             (StatusCode::PAYLOAD_TOO_LARGE, body)
         }),
     ));
-    let chunks =
-        stream::iter(["0123456789", "abcdefghij", "KLMNOPQRST"].map(Ok::<_, std::io::Error>));
+    let mut payload = vec![b'x'; REQUEST_CAPTURE_LIMIT - 1];
+    payload.extend_from_slice(b"yz-tail-marker");
+    let expected = Bytes::from(payload);
+    let chunks = stream::iter([
+        Ok::<_, std::io::Error>(expected.slice(..REQUEST_CAPTURE_LIMIT - 1)),
+        Ok(expected.slice(REQUEST_CAPTURE_LIMIT - 1..)),
+    ]);
     let (status, _, echoed) = send(
         &app,
         post_request("/v1/responses", Body::from_stream(chunks)),
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(echoed, "0123456789abcdefghijKLMNOPQRST");
+    assert_eq!(echoed, expected);
     let (_, log) = harness.only_log();
-    assert!(
-        log.contains(
-            "=== REQUEST BODY ===\n0123456789abcdef\n[REQUEST BODY TRUNCATED: captured first 16 bytes]\n\n"
-        ),
-        "{log}"
+    let request_body = log
+        .split("=== REQUEST BODY ===\n")
+        .nth(1)
+        .unwrap()
+        .split("=== RESPONSE ===")
+        .next()
+        .unwrap()
+        .trim_end_matches('\n');
+    assert_eq!(
+        request_body,
+        format!(
+            "{}\n[REQUEST BODY TRUNCATED: captured first {REQUEST_CAPTURE_LIMIT} bytes]",
+            String::from_utf8_lossy(&expected[..REQUEST_CAPTURE_LIMIT])
+        )
     );
+    assert!(!request_body.contains("tail-marker"));
 }
 
 // Not upstream's: with `request-log` off, the error log shows what the
