@@ -701,13 +701,19 @@ mod tests {
         // Changing a primary token affects every thread: isolate this test from
         // the rest of the harness, including when cargo runs tests in parallel.
         const CHILD: &str = "OFP_ADMIN_OWNER_TEST_CHILD";
+        const WRITE_CHILD: &str = "OFP_ADMIN_OWNER_WRITE_CHILD";
+        const TEST: &str = "trust::windows::tests::admin_owner_setup_and_children_create_trusted_machine_objects";
+        // This child deliberately does no token setup, so its objects prove
+        // inheritance of the parent's owner rather than another normalization.
+        if let Some(root) = std::env::var_os(WRITE_CHILD) {
+            let directory = std::path::PathBuf::from(root).join("child");
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("child.txt"), b"child").unwrap();
+            return;
+        }
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "trust::windows::tests::admin_owner_setup_and_children_create_trusted_machine_objects",
-                    "--nocapture",
-                ])
+                .args(["--exact", TEST, "--nocapture"])
                 .env(CHILD, "1")
                 .output()
                 .unwrap();
@@ -803,16 +809,12 @@ mod tests {
         create_system_data_dir(&directory).unwrap();
         let file = directory.join("parent.txt");
         std::fs::write(&file, b"parent").unwrap();
-        // cmd has no owner-normalization code: these prove that the primary
-        // token's changed default owner actually survives process creation.
-        let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32/cmd.exe");
-        let status = std::process::Command::new(cmd)
-            .args(["/d", "/c", "mkdir child && echo child>child\\child.txt"])
-            .current_dir(&directory)
-            .status()
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(WRITE_CHILD, &directory)
+            .output()
             .unwrap();
-        assert!(status.success());
+        assert!(output.status.success(), "{output:?}");
         for path in [
             &directory,
             &file,
