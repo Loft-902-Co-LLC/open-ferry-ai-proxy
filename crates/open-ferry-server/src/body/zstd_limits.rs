@@ -121,8 +121,8 @@ impl Bits<'_> {
 /// Parses the probability encoding from fse/fse_decoder.rs:225-302 without
 /// allocation. Rejects oversized symbol/accuracy tables before ruzstd's growth;
 /// in particular, an intermediate zero run must already fit the symbol bound.
-/// This is stricter about rejecting invalid headers before allocation, rather
-/// than a complete duplicate of ruzstd's table/bitstream acceptance checks.
+/// It refuses nothing ruzstd accepts: invalid headers are only refused before
+/// allocation, and the remaining table and bitstream checks stay with ruzstd.
 fn fse_header(input: &[u8], max_log: u32, max_symbol: usize) -> Result<usize, DecodeError> {
     let mut bits = Bits { input, position: 0 };
     let log = bits.read(4)? + 5;
@@ -173,9 +173,11 @@ fn fse_header(input: &[u8], max_log: u32, max_symbol: usize) -> Result<usize, De
 }
 
 /// Parses allocation-driving entropy headers and all three sequence-count
-/// encodings, including two-byte zero, as ruzstd does. Malformed/truncated
-/// headers and oversized entropy tables are refused before allocation; ruzstd
-/// still performs decoding, history, integrity and complete format validation.
+/// encodings, including two-byte zero, as ruzstd does. Each check is the same
+/// as ruzstd's or looser, so it accepts what ruzstd accepts; malformed or
+/// truncated headers and oversized entropy tables are just refused before
+/// allocation. ruzstd still performs decoding, history, integrity and complete
+/// format validation.
 pub(super) fn validate_block(input: &[u8]) -> Result<(), DecodeError> {
     let block_header = little(input, 0, 3)?;
     if (block_header >> 1) & 3 != 2 {
