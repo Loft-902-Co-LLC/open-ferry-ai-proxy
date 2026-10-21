@@ -7,13 +7,18 @@
 
 use super::{NAME_MAP_KEYWORDS, is_literal_value_keyword, merge_hint, ref_name};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const COPY_BYTES: usize = 256 * 1024;
 const MAX_REFERENCE_DEPTH: usize = 64;
 const MAX_DESCRIPTION_BYTES: usize = 512;
 
 pub(crate) fn inline_for_clean(schema: &Value) -> Value {
+    // Upstream skips this pass entirely unless its JSON contains the exact
+    // $ref token. Without one, later passes still see definition containers.
+    if !contains_ref_token(schema) {
+        return schema.clone();
+    }
     // The projection cleans the same single-key carrier as upstream. References
     // within it are relative to the schema, rather than the carrier.
     if let Some(map) = schema.as_object()
@@ -26,17 +31,52 @@ pub(crate) fn inline_for_clean(schema: &Value) -> Value {
         root: schema,
         remaining: COPY_BYTES,
         active: HashSet::new(),
+        targets: HashMap::new(),
+        #[cfg(test)]
+        target_size_scans: 0,
     }
     .root()
+}
+
+fn contains_ref_token(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key == "$ref" || contains_ref_token(value)),
+        Value::Array(values) => values.iter().any(contains_ref_token),
+        Value::String(value) => value == "$ref",
+        _ => false,
+    }
 }
 
 struct Resolver<'a> {
     root: &'a Value,
     remaining: usize,
     active: HashSet<String>,
+    targets: HashMap<String, Option<(&'a Value, usize)>>,
+    #[cfg(test)]
+    target_size_scans: usize,
 }
 
-impl Resolver<'_> {
+impl<'a> Resolver<'a> {
+    // Targets and their stored size are independent of the active reference
+    // stack and remaining budget. Expanded results are not: caching those would
+    // change cycle fallback and per-reference charging.
+    fn target(&mut self, reference: &str) -> Option<(&'a Value, usize)> {
+        if let Some(target) = self.targets.get(reference) {
+            return *target;
+        }
+        let target = local_ref(self.root, reference).map(|target| {
+            #[cfg(test)]
+            {
+                self.target_size_scans += 1;
+            }
+            (target, expansion_size(target, false))
+        });
+        self.targets.insert(reference.to_owned(), target);
+        target
+    }
+
     fn root(&mut self) -> Value {
         let Some(map) = self.root.as_object() else {
             return self.resolve(self.root, 0);
@@ -45,10 +85,9 @@ impl Resolver<'_> {
         // ahead of the schema the caller actually sends.
         let mut out = self.entries(map, 0);
         if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-            && let Some(target) = local_ref(self.root, reference)
+            && let Some((target, cost)) = self.target(reference)
         {
             out.shift_remove("$ref");
-            let cost = expansion_size(target, false);
             if let Some(remaining) = self.remaining.checked_sub(cost) {
                 self.remaining = remaining;
                 self.active.insert(reference.to_owned());
@@ -71,9 +110,8 @@ impl Resolver<'_> {
             }
             Value::Object(map) => {
                 if let Some(reference) = map.get("$ref").and_then(Value::as_str)
-                    && let Some(target) = local_ref(self.root, reference)
+                    && let Some((target, cost)) = self.target(reference)
                 {
-                    let cost = expansion_size(target, false);
                     if depth >= MAX_REFERENCE_DEPTH
                         || self.active.contains(reference)
                         || cost > self.remaining

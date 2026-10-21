@@ -197,3 +197,38 @@ fn long_reference_chains_stop_at_the_stack_bound() {
     assert!(out.to_string().contains("See:"));
     assert!(out.to_string().len() < 128);
 }
+
+#[test]
+fn repeated_references_lookup_and_size_the_target_once_but_each_spends_budget() {
+    let properties: Map<_, _> = (0..1000)
+        .map(|i| (format!("p{i}"), json!({"$ref":"#/$defs/Large"})))
+        .collect();
+    let root = json!({"properties":properties,"$defs":{"Large":{"type":"string","description":"x".repeat(32*1024)}}});
+    let mut resolver = Resolver {
+        root: &root,
+        remaining: COPY_BYTES,
+        active: HashSet::new(),
+        targets: HashMap::new(),
+        target_size_scans: 0,
+    };
+    let out = resolver.root();
+    assert_eq!(resolver.target_size_scans, 1);
+    assert!(resolver.remaining < 32 * 1024);
+    assert!(out.to_string().len() < 512 * 1024);
+    assert_eq!(out["properties"].as_object().unwrap().len(), 1000);
+    assert!(
+        out["properties"]["p999"]["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("See:")
+    );
+}
+
+#[test]
+fn no_ref_fast_path_retains_definitions_for_the_later_cleaning_passes() {
+    let schema = json!({"properties":{"p":{"type":"string"}},"$defs":{"unused":{"type":"string"}}});
+    assert_eq!(inline_for_clean(&schema), schema);
+    let mut schema = schema;
+    schema["example"] = json!("$ref");
+    assert!(inline_for_clean(&schema).get("$defs").is_none());
+}
