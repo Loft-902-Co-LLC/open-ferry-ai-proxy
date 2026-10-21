@@ -19,6 +19,9 @@
 //!   and matches percent-encoded paths decoded; both get 404 here.
 //! - Unset or non-positive `max-request-body-bytes` keeps the 64 MiB
 //!   [`ServerConfig::body_limit`]; upstream disables its cap.
+//! - open-ferry's own [`ingress`] budgets buffered bodies across both listeners
+//!   and bounds uploads. `server.ingress-limits` also configures the accept
+//!   loop's admission and transport deadlines.
 //! - `Content-Encoding: gzip` takes concatenated members, and zstd errors
 //!   read differently.
 //! - JSON written here, except on the Gemini routes, doesn't escape `<`,
@@ -45,6 +48,7 @@ mod errors;
 mod exec;
 mod handlers;
 mod headers;
+pub mod ingress;
 mod json;
 mod query;
 mod request_context;

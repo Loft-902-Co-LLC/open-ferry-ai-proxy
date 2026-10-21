@@ -4,7 +4,7 @@
 
 //! The router, and the middleware every request passes through: from the
 //! outside in, the request context, which makes the request's
-//! `RequestContext`, the access log, the request log, CORS, panic handling
+//! `RequestContext`, the access log, ingress body admission, the request log, CORS, panic handling
 //! and safe mode.
 //!
 //! open-ferry's own: [`router_without_proxy`] serves routes without the
@@ -68,7 +68,8 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             .post(gemini::action.layer(auth.clone()))
     };
     let native_video_create = || post(openai_videos::native_create.layer(auth.clone()));
-    Router::new()
+    let ingress = state.ingress().clone();
+    let router = Router::new()
         .route("/", get(health::root).head(not_found))
         .route("/healthz", get(health::healthz).head(health::healthz_head))
         .route(
@@ -173,12 +174,15 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             declared_body_limit,
-        ))
+        ));
+    let router = ingress
+        .protect(router)
         .layer(middleware::from_fn(access_log::layer))
         .layer(middleware::from_fn_with_state(
             state,
             request_context::layer,
-        ))
+        ));
+    ingress.probe(router)
 }
 
 /// Rejects a declared oversized body before it is read, logged or authenticated
@@ -246,19 +250,23 @@ async fn logged_body_limit(
 /// 404. Safe mode, which only shuts proxy paths, isn't applied, so those
 /// paths answer the 404 here too. `routes` must not set a fallback.
 pub fn router_without_proxy(state: AppState, routes: Router) -> Router {
-    routes
+    let ingress = state.ingress().clone();
+    let router = routes
         .fallback(not_found)
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_log::layer,
-        ))
+        ));
+    let router = ingress
+        .protect(router)
         .layer(middleware::from_fn(access_log::layer))
         .layer(middleware::from_fn_with_state(
             state,
             request_context::layer,
-        ))
+        ));
+    ingress.probe(router)
 }
 
 /// Gin's 404.
@@ -282,7 +290,7 @@ async fn cors(request: Request, next: Next) -> Response {
     response
 }
 
-fn set_cors_headers(headers: &mut HeaderMap) {
+pub(crate) fn set_cors_headers(headers: &mut HeaderMap) {
     for (name, value) in [
         (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
         (

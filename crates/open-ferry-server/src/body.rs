@@ -70,15 +70,26 @@ pub(crate) async fn read_raw(
         return Err(invalid_request(413, TOO_LARGE));
     }
     let mut stream = body.into_data_stream();
+    // The outer ingress layer produces one budget-owned chunk. Preserve its
+    // owner through handlers and logging instead of copying and losing it.
+    let mut first = None;
     let mut buffer = BytesMut::new();
     while let Some(frame) = stream.next().await {
         let frame = frame.map_err(|err| invalid_request(400, &err.to_string()))?;
-        if buffer.len() + frame.len() > limit {
+        let len = first.as_ref().map_or(buffer.len(), Bytes::len);
+        if frame.len() > limit.saturating_sub(len) {
             return Err(invalid_request(413, TOO_LARGE));
+        }
+        if first.is_none() && buffer.is_empty() {
+            first = Some(frame);
+            continue;
+        }
+        if let Some(first) = first.take() {
+            buffer.extend_from_slice(&first);
         }
         buffer.extend_from_slice(&frame);
     }
-    Ok(buffer.freeze())
+    Ok(first.unwrap_or_else(|| buffer.freeze()))
 }
 
 /// Reads a body and decodes its `Content-Encoding` (upstream's
@@ -100,6 +111,13 @@ pub(crate) async fn read_decoded(
     match decode(&raw, &encoding, limit) {
         Ok(decoded) => Ok(decoded),
         Err(DecodeError::TooLarge) => Err(invalid_request(413, TOO_LARGE)),
+        Err(DecodeError::Budget) => {
+            crate::ingress::warn_budget();
+            Err(crate::ingress::rejected(
+                503,
+                "request body buffer budget exhausted",
+            ))
+        }
         Err(DecodeError::Failed(_)) if go::json_valid(&raw) => Ok(raw),
         Err(DecodeError::Failed(err)) => Err(invalid_request(400, &err)),
     }
@@ -107,6 +125,8 @@ pub(crate) async fn read_decoded(
 
 #[derive(Debug, PartialEq, Eq)]
 enum DecodeError {
+    /// The server-wide decoded storage budget was exhausted.
+    Budget,
     /// The decoded body is over the limit.
     TooLarge,
     /// The body couldn't be decoded; the text says why.
@@ -120,8 +140,8 @@ fn decode(raw: &Bytes, encoding: &str, limit: usize) -> Result<Bytes, DecodeErro
         let name = go::to_lower(part.trim());
         body = match name.as_str() {
             "" | "identity" => continue,
-            "zstd" => Bytes::from(decode_zstd(&body, limit)?),
-            "gzip" | "x-gzip" => Bytes::from(decode_gzip(&body, limit)?),
+            "zstd" => decode_zstd(&body, limit)?,
+            "gzip" | "x-gzip" => decode_gzip(&body, limit)?,
             _ => {
                 return Err(DecodeError::Failed(format!(
                     "unsupported request content encoding: {name}"
@@ -133,12 +153,12 @@ fn decode(raw: &Bytes, encoding: &str, limit: usize) -> Result<Bytes, DecodeErro
 }
 
 /// Decodes a zstd stream of any number of frames, skipping skippable ones.
-fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Vec<u8>, DecodeError> {
+fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
     let failed = |err: &dyn std::fmt::Display| {
         DecodeError::Failed(format!("failed to decode zstd request body: {err}"))
     };
     let mut decoder = FrameDecoder::new();
-    let mut output = Vec::new();
+    let mut output = crate::ingress::BudgetBuffer::new(crate::ingress::request_budget());
     while !input.is_empty() {
         match decoder.init(&mut input) {
             Ok(()) => {}
@@ -161,7 +181,7 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Vec<u8>, DecodeError> {
                 if output.len() + chunk.len() > limit {
                     return Err(DecodeError::TooLarge);
                 }
-                output.extend_from_slice(&chunk);
+                output.push(&chunk).map_err(|()| DecodeError::Budget)?;
             }
             if decoder.is_finished() {
                 break;
@@ -173,20 +193,29 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Vec<u8>, DecodeError> {
             return Err(failed(&"checksum mismatch"));
         }
     }
-    Ok(output)
+    Ok(output.finish())
 }
 
 /// Decodes a gzip stream of any number of members.
-fn decode_gzip(input: &[u8], limit: usize) -> Result<Vec<u8>, DecodeError> {
-    let mut output = Vec::new();
-    flate2::read::MultiGzDecoder::new(input)
-        .take(limit as u64 + 1)
-        .read_to_end(&mut output)
-        .map_err(|err| DecodeError::Failed(format!("failed to decode gzip request body: {err}")))?;
-    if output.len() > limit {
-        return Err(DecodeError::TooLarge);
+fn decode_gzip(input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
+    let mut output = crate::ingress::BudgetBuffer::new(crate::ingress::request_budget());
+    let mut decoder = flate2::read::MultiGzDecoder::new(input);
+    let mut chunk = [0; 16 * 1024];
+    loop {
+        let read = decoder.read(&mut chunk).map_err(|err| {
+            DecodeError::Failed(format!("failed to decode gzip request body: {err}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        if read > limit.saturating_sub(output.len()) {
+            return Err(DecodeError::TooLarge);
+        }
+        output
+            .push(&chunk[..read])
+            .map_err(|()| DecodeError::Budget)?;
     }
-    Ok(output)
+    Ok(output.finish())
 }
 
 #[cfg(test)]

@@ -108,13 +108,30 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
 
     let (parts, body) = request.into_parts();
     let content_length = http_body::Body::size_hint(&body).exact();
-    let (body, kept) = match capture_plan(mode, &parts.headers, content_length) {
-        Capture::Eager => {
+    let plan = capture_plan(mode, &parts.headers, content_length);
+    let buffered = parts.extensions.get::<crate::ingress::BufferedRequest>();
+    let (body, kept) = match (buffered, plan) {
+        (Some(buffered), Capture::Eager | Capture::Deferred) => {
+            let limit = if plan == Capture::Deferred {
+                open_ferry_core::observe::request_log::CAPTURE_LIMIT
+            } else {
+                state.settings().config.body_limit
+            };
+            let len = buffered.0.len().min(limit);
+            (
+                body,
+                RequestBody::Captured {
+                    raw: buffered.0.slice(..len),
+                    truncated: len < buffered.0.len(),
+                },
+            )
+        }
+        (_, Capture::Eager) => {
             let limit = state.settings().config.body_limit;
             let (raw, truncated, body) = read_ahead(body, limit).await;
             (body, RequestBody::Captured { raw, truncated })
         }
-        Capture::Deferred => {
+        (_, Capture::Deferred) => {
             let capture = DeferredCapture::new(content_length);
             let body = Body::new(TeeBody {
                 inner: body,
@@ -122,7 +139,7 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
             });
             (body, RequestBody::Deferred(capture))
         }
-        Capture::None => (body, RequestBody::None),
+        (_, Capture::None) => (body, RequestBody::None),
     };
     let downstream = Downstream {
         url: Downstream::url(parts.uri.path(), parts.uri.query()),
