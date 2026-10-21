@@ -116,6 +116,17 @@ function SettingsEditor({
     ? [...effectiveKeyChanges(savedKeys, keyChanges).filter((change) => change.kind === "add"),
       ...keyChanges.filter((change) => change.kind === "delete")]
     : effectiveKeyChanges(savedKeys, keyChanges);
+  // Once another writer fulfills an unversioned deletion, forget its
+  // intent so a later re-addition cannot arm it again. Versioned drafts
+  // keep missing targets for the refusal and Undo controls.
+  useEffect(() => {
+    if (keys.data === undefined || editor.editor.versioned) return;
+    const saved = keysIn(keys.data);
+    setKeyChanges((current) => {
+      const pending = current.filter((change) => change.kind !== "delete" || saved.includes(change.key));
+      return pending.length === current.length ? current : pending;
+    });
+  }, [keys.data, editor.editor.versioned, setKeyChanges]);
   const unsaved = (settingsShown ? settings.unsaved.length : 0) + pendingKeys.length;
   const [review, setReview] = useState<Review | null>(null);
   const [outcome, setOutcome] = useState<Outcome>(null);

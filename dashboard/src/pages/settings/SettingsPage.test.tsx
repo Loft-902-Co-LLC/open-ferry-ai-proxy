@@ -2238,3 +2238,90 @@ it("uses the drafted path rather than the last query for an ABA moved warning", 
   expect(state.tree.routing.retry["request-retry"]).toBe(3);
   expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual(['"3"']);
 });
+
+
+describe("focus-period snapshot retention", () => {
+  it.each(["typing convergence", "revert before an external change"])(
+    "refuses a newer target after %s while focus is kept",
+    async (sequence) => {
+      const state = versionedServer();
+      const { user } = await openSettings();
+      const retries = screen.getByRole("textbox", { name: "Retries" });
+      await user.click(retries);
+      await user.clear(retries);
+      await user.type(retries, "3");
+      if (sequence === "revert before an external change") {
+        await user.keyboard("{Backspace}1");
+        expect(retries).toHaveValue("1");
+        expectNothingUnsaved();
+      }
+      state.external(false, 2);
+      await refetchOnFocus();
+      expect(retries).toHaveFocus();
+      if (sequence === "typing convergence") {
+        expect(retries).toHaveValue("3");
+        await user.keyboard("{Backspace}2");
+      }
+      expect(retries).toHaveValue("2");
+      expectNothingUnsaved();
+      await user.type(retries, "5");
+      expect(retries).toHaveValue("25");
+      await user.click(screen.getByRole("button", { name: "Review and save" }));
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog", { name: "Review the changes" }) !== null ||
+          screen.queryByText("The config changed since this page loaded") !== null).toBe(true);
+      });
+      const dialog = screen.queryByRole("dialog", { name: "Review the changes" });
+      if (dialog !== null) {
+        await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+        await waitFor(() => {
+          expect(screen.queryByText("Saved 1 setting. The server uses it from now on.") !== null ||
+            within(dialog).queryByText("The config changed since this page loaded") !== null).toBe(true);
+        });
+      }
+      expect(state.tree.routing.retry["request-retry"]).toBe(2);
+      expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`)).toEqual([]);
+      expect(screen.getByText(/Changed fields: Retries/)).toBeVisible();
+    },
+  );
+
+  it("saves normally after reverting to the original value and blurring", async () => {
+    const state = versionedServer();
+    const { user } = await openSettings();
+    const retries = screen.getByRole("textbox", { name: "Retries" });
+    await user.click(retries);
+    await user.clear(retries);
+    await user.type(retries, "3");
+    await user.keyboard("{Backspace}1");
+    expect(retries).toHaveValue("1");
+    expectNothingUnsaved();
+    await user.tab();
+    expect(retries).not.toHaveFocus();
+    expectNothingUnsaved();
+    await fill(user, retries, "4");
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    await screen.findByText("Saved 1 setting. The server uses it from now on.");
+    expect(state.tree.routing.retry["request-retry"]).toBe(4);
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual(['"1"']);
+    await waitFor(expectNothingUnsaved);
+  });
+});
+
+it("never re-arms an unversioned deletion after the removed key comes back", async () => {
+  const state = server();
+  const { user } = await openSettings();
+  await user.click(screen.getByRole("button", { name: /^Delete the client key.*0001/ }));
+  expect(screen.getByText("1 unsaved change.")).toBeVisible();
+  state.keys = [KEY_B];
+  await refetchOnFocus();
+  expectNothingUnsaved();
+  expect(screen.queryByRole("button", { name: /^Undo deleting/ })).not.toBeInTheDocument();
+  state.keys = [KEY_A, KEY_B];
+  await refetchOnFocus();
+  expect(screen.getByRole("button", { name: /^Delete the client key.*0001/ })).toBeVisible();
+  expectNothingUnsaved();
+  expect(screen.queryByRole("button", { name: /^Undo deleting/ })).not.toBeInTheDocument();
+  expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+});
