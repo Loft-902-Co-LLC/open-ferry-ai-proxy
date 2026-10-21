@@ -294,11 +294,26 @@ test("reviews a second YAML edit after legacy migration without leaving the edit
   const page = the();
   const editor = await openYaml();
   expectFile(/^host: 127\.0\.0\.1$/m, "the original legacy layout before its first YAML save");
+  // The v8 writer accepts v8 bodies, including JSON (valid YAML). Its
+  // stored legacy file migrates, and this flow-style draft is re-rendered.
+  const versioned = await (await call("/v8/management/config")).json() as Record<string, unknown>;
+  const section = versioned.management;
+  if (section === null || typeof section !== "object" || Array.isArray(section)) {
+    throw new Error("The normalized fixture has no management section");
+  }
+  (section as Record<string, unknown>)["secret-key"] = managementKey;
+  const comments = configText().split(NL).filter((line) => line.startsWith("#"));
+  const draft = [...comments, "# some-future-setting: keep-me", JSON.stringify(versioned, null, 2), "# first YAML migration save", ""].join(NL);
   await editor.click();
-  await page.keyboard.press("ControlOrMeta+End");
-  await pasteSecret("\n# first YAML migration save\n");
+  await page.keyboard.press("ControlOrMeta+A");
+  await pasteSecret(draft);
   await page.getByRole("button", { name: "Review changes" }).click();
+  const written = page.waitForResponse((response) => new URL(response.url()).pathname === "/v8/management/config.yaml" && response.request().method() === "PUT");
   await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
+  const answer = await written;
+  const body: unknown = await answer.json();
+  const code = body !== null && typeof body === "object" && "error" in body && typeof body.error === "string" && /^[a-z_]+$/.test(body.error) ? body.error : "none";
+  expect(answer.status(), `whole-YAML HTTP status (code: ${code})`).toBe(200);
   await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
   expectFile(/^server:$/m, "the stored v8 layout");
   await editor.click();
