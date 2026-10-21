@@ -92,7 +92,7 @@ impl Ingress {
     pub fn new(limits: IngressConfig, body_limit: usize) -> Self {
         let limit = limits
             .buffered_body_bytes
-            .map(|limit| limit.max(body_limit));
+            .map(|limit| limit.max(body_limit.saturating_mul(3)));
         Self {
             settings: watch::channel(Snapshot { limits, body_limit }).0,
             budget: BodyBudget::new(limit),
@@ -106,7 +106,7 @@ impl Ingress {
         self.budget.set_limit(
             limits
                 .buffered_body_bytes
-                .map(|limit| limit.max(body_limit)),
+                .map(|limit| limit.max(body_limit.saturating_mul(3))),
         );
         self.settings.send_replace(Snapshot { limits, body_limit });
     }
