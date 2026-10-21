@@ -14,6 +14,9 @@ const FIXED_SCRATCH: usize = 6 << 20;
 ///   decoding/block_decoder.rs:188-206). Sequence execution checks after each
 ///   repeat (decoding/sequence_execution.rs:12-53), but the largest ML is
 ///   131074, so its worst overshoot fits BLOCK + MAX_LITERALS too.
+///   Reserve's required size includes a sentinel. A growing ring's old
+///   allocation is at most the capacity tier preceding its replacement,
+///   including capacity retained from earlier malformed zero-sequence blocks.
 /// - Fixed scratch covers retained capacity: <2 MiB for 20-bit literals;
 ///   <2.25 MiB for up to 98047 twelve-byte sequences, whose reserve may
 ///   double an arbitrary prior capacity (blocks/sequence_section.rs:21-29,
@@ -32,7 +35,12 @@ const FIXED_SCRATCH: usize = 6 << 20;
 ///
 /// The reservation never shrinks between frames, covering retained scratch.
 pub(super) fn working_bytes(window: usize) -> usize {
-    ring_capacity(window + BLOCK) + ring_capacity(window + BLOCK + MAX_LITERALS) + FIXED_SCRATCH
+    let replacement = ring_capacity(window + BLOCK + MAX_LITERALS + 1);
+    // The required size is always above 2 * BLOCK, so the replacement follows
+    // the power-of-two-plus-slack rule. The previous tier bounds the old ring;
+    // an already larger retained ring is reused, and charges never shrink.
+    let previous = (replacement - 2 * BLOCK - 1) / 2 + 2 * BLOCK + 1;
+    replacement + previous + FIXED_SCRATCH
 }
 
 fn ring_capacity(required: usize) -> usize {

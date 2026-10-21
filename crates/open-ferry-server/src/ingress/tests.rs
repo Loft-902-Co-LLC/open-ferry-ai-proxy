@@ -979,7 +979,7 @@ async fn a_small_zstd_frame_uses_its_own_window_in_the_precharge() {
     assert!(!stats.overflow);
     assert!(stats.peak <= charged);
     assert!(
-        charged <= 8 << 20,
+        charged <= 9 << 20,
         "64 KiB frame window reserved {} bytes",
         charged
     );
