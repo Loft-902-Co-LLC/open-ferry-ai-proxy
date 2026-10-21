@@ -743,14 +743,14 @@ impl Translator {
                 );
                 // The SSE frames for every line, then those for the stream's end,
                 // as the harness collects upstream's.
-                let mut output: String = case
+                let mut output: Vec<String> = case
                     .events
                     .iter()
                     .map(|line| stream.translate_line(line.as_bytes()))
                     .collect();
-                output.push_str(&stream.finalize_tool_input());
+                output.push(stream.finalize_tool_input());
                 Ok(self
-                    .read(case, output.as_bytes())
+                    .read(case, serde_json::to_string(&output).unwrap().as_bytes())
                     .expect("streams always read"))
             }
             Self::OpenAIResponsesRequest => {
@@ -1770,8 +1770,25 @@ impl Translator {
                 return Some(lines);
             }
             Self::ClaudeResponsesStream => {
-                let mut frames = sse_frames(&text);
-                claude_closures::normalize(&mut frames);
+                // Keep each provider event separate: both Go map loops close
+                // calls within one event, never across different inputs.
+                let batches: Vec<String> =
+                    serde_json::from_str(&text).unwrap_or_else(|_| vec![text.to_string()]);
+                let mut frames: Value = batches
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, batch)| {
+                        let mut frames = sse_frames(batch);
+                        if case
+                            .events
+                            .get(i)
+                            .is_some_and(|event| claude_closures::closes_calls(event))
+                        {
+                            claude_closures::normalize(&mut frames);
+                        }
+                        frames.as_array().cloned().unwrap_or_default()
+                    })
+                    .collect();
                 for frame in frames.as_array_mut().into_iter().flatten() {
                     if let Some(response) = frame.pointer_mut("/data/response") {
                         mask_time_now(response, "created_at");
@@ -1993,9 +2010,16 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
     let failed = report["failed"].as_bool()?;
     let all = || events.iter().flatten().chain(&finish);
     let output = match native {
+        Some(Translator::ClaudeResponsesStream) => serde_json::to_string(
+            &events
+                .iter()
+                .map(|chunks| chunks.concat())
+                .chain(std::iter::once(finish.concat()))
+                .collect::<Vec<_>>(),
+        )
+        .expect("strings serialize"),
         Some(
             Translator::Stream
-            | Translator::ClaudeResponsesStream
             | Translator::OpenAIResponsesStream
             | Translator::GeminiClaudeStream
             | Translator::GeminiResponsesStream,
@@ -2043,12 +2067,10 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
         .enumerate()
         .map(|(i, chunks)| {
             if matches!(native, Some(Translator::ClaudeResponsesStream))
-                && case.events.get(i).is_some_and(|event| {
-                    event
-                        .strip_prefix("data: ")
-                        .and_then(|text| exact::from_str(text).ok())
-                        .is_some_and(|event| event["type"] == "message_stop")
-                })
+                && case
+                    .events
+                    .get(i)
+                    .is_some_and(|event| claude_closures::closes_calls(event))
                 && let Some(shape) = claude_closures::chunk_shape(chunks)
             {
                 return shape;
