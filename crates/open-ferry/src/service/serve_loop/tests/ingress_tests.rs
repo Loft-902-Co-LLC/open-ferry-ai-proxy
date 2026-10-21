@@ -94,8 +94,9 @@ async fn ingress_header_deadline_closes_partial_heads_and_keepalive_gaps() {
 
 #[tokio::test]
 async fn ingress_tls_handshake_deadline_reclaims_admission() {
-    let (tls, _, _dir) = certificates();
-    let served = start_limited(limits(), Some(tls), None);
+    let (tls, mut client, _dir) = certificates();
+    client.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let served = start_limited(IngressConfig { max_connections: Some(1), ..limits() }, Some(tls), None);
     let mut stream = connect(served.addr).await;
     until(|| served.control.live_count() == 1).await;
     tokio::time::pause();
@@ -104,6 +105,11 @@ async fn ingress_tls_handshake_deadline_reclaims_admission() {
     tokio::time::resume();
     assert_eq!(served.control.live_count(), 0);
     closed(&mut stream).await;
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+    let mut next = tls_connect(&connector, connect(served.addr).await).await;
+    get_request(&mut next, "/", true).await;
+    assert!(is_ok(&read_response(&mut next).await));
+    drop(next);
     served.control.stop();
     within(served.server).await.unwrap().unwrap();
 }
@@ -145,7 +151,7 @@ async fn ingress_cap_queues_in_backlog_and_recovers_without_half_registration() 
 }
 
 #[tokio::test]
-async fn ingress_cap_is_per_listener_with_shared_controls_and_budget() {
+async fn ingress_cap_is_per_listener_with_shared_controls() {
     let control = ServeControl::new();
     let ingress = Ingress::new(
         IngressConfig {
