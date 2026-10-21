@@ -216,28 +216,7 @@ fn handle(state: &ManagementState, request: CallbackRequest, v8: bool) -> Respon
             return failure(StatusCode::BAD_REQUEST, "conflicting callback parameters");
         }
         if let Some(query) = &parsed_query {
-            let has_user_info = redirect.split_once("://").is_some_and(|(_, rest)| {
-                rest.split(['/', '?', '#'])
-                    .next()
-                    .unwrap_or_default()
-                    .contains('@')
-            });
-            let parsed = reqwest::Url::parse(redirect).ok();
-            let expected = reqwest::Url::parse(&expected).ok();
-            if has_user_info
-                || !parsed
-                    .as_ref()
-                    .zip(expected.as_ref())
-                    .is_some_and(|(url, expected)| {
-                        url.scheme() == expected.scheme()
-                            && url.host_str() == expected.host_str()
-                            && url.port() == expected.port()
-                            && url.path() == expected.path()
-                            && url.username().is_empty()
-                            && url.password().is_none()
-                            && url.fragment().is_none()
-                    })
-            {
+            if !bind_callback_url_matches(redirect, &expected) {
                 return failure(StatusCode::BAD_REQUEST, "unexpected SIWC callback URL");
             }
             for (key, selected) in [
@@ -331,6 +310,20 @@ fn handle(state: &ManagementState, request: CallbackRequest, v8: bool) -> Respon
         StatusCode::OK,
         &Json::map([("status", Json::Str("ok".into()))]),
     )
+}
+
+/// Compare Go-parsed components before WHATWG URL normalization. Keep the
+/// existing refusal of any fragment, including an empty one.
+fn bind_callback_url_matches(supplied: &str, expected: &str) -> bool {
+    !supplied.contains('#')
+        && crate::go_url::parse(supplied.as_bytes())
+            .zip(crate::go_url::parse(expected.as_bytes()))
+            .is_some_and(|(url, expected)| {
+                url.scheme == expected.scheme
+                    && url.host == expected.host
+                    && url.path == expected.path
+                    && url.user.is_none()
+            })
 }
 
 /// The query of `url`, or `None` where Go's `url.Parse` fails.
@@ -509,6 +502,30 @@ mod tests {
         assert_eq!(state("http://[::1/cb?state=a"), None);
         assert_eq!(state("http://h/cb?state=a\x7f"), None);
         assert_eq!(state("http://h/cb?state=a#%zz"), None);
+    }
+
+    #[test]
+    fn bind_callback_components_match_go_without_normalization() {
+        let expected = "http://127.0.0.1:1455/auth/callback";
+        for supplied in [
+            "http://127.0.0.1:1455/other/../auth/callback",
+            "http://127.0.0.1:1455/./auth/callback",
+            "http://2130706433:1455/auth/callback",
+            "http://127.1:1455/auth/callback",
+            "http://0x7f.0.0.1:1455/auth/callback",
+            "http://@127.0.0.1:1455/auth/callback",
+            "http://127.0.0.1:1455/auth/callback#",
+            "http://127.0.0.1:1455/%2e/auth/callback",
+        ] {
+            assert!(!bind_callback_url_matches(supplied, expected), "{supplied}");
+        }
+        for supplied in [
+            expected,
+            "HTTP://127.0.0.1:1455/auth/callback",
+            "http://127.0.0.1:1455/%61uth/callback",
+        ] {
+            assert!(bind_callback_url_matches(supplied, expected), "{supplied}");
+        }
     }
 
     /// Not upstream's: Go's decode of these bodies into the callback request.

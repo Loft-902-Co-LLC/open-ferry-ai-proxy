@@ -1088,3 +1088,36 @@ async fn incomplete_token_responses_never_enable_siwc() {
         assert!(api.sync.calls().is_empty());
     }
 }
+
+#[tokio::test]
+async fn bind_callback_rejects_normalized_alternatives_and_accepts_exact_url() {
+    let dir = AuthDir::new();
+    dir.write("codex-bind.json", OUTER);
+    let upstream = Upstream::answering(tokens()).await;
+    let api = login_api(&dir, &upstream.url);
+    api.state.oauth_sessions().overrides().ports = Some((1455, 1455));
+    let state = start_login(&api, START).await;
+    for url in [
+        "http://127.0.0.1:1455/other/../auth/callback",
+        "http://127.0.0.1:1455/./auth/callback",
+        "http://2130706433:1455/auth/callback",
+        "http://127.1:1455/auth/callback",
+        "http://0x7f.0.0.1:1455/auth/callback",
+    ] {
+        api.post("/v8/management/oauth/callback", &json!({
+            "state":state,"redirect_url":format!("{url}?state={state}&code=dummy&client_id=dummy")
+        }).to_string()).await.expect(StatusCode::BAD_REQUEST);
+        assert!(upstream.requests().is_empty());
+        assert!(
+            api.state
+                .oauth_sessions()
+                .store()
+                .is_pending(&state, "codex")
+        );
+    }
+    api.post("/v8/management/oauth/callback", &json!({
+        "redirect_url":format!("http://127.0.0.1:1455/auth/callback?state={state}&code=dummy&client_id=dummy")
+    }).to_string()).await.expect(StatusCode::OK);
+    completed(&api, &state).await;
+    assert_eq!(upstream.requests().len(), 1);
+}

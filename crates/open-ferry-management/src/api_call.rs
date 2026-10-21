@@ -560,6 +560,7 @@ fn redirect(
                 reference.scheme.clone()
             },
             host: reference.host.clone(),
+            path: reference.path.clone(),
             user: reference.user.clone(),
         }
     } else {
