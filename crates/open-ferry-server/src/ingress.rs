@@ -576,7 +576,7 @@ impl Reservation {
         self.grow_to(bytes.checked_mul(2).ok_or(())?)
     }
 
-    fn grow_to(&mut self, bytes: usize) -> Result<(), ()> {
+    pub(crate) fn grow_to(&mut self, bytes: usize) -> Result<(), ()> {
         let additional = bytes.saturating_sub(self.bytes);
         if additional == 0 {
             return Ok(());

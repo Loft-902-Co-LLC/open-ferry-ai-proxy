@@ -166,6 +166,8 @@ fn decode(raw: &Bytes, encoding: &str, limit: usize) -> Result<Bytes, DecodeErro
     Ok(body)
 }
 
+mod zstd_limits;
+
 /// Decodes a zstd stream of any number of frames, skipping skippable ones.
 fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
     let failed = |err: &dyn std::fmt::Display| {
@@ -174,17 +176,13 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
     let mut decoder = FrameDecoder::new();
     let window = limit.min(8 << 20);
     decoder.set_max_window_size(window as u64);
-    // Charge before init or expansion. This covers both ring-buffer allocations
-    // during growth, one block's literals/sequences and entropy tables. Decoding
-    // one block at a time and draining in fixed stack chunks bounds that scratch.
-    let working_bytes = window
-        .saturating_mul(4)
-        .saturating_add(window.min(128 << 10).saturating_mul(20))
-        .saturating_add(64 << 10);
-    let _working =
-        crate::ingress::reserve_decoder(working_bytes).map_err(|()| DecodeError::Budget)?;
+    let mut working = crate::ingress::reserve_decoder(0).map_err(|()| DecodeError::Budget)?;
     let mut output = crate::ingress::BudgetBuffer::with_limit(crate::ingress::request_budget(), limit);
     while !input.is_empty() {
+        if let Some(frame_window) = zstd_limits::frame_window(input)? {
+            if frame_window > window { return Err(DecodeError::TooLarge); }
+            working.grow_to(zstd_limits::working_bytes(frame_window)).map_err(|()| DecodeError::Budget)?;
+        }
         match decoder.init(&mut input) {
             Ok(()) => {}
             Err(FrameDecoderError::WindowSizeTooBig { .. }) => return Err(DecodeError::TooLarge),
@@ -200,6 +198,7 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
             Err(err) => return Err(failed(&err)),
         }
         loop {
+            zstd_limits::validate_block(input)?;
             decoder
                 .decode_blocks(&mut input, BlockDecodingStrategy::UptoBlocks(1))
                 .map_err(|err| failed(&err))?;
