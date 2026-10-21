@@ -161,6 +161,15 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
         DecodeError::Failed(format!("failed to decode zstd request body: {err}"))
     };
     let mut decoder = FrameDecoder::new();
+    let window = limit.min(8 << 20);
+    decoder.set_max_window_size(window as u64);
+    // Charge before init or expansion. This covers both ring-buffer allocations
+    // during growth, one block's literals/sequences and entropy tables. Decoding
+    // one block at a time and draining in fixed stack chunks bounds that scratch.
+    let working_bytes = window.saturating_mul(4)
+        .saturating_add(window.min(128 << 10).saturating_mul(20))
+        .saturating_add(64 << 10);
+    let _working = crate::ingress::reserve_decoder(working_bytes).map_err(|()| DecodeError::Budget)?;
     let mut output = crate::ingress::BudgetBuffer::new(crate::ingress::request_budget());
     while !input.is_empty() {
         match decoder.init(&mut input) {
@@ -178,13 +187,15 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
         }
         loop {
             decoder
-                .decode_blocks(&mut input, BlockDecodingStrategy::UptoBytes(1 << 20))
+                .decode_blocks(&mut input, BlockDecodingStrategy::UptoBlocks(1))
                 .map_err(|err| failed(&err))?;
-            if let Some(chunk) = decoder.collect() {
-                if output.len() + chunk.len() > limit {
+            while decoder.can_collect() != 0 {
+                if decoder.can_collect() > limit.saturating_sub(output.len()) {
                     return Err(DecodeError::TooLarge);
                 }
-                output.push(&chunk).map_err(|()| DecodeError::Budget)?;
+                let mut chunk = [0; 16 << 10];
+                let read = decoder.read(&mut chunk).map_err(|err| failed(&err))?;
+                output.push(&chunk[..read]).map_err(|()| DecodeError::Budget)?;
             }
             if decoder.is_finished() {
                 break;
@@ -225,6 +236,16 @@ fn decode_gzip(input: &[u8], limit: usize) -> Result<Bytes, DecodeError> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn a_zstd_128_mib_window_is_rejected_before_allocating_it() {
+        let frame = [0x28, 0xb5, 0x2f, 0xfd, 0, 0x88, 1, 0, 0];
+        crate::allocation_probe::start();
+        let result = decode_zstd(&frame, 64 << 20);
+        let largest = crate::allocation_probe::finish();
+        assert!(matches!(result, Err(DecodeError::Failed(_))));
+        assert!(largest < 1 << 20, "allocated {largest} bytes for a rejected window");
+    }
 
     fn zstd_frame(payload: &[u8]) -> Vec<u8> {
         ruzstd::encoding::compress_to_vec(payload, ruzstd::encoding::CompressionLevel::Fastest)
