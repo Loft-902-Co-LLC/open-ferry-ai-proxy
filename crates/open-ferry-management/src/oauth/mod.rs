@@ -183,6 +183,8 @@ pub(crate) struct Overrides {
     pub(crate) bind_cancel_observed: Option<std::sync::Arc<tokio::sync::Notify>>,
     #[cfg(test)]
     pub(crate) bind_shutdown_events: Option<BindShutdownEvents>,
+    #[cfg(test)]
+    pub(crate) bind_retry_records: Option<BindRetryRecords>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -193,6 +195,12 @@ pub(crate) type BindWritePause = std::sync::Arc<(
 
 #[cfg(test)]
 type BindShutdownEvents = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+#[cfg(test)]
+type BindRetryRecords = std::sync::Arc<(
+    tokio::sync::Notify,
+    std::sync::Mutex<Vec<(bool, u32, Duration)>>,
+)>;
+
 #[cfg(test)]
 type BindAdmissionTimes = std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>;
 
@@ -229,6 +237,8 @@ impl Default for Overrides {
             bind_cancel_observed: None,
             #[cfg(test)]
             bind_shutdown_events: None,
+            #[cfg(test)]
+            bind_retry_records: None,
             #[cfg(test)]
             bind_drain_budget: None,
             #[cfg(test)]

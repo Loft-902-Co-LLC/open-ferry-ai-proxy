@@ -345,8 +345,18 @@ pub(super) async fn save(
                 .unwrap_or_default()
                 .subsec_nanos()
                 % 21;
-            let backoff = retry_delay(attempted, failures)
-                + std::time::Duration::from_millis(u64::from(jitter));
+            let delay = retry_delay(attempted, failures);
+            #[cfg(test)]
+            if let Some(records) = checking
+                .oauth_sessions()
+                .overrides()
+                .bind_retry_records
+                .clone()
+            {
+                records.1.lock().unwrap().push((attempted, failures, delay));
+                records.0.notify_one();
+            }
+            let backoff = delay + std::time::Duration::from_millis(u64::from(jitter));
             if file_busy {
                 turn.defer_file_retry(backoff);
                 // Test pauses are after deferral and all transaction guards.
