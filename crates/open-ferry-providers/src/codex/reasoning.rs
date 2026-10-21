@@ -19,6 +19,7 @@
 
 use open_ferry_translate::signature::{
     Provider, detect_signature_provider, inspect_gpt_reasoning_signature,
+    inspect_meta_reasoning_signature,
 };
 use serde_json::{Map, Value, json};
 
@@ -29,16 +30,26 @@ use crate::json::{bool_of, get, str_at, str_of};
 /// `is_compat`, a third-party Responses model's cleartext reasoning and IDs
 /// are kept. Returns whether anything changed.
 pub(crate) fn sanitize_reasoning(body: &mut Value, is_compat: bool) -> bool {
-    sanitize_reasoning_with_options(body, is_compat, is_compat)
+    let target = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let keep_meta = is_compat && Provider::from_model_name(target) == Provider::Meta;
+    sanitize_reasoning_with_options(body, is_compat, is_compat, keep_meta)
 }
 
 /// Keeps foreign-format encrypted reasoning for Meta, while applying the
 /// usual Responses content and orphan-ID rules.
-pub(crate) fn sanitize_reasoning_keep_foreign(body: &mut Value) -> bool {
-    sanitize_reasoning_with_options(body, false, true)
+pub(crate) fn sanitize_reasoning_for_meta(body: &mut Value) -> bool {
+    sanitize_reasoning_with_options(body, false, true, true)
 }
 
-fn sanitize_reasoning_with_options(body: &mut Value, is_compat: bool, keep_foreign: bool) -> bool {
+fn sanitize_reasoning_with_options(
+    body: &mut Value,
+    is_compat: bool,
+    keep_foreign: bool,
+    keep_meta: bool,
+) -> bool {
     // Codex doesn't persist items with store off, so a reasoning ID without
     // usable encrypted content would be looked up and fail.
     let strip_ids = !bool_of(get(body, "store"));
@@ -53,7 +64,7 @@ fn sanitize_reasoning_with_options(body: &mut Value, is_compat: bool, keep_forei
         let Value::Object(item) = item else {
             continue;
         };
-        changed |= sanitize_item(item, index, strip_ids, is_compat, keep_foreign);
+        changed |= sanitize_item(item, index, strip_ids, is_compat, keep_foreign, keep_meta);
     }
     changed
 }
@@ -64,6 +75,7 @@ fn sanitize_item(
     strip_ids: bool,
     is_compat: bool,
     keep_foreign: bool,
+    keep_meta: bool,
 ) -> bool {
     let mut changed = false;
     let has_content = matches!(item.get("content"), Some(Value::Array(parts)) if !parts.is_empty());
@@ -92,6 +104,9 @@ fn sanitize_item(
         Value::String(raw) if raw.as_str() != raw.trim() => {
             Some("encrypted_content has leading or trailing whitespace".to_owned())
         }
+        Value::String(raw) if keep_meta => inspect_meta_reasoning_signature(raw)
+            .err()
+            .map(|error| error.to_string()),
         // With foreign replay enabled a third-party Responses model (such as
         // Muse) expects its own encrypted content of an unknown format back;
         // an empty one and a known provider's still go.
@@ -177,6 +192,31 @@ pub(crate) mod tests {
             *byte = i as u8;
         }
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    }
+
+    #[test]
+    fn meta_replay_is_native_and_target_gated() {
+        let native = format!("Q-PaDgE{}", "A".repeat(1419));
+        for sig in [&native, &valid_signature(), "opaque"] {
+            for target in ["muse-spark", "gpt-5"] {
+                let mut body = json!({"model":target,"store":false,"input":[{"type":"reasoning","id":"r","encrypted_content":sig}]});
+                sanitize_reasoning(&mut body, true);
+                assert_eq!(
+                    body["input"][0].get("encrypted_content").is_some(),
+                    if target == "muse-spark" {
+                        sig == &native
+                    } else {
+                        sig != &native
+                    }
+                );
+            }
+            let mut body = json!({"store":false,"input":[{"type":"reasoning","id":"r","encrypted_content":sig}]});
+            sanitize_reasoning_for_meta(&mut body);
+            assert_eq!(
+                body["input"][0].get("encrypted_content").is_some(),
+                sig == &native
+            );
+        }
     }
 
     fn sanitize(raw: &str) -> Value {

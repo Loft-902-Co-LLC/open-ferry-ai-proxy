@@ -83,6 +83,7 @@ fn convert(
     if let Some(Value::Array(messages)) = request.get("messages") {
         let replay = SignatureReplay {
             grok_target: go::to_lower(base_model_name(model_name).trim()).contains("grok"),
+            meta_target: Provider::from_model_name(base_model_name(model_name)) == Provider::Meta,
             preserve_unknown: preserve_unknown_signatures,
         };
         let mut builder = InputBuilder::new(&tool_names, replay);
@@ -204,6 +205,7 @@ struct InputBuilder<'a> {
 struct SignatureReplay {
     /// The target is an xAI model, which gets its own `encrypted_content` back.
     grok_target: bool,
+    meta_target: bool,
     /// Also replay signatures that are blank or in no known format.
     preserve_unknown: bool,
 }
@@ -214,6 +216,9 @@ impl SignatureReplay {
         let raw = str_of(signature);
         if let Some(signature) = compatible_signature_for_provider(Provider::Gpt, &raw) {
             return Some(signature);
+        }
+        if self.meta_target && crate::signature::is_valid_meta_reasoning_signature(&raw) {
+            return Some(raw.into_owned());
         }
         if self.preserve_unknown
             && (raw.trim().is_empty()
@@ -784,3 +789,23 @@ pub fn shorten_call_id(id: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod meta_replay_tests {
+    use super::*;
+    #[test]
+    fn only_meta_targets_restore_native_thinking() {
+        let sig = format!("Q-PaDgE{}", "A".repeat(1419));
+        for target in [false, true] {
+            let policy = SignatureReplay {
+                grok_target: false,
+                meta_target: target,
+                preserve_unknown: false,
+            };
+            assert_eq!(
+                policy.encrypted_content(Some(&Value::String(sig.clone()))),
+                target.then_some(sig.clone())
+            );
+        }
+    }
+}
