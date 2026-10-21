@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/filelock_unix.go,
-// filelock_windows.go and token.go:19-62 (v8.0.32, MIT).
+// filelock_windows.go and token.go:19-62 (v8.0.36, MIT).
 //! Per-credential process mutex and exclusive OS lock, with a bounded wait.
 //!
 //! Async acquisition uses `spawn_blocking`, or runs inline without a runtime.
@@ -41,8 +41,10 @@ impl Drop for CredentialLock {
     }
 }
 
-/// Upstream's trimmed, absolute, lexically cleaned path plus `.lock`.
-/// Symlinks are deliberately not resolved, including in the process mutex key.
+/// Upstream's trimmed absolute path plus `.lock`, resolving an existing
+/// regular target or its parent so permitted directory aliases share one lock.
+/// Nonregular leaf targets keep their lock in the credential parent so the
+/// store can refuse them without creating locks beside devices or directories.
 pub fn credential_lock_path(credential: &Path) -> io::Result<PathBuf> {
     let text = credential
         .as_os_str()
@@ -50,7 +52,26 @@ pub fn credential_lock_path(credential: &Path) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("credential path is not valid UTF-8"))?;
     let absolute = std::path::absolute(text.trim())?;
     let cleaned = super::path::clean(&absolute);
-    let mut name = cleaned.into_os_string();
+    let canonical = cleaned
+        .canonicalize()
+        .and_then(|resolved| {
+            if resolved.metadata()?.is_file() {
+                Ok(resolved)
+            } else {
+                Err(io::Error::other("credential target is not a regular file"))
+            }
+        })
+        .or_else(|_| {
+            let parent = cleaned
+                .parent()
+                .ok_or_else(|| io::Error::other("credential has no parent"))?;
+            let leaf = cleaned
+                .file_name()
+                .ok_or_else(|| io::Error::other("credential has no file name"))?;
+            parent.canonicalize().map(|parent| parent.join(leaf))
+        })
+        .unwrap_or(cleaned);
+    let mut name = canonical.into_os_string();
     name.push(".lock");
     Ok(PathBuf::from(name))
 }

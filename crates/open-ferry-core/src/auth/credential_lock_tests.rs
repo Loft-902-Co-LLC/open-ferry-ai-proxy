@@ -57,19 +57,23 @@ async fn process_mutex_contends_and_aliases_share_identity() {
 }
 
 #[test]
-fn lock_identity_is_trimmed_absolute_and_lexical() {
+fn lock_identity_is_trimmed_absolute_and_canonical() {
     let dir = scratch();
     let path = dir.path().join("sub").join("..").join("codex.json");
-    let expected = crate::auth::path::clean(dir.path()).join("codex.json.lock");
+    let expected = dir.path().canonicalize().unwrap().join("codex.json.lock");
     assert_eq!(credential_lock_path(&path).unwrap(), expected);
     let padded = format!("  {}  ", path.display());
     assert_eq!(credential_lock_path(Path::new(&padded)).unwrap(), expected);
     let marker = dir.path().join("siwc-1-short-alias-result.txt");
-    fs::write(marker, b"lexical identity deliberately preserves aliases").unwrap();
+    fs::write(
+        marker,
+        b"canonical identity resolves permitted directory aliases",
+    )
+    .unwrap();
 }
 
 #[test]
-fn credential_symlink_lock_stays_next_to_the_link() {
+fn credential_symlink_lock_shares_the_targets_identity() {
     let dir = scratch();
     let target = dir.path().join("target.json");
     let link = dir.path().join("link.json");
@@ -88,9 +92,9 @@ fn credential_symlink_lock_stays_next_to_the_link() {
     }
     assert_eq!(
         credential_lock_path(&link).unwrap(),
-        crate::auth::path::clean(dir.path()).join("link.json.lock")
+        dir.path().canonicalize().unwrap().join("target.json.lock")
     );
-    assert_ne!(
+    assert_eq!(
         credential_lock_path(&link).unwrap(),
         credential_lock_path(&target).unwrap()
     );
@@ -330,4 +334,64 @@ async fn direct_upstream_flock_blocks_our_lock() {
         unsafe { libc::flock(upstream.as_raw_fd(), libc::LOCK_UN) },
         0
     );
+}
+
+#[cfg(windows)]
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/windows_junction.rs"
+));
+
+#[tokio::test]
+async fn directory_aliases_share_locks_for_existing_and_missing_credentials() {
+    let dir = scratch();
+    let directory = super::super::path::clean(dir.path());
+    let real = directory.join("real");
+    let alias = directory.join("alias");
+    fs::create_dir(&real).unwrap();
+    #[cfg(windows)]
+    junction(&real, &alias);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let path = real.join("codex.json");
+    let alternate = alias.join("codex.json");
+    for exists in [false, true] {
+        if exists {
+            fs::write(&path, b"{}").unwrap();
+        }
+        assert_eq!(
+            credential_lock_path(&path).unwrap(),
+            credential_lock_path(&alternate).unwrap()
+        );
+        let guard = acquire_credential_lock(&path).await.unwrap();
+        assert!(
+            acquire_with_timeout(alternate.clone(), Duration::from_millis(100))
+                .await
+                .is_err()
+        );
+        drop(guard);
+        drop(acquire_credential_lock(&alternate).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn nonregular_leaf_alias_keeps_its_lock_in_the_credential_parent() {
+    let dir = scratch();
+    let directory = super::super::path::clean(dir.path());
+    let target = directory.join("nonregular");
+    let alias = directory.join("credential.json");
+    fs::create_dir(&target).unwrap();
+    #[cfg(windows)]
+    junction(&target, &alias);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let expected = directory
+        .canonicalize()
+        .unwrap()
+        .join("credential.json.lock");
+    assert_eq!(credential_lock_path(&alias).unwrap(), expected);
+    let guard = acquire_credential_lock(&alias).await.unwrap();
+    assert!(expected.is_file());
+    assert!(!directory.join("nonregular.lock").exists());
+    drop(guard);
 }
