@@ -1,12 +1,74 @@
-//! Tests of the routes of `crate::model_definitions`. Upstream has no tests
-//! of `GetStaticModelDefinitions`; the expected models are upstream's
-//! answers for the same channels.
+// Ported from CLIProxyAPI internal/api/handlers/management/
+// model_definitions_test.go (v8.0.36, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+//! Static definitions and the sorted registry fallback for served providers.
 
 use http::{Method, StatusCode};
+use open_ferry_core::models::ModelInfo;
 use open_ferry_core::registry::StaticCatalog;
 use serde_json::Value;
 
 use super::{Api, LOCAL, request_from};
+
+#[tokio::test]
+async fn configured_provider_definitions_fall_back_to_sorted_registry_models() {
+    let api = Api::new();
+    let models: Vec<ModelInfo> = ["z-custom", "a-custom"]
+        .into_iter()
+        .map(|id| ModelInfo {
+            id: id.into(),
+            display_name: format!("Custom {id}"),
+            ..ModelInfo::default()
+        })
+        .collect();
+    api.registry.register_client("custom-key", "acme", &models);
+    for route in [
+        "/v0/management/model-definitions",
+        "/v8/management/routing/model-definitions",
+    ] {
+        let body = api
+            .get(&format!("{route}/Acme"))
+            .await
+            .expect(StatusCode::OK);
+        assert_eq!(body["channel"], "acme");
+        assert_eq!(ids(&body), ["a-custom", "z-custom"]);
+        assert_eq!(body["models"][0]["display_name"], "Custom a-custom");
+    }
+    for channel in ["antigravity", "kimi", "aistudio", "devin", "gemini-cli"] {
+        api.registry.register_client(channel, channel, &models);
+        api.get(&format!("/v0/management/model-definitions/{channel}"))
+            .await
+            .expect(StatusCode::BAD_REQUEST);
+    }
+    api.get("/v0/management/model-definitions/unknown")
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn an_empty_static_channel_falls_back_without_changing_catalog_priority() {
+    let registry = open_ferry_core::registry::ModelRegistry::new();
+    let models: Vec<ModelInfo> = ["z-registered", "a-registered"]
+        .into_iter()
+        .map(|id| ModelInfo {
+            id: id.into(),
+            ..ModelInfo::default()
+        })
+        .collect();
+    registry.register_client("claude-key", "claude", &models);
+    let empty = StaticCatalog::from_json("{}", "test").unwrap();
+    let fallback = crate::model_definitions::resolved_models(&empty, &registry, "claude");
+    assert_eq!(
+        fallback.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["a-registered", "z-registered"]
+    );
+    let catalog = StaticCatalog::embedded();
+    assert_eq!(
+        crate::model_definitions::resolved_models(catalog, &registry, "claude"),
+        catalog.models_for_channel("claude")
+    );
+    assert!(crate::model_definitions::resolved_models(&empty, &registry, "unknown").is_empty());
+}
 
 /// The answer's models' IDs.
 fn ids(body: &Value) -> Vec<&str> {

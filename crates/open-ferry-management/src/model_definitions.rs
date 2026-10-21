@@ -2,13 +2,13 @@
 // model_definitions.go (GetStaticModelDefinitions), the channel names of
 // internal/registry/model_definitions.go (GetStaticModelDefinitionsByChannel)
 // and the JSON layout of internal/registry/model_registry.go (ModelInfo)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v0/management/model-definitions/:channel` (also
 //! `/v8/management/routing/model-definitions/:channel`): the models a
 //! channel serves, from the static model catalog in use
-//! ([`StaticCatalog::current`]).
+//! ([`StaticCatalog::current`]), falling back to its registered models.
 //!
 //! The channel is the path's, or the `channel` query parameter when the
 //! path's is blank. The answer is `{"channel":<channel>,"models":[...]}`
@@ -20,14 +20,15 @@
 //!   `gemini-interactions`, `vertex`, `codex` (with the Pro plan's models),
 //!   `xai` (also `x-ai` and `grok`) and `meta` (also `muse`). Upstream also
 //!   knows `aistudio`, `kimi` (also `kimi-ai`, `kimi.ai` and `kimi.com`),
-//!   `antigravity` and `devin`, which are a 400 here.
+//!   `antigravity` and `devin`, which are a 400 here. Configured
+//!   OpenAI-compatible provider names use the registry fallback.
 //! - A model's `config` isn't written: it holds the client headers upstream
 //!   sends for a model, which open-ferry doesn't send.
 //! - A channel whose `%`-escapes don't decode to UTF-8 is named in the
 //!   answer as it was sent.
 
 use axum::extract::rejection::PathRejection;
-use axum::extract::{Path, RawQuery};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::Uri;
 use axum::response::Response;
 use axum::routing::get;
@@ -41,6 +42,7 @@ use crate::config_read::{Fields, strings, thinking_fields};
 use crate::go::lossy;
 use crate::json::{self, Json};
 use crate::query::Query;
+use crate::state::ManagementState;
 
 /// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {
@@ -59,6 +61,7 @@ pub(crate) fn routes() -> Vec<Route> {
 /// `GET /v0/management/model-definitions/:channel` (upstream's
 /// `GetStaticModelDefinitions`).
 async fn definitions(
+    State(state): State<ManagementState>,
     channel: Result<Path<String>, PathRejection>,
     uri: Uri,
     RawQuery(raw): RawQuery,
@@ -76,7 +79,7 @@ async fn definitions(
     if channel.is_empty() {
         return json::error(StatusCode::BAD_REQUEST, "channel is required");
     }
-    let models = channel_models(&StaticCatalog::current(), &channel);
+    let models = resolved_models(&StaticCatalog::current(), state.registry(), &channel);
     if models.is_empty() {
         return json::response(
             StatusCode::BAD_REQUEST,
@@ -93,6 +96,36 @@ async fn definitions(
             ("models", Json::Array(models.iter().map(model).collect())),
         ]),
     )
+}
+
+/// Registry fallback also serves configured OpenAI-compatible provider names,
+/// while deliberately unported providers remain unavailable.
+fn served_channel(channel: &str) -> bool {
+    !matches!(
+        to_lower(channel).as_str(),
+        "aistudio"
+            | "kimi"
+            | "kimi-ai"
+            | "kimi.ai"
+            | "kimi.com"
+            | "antigravity"
+            | "devin"
+            | "gemini-cli"
+            | "home"
+    )
+}
+
+pub(crate) fn resolved_models(
+    catalog: &StaticCatalog,
+    registry: &open_ferry_core::registry::ModelRegistry,
+    channel: &str,
+) -> Vec<ModelInfo> {
+    let mut models = channel_models(catalog, channel);
+    if models.is_empty() && served_channel(channel) {
+        models = registry.available_models_by_provider(channel);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    models
 }
 
 /// The models of a channel, in upstream's spellings of its name (its
