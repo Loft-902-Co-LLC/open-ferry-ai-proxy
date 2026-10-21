@@ -425,7 +425,7 @@ async fn policy_disabled_reads_keep_the_previous_snapshot() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn rollback_does_not_send_when_the_confirmed_target_changes_or_disappears() {
     use open_ferry_update::journal::{JOURNAL_FILE, Journal};
     for removed in [false, true] {
@@ -874,28 +874,47 @@ async fn unreadable_optional_history_keeps_live_status_and_returns_a_fixed_note(
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_status_read_started_before_acceptance_does_not_clear_pending() {
-    let fake = Switcher::new(Duration::ZERO, None);
-    let (dash, _scratch) = supervised(fake.clone());
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    *fake.status_gate.lock().unwrap() = Some((started.clone(), release.clone()));
-    let read = dash.get(STATUS);
-    tokio::pin!(read);
-    tokio::select! {
-        _ = &mut read => panic!("the old snapshot must stay gated"),
-        () = started.notified() => {}
+    for delay in [Duration::ZERO, Duration::from_millis(1500)] {
+        let fake = Switcher::new(delay, None);
+        let (dash, _scratch) = supervised(fake.clone());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *fake.status_gate.lock().unwrap() = Some((started.clone(), release.clone()));
+        let read = dash.get(STATUS);
+        tokio::pin!(read);
+        tokio::select! {
+            _ = &mut read => panic!("the old snapshot must stay gated"),
+            () = started.notified() => {}
+        }
+        let reply = dash
+            .call(Method::POST, INSTALL, "")
+            .await
+            .json(StatusCode::ACCEPTED);
+        if delay.is_zero() {
+            assert_eq!(reply["accepted"], true);
+        } else {
+            assert_eq!(reply["preparing"], true);
+        }
+        // A 202 can still be preparing. Wait for the task to record acceptance
+        // without reading status, which would itself clear pending.
+        dash.state
+            .update_requests
+            .wait_for_preparation_for_test()
+            .await;
+        release.notify_one();
+        let stale_read = read.await.json(StatusCode::OK);
+        assert_eq!(stale_read["switch_request"]["state"], "accepted");
+        assert_eq!(stale_read["switch_request"]["pending"], true);
+        assert_eq!(
+            reply["request_id"],
+            stale_read["switch_request"]["request_id"]
+        );
+        let fresh_read = dash.get(STATUS).await.json(StatusCode::OK);
+        assert_eq!(fresh_read["switch_request"]["state"], "accepted");
+        assert_eq!(fresh_read["switch_request"]["pending"], false);
     }
-    dash.call(Method::POST, INSTALL, "")
-        .await
-        .json(StatusCode::ACCEPTED);
-    release.notify_one();
-    let stale_read = read.await.json(StatusCode::OK);
-    assert_eq!(stale_read["switch_request"]["state"], "accepted");
-    assert_eq!(stale_read["switch_request"]["pending"], true);
-    let fresh_read = dash.get(STATUS).await.json(StatusCode::OK);
-    assert_eq!(fresh_read["switch_request"]["pending"], false);
 }
 
 #[tokio::test]

@@ -349,6 +349,13 @@ impl SwitchRequest {
 }
 
 impl Requests {
+    /// Wait for the recorded result without a status read that could clear pending.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_preparation_for_test(&self) {
+        let task = self.0.lock().unwrap().task.take().unwrap();
+        task.await.unwrap();
+    }
+
     #[cfg(test)]
     pub(crate) async fn ended_preparation_for_test(&self, action: &'static str) -> String {
         let task = tokio::spawn(async {});
