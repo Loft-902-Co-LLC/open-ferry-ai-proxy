@@ -56,7 +56,6 @@ fn groups(frames: &[Value]) -> Option<Vec<usize>> {
         }
     }
     let mut groups = Vec::new();
-    let mut ids = Vec::new();
     let mut start = 0;
     while start < frames.len() {
         let Some(done) =
@@ -67,10 +66,9 @@ fn groups(frames: &[Value]) -> Option<Vec<usize>> {
             break;
         };
         let (index, id) = identity(&frames[done])?;
-        if groups.iter().any(|(seen, _, _)| *seen == index) || ids.contains(&id) {
+        if groups.iter().any(|(seen, _, _)| *seen == index) {
             return None;
         }
-        ids.push(id);
         let kind = frames[done]["data"]["item"]["type"].as_str()?;
         let mut at = start;
         if frames[at]["event"] == "response.output_item.added" {
@@ -348,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_item_ids_are_not_independent_closures() {
+    fn repeated_item_ids_keep_distinct_output_index_closures() {
         let one = closure(1, "function_call");
         let mut two = closure(2, "function_call");
         for frame in &mut two {
@@ -362,7 +360,9 @@ mod tests {
         let mut reverse = numbered([two, one].concat());
         normalize(&mut forward);
         normalize(&mut reverse);
-        assert_ne!(forward, reverse);
+        // Go maps these calls by block index, even when the provider repeats
+        // an ID. The output index still separates their complete groups.
+        assert_eq!(forward, reverse);
     }
 
     #[test]
