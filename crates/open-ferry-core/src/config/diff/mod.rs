@@ -121,14 +121,46 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         old.max_request_body_bytes,
         new.max_request_body_bytes,
     );
-    changes.int("ingress-limits.max-connections", old.ingress_limits.max_connections, new.ingress_limits.max_connections);
-    changes.int("ingress-limits.header-timeout-seconds", old.ingress_limits.header_timeout_seconds, new.ingress_limits.header_timeout_seconds);
-    changes.int("ingress-limits.tls-handshake-timeout-seconds", old.ingress_limits.tls_handshake_timeout_seconds, new.ingress_limits.tls_handshake_timeout_seconds);
-    changes.int("ingress-limits.idle-timeout-seconds", old.ingress_limits.idle_timeout_seconds, new.ingress_limits.idle_timeout_seconds);
-    changes.int("ingress-limits.body-idle-timeout-seconds", old.ingress_limits.body_idle_timeout_seconds, new.ingress_limits.body_idle_timeout_seconds);
-    changes.int("ingress-limits.body-total-timeout-seconds", old.ingress_limits.body_total_timeout_seconds, new.ingress_limits.body_total_timeout_seconds);
-    changes.int("ingress-limits.buffered-body-bytes", old.ingress_limits.buffered_body_bytes, new.ingress_limits.buffered_body_bytes);
-    changes.int("ingress-limits.write-stall-timeout-seconds", old.ingress_limits.write_stall_timeout_seconds, new.ingress_limits.write_stall_timeout_seconds);
+    changes.int(
+        "ingress-limits.max-connections",
+        old.ingress_limits.max_connections,
+        new.ingress_limits.max_connections,
+    );
+    changes.int(
+        "ingress-limits.header-timeout-seconds",
+        old.ingress_limits.header_timeout_seconds,
+        new.ingress_limits.header_timeout_seconds,
+    );
+    changes.int(
+        "ingress-limits.tls-handshake-timeout-seconds",
+        old.ingress_limits.tls_handshake_timeout_seconds,
+        new.ingress_limits.tls_handshake_timeout_seconds,
+    );
+    changes.int(
+        "ingress-limits.idle-timeout-seconds",
+        old.ingress_limits.idle_timeout_seconds,
+        new.ingress_limits.idle_timeout_seconds,
+    );
+    changes.int(
+        "ingress-limits.body-idle-timeout-seconds",
+        old.ingress_limits.body_idle_timeout_seconds,
+        new.ingress_limits.body_idle_timeout_seconds,
+    );
+    changes.int(
+        "ingress-limits.body-total-timeout-seconds",
+        old.ingress_limits.body_total_timeout_seconds,
+        new.ingress_limits.body_total_timeout_seconds,
+    );
+    changes.int(
+        "ingress-limits.buffered-body-bytes",
+        old.ingress_limits.buffered_body_bytes,
+        new.ingress_limits.buffered_body_bytes,
+    );
+    changes.int(
+        "ingress-limits.write-stall-timeout-seconds",
+        old.ingress_limits.write_stall_timeout_seconds,
+        new.ingress_limits.write_stall_timeout_seconds,
+    );
     changes.flag(
         "streaming.send-keepalive-before-ft",
         old.streaming.send_keepalive_before_ft,

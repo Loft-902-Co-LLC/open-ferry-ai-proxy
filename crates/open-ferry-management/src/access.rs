@@ -429,7 +429,8 @@ pub(crate) async fn authenticate(
     let provided = provided_key(request.headers()).to_vec();
     match authenticate_key(&state, &ip, local, &provided).await {
         Ok(()) => {
-            let mut response = open_ferry_server::ingress::after_management_auth(request, next).await;
+            let mut response =
+                open_ferry_server::ingress::after_management_auth(request, next).await;
             set_build_headers(response.headers_mut());
             response
         }

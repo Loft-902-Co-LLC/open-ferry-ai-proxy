@@ -86,7 +86,9 @@ impl DeferredCapture {
     /// What was kept, and the markers saying what is missing (upstream's
     /// `Bytes` and `statusMarker`).
     #[cfg(test)]
-    pub(crate) fn snapshot(&self) -> (Vec<u8>, String) { self.snapshot_prefix(CAPTURE_LIMIT) }
+    pub(crate) fn snapshot(&self) -> (Vec<u8>, String) {
+        self.snapshot_prefix(CAPTURE_LIMIT)
+    }
 
     pub(crate) fn snapshot_prefix(&self, limit: usize) -> (Vec<u8>, String) {
         let deferred = self.inner.lock().unwrap_or_else(PoisonError::into_inner);

@@ -96,7 +96,14 @@ async fn ingress_header_deadline_closes_partial_heads_and_keepalive_gaps() {
 async fn ingress_tls_handshake_deadline_reclaims_admission() {
     let (tls, mut client, _dir) = certificates();
     client.alpn_protocols = vec![b"http/1.1".to_vec()];
-    let served = start_limited(IngressConfig { max_connections: Some(1), ..limits() }, Some(tls), None);
+    let served = start_limited(
+        IngressConfig {
+            max_connections: Some(1),
+            ..limits()
+        },
+        Some(tls),
+        None,
+    );
     let mut stream = connect(served.addr).await;
     until(|| served.control.live_count() == 1).await;
     tokio::time::pause();
@@ -196,7 +203,12 @@ async fn read_h2_packet(stream: &mut TcpStream) -> (u8, u8, u32, Vec<u8>) {
     assert!(len < 1 << 20);
     let mut payload = vec![0; len];
     within(stream.read_exact(&mut payload)).await.unwrap();
-    (head[3], head[4], u32::from_be_bytes(head[5..9].try_into().unwrap()) & 0x7fff_ffff, payload)
+    (
+        head[3],
+        head[4],
+        u32::from_be_bytes(head[5..9].try_into().unwrap()) & 0x7fff_ffff,
+        payload,
+    )
 }
 
 #[tokio::test]
@@ -255,14 +267,25 @@ async fn ingress_partial_headers_cannot_hold_a_draining_h2_connection() {
     let served = start_limited(limits(), None, None);
     let mut stream = raw_h2(&served, 65535).await;
     h2_get(&mut stream, 1, "/").await;
-    loop { if read_h2_packet(&mut stream).await.0 == 0 { break; } }
+    loop {
+        if read_h2_packet(&mut stream).await.0 == 0 {
+            break;
+        }
+    }
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(4)).await;
     settle().await;
     tokio::time::resume();
-    loop { if read_h2_frame(&mut stream).await == 7 { break; } }
-    stream.write_all(&[0, 0, 1, 1, 1, 0, 0, 0, 3, 0x82]).await.unwrap();
-    until(|| traffic(&served).is_some_and(|traffic| traffic.state().partial_head.is_some())).await;
+    loop {
+        if read_h2_frame(&mut stream).await == 7 {
+            break;
+        }
+    }
+    stream
+        .write_all(&[0, 0, 1, 1, 1, 0, 0, 0, 3, 0x82])
+        .await
+        .unwrap();
+    until(|| traffic(&served).is_some_and(|traffic| traffic.has_partial_headers())).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3)).await;
     settle().await;
@@ -525,7 +548,10 @@ async fn ingress_body_timeout_answers_408_then_closes_the_socket() {
 
 async fn raw_h2(served: &Served, window: u32) -> TcpStream {
     let mut stream = connect(served.addr).await;
-    stream.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.unwrap();
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .await
+        .unwrap();
     let mut settings = vec![0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4];
     settings.extend_from_slice(&window.to_be_bytes());
     stream.write_all(&settings).await.unwrap();
@@ -550,26 +576,43 @@ async fn h2_window(stream: &mut TcpStream, id: u32, amount: u32) {
 }
 
 fn sse_routes() -> Router {
-    Router::new().route("/sse", get(|| async {
-        ([ ("content-type", "text/event-stream") ],
-        Body::from_stream(futures_util::stream::repeat_with(|| {
-            Ok::<_, Infallible>(axum::body::Bytes::from_static(&[b'x'; 64 * 1024]))
-        })))
-    }))
+    Router::new().route(
+        "/sse",
+        get(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                Body::from_stream(futures_util::stream::repeat_with(|| {
+                    Ok::<_, Infallible>(axum::body::Bytes::from_static(&[b'x'; 64 * 1024]))
+                })),
+            )
+        }),
+    )
 }
 
 #[tokio::test]
 async fn ingress_h2_resets_only_the_stalled_stream_and_keeps_its_peer_stream() {
     let gate = Gate::default();
     let route_gate = gate.clone();
-    let routes = sse_routes().route("/ok", get(move || {
-        let gate = route_gate.clone();
-        async move { gate.started.notify_one(); gate.proceed.notified().await; "ok" }
-    }));
+    let routes = sse_routes().route(
+        "/ok",
+        get(move || {
+            let gate = route_gate.clone();
+            async move {
+                gate.started.notify_one();
+                gate.proceed.notified().await;
+                "ok"
+            }
+        }),
+    );
     let served = start_limited(limits(), None, Some(routes));
     let mut stream = raw_h2(&served, 1).await;
     h2_get(&mut stream, 1, "/sse").await;
-    loop { let frame = read_h2_packet(&mut stream).await; if frame.0 == 0 && frame.2 == 1 { break; } }
+    loop {
+        let frame = read_h2_packet(&mut stream).await;
+        if frame.0 == 0 && frame.2 == 1 {
+            break;
+        }
+    }
     h2_get(&mut stream, 3, "/ok").await;
     within(gate.started.notified()).await;
     assert!(traffic(&served).unwrap().has_pending_delivery());
@@ -581,7 +624,11 @@ async fn ingress_h2_resets_only_the_stalled_stream_and_keeps_its_peer_stream() {
     loop {
         let frame = read_h2_packet(&mut stream).await;
         if frame.0 == 3 && frame.2 == 1 {
-            assert_eq!(u32::from_be_bytes(frame.3.try_into().unwrap()), 8, "expected CANCEL");
+            assert_eq!(
+                u32::from_be_bytes(frame.3.try_into().unwrap()),
+                8,
+                "expected CANCEL"
+            );
             break;
         }
     }
@@ -589,7 +636,11 @@ async fn ingress_h2_resets_only_the_stalled_stream_and_keeps_its_peer_stream() {
     h2_window(&mut stream, 3, 32).await;
     loop {
         let frame = read_h2_packet(&mut stream).await;
-        if frame.0 == 0 && frame.2 == 3 { assert_eq!(frame.3, b"ok"); assert_ne!(frame.1 & 1, 0); break; }
+        if frame.0 == 0 && frame.2 == 3 {
+            assert_eq!(frame.3, b"ok");
+            assert_ne!(frame.1 & 1, 0);
+            break;
+        }
     }
     assert_eq!(served.control.live_count(), 1);
     drop(stream);
@@ -607,7 +658,10 @@ async fn ingress_h2_slow_readers_can_progress_for_longer_than_the_deadline() {
         loop {
             let frame = read_h2_packet(&mut stream).await;
             assert_ne!(frame.0, 3, "progressing stream was reset");
-            if frame.0 == 0 && frame.2 == 1 { assert_eq!(frame.3.len(), 1); break; }
+            if frame.0 == 0 && frame.2 == 1 {
+                assert_eq!(frame.3.len(), 1);
+                break;
+            }
         }
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -630,10 +684,12 @@ async fn ingress_h2_connection_window_stall_still_closes_the_connection() {
     let mut received = 0;
     while received < 65535 {
         let frame = read_h2_packet(&mut stream).await;
-        if frame.0 == 0 { received += frame.3.len(); }
+        if frame.0 == 0 {
+            received += frame.3.len();
+        }
     }
     assert_eq!(received, 65535);
-    assert_eq!(traffic(&served).unwrap().state().send_window, 0);
+    assert_eq!(traffic(&served).unwrap().connection_send_window(), 0);
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3)).await;
     settle().await;
@@ -646,7 +702,15 @@ async fn ingress_h2_connection_window_stall_still_closes_the_connection() {
 
 #[tokio::test]
 async fn ingress_h2_oversize_rejection_does_not_drain_the_connection() {
-    let served = start_limited(IngressConfig { header_timeout: None, idle_timeout: None, ..limits() }, None, None);
+    let served = start_limited(
+        IngressConfig {
+            header_timeout: None,
+            idle_timeout: None,
+            ..limits()
+        },
+        None,
+        None,
+    );
     let mut stream = raw_h2(&served, 65535).await;
     let block = b"\x82\x86\x84\x01\x09localhost\x00\x0econtent-length\x071048577";
     let mut head = vec![0, 0, block.len() as u8, 1, 4, 0, 0, 0, 1];
@@ -655,7 +719,9 @@ async fn ingress_h2_oversize_rejection_does_not_drain_the_connection() {
     loop {
         let frame = read_h2_packet(&mut stream).await;
         assert_ne!(frame.0, 7, "a size rejection sent GOAWAY");
-        if frame.0 == 0 && frame.2 == 1 { break; }
+        if frame.0 == 0 && frame.2 == 1 {
+            break;
+        }
     }
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(6)).await;
@@ -666,7 +732,10 @@ async fn ingress_h2_oversize_rejection_does_not_drain_the_connection() {
     loop {
         let frame = read_h2_packet(&mut stream).await;
         assert_ne!(frame.0, 7);
-        if frame.0 == 0 && frame.2 == 3 { assert_eq!(frame.3, b"ok"); break; }
+        if frame.0 == 0 && frame.2 == 3 {
+            assert_eq!(frame.3, b"ok");
+            break;
+        }
     }
     drop(stream);
     until(|| served.control.live_count() == 0).await;

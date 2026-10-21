@@ -62,7 +62,10 @@ async fn write_deadline_tracks_delivery_progress_and_not_upstream_silence() {
 
 #[tokio::test(start_paused = true)]
 async fn a_queued_chunk_does_not_expire_while_its_stream_is_progressing() {
-    let config = IngressConfig { write_stall_timeout: Some(Duration::from_secs(2)), ..IngressConfig::default() };
+    let config = IngressConfig {
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     let flight = Flight::new(traffic.clone());
@@ -77,36 +80,76 @@ async fn a_queued_chunk_does_not_expire_while_its_stream_is_progressing() {
 
 #[tokio::test(start_paused = true)]
 async fn socket_progress_survives_successive_pending_tls_flushes() {
-    struct StepSocket { writable: bool }
-    impl AsyncWrite for StepSocket {
-        fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
-            if std::mem::take(&mut self.writable) { Poll::Ready(Ok(bytes.len().min(1))) } else { Poll::Pending }
-        }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    struct StepSocket {
+        writable: bool,
     }
-    struct BufferedTls { socket: SocketIo<StepSocket> }
+    impl AsyncWrite for StepSocket {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if std::mem::take(&mut self.writable) {
+                Poll::Ready(Ok(bytes.len().min(1)))
+            } else {
+                Poll::Pending
+            }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    struct BufferedTls {
+        socket: SocketIo<StepSocket>,
+    }
     impl AsyncWrite for BufferedTls {
-        fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> { Poll::Pending }
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
         fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
             if let Poll::Ready(Ok(_)) = Pin::new(&mut self.socket).poll_write(cx, b"encrypted") {
-                assert!(Pin::new(&mut self.socket).poll_write(cx, b"encrypted").is_pending());
+                assert!(
+                    Pin::new(&mut self.socket)
+                        .poll_write(cx, b"encrypted")
+                        .is_pending()
+                );
             }
             Poll::Pending
         }
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
     }
-    let config = IngressConfig { write_stall_timeout: Some(Duration::from_secs(2)), ..IngressConfig::default() };
+    let config = IngressConfig {
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     let _flight = Flight::new(traffic.clone());
-    let mut io = Guarded { inner: BufferedTls { socket: SocketIo { inner: StepSocket { writable: false }, traffic: traffic.clone() } }, traffic: traffic.clone() };
+    let mut io = Guarded {
+        inner: BufferedTls {
+            socket: SocketIo {
+                inner: StepSocket { writable: false },
+                traffic: traffic.clone(),
+            },
+        },
+        traffic: traffic.clone(),
+    };
     for _ in 0..5 {
         tokio::time::advance(Duration::from_secs(1)).await;
         io.inner.socket.inner.writable = true;
         std::future::poll_fn(|cx| {
             assert!(Pin::new(&mut io).poll_flush(cx).is_pending());
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         assert!(traffic.due().unwrap().0 > Instant::now());
     }
     tokio::time::advance(Duration::from_secs(3)).await;
@@ -153,15 +196,24 @@ async fn h2_idle_deadline_uses_accepted_protocol_task_lifetimes() {
     traffic.received(&[0, 0, 0, 0, 0, 0, 0, 0, 7]);
     assert!(traffic.due().is_none());
     drop(protocol);
-    assert_eq!(traffic.due().unwrap().0, Instant::now() + Duration::from_secs(120));
+    assert_eq!(
+        traffic.due().unwrap().0,
+        Instant::now() + Duration::from_secs(120)
+    );
     traffic.received(&[0, 0, 0, 0, 0, 0, 0, 0, 7]);
     assert_eq!(traffic.state().protocol_tasks, 0);
-    assert_eq!(traffic.due().unwrap().0, Instant::now() + Duration::from_secs(120));
+    assert_eq!(
+        traffic.due().unwrap().0,
+        Instant::now() + Duration::from_secs(120)
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn partial_headers_remain_armed_during_goaway() {
-    let config = IngressConfig { header_timeout: Some(Duration::from_secs(2)), ..IngressConfig::default() };
+    let config = IngressConfig {
+        header_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     let flight = Flight::new(traffic.clone());
@@ -176,7 +228,10 @@ async fn partial_headers_remain_armed_during_goaway() {
 
 #[tokio::test(start_paused = true)]
 async fn draining_has_an_absolute_bound_even_with_an_accepted_stream() {
-    let config = IngressConfig { body_total_timeout: Some(Duration::from_secs(4)), ..IngressConfig::default() };
+    let config = IngressConfig {
+        body_total_timeout: Some(Duration::from_secs(4)),
+        ..IngressConfig::default()
+    };
     let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
     traffic.received(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     let flight = Flight::new(traffic.clone());

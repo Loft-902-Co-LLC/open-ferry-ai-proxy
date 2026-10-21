@@ -37,15 +37,25 @@ fn request_log_rendering_bounds_raw_copies_and_compressed_expansion() {
     use std::io::Write;
     let mut request = downstream("/test", b"small request");
     assert_eq!(super::writer::request_body(&request), b"small request");
-    request.body = RequestBody::Captured { raw: Bytes::from(vec![b'x'; REQUEST_CAPTURE_LIMIT + 9]), truncated: false };
+    request.body = RequestBody::Captured {
+        raw: Bytes::from(vec![b'x'; REQUEST_CAPTURE_LIMIT + 9]),
+        truncated: false,
+    };
     let rendered = super::writer::request_body(&request);
     assert!(rendered.len() < REQUEST_CAPTURE_LIMIT + 128);
     assert!(rendered.starts_with(&[b'x'; 32]));
     assert!(String::from_utf8_lossy(&rendered).contains("TRUNCATED"));
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(&vec![b'x'; REQUEST_CAPTURE_LIMIT + 1]).unwrap();
-    request.body = RequestBody::Captured { raw: Bytes::from(encoder.finish().unwrap()), truncated: false };
-    request.headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+    encoder
+        .write_all(&vec![b'x'; REQUEST_CAPTURE_LIMIT + 1])
+        .unwrap();
+    request.body = RequestBody::Captured {
+        raw: Bytes::from(encoder.finish().unwrap()),
+        truncated: false,
+    };
+    request
+        .headers
+        .insert("content-encoding", HeaderValue::from_static("gzip"));
     let rendered = super::writer::request_body(&request);
     assert!(rendered.len() < REQUEST_CAPTURE_LIMIT);
     assert!(String::from_utf8_lossy(&rendered).contains("65536"));

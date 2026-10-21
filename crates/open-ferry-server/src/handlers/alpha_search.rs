@@ -56,7 +56,9 @@ pub(crate) async fn search(
     client: ClientRequest,
     body: Body,
 ) -> Response {
-    let limit = MAX_SEARCH_BODY.min(crate::ingress::body_limit(state.settings().config.body_limit));
+    let limit = MAX_SEARCH_BODY.min(crate::ingress::body_limit(
+        state.settings().config.body_limit,
+    ));
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,
         Err(response) if response.status() == StatusCode::PAYLOAD_TOO_LARGE => {

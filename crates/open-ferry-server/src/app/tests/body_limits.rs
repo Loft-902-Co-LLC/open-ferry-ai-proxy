@@ -210,10 +210,7 @@ async fn logging_leaves_unauthenticated_chunked_bodies_unread() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(read.load(Ordering::SeqCst), 0);
     assert_eq!(response.headers()["access-control-allow-origin"], "*");
-    assert_eq!(
-        body_text(response).await,
-        r#"{"error":"Missing API key"}"#
-    );
+    assert_eq!(body_text(response).await, r#"{"error":"Missing API key"}"#);
 }
 
 #[tokio::test]

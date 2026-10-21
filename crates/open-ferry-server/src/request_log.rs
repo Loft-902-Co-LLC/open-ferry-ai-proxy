@@ -115,9 +115,14 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
     // request is never polled by logging, including in Full mode.
     let (body, kept) = match plan {
         Capture::Eager | Capture::Deferred => {
-            let capture = DeferredCapture::with_limit(content_length,
-                open_ferry_core::observe::request_log::REQUEST_CAPTURE_LIMIT);
-            let body = Body::new(TeeBody { inner: body, capture: capture.clone() });
+            let capture = DeferredCapture::with_limit(
+                content_length,
+                open_ferry_core::observe::request_log::REQUEST_CAPTURE_LIMIT,
+            );
+            let body = Body::new(TeeBody {
+                inner: body,
+                capture: capture.clone(),
+            });
             (body, RequestBody::Deferred(capture))
         }
         Capture::None => (body, RequestBody::None),

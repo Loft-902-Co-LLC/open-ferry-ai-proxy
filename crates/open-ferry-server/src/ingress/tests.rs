@@ -31,19 +31,36 @@ async fn authentication_precedes_body_polling_and_budget_reservation() {
     use crate::config::ServerConfig;
     use crate::testing::{FakeCatalog, FakeDispatcher, state};
     let dispatcher = FakeDispatcher::new(vec![]);
-    let state = state(ServerConfig { api_keys: vec!["client-secret".into()], body_limit: 4,
-        ingress: IngressConfig { buffered_body_bytes: Some(12), ..IngressConfig::default() },
-        ..ServerConfig::default() }, FakeCatalog::new(), &dispatcher);
+    let state = state(
+        ServerConfig {
+            api_keys: vec!["client-secret".into()],
+            body_limit: 4,
+            ingress: IngressConfig {
+                buffered_body_bytes: Some(12),
+                ..IngressConfig::default()
+            },
+            ..ServerConfig::default()
+        },
+        FakeCatalog::new(),
+        &dispatcher,
+    );
     let router = crate::router(state.clone());
     let polls = Arc::new(AtomicUsize::new(0));
     for _ in 0..4 {
         let count = polls.clone();
-        let response = router.clone().oneshot(Request::post("/v1/chat/completions")
-            .header(header::CONTENT_LENGTH, "67108864")
-            .body(Body::from_stream(stream::once(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, std::io::Error>(Bytes::new())
-            }))).unwrap()).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header(header::CONTENT_LENGTH, "67108864")
+                    .body(Body::from_stream(stream::once(async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, std::io::Error>(Bytes::new())
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), 401);
         assert_eq!(state.ingress().reserved_body_bytes(), 0);
     }
@@ -56,24 +73,53 @@ async fn authenticated_and_keyless_proxy_uploads_enforce_the_budget() {
     use crate::testing::{FakeCatalog, FakeDispatcher, state};
     for keyed in [true, false] {
         let dispatcher = FakeDispatcher::new(vec![]);
-        let state = state(ServerConfig { api_keys: if keyed { vec!["client-secret".into()] } else { vec![] },
-            body_limit: 4, ingress: IngressConfig { buffered_body_bytes: Some(12), ..IngressConfig::default() },
-            ..ServerConfig::default() }, FakeCatalog::new(), &dispatcher);
+        let state = state(
+            ServerConfig {
+                api_keys: if keyed {
+                    vec!["client-secret".into()]
+                } else {
+                    vec![]
+                },
+                body_limit: 4,
+                ingress: IngressConfig {
+                    buffered_body_bytes: Some(12),
+                    ..IngressConfig::default()
+                },
+                ..ServerConfig::default()
+            },
+            FakeCatalog::new(),
+            &dispatcher,
+        );
         let router = crate::router(state.clone());
         let mut tasks = Vec::new();
         for _ in 0..3 {
             let started = Arc::new(Notify::new());
-            let mut request = Request::post("/v1/chat/completions").header(header::CONTENT_LENGTH, "4");
-            if keyed { request = request.header(header::AUTHORIZATION, "Bearer client-secret"); }
-            tasks.push(tokio::spawn(router.clone().oneshot(request.body(stalled(started.clone())).unwrap())));
+            let mut request =
+                Request::post("/v1/chat/completions").header(header::CONTENT_LENGTH, "4");
+            if keyed {
+                request = request.header(header::AUTHORIZATION, "Bearer client-secret");
+            }
+            tasks.push(tokio::spawn(
+                router
+                    .clone()
+                    .oneshot(request.body(stalled(started.clone())).unwrap()),
+            ));
             started.notified().await;
         }
         assert_eq!(state.ingress().reserved_body_bytes(), 12);
         let mut request = Request::post("/v1/chat/completions").header(header::CONTENT_LENGTH, "4");
-        if keyed { request = request.header(header::AUTHORIZATION, "Bearer client-secret"); }
-        let response = router.oneshot(request.body(Body::from("abcd")).unwrap()).await.unwrap();
+        if keyed {
+            request = request.header(header::AUTHORIZATION, "Bearer client-secret");
+        }
+        let response = router
+            .oneshot(request.body(Body::from("abcd")).unwrap())
+            .await
+            .unwrap();
         assert_eq!(response.status(), 503);
-        for task in tasks { task.abort(); let _ = task.await; }
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
         assert_eq!(state.ingress().reserved_body_bytes(), 0);
     }
 }
@@ -277,7 +323,10 @@ async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_three_bodies() 
         },
         8,
     );
-    assert_eq!(ingress.budget.0.lock().unwrap().limit, Some(MANAGEMENT_RESERVE + 24));
+    assert_eq!(
+        ingress.budget.0.lock().unwrap().limit,
+        Some(MANAGEMENT_RESERVE + 24)
+    );
     let mut other = BudgetBuffer::new(Some(proxy));
     assert!(other.push(b"x").is_err());
     drop(bytes);
@@ -289,34 +338,59 @@ async fn reload_keeps_old_bytes_charged_and_clamps_the_budget_to_three_bodies() 
 #[tokio::test]
 async fn a_multipart_body_at_the_limit_fits_the_budget_floor() {
     let ingress = Ingress::new(
-        IngressConfig { buffered_body_bytes: Some(16), ..IngressConfig::default() },
+        IngressConfig {
+            buffered_body_bytes: Some(16),
+            ..IngressConfig::default()
+        },
         16,
     );
-    let response = app(&ingress).oneshot(
-        Request::post("/")
-            .header(header::CONTENT_LENGTH, "16")
-            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
-            .body(Body::from("0123456789abcdef")).unwrap()
-    ).await.unwrap();
+    let response = app(&ingress)
+        .oneshot(
+            Request::post("/")
+                .header(header::CONTENT_LENGTH, "16")
+                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
+                .body(Body::from("0123456789abcdef"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
     drop(response);
     assert_eq!(ingress.budget.used(), 0);
     let raised = Ingress::new(IngressConfig::default(), 256 << 20);
-    assert_eq!(raised.budget.0.lock().unwrap().limit, Some(MANAGEMENT_RESERVE + 3 * (256 << 20)));
+    assert_eq!(
+        raised.budget.0.lock().unwrap().limit,
+        Some(MANAGEMENT_RESERVE + 3 * (256 << 20))
+    );
 }
 
 #[test]
 fn proxy_pressure_preserves_room_for_a_full_management_upload() {
-    let ingress = Ingress::new(IngressConfig { buffered_body_bytes: Some(12), ..IngressConfig::default() }, 4);
+    let ingress = Ingress::new(
+        IngressConfig {
+            buffered_body_bytes: Some(12),
+            ..IngressConfig::default()
+        },
+        4,
+    );
     let mut proxy = ingress.budget.clone();
     proxy.1 = Pool::Proxy;
-    let mut held = Reservation { budget: Some(proxy.clone()), bytes: 0 };
+    let mut held = Reservation {
+        budget: Some(proxy.clone()),
+        bytes: 0,
+    };
     held.grow_to(12).unwrap();
-    let mut extra = Reservation { budget: Some(proxy), bytes: 0 };
+    let mut extra = Reservation {
+        budget: Some(proxy),
+        bytes: 0,
+    };
     assert!(extra.grow_to(1).is_err());
     let mut management = ingress.budget.clone();
     management.1 = Pool::Management;
-    let mut upload = Reservation { budget: Some(management), bytes: 0 };
+    let mut upload = Reservation {
+        budget: Some(management),
+        bytes: 0,
+    };
     upload.grow_to(MANAGEMENT_RESERVE).unwrap();
     assert_eq!(ingress.reserved_body_bytes(), 12 + MANAGEMENT_RESERVE);
     drop(upload);
@@ -329,20 +403,30 @@ async fn an_upload_keeps_its_size_limit_across_a_reload() {
     use crate::config::ServerConfig;
     use crate::testing::{FakeCatalog, FakeDispatcher, state};
     let dispatcher = FakeDispatcher::new(vec![]);
-    let state = state(ServerConfig { body_limit: 16, ..ServerConfig::default() }, FakeCatalog::new(), &dispatcher);
+    let state = state(
+        ServerConfig {
+            body_limit: 16,
+            ..ServerConfig::default()
+        },
+        FakeCatalog::new(),
+        &dispatcher,
+    );
     let ingress = state.ingress().clone();
     let handler_state = state.clone();
-    let router = ingress.wrap(Router::new().route("/", post(move |request: Request| {
-        let state = handler_state.clone();
-        async move {
-            let limit = body_limit(state.settings().config.body_limit);
-            let (parts, body) = request.into_parts();
-            match crate::body::read_raw(&parts.headers, body, limit).await {
-                Ok(bytes) => Response::new(Body::from(bytes)),
-                Err(response) => response,
+    let router = ingress.wrap(Router::new().route(
+        "/",
+        post(move |request: Request| {
+            let state = handler_state.clone();
+            async move {
+                let limit = body_limit(state.settings().config.body_limit);
+                let (parts, body) = request.into_parts();
+                match crate::body::read_raw(&parts.headers, body, limit).await {
+                    Ok(bytes) => Response::new(Body::from(bytes)),
+                    Err(response) => response,
+                }
             }
-        }
-    })));
+        }),
+    ));
     let started = Arc::new(Notify::new());
     let proceed = Arc::new(Notify::new());
     let (signal, gate) = (started.clone(), proceed.clone());
@@ -351,14 +435,32 @@ async fn an_upload_keeps_its_size_limit_across_a_reload() {
         gate.notified().await;
         Ok::<_, std::io::Error>(Bytes::from_static(b"abcdefghijkl"))
     }));
-    let task = tokio::spawn(router.clone().oneshot(Request::post("/").header(header::CONTENT_LENGTH, "12").body(body).unwrap()));
+    let task = tokio::spawn(
+        router.clone().oneshot(
+            Request::post("/")
+                .header(header::CONTENT_LENGTH, "12")
+                .body(body)
+                .unwrap(),
+        ),
+    );
     started.notified().await;
-    state.set_config(ServerConfig { body_limit: 4, ..ServerConfig::default() });
+    state.set_config(ServerConfig {
+        body_limit: 4,
+        ..ServerConfig::default()
+    });
     proceed.notify_one();
     let response = task.await.unwrap().unwrap();
     assert_eq!(response.status(), 200);
     drop(response);
-    let response = router.oneshot(Request::post("/").header(header::CONTENT_LENGTH, "12").body(Body::from("abcdefghijkl")).unwrap()).await.unwrap();
+    let response = router
+        .oneshot(
+            Request::post("/")
+                .header(header::CONTENT_LENGTH, "12")
+                .body(Body::from("abcdefghijkl"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), 413);
 }
 
@@ -395,16 +497,30 @@ async fn decoding_is_charged_in_addition_to_raw_storage() {
 #[tokio::test]
 async fn zstd_working_storage_is_reserved_before_expansion() {
     let ingress = ingress(1 << 20);
-    let router = ingress.wrap(Router::new().route("/", post(|request: Request| async move {
-        let (parts, body) = request.into_parts();
-        match crate::body::read_decoded(&parts.headers, body, 1 << 20).await {
-            Ok(bytes) => Response::new(Body::from(bytes)),
-            Err(response) => response,
-        }
-    })));
-    let compressed = ruzstd::encoding::compress_to_vec(&[b'a'; 4096][..], ruzstd::encoding::CompressionLevel::Fastest);
+    let router = ingress.wrap(Router::new().route(
+        "/",
+        post(|request: Request| async move {
+            let (parts, body) = request.into_parts();
+            match crate::body::read_decoded(&parts.headers, body, 1 << 20).await {
+                Ok(bytes) => Response::new(Body::from(bytes)),
+                Err(response) => response,
+            }
+        }),
+    ));
+    let compressed = ruzstd::encoding::compress_to_vec(
+        &[b'a'; 4096][..],
+        ruzstd::encoding::CompressionLevel::Fastest,
+    );
     let raw_len = compressed.len();
-    let response = router.oneshot(Request::post("/").header(header::CONTENT_ENCODING, "zstd").body(Body::from(compressed)).unwrap()).await.unwrap();
+    let response = router
+        .oneshot(
+            Request::post("/")
+                .header(header::CONTENT_ENCODING, "zstd")
+                .body(Body::from(compressed))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), 503);
     assert_eq!(ingress.budget.used(), 0);
     assert_eq!(ingress.budget.0.lock().unwrap().peak, raw_len);
