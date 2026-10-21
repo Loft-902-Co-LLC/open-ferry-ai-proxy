@@ -22,6 +22,32 @@ fn structural_depth(value: &Value) -> usize {
     maximum
 }
 
+fn translate(route: &str, schema: Value) -> Value {
+    let request = match route {
+        "claude" => json!({"messages":[{"role":"user","content":"hi"}],
+            "tools":[{"name":"T","input_schema":schema}]}),
+        "chat" => json!({"messages":[{"role":"user","content":"hi"}],
+            "tools":[{"type":"function","function":{"name":"T","parameters":schema}}]}),
+        "responses" => json!({"input":"hi",
+            "tools":[{"type":"function","name":"T","parameters":schema}]}),
+        _ => unreachable!(),
+    };
+    let request: Value = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+    let (out, error) = match route {
+        "claude" => open_ferry_translate::gemini::claude::convert_claude_request_to_gemini(
+            "gemini-2.5-pro", &request, false, ModelCatalog::embedded()),
+        "chat" => open_ferry_translate::gemini::openai::chat_completions::convert_openai_request_to_gemini(
+            "gemini-2.5-pro", &request, false),
+        "responses" => open_ferry_translate::gemini::openai::responses::convert_openai_responses_request_to_gemini(
+            "gemini-2.5-pro", &request, false),
+        _ => unreachable!(),
+    };
+    assert!(error.is_none(), "{route}");
+    assert!(structural_depth(&out) <= 128, "{route}");
+    assert!(!serde_json::to_vec(&out).unwrap().is_empty());
+    out
+}
+
 fn check(route: &'static str, keyword: &'static str) {
     std::thread::Builder::new()
         .stack_size(2 << 20)
@@ -36,40 +62,56 @@ fn check(route: &'static str, keyword: &'static str) {
                 } else {
                     schema[keyword] = json!([branch]);
                 }
-                let request = match route {
-                    "claude" => json!({"messages":[{"role":"user","content":"hi"}],
-                        "tools":[{"name":"T","input_schema":schema}]}),
-                    "chat" => json!({"messages":[{"role":"user","content":"hi"}],
-                        "tools":[{"type":"function","function":{"name":"T","parameters":schema}}]}),
-                    "responses" => json!({"input":"hi",
-                        "tools":[{"type":"function","name":"T","parameters":schema}]}),
-                    _ => unreachable!(),
-                };
-                let request: Value =
-                    serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
-                let (out, error) = match route {
-                    "claude" => open_ferry_translate::gemini::claude::convert_claude_request_to_gemini(
-                        "gemini-2.5-pro", &request, false, ModelCatalog::embedded()),
-                    "chat" => open_ferry_translate::gemini::openai::chat_completions::convert_openai_request_to_gemini(
-                        "gemini-2.5-pro", &request, false),
-                    "responses" => open_ferry_translate::gemini::openai::responses::convert_openai_responses_request_to_gemini(
-                        "gemini-2.5-pro", &request, false),
-                    _ => unreachable!(),
-                };
-                assert!(error.is_none());
+                let out = translate(route, schema);
                 let schema = &out["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
                 assert!(schema.is_object());
                 assert!(structural_depth(schema) <= 128, "{route}/{keyword}/{pairs}");
                 assert_eq!(schema["properties"], json!({"a":{"type":"string"}}));
-                assert!(structural_depth(&out) <= 128);
-                assert!(!serde_json::to_vec(&out).unwrap().is_empty());
                 drop(out);
-                drop(request);
             }
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+fn check_central_gate(property: Value, expected: Value) {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            for route in ["claude", "chat", "responses"] {
+                let name = r"\.".repeat(20_000);
+                let schema = json!({"type":"object","properties":{
+                    "a":{"type":"string"}, name.clone():property}});
+                let out = translate(route, schema);
+                let schema = &out["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+                assert!(schema.is_object(), "{route}");
+                assert!(structural_depth(schema) <= 128, "{route}");
+                assert_eq!(schema["properties"]["a"], json!({"type":"string"}));
+                // The guarded leaf edit must not rebuild the escaped name as
+                // thousands of nested keys, or discard the original property.
+                assert_eq!(schema["properties"].as_object().unwrap().len(), 2);
+                assert_eq!(schema["properties"][&name], expected, "{route}");
+                drop(out);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn external_ref_escaped_paths_fit_two_mib_stack() {
+    let property = json!({"$ref":"https://example.com/x.json"});
+    check_central_gate(property.clone(), property);
+}
+
+#[test]
+fn array_without_items_escaped_paths_fit_two_mib_stack() {
+    check_central_gate(
+        json!({"type":"array"}),
+        json!({"type":"array","items":{"type":"string"}}),
+    );
 }
 
 #[test]
