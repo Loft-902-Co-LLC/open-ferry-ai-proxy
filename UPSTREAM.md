@@ -12,31 +12,6 @@ open-ferry-ai-proxy is a port of [router-for-me/CLIProxyAPI](https://github.com/
 
 When we move the pin, we update this table, bring every ported file's header to the new version, and note behaviour changes in the commit or PR. Every upstream commit between the old and the new pin is ported, unless it is listed under the move below with the reason.
 
-### What moving from v8.0.27 to v8.0.32 left out
-
-| Upstream commits | What isn't ported | Why |
-|---|---|---|
-| fb87727d, 1fbb06d5, f88b6b2f, 207d119d, 5be2cdab | Nothing | Merges, with no changes of their own |
-| a4a545c0, 02efbf13, 333f62b3, 50bfc50f, 39ace7e9, c96d9c92, e7003d2a | All | Upstream's README files and sponsor images |
-| 02fc76b1 | All | Recovering the MCP tool names of a cloaked Claude sign-in's request (`claudeMCPAliasResolver`). This project doesn't cloak |
-| 345cc9d5, b3dc6c3f | The handshake bound and retry for the uTLS transports (`helps/utls_client.go`, `utls_handshake_timeout.go`, `sdk/cliproxy/executor/tls_handshake_timeout.go`) | uTLS fingerprints are client impersonation. `requests.tls-handshake-timeout-seconds` is carried in both config layouts and reported as ignored; its duration helper isn't needed. The provider-neutral part is ported: a recorded `tls handshake timeout` message alone no longer counts as a transient failure, and a transient transport fault stands in for upstream's typed deadline error |
-| 9db0729f, 4e8a4125 | The new `claude-header-defaults` overrides' effect (beta strip and append, diagnostics, client request ID modes) | Header defaults pose as Claude Code, which is client impersonation. The keys and their normalization are carried in both config layouts and reported as ignored. 4e8a4125's executor tests test that impersonation |
-| 7604d3df | All but its config key (`upstream.claude.session-date-pin-days`, carried in both layouts) | The session date pin for cloaked Claude requests. This project doesn't cloak |
-| 51952a7b | All | The Go SDK's request-scoped transport decorator (`sdk/httptransport`), a seam for programs that embed upstream. There is no Go SDK here |
-| e235fb3d, e230a04b, 81573f04 | All | Fixes for data races on upstream's shared config. Here the config is an immutable snapshot, swapped whole on a reload, so the races can't happen |
-| f9437700 | All | Seeding the Postgres, git and object stores with the config. Those stores aren't ported, and its upload preparation adds nothing for a local file |
-| 50eaed0d, 355fd10e | The plugin API's config field defaults and the plugin host's shadow copies of libraries | There is no plugin host |
-| a19a8ecd | The test updates for AI Studio's and Antigravity's executors | Neither is ported. The commit's catalog entries are in the catalog |
-| 77fd91e8 | The Antigravity Responses translator's tool search test (`antigravity_openai-responses_tool_search_test.go`) | Antigravity isn't ported. The Gemini translator's tool search is ported |
-| 5efe9758 | Antigravity's Claude tool schema entry point (`CleanJSONSchemaForAntigravityClaudeTool`), its forced flattening of tool unions, and their tests. The shared nullable-marker inheritance when a single union branch is unwrapped is ported | Antigravity isn't ported |
-| 912a038b, 8fb633c9 | All | Antigravity's cached token counts and its fallback client version. Antigravity isn't ported |
-| 40ce0e01 | All | Kimi's schema normalization. Kimi isn't ported |
-| 202b8b8c | Antigravity's response translator | Antigravity isn't ported. The shared re-clean decision (does the wrapped, re-cleaned top-level object declare and require `_`) is ported |
-| 7f2f17d7 | `aistudio_executor.go` | The AI Studio relay isn't ported |
-| 35af74f9 | The Home conductor's call (`conductor_home.go`) | Home isn't ported. The rest, which protects a cooldown from a stale success, is ported |
-| b946d54e | Devin's executor, `helps/devin_quota.go`, its revalidation scheduling and quota restoration, the `auto_refresh_loop` and `shouldRefresh` hunks, and the `isDevinQuotaExhaustionMessage` checks | Devin isn't ported. The provider-neutral two-layer model state under a credential-wide quota cooldown is ported, with its saved record, restore and refresh merge |
-| a0fd8448, e9ba5c50 | Antigravity's parts, and a0fd8448's path for the native `Schema` carrier (a multi-branch `oneOf` becomes an `anyOf`, and a `oneOf` beside an `anyOf` moves into the description) | Antigravity isn't ported. The native carrier path is taken only by Antigravity's cleaners and by `CleanJSONSchemaForGemini`, which upstream calls only from tests; this project sends Gemini tool schemas as `parametersJsonSchema` |
-
 ### What moving from v8.0.32 to v8.0.36 left out
 
 | Upstream commits | What isn't ported | Why |
@@ -68,6 +43,31 @@ When we move the pin, we update this table, bring every ported file's header to 
 | d9451cb6, d50a1995, ae3ee3be, 6bbd2cb7, 8a3e7622, 88041f0c | Integration pending | The SIWC/routing group awaits its final reviewed head. Its proposal omits no applicable served-provider/file-store behavior; the existing security and client-identity deviations remain |
 | 45ccd9c3 | Home-only image-routing fallback | Home is not ported. The served-provider routing port is pending the reviewed SIWC/routing group |
 | 8df4e42a | cmd/fetch_codex_models baseline changes | The catalog downloader impersonates Codex and is not ported. Model-list capability changes are pending the reviewed SIWC/routing group |
+
+### What moving from v8.0.27 to v8.0.32 left out
+
+| Upstream commits | What isn't ported | Why |
+|---|---|---|
+| fb87727d, 1fbb06d5, f88b6b2f, 207d119d, 5be2cdab | Nothing | Merges, with no changes of their own |
+| a4a545c0, 02efbf13, 333f62b3, 50bfc50f, 39ace7e9, c96d9c92, e7003d2a | All | Upstream's README files and sponsor images |
+| 02fc76b1 | All | Recovering the MCP tool names of a cloaked Claude sign-in's request (`claudeMCPAliasResolver`). This project doesn't cloak |
+| 345cc9d5, b3dc6c3f | The handshake bound and retry for the uTLS transports (`helps/utls_client.go`, `utls_handshake_timeout.go`, `sdk/cliproxy/executor/tls_handshake_timeout.go`) | uTLS fingerprints are client impersonation. `requests.tls-handshake-timeout-seconds` is carried in both config layouts and reported as ignored; its duration helper isn't needed. The provider-neutral part is ported: a recorded `tls handshake timeout` message alone no longer counts as a transient failure, and a transient transport fault stands in for upstream's typed deadline error |
+| 9db0729f, 4e8a4125 | The new `claude-header-defaults` overrides' effect (beta strip and append, diagnostics, client request ID modes) | Header defaults pose as Claude Code, which is client impersonation. The keys and their normalization are carried in both config layouts and reported as ignored. 4e8a4125's executor tests test that impersonation |
+| 7604d3df | All but its config key (`upstream.claude.session-date-pin-days`, carried in both layouts) | The session date pin for cloaked Claude requests. This project doesn't cloak |
+| 51952a7b | All | The Go SDK's request-scoped transport decorator (`sdk/httptransport`), a seam for programs that embed upstream. There is no Go SDK here |
+| e235fb3d, e230a04b, 81573f04 | All | Fixes for data races on upstream's shared config. Here the config is an immutable snapshot, swapped whole on a reload, so the races can't happen |
+| f9437700 | All | Seeding the Postgres, git and object stores with the config. Those stores aren't ported, and its upload preparation adds nothing for a local file |
+| 50eaed0d, 355fd10e | The plugin API's config field defaults and the plugin host's shadow copies of libraries | There is no plugin host |
+| a19a8ecd | The test updates for AI Studio's and Antigravity's executors | Neither is ported. The commit's catalog entries are in the catalog |
+| 77fd91e8 | The Antigravity Responses translator's tool search test (`antigravity_openai-responses_tool_search_test.go`) | Antigravity isn't ported. The Gemini translator's tool search is ported |
+| 5efe9758 | Antigravity's Claude tool schema entry point (`CleanJSONSchemaForAntigravityClaudeTool`), its forced flattening of tool unions, and their tests. The shared nullable-marker inheritance when a single union branch is unwrapped is ported | Antigravity isn't ported |
+| 912a038b, 8fb633c9 | All | Antigravity's cached token counts and its fallback client version. Antigravity isn't ported |
+| 40ce0e01 | All | Kimi's schema normalization. Kimi isn't ported |
+| 202b8b8c | Antigravity's response translator | Antigravity isn't ported. The shared re-clean decision (does the wrapped, re-cleaned top-level object declare and require `_`) is ported |
+| 7f2f17d7 | `aistudio_executor.go` | The AI Studio relay isn't ported |
+| 35af74f9 | The Home conductor's call (`conductor_home.go`) | Home isn't ported. The rest, which protects a cooldown from a stale success, is ported |
+| b946d54e | Devin's executor, `helps/devin_quota.go`, its revalidation scheduling and quota restoration, the `auto_refresh_loop` and `shouldRefresh` hunks, and the `isDevinQuotaExhaustionMessage` checks | Devin isn't ported. The provider-neutral two-layer model state under a credential-wide quota cooldown is ported, with its saved record, restore and refresh merge |
+| a0fd8448, e9ba5c50 | Antigravity's parts, and a0fd8448's path for the native `Schema` carrier (a multi-branch `oneOf` becomes an `anyOf`, and a `oneOf` beside an `anyOf` moves into the description) | Antigravity isn't ported. The native carrier path is taken only by Antigravity's cleaners and by `CleanJSONSchemaForGemini`, which upstream calls only from tests; this project sends Gemini tool schemas as `parametersJsonSchema` |
 
 ### What moving from v8.0.20 to v8.0.27 left out
 
