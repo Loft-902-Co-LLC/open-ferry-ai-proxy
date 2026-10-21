@@ -93,8 +93,8 @@ use super::ext;
 use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token};
 use super::oauth::{CodexAuth, Endpoints};
 use super::request::{
-    Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, endpoint, original_request,
-    prepare_body, refuse_control_characters, response_format,
+    Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, endpoint, prepare_body,
+    refuse_control_characters, response_format,
 };
 use super::stream::{self, Bootstrap, Clock, MAX_LINE, SseReader, StreamSetup, is_grok_client};
 use super::terminal::{
@@ -387,10 +387,10 @@ impl CodexExecutor {
             Cow::Borrowed(_) => data,
         };
         let data = ext::restore(&prepared.turn, &data).into_owned();
-        let original = original_request(request, options);
+        let original = crate::json::response_request(request, options);
         let context = ResponseContext {
             model: &request.model,
-            original_request: (&original).into(),
+            original_request: original.as_request(),
             request: &prepared.translated,
         };
         let out = Registry::global()
@@ -494,10 +494,10 @@ impl CodexExecutor {
                 data.to_vec()
             };
             ext::on_completed(&prepared.turn, &event);
-            let original = original_request(request, options);
+            let original = crate::json::response_request(request, options);
             let context = ResponseContext {
                 model: &request.model,
-                original_request: (&original).into(),
+                original_request: original.as_request(),
                 request: &prepared.translated,
             };
             let out = Registry::global()
@@ -565,13 +565,13 @@ impl CodexExecutor {
         }
         let response_headers = response.headers().clone();
 
-        let original = original_request(&request, &options);
+        let original = crate::json::response_request(&request, &options);
         let translator = Registry::global().response_stream(
             &Format::CODEX,
             &format,
             &ResponseContext {
                 model: &request.model,
-                original_request: (&original).into(),
+                original_request: original.as_request(),
                 request: &prepared.translated,
             },
         );

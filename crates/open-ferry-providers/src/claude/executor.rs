@@ -517,10 +517,10 @@ impl ClaudeExecutor {
         if let Some(scope) = &prepared.web_search {
             scope.record(&data);
         }
-        let original = original_request(request, options);
+        let original = crate::json::response_request(request, options);
         let context = ResponseContext {
             model: &request.model,
-            original_request: (&original).into(),
+            original_request: original.as_request(),
             request: &prepared.translation,
         };
         let registry = self.response_registry(&format);
@@ -602,10 +602,10 @@ impl ClaudeExecutor {
         let response_headers = response.headers().clone();
 
         let translator = (format != Format::CLAUDE).then(|| {
-            let original = original_request(request, options);
+            let original = crate::json::response_request(request, options);
             let context = ResponseContext {
                 model: &request.model,
-                original_request: (&original).into(),
+                original_request: original.as_request(),
                 request: &prepared.translation,
             };
             let mut translator = self
@@ -956,16 +956,6 @@ fn parse_object(raw: &[u8]) -> Value {
     match exact::from_slice(raw) {
         Ok(value @ Value::Object(_)) => value,
         _ => Value::Object(Map::new()),
-    }
-}
-
-/// The client's request, for response translators: the original request if
-/// the caller kept one, else the payload (`ApplyPatchOriginalRequest`).
-pub(crate) fn original_request(request: &Request, options: &Options) -> Value {
-    if options.original_request.is_empty() {
-        parse_object(&request.payload)
-    } else {
-        parse_object(&options.original_request)
     }
 }
 

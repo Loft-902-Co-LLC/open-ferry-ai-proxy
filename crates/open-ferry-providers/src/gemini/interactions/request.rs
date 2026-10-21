@@ -45,7 +45,7 @@ use open_ferry_translate::registry::{
 use serde_json::Value;
 
 use crate::codex::compat;
-use crate::codex::request::{original_request, parse_object, response_format};
+use crate::codex::request::{parse_object, response_format};
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::json;
@@ -250,10 +250,10 @@ pub(in crate::gemini) fn translate_answer(
     data: Vec<u8>,
 ) -> Result<Response, ExecError> {
     let format = response_format(options);
-    let original = original_request(request, options);
+    let original = crate::json::response_request(request, options);
     let context = ResponseContext {
         model: &request.model,
-        original_request: (&original).into(),
+        original_request: original.as_request(),
         request: sent,
     };
     let out = Registry::global()

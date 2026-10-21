@@ -1035,14 +1035,12 @@ impl Translator {
             }
             Self::RegistryStream => {
                 let (from, to) = registry_formats(case);
-                let original = request.ok();
+                let original =
+                    open_ferry_translate::json::ResponseRequestData::new(case.request.as_bytes());
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
-                    original_request: open_ferry_translate::json::ResponseRequest::from_bytes(
-                        case.request.as_bytes(),
-                        original.as_ref(),
-                    ),
+                    original_request: original.as_request(),
                     request: &translated,
                 };
                 let mut stream = Registry::global().response_stream(&from, &to, &context);
@@ -1070,14 +1068,12 @@ impl Translator {
             }
             Self::RegistryNonStream => {
                 let (from, to) = registry_formats(case);
-                let original = request.ok();
+                let original =
+                    open_ferry_translate::json::ResponseRequestData::new(case.request.as_bytes());
                 let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
-                    original_request: open_ferry_translate::json::ResponseRequest::from_bytes(
-                        case.request.as_bytes(),
-                        original.as_ref(),
-                    ),
+                    original_request: original.as_request(),
                     request: &translated,
                 };
                 let body = case
