@@ -711,6 +711,92 @@ class PublishedPreconditions(unittest.TestCase):
         self.assertEqual(q.service_args("uninstall"), [q.exe, "service", "uninstall", "-system"])
 
 
+class RunnerAndInstallerSafety(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+        self.out = self.work / "diagnostics"
+        self.out.mkdir()
+        self.output = io.StringIO()
+        self.enterContext(redirect_stdout(self.output))
+        for name, value in (("WORK", self.work), ("OUT", self.out), ("SECRETS", ["fixture-token"]),
+                            ("record", real_record)):
+            self.enterContext(patch.object(qualification, name, value))
+
+    def log(self):
+        path = self.out / "qualification.log"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def failed_install(self, config):
+        q = PublishedPreconditions.install_fixture(self)
+        if config is None:
+            q.config.unlink()
+        else:
+            q.config.write_text(config, encoding="utf-8", newline="\n")
+        output = "install failed fixture-token fixture-management fixture-client fixture-client-two"
+        def run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 1 if args[0] == "sh" else 0, output)
+        with patch.object(qualification.subprocess, "run", side_effect=run), \
+                self.assertRaises(RuntimeError) as raised:
+            q.install(None)
+        return str(raised.exception)
+
+    def test_failed_install_without_config_shows_output_and_redacts_job_token(self):
+        error = self.failed_install(None)
+        self.assertIn("installer output above", error)
+        self.assertNotIn("withheld", error)
+        self.assertIn("Installer output:\ninstall failed [redacted]", self.log())
+        self.assertNotIn("fixture-token", self.log() + self.output.getvalue())
+        self.assertEqual([path.name for path in self.out.iterdir()], ["qualification.log"])
+
+    def test_failed_install_with_config_redacts_management_and_every_api_key(self):
+        error = self.failed_install("management: {secret-key: fixture-management}\n"
+                                    "access: {api-keys: [fixture-client, fixture-client-two]}\n")
+        self.assertIn("installer output above", error)
+        self.assertNotIn("withheld", error)
+        self.assertIn("Installer output:", self.log())
+        for secret in ("fixture-token", "fixture-management", "fixture-client", "fixture-client-two"):
+            self.assertNotIn(secret, self.log() + self.output.getvalue() + error)
+        self.assertIn("install failed " + " ".join(["[redacted]"] * 4), self.log())
+
+    def test_failed_install_with_unreadable_or_incomplete_keys_withholds_output(self):
+        configs = ("management: [unterminated", "{}", "management: {secret-key: key}\naccess: {}",
+                   "management: {secret-key: key}\naccess: {api-keys: []}",
+                   "management: {secret-key: ''}\naccess: {api-keys: [client]}",
+                   "management: {secret-key: 42}\naccess: {api-keys: [client]}",
+                   "management: {secret-key: key}\naccess: {api-keys: client}",
+                   "management: {secret-key: key}\naccess: {api-keys: [client, null]}")
+        for config in configs:
+            with self.subTest(config=config):
+                error = self.failed_install(config)
+                self.assertIn("installer output withheld", error)
+                self.assertNotIn("Installer output:\n", self.log())
+                self.assertNotIn("install failed fixture", self.log())
+                self.assertNotIn("fixture-management", self.log() + self.output.getvalue())
+        q = PublishedPreconditions.install_fixture(self)
+        (self.work / "private-command-failure.txt").write_text("must remain private", newline="\n")
+        with patch.object(qualification.Path, "read_text", side_effect=PermissionError("denied")):
+            self.assertFalse(q.show_failed_install())
+        self.assertNotIn("must remain private", self.log())
+
+    def test_stale_installer_failure_is_removed_before_current_install(self):
+        q = PublishedPreconditions.install_fixture(self)
+        failure = self.work / "private-command-failure.txt"
+        failure.write_text("stale installer output", newline="\n")
+        def run(args, **kwargs):
+            if args[0] == "sh":
+                self.assertFalse(failure.exists())
+                raise RuntimeError("current installer failed before capturing output")
+            return subprocess.CompletedProcess(args, 0, "authenticated")
+        with patch.object(qualification.subprocess, "run", side_effect=run), \
+                self.assertRaisesRegex(RuntimeError, "current installer"):
+            q.install(None)
+        self.assertNotIn("stale installer output", self.log() + self.output.getvalue())
+        self.assertNotIn("Installer output:\n", self.log())
+
+
+
 class CandidateSignatures(unittest.TestCase):
     def test_fault_modes_select_the_intended_verification_path(self):
         trusted, alternate = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
