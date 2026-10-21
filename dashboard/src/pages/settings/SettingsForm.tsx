@@ -92,7 +92,7 @@ export function useSettingsForm(config: unknown, facts: ServerFacts | undefined)
     }
   }, [current, loaded, dirtyFields, focused, form]);
   const unsaved = SETTING_IDS.filter((id) => isEdited(current[id], loaded[id]));
-  const retained = focused !== null && dirtyFields[focused] === true ? [...new Set([...unsaved, focused])] : unsaved;
+  const retained = focused !== null ? [...new Set([...unsaved, focused])] : unsaved;
   const problems = useMemo(() => loadedProblems(loaded, facts), [loaded, facts]);
 
   /** Marks `id` saved as `value`, so the form no longer counts it unsaved. */
