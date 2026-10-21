@@ -1,6 +1,6 @@
 // Calls with the session's key, for screens.
 
-import { useQuery, useQueryClient, type QueryClient, type UseQueryOptions } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient, type UseQueryOptions, type UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useId, useMemo } from "react";
 
 import { useManagementKey } from "../session/session";
@@ -75,12 +75,22 @@ export function useConfigEditor() {
   const scope = useId();
   const editor = useMemo(() => new ConfigEditor(configStore(client, key)), [client, key]);
   const reload = useCallback(async () => {
-    editor.reset();
-    await client.refetchQueries({ predicate: (query) => query.queryKey.includes(scope) });
+    await client.refetchQueries({ predicate: (query) => query.queryKey.includes(scope) }, { throwOnError: true });
+    editor.retainDrafts([]);
+    editor.setDirty(false);
   }, [client, editor, scope]);
   return useMemo(() => ({ editor, call: editor.call, ready: editor.ready,
     toggleCredential: editor.toggleCredential, setDirty: editor.setDirty,
     checkChanges: editor.checkChanges, reload, scope }), [editor, reload, scope]);
+}
+
+/** Draft forms consume the payload and its baseline from the same query value. */
+export function useDraftConfigQuery<T>(editor: ReturnType<typeof useConfigEditor>, path: string) {
+  const query = useQuery({
+    queryKey: [path, "config-draft", editor.scope],
+    queryFn: ({ signal }) => editor.editor.readValue<T>(path, signal),
+  });
+  return { ...query, data: query.data?.data, snapshot: query.data } as UseQueryResult<T> & { snapshot: typeof query.data };
 }
 
 export function useConfigQuery<T>(

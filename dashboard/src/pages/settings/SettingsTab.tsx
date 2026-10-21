@@ -10,7 +10,8 @@ import {
 
 import { callProblem, cantSaveConfig } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
-import { useConfigEditor, useConfigQuery } from "../../api/hooks";
+import { useConfigEditor, useConfigQuery, useDraftConfigQuery } from "../../api/hooks";
+import type { ConfigRead } from "../../api/configEditor";
 import { API_KEYS, CONFIG, V8_CONFIG } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Loading, QueryState } from "../../components/QueryState";
@@ -68,8 +69,8 @@ interface ReviewRequest {
 
 interface SettingsEditorProps {
   editor: ReturnType<typeof useConfigEditor>;
-  config: UseQueryResult;
-  facts: UseQueryResult<ServerFacts>;
+  config: UseQueryResult & { snapshot: ConfigRead<unknown> | undefined };
+  facts: UseQueryResult<ServerFacts> & { snapshot: ConfigRead<unknown> | undefined };
   keys: UseQueryResult<ApiKeysAnswer>;
   keyChanges: KeyChange[];
   setKeyChanges: Dispatch<SetStateAction<KeyChange[]>>;
@@ -116,8 +117,9 @@ function SettingsEditor({
 
   useEffect(() => {
     editor.setDirty(unsaved > 0);
+    editor.editor.retainDrafts(settings.unsaved.map((id) => saveCall(id, settings.loaded[id]).path));
     onUnsavedChange(unsaved > 0);
-  }, [editor, unsaved, onUnsavedChange]);
+  }, [editor, unsaved, settings.unsaved, settings.loaded, onUnsavedChange]);
 
   // A field scrolled into view, as by Tab, stops clear of the bar, with room
   // for the start of its hint: its scroll margin is the bar's height and
@@ -172,12 +174,10 @@ function SettingsEditor({
       let addressProblem: string | null = null;
       if (edited !== null) {
         const answer = await call<unknown>(CONFIG);
-        client.setQueryData([CONFIG, "config-editor", editor.scope], answer);
         let freshFacts = facts.data;
         if (edited.managementAddress !== base.managementAddress) {
           // The proxy's port may have moved since the page read it.
           freshFacts = await readServerFacts(call);
-          client.setQueryData([...FACTS, editor.scope], freshFacts);
           addressProblem = managementAddressProblem(edited.managementAddress, freshFacts.proxyPort);
           restart = restartNotice(edited.managementAddress, {
             tls: tlsOn(answer),
@@ -327,6 +327,10 @@ function SettingsEditor({
             settings={settings}
             facts={factsUnsupported ? null : facts}
             onSubmit={startReview}
+            onDraft={(id) => {
+              const snapshot = id === "managementAddress" ? facts.snapshot : config.snapshot;
+              if (snapshot !== undefined) editor.editor.bindDraft(saveCall(id, settings.loaded[id]).path, snapshot);
+            }}
           />
         ) : config.data === undefined ? (
           <QueryState query={config} loading="Reading the settings…">
@@ -345,6 +349,7 @@ function SettingsEditor({
         formId={settingsShown ? formId : undefined}
         onDiscard={() => {
           settings.discard();
+          editor.editor.retainDrafts([]);
           setKeyChanges([]);
           setOutcome(null);
           read.reset();
@@ -383,21 +388,24 @@ export interface SettingsTabProps {
  */
 export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
   const editor = useConfigEditor();
-  const config = useConfigQuery<unknown>(editor, CONFIG);
-  const { call } = editor;
-  const facts = useQuery({
+  const config = useDraftConfigQuery<unknown>(editor, CONFIG);
+  const factsQuery = useQuery({
     queryKey: [...FACTS, editor.scope],
-    queryFn: ({ signal }) => readServerFacts(call, signal),
+    queryFn: async ({ signal }) => {
+      const snapshot = await editor.editor.readValue<unknown>(V8_CONFIG, signal);
+      return { data: await readServerFacts(async () => snapshot.data), snapshot };
+    },
   });
+  const facts = { ...factsQuery, data: factsQuery.data?.data, snapshot: factsQuery.data?.snapshot } as UseQueryResult<ServerFacts> & { snapshot: ConfigRead<unknown> | undefined };
   const keys = useConfigQuery<ApiKeysAnswer>(editor, API_KEYS);
   // Kept here, so they outlast the editor starting afresh below.
   const [keyChanges, setKeyChanges] = useState<KeyChange[]>([]);
   const [keysReadOnly, setKeysReadOnly] = useState(false);
   const [round, setRound] = useState(0);
   const reload = async () => {
+    await editor.reload();
     setKeyChanges([]);
     onUnsavedChange(false);
-    await editor.reload();
     setRound((value) => value + 1);
   };
   return (
