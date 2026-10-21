@@ -812,7 +812,9 @@ jobs:
               if ($owner -ne $identity.User.Value) { throw 'Expected old binary to retain the account default owner' }
             } finally {
               [RunnerOwner]::SetOwner('S-1-5-32-544')
-              if (Test-Path -LiteralPath $legacyConfig) { Remove-Item -LiteralPath $legacyConfig -Force }
+              foreach ($path in @($legacyConfig, "$legacyConfig.lock", "$legacyConfig.sha256", "$legacyConfig.bak")) {
+                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+              }
             }
           } finally {
             if (Get-Service -Name open-ferry -ErrorAction SilentlyContinue) {
