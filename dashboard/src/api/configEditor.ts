@@ -149,7 +149,7 @@ export class ConfigStore {
 }
 
 /** Only a stored-file parse failure permits the explicitly unguarded repair path. */
-export function isBrokenConfig(error: unknown): error is ApiError {
+export function isBrokenConfig(error: unknown): boolean {
   return isApiError(error) && error.status === 500 && error.code === "invalid_config";
 }
 
@@ -300,7 +300,7 @@ export class ConfigEditor {
       return await this.perform<T>(path, request);
     } catch (error) {
       if (path !== CONFIG_YAML || (request.method !== undefined && request.method !== "GET") ||
-          !isBrokenConfig(error)) throw error;
+          !isApiError(error) || !isBrokenConfig(error)) throw error;
       this.recovery = error;
       this.base = { tree: undefined, etag: undefined };
       return (await this.response<T>(CONFIG_YAML, request)).data;
