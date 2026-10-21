@@ -564,6 +564,12 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             "config-version: 8\napi-keys:\n  vertex: [{keys: [{api-key: dummy}], models: [{name: meta/llama}]}]\n",
             vec![resave(false), resave(true)],
         ),
+        Case::new("plugin-foot-comment-reencoded-and-restored", "", "").with_options(
+            serde_json::from_str(include_str!(
+                "testdata/config-save-plugin-foot-comment.json"
+            ))
+            .expect("saved config case"),
+        ),
         Case::new("plugin-anchor-line-comment-auth-dir", "", "").with_options(
             serde_json::from_str(include_str!(
                 "testdata/config-save-anchor-line-comment.json"
@@ -809,8 +815,7 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
         case("oauth-write-v8", "", vec![write(OAUTH_V8)]),
         // Upstream writes the comment at the end of a plugin's settings that
         // end the file twice, from the plugin's decoded node and from the
-        // file; open-ferry keeps the file's plugins, so writes it once
-        // (counted as equivalent).
+        // file. Both copies must survive on each side.
         case(
             "plugins-foot-comment",
             PLUGINS_FOOT_COMMENT,
@@ -833,8 +838,7 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             "plugins-configs-rebuilt",
             PLUGINS_UNSORTED,
             vec![save("port: 8318\n", false)],
-        )
-        .known_difference(PLUGINS_REWRITTEN),
+        ),
     ];
     if let Ok(example) = fs::read_to_string(upstream.join("config.example.yaml")) {
         let keys = uncomment_api_keys(&example);

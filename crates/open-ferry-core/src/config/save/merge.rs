@@ -41,17 +41,8 @@
 //!   same values but can change their spelling (`yes` to `true`).
 //! - List items are matched without their untyped keys, and those keys are
 //!   never pruned from an item, since the generated item lacks them.
-//! - `plugins.configs` isn't replaced from the generated tree
-//!   (`replacePluginConfigsSubtree`): the plugin host isn't ported, so the
-//!   file's plugin settings stay as they are. Upstream writes the plugin IDs
-//!   from a map, sorted and plain, and drops an empty `plugins.configs`
-//!   mapping; and it writes `plugins.dir` as `ResolvePluginsDir` made it.
-//!   Its subtree, re-encoded from each plugin's decoded node, carries the
-//!   plugin's comments, some on other nodes than in the file (a comment
-//!   ending settings that end the file goes on the last list item, not on
-//!   the list's key), and `preserveV8Comments` then puts the file's comments
-//!   back on their keys, so upstream writes such a comment twice in a row.
-//!   It is written once here.
+//! - `plugins.dir` keeps the file's spelling instead of the path upstream's
+//!   plugin host resolves. Plugin configs do use the generated node tree.
 //! - open-ferry's own `routing.quota` is trimmed to the generated keys as
 //!   the OAuth maps are ([`prune_routing_quota`]), so a setting cleared in
 //!   the config leaves the file instead of coming back on the next load.
@@ -62,7 +53,7 @@ use super::super::yaml3::{
     AliasTarget, BOOL_TAG, FLOAT_TAG, INT_TAG, Kind, NULL_TAG, Node, SEQ_TAG, STR_TAG, Style,
 };
 use super::generate::DEFAULT_PPROF_ADDR;
-use super::tree::{find_map_key_index, remove_map_key};
+use super::tree::{find_map_key_index, remove_map_key, yaml_path, yaml_path_mut};
 
 /// The settings this port doesn't type, by path. The generated tree holds
 /// upstream's defaults for those it writes at all; a path under one of
@@ -130,6 +121,47 @@ fn is_plugin_configs_path(path: &[String]) -> bool {
 /// `isPluginConfigsSubtreePath`.
 fn is_plugin_configs_subtree_path(path: &[String]) -> bool {
     matches!(path, [plugins, configs, ..] if plugins == "plugins" && configs == "configs")
+}
+
+/// `replacePluginConfigsSubtree`: use the plugin nodes after their generated
+/// YAML round trip. The encoder can move comments between nodes; restoring
+/// the source mapping's comments later must retain those moves too.
+pub(crate) fn replace_plugin_configs_subtree(dst: &mut Node, src: &Node) {
+    let source = yaml_path(src, "plugins.configs")
+        .filter(|node| node.kind == Kind::Mapping && !node.content.is_empty());
+    let Some(source) = source else {
+        if let Some(plugins) = yaml_path_mut(dst, "plugins") {
+            remove_map_key(plugins, "configs");
+        }
+        return;
+    };
+    let mut copy = source.clone();
+    if find_map_key_index(dst, "plugins").is_none() {
+        dst.content.push(Node::scalar(STR_TAG, "plugins"));
+        dst.content.push(Node::mapping());
+    }
+    let Some(plugins) = yaml_path_mut(dst, "plugins") else {
+        return;
+    };
+    if plugins.kind != Kind::Mapping {
+        return;
+    }
+    if let Some(index) = find_map_key_index(plugins, "configs") {
+        let old = &plugins.content[index + 1];
+        if copy.head_comment.is_empty() {
+            copy.head_comment.clone_from(&old.head_comment);
+        }
+        if copy.line_comment.is_empty() {
+            copy.line_comment.clone_from(&old.line_comment);
+        }
+        if copy.foot_comment.is_empty() {
+            copy.foot_comment.clone_from(&old.foot_comment);
+        }
+        plugins.content[index + 1] = copy;
+    } else {
+        plugins.content.push(Node::scalar(STR_TAG, "configs"));
+        plugins.content.push(copy);
+    }
 }
 
 /// `mergeMappingPreserve`: merges the mapping `src` into `dst`, keeping the
