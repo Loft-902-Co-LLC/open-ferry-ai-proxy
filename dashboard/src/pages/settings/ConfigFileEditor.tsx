@@ -4,7 +4,8 @@ import { Suspense, lazy, useEffect, useId, useState } from "react";
 
 import { callProblem, saveProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
-import { useApiCall } from "../../api/hooks";
+import { useApiResponse } from "../../api/hooks";
+import { ConfigEditor } from "../../api/configEditor";
 import { CONFIG_YAML } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Button } from "../../components/Button";
@@ -190,9 +191,8 @@ function ReviewDialog({ review, base, pending, error, onSave, onClose }: ReviewD
       {moved && (
         <Alert tone="warn" title="config.yaml changed on the server since you opened it">
           <p>
-            The changes below are against the file as it is now, so saving also undoes what
-            changed meanwhile. To keep those changes, close this, copy your edits, and reload the
-            file.
+            Copy your edits and reload the latest file before saving. A server with version
+            checks refuses this save so it cannot overwrite the changes made meanwhile.
           </p>
         </Alert>
       )}
@@ -218,13 +218,14 @@ function ReviewDialog({ review, base, pending, error, onSave, onClose }: ReviewD
 
 interface ConfigFileProps {
   initial: string;
+  editor: ConfigEditor;
   onReload: () => void;
   onUnsavedChange?: ((unsaved: boolean) => void) | undefined;
 }
 
 /** The file, in an editor, once loaded. */
-function ConfigFile({ initial, onReload, onUnsavedChange }: ConfigFileProps) {
-  const call = useApiCall();
+function ConfigFile({ initial, editor, onReload, onUnsavedChange }: ConfigFileProps) {
+  const { call } = editor;
   const client = useQueryClient();
   const statusId = useId();
   /** The file as the editor opened it, or as last saved. */
@@ -368,20 +369,21 @@ export function ConfigFileEditor({
   /** Told whether the editor holds unsaved changes, as that changes. */
   onUnsavedChange?: (unsaved: boolean) => void;
 }) {
-  const call = useApiCall();
+  const response = useApiResponse();
   // The file as last loaded, and how many loads there were, so a reload
   // starts the editor afresh.
-  const [file, setFile] = useState<{ text: string; load: number } | null>(null);
+  const [file, setFile] = useState<{ text: string; load: number; editor: ConfigEditor } | null>(null);
   const load = useMutation({
     mutationFn: async () => {
-      const text = await call<unknown>(CONFIG_YAML);
+      const editor = new ConfigEditor(response);
+      const text = await editor.call<unknown>(CONFIG_YAML);
       if (typeof text !== "string") {
         throw new NotTextError();
       }
-      return text;
+      return { text, editor };
     },
-    onSuccess: (text) => {
-      setFile((previous) => ({ text, load: (previous?.load ?? 0) + 1 }));
+    onSuccess: ({ text, editor }) => {
+      setFile((previous) => ({ text, editor, load: (previous?.load ?? 0) + 1 }));
     },
   });
 
@@ -419,6 +421,7 @@ export function ConfigFileEditor({
           <ConfigFile
             key={file.load}
             initial={file.text}
+            editor={file.editor}
             onReload={() => {
               load.mutate();
             }}

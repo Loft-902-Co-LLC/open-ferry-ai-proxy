@@ -608,7 +608,7 @@ describe("routing by quota", () => {
     await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
-    expect(dialog).toHaveTextContent("Nothing else in the file changes.");
+    expect(dialog).toHaveTextContent("Versioned saves use the v8 config route.");
     await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
     expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
     expect(v8Puts(state.api)).toEqual([]);
@@ -738,13 +738,13 @@ describe("the management address", () => {
   it("saves it through the v8 config route, and says where the dashboard is after a restart", async () => {
     const state = server();
     const { user } = await openSettings();
-    expect(addressReads(state.api)).toBe(1);
+    expect(addressReads(state.api)).toBe(2);
     await fill(user, address(), " 127.0.0.1:8318 ");
     await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
     // The review reads the address and the proxy's port again.
-    expect(addressReads(state.api)).toBe(2);
+    expect(addressReads(state.api)).toBe(3);
     expect(dialog).toHaveTextContent(
       "the server uses it from then on, except the management address, which takes a restart.",
     );
@@ -801,25 +801,17 @@ describe("the management address", () => {
     expect(v8Puts(state.api)).toEqual([]);
   });
 
-  it("says why it can't be read, and still lets the other settings save", async () => {
+  it("refuses config editing when the version read fails", async () => {
     const state = server();
-    state.api.use(
-      route("GET", V8_CONFIG, {
-        status: 500,
-        json: { error: "read_failed", message: "failed to read config" },
-      }),
-    );
-    const { user } = await openSettings();
-    const card = screen.getByRole("region", { name: "Management" });
-    expect(await within(card).findByRole("button", { name: "Try again" })).toBeVisible();
-    expect(within(card).queryByRole("textbox")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
-    await user.click(screen.getByRole("button", { name: "Review and save" }));
-    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
-    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
-    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
-    expect(patches(state.api)).toEqual([["debug", { value: true }]]);
+    state.api.use(route("GET", V8_CONFIG, {
+      status: 500, json: { error: "read_failed", message: "failed to read config" },
+    }));
+    renderApp("/settings");
+    expect((await screen.findAllByText(/^failed to read config/)).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("textbox", { name: "Retries" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review and save" })).not.toBeInTheDocument();
+    expect(patches(state.api)).toEqual([]);
+    expect(v8Puts(state.api)).toEqual([]);
   });
 
   it("isn't offered by a server without the v8 config route", async () => {
@@ -1166,6 +1158,7 @@ describe("config.yaml", () => {
     expect(put).toHaveLength(1);
     expect(put[0]?.body).toBe(draft);
     expect(put[0]?.headers.get("content-type")).toBe("application/yaml");
+    expect(put[0]?.headers.has("if-match")).toBe(false);
     expect(screen.getByText("No unsaved changes.", { selector: "[role=status]:not([hidden] *)" })).toBeVisible();
   });
 
@@ -1184,6 +1177,35 @@ describe("config.yaml", () => {
       "Added: request-retry: 1",
       "Added: # mine",
     ]);
+  });
+
+  it("sends the loaded ETag and explains a 412 without losing edits", async () => {
+    const state = server();
+    let etag = '"loaded"';
+    state.api.use(
+      route("GET", V8_CONFIG, () => ({ json: state.v8, headers: { ETag: etag } })),
+      route("GET", "/v8/management/config.yaml", () => ({ text: state.yaml, headers: { ETag: etag } })),
+      route("PUT", "/v8/management/config.yaml", { status: 412, json: { error: "precondition_failed" } }),
+    );
+    const { user } = await openSettings();
+    const editor = await openFile(user);
+    const draft = `${YAML}# mine${NL}`;
+    fireEvent.change(editor, { target: { value: draft } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
+    etag = '"changed-on-disk"';
+    state.yaml = YAML.replace("request-retry: 1", "request-retry: 5");
+    await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
+    expect(await within(dialog).findByText("The config changed since this page loaded")).toBeVisible();
+    expect(dialog).toHaveTextContent("Unsaved edits will be lost on reload");
+    expect(within(dialog).getByRole("button", { name: "Reload latest config" })).toBeVisible();
+    const writes = state.api.callsTo("PUT", "/v8/management/config.yaml");
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.headers.get("if-match")).toBe('"loaded"');
+    expect(state.api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(editor).toHaveValue(draft);
+    expect(state.yaml).toContain("request-retry: 5");
   });
 
   it("says why the server refused the file, and keeps the edit", async () => {

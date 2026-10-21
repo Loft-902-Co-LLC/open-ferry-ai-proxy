@@ -28,7 +28,8 @@ env:
 # - The merge queue and workflow_dispatch run everything.
 # - A push to main, which is a PR that landed, runs no tests. It builds what
 #   the Rust caches hold when main's caches don't have it yet, and saves them.
-# - When only files under dashboard/ changed, the Rust jobs are skipped.
+# - When only files under dashboard/ changed, the Rust jobs are skipped;
+#   dashboard-real still builds the binary with those embedded assets.
 # The checks the ruleset requires keep their names. check and blue-green sum
 # up the jobs that do the work, per OS.
 
@@ -39,6 +40,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.diff.outputs.rust }}
+      dashboard-real: ${{ steps.diff.outputs.dashboard-real }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,20 +68,25 @@ jobs:
             *) base= ;;
           esac
           rust=true
+          dashboard_real=true
           if [[ -n $base && $base != 0000000000000000000000000000000000000000 ]] &&
             git fetch --quiet --no-tags --depth=1 origin "$base" &&
             git diff --name-only --no-renames "$base" HEAD > "$RUNNER_TEMP/changed" &&
             [[ -s $RUNNER_TEMP/changed ]]; then
             rust=false
+            dashboard_real=false
             while IFS= read -r path; do
               if [[ $path != dashboard/* ]] || git grep --quiet --fixed-strings -e "$path" -- crates; then
                 echo "Rust change: $path"
                 rust=true
-                break
+              fi
+              if [[ $path == dashboard/* || $path == *.rs || $path == crates/* || $path == Cargo.* || $path == rust-toolchain.toml || $path == .cargo/* || $path == .github/workflows/ci.yml || $path == .github/actions/* || $path == docs/agents.md ]]; then
+                dashboard_real=true
               fi
             done < "$RUNNER_TEMP/changed"
           fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "dashboard-real=$dashboard_real" >> "$GITHUB_OUTPUT"
 
   # Format, clippy, the tests and the docs. The Windows job runs the same
   # steps.
@@ -466,15 +473,15 @@ jobs:
   # run passes nothing.
   check:
     name: check (${{ matrix.os }})
-    needs: [changes, tests-ubuntu, tests-windows, release-seams-ubuntu, release-seams-windows, release-seams-feature-ubuntu, release-seams-feature-windows]
+    needs: [changes, tests-ubuntu, tests-windows, release-seams-ubuntu, release-seams-windows, release-seams-feature-ubuntu, release-seams-feature-windows, dashboard-real]
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            jobs: tests-ubuntu release-seams-ubuntu release-seams-feature-ubuntu
-            queue-only: release-seams-ubuntu release-seams-feature-ubuntu
+            jobs: tests-ubuntu release-seams-ubuntu release-seams-feature-ubuntu dashboard-real
+            queue-only: release-seams-ubuntu release-seams-feature-ubuntu dashboard-real
           - os: windows-latest
             jobs: tests-windows release-seams-windows release-seams-feature-windows
             queue-only: release-seams-windows release-seams-feature-windows
@@ -487,6 +494,7 @@ jobs:
           JOBS: changes ${{ matrix.jobs }}
           QUEUE_ONLY: ${{ matrix.queue-only }}
           RUST: ${{ needs.changes.outputs.rust }}
+          DASHBOARD_REAL: ${{ needs.changes.outputs.dashboard-real }}
           EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
@@ -499,7 +507,11 @@ jobs:
               # Skipped as planned: nothing Rust changed, or a PR leaves the
               # job to the merge queue.
               skipped)
-                if [[ $job != changes && $RUST == false ]]; then continue; fi
+                if [[ $job == dashboard-real ]]; then
+                  if [[ $DASHBOARD_REAL == false ]]; then continue; fi
+                elif [[ $job != changes && $RUST == false ]]; then
+                  continue
+                fi
                 if [[ $EVENT == pull_request && " $QUEUE_ONLY " == *" $job "* ]]; then continue; fi
                 ;;
             esac
@@ -627,6 +639,65 @@ jobs:
           path: dashboard/test-results
           retention-days: 7
           if-no-files-found: ignore
+
+  # Real embedded-server journeys are queue-only on PRs, like release-seams.
+  # workflow_dispatch exercises them on a branch; main warms their Rust cache.
+  dashboard-real:
+    name: dashboard-real (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.dashboard-real == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci --ignore-scripts
+
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: dashboard-real
+
+      - name: Build the embedded dashboard
+        if: github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true'
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Build the real debug server with dashboard/dist
+        if: github.event_name != 'push' || steps.rust.outputs.cache-hit != 'true'
+        run: cargo build -p open-ferry --bin open-ferry --locked
+
+      - name: Install Chromium for the real-server journeys
+        if: github.event_name != 'push'
+        working-directory: dashboard
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Real-server dashboard journeys
+        if: github.event_name != 'push'
+        working-directory: dashboard
+        env:
+          OPEN_FERRY_BIN: ${{ github.workspace }}/target/debug/open-ferry
+        run: npm run e2e:real
+
+      # No artifacts: assertion diagnostics or failure contexts can contain
+      # keys or config.yaml even when trace, screenshot and video are off.
+      - name: Save the cache
+        if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.key }}
 
   # install.sh and install.ps1 against fake releases served from 127.0.0.1:
   # nothing here downloads a real release or calls GitHub, and the scripts'

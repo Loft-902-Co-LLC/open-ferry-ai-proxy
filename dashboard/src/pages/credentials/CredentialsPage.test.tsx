@@ -23,6 +23,7 @@ import {
   type SignInStatus,
 } from "../../api/credentials";
 import { CLAUDE_CLI_AUTH_STATUS, CLAUDE_CLI_ENTRIES, type ClaudeCliEntry } from "../../api/dashboard";
+import { V8_CONFIG } from "../../api/management";
 import {
   claudeCliCredential,
   claudeCliEntry,
@@ -451,6 +452,21 @@ describe("the credential list", () => {
     expect(state.api.callsTo("PATCH", AUTH_FILE_STATUS)[1]?.json()).toMatchObject({
       disabled: false,
     });
+  });
+
+  it("toggles a runtime-only API key without writing config.yaml", async () => {
+    const state = server([credential({
+      account_type: "api_key", account: "unit-runtime-key", source: "memory", runtime_only: true,
+    })]);
+    state.api.use(route("GET", V8_CONFIG, { json: {}, headers: { ETag: '"modern"' } }));
+    const { user } = renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await openFolded(user, card, "1 ready", NAME);
+    await user.click(within(item).getByRole("button", { name: `Turn off ${NAME}` }));
+    expect(await within(card).findByRole("button", { name: `Turn on ${NAME}` })).toBeVisible();
+    expect(state.api.callsTo("PATCH", AUTH_FILE_STATUS)).toHaveLength(1);
+    expect(state.api.callsTo("PATCH", AUTH_FILE_STATUS)[0]?.headers.has("if-match")).toBe(false);
+    expect(state.api.callsTo("PATCH", V8_CONFIG)).toEqual([]);
   });
 
   it("stops a credential resting, and keeps saying so as it folds away", async () => {

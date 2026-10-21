@@ -1,10 +1,11 @@
 // Calls with the session's key, for screens.
 
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useId, useMemo } from "react";
 
 import { useManagementKey } from "../session/session";
 import { apiDownload, apiRequest, type ApiRequest, type DownloadRequest } from "./client";
+import { ConfigEditor } from "./configEditor";
 
 export type Query = ApiRequest["query"];
 
@@ -53,4 +54,23 @@ export function useApiDownload() {
     (path: string, request?: DownloadRequest) => apiDownload(key, path, request),
     [key],
   );
+}
+
+/** One form's config snapshot. Its queries have their own cache entries so
+ * cached values from another form cannot be paired with a newer version. */
+export function useConfigEditor() {
+  const response = useApiResponse();
+  const scope = useId();
+  const editor = useMemo(() => new ConfigEditor(response), [response]);
+  return useMemo(() => ({ call: editor.call, ready: editor.ready, toggleCredential: editor.toggleCredential, scope }), [editor, scope]);
+}
+
+export function useConfigQuery<T>(
+  editor: ReturnType<typeof useConfigEditor>,
+  path: string,
+) {
+  return useQuery<T>({
+    queryKey: [path, "config-editor", editor.scope],
+    queryFn: ({ signal }) => editor.call<T>(path, { signal }),
+  });
 }

@@ -144,7 +144,7 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
         then on{restart === null ? "" : ", except the management address, which takes a restart"}.{" "}
         {v8
           ? "The quota settings, updates and the management address go through the server's v8 config route, which saves the whole file in the v8 layout: settings written in the older layout move to their v8 places, with the same values."
-          : "Nothing else in the file changes."}
+          : "Versioned saves use the v8 config route. A file in the older layout moves to the v8 layout with the same values."}
       </p>
       {keys.length > 0 && (
         <div className="space-y-2">
@@ -175,8 +175,9 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
           {moved && (
             <Alert tone="warn" title="Some of these changed on the server since the page loaded">
               <p>
-                Someone or something else changed them. &ldquo;Now&rdquo; shows the server&apos;s
-                values as they are now; saving replaces them.
+                Someone or something else changed them. &ldquo;Now&rdquo; shows the latest values.
+                Copy your edits and reload before saving. Servers with version checks refuse
+                saves based on an older config.
               </p>
             </Alert>
           )}

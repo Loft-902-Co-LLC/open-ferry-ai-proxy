@@ -14,7 +14,7 @@ import {
   type KeyProvider,
   type ProviderKey,
 } from "../../api/credentials";
-import { useApiCall, useApiQuery } from "../../api/hooks";
+import { useConfigEditor, useConfigQuery } from "../../api/hooks";
 import { Alert } from "../../components/Alert";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
@@ -92,12 +92,14 @@ const PROVIDER_OPTIONS = KEY_PROVIDERS.map((provider) => ({
 /** Adds a provider API key to its list in config.yaml. */
 function AddKeyDialog({
   open,
+  editor,
   providers,
   onClose,
   onAdded,
   onReadOnly,
 }: {
   open: boolean;
+  editor: ReturnType<typeof useConfigEditor>;
   /** The lists this server can change. */
   providers: readonly KeyProvider[];
   onClose: () => void;
@@ -105,7 +107,7 @@ function AddKeyDialog({
   /** Called when the server turns out unable to save config.yaml. */
   onReadOnly: () => void;
 }) {
-  const call = useApiCall();
+  const { call } = editor;
   const client = useQueryClient();
   const formId = useId();
   const form = useForm<AddForm>({
@@ -223,6 +225,7 @@ function keyAnchor(provider: KeyProvider, entry: ProviderKey, index: number): st
 }
 
 interface KeyEntryProps {
+  editor: ReturnType<typeof useConfigEditor>;
   provider: KeyProvider;
   entry: ProviderKey;
   /** Its element's id, which the address can point at. */
@@ -233,8 +236,8 @@ interface KeyEntryProps {
 }
 
 /** One key in a list, with a button to delete it. */
-function KeyEntry({ provider, entry, anchor, writable, onReadOnly }: KeyEntryProps) {
-  const call = useApiCall();
+function KeyEntry({ editor, provider, entry, anchor, writable, onReadOnly }: KeyEntryProps) {
+  const { call } = editor;
   const client = useQueryClient();
   const name = providerName(provider);
   const [confirm, setConfirm] = useState(false);
@@ -251,7 +254,7 @@ function KeyEntry({ provider, entry, anchor, writable, onReadOnly }: KeyEntryPro
       if (index < 0) {
         throw new KeyGoneError();
       }
-      await call<unknown>(path, { method: "DELETE", query: { index } });
+      await call<unknown>(path, { method: "DELETE", query: { index }, configTarget: { key, baseUrl } });
     },
     onError: (error) => {
       if (cantSaveConfig(error)) {
@@ -335,6 +338,7 @@ function KeyEntry({ provider, entry, anchor, writable, onReadOnly }: KeyEntryPro
 }
 
 interface KeyListProps {
+  editor: ReturnType<typeof useConfigEditor>;
   provider: KeyProvider;
   query: UseQueryResult;
   writable: boolean;
@@ -342,7 +346,7 @@ interface KeyListProps {
 }
 
 /** One provider's keys. */
-function KeyList({ provider, query, writable, onReadOnly }: KeyListProps) {
+function KeyList({ editor, provider, query, writable, onReadOnly }: KeyListProps) {
   const titleId = useId();
   const name = providerName(provider);
   const address = useAddressAnchor();
@@ -364,6 +368,7 @@ function KeyList({ provider, query, writable, onReadOnly }: KeyListProps) {
               {entries.map((entry, index) => (
                 <KeyEntry
                   key={`${entry["api-key"]}-${entry["base-url"] ?? ""}-${String(index)}`}
+                  editor={editor}
                   provider={provider}
                   entry={entry}
                   anchor={keyAnchor(provider, entry, index)}
@@ -388,9 +393,10 @@ export interface ProviderKeysProps {
 
 /** The provider API keys in config.yaml, which the server sends requests with. */
 export function ProviderKeys({ adding, onAdd, onAddClosed }: ProviderKeysProps) {
-  const claude = useApiQuery<unknown>(KEY_LISTS.claude.path);
-  const codex = useApiQuery<unknown>(KEY_LISTS.codex.path);
-  const gemini = useApiQuery<unknown>(KEY_LISTS.gemini.path);
+  const editor = useConfigEditor();
+  const claude = useConfigQuery<unknown>(editor, KEY_LISTS.claude.path);
+  const codex = useConfigQuery<unknown>(editor, KEY_LISTS.codex.path);
+  const gemini = useConfigQuery<unknown>(editor, KEY_LISTS.gemini.path);
   const queries: Record<KeyProvider, UseQueryResult> = { claude, codex, gemini };
   const [added, setAdded] = useState<KeyProvider | null>(null);
   // Set once a change answers that the server can't save config.yaml.
@@ -442,6 +448,7 @@ export function ProviderKeys({ adding, onAdd, onAddClosed }: ProviderKeysProps) 
       {served.map((provider) => (
         <KeyList
           key={provider}
+          editor={editor}
           provider={provider}
           query={queries[provider]}
           writable={writable}
@@ -450,6 +457,7 @@ export function ProviderKeys({ adding, onAdd, onAddClosed }: ProviderKeysProps) 
       ))}
       <AddKeyDialog
         open={adding && !unsupported}
+        editor={editor}
         providers={served}
         onClose={onAddClosed}
         onAdded={(provider) => {

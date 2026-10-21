@@ -21,6 +21,7 @@ export type CallProblem =
   | AccessProblem
   | { kind: "ledger-unavailable" }
   | { kind: "config-not-saved" }
+  | { kind: "config-conflict" }
   | { kind: "unsupported" }
   | { kind: "not-found" }
   | { kind: "invalid"; message: string | null }
@@ -91,6 +92,9 @@ function problemOf(error: ApiError): CallProblem {
   }
   if (error.status === 503 && error.code === NO_CONFIG_WRITER) {
     return { kind: "config-not-saved" };
+  }
+  if (error.status === 412) {
+    return { kind: "config-conflict" };
   }
   if (error.status === 404) {
     return error.code === null ? { kind: "unsupported" } : { kind: "not-found" };

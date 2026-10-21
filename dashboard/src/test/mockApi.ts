@@ -54,7 +54,7 @@ export interface MockApi {
 
 /** Replaces fetch with `routes` for the rest of the test. */
 export function mockApi(...initial: MockRoute[]): MockApi {
-  const routes = [...initial];
+  const routes = [...initial, route("GET", V8_CONFIG, { status: 404 })];
   const calls: MockRequest[] = [];
   const unhandled: MockRequest[] = [];
 
