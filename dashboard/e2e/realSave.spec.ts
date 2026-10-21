@@ -356,6 +356,23 @@ test("turns settings on where the Usage and Logs pages offer to", async () => {
   expectCommentsKept();
 });
 
+test("records usage then makes a client key in the Overview health layout", async () => {
+  const page = the();
+  await management("PATCH", "usage-statistics-enabled", { value: false });
+  await page.goto(APP);
+  await expect(page.getByRole("button", { name: "Start recording" })).toBeVisible();
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await expect(page.getByRole("button", { name: "Start recording" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Connect a client", exact: true }).click();
+  await page.getByRole("button", { name: "Make a new key" }).click();
+  await expect(page.getByText(/^Added a client key\./)).toBeVisible();
+  const keys = await clientKeys();
+  expect(keys.length, "the client key count after the sibling form saves").toBe(3);
+  expectFile(keys[2] ?? "-", "the key made after Start recording");
+  expectFile(/^ *usage-statistics-enabled: true$/m, "usage recording retained after key creation");
+  await management("DELETE", "api-keys?index=2");
+});
+
 test("saves every setting through its own route", async () => {
   const page = the();
   await page.goto(`${APP}settings`);
@@ -429,6 +446,69 @@ test("saves every setting through its own route", async () => {
   await expect(form.logLimit).toHaveValue("64");
   await expect(form.failedKept).toHaveValue("5");
   await expect(form.usage).not.toBeChecked();
+});
+
+test("rebases a Settings draft after a different YAML field saves without leaving the page", async () => {
+  const page = the();
+  await page.goto(`${APP}settings`);
+  const retries = page.getByRole("textbox", { name: "Retries" });
+  await expect(retries).toHaveValue("4");
+  await retries.fill("6");
+  await page.getByRole("tab", { name: "config.yaml" }).click();
+  await page.getByRole("button", { name: "Show config.yaml" }).click();
+  const editor = page.getByRole("textbox", { name: "config.yaml" });
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await pasteSecret(file().replace(/(debug: )true\b/, "$1false"));
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  await page.getByRole("tab", { name: "Settings", exact: true }).click();
+  await expect(retries).toHaveValue("6");
+  await page.getByRole("button", { name: "Review and save" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save 1 setting" }).click();
+  await expect(page.getByText("Saved 1 setting. The server uses it from now on.")).toBeVisible();
+  expectFile(/^ *request-retry: 6\b/m, "the Settings draft rebased onto the YAML save");
+  expectFile(/^ *debug: false$/m, "the independent YAML edit retained");
+  await management("PATCH", "request-retry", { value: 4 });
+  await management("PATCH", "debug", { value: true });
+});
+
+test("names a same-field Settings conflict and reloads only that form", async () => {
+  const page = the();
+  await page.goto(`${APP}settings`);
+  const retries = page.getByRole("textbox", { name: "Retries" });
+  await expect(retries).toHaveValue("4");
+  await retries.fill("6");
+  await page.getByRole("tab", { name: "config.yaml" }).click();
+  await page.getByRole("button", { name: "Show config.yaml" }).click();
+  const editor = page.getByRole("textbox", { name: "config.yaml" });
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await pasteSecret(file().replace(/(request-retry: )4\b/, "$19"));
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await pasteSecret("\n# YAML draft survives a sibling reload\n");
+  await page.getByRole("tab", { name: "Settings", exact: true }).click();
+  await expect(retries).toHaveValue("6");
+  await page.getByRole("button", { name: "Review and save" }).click();
+  await expect(page.getByText("The config changed since this page loaded")).toBeVisible();
+  await expect(page.getByText(/Changed fields: Retries/)).toBeVisible();
+  await page.getByRole("button", { name: "Reload latest config" }).click();
+  await expect(retries).toHaveValue("9");
+  await page.getByRole("tab", { name: "config.yaml" }).click();
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await expectEditorShows("# YAML draft survives a sibling reload", "the other form's unsaved draft");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+  expectFile("# YAML draft survives a sibling reload", "the YAML draft saved after the Settings reload");
+  expectFile(/^ *request-retry: 9\b/m, "the conflicting YAML field kept");
+  await management("PATCH", "request-retry", { value: 4 });
 });
 
 test("adds and deletes a client key on the Settings page", async () => {
@@ -613,7 +693,6 @@ test("refuses stale settings and YAML saves after an on-disk edit", async () => 
   await expect(review.getByText("The config changed since this page loaded")).toBeVisible();
   await expect(review.getByText(/Unsaved edits will be lost on reload/)).toBeVisible();
   expectFile(/^ *request-retry: 8\b/m, "the on-disk retry value after the refused settings save");
-  page.once("dialog", (dialog) => { void dialog.accept(); });
   await review.getByRole("button", { name: "Reload latest config" }).click();
   await expect(retries).toHaveValue("8");
 
@@ -629,9 +708,7 @@ test("refuses stale settings and YAML saves after an on-disk edit", async () => 
   await yamlReview.getByRole("button", { name: "Save config.yaml" }).click();
   await expect(yamlReview.getByText("The config changed since this page loaded")).toBeVisible();
   expect(file() === onDisk, "the refused YAML save leaves every on-disk byte unchanged").toBe(true);
-  page.once("dialog", (dialog) => { void dialog.accept(); });
   await yamlReview.getByRole("button", { name: "Reload latest config" }).click();
-  await page.getByRole("button", { name: "Show config.yaml" }).click();
   await expectEditorShows("# The dashboard's real-save pass", "the reloaded file");
 });
 

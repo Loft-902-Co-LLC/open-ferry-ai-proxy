@@ -450,7 +450,7 @@ export function ClientSetupCard({
           <p>Its client keys are no longer the examples, so it serves proxy requests.</p>
         </Alert>
       )}
-      {writeError !== null && <ProblemNotice problem={saveProblem(writeError)} live />}
+      {writeError !== null && <ProblemNotice problem={saveProblem(writeError)} live onReloadConfig={() => { void editor.reload(); }} />}
       {keysUnsupported && (
         <Alert tone="info" title="This server doesn't list its client keys">
           <p>

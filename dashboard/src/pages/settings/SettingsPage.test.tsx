@@ -1182,8 +1182,17 @@ describe("config.yaml", () => {
   it("sends the loaded ETag and explains a 412 without losing edits", async () => {
     const state = server();
     let etag = '"loaded"';
+    let race = false;
     state.api.use(
-      route("GET", V8_CONFIG, () => ({ json: state.v8, headers: { ETag: etag } })),
+      route("GET", V8_CONFIG, () => {
+        const answer = { json: state.v8, headers: { ETag: etag } };
+        if (race) {
+          etag = '"changed-on-disk"';
+          state.yaml = YAML.replace("request-retry: 1", "request-retry: 5");
+          race = false;
+        }
+        return answer;
+      }),
       route("GET", "/v8/management/config.yaml", () => ({ text: state.yaml, headers: { ETag: etag } })),
       route("PUT", "/v8/management/config.yaml", { status: 412, json: { error: "precondition_failed" } }),
     );
@@ -1193,8 +1202,7 @@ describe("config.yaml", () => {
     fireEvent.change(editor, { target: { value: draft } });
     await user.click(screen.getByRole("button", { name: "Review changes" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
-    etag = '"changed-on-disk"';
-    state.yaml = YAML.replace("request-retry: 1", "request-retry: 5");
+    race = true;
     await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
     expect(await within(dialog).findByText("The config changed since this page loaded")).toBeVisible();
     expect(dialog).toHaveTextContent("Unsaved edits will be lost on reload");

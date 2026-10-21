@@ -1,11 +1,11 @@
 // Calls with the session's key, for screens.
 
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import { useCallback, useId, useMemo } from "react";
 
 import { useManagementKey } from "../session/session";
 import { apiDownload, apiRequest, type ApiRequest, type DownloadRequest } from "./client";
-import { ConfigEditor } from "./configEditor";
+import { ConfigEditor, ConfigStore } from "./configEditor";
 
 export type Query = ApiRequest["query"];
 
@@ -56,21 +56,41 @@ export function useApiDownload() {
   );
 }
 
-/** One form's config snapshot. Its queries have their own cache entries so
- * cached values from another form cannot be paired with a newer version. */
+const configStores = new WeakMap<QueryClient, { key: string; store: ConfigStore }>();
+function configStore(client: QueryClient, key: string): ConfigStore {
+  const existing = configStores.get(client);
+  if (existing?.key === key) return existing.store;
+  const store = new ConfigStore(
+    <T,>(path: string, request?: ApiRequest) => apiRequest<T>(key, path, request),
+    () => { void client.invalidateQueries(); },
+  );
+  configStores.set(client, { key, store });
+  return store;
+}
+
+/** Shared freshness, with a baseline retained only for this form's draft. */
 export function useConfigEditor() {
-  const response = useApiResponse();
+  const key = useManagementKey();
+  const client = useQueryClient();
   const scope = useId();
-  const editor = useMemo(() => new ConfigEditor(response), [response]);
-  return useMemo(() => ({ call: editor.call, ready: editor.ready, toggleCredential: editor.toggleCredential, scope }), [editor, scope]);
+  const editor = useMemo(() => new ConfigEditor(configStore(client, key)), [client, key]);
+  const reload = useCallback(async () => {
+    editor.reset();
+    await client.refetchQueries({ predicate: (query) => query.queryKey.includes(scope) });
+  }, [client, editor, scope]);
+  return useMemo(() => ({ editor, call: editor.call, ready: editor.ready,
+    toggleCredential: editor.toggleCredential, setDirty: editor.setDirty,
+    checkChanges: editor.checkChanges, reload, scope }), [editor, reload, scope]);
 }
 
 export function useConfigQuery<T>(
   editor: ReturnType<typeof useConfigEditor>,
   path: string,
+  options: Omit<UseQueryOptions<T>, "queryKey" | "queryFn"> = {},
 ) {
   return useQuery<T>({
     queryKey: [path, "config-editor", editor.scope],
     queryFn: ({ signal }) => editor.call<T>(path, { signal }),
+    ...options,
   });
 }

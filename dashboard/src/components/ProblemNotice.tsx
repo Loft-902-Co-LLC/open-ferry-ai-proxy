@@ -120,9 +120,10 @@ export function explainProblem(problem: CallProblem): Explanation {
         tone: "warn",
         title: "The config changed since this page loaded",
         body: <>
-          <p>The server refused this save. Reload the latest config before saving again.
-            Unsaved edits will be lost on reload; copy them first if you want to keep them.</p>
-          <Button onClick={() => { window.location.reload(); }}>Reload latest config</Button>
+          <p>{problem.local === true ? "The dashboard stopped this save." : "The server refused this save."}
+            {problem.fields !== undefined && ` Changed fields: ${problem.fields.join(", ")}.`}
+            {" "}Reload this form before saving again. Unsaved edits will be lost on reload;
+            copy them first if you want to keep them.</p>
         </>,
       };
     case "config-not-saved":
@@ -184,13 +185,18 @@ export interface ProblemNoticeProps {
   /** Something to do about it, such as a retry button. */
   action?: ReactNode;
   className?: string;
+  /** Reload only the form that owns this failed config save. */
+  onReloadConfig?: () => void;
 }
 
-export function ProblemNotice({ problem, live = false, action, className }: ProblemNoticeProps) {
+export function ProblemNotice({ problem, live = false, action, className, onReloadConfig }: ProblemNoticeProps) {
   const { tone, title, body } = explainProblem(problem);
   return (
     <Alert tone={tone} title={title} live={live} className={className}>
       {body}
+      {problem.kind === "config-conflict" && onReloadConfig !== undefined && (
+        <Button onClick={onReloadConfig}>Reload latest config</Button>
+      )}
       {action !== undefined && <div className="flex flex-wrap gap-2">{action}</div>}
     </Alert>
   );

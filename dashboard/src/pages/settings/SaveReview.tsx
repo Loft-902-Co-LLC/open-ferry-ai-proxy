@@ -72,7 +72,7 @@ export interface Review {
 }
 
 /** Why a change wasn't saved. */
-function StopReason({ reason }: { reason: unknown }) {
+function StopReason({ reason, onReload }: { reason: unknown; onReload?: (() => void) | undefined }) {
   if (reason instanceof DuplicateKeyError) {
     return (
       <Alert tone="warn" live title="That key is already in the list">
@@ -87,7 +87,7 @@ function StopReason({ reason }: { reason: unknown }) {
       </Alert>
     );
   }
-  return <ProblemNotice problem={saveProblem(reason)} live />;
+  return <ProblemNotice problem={saveProblem(reason)} live onReloadConfig={onReload} />;
 }
 
 interface ReviewDialogProps {
@@ -96,13 +96,14 @@ interface ReviewDialogProps {
   error: unknown;
   onSave: () => void;
   onClose: () => void;
+  onReload?: () => void;
 }
 
 /**
  * What a save will change: client keys to add and delete, and each setting
  * against the server's value now.
  */
-export function ReviewDialog({ review, pending, error, onSave, onClose }: ReviewDialogProps) {
+export function ReviewDialog({ review, pending, error, onSave, onClose, onReload }: ReviewDialogProps) {
   const changes = review?.changes ?? [];
   const keys = changes.flatMap((pending) => (pending.kind === "key" ? [pending.change] : []));
   const settings = changes.flatMap((pending) => (pending.kind === "setting" ? [pending.change] : []));
@@ -231,7 +232,7 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
               </p>
             </Alert>
           )}
-          <StopReason reason={stopped?.reason ?? error} />
+          <StopReason reason={stopped?.reason ?? error} onReload={onReload} />
         </>
       )}
     </Dialog>
@@ -274,6 +275,7 @@ interface SaveBarProps {
   formId?: string | undefined;
   onDiscard: () => void;
   onReview: () => void;
+  onReload?: () => void;
 }
 
 /** Room left between a field and the bar, in pixels, when the bar comes up over it. */
@@ -294,6 +296,7 @@ export function SaveBar({
   formId,
   onDiscard,
   onReview,
+  onReload,
 }: SaveBarProps) {
   const active = unsaved > 0 || reviewing;
   const shown = active || outcome !== null || reviewError !== null;
@@ -336,7 +339,7 @@ export function SaveBar({
           <span>Nothing to save: the server already has these values.</span>
         </p>
       )}
-      {reviewError !== null && <ProblemNotice problem={callProblem(reviewError)} live />}
+      {reviewError !== null && <ProblemNotice problem={callProblem(reviewError)} live onReloadConfig={onReload} />}
       <div className={active ? "flex flex-wrap items-center justify-between gap-3" : undefined}>
         <p role="status" className={active ? "font-medium" : "sr-only"}>
           {unsaved === 0

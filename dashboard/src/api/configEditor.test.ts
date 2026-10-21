@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mockApi, route } from "../test/mockApi";
 import { apiRequest } from "./client";
-import { ConfigEditor } from "./configEditor";
+import { ConfigEditor, ConfigStore } from "./configEditor";
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "./management";
 
 const RETRY = `${V8_CONFIG}/routing/retry/request-retry`;
@@ -10,23 +10,79 @@ function editor() {
 }
 
 describe("a form's config version", () => {
-  it("sends the loaded ETag, advances only after a successful save, and never rebases on review", async () => {
-    let version = '"loaded"';
+  function shared() {
+    let version = 1;
+    const tree = { routing: { retry: { "request-retry": 1 } },
+      observability: { logs: { debug: false } }, access: { "api-keys": ["unit-client"] } };
+    let race = false;
     const api = mockApi(
-      route("GET", V8_CONFIG, () => ({ json: {}, headers: { ETag: version } })),
-      route("GET", CONFIG, { json: {} }),
-      route("PUT", RETRY, { json: {}, headers: { ETag: '"saved"' } }),
+      route("GET", V8_CONFIG, () => {
+        const answer = { json: structuredClone(tree), headers: { ETag: `"${String(version)}"` } };
+        if (race) { race = false; version++; tree.observability.logs.debug = true; }
+        return answer;
+      }),
+      ...[[RETRY, (value: unknown) => { tree.routing.retry["request-retry"] = Number(value); }],
+        [`${V8_CONFIG}/observability/logs/debug`, (value: unknown) => { tree.observability.logs.debug = value === true; }],
+      ].map(([path, write]) => route("PUT", path as string, (request) => {
+        if (request.headers.get("if-match") !== `"${String(version)}"`) {
+          return { status: 412, json: { error: "precondition_failed" }, headers: { ETag: '"refusal-only"' } };
+        }
+        (write as (value: unknown) => void)(request.json());
+        version++;
+        return { json: {}, headers: { ETag: `"${String(version)}"` } };
+      })),
     );
-    const form = editor();
-    await form.call(CONFIG);
-    version = '"another-writer"';
-    await expect(form.call(V8_CONFIG)).rejects.toMatchObject({ status: 412 }); // No silent rebase.
-    await form.call(`${MANAGEMENT}/request-retry`, { method: "PATCH", json: { value: 2 } });
-    await form.call(`${MANAGEMENT}/request-retry`, { method: "PATCH", json: { value: 3 } });
-    const calls = api.callsTo("PUT", RETRY);
-    expect(calls[0]?.headers.get("if-match")).toBe('"loaded"');
-    expect(calls[1]?.headers.get("if-match")).toBe('"saved"');
-    expect(calls[0]?.json()).toBe(2);
+    const changed = vi.fn();
+    const store = new ConfigStore(<T,>(path: string, request = {}) => apiRequest<T>("unit-key", path, request), changed);
+    return { api, tree, changed, first: new ConfigEditor(store), second: new ConfigEditor(store), race: () => { race = true; } };
+  }
+  const retryWrite = { method: "PATCH", json: { value: 2 } } as const;
+  const debugPath = `${MANAGEMENT}/debug`;
+
+  it("lets a clean sibling adopt another editor's save on refetch", async () => {
+    const state = shared();
+    await Promise.all([state.first.call(CONFIG), state.second.call(CONFIG)]);
+    await state.first.call(`${MANAGEMENT}/request-retry`, retryWrite);
+    expect(await state.second.call(CONFIG)).toMatchObject({ "request-retry": 2 });
+    await state.second.call(debugPath, { method: "PUT", json: { value: true } });
+    expect(state.api.callsTo("PUT", `${V8_CONFIG}/observability/logs/debug`)[0]?.headers.get("if-match")).toBe('"2"');
+    expect(state.changed).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a draft's base through refetch and rebases an unrelated-field save", async () => {
+    const state = shared();
+    await Promise.all([state.first.call(CONFIG), state.second.call(CONFIG)]);
+    state.first.setDirty(true);
+    await state.second.call(debugPath, { method: "PUT", json: { value: true } });
+    await expect(state.first.call(CONFIG)).resolves.toMatchObject({ debug: true });
+    await state.first.checkChanges([`${MANAGEMENT}/request-retry`]);
+    await state.first.call(`${MANAGEMENT}/request-retry`, retryWrite);
+    expect(state.api.callsTo("PUT", RETRY)[0]?.headers.get("if-match")).toBe('"2"');
+    expect(state.tree.routing.retry["request-retry"]).toBe(2);
+    expect(state.tree.observability.logs.debug).toBe(true);
+  });
+
+  it("names a drafted field changed by another editor and sends no stale write", async () => {
+    const state = shared();
+    await Promise.all([state.first.call(CONFIG), state.second.call(CONFIG)]);
+    state.first.setDirty(true);
+    await state.second.call(`${MANAGEMENT}/request-retry`, { method: "PUT", json: { value: 3 } });
+    await state.first.call(CONFIG);
+    await expect(state.first.call(`${MANAGEMENT}/request-retry`, retryWrite))
+      .rejects.toMatchObject({ status: 412, fields: ["Retries"] });
+    expect(state.api.callsTo("PUT", RETRY)).toHaveLength(1);
+  });
+
+  it("uses the re-read's If-Match and never retries a racing server refusal", async () => {
+    const state = shared();
+    await state.first.call(CONFIG);
+    state.first.setDirty(true);
+    state.race();
+    await expect(state.first.call(`${MANAGEMENT}/request-retry`, retryWrite)).rejects.toMatchObject({ status: 412 });
+    expect(state.api.callsTo("PUT", RETRY)).toHaveLength(1);
+    expect(state.api.callsTo("PUT", RETRY)[0]?.headers.get("if-match")).toBe('"1"');
+    await state.first.call(`${MANAGEMENT}/request-retry`, retryWrite);
+    expect(state.api.callsTo("PUT", RETRY)[1]?.headers.get("if-match")).toBe('"2"');
   });
 
   it.each([undefined, '"base"'])("guards YAML, client keys and provider lists with version %s", async (etag) => {
