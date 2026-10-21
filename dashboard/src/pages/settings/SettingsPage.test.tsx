@@ -1730,3 +1730,29 @@ describe("recovery snapshot regressions", () => {
     expect(screen.getByText("Unsaved changes.")).toBeVisible();
   });
 });
+
+describe("YAML save completion", () => {
+  it("reports a successful PUT separately from a failed stored-text re-read and offers Reload", async () => {
+    const state = versionedServer();
+    state.api.use(route("PUT", "/v8/management/config.yaml", (request) => {
+      state.external(false);
+      state.state.yaml = request.body ?? "";
+      state.yamlReadFailed(true);
+      return { json: {}, headers: { ETag: state.tag() } };
+    }));
+    const { user } = await openSettings();
+    fireEvent.change(await openFile(user), { target: { value: `${YAML}# saved comment\n` } });
+    await user.click(screen.getByRole("button", { name: "Review changes" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Save config.yaml" }));
+    const title = await screen.findByText("Saved config.yaml, but couldn't re-read it");
+    const notice = title.closest('[role="status"]') as HTMLElement;
+    expect(notice).toHaveTextContent("The file was saved");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unsaved changes.")).not.toBeInTheDocument();
+    expect(screen.getByText("No unsaved changes.", { selector: '[role="status"]:not([hidden] *)' })).toBeVisible();
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toHaveLength(1);
+    state.yamlReadFailed(false);
+    await user.click(within(notice).getByRole("button", { name: "Reload" }));
+    expect(await screen.findByRole("textbox", { name: "config.yaml" })).toHaveValue(`${YAML}# saved comment\n`);
+  });
+});

@@ -257,8 +257,9 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
   const [round, setRound] = useState(0);
   const [review, setReview] = useState<Review | null>(null);
   const [saved, setSaved] = useState(false);
+  const [readAfterSaveFailed, setReadAfterSaveFailed] = useState(false);
   const [confirmReload, setConfirmReload] = useState(false);
-  const edited = draft !== base.data;
+  const edited = !readAfterSaveFailed && draft !== base.data;
 
   useEffect(() => {
     onUnsavedChange?.(edited);
@@ -285,17 +286,23 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
   const save = useMutation({
     mutationFn: async (text: string) => {
       await editor.saveYaml(base, { method: "PUT", body: text, contentType: "application/yaml" });
-      const stored = await editor.readValue<unknown>(CONFIG_YAML);
-      if (typeof stored.data !== "string") throw new NotTextError();
-      return stored as ConfigRead<string>;
+      // Submission succeeded even if retrieving the normalized bytes fails.
+      try {
+        const stored = await editor.readValue<unknown>(CONFIG_YAML);
+        if (typeof stored.data !== "string") throw new NotTextError();
+        return stored as ConfigRead<string>;
+      } catch { return null; }
     },
     onSuccess: (stored) => {
       setReview(null);
       setSaved(true);
-      onStored(stored);
-      setBase(stored);
-      setDraft(stored.data);
-      setRound((value) => value + 1);
+      setReadAfterSaveFailed(stored === null);
+      if (stored !== null) {
+        onStored(stored);
+        setBase(stored);
+        setDraft(stored.data);
+        setRound((value) => value + 1);
+      }
     },
     // Every screen reads settings from it.
     onSettled: () => client.invalidateQueries(),
@@ -308,13 +315,17 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
 
   return (
     <div className="space-y-3">
-      {saved && !edited && (
+      {saved && !edited && !readAfterSaveFailed && (
         <Alert tone="ok" live>
           <p>Saved config.yaml. The server uses it from now on.</p>
         </Alert>
       )}
       {read.isError && <ProblemNotice problem={callProblem(read.error)} live onReloadConfig={onReload} />}
-      <Suspense fallback={<Loading>Loading the editor…</Loading>}>
+      {readAfterSaveFailed && <Alert tone="warn" live title="Saved config.yaml, but couldn't re-read it">
+        <p>The file was saved. Reload to read the stored text before editing again.</p>
+        <Button onClick={onReload}>Reload</Button>
+      </Alert>}
+      {!readAfterSaveFailed && <Suspense fallback={<Loading>Loading the editor…</Loading>}>
         <YamlEditor
           key={round}
           initial={base.data}
@@ -324,7 +335,7 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
             setDraft(text);
           }}
         />
-      </Suspense>
+      </Suspense>}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p id={statusId} role="status" className="font-medium">
           {edited ? "Unsaved changes." : "No unsaved changes."}
@@ -356,7 +367,7 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
           </Button>
           <Button
             variant="primary"
-            disabled={!edited || read.isPending}
+            disabled={!edited || read.isPending || readAfterSaveFailed}
             onClick={() => {
               setSaved(false);
               save.reset();
