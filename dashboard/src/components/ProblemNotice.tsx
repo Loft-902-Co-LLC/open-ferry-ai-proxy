@@ -1,7 +1,7 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
-import type { CallProblem } from "../api/access";
+import { callProblem, type CallProblem } from "../api/access";
 import { useSession } from "../session/session";
 import { Alert, type AlertTone } from "./Alert";
 import { Code } from "./Code";
@@ -195,17 +195,26 @@ export interface ProblemNoticeProps {
   action?: ReactNode;
   className?: string;
   /** Reload only the form that owns this failed config save. */
-  onReloadConfig?: () => void;
+  onReloadConfig?: () => void | Promise<void>;
 }
 
 export function ProblemNotice({ problem, live = false, action, className, onReloadConfig }: ProblemNoticeProps) {
   const { tone, title, body } = explainProblem(problem);
+  const [reloadError, setReloadError] = useState<unknown>(null);
+  const [reloading, setReloading] = useState(false);
   return (
     <Alert tone={tone} title={title} live={live} className={className}>
       {body}
       {problem.kind === "config-conflict" && onReloadConfig !== undefined && (
-        <Button onClick={onReloadConfig}>Reload latest config</Button>
+        <Button disabled={reloading} onClick={() => {
+          setReloadError(null);
+          setReloading(true);
+          void Promise.resolve().then(onReloadConfig).catch((error: unknown) => {
+            setReloadError(error);
+          }).finally(() => { setReloading(false); });
+        }}>Reload latest config</Button>
       )}
+      {reloadError !== null && <ProblemNotice problem={callProblem(reloadError)} live />}
       {action !== undefined && <div className="flex flex-wrap gap-2">{action}</div>}
     </Alert>
   );

@@ -9,7 +9,7 @@ import {
   USAGE_SUMMARY,
   type ClientSetup,
 } from "../api/dashboard";
-import { API_KEYS, USAGE_STATISTICS_ENABLED } from "../api/management";
+import { API_KEYS, USAGE_STATISTICS_ENABLED, V8_CONFIG } from "../api/management";
 import { EXAMPLE_API_KEYS } from "../app/safeMode";
 import { startOfDay } from "../lib/timeRange";
 import {
@@ -816,5 +816,25 @@ describe("today's calls", () => {
       expect(within(today).queryByText("Usage isn't being recorded")).not.toBeInTheDocument();
     });
     expect(api.callsTo("PUT", USAGE_STATISTICS_ENABLED)[0]?.json()).toEqual({ value: true });
+  });
+});
+
+
+describe("config conflict Reload", () => {
+  it("shows a failed Reload in the owning notice without an unhandled rejection", async () => {
+    const { api } = server([KEY]);
+    api.use(
+      route("GET", V8_CONFIG, { json: { access: { "api-keys": [KEY] } }, headers: { ETag: '\"base\"' } }),
+      route("PUT", `${V8_CONFIG}/access/api-keys`, { status: 412, json: { error: "precondition_failed" } }),
+    );
+    const { user } = renderApp("/");
+    await user.click(await screen.findByRole("button", { name: "Make a new key" }));
+    const notice = (await screen.findByText("The config changed since this page loaded")).closest('[role="status"]');
+    expect(notice).not.toBeNull();
+    api.use(route("GET", V8_CONFIG, { status: 503, json: { error: "unavailable", message: "config read unavailable" } }));
+    await user.click(within(notice as HTMLElement).getByRole("button", { name: "Reload latest config" }));
+    expect(await within(notice as HTMLElement).findByText("The server failed (HTTP 503)")).toBeVisible();
+    expect(within(notice as HTMLElement).getByText(/config read unavailable/)).toBeVisible();
+    expect(api.callsTo("PUT", `${V8_CONFIG}/access/api-keys`)).toHaveLength(1);
   });
 });

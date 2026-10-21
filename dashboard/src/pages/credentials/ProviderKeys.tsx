@@ -211,7 +211,7 @@ function AddKeyDialog({
               <p>The server already has this key with this base URL.</p>
             </Alert>
           ) : (
-            <ProblemNotice problem={saveProblem(add.error)} live onReloadConfig={() => { void editor.reload(); }} />
+            <ProblemNotice problem={saveProblem(add.error)} live onReloadConfig={editor.reload} />
           ))}
       </form>
     </Dialog>
@@ -314,7 +314,7 @@ function KeyEntry({ editor, provider, entry, anchor, writable, onReadOnly }: Key
             <p>That key was already deleted.</p>
           </Alert>
         ) : (
-          <ProblemNotice problem={saveProblem(remove.error)} live onReloadConfig={() => { void editor.reload(); }} />
+          <ProblemNotice problem={saveProblem(remove.error)} live onReloadConfig={editor.reload} />
         ))}
       <ConfirmDialog
         open={confirm}
