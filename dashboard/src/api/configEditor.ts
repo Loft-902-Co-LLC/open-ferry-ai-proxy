@@ -206,6 +206,8 @@ export class ConfigEditor {
     const keep = new Set(paths.flatMap((path) => this.paths(path)));
     for (const path of this.drafts.keys()) if (!keep.has(path)) this.drafts.delete(path);
   };
+  /** Clear retained values without opting one-click editors into draft binding. */
+  readonly clearDrafts = () => { this.drafts.clear(); };
   private version(snapshot: Snapshot): void {
     this.store.checkVersion(snapshot);
   }
