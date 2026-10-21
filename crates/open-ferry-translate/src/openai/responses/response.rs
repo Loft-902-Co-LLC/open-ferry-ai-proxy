@@ -57,8 +57,6 @@
 //! - Strings are written with serde_json's escaping. Upstream writes `<`, `>`,
 //!   `&`, U+2028 and U+2029 in some fields as `\u003c` and so on; the JSON
 //!   values are the same.
-//! - A token count too large for `i64` saturates. Go's result depends on the
-//!   CPU; amd64 gives the minimum `i64`.
 //! - A `temperature` or `top_p` that reads as infinite or NaN is written as
 //!   `null`. Upstream writes `+Inf` or `NaN`, which isn't JSON.
 //! - Names cut to 64 bytes start at a character boundary (see

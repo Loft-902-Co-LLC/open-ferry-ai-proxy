@@ -151,6 +151,31 @@ fn preserves_cache_read_usage_streaming() {
     assert_eq!(usage["cache_read_input_tokens"], 10340, "{usage}");
 }
 
+// Seed 7, registry interactions-7677031846980938026-86. Go's float-to-int
+// overflow happens before it filters positive cached counts or subtracts them.
+#[test]
+fn overflowing_cached_tokens_follow_go_cpu_conversion() {
+    let usage =
+        r#"{"total_input_tokens":3905,"total_output_tokens":3700,"total_cached_tokens":1e+30}"#;
+    let expected = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+        json!({"input_tokens":3905,"output_tokens":3700})
+    } else {
+        json!({"input_tokens":0,"output_tokens":3700,"cache_read_input_tokens":i64::MAX})
+    };
+    let body = format!(r#"{{"interaction":{{"id":"i1","usage":{usage}}}}}"#);
+    let whole = convert_interactions_response_to_claude_non_stream("m", body.as_bytes());
+    assert_eq!(whole["usage"], expected);
+
+    let completed = format!(
+        r#"{{"event_type":"interaction.completed","interaction":{{"id":"i1","usage":{usage}}}}}"#
+    );
+    let frames = stream("m", &[&completed]);
+    assert_eq!(
+        find_event(&frames, "message_delta").unwrap()["usage"],
+        expected
+    );
+}
+
 /// The non-streaming subtests of
 /// TestConvertInteractionsResponseToClaude_PreservesCacheReadUsage: the
 /// usage given, and the Claude usage fields expected (`None` for absent).
