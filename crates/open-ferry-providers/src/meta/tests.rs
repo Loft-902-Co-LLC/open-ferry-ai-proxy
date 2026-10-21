@@ -1536,3 +1536,28 @@ async fn the_taps_see_the_answer_as_it_came() {
         assert!(raw.seen().contains(ECHOED), "{}", raw.seen());
     }
 }
+
+#[tokio::test]
+async fn count_tokens_uses_third_party_meta_preparation_without_network() {
+    let base_url = "https://openrouter.ai/api/v1";
+    let signature = format!("Q-PaDgE{}.Router123", "A".repeat(1419));
+    let payload = json!({"model":"muse-spark","input":[{"type":"reasoning","encrypted_content":signature,"summary":[]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello there"}]}]});
+    let request = request("muse-spark", &payload.to_string());
+    let options = options("openai-response");
+    // Ciphertext is not itself token-counted, so check the preparation policy
+    // as well as exercising the public local-only counting path.
+    let prepared =
+        super::request::prepare_for_base_url(None, None, &request, &options, false, base_url)
+            .unwrap();
+    assert_eq!(prepared.body["input"][0]["encrypted_content"], signature);
+    let expected = count_input_tokens(tiktoken_rs::o200k_base_singleton(), &prepared.body);
+    let response = executor()
+        .count_tokens(api_key_auth(base_url), request, options)
+        .await
+        .unwrap();
+    assert_eq!(
+        get(&payload_json(&response), "response.usage.input_tokens"),
+        Some(&json!(expected))
+    );
+    assert!(expected > 0);
+}

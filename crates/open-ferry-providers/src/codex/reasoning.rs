@@ -101,14 +101,20 @@ fn native_meta_url(base: &str) -> bool {
     url::Url::parse(base.trim())
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
-        .is_none_or(|host| host.is_empty() || host == "api.meta.ai" || host.ends_with(".meta.ai"))
+        .is_none_or(|host| {
+            let host = host.strip_suffix('.').unwrap_or(&host);
+            host.is_empty() || host == "api.meta.ai" || host.ends_with(".meta.ai")
+        })
 }
 
 pub(crate) fn is_openrouter_url(base: &str) -> bool {
     url::Url::parse(base.trim())
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
-        .is_some_and(|host| host == "openrouter.ai" || host.ends_with(".openrouter.ai"))
+        .is_some_and(|host| {
+            let host = host.strip_suffix('.').unwrap_or(&host);
+            host == "openrouter.ai" || host.ends_with(".openrouter.ai")
+        })
 }
 
 pub(crate) fn canonical_signature(raw: &str) -> &str {
@@ -465,6 +471,11 @@ mod destination_tests {
             for base in [
                 "https://openrouter.ai/api/v1",
                 "https://sub.openrouter.ai/v1",
+                "https://openrouter.ai./v1",
+                "https://api.openrouter.ai./v1",
+                "https://openrouter.ai@evil.com/v1",
+                "https://evilopenrouter.ai/v1",
+                "https://openrouter.ai.evil.com/v1",
                 "https://api.openai.com/v1",
                 "https://chatgpt.com/backend-api/codex",
                 "https://api.x.ai/v1",
@@ -485,7 +496,12 @@ mod destination_tests {
                 assert_eq!(canonical_signature(&routed), native);
             }
         }
-        for base in ["", "https://api.meta.ai/v1", "https://a.meta.ai/v1"] {
+        for base in [
+            "",
+            "https://api.meta.ai/v1",
+            "https://a.meta.ai/v1",
+            "https://api.meta.ai./v1",
+        ] {
             let mut body = json!({"input":[{"type":"reasoning","id":"orphan","encrypted_content":format!("{meta}.Router123")}]});
             sanitize_reasoning_for_meta_base_url(&mut body, base);
             assert!(body["input"][0].get("encrypted_content").is_none());
@@ -502,6 +518,28 @@ mod destination_tests {
             assert!(body["input"][0].get("encrypted_content").is_none());
         }
     }
+
+    #[test]
+    fn trailing_dot_destinations_keep_native_and_router_policy() {
+        assert!(native_meta_url("https://api.meta.ai./v1"));
+        assert!(is_openrouter_url("https://openrouter.ai./v1"));
+        for base in [
+            "https://openrouter.ai@evil.com/v1",
+            "https://evilopenrouter.ai/v1",
+            "https://openrouter.ai.evil.com/v1",
+            "https://openrouter.ai../v1",
+        ] {
+            assert!(!is_openrouter_url(base), "{base}");
+        }
+        for base in [
+            "https://api.meta.ai@evil.com/v1",
+            "https://evilmeta.ai/v1",
+            "https://api.meta.ai.evil.com/v1",
+        ] {
+            assert!(!native_meta_url(base), "{base}");
+        }
+    }
+
     #[test]
     fn deployment_alias_fallback_is_limited_to_responses_families() {
         for model in ["meta/muse", "grok-4", "gpt-5"] {
@@ -555,6 +593,32 @@ mod preparation_tests {
             assert_eq!(reasoning["encrypted_content"], native);
         }
     }
+    #[test]
+    fn http_search_history_tool_precedes_image_generation() {
+        let request = Request {
+            model: "gpt-5".into(),
+            payload: bytes::Bytes::from(
+                json!({"input":[{"type":"web_search_call","id":"search"}]}).to_string(),
+            ),
+        };
+        for kind in [Kind::Execute, Kind::Stream] {
+            let prepared = prepare_body(
+                kind,
+                Context::default(),
+                &request,
+                &Options::new(Format::OPENAI_RESPONSE),
+            )
+            .unwrap();
+            let tools: Vec<_> = prepared.body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["type"].as_str().unwrap())
+                .collect();
+            assert_eq!(tools, ["web_search", "image_generation"]);
+        }
+    }
+
     #[test]
     fn search_history_is_reconciled_in_every_http_preparation_path() {
         for kind in [Kind::Execute, Kind::Stream, Kind::Compact] {

@@ -84,7 +84,7 @@ use serde_json::Value;
 
 use self::completed::translate_completed;
 use self::error::wrap_upstream_error;
-use self::request::{Creds, build_headers, creds, endpoint, missing_token, prepare};
+use self::request::{Creds, build_headers, creds, endpoint, missing_token};
 use crate::codex::client::{Clients, error_chain, read_body, read_body_prefix};
 use crate::codex::request::{base_model, refuse_control_characters};
 use crate::codex::stream::MAX_LINE;
@@ -324,13 +324,14 @@ impl MetaExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        Self::credentials(auth)?;
-        let prepared = prepare(
+        let creds = Self::credentials(auth)?;
+        let prepared = request::prepare_for_base_url(
             self.config.as_deref(),
             self.models.as_deref(),
             request,
             options,
             false,
+            &creds.base_url,
         )?;
         let body = prepared.body;
         let count = tokio::task::spawn_blocking(move || {

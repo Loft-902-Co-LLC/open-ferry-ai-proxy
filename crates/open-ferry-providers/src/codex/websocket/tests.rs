@@ -1967,3 +1967,34 @@ fn parse_bool_is_gos() {
         assert_eq!(parse_bool(text), None, "{text}");
     }
 }
+
+#[test]
+fn websocket_search_history_tool_precedes_image_generation() {
+    use crate::codex::request::{Context, Kind};
+    let auth = auth("https://upstream.example/v1");
+    let request = request(
+        "gpt-5",
+        r#"{"input":[{"type":"web_search_call","id":"search"}]}"#,
+    );
+    for kind in [Kind::Execute, Kind::Stream] {
+        let prepared = request::prepare(
+            kind,
+            Context {
+                auth: Some(&auth),
+                ..Context::default()
+            },
+            &auth,
+            "https://upstream.example/v1",
+            &request,
+            &ws_options(""),
+        )
+        .unwrap();
+        let tools: Vec<_> = prepared.body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(tools, ["web_search", "image_generation"]);
+    }
+}

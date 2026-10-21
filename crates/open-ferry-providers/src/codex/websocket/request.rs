@@ -160,12 +160,12 @@ pub(super) fn prepare(
         delete(&mut body, "prompt_cache_retention");
         delete(&mut body, "safety_identifier");
     }
+    crate::codex::request::ensure_web_search_tool_for_history(&mut body, &options.headers);
     if !auth.use_siwc() {
         normalize_instructions(&mut body, native);
         ensure_image_generation_tool(&mut body, base, context, &options.headers);
     }
 
-    crate::codex::request::ensure_web_search_tool_for_history(&mut body, &options.headers);
     // normalizeCodexWebsocketParallelToolCalls
     if is_responses_lite(&body, &options.headers) {
         set_bool_if_different(&mut body, "parallel_tool_calls", false);

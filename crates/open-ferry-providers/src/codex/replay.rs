@@ -252,10 +252,24 @@ fn session_key_from_turn_metadata(turn_metadata: &str) -> String {
 /// Whether the input has a reasoning item whose `encrypted_content` is a
 /// valid signature (`codexInputHasValidReasoningEncryptedContent`).
 fn input_has_valid_reasoning(input: &[Value]) -> bool {
+    input_has_valid_reasoning_using(input, super::reasoning::canonical_signature)
+}
+
+fn input_has_valid_reasoning_using(
+    input: &[Value],
+    mut canonicalize: impl FnMut(&str) -> &str,
+) -> bool {
     input.iter().any(|item| {
-        str_at(item, "type").trim() == "reasoning"
-            && matches!(item.get("encrypted_content"), Some(Value::String(encrypted))
-                if inspect_gpt_reasoning_signature(super::reasoning::canonical_signature(encrypted)).is_ok() || open_ferry_translate::signature::is_valid_meta_reasoning_signature(super::reasoning::canonical_signature(encrypted)) || open_ferry_translate::signature::is_valid_grok_encrypted_content(super::reasoning::canonical_signature(encrypted)))
+        if str_at(item, "type").trim() != "reasoning" {
+            return false;
+        }
+        let Some(Value::String(encrypted)) = item.get("encrypted_content") else {
+            return false;
+        };
+        let canonical = canonicalize(encrypted);
+        inspect_gpt_reasoning_signature(canonical).is_ok()
+            || open_ferry_translate::signature::is_valid_meta_reasoning_signature(canonical)
+            || open_ferry_translate::signature::is_valid_grok_encrypted_content(canonical)
     })
 }
 
@@ -829,6 +843,36 @@ mod tests;
 mod canonical_signature_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn reasoning_check_canonicalizes_each_candidate_once() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+        let gpt = super::super::reasoning::tests::valid_signature();
+        let meta = format!("Q-PaDgE{}", "A".repeat(1419));
+        let grok = STANDARD_NO_PAD.encode((0..255).collect::<Vec<u8>>());
+        for signature in [gpt, meta, grok] {
+            let input = vec![
+                json!({"type":"message","encrypted_content":"not reasoning"}),
+                json!({"type":"reasoning","encrypted_content":null}),
+                json!({"type":"reasoning","encrypted_content":"invalid"}),
+                json!({"type":"reasoning","encrypted_content":format!("{signature}.Router123")}),
+                json!({"type":"reasoning","encrypted_content":"not reached"}),
+            ];
+            let mut seen = Vec::new();
+            assert!(input_has_valid_reasoning_using(&input, |raw| {
+                seen.push(raw.to_owned());
+                super::super::reasoning::canonical_signature(raw)
+            }));
+            assert_eq!(
+                seen,
+                ["invalid".to_owned(), format!("{signature}.Router123")]
+            );
+            assert!(input_has_valid_reasoning(&input));
+            assert!(!input_has_valid_reasoning(&[
+                json!({"type":"reasoning","encrypted_content":format!("{signature}.bad-suffix")})
+            ]));
+        }
+    }
+
     #[test]
     fn prefixed_and_router_forms_do_not_duplicate_saved_reasoning() {
         let native = super::super::reasoning::tests::valid_signature();

@@ -509,6 +509,9 @@ pub(crate) fn prepare_body(
             set_bool_if_different(&mut body, "stream", false);
         }
     }
+    if matches!(kind, Kind::Execute | Kind::Stream) {
+        ensure_web_search_tool_for_history(&mut body, &options.headers);
+    }
     if kind != Kind::CountTokens && context.auth.is_some_and(Auth::use_siwc) {
         super::siwc_request::apply_body(
             &mut body,
@@ -533,7 +536,9 @@ pub(crate) fn prepare_body(
         });
     }
 
-    ensure_web_search_tool_for_history(&mut body, &options.headers);
+    if kind == Kind::Compact {
+        ensure_web_search_tool_for_history(&mut body, &options.headers);
+    }
     normalize_parallel_tool_calls(&mut body, &options.headers);
     normalize_tool_schemas(&mut body);
     let turn = ext::prepare(kind, context, request, options, &mut body);

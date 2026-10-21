@@ -271,6 +271,7 @@ fn translate(
 
 /// Translates and adjusts the payload of a call, which asks for a stream if
 /// `stream` is set (`prepareResponsesRequest`).
+#[cfg(test)]
 pub(super) fn prepare(
     config: Option<&Config>,
     models: Option<&dyn ModelCatalog>,
