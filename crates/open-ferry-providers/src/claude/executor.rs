@@ -253,7 +253,8 @@ impl ClaudeExecutor {
             upstream_stream,
             self.models.as_deref(),
         )?;
-        if let Some(scope) = web_search::scope(config, auth, request, options) {
+        let web_search = web_search::scope(config, auth, request, options);
+        if let Some(scope) = &web_search {
             scope.restore(&mut body);
         }
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
@@ -299,6 +300,7 @@ impl ClaudeExecutor {
             upstream: body,
             translation,
             extra_betas,
+            web_search,
         })
     }
 
@@ -512,7 +514,7 @@ impl ClaudeExecutor {
             })?;
         }
 
-        if let Some(scope) = web_search::scope(self.config.as_deref(), auth, request, options) {
+        if let Some(scope) = &prepared.web_search {
             scope.record(&data);
         }
         let original = original_request(request, options);
@@ -602,7 +604,7 @@ impl ClaudeExecutor {
                 fast,
                 status,
                 secrets,
-                web_search: web_search::scope(self.config.as_deref(), auth, request, options),
+                web_search: prepared.web_search,
             },
         );
         Ok(StreamResponse {
@@ -637,7 +639,8 @@ impl ClaudeExecutor {
             translate_stream,
             self.models.as_deref(),
         )?;
-        if let Some(scope) = web_search::scope(config, auth, request, options) {
+        let web_search = web_search::scope(config, auth, request, options);
+        if let Some(scope) = &web_search {
             scope.restore(&mut body);
         }
         if target.key.trim().is_empty() || !target.first_party {
@@ -776,6 +779,8 @@ struct Prepared {
     translation: Value,
     /// The body's `betas`, for the header.
     extra_betas: Vec<String>,
+    /// One credential/session scope shared by restoration and response recording.
+    web_search: Option<web_search::Scope>,
 }
 
 /// The client's request in Claude's format, for `base_model`, with its

@@ -84,6 +84,8 @@ pub(crate) struct Scope {
     limit: usize,
 }
 
+// Matches upstream: file-derived auth IDs survive token replacement, and
+// execution: session keys bypass caller prefixes in isolate_session_key.
 pub(crate) fn scope(
     config: Option<&Config>,
     auth: &Auth,
