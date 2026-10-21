@@ -774,7 +774,8 @@ fn closed_object_strips_recleaned_executor_underscore() {
     );
 }
 
-// Not upstream's: Go 1.26.4 outputs from the upstream wrapped cleaner cover
+// Not upstream's: Go 1.26.4 decisions from upstream object analysis after the
+// wrapped cleaner cover
 // normalization, refs, unions, required filtering and existing placeholders.
 #[test]
 fn reclean_projection_matches_upstream_edges() {
@@ -879,7 +880,7 @@ fn reclean_projection_matches_upstream_edges() {
   ["anyOf [{}, [{\"type\": \"null\"}]]",{"anyOf":[{"type":"null"}]},false,false],
   ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":[{"type":"null"}]},true,false],
   ["anyOf [{}, \"bad\"]",{"anyOf":"bad"},false,false],
-  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":"bad"},true,false],
+  ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":"bad"},false,false],
   ["anyOf [{}, {\"properties\": {\"reason\": {}}}]",{"anyOf":{"properties":{"reason":{}}}},true,false],
   ["anyOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"properties\": {\"reason\": {}}}]",{"type":"object","properties":{"flag":{"type":"string"}},"anyOf":{"properties":{"reason":{}}}},true,false],
   ["oneOf [{}, []]",{"oneOf":[]},false,false],
@@ -899,7 +900,7 @@ fn reclean_projection_matches_upstream_edges() {
   ["oneOf [{}, [{\"type\": \"null\"}]]",{"oneOf":[{"type":"null"}]},false,false],
   ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, [{\"type\": \"null\"}]]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":[{"type":"null"}]},true,false],
   ["oneOf [{}, \"bad\"]",{"oneOf":"bad"},false,false],
-  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":"bad"},true,false],
+  ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, \"bad\"]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":"bad"},false,false],
   ["oneOf [{}, {\"properties\": {\"reason\": {}}}]",{"oneOf":{"properties":{"reason":{}}}},true,false],
   ["oneOf [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}, {\"properties\": {\"reason\": {}}}]",{"type":"object","properties":{"flag":{"type":"string"}},"oneOf":{"properties":{"reason":{}}}},true,false],
   ["structural {\"allOf\": [{\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}]}",{"allOf":[{"type":"object","properties":{"flag":{"type":"string"}}}]},true,false],

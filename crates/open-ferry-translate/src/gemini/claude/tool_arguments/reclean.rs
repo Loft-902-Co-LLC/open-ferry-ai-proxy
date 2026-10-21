@@ -25,7 +25,7 @@
 //!
 //! The scalar-required and literal-type shapes never come from our Gemini cleaner.
 
-use super::{array, gjson_array, str_of};
+use super::{analyze, array, gjson_array, str_of};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
@@ -582,10 +582,7 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
     let Some(schema) = projected.get("schema") else {
         return false;
     };
-    schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_some_and(|properties| properties.contains_key(placeholder))
+    analyze(schema, schema).properties.contains_key(placeholder)
         && gjson_array(schema.get("required")).any(|v| str_of(Some(v)) == placeholder)
 }
 
