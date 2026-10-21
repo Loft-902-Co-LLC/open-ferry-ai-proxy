@@ -641,8 +641,6 @@ Nor are Home mode or the plugin host's management routes. The control panel's pa
 
 ## Observability
 
-Upstream's request logs, log files, usage statistics, payload rules and saved cooldowns are ported, each in a subsection below. Only the usage queue's Redis protocol isn't (see [The usage queue over RESP](#the-usage-queue-over-resp)).
-
 ### The foundation
 
 What the parts share is in place:
@@ -985,6 +983,28 @@ Upstream serves with Go's `net/http`. open-ferry's one loop for every listener (
 Deviations: the stop on shutdown is `axum::serve`'s graceful shutdown and doesn't wait for upgraded connections, as before; the TLS accept loop waits a second after a failed accept, where the old one waited 100 ms (`TlsListener`, kept for the TLS test only, does not serve any more).
 
 Tests: none are upstream's. They bind 127.0.0.1 on ports the system picks and check the pause and resume (the backlog kept across cycles), the release of keep-alive, in-flight, HTTP/2, WebSocket (both versions) and TLS-handshake connections, the first-request deadline, the cut and the stop.
+
+## Added in open-ferry: ingress limits
+
+`service::serve_loop` limits concurrent accepted connections per listener using
+the process descriptor limit (a bounded fallback on Windows), reserves handles
+for upstream traffic and files, and stops accepting at capacity so the kernel
+backlog queues clients. It adds header, inbound TLS handshake, idle and response
+write-progress deadlines. `open_ferry_server::ingress` admits every non-upgrade
+request body through one budget shared by both listeners, with upload progress
+and total deadlines. Decoding and request logging retain budget-owned bytes.
+Both legacy and v8 config writes preserve the new keys and their comments.
+
+These are open-ferry additions: upstream's main `net/http.Server` sets only its
+address and handler, with no timeouts. SSE response lifetime is unlimited, and
+HTTP/1 WebSocket upgrades and HTTP/2 extended CONNECT leave the header, upload
+and idle timers. Upgrades retain admission slots and write-stall protection;
+existing WebSocket ping handling and blue-green release/cut semantics remain.
+See [configuration](docs/configuration.md#ingress-limits-open-ferry-additions)
+for every default, the descriptor reserve, explicit disabling and reload rules.
+
+Upstream's request logs, log files, usage statistics, payload rules and saved cooldowns are ported, each in a subsection below. Only the usage queue's Redis protocol isn't (see [The usage queue over RESP](#the-usage-queue-over-resp)).
+
 
 ## Added in open-ferry: routing by quota
 
