@@ -77,6 +77,9 @@ fn raise_nofile_with(
     let mut result = set(raised);
     if result == Err(22) && retry_einval {
         raised.0 = raised.0.min(10240);
+        if raised.0 <= original.0 {
+            return Ok((original, true));
+        }
         result = set(raised);
     }
     Ok(if result.is_ok() {
