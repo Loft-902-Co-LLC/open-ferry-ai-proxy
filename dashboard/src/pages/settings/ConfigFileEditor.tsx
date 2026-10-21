@@ -1,3 +1,4 @@
+import { yamlLanguage } from "@codemirror/lang-yaml";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, FileDiff, RotateCw, Save, Undo2 } from "lucide-react";
 import { Suspense, lazy, useEffect, useId, useState } from "react";
@@ -35,11 +36,17 @@ function plural(count: number, one: string, many: string): string {
 }
 
 /** Why the server didn't save the file, in its words where it gave them. */
-function SaveProblem({ error, onReload }: { error: unknown; onReload: () => void }) {
-  if (isApiError(error) && error.code === "invalid_yaml") {
+function SaveProblem({ error, draft, onReload }: { error: unknown; draft: string; onReload: () => void }) {
+  if (isApiError(error) && (error.code === "invalid_yaml" || (error.status === 400 && error.code === "invalid_body"))) {
+    let line: number | null = null;
+    yamlLanguage.parser.parse(draft).iterate({
+      enter(node) {
+        if (line === null && node.type.isError) line = draft.slice(0, node.from).split(/\r\n?|\n/).length;
+      },
+    });
     return (
       <Alert tone="danger" live title="That isn't valid YAML">
-        <p>{error.detail ?? "The server couldn't read it."} Nothing was saved.</p>
+        <p>{line !== null && `Check line ${String(line)}. `}{error.detail} Nothing was saved.</p>
       </Alert>
     );
   }
@@ -213,7 +220,7 @@ function ReviewDialog({ review, base, pending, error, onSave, onClose, onReload 
           <DiffView lines={lines} />
         </>
       )}
-      {error !== null && <SaveProblem error={error} onReload={onReload} />}
+      {error !== null && <SaveProblem error={error} draft={review?.draft ?? ""} onReload={onReload} />}
     </Dialog>
   );
 }
