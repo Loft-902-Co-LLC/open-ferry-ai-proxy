@@ -829,13 +829,13 @@ describe("the management address", () => {
     const state = server();
     const { user } = await openSettings();
     const reads = addressReads(state.api);
-    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBe(3);
     await fill(user, address(), " 127.0.0.1:8318 ");
     await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
     // The review reads the address and the proxy's port again.
-    expect(addressReads(state.api)).toBeGreaterThan(reads);
+    expect(addressReads(state.api)).toBe(5);
     expect(dialog).toHaveTextContent(
       "the server uses it from then on, except the management address, which takes a restart.",
     );
@@ -2214,4 +2214,26 @@ it("drops an unversioned stale deletion row when the bar no longer counts it", a
   expect(screen.queryByText("Already removed on the server")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /^Undo deleting/ })).not.toBeInTheDocument();
   expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+});
+
+
+it("uses the drafted path rather than the last query for an ABA moved warning", async () => {
+  const state = versionedServer();
+  const { user } = await openSettings();
+  const retries = screen.getByRole("textbox", { name: "Retries" });
+  fireEvent.change(retries, { target: { value: "3" } });
+  state.external(false, 2);
+  await refetchOnFocus();
+  expect(retries).toHaveValue("3");
+  // A -> B -> A while the draft stays based on A. The query still shows
+  // B as loaded when Review reads A, so only the per-path comparison is right.
+  state.external(false, 1);
+  await user.click(screen.getByRole("button", { name: "Review and save" }));
+  const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+  expect(dialog).not.toHaveTextContent("changed on the server");
+  expect(dialog).not.toHaveTextContent("Changed on the server");
+  await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+  await screen.findByText("Saved 1 setting. The server uses it from now on.");
+  expect(state.tree.routing.retry["request-retry"]).toBe(3);
+  expect(state.api.callsTo("PUT", `${V8_CONFIG}/routing/retry/request-retry`).map((call) => call.headers.get("if-match"))).toEqual(['"3"']);
 });
