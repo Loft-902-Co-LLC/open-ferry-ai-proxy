@@ -1254,22 +1254,30 @@ describe("config.yaml", () => {
     expect(state.yaml).toBe(YAML);
   });
 
-  it("says why the server refused the file, and keeps the edit", async () => {
+  it.each([
+    { invalid: "oops: : :", line: null }, // The highlighting parser accepts this; the server rejects it.
+    { invalid: "oops: [}", line: 4 },
+  ])("explains a bare v8 invalid_body and keeps the edit ($invalid)", async ({ invalid, line }) => {
     const state = server();
     state.api.use(
-      route("PUT", CONFIG_YAML, {
+      route("GET", V8_CONFIG, { json: state.v8, headers: { ETag: '"loaded"' } }),
+      route("GET", "/v8/management/config.yaml", { text: YAML, headers: { ETag: '"loaded"' } }),
+      route("PUT", "/v8/management/config.yaml", {
         status: 400,
-        json: { error: "invalid_yaml", message: "yaml: line 2: mapping values are not allowed here" },
+        json: { error: "invalid_body" },
       }),
     );
     const { user } = await openSettings();
     const editor = await openFile(user);
-    fireEvent.change(editor, { target: { value: `${YAML}oops: : :${NL}` } });
+    fireEvent.change(editor, { target: { value: `${YAML}${invalid}${NL}` } });
     await user.click(screen.getByRole("button", { name: "Review changes" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
     await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
     expect(await within(dialog).findByText("That isn't valid YAML")).toBeVisible();
-    expect(dialog).toHaveTextContent("mapping values are not allowed here");
+    if (line !== null) expect(dialog).toHaveTextContent(`Check line ${String(line)}.`);
+    expect(dialog).toHaveTextContent("Nothing was saved.");
+    expect(state.api.callsTo("PUT", "/v8/management/config.yaml")).toHaveLength(1);
+    expect(state.api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.getByText("Unsaved changes.")).toBeVisible();
   });
