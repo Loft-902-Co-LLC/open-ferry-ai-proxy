@@ -2,7 +2,7 @@
 // sdk/api/handlers/handlers.go (BuildErrorResponseBodyWithError),
 // sdk/api/handlers/handlers_errors.go, executionErrorMessage in
 // sdk/api/handlers/handlers_execution.go and the error helpers in
-// sdk/api/handlers/claude/code_handlers.go (v8.0.32, MIT).
+// sdk/api/handlers/claude/code_handlers.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Errors as clients see them: [`ErrorMessage`], and the OpenAI and Claude
@@ -259,6 +259,7 @@ fn claude_error_type(status: u16) -> &'static str {
         402 => "billing_error",
         403 => "permission_error",
         404 => "not_found_error",
+        409 => "conflict_error",
         408 | 504 => "timeout_error",
         413 => "request_too_large",
         429 => "rate_limit_error",

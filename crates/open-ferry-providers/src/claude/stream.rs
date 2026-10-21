@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor_stream.go
 // (the stream loops and validateClaudeStreamingResponse),
 // claude_executor_diagnostics.go (observeClaudeStreamLine) and
-// helps/apply_patch.go (the stream failure helpers) (v8.0.32, MIT).
+// helps/apply_patch.go (the stream failure helpers) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude's SSE stream, read a line at a time.
@@ -9,7 +9,7 @@
 //! A Claude client gets whole events, each with its blank line, as Claude
 //! sent them. Any other client gets each line translated to its format. A
 //! `message_stop` event ends the stream; a connection that fails before it
-//! ends the stream with an error, while a clean end without it just ends.
+//! ends the stream with an error, including a clean premature EOF.
 //!
 //! A non-streaming call that Claude answered with a stream is checked first
 //! ([`validate`]): it must hold a `message_start` with an ID and model and a
@@ -60,6 +60,7 @@ pub(crate) fn apply_patch_error() -> ExecError {
 }
 
 /// The JSON of a `data:` line, if it has valid JSON.
+#[cfg(test)]
 fn data_event(line: &[u8]) -> Option<Value> {
     let data = trim_space(line).strip_prefix(b"data:")?;
     serde_json::from_slice(trim_space(data)).ok()
@@ -67,6 +68,7 @@ fn data_event(line: &[u8]) -> Option<Value> {
 
 /// The `type` of a `data:` line's event, if it has valid JSON; a
 /// `message_stop` ends a reply (`observeClaudeStreamLine`).
+#[cfg(test)]
 fn event_type(line: &[u8]) -> Option<String> {
     data_event(line).map(|event| str_at(&event, "type"))
 }
@@ -163,6 +165,8 @@ struct State {
     /// The event read so far, for a Claude client.
     event: Vec<u8>,
     completed: bool,
+    observation: Vec<u8>,
+    stream_error: Option<String>,
     pending: VecDeque<Result<Bytes, ExecError>>,
     finished: bool,
 }
@@ -174,6 +178,8 @@ pub(crate) fn forward(response: reqwest::Response, setup: StreamSetup) -> ChunkS
         setup,
         event: Vec::new(),
         completed: false,
+        observation: Vec::new(),
+        stream_error: None,
         pending: VecDeque::new(),
         finished: false,
     };
@@ -200,13 +206,46 @@ impl State {
             None => return self.end(None),
         };
         let line = self.redact(line);
-        if event_type(&line).as_deref() == Some("message_stop") {
-            self.completed = true;
+        if self.observation.len() + line.len() < MAX_LINE {
+            self.observation.extend_from_slice(&line);
+            self.observation.push(b'\n');
+        }
+        if trim_space(&line).is_empty() {
+            self.observe_event();
         }
         if self.setup.translator.is_none() {
             self.forward_line(&line);
         } else {
             self.translate_line(&line);
+        }
+        if self.stream_error.is_some() && !self.finished {
+            self.end(None);
+        }
+    }
+
+    fn observe_event(&mut self) {
+        let raw = std::mem::take(&mut self.observation);
+        let data: Vec<_> = raw
+            .split(|b| *b == b'\n')
+            .filter_map(|line| trim_space(line).strip_prefix(b"data:"))
+            .map(trim_space)
+            .filter(|data| !data.is_empty())
+            .collect();
+        let bare = data.is_empty();
+        let payload = if bare { raw.clone() } else { data.join(&b'\n') };
+        let Ok(event) = serde_json::from_slice::<Value>(trim_space(&payload)) else {
+            return;
+        };
+        match str_at(&event, "type").as_str() {
+            "message_stop" => self.completed = true,
+            "message" if bare && !str_at(&event, "stop_reason").trim().is_empty() => {
+                self.completed = true
+            }
+            "error" if !bare && self.stream_error.is_none() => {
+                self.stream_error =
+                    Some(String::from_utf8_lossy(trim_space(&payload)).into_owned());
+            }
+            _ => {}
         }
     }
 
@@ -277,6 +316,7 @@ impl State {
     /// failed before `message_stop`.
     fn end(&mut self, error: Option<LineError>) {
         self.finished = true;
+        self.observe_event();
         match self.setup.translator.as_mut() {
             None => self.flush(),
             Some(translator) => {
@@ -292,16 +332,18 @@ impl State {
         if self.completed {
             return;
         }
-        if let Some(error) = error {
-            tracing::debug!("claude: stream read failed: {error}");
-            let error = wrap_fast(
-                self.setup.fast,
-                self.setup.status,
-                plain_error(error.to_string()),
-            );
-            self.reader.report(&error);
-            self.pending.push_back(Err(error));
-        }
+        let error = match error {
+            Some(error) => plain_error(error.to_string()),
+            None => ExecError::upstream(
+                502,
+                self.stream_error
+                    .take()
+                    .unwrap_or_else(|| "upstream stream closed before message_stop".to_owned()),
+            ),
+        };
+        let error = wrap_fast(self.setup.fast, self.setup.status, error);
+        self.reader.report(&error);
+        self.pending.push_back(Err(error));
     }
 }
 

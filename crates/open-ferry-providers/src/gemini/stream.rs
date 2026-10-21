@@ -3,7 +3,7 @@
 // executeStreamWithServiceAccount and executeStreamWithAPIKey),
 // helps/apply_patch.go (EndApplyPatchStream, StopApplyPatchStream) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Gemini or Vertex AI SSE stream, read a line at a time and translated
@@ -81,6 +81,7 @@ struct State {
     pending: VecDeque<Result<Bytes, ExecError>>,
     finished: bool,
     translated_error: Option<String>,
+    saw_finish_reason: bool,
 }
 
 /// Translates the provider's stream in `response` to the client's format.
@@ -97,6 +98,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         pending: VecDeque::new(),
         finished: false,
         translated_error: None,
+        saw_finish_reason: false,
     };
     futures_util::stream::unfold(state, |mut state| async move {
         loop {
@@ -120,6 +122,7 @@ impl State {
             Some(Err(error)) => return self.end(Some(error)).await,
             None => return self.end(None).await,
         };
+        self.saw_finish_reason |= json_payload(&line).is_some_and(has_finish_signal);
         match self.setup.lines {
             Lines::Gemini => {
                 let filtered = filter_sse_usage_metadata(&line);
@@ -225,6 +228,13 @@ impl State {
                 .push_back(Err(ExecError::new(ErrorKind::Upstream, error.to_string())));
             return;
         }
+        if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {
+            let error = ExecError::upstream(502, "upstream stream closed before finishReason")
+                .with_usage_kept();
+            self.reader.report(&error);
+            self.pending.push_back(Err(error));
+            return;
+        }
         self.send(b"[DONE]").await;
         if let Some(error) = self.translated_error.take() {
             self.pending.push_back(Err(
@@ -236,6 +246,23 @@ impl State {
             self.fail();
         }
     }
+}
+
+fn has_finish_signal(payload: &[u8]) -> bool {
+    let Ok(root) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return false;
+    };
+    [&root, &root["response"]].into_iter().any(|root| {
+        root["candidates"].as_array().is_some_and(|candidates| {
+            candidates.iter().any(|candidate| {
+                !crate::json::str_at(candidate, "finishReason")
+                    .trim()
+                    .is_empty()
+            })
+        }) || !crate::json::str_at(root, "promptFeedback.blockReason")
+            .trim()
+            .is_empty()
+    })
 }
 
 /// Retains the JSON body from any SSE line form JSONPayload accepts.
