@@ -102,15 +102,13 @@ interface Change { path: string; value: unknown }
 
 const FIELD_NAMES: Record<string, string> = {
   ...Object.fromEntries(Object.values(CONFIG_FIELDS).map(({ path, label }) => [
-    path.startsWith(`${V8_CONFIG}/`) ? path.slice(V8_CONFIG.length + 1) : SETTINGS[path.slice(MANAGEMENT.length + 1)], label,
-  ])),
-  "routing/retry/request-retry": "Retries",
+    path.startsWith(`${V8_CONFIG}/`) ? path.slice(V8_CONFIG.length + 1) : SETTINGS[path.slice(MANAGEMENT.length + 1)] ?? path, label,
+  ] as const)),
   "access/api-keys": "Client API keys",
   "api-keys": "Provider API keys",
   "api-keys/claude": "Claude API keys",
   "api-keys/codex": "Codex API keys",
   "api-keys/gemini": "Gemini API keys",
-  "observability/usage/usage-statistics-enabled": "Usage statistics",
 };
 function fieldName(path: string): string {
   return FIELD_NAMES[path] ?? (path === "" ? "config.yaml" : path.replaceAll("/", "."));
@@ -216,7 +214,8 @@ export class ConfigEditor {
       }
       this.version(fresh);
       let data: unknown;
-      if (fresh.etag === undefined || path === CONFIG_YAML) {
+      if (path === V8_CONFIG && fresh.tree !== undefined) data = fresh.tree;
+      else if (fresh.etag === undefined || path === CONFIG_YAML) {
         const answer = await this.response<T>(fresh.etag !== undefined ? V8_YAML : path, { signal });
         if (path === CONFIG_YAML && fresh.etag !== undefined) {
           fresh = { tree: fresh.tree, etag: answer.headers.get("etag") ?? undefined };
@@ -419,7 +418,7 @@ export class ConfigEditor {
       }
       if (request.method !== "PUT") throw new Error("This config write has no versioned route.");
       if (this.yamlBase === undefined) await this.ready();
-      return await this.saveYaml(this.yamlBase ?? { ...this.base!, data: undefined, recovery: null }, request) as T;
+      return await this.saveYaml(this.yamlBase ?? { tree: this.base?.tree, etag: this.base?.etag, data: undefined, recovery: null }, request) as T;
     }
     return this.perform<T>(path, request);
   };

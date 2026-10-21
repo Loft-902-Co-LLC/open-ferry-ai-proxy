@@ -279,6 +279,8 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
       if (typeof fresh.data !== "string") {
         throw new NotTextError();
       }
+      if (base.recovery !== null && fresh.recovery === null) throw new RecoveryEnded();
+      if (base.etag !== undefined && fresh.recovery !== null) throw new StoredConfigUnusable(fresh.recovery.detail);
       return { fresh: fresh as ConfigRead<string>, draft };
     },
     onSuccess: setReview,
@@ -320,7 +322,7 @@ function ConfigFile({ initial, editor, onReload, onStored, onUnsavedChange }: Co
           <p>Saved config.yaml. The server uses it from now on.</p>
         </Alert>
       )}
-      {read.isError && <ProblemNotice problem={callProblem(read.error)} live onReloadConfig={onReload} />}
+      {read.isError && <SaveProblem error={read.error} draft={draft} onReload={onReload} />}
       {readAfterSaveFailed && <Alert tone="warn" live title="Saved config.yaml, but couldn't re-read it">
         <p>The file was saved. Reload to read the stored text before editing again.</p>
         <Button onClick={onReload}>Reload</Button>

@@ -175,11 +175,15 @@ function SettingsEditor({
       let restart: string | null = null;
       let addressProblem: string | null = null;
       if (edited !== null) {
-        const answer = await call<unknown>(CONFIG);
+        const snapshot = await editor.editor.readValue<unknown>(CONFIG);
+        const answer = snapshot.data;
+        client.setQueryData([CONFIG, "config-draft", editor.scope], snapshot);
         let freshFacts = facts.data;
         if (edited.managementAddress !== base.managementAddress) {
           // The proxy's port may have moved since the page read it.
-          freshFacts = await readServerFacts(call);
+          const factsSnapshot = await editor.editor.readValue<unknown>(V8_CONFIG);
+          freshFacts = await readServerFacts(() => Promise.resolve(factsSnapshot.data));
+          client.setQueryData([...FACTS, editor.scope], { data: freshFacts, snapshot: factsSnapshot });
           addressProblem = managementAddressProblem(edited.managementAddress, freshFacts.proxyPort);
           restart = restartNotice(edited.managementAddress, {
             tls: tlsOn(answer),
@@ -397,7 +401,7 @@ export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
     queryKey: [...FACTS, editor.scope],
     queryFn: async ({ signal }) => {
       const snapshot = await editor.editor.readValue<unknown>(V8_CONFIG, signal);
-      return { data: await readServerFacts(async () => snapshot.data), snapshot };
+      return { data: await readServerFacts(() => Promise.resolve(snapshot.data)), snapshot };
     },
   });
   const facts = { ...factsQuery, data: factsQuery.data?.data, snapshot: factsQuery.data?.snapshot } as UseQueryResult<ServerFacts> & { snapshot: ConfigRead<unknown> | undefined };
@@ -432,7 +436,7 @@ export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
         setKeysReadOnly(true);
       }}
       onUnsavedChange={onUnsavedChange}
-      onReload={() => { void reload(); }}
+      onReload={() => { void reload().catch(() => { /* Query notices show failed reads; keep the draft intact. */ }); }}
     />
   );
 }

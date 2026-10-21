@@ -117,7 +117,8 @@ describe("connecting a client", () => {
     const state = server([KEY]);
     state.api.use(route("GET", API_KEYS, { status: 500, json: { error: "invalid_config", message: "config file is empty" } }));
     renderApp("/");
-    const notice = (await screen.findByText("The server can't use config.yaml")).closest('[role="status"]') as HTMLElement;
+    const notice = (await screen.findByText("The server can't use config.yaml")).closest('[role="status"]');
+    if (!(notice instanceof HTMLElement)) throw new Error("The read-failure notice must be live");
     expect(notice).not.toBeNull();
     expect(notice).toHaveTextContent("config file is empty");
     expect(within(notice).getByRole("link", { name: "YAML editor" })).toHaveAttribute("href", "/settings?tab=file");
