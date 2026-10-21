@@ -107,6 +107,7 @@ use super::stream::{self, MAX_LINE, StreamSetup, apply_patch_error};
 use super::thinking;
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::usage::ensure_responses_usage_details;
+use super::web_search;
 use crate::codex::compat;
 use crate::json::{self, Body};
 use crate::observe_send::{self, Attempt, BodyTap};
@@ -234,13 +235,14 @@ impl ClaudeExecutor {
     /// The Messages body for Claude, from the client's request.
     fn prepare_messages(
         &self,
+        auth: &Auth,
         request: &Request,
         options: &Options,
-        base_model: &str,
         upstream_stream: bool,
         set_stream: bool,
         summary: bool,
     ) -> Result<Prepared, ExecError> {
+        let base_model = thinking::parse_suffix(&request.model).0;
         let config = self.config.as_deref();
         let mut body = translate_request_with_models(
             config,
@@ -250,6 +252,9 @@ impl ClaudeExecutor {
             upstream_stream,
             self.models.as_deref(),
         )?;
+        if let Some(scope) = web_search::scope(config, auth, request, options) {
+            scope.restore(&mut body);
+        }
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);
@@ -469,7 +474,7 @@ impl ClaudeExecutor {
         // A client that needs translating gets it from Claude's stream.
         let upstream_stream = format != Format::CLAUDE;
         let prepared =
-            self.prepare_messages(request, options, base_model, upstream_stream, true, summary)?;
+            self.prepare_messages(auth, request, options, upstream_stream, true, summary)?;
         let headers = build_headers(&target, &prepared, auth, options, upstream_stream, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
@@ -506,6 +511,9 @@ impl ClaudeExecutor {
             })?;
         }
 
+        if let Some(scope) = web_search::scope(self.config.as_deref(), auth, request, options) {
+            scope.record(&data);
+        }
         let original = original_request(request, options);
         let context = ResponseContext {
             model: &request.model,
@@ -548,7 +556,7 @@ impl ClaudeExecutor {
         let target = self.target(auth);
         let url = format!("{}/v1/messages?beta=true", target.base_url);
         let format = response_format(options);
-        let prepared = self.prepare_messages(request, options, base_model, true, false, false)?;
+        let prepared = self.prepare_messages(auth, request, options, true, false, false)?;
         let headers = build_headers(&target, &prepared, auth, options, true, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
@@ -593,6 +601,7 @@ impl ClaudeExecutor {
                 fast,
                 status,
                 secrets,
+                web_search: web_search::scope(self.config.as_deref(), auth, request, options),
             },
         );
         Ok(StreamResponse {
@@ -626,6 +635,9 @@ impl ClaudeExecutor {
             translate_stream,
             self.models.as_deref(),
         )?;
+        if let Some(scope) = web_search::scope(config, auth, request, options) {
+            scope.restore(&mut body);
+        }
         if target.key.trim().is_empty() || !target.first_party {
             return Err(ExecError::upstream(
                 501,

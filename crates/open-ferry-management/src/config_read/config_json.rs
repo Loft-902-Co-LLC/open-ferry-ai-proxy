@@ -173,6 +173,20 @@ pub(super) fn config(config: &Config) -> Json {
                             "enable-apply-patch",
                             Json::Bool(codex_client.enable_apply_patch),
                         )
+                        .with(
+                            "web-search-result-cache",
+                            Fields::new()
+                                .with(
+                                    "enabled",
+                                    Json::Bool(codex_client.web_search_result_cache.enabled),
+                                )
+                                .with("ttl", string(&codex_client.web_search_result_cache.ttl))
+                                .with(
+                                    "limit",
+                                    Json::Int(codex_client.web_search_result_cache.limit),
+                                )
+                                .done(),
+                        )
                         .done(),
                 )
                 .done(),

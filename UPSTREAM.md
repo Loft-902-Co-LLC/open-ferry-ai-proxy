@@ -272,6 +272,10 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **A tool search's summary status is written with serde_json's escaping.** In the Gemini Responses translator's tool search (`gemini/openai/responses/tool_search.rs`), upstream's sjson writes a plain ASCII status as it is and escapes `<`, `>`, `&`, U+2028 and U+2029 only in a status that also holds a control character, a non-ASCII character, a quote or a backslash; serde_json never escapes those. The decoded value is the same. A search call's argument objects and a discovery summary's `error` value are serialized compactly, where upstream keeps their original text.
 - **A closed HTTP/2 connection is a transient lifecycle drop, not a credential failure.** The credential manager matches Go's `http2: client connection force closed via ClientConn.Close` and `http2: client conn is closed`, as upstream does, and the texts hyper gives for the same failures, `operation was canceled: connection closed` and `connection closed before message completed` (`manager/classify.rs`). The Claude executor also treats a `hyper::Error` with `is_closed()` in an error's source chain, hyper's `channel closed` (the connection's dispatcher had already exited), as one (`claude/client.rs`). Go reports that as a closed client connection; hyper has no such text.
 
+The opt-in `client.codex.web-search-result-cache` keeps Claude native search results
+for Responses history in process, scoped by the client's named session, caller and
+selected upstream credential. Expiry is checked on access; no Home KV is used.
+
 ### Session affinity
 
 With `routing.session-affinity` on, a conversation stays on the credential that served it, so its prompt cache stays warm (`manager::affinity`, from `SessionAffinitySelector` in `sdk/cliproxy/auth/selector.go` and `session_cache.go`, and `session`, from `sdk/cliproxy/session`):

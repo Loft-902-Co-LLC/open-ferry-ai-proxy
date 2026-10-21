@@ -303,6 +303,11 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+    # Cache native upstream search results omitted from later Responses history.
+    # web-search-result-cache:
+    #   enabled: false
+    #   ttl: "24h"
+    #   limit: 1024
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:

@@ -33,7 +33,7 @@ mod compact;
 mod errors;
 mod executor;
 mod reasoning;
-mod replay;
+pub(crate) mod replay;
 mod request;
 mod response;
 mod schema;

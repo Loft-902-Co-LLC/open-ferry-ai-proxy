@@ -728,6 +728,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn web_search_cache_saves_defaults_updates_and_migrates_both_layouts() {
+        for layout in ["port: 0\n", "config-version: 8\n"] {
+            let dir = TempDir::new();
+            let file = dir.path().join("config.yaml");
+            fs::write(&file, layout).unwrap();
+            let mut cfg = Config::load(&file).unwrap();
+            for (enabled, ttl, limit) in [(true, "30m", 128), (false, "24h", 1024), (false, "", 0)]
+            {
+                cfg.client.codex.web_search_result_cache =
+                    crate::config::CodexWebSearchResultCacheConfig {
+                        enabled,
+                        ttl: ttl.into(),
+                        limit,
+                    };
+                for migrate in [false, true] {
+                    save_preserving_comments(&file, &cfg, migrate).unwrap();
+                    let loaded = Config::load(&file).unwrap();
+                    assert_eq!(
+                        loaded.client.codex.web_search_result_cache,
+                        cfg.client.codex.web_search_result_cache
+                    );
+                }
+            }
+        }
+    }
+
     // Ports TestV8MovedCommentsSurviveV0Saves (config_v8_comments_test.go).
     #[test]
     fn v8_moved_comments_survive_v0_saves() {

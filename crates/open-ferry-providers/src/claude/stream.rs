@@ -154,6 +154,7 @@ pub(crate) struct StreamSetup {
     pub(crate) status: u16,
     /// The secrets the request sent, redacted from each error event.
     pub(crate) secrets: Secrets,
+    pub(crate) web_search: Option<super::web_search::Scope>,
 }
 
 /// The state of one stream.
@@ -200,6 +201,9 @@ impl State {
             None => return self.end(None),
         };
         let line = self.redact(line);
+        if let Some(scope) = &self.setup.web_search {
+            scope.record(&line);
+        }
         if event_type(&line).as_deref() == Some("message_stop") {
             self.completed = true;
         }

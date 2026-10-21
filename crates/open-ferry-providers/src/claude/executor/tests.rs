@@ -2724,6 +2724,115 @@ payload:
     assert_eq!(sent["top_k"], 7, "{sent}");
 }
 
+fn search_result_content(body: &Value) -> Value {
+    body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .find(|block| block["type"] == "web_search_tool_result")
+        .map(|block| block["content"].clone())
+        .unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn web_search_results_survive_replay_only_for_the_same_credential() {
+    let results = json!([{"type": "web_search_result", "url": "https://example.com/a", "title": "A", "encrypted_content": "dummy-ciphertext"}]);
+    let result_block = json!({"type": "web_search_tool_result", "tool_use_id": "srvtoolu_cached", "content": results});
+    let config = Arc::new(
+        Config::parse(
+            "client: {codex: {web-search-result-cache: {enabled: true, ttl: 30m, limit: 1024}}}",
+        )
+        .unwrap(),
+    );
+    for stream in [false, true] {
+        let reply = if stream {
+            Reply::sse(&SSE.replace("event: message_delta", &format!("event: content_block_start\ndata: {}\n\nevent: message_delta", json!({"type": "content_block_start", "index": 1, "content_block": result_block}))))
+        } else {
+            let mut message: Value = serde_json::from_str(MESSAGE).unwrap();
+            message["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(result_block.clone());
+            Reply::json(&message.to_string())
+        };
+        let mock = Mock::start(reply).await;
+        let executor = mock.executor().with_config(config.clone());
+        let mut auth = (*api_key_auth()).clone();
+        auth.id = format!("cache-credential-a-{stream}");
+        let auth = Arc::new(auth);
+        let mut opts = options(Format::OPENAI_RESPONSE);
+        opts.response_format = Format::CLAUDE;
+        opts.metadata.execution_session_id = Some(format!("web-search-executor-{stream}"));
+        let first = Request {
+            model: "claude-sonnet-5-5".into(),
+            payload: Bytes::from(
+                json!({"input": [{"role": "user", "content": "search"}]}).to_string(),
+            ),
+        };
+        if stream {
+            let response = executor
+                .execute_stream(auth.clone(), first, opts.clone())
+                .await
+                .unwrap();
+            for chunk in response.chunks.collect::<Vec<_>>().await {
+                chunk.unwrap();
+            }
+        } else {
+            executor
+                .execute(auth.clone(), first, opts.clone())
+                .await
+                .unwrap();
+        }
+        let replay = Request {model: "claude-sonnet-5-5".into(), payload: Bytes::from(json!({"input": [
+            {"type": "web_search_call", "id": "ws_srvtoolu_cached", "status": "completed", "action": {"type": "search", "query": "q"}},
+            {"role": "user", "content": "continue"}]}).to_string())};
+        // Preparation is shared by Execute and ExecuteStream; check the actual next wire body.
+        if stream {
+            let response = executor
+                .execute_stream(auth.clone(), replay.clone(), opts.clone())
+                .await
+                .unwrap();
+            for chunk in response.chunks.collect::<Vec<_>>().await {
+                chunk.unwrap();
+            }
+        } else {
+            executor
+                .execute(auth.clone(), replay.clone(), opts.clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            search_result_content(&mock.last().json()),
+            results,
+            "stream={stream}: {}",
+            mock.last().body
+        );
+        let mut other = (*auth).clone();
+        other.id = format!("cache-credential-b-{stream}");
+        let prepared = executor
+            .prepare_messages(&other, &replay, &opts, stream, true, false)
+            .unwrap();
+        assert_eq!(search_result_content(&prepared.upstream), json!([]));
+        let count_mock = Mock::start(Reply::json(r#"{"input_tokens":99}"#)).await;
+        count_mock
+            .executor()
+            .with_config(config.clone())
+            .count_tokens(auth.clone(), replay.clone(), opts.clone())
+            .await
+            .unwrap();
+        assert_eq!(search_result_content(&count_mock.last().json()), results);
+        // User payload rules keep the final word over restored content.
+        let filtered = Arc::new(Config::parse("client: {codex: {web-search-result-cache: {enabled: true}}}\npayload:\n  filter:\n    - models: [{name: claude-sonnet-5-5, protocol: claude}]\n      params: [messages.0.content.1.content]\n").unwrap());
+        let prepared = mock
+            .executor()
+            .with_config(filtered)
+            .prepare_messages(&auth, &replay, &opts, false, true, false)
+            .unwrap();
+        assert_eq!(search_result_content(&prepared.upstream), Value::Null);
+    }
+}
+
 #[tokio::test]
 async fn registered_claude_disable_type_reaches_the_wire() {
     struct Models;

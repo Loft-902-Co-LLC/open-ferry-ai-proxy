@@ -45,5 +45,6 @@ mod thinking;
 pub mod token;
 mod tool_call_ids;
 pub(crate) mod usage;
+mod web_search;
 
 pub use executor::ClaudeExecutor;

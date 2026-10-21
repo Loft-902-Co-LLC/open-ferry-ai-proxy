@@ -459,7 +459,7 @@ fn disabled_executor_bodies_match_upstream_golden_without_cloaking() {
             body
         } else {
             executor
-                .prepare_messages(&request, &options, "claude-sonnet-4-5", true, true, false)
+                .prepare_messages(&api_key_auth(), &request, &options, true, true, false)
                 .unwrap()
                 .upstream
         };
@@ -494,7 +494,7 @@ payload:
     let mut options = options(Format::OPENAI_RESPONSE);
     options.original_request = request.payload.clone();
     let prepared = executor
-        .prepare_messages(&request, &options, "claude-sonnet-4-5", true, true, false)
+        .prepare_messages(&api_key_auth(), &request, &options, true, true, false)
         .unwrap();
     assert_eq!(prepared.upstream["tools"][1]["name"], "lookup");
     assert_eq!(

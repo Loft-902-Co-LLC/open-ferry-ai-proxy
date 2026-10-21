@@ -421,6 +421,8 @@ pub struct CodexClientConfig {
     pub optimize_multi_agent_v2: bool,
     /// Advertises freeform `apply_patch` for supported models.
     pub enable_apply_patch: bool,
+    /// Session-scoped native web search results for Responses clients.
+    pub web_search_result_cache: super::CodexWebSearchResultCacheConfig,
 }
 
 /// Streaming behavior.
