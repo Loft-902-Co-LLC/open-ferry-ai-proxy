@@ -1,10 +1,10 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, FileDiff, RotateCw, Save, Undo2 } from "lucide-react";
 import { Suspense, lazy, useEffect, useId, useState } from "react";
 
 import { callProblem, saveProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
-import { useApiResponse } from "../../api/hooks";
+import { useConfigEditor } from "../../api/hooks";
 import { ConfigEditor } from "../../api/configEditor";
 import { CONFIG_YAML } from "../../api/management";
 import { Alert } from "../../components/Alert";
@@ -35,7 +35,7 @@ function plural(count: number, one: string, many: string): string {
 }
 
 /** Why the server didn't save the file, in its words where it gave them. */
-function SaveProblem({ error }: { error: unknown }) {
+function SaveProblem({ error, onReload }: { error: unknown; onReload: () => void }) {
   if (isApiError(error) && error.code === "invalid_yaml") {
     return (
       <Alert tone="danger" live title="That isn't valid YAML">
@@ -53,6 +53,7 @@ function SaveProblem({ error }: { error: unknown }) {
   return (
     <ProblemNotice
       problem={saveProblem(error)}
+      onReloadConfig={onReload}
       live
     />
   );
@@ -156,10 +157,11 @@ interface ReviewDialogProps {
   error: unknown;
   onSave: () => void;
   onClose: () => void;
+  onReload: () => void;
 }
 
 /** The diff a save makes against the file as the server has it now. */
-function ReviewDialog({ review, base, pending, error, onSave, onClose }: ReviewDialogProps) {
+function ReviewDialog({ review, base, pending, error, onSave, onClose, onReload }: ReviewDialogProps) {
   const lines = review === null ? [] : diffLines(review.fresh, review.draft);
   const { added, removed } = diffCounts(lines);
   const same = review !== null && review.fresh === review.draft;
@@ -211,7 +213,7 @@ function ReviewDialog({ review, base, pending, error, onSave, onClose }: ReviewD
           <DiffView lines={lines} />
         </>
       )}
-      {error !== null && <SaveProblem error={error} />}
+      {error !== null && <SaveProblem error={error} onReload={onReload} />}
     </Dialog>
   );
 }
@@ -239,8 +241,16 @@ function ConfigFile({ initial, editor, onReload, onUnsavedChange }: ConfigFilePr
   const edited = draft !== base;
 
   useEffect(() => {
+    editor.setDirty(edited);
     onUnsavedChange?.(edited);
-  }, [edited, onUnsavedChange]);
+  }, [edited, editor, onUnsavedChange]);
+
+  // A clean editor follows query updates; a draft retains its own base.
+  if (!edited && initial !== base) {
+    setBase(initial);
+    setDraft(initial);
+    setRound((value) => value + 1);
+  }
 
   const read = useMutation({
     mutationFn: async () => {
@@ -276,13 +286,14 @@ function ConfigFile({ initial, editor, onReload, onUnsavedChange }: ConfigFilePr
           <p>Saved config.yaml. The server uses it from now on.</p>
         </Alert>
       )}
-      {read.isError && <ProblemNotice problem={callProblem(read.error)} live />}
+      {read.isError && <ProblemNotice problem={callProblem(read.error)} live onReloadConfig={onReload} />}
       <Suspense fallback={<Loading>Loading the editor…</Loading>}>
         <YamlEditor
           key={round}
           initial={base}
           label="config.yaml"
           onChange={(text) => {
+            editor.setDirty(text !== base);
             setSaved(false);
             setDraft(text);
           }}
@@ -340,6 +351,7 @@ function ConfigFile({ initial, editor, onReload, onUnsavedChange }: ConfigFilePr
           }
         }}
         onClose={closeReview}
+        onReload={onReload}
       />
       <ConfirmDialog
         open={confirmReload}
@@ -369,44 +381,45 @@ export function ConfigFileEditor({
   /** Told whether the editor holds unsaved changes, as that changes. */
   onUnsavedChange?: (unsaved: boolean) => void;
 }) {
-  const response = useApiResponse();
-  // The file as last loaded, and how many loads there were, so a reload
-  // starts the editor afresh.
-  const [file, setFile] = useState<{ text: string; load: number; editor: ConfigEditor } | null>(null);
-  const load = useMutation({
-    mutationFn: async () => {
-      const editor = new ConfigEditor(response);
+  const editor = useConfigEditor();
+  const [visible, setVisible] = useState(false);
+  const [round, setRound] = useState(0);
+  const file = useQuery({
+    queryKey: [CONFIG_YAML, "config-editor", editor.scope],
+    enabled: visible,
+    queryFn: async () => {
       const text = await editor.call<unknown>(CONFIG_YAML);
-      if (typeof text !== "string") {
-        throw new NotTextError();
-      }
-      return { text, editor };
-    },
-    onSuccess: ({ text, editor }) => {
-      setFile((previous) => ({ text, editor, load: (previous?.load ?? 0) + 1 }));
+      if (typeof text !== "string") throw new NotTextError();
+      return text;
     },
   });
+  const reload = async () => {
+    editor.editor.reset();
+    const result = await file.refetch();
+    if (result.error === null) setRound((value) => value + 1);
+  };
 
   return (
     <Card
       title="config.yaml"
       description="The whole file, for the settings the form doesn't have. Changes are checked and saved as a whole."
     >
-      {file === null ? (
+      {file.data === undefined ? (
         <>
           <p>
             It holds the client keys and the provider API keys in plain text. Open it where no one
             can see your screen.
           </p>
-          {load.isError && <ProblemNotice problem={callProblem(load.error)} live />}
+          {file.isError && <ProblemNotice problem={callProblem(file.error)} live />}
           <Button
             variant="primary"
-            disabled={load.isPending}
+            disabled={file.isFetching}
             onClick={() => {
-              load.mutate();
+              setVisible(true);
+              if (visible) void file.refetch();
             }}
           >
-            {load.isPending ? <Spinner /> : <Eye aria-hidden="true" className="size-4" />}
+            {file.isFetching ? <Spinner /> : <Eye aria-hidden="true" className="size-4" />}
             Show config.yaml
           </Button>
         </>
@@ -416,15 +429,13 @@ export function ConfigFileEditor({
             <Code>Ctrl</Code>+<Code>F</Code> (<Code>⌘</Code>+<Code>F</Code> on a Mac) searches.{" "}
             <Code>Tab</Code> leaves the editor, so indent with spaces.
           </p>
-          {load.isPending && <Loading>Reloading config.yaml…</Loading>}
-          {load.isError && <ProblemNotice problem={callProblem(load.error)} live />}
+          {file.isFetching && <Loading>Reloading config.yaml…</Loading>}
+          {file.isError && <ProblemNotice problem={callProblem(file.error)} live />}
           <ConfigFile
-            key={file.load}
-            initial={file.text}
-            editor={file.editor}
-            onReload={() => {
-              load.mutate();
-            }}
+            key={round}
+            initial={file.data}
+            editor={editor.editor}
+            onReload={() => { void reload(); }}
             onUnsavedChange={onUnsavedChange}
           />
         </>

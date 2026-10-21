@@ -76,6 +76,7 @@ interface SettingsEditorProps {
   keysReadOnly: boolean;
   onKeysReadOnly: () => void;
   onUnsavedChange: (unsaved: boolean) => void;
+  onReload: () => void;
 }
 
 /**
@@ -92,6 +93,7 @@ function SettingsEditor({
   keysReadOnly,
   onKeysReadOnly,
   onUnsavedChange,
+  onReload,
 }: SettingsEditorProps) {
   const { call } = editor;
   const client = useQueryClient();
@@ -113,8 +115,9 @@ function SettingsEditor({
   const [outcome, setOutcome] = useState<Outcome>(null);
 
   useEffect(() => {
+    editor.setDirty(unsaved > 0);
     onUnsavedChange(unsaved > 0);
-  }, [unsaved, onUnsavedChange]);
+  }, [editor, unsaved, onUnsavedChange]);
 
   // A field scrolled into view, as by Tab, stops clear of the bar, with room
   // for the start of its hint: its scroll margin is the bar's height and
@@ -159,6 +162,11 @@ function SettingsEditor({
 
   const read = useMutation({
     mutationFn: async ({ edited, base, keys: changes }: ReviewRequest) => {
+      await editor.checkChanges([
+        ...(edited === null ? [] : SETTING_IDS.filter((id) => edited[id] !== base[id])
+          .map((id) => saveCall(id, edited[id]).path)),
+        ...(changes.length > 0 ? [API_KEYS] : []),
+      ]);
       let fresh: SettingValues | null = null;
       let restart: string | null = null;
       let addressProblem: string | null = null;
@@ -338,6 +346,7 @@ function SettingsEditor({
           read.reset();
         }}
         onReview={startReview}
+        onReload={onReload}
       />
       <ReviewDialog
         review={review}
@@ -352,6 +361,7 @@ function SettingsEditor({
           setReview(null);
           save.reset();
         }}
+        onReload={onReload}
       />
     </div>
   );
@@ -379,6 +389,13 @@ export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
   // Kept here, so they outlast the editor starting afresh below.
   const [keyChanges, setKeyChanges] = useState<KeyChange[]>([]);
   const [keysReadOnly, setKeysReadOnly] = useState(false);
+  const [round, setRound] = useState(0);
+  const reload = async () => {
+    setKeyChanges([]);
+    onUnsavedChange(false);
+    await editor.reload();
+    setRound((value) => value + 1);
+  };
   return (
     // The form starts once, with the settings loaded, so it never counts
     // the values arriving as edits.
@@ -386,7 +403,7 @@ export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
       key={
         config.data === undefined || (facts.dataUpdatedAt === 0 && facts.errorUpdatedAt === 0)
           ? "loading"
-          : "loaded"
+          : `loaded-${String(round)}`
       }
       editor={editor}
       config={config}
@@ -399,6 +416,7 @@ export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
         setKeysReadOnly(true);
       }}
       onUnsavedChange={onUnsavedChange}
+      onReload={() => { void reload(); }}
     />
   );
 }

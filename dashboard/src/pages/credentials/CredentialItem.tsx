@@ -565,7 +565,7 @@ export function CredentialItem({
           )}
         </div>
 
-        {problem !== null && <ProblemNotice problem={problem} live />}
+        {problem !== null && <ProblemNotice problem={problem} live onReloadConfig={() => { void editor.reload(); }} />}
       </div>
 
       <ConfirmDialog

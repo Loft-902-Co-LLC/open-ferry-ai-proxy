@@ -61,7 +61,7 @@ export function TurnOnSetting({ path, label, configKey, invalidate }: TurnOnSett
             </p>
           </Alert>
         ) : (
-          <ProblemNotice problem={callProblem(turnOn.error)} live />
+          <ProblemNotice problem={callProblem(turnOn.error)} live onReloadConfig={() => { void editor.reload(); }} />
         ))}
     </div>
   );

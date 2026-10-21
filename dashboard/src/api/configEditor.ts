@@ -1,6 +1,5 @@
-// A form owns one version of config.yaml. Reads never replace that version:
-// a background refresh or a review must not silently authorize overwriting
-// someone else's edit. Only a successful write advances it, from its ETag.
+// Shared reads follow the current file. Each dirty form retains its draft's
+// baseline and compares only the fields it will write before rebasing.
 import { ApiError, isUnsupportedRoute, type ApiRequest, type ApiResponse } from "./client";
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "./management";
 import { AUTH_FILE_STATUS, type Credential, type StatusAnswer } from "./credentials";
@@ -27,13 +26,13 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function valueAt(tree: unknown, path: string): unknown {
-  return path.split("/").reduce<unknown>((value, key) => record(value)[key], tree);
+  return path === "" ? tree : path.split("/").reduce<unknown>((value, key) => record(value)[key], tree);
 }
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(record(value)).sort(([a], [b]) => a.localeCompare(b))
+    return Object.fromEntries(Object.entries(record(value)).filter(([key]) => key !== "auth_index" && key !== "auth-index").sort(([a], [b]) => a.localeCompare(b))
       .map(([key, item]) => [key, canonical(item)] as const));
   }
   return value;
@@ -81,40 +80,135 @@ function formValues(tree: unknown, path: string): unknown {
   }) : [] };
 }
 
-/** One form's on-disk config version. A read made after the version read
- * can only be newer: a save then conservatively conflicts, never pairs
- * an older in-memory value with a newer on-disk tag. */
-export class ConfigEditor {
-  private version: Promise<string | undefined> | undefined;
-  private etag: string | undefined;
 
-  constructor(private readonly response: ResponseCall) {}
+interface Snapshot {
+  tree: unknown;
+  etag: string | undefined;
+}
+interface Change { path: string; value: unknown }
 
-  private loadVersion(): Promise<string | undefined> {
-    this.version ??= this.response(V8_CONFIG).then((answer) => {
-      this.etag = answer.headers.get("etag") ?? undefined;
-      return this.etag;
-    }).catch((error: unknown) => {
-      if (isUnsupportedRoute(error)) return undefined;
-      this.version = undefined;
+const FIELD_NAMES: Record<string, string> = {
+  "routing/retry/request-retry": "Retries",
+  "access/api-keys": "Client API keys",
+  "api-keys": "Provider API keys",
+  "api-keys/claude": "Claude API keys",
+  "api-keys/codex": "Codex API keys",
+  "api-keys/gemini": "Gemini API keys",
+  "observability/usage/usage-statistics-enabled": "Usage statistics",
+};
+function fieldName(path: string): string {
+  return FIELD_NAMES[path] ?? (path === "" ? "config.yaml" : path.replaceAll("/", "."));
+}
+function same(a: unknown, b: unknown): boolean {
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+function changedTree(tree: unknown, changes: readonly Change[]): unknown {
+  let result: unknown = structuredClone(tree);
+  for (const { path, value } of changes) {
+    if (path === "") { result = structuredClone(value); continue; }
+    const root = { ...record(result) };
+    let parent = root;
+    const parts = path.split("/");
+    for (const part of parts.slice(0, -1)) {
+      const child = { ...record(parent[part]) };
+      parent[part] = child;
+      parent = child;
+    }
+    parent[parts.at(-1) ?? ""] = structuredClone(value);
+    result = root;
+  }
+  return result;
+}
+
+/** A local refusal: these field names are safe to display, never values. */
+export class ConfigConflict extends ApiError {
+  constructor(readonly fields: readonly string[]) {
+    super(412, "precondition_failed", null, null);
+    this.name = "ConfigConflict";
+  }
+}
+
+/** One authenticated API client's store. Successful writes refetch mounted
+ * queries; editor baselines remain independent only while they have drafts. */
+export class ConfigStore {
+  private initial: Promise<Snapshot> | undefined;
+  constructor(readonly response: ResponseCall, readonly changed: () => void = () => { /* No mounted queries in standalone adapters. */ }) {}
+
+  readonly read = async (signal?: AbortSignal): Promise<Snapshot> => {
+    const answer = await this.response(V8_CONFIG, { signal });
+    return { tree: answer.data, etag: answer.headers.get("etag") ?? undefined };
+  };
+  readonly ready = (): Promise<Snapshot> => {
+    this.initial ??= this.read().catch((error: unknown) => {
+      if (isUnsupportedRoute(error)) return { tree: undefined, etag: undefined };
+      this.initial = undefined;
       throw error;
     });
-    return this.version;
-  }
+    return this.initial;
+  };
+}
 
-  private checkRead(answer: ApiResponse, condition: string): void {
-    if (answer.headers.get("etag") !== condition) {
-      throw new ApiError(412, "precondition_failed", null, null);
+export class ConfigEditor {
+  private base: Snapshot | undefined;
+  private dirty = false;
+  readonly store: ConfigStore;
+
+  constructor(store: ConfigStore | ResponseCall) {
+    this.store = store instanceof ConfigStore ? store : new ConfigStore(store);
+  }
+  private get response(): ResponseCall { return this.store.response; }
+  get versioned(): boolean { return this.base?.etag !== undefined; }
+  readonly setDirty = (dirty: boolean) => { this.dirty = dirty; };
+  readonly reset = () => { this.base = undefined; this.dirty = false; };
+  readonly ready = async () => {
+    this.base ??= await this.store.ready();
+    return this.base.etag;
+  };
+  private adopt(snapshot: Snapshot): void {
+    if (!this.dirty || this.base === undefined) this.base = snapshot;
+  }
+  private async read(signal?: AbortSignal): Promise<Snapshot> {
+    const fresh = await this.store.read(signal);
+    if (this.versioned && fresh.etag === undefined) {
+      throw new Error("The server omitted the config version. Reload before saving.");
     }
+    this.adopt(fresh);
+    return fresh;
   }
-
-  private async snapshot(condition: string, signal?: AbortSignal): Promise<unknown> {
-    const answer = await this.response(V8_CONFIG, { signal });
-    this.checkRead(answer, condition);
+  private async forWrite(paths: readonly string[], wholeFile = false): Promise<Snapshot> {
+    const fresh = await this.read();
+    const base = this.base;
+    const conflicts = wholeFile && base?.etag !== fresh.etag ? ["config.yaml"] :
+      paths.filter((path) => !same(valueAt(base?.tree, path), valueAt(fresh.tree, path))).map(fieldName);
+    if (conflicts.length > 0) throw new ConfigConflict(conflicts);
+    return fresh;
+  }
+  private paths(path: string): string[] {
+    if (path === CONFIG_YAML) return [""];
+    if (path === API_KEYS) return ["access/api-keys"];
+    const family = PROVIDER_LIST.exec(path)?.[1];
+    if (family !== undefined) return [`api-keys/${family}`];
+    if (path.startsWith(`${V8_CONFIG}/`)) return [path.slice(V8_CONFIG.length + 1)];
+    const setting = SETTINGS[path.slice(MANAGEMENT.length + 1)];
+    if (path.startsWith(`${MANAGEMENT}/`) && setting !== undefined) return [setting];
+    throw new Error("This config write has no versioned route.");
+  }
+  /** Check the entire pending Settings batch before showing its review. */
+  readonly checkChanges = async (paths: readonly string[]) => {
+    await this.ready();
+    if (this.versioned && paths.length > 0) await this.forWrite(paths.flatMap((path) => this.paths(path)));
+  };
+  private async send<T>(path: string, request: ApiRequest, fresh: Snapshot, changes: readonly Change[]): Promise<T> {
+    const answer = await this.response<T>(path, { ...request, ifMatch: fresh.etag });
+    // A failed request never reaches here, never retries, and never adopts
+    // the refusal's ETag. Advance only saved fields in a dirty baseline.
+    this.base = {
+      tree: changedTree(this.base?.tree, changes),
+      etag: answer.headers.get("etag") ?? fresh.etag,
+    };
+    this.store.changed();
     return answer.data;
   }
-
-  readonly ready = () => this.loadVersion();
 
   /** Config-backed credential toggles also save config.yaml. Resolve the
    * credential by the v8 read's stable auth index, and retain every other
@@ -123,14 +217,14 @@ export class ConfigEditor {
     credential: Pick<Credential, "name" | "auth_index">,
     disabled: boolean,
   ): Promise<StatusAnswer> => {
-    await this.loadVersion();
-    if (this.etag === undefined) {
+    await this.ready();
+    if (this.base?.etag === undefined) {
       return (await this.response<StatusAnswer>(AUTH_FILE_STATUS, {
         method: "PATCH", json: { name: credential.name, auth_index: credential.auth_index, disabled },
       })).data;
     }
-    const condition = this.etag;
-    const snapshot = await this.snapshot(condition);
+    const fresh = await this.forWrite(["api-keys"]);
+    const snapshot = fresh.tree;
     const families = record(record(snapshot)["api-keys"]);
     const changed: Record<string, unknown> = {};
     const matches = (entry: Record<string, unknown>) => credential.auth_index !== "" &&
@@ -187,39 +281,54 @@ export class ConfigEditor {
     }
     if (Object.keys(changed).length === 0) {
       // The displayed credential no longer names a key in the current file.
-      throw new ApiError(412, "precondition_failed", null, null);
+      throw new ConfigConflict(["Provider API keys"]);
     }
-    await this.call(V8_CONFIG, { method: "PATCH", json: { "api-keys": changed }, ifMatch: condition });
+    await this.send(V8_CONFIG, { method: "PATCH", json: { "api-keys": changed } }, fresh,
+      Object.entries(changed).map(([family, value]) => ({ path: `api-keys/${family}`, value })));
     return { status: "ok", disabled };
   };
 
+
   readonly call = async <T>(path: string, request: ApiRequest = {}): Promise<T> => {
-    await this.loadVersion();
+    await this.ready();
     const writing = request.method !== undefined && request.method !== "GET";
-    // Older endpoints remain usable, without inventing an If-Match value.
-    if (this.etag === undefined) return (await this.response<T>(path, request)).data;
-    const condition = request.ifMatch ?? this.etag;
-    if (!writing && (path === CONFIG || path === API_KEYS || PROVIDER_LIST.test(path))) {
-      return formValues(await this.snapshot(condition, request.signal), path) as T;
+    if (!this.versioned) {
+      const answer = await this.response<T>(path, request);
+      if (writing) this.store.changed();
+      return answer.data;
     }
+    if (!writing) {
+      if (path === CONFIG_YAML) {
+        const answer = await this.response<T>(V8_YAML, request);
+        this.adopt({ tree: this.base?.tree, etag: answer.headers.get("etag") ?? undefined });
+        return answer.data;
+      }
+      if (path === CONFIG || path === API_KEYS || PROVIDER_LIST.test(path) || path === V8_CONFIG) {
+        const fresh = await this.read(request.signal);
+        return (path === V8_CONFIG ? fresh.tree : formValues(fresh.tree, path)) as T;
+      }
+      return (await this.response<T>(path, request)).data;
+    }
+    const locations = this.paths(path);
+    const fresh = await this.forWrite(locations, path === CONFIG_YAML);
     let target = path;
     let change = request;
+    let value: unknown = request.json;
     if (path === CONFIG_YAML) {
       target = V8_YAML;
-    } else if (writing && path.startsWith(`${MANAGEMENT}/`)) {
+    } else if (path.startsWith(`${MANAGEMENT}/`)) {
       const setting = SETTINGS[path.slice(MANAGEMENT.length + 1)];
       if (setting !== undefined) {
         target = `${V8_CONFIG}/${setting}`;
-        change = { method: "PUT", json: record(request.json).value };
+        value = record(request.json).value;
+        change = { method: "PUT", json: value };
       } else if (path === API_KEYS) {
-        // Index deletes and read/modify/write additions are guarded by the
-        // form's version, so another writer cannot move a different key here.
-        const answer = formValues(await this.snapshot(condition), API_KEYS) as { "api-keys": string[] | null };
+        const answer = formValues(fresh.tree, API_KEYS) as { "api-keys": string[] | null };
         const keys = [...(answer["api-keys"] ?? [])];
         if (request.method === "DELETE") {
           const index = Number(request.query?.index);
           if (!Number.isInteger(index) || request.configTarget === undefined || keys[index] !== request.configTarget.key) {
-            throw new ApiError(412, "precondition_failed", null, null);
+            throw new ConfigConflict(["Client API keys"]);
           }
           keys.splice(index, 1);
         } else if (request.method === "PATCH") {
@@ -231,13 +340,13 @@ export class ConfigEditor {
           else keys[at] = key;
         }
         target = `${V8_CONFIG}/access/api-keys`;
-        change = { method: "PUT", json: request.method === "PUT" ? request.json : keys };
+        value = request.method === "PUT" ? request.json : keys;
+        change = { method: "PUT", json: value };
       } else if (PROVIDER_LIST.test(path)) {
         const family = PROVIDER_LIST.exec(path)?.[1] ?? "";
-        const snapshot = await this.snapshot(condition);
-        const stored = record(record(snapshot)["api-keys"])[family];
+        const stored = record(record(fresh.tree)["api-keys"])[family];
         const groups: unknown[] = Array.isArray(stored) ? stored.map((item: unknown) => item) : [];
-        const existing = record(formValues(snapshot, path))[`${family}-api-key`];
+        const existing = record(formValues(fresh.tree, path))[`${family}-api-key`];
         const entries: unknown[] = Array.isArray(existing) ? existing : [];
         if (request.method === "DELETE") {
           const index = Number(request.query?.index);
@@ -245,7 +354,7 @@ export class ConfigEditor {
           const intended = request.configTarget;
           if (!Number.isInteger(index) || intended === undefined || entry["api-key"] !== intended.key ||
               (entry["base-url"] ?? "") !== (intended.baseUrl ?? "")) {
-            throw new ApiError(412, "precondition_failed", null, null);
+            throw new ConfigConflict([fieldName(`api-keys/${family}`)]);
           }
           let place = 0;
           for (let i = 0; i < groups.length; i++) {
@@ -260,8 +369,8 @@ export class ConfigEditor {
         } else {
           const next: unknown[] = Array.isArray(request.json) ? request.json : [];
           if (next.length !== entries.length + 1 ||
-              entries.some((entry, index) => JSON.stringify(canonical(writable(entry))) !== JSON.stringify(canonical(writable(next[index]))))) {
-            throw new ApiError(412, "precondition_failed", null, null);
+              entries.some((entry, index) => !same(writable(entry), writable(next[index])))) {
+            throw new ConfigConflict([fieldName(`api-keys/${family}`)]);
           }
           const key = writable(next.at(-1));
           const baseUrl = key["base-url"];
@@ -269,22 +378,10 @@ export class ConfigEditor {
           groups.push({ ...(baseUrl === undefined ? {} : { "base-url": baseUrl }), keys: [key] });
         }
         target = `${V8_CONFIG}/api-keys/${family}`;
-        change = { method: "PUT", json: groups };
-      } else {
-        // A newly added writer must be mapped deliberately, never silently
-        // fall back to an endpoint that ignores the precondition.
-        throw new Error("This config write has no versioned route.");
+        value = groups;
+        change = { method: "PUT", json: value };
       }
     }
-    const answer = await this.response<T>(target, {
-      ...change, ...(writing ? { ifMatch: request.ifMatch ?? condition } : {}),
-    });
-    if (!writing) this.checkRead(answer, condition);
-    if (writing) {
-      const next = answer.headers.get("etag");
-      // If a guarded server drops its tag, fail closed on the next write.
-      if (next !== null) this.etag = next;
-    }
-    return answer.data;
+    return this.send<T>(target, change, fresh, path === CONFIG_YAML ? [] : [{ path: locations[0] ?? "", value }]);
   };
 }

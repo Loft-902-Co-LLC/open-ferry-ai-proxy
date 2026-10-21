@@ -6,6 +6,7 @@
 // Both check access with the same code, so each refusal has a twin here.
 
 import { isApiError, type ApiError } from "./client";
+import { ConfigConflict } from "./configEditor";
 
 /** A refusal that is about access, not about the call itself. */
 export type AccessProblem =
@@ -21,7 +22,7 @@ export type CallProblem =
   | AccessProblem
   | { kind: "ledger-unavailable" }
   | { kind: "config-not-saved" }
-  | { kind: "config-conflict" }
+  | { kind: "config-conflict"; fields?: readonly string[]; local?: boolean }
   | { kind: "unsupported" }
   | { kind: "not-found" }
   | { kind: "invalid"; message: string | null }
@@ -94,7 +95,9 @@ function problemOf(error: ApiError): CallProblem {
     return { kind: "config-not-saved" };
   }
   if (error.status === 412) {
-    return { kind: "config-conflict" };
+    return error instanceof ConfigConflict
+      ? { kind: "config-conflict", fields: error.fields, local: true }
+      : { kind: "config-conflict" };
   }
   if (error.status === 404) {
     return error.code === null ? { kind: "unsupported" } : { kind: "not-found" };
