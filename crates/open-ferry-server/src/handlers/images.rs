@@ -219,7 +219,7 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
         Ok(boundary) => boundary,
         Err(text) => return invalid_request(400, text),
     };
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,
         Err(response) => return response,
@@ -292,7 +292,7 @@ async fn read_json(
     client: &ClientRequest,
     body: Body,
 ) -> Result<JsonRequest, Response> {
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let raw = body::read_decoded(&client.headers, body, limit).await?;
     if !json::valid(&raw) {
         return Err(invalid_request(400, "body must be valid JSON"));

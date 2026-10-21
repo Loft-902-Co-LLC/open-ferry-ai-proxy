@@ -36,7 +36,7 @@ pub(crate) async fn messages(
 ) -> Response {
     let settings = state.settings();
     let passthrough = settings.config.passthrough_headers;
-    let limit = settings.config.body_limit;
+    let limit = crate::ingress::body_limit(settings.config.body_limit);
     let nonstream_keepalive = settings.config.nonstream_keepalive;
     let keepalive = settings.config.streaming.keepalive;
     let pre_ft = pre_first_token_interval(&settings.config.streaming);
@@ -113,7 +113,7 @@ pub(crate) async fn count_tokens(
 ) -> Response {
     let settings = state.settings();
     let passthrough = settings.config.passthrough_headers;
-    let limit = settings.config.body_limit;
+    let limit = crate::ingress::body_limit(settings.config.body_limit);
     drop(settings);
     let raw = match body::read_raw(&client.headers, body, limit).await {
         Ok(raw) => raw,

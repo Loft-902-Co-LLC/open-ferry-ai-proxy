@@ -28,8 +28,14 @@ tokio::task_local! {
 #[derive(Clone)]
 struct RequestScope {
     ingress: Ingress,
+    body_limit: usize,
     rejected: Arc<AtomicBool>,
     decoded: Arc<Mutex<Vec<Bytes>>>,
+}
+
+/// The limit captured when this upload started, including downstream decoding.
+pub(crate) fn body_limit(current: usize) -> usize {
+    REQUEST_INGRESS.try_with(|scope| scope.body_limit).unwrap_or(current)
 }
 
 /// The budget of the request currently being decoded. Standalone body-reader
@@ -235,7 +241,7 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
         ]
         .iter()
         .any(|prefix| parts.uri.path().starts_with(prefix));
-    let response = admitted(ingress, parts, raw, parser, next);
+    let response = admitted(ingress, snapshot.body_limit, parts, raw, parser, next);
     if owned_upload {
         return match tokio::spawn(response).await {
             Ok(response) => response,
@@ -248,6 +254,7 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
 
 async fn admitted(
     ingress: Ingress,
+    body_limit: usize,
     mut parts: http::request::Parts,
     raw: Bytes,
     parser: Reservation,
@@ -258,6 +265,7 @@ async fn admitted(
     // whose collected bytes no longer share the input Bytes owner.
     let scope = RequestScope {
         ingress,
+        body_limit,
         rejected: Arc::new(AtomicBool::new(false)),
         decoded: Arc::default(),
     };

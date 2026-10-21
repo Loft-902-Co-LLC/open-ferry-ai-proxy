@@ -118,7 +118,7 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
             let limit = if plan == Capture::Deferred {
                 open_ferry_core::observe::request_log::CAPTURE_LIMIT
             } else {
-                state.settings().config.body_limit
+                crate::ingress::body_limit(state.settings().config.body_limit)
             };
             let len = buffered.0.len().min(limit);
             (
@@ -130,7 +130,7 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
             )
         }
         (_, Capture::Eager) => {
-            let limit = state.settings().config.body_limit;
+            let limit = crate::ingress::body_limit(state.settings().config.body_limit);
             let (raw, truncated, body) = read_ahead(body, limit).await;
             (body, RequestBody::Captured { raw, truncated })
         }

@@ -38,7 +38,7 @@ pub(crate) async fn chat_completions(
     client: ClientRequest,
     body: Body,
 ) -> Response {
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let raw = match body::read_decoded(&client.headers, body, limit).await {
         Ok(raw) => raw,
         Err(response) => return response,
@@ -77,7 +77,7 @@ pub(crate) async fn completions(
     client: ClientRequest,
     body: Body,
 ) -> Response {
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let raw = match body::read_decoded(&client.headers, body, limit).await {
         Ok(raw) => raw,
         Err(response) => return response,
