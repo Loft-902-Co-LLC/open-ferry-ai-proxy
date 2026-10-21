@@ -154,12 +154,7 @@ pub fn claude_cli_auth(
         updated_at: Some(ctx.now),
         ..Auth::default()
     };
-    apply_auth_excluded_models_meta(
-        &mut auth,
-        &ctx.oauth_excluded_models,
-        &entry.excluded_models,
-        AUTH_KIND_API_KEY,
-    );
+    apply_auth_excluded_models_meta(&mut auth, &entry.excluded_models, AUTH_KIND_API_KEY);
     auth
 }
 

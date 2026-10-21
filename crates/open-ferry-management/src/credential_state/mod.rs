@@ -6,7 +6,7 @@
 // authFileHeadersStringMap, syncAuthFileMetadataFields and the attribute
 // syncs it calls, authFileIntValue, authFileBoolValue),
 // auth_files_refresh.go (RefreshAuthFiles) and auth_files.go
-// (lookupAuthFile, matchesAuthFileLookup) (v8.0.32, MIT).
+// (lookupAuthFile, matchesAuthFileLookup) (v8.0.36, MIT).
 // The config API key branch of PatchAuthFileStatus is ported with
 // config_apikey_disable.go (configAPIKeyDisablePattern).
 // https://github.com/router-for-me/CLIProxyAPI
@@ -339,12 +339,15 @@ fn edit_failed(error: EditError<String>) -> Response {
 
 /// The credential a fields change names, by ID or by file name.
 fn fields_target(manager: &Manager, name: &str) -> Option<Arc<Auth>> {
-    manager.get(name).or_else(|| {
-        manager
-            .list()
-            .into_iter()
-            .find(|auth| auth.file_name == name)
-    })
+    manager
+        .get(name)
+        .or_else(|| {
+            manager
+                .list()
+                .into_iter()
+                .find(|auth| auth.file_name == name)
+        })
+        .filter(|auth| auth.auth_source_kind() != Some(open_ferry_core::auth::AuthSource::Config))
 }
 
 /// Turns the config API key whose credential has `id` off or on, saves the
@@ -752,6 +755,18 @@ fn apply_fields(
             return Err("field name is required".to_owned());
         }
         let root = root_field(path);
+        if root == "excluded_models" {
+            if path != "excluded_models" {
+                return Err("excluded_models does not support nested fields".to_owned());
+            }
+            if !value.is_null()
+                && !value
+                    .as_array()
+                    .is_some_and(|models| models.iter().all(Value::is_string))
+            {
+                return Err("excluded_models must be a string array or null".to_owned());
+            }
+        }
         if path == ATTRIBUTE_WEIGHT {
             match value {
                 Value::Null => {
@@ -791,6 +806,16 @@ fn apply_fields(
     }
     if changed {
         sync_metadata_fields(auth, &roots);
+        if roots.contains("excluded_models") {
+            let (models, invalid) =
+                open_ferry_core::auth::synthesizer::file::extract_excluded_models(&auth.metadata);
+            if let Some(error) = invalid {
+                return Err(error.to_string());
+            }
+            auth.attributes.remove("excluded_models");
+            auth.attributes.remove("excluded_models_hash");
+            open_ferry_core::auth::synthesizer::apply_auth_excluded_models_meta(auth, &models, "");
+        }
     }
     Ok(changed)
 }

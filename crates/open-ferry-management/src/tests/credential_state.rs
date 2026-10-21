@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // auth_files_status_sync_test.go, auth_files_patch_fields_test.go and
-// auth_files_refresh_test.go (v8.0.32, MIT).
+// auth_files_refresh_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes of `crate::credential_state`: turning credentials on and off,
@@ -1511,4 +1511,127 @@ fn auth_json_matches_go() {
             r#""next_retry_after":"0001-01-01T00:00:00Z"},"ok":true}"#,
         )
     );
+}
+
+// Ported from auth_files_excluded_models_test.go (v8.0.36).
+#[tokio::test]
+async fn exclusion_patches_rebuild_only_credential_owned_rules() {
+    for (fields, expected) in [
+        (
+            r#""excluded_models":[" Local-* ","LOCAL-*"]"#,
+            Some("local-*"),
+        ),
+        (r#""excluded-models":["local-*"]"#, Some("local-*")),
+        (
+            r#""excluded_models":[],"excluded-models":["alias-*"]"#,
+            None,
+        ),
+        (r#""excluded_models":[]"#, None),
+        (r#""excluded_models":[" ","\t"]"#, None),
+        (r#""excluded_models":null"#, None),
+    ] {
+        let dir = AuthDir::new();
+        let mut config = dir.config();
+        config
+            .oauth_excluded_models
+            .insert("codex".into(), vec!["global-*".into()]);
+        let api = Api::over_with(&dir, config, None);
+        let mut record = codex_file(
+            &dir,
+            "credential.json",
+            r#"{"type":"codex","excluded-models":["old-*"]}"#,
+        );
+        record.attributes.insert("auth_kind".into(), "oauth".into());
+        record
+            .attributes
+            .insert("excluded_models".into(), "stale-*".into());
+        record
+            .attributes
+            .insert("excluded_models_hash".into(), "stale-hash".into());
+        api.register(record);
+        patch(
+            &api,
+            FIELDS,
+            &format!(r#"{{"name":"credential.json",{fields}}}"#),
+        )
+        .await
+        .expect(StatusCode::OK);
+        for record in [
+            current(&api, "credential.json"),
+            Arc::new(upserts(&api).remove(0)),
+        ] {
+            assert_eq!(record.attribute("excluded_models"), expected);
+            let hash = expected.map(|s| {
+                open_ferry_core::auth::synthesizer::compute_excluded_models_hash(&[s.to_owned()])
+            });
+            assert_eq!(record.attribute("excluded_models_hash"), hash.as_deref());
+            assert_eq!(record.attribute("auth_kind"), Some("oauth"));
+            assert!(!record.metadata.contains_key("excluded-models"));
+        }
+        assert!(
+            !dir.read_json("credential.json")
+                .as_object()
+                .unwrap()
+                .contains_key("excluded-models")
+        );
+    }
+}
+
+#[tokio::test]
+async fn exclusion_patches_reject_invalid_shapes_without_mutating_or_saving() {
+    for fields in [
+        r#""excluded_models":123"#,
+        r#""excluded-models":true"#,
+        r#""excluded_models":{}"#,
+        r#""excluded_models":["a",null]"#,
+        r#""excluded_models":[42,false]"#,
+        r#""excluded_models":[["a"]]"#,
+        r#""excluded_models":"a""#,
+        r#""excluded_models":"a,b""#,
+        r#""excluded-models":"a""#,
+        r#""excluded_models":" ""#,
+        r#""excluded_models.child":["a"]"#,
+        r#""excluded-models.0":"a""#,
+    ] {
+        let dir = AuthDir::new();
+        let api = Api::over(&dir);
+        let data = r#"{"type":"codex","excluded_models":["old"]}"#;
+        api.register(codex_file(&dir, "credential.json", data));
+        let saved = std::fs::read(dir.path().join("credential.json")).unwrap();
+        let before = current(&api, "credential.json");
+        patch(
+            &api,
+            FIELDS,
+            &format!(r#"{{"name":"credential.json","abc":true,{fields}}}"#),
+        )
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+        let after = current(&api, "credential.json");
+        assert_eq!(after.metadata, before.metadata);
+        assert_eq!(after.attributes, before.attributes);
+        assert_eq!(
+            std::fs::read(dir.path().join("credential.json")).unwrap(),
+            saved
+        );
+        assert!(api.sync.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn fields_reject_config_sourced_credentials() {
+    let dir = AuthDir::new();
+    let api = Api::over_with(&dir, config_key(&dir), None);
+    let id = config_key_auth(&api);
+    let before = current(&api, &id);
+    patch(
+        &api,
+        FIELDS,
+        &format!(r#"{{"name":"{id}","excluded_models":[]}}"#),
+    )
+    .await
+    .assert(StatusCode::NOT_FOUND, r#"{"error":"auth file not found"}"#);
+    let after = current(&api, &id);
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.attributes, before.attributes);
+    assert!(api.sync.calls().is_empty());
 }
