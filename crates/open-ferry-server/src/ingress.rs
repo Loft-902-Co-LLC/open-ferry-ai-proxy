@@ -256,7 +256,7 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
     }
     let snapshot = ingress.settings.borrow().clone();
     let (parts, body) = request.into_parts();
-    let (raw, parser) = match buffer(&ingress, &snapshot, &parts.headers, body).await {
+    let (raw, parser, oversized) = match buffer(&ingress, &snapshot, &parts.headers, body).await {
         Ok(buffered) => buffered,
         Err(response) => return response,
     };
@@ -272,7 +272,7 @@ async fn layer(State(ingress): State<Ingress>, request: Request, next: Next) -> 
         ]
         .iter()
         .any(|prefix| parts.uri.path().starts_with(prefix));
-    let response = admitted(ingress, snapshot.body_limit, parts, raw, parser, next);
+    let response = admitted(ingress, snapshot.body_limit, parts, raw, parser, oversized, next);
     if owned_upload {
         return match tokio::spawn(response).await {
             Ok(response) => response,
@@ -289,6 +289,7 @@ async fn admitted(
     parts: http::request::Parts,
     raw: Bytes,
     parser: Reservation,
+    oversized: bool,
     next: Next,
 ) -> Response {
     // Keep the reservation through downstream extractors, including ones
@@ -300,10 +301,15 @@ async fn admitted(
         decoded: Arc::default(),
     };
     let _hold = (raw.clone(), parser);
+    let body = if oversized {
+        Body::from_stream(futures_util::stream::iter([
+            Ok(raw), Err(BodyTooLarge),
+        ]))
+    } else { Body::from(raw) };
     let response = REQUEST_INGRESS
         .scope(
             scope.clone(),
-            next.run(Request::from_parts(parts, Body::from(raw))),
+            next.run(Request::from_parts(parts, body)),
         )
         .await;
     // Handlers may translate body failures; preserve the budget's 503 and
@@ -320,6 +326,13 @@ async fn admitted(
     // A long SSE response does not extend the handler's temporary allowance.
     response
 }
+
+#[derive(Debug)]
+pub(crate) struct BodyTooLarge;
+impl std::fmt::Display for BodyTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("http: request body too large") }
+}
+impl std::error::Error for BodyTooLarge {}
 
 /// The shape used by the server's pre-handler body-size rejection.
 pub(crate) fn rejected(status: u16, message: &'static str) -> Response {
@@ -353,7 +366,7 @@ async fn buffer(
     snapshot: &Snapshot,
     headers: &HeaderMap,
     body: Body,
-) -> Result<(Bytes, Reservation), Response> {
+) -> Result<(Bytes, Reservation, bool), Response> {
     let declared = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|length| length.to_str().ok())
@@ -394,7 +407,7 @@ async fn buffer(
         buffer.bytes = Vec::with_capacity(length as usize);
     }
     if body.is_end_stream() {
-        return Ok((buffer.finish(), parser));
+        return Ok((buffer.finish(), parser, false));
     }
     let mut data = body.into_data_stream();
     let mut idle = snapshot
@@ -426,7 +439,9 @@ async fn buffer(
             continue;
         }
         if frame.len() > snapshot.body_limit.saturating_sub(buffer.len()) {
-            return Err(rejected(413, "http: request body too large"));
+            // Preserve the route's upstream error shape. The bounded prefix
+            // is replayed once, then its reader receives the size error.
+            return Ok((buffer.finish(), parser, true));
         }
         buffer.push(&frame).map_err(|()| {
             ingress.warn("buffered body bytes");
@@ -442,7 +457,7 @@ async fn buffer(
             timer.as_mut().reset(Instant::now() + duration);
         }
     }
-    Ok((buffer.finish(), parser))
+    Ok((buffer.finish(), parser, false))
 }
 
 #[derive(Clone, Debug)]
