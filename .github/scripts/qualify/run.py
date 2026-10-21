@@ -175,7 +175,7 @@ class QualificationFailure(RuntimeError):
 
 def clean(value):
     text = str(value)
-    for secret in SECRETS:
+    for secret in sorted(SECRETS, key=len, reverse=True):
         text = text.replace(secret, "[redacted]")
     return text
 
@@ -614,20 +614,33 @@ class Qualification:
         self.root_auth_dirs = []
 
     def show_failed_install(self):
-        # init prints its keys only once the config is written: with no
-        # config the output holds none, and with one its keys are redacted.
+        # init prints keys only after writing config. A dangling link or an
+        # unreadable/incomplete config cannot establish that output is safe.
         failure = WORK / "private-command-failure.txt"
         if not failure.is_file():
-            return
-        if self.config.exists():
+            return False
+        try:
+            self.config.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            record("Installer output withheld: its config could not be inspected")
+            return False
+        else:
             try:
                 config = yaml.safe_load(self.config.read_text(encoding="utf-8"))
-                keys = [config["management"]["secret-key"], *config["access"]["api-keys"]]
+                management = config["management"]["secret-key"]
+                clients = config["access"]["api-keys"]
+                require(isinstance(management, str) and bool(management)
+                        and isinstance(clients, list) and bool(clients)
+                        and all(isinstance(key, str) and bool(key) for key in clients),
+                        "incomplete installer keys")
             except Exception:
-                record("Installer output withheld: its config exists but its keys couldn't be read")
-                return
-            SECRETS.extend(key for key in keys if key)
+                record("Installer output withheld: its config exists but all keys couldn't be read")
+                return False
+            SECRETS.extend([management, *clients])
         record("Installer output:\n" + failure.read_text(encoding="utf-8"))
+        return True
 
     def install(self, base):
         if not self.published:
@@ -652,10 +665,15 @@ class Qualification:
                 self.prepare_root_auth()
             if self.published:
                 command(["gh", "auth", "status"], env=self.env, sensitive=True)
+            # Other sensitive commands can write this file too. Only the
+            # current installer failure may be considered for diagnostics.
+            (WORK / "private-command-failure.txt").unlink(missing_ok=True)
             try:
                 installed = command(args, env=self.env, sensitive=True, timeout=180)
-            except RuntimeError:
-                self.show_failed_install()
+            except RuntimeError as error:
+                if self.show_failed_install():
+                    raise RuntimeError(str(error).replace(
+                        "installer output withheld: init may print keys", "installer output above")) from None
                 raise
         finally:
             self.remove_root_auth()
