@@ -13,6 +13,8 @@ use tokio::time::Instant;
 /// h2's graceful ping exchange. Accepted streams also have an absolute drain
 /// bound of this grace plus the configured body deadline.
 const GOAWAY_GRACE: Duration = Duration::from_secs(5);
+// A signalled reset is an attempt, not proof that h2 released queued DATA.
+const RESET_GRACE: Duration = Duration::from_secs(1);
 
 /// Reserve half the process limit (at least 256 descriptors) for upstream
 /// sockets, credentials and files. Split the remainder between two listeners,
@@ -383,7 +385,9 @@ impl Traffic {
                 consider(at + duration, "response write progress", None);
             }
             for (&id, progress) in &state.deliveries {
-                if progress.pending != 0 && !progress.reset {
+                if progress.reset {
+                    consider(progress.progressed + RESET_GRACE, "stream reset grace", None);
+                } else if progress.pending != 0 {
                     let stream =
                         (state.protocol == Protocol::Http2 && state.send_window > 0).then_some(id);
                     consider(
@@ -515,8 +519,10 @@ pub(super) async fn watch_traffic(core: Weak<ConnCore>, traffic: Arc<Traffic>) {
                     let mut state = traffic.state();
                     if let Some(id) = stream
                         && let Some(progress) = state.deliveries.get_mut(&id)
-                        && let Some(cancel) = progress.cancel.clone() {
+                        && let Some(cancel) = progress.cancel.clone()
+                        && !cancel.done.load(Ordering::Acquire) {
                         progress.reset = true;
+                        progress.progressed = Instant::now();
                         drop(state);
                         cancel.cancel();
                         continue;
@@ -545,6 +551,7 @@ struct StreamProgress {
 #[derive(Default)]
 struct TaskCancel {
     cancelled: AtomicBool,
+    done: AtomicBool,
     wake: Notify,
 }
 impl TaskCancel {
@@ -560,10 +567,18 @@ impl TaskCancel {
     }
 }
 
+struct TaskCompletion(Arc<TaskCancel>);
+impl Drop for TaskCompletion {
+    fn drop(&mut self) {
+        self.0.done.store(true, Ordering::Release);
+    }
+}
+
 tokio::task_local! { static STREAM_TASK: Arc<TaskCancel>; }
 
 /// Hyper's H2 request and upgrade tasks have independent cancellation scopes.
-/// Dropping a request task drops its h2 send handle, which sends RST_STREAM/CANCEL.
+/// Cancelling a live producer can reset its send handle. A completed producer
+/// may leave EOS DATA queued in h2, so task completion is tracked separately.
 #[derive(Clone)]
 pub(super) struct StreamExecutor(pub(super) Arc<Traffic>);
 impl<F> hyper::rt::Executor<F> for StreamExecutor
@@ -576,6 +591,7 @@ where
         let task = ProtocolTask::new(self.0.clone());
         tokio::spawn(STREAM_TASK.scope(cancel.clone(), async move {
             let _task = task;
+            let _completed = TaskCompletion(cancel.clone());
             tokio::select! { biased; () = cancel.cancelled() => {}, _ = future => {} }
         }));
     }
