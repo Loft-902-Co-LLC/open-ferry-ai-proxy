@@ -406,3 +406,19 @@ fn numbers_keep_their_text() {
     let start = find_event(&frames, "message_start").expect("message_start");
     assert_eq!(start["message"]["id"], "-0");
 }
+
+#[test]
+fn whole_response_ignores_trailing_data_after_the_first_value() {
+    let body = r#"{"id":"interaction_1","model":"m","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}],"usage":{"total_input_tokens":3,"total_output_tokens":2}}"#;
+    let expected = convert_interactions_response_to_claude_non_stream("m", body.as_bytes());
+    assert_eq!(expected["model"], "m");
+    for suffix in [" trailing", " {}", " []"] {
+        assert_eq!(
+            convert_interactions_response_to_claude_non_stream(
+                "m",
+                format!("{body}{suffix}").as_bytes()
+            ),
+            expected
+        );
+    }
+}
