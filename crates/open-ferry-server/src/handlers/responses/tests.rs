@@ -343,16 +343,18 @@ async fn subscription_telemetry_is_filtered_for_all_clients() {
             "data: {\"type\":\"response.subscription_usage\"}\n\n",
         ] {
             let input = format!("{CREATED}{private}{COMPLETED}");
-            for split in 0..=input.len() {
-                let body = run(
-                    Framer::new(codex),
-                    vec![ok(&input[..split]), ok(&input[split..])],
-                )
-                .await;
+            // Executors emit complete fields or frames. Arbitrary colon-leading
+            // fragments follow upstream's newline-repair heuristic, tested in framer.rs.
+            for chunks in [
+                vec![ok(&input)],
+                vec![ok(CREATED), ok(private), ok(COMPLETED)],
+                input.split_inclusive('\n').map(ok).collect(),
+            ] {
+                let body = run(Framer::new(codex), chunks).await;
                 assert_eq!(
                     body,
                     format!("{CREATED}{COMPLETED}\n"),
-                    "{private} split {split}"
+                    "{private} codex={codex}"
                 );
             }
         }
