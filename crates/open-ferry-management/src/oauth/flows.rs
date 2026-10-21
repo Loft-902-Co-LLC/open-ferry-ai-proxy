@@ -652,9 +652,11 @@ async fn complete(
                 outcome == super::siwc_bind::SaveOutcome::Synchronized,
             )
         }),
-        _ => Err(super::siwc_bind::SaveError::Failed(std::io::Error::other(
-            "OAuth credential kind mismatch",
-        ))),
+        _ => {
+            tracing::error!("{SAVE_FAILED}: OAuth credential kind mismatch");
+            store.set_error(&login.state, SAVE_FAILED);
+            return;
+        }
     };
     match saved {
         Ok((path, synchronized)) => {
