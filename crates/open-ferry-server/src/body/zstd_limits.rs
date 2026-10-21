@@ -25,6 +25,7 @@ const FIXED_SCRATCH: usize = 6 << 20;
 ///   `validate_block` bounds FSE probability counts *before* ruzstd's unchecked
 ///   zero-run resize at fse/fse_decoder.rs:269-280. Without that validation the
 ///   fixed table allowance would not cover malformed input.
+///
 /// The reservation never shrinks between frames, covering retained scratch.
 pub(super) fn working_bytes(window: usize) -> usize {
     ring_capacity(window + BLOCK) + ring_capacity(window + BLOCK + MAX_LITERALS) + FIXED_SCRATCH
