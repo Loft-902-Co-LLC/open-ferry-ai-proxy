@@ -192,7 +192,7 @@ async fn declared_body_limit(
     request: Request,
     next: Next,
 ) -> Response {
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let length = request
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -224,7 +224,7 @@ async fn logged_body_limit(
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();
-    match crate::body::read_raw(&parts.headers, body, state.settings().config.body_limit).await {
+    match crate::body::read_raw(&parts.headers, body, crate::ingress::body_limit(state.settings().config.body_limit)).await {
         Ok(raw) => {
             next.run(Request::from_parts(parts, axum::body::Body::from(raw)))
                 .await

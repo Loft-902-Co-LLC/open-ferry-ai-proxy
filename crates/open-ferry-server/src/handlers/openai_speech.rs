@@ -94,7 +94,7 @@ pub(crate) async fn speech(
         let settings = state.settings();
         (
             settings.config.passthrough_headers,
-            settings.config.body_limit,
+            crate::ingress::body_limit(settings.config.body_limit),
         )
     };
     let raw = match body::read_decoded(&client.headers, body, limit).await {

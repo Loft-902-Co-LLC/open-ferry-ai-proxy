@@ -124,7 +124,7 @@ pub(crate) async fn websocket(
             return handshake_error(400);
         }
     };
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let turn_state = headers
         .get(TURN_STATE_HEADER)
         .map(|value| String::from_utf8_lossy(value.as_bytes()).trim().to_owned())

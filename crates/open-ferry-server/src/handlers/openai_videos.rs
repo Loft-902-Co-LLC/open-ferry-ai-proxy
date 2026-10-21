@@ -116,7 +116,7 @@ impl Settings {
         let settings = state.settings();
         Self {
             passthrough: settings.config.passthrough_headers,
-            body_limit: settings.config.body_limit,
+            body_limit: crate::ingress::body_limit(settings.config.body_limit),
             keepalive: settings.config.nonstream_keepalive,
             ttl: settings.config.video_auth_ttl,
         }

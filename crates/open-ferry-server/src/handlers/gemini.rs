@@ -142,7 +142,7 @@ pub(crate) async fn action(
 
     let settings = state.settings();
     let passthrough = settings.config.passthrough_headers;
-    let limit = settings.config.body_limit;
+    let limit = crate::ingress::body_limit(settings.config.body_limit);
     let nonstream_keepalive = settings.config.nonstream_keepalive;
     let keepalive = settings.config.streaming.keepalive;
     let pre_ft = crate::stream::pre_first_token_interval(&settings.config.streaming);

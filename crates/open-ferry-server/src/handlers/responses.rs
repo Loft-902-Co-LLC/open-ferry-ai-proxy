@@ -76,7 +76,7 @@ pub(crate) async fn responses(
     client: ClientRequest,
     body: Body,
 ) -> Response {
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let mut raw = match body::read_decoded(&client.headers, body, limit).await {
         Ok(raw) => raw,
         Err(response) => return response,
@@ -106,7 +106,7 @@ pub(crate) async fn compact(
     client: ClientRequest,
     body: Body,
 ) -> Response {
-    let limit = state.settings().config.body_limit;
+    let limit = crate::ingress::body_limit(state.settings().config.body_limit);
     let mut raw = match body::read_decoded(&client.headers, body, limit).await {
         Ok(raw) => raw,
         Err(response) => return response,

@@ -251,6 +251,44 @@ async fn a_multipart_body_at_the_limit_fits_the_budget_floor() {
 }
 
 #[tokio::test]
+async fn an_upload_keeps_its_size_limit_across_a_reload() {
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+    let dispatcher = FakeDispatcher::new(vec![]);
+    let state = state(ServerConfig { body_limit: 16, ..ServerConfig::default() }, FakeCatalog::new(), &dispatcher);
+    let ingress = state.ingress().clone();
+    let handler_state = state.clone();
+    let router = ingress.wrap(Router::new().route("/", post(move |request: Request| {
+        let state = handler_state.clone();
+        async move {
+            let limit = body_limit(state.settings().config.body_limit);
+            let (parts, body) = request.into_parts();
+            match crate::body::read_raw(&parts.headers, body, limit).await {
+                Ok(bytes) => Response::new(Body::from(bytes)),
+                Err(response) => response,
+            }
+        }
+    })));
+    let started = Arc::new(Notify::new());
+    let proceed = Arc::new(Notify::new());
+    let (signal, gate) = (started.clone(), proceed.clone());
+    let body = Body::from_stream(stream::once(async move {
+        signal.notify_one();
+        gate.notified().await;
+        Ok::<_, std::io::Error>(Bytes::from_static(b"abcdefghijkl"))
+    }));
+    let task = tokio::spawn(router.clone().oneshot(Request::post("/").header(header::CONTENT_LENGTH, "12").body(body).unwrap()));
+    started.notified().await;
+    state.set_config(ServerConfig { body_limit: 4, ..ServerConfig::default() });
+    proceed.notify_one();
+    let response = task.await.unwrap().unwrap();
+    assert_eq!(response.status(), 200);
+    drop(response);
+    let response = router.oneshot(Request::post("/").header(header::CONTENT_LENGTH, "12").body(Body::from("abcdefghijkl")).unwrap()).await.unwrap();
+    assert_eq!(response.status(), 413);
+}
+
+#[tokio::test]
 async fn decoding_is_charged_in_addition_to_raw_storage() {
     use std::io::Write;
     let ingress = ingress(64);
