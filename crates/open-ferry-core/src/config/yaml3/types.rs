@@ -15,6 +15,8 @@
 //! tokens and events.
 //!
 //! Deviations from upstream:
+//! - Config writers mark keys followed by an empty null so their emitter can
+//!   preserve an older pending key comment that yaml.v3 would overwrite.
 //! - An event's style is two fields, [`Event::scalar_style`] and
 //!   [`Event::collection_style`], where yaml.v3 has one `style` that each
 //!   event type reads as its own kind of style.
@@ -283,6 +285,8 @@ impl fmt::Display for EventType {
 /// An event (`yaml_event_t`).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Event {
+    /// Config-writer hint: this scalar key precedes an empty null value.
+    pub(crate) empty_null_value: bool,
     /// The event type.
     pub(crate) typ: EventType,
     /// The beginning of the event.

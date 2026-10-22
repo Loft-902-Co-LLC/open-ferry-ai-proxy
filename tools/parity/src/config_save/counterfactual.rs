@@ -64,6 +64,25 @@ mod tests {
     use crate::upstream::GoResult;
 
     #[test]
+    fn null_plugin_refusal_without_exact_counterfactual_stays_different() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../cases/testdata/config-save-null-generated-refusal.json"
+        ))
+        .unwrap();
+        let case = Case::new("null-plugin-generated-refusal", "", "")
+            .with_options(fixture["options"].clone());
+        let rust = Translator::ConfigSave.run_rust(&case).unwrap();
+        assert_eq!(rust, fixture["open_ferry_output"]);
+        assert!(rewritten(&case).is_none());
+        let evaluated = crate::evaluate(
+            Translator::ConfigSave,
+            &case,
+            &GoResult::Output(fixture["original_go"].to_string().into_bytes()),
+        );
+        assert!(matches!(evaluated.outcome, crate::Outcome::Different(_)));
+    }
+
+    #[test]
     fn three_saved_whole_cases_require_every_counterfactual_check() {
         let fixtures: Value = serde_json::from_str(include_str!(
             "../cases/testdata/config-save-counterfactual.json"

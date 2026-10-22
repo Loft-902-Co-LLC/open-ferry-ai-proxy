@@ -149,7 +149,7 @@ pub(crate) fn protected_node(
     let mut node = node.clone();
     protect_conflicting_key_comments(&mut node);
     let mut encoder = Encoder::new();
-    encoder.emitter.protect_block_comments = true;
+    encoder.emitter.protect_config_comments = true;
     encoder.set_indent(indent);
     encoder.encode_node(&node)?;
     encoder.finish()?;
@@ -187,6 +187,7 @@ pub(crate) struct Encoder {
     flow: bool,
     indent: usize,
     done_init: bool,
+    empty_null_value: bool,
 }
 
 impl Encoder {
@@ -199,6 +200,7 @@ impl Encoder {
             flow: false,
             indent: 0,
             done_init: false,
+            empty_null_value: false,
         }
     }
 
@@ -383,6 +385,7 @@ impl Encoder {
         event.foot_comment = comments.foot.as_bytes().to_vec();
         event.tail_comment = comments.tail.as_bytes().to_vec();
         event.start_mark = comments.mark;
+        event.empty_null_value = std::mem::take(&mut self.empty_null_value);
         self.emit(event)
     }
 
@@ -507,6 +510,10 @@ impl Encoder {
                 let mut tail = "";
                 for [key, value] in node.content.as_chunks::<2>().0 {
                     let key_foot = key.foot_comment.as_str();
+                    self.empty_null_value = key.kind == Kind::Scalar
+                        && value.kind == Kind::Scalar
+                        && short_tag(&value.tag) == super::NULL_TAG
+                        && value.value.is_empty();
                     self.node(key, tail, !key_foot.is_empty(), depth)?;
                     tail = key_foot;
                     self.node(value, "", false, depth)?;

@@ -268,7 +268,7 @@ pub(crate) struct Emitter {
     /// A line comment given for a mapping key, kept for its value.
     key_line_comment: Vec<u8>,
     /// Config writers keep multiline comments out of scalar bodies.
-    pub(crate) protect_block_comments: bool,
+    pub(crate) protect_config_comments: bool,
     pub(crate) protected_scalars: Vec<super::types::Mark>,
 }
 
@@ -343,7 +343,7 @@ impl Emitter {
             foot_comment: Vec::new(),
             tail_comment: Vec::new(),
             key_line_comment: Vec::new(),
-            protect_block_comments: false,
+            protect_config_comments: false,
             protected_scalars: Vec::new(),
         }
     }
@@ -1010,6 +1010,18 @@ impl Emitter {
             //      as the scanner associates line comments with the value.
             //      Either way, save the line comment and render it
             //      appropriately later.
+            if self.protect_config_comments
+                && event.empty_null_value
+                && !self.key_line_comment.is_empty()
+            {
+                // Go overwrites the older pending key comment here. Preserve
+                // it as a standalone comment before writing the new key.
+                let current = mem::take(&mut self.line_comment);
+                self.line_comment = mem::take(&mut self.key_line_comment);
+                self.process_line_comment()?;
+                self.write_indent()?;
+                self.line_comment = current;
+            }
             self.key_line_comment = mem::take(&mut self.line_comment);
         }
         if self.check_simple_key(event) {
@@ -1235,7 +1247,7 @@ impl Emitter {
 
         // This must run after pending key comments have reached their final
         // recipient. Looking only at the scalar node misses those comments.
-        if self.protect_block_comments
+        if self.protect_config_comments
             && matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
             && self.line_comment.contains(&b'\n')
         {
