@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → Claude Messages request.
@@ -62,9 +62,7 @@ use super::tools::{
     Descriptor, RequestTools, allows_external_web_access, is_unsupported_builtin_tool_type,
     qualify, tool_description, tool_name, tool_parameters,
 };
-use super::web_search::{
-    attach_claude_citations, convert_responses_web_search_call_to_claude_blocks,
-};
+use super::web_search::attach_claude_citations;
 use crate::apply_patch;
 use crate::common::cache_control;
 use crate::common::claude::{
@@ -207,7 +205,10 @@ fn convert(
     // Before the prefill check, so an interrupted turn ends with a made-up
     // tool result rather than an assistant turn some models reject.
     let mut messages = repair_tool_pairing(messages);
-    if !compat && rejects_assistant_prefill(model_name) && messages.last().is_some_and(is_assistant)
+    if !compat
+        && rejects_assistant_prefill(model_name)
+        && messages.last().is_some_and(is_assistant)
+        && !messages.last().is_some_and(ends_with_server_tool)
     {
         messages.pop();
     }
@@ -248,19 +249,44 @@ fn convert(
     if native_tool_search && let Some(anchor) = tool_search::deferred_anchor_tool(&claude_tools) {
         claude_tools.insert(anchor_index.unwrap_or(claude_tools.len()), anchor);
     }
-    if !claude_tools.is_empty() {
+    let has_tools = !claude_tools.is_empty();
+    if has_tools {
         out.insert("tools".into(), claude_tools.into());
     }
     let name_map = tools.name_map(&included);
-    if let Some(choice) =
-        convert_tool_choice(request.get("tool_choice"), &tools, &included, &name_map)
+    let choice = convert_tool_choice(request.get("tool_choice"), &tools, &included, &name_map);
+    if let Some(value) = choice.value {
+        out.insert("tool_choice".into(), value);
+    }
+    if request.get("parallel_tool_calls") == Some(&Value::Bool(false))
+        && has_tools
+        && !choice.none
+        && !choice.forced_filtered
     {
-        out.insert("tool_choice".into(), choice);
+        let choice = out
+            .entry("tool_choice")
+            .or_insert_with(|| json!({"type":"auto"}));
+        if choice.get("type").and_then(Value::as_str) != Some("none") {
+            choice["disable_parallel_tool_use"] = true.into();
+        }
     }
 
     let mut out = Value::Object(out);
     apply_translated_to_claude(&mut out, request, "openai-response", model_name, models);
     (out, drops.err())
+}
+
+fn ends_with_server_tool(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|parts| parts.last())
+        .is_some_and(|part| {
+            matches!(
+                go::to_lower(str_of(part.get("type")).trim()).as_str(),
+                "server_tool_use" | "web_search_tool_result"
+            )
+        })
 }
 
 /// `normalizeCodexAgentMessages`: Codex's multi-agent `agent_message` items
@@ -484,7 +510,8 @@ fn convert_input(
     let mut answered = HashSet::new();
     let mut called = HashSet::new();
 
-    for item in &items {
+    let search_history = super::web_search::SearchHistory::scan(&items);
+    for (item_index, item) in items.iter().enumerate() {
         let item: &Value = item;
         // These already became system blocks.
         if is_system_level_role(&str_of(item.get("role"))) {
@@ -506,8 +533,8 @@ fn convert_input(
                 turns.push(role, parts);
             }
             "web_search_call" => {
-                if let Some(blocks) = convert_responses_web_search_call_to_claude_blocks(item) {
-                    turns.push("assistant", blocks.into());
+                if let Some(blocks) = search_history.claude_blocks(item_index, item) {
+                    turns.push("assistant", blocks);
                 }
             }
             "reasoning" => {
@@ -1248,22 +1275,38 @@ fn web_search_tool(tool: &Value) -> Option<Value> {
 
 /// `tool_choice`: `auto`, `required` if any tool survived, or one named
 /// function or custom tool that did. Others are left out.
+#[derive(Default)]
+struct ToolChoice {
+    value: Option<Value>,
+    none: bool,
+    forced_filtered: bool,
+}
+
 fn convert_tool_choice(
     choice: Option<&Value>,
     tools: &RequestTools,
     included: &HashSet<String>,
     name_map: &HashMap<String, String>,
-) -> Option<Value> {
-    match choice? {
-        Value::String(choice) => match choice.as_str() {
-            "auto" => Some(json!({"type": "auto"})),
-            "required" if !included.is_empty() => Some(json!({"type": "any"})),
-            _ => None,
+) -> ToolChoice {
+    let mut out = ToolChoice::default();
+    match choice {
+        Some(Value::String(choice)) => match choice.as_str() {
+            "auto" => out.value = Some(json!({"type": "auto"})),
+            "none" => out.none = true,
+            "required" if !included.is_empty() => out.value = Some(json!({"type": "any"})),
+            "required" => out.forced_filtered = true,
+            _ => {}
         },
-        choice @ Value::Object(_) => {
+        Some(choice @ Value::Object(_)) => {
             let kind = str_of(choice.get("type"));
+            let kind = kind.trim();
+            if kind == "none" {
+                out.none = true;
+                return out;
+            }
             if kind != "function" && kind != "custom" {
-                return None;
+                out.forced_filtered = !matches!(kind, "" | "auto") && !included.contains(kind);
+                return out;
             }
             let first = |keys: [&str; 3]| {
                 keys.into_iter()
@@ -1279,15 +1322,18 @@ fn convert_tool_choice(
             if let Some(mapped) = name_map.get(&name).filter(|mapped| !mapped.is_empty()) {
                 name = mapped.clone();
             }
-            included.contains(&name).then(|| {
-                object([
+            if included.contains(&name) {
+                out.value = Some(object([
                     ("name", tools.claude_name(&name).into()),
                     ("type", "tool".into()),
-                ])
-            })
+                ]));
+            } else {
+                out.forced_filtered = true;
+            }
         }
-        _ => None,
+        _ => {}
     }
+    out
 }
 
 fn text_block(text: impl Into<Value>) -> Value {
