@@ -149,6 +149,12 @@ pub fn chat_requests() -> Vec<Case> {
 /// Interactions requests for the translator to Chat Completions.
 pub fn interactions_requests() -> Vec<Case> {
     vec![
+        request(
+            "object-media-and-function-name-json-text",
+            "gemini-2.5-flash-lite",
+            include_str!("seed11-request.json"),
+            false,
+        ),
         // TestConvertInteractionsRequestToOpenAIPreservesExpressibleFields
         request(
             "preserves-expressible-fields",

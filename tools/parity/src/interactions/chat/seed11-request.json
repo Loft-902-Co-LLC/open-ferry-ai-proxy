@@ -1,0 +1,108 @@
+{
+  "model": "models\/gemini-2.5-flash",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "audio",
+          "mime_type": "text\/plain",
+          "data": "aGVsbG8="
+        }
+      ]
+    },
+    {
+      "type": "function_result",
+      "name": "mcp__server__tool",
+      "call_id": "call_9",
+      "result": "{\"$ref\":\"#\/a\"}"
+    },
+    {
+      "type": "",
+      "text": "\n"
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "text": "\u0085next line\u00a0no-break space"
+        }
+      ]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "text": " "
+        }
+      ]
+    },
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "text": "no type"
+        },
+        {
+          "type": "image",
+          "mime_type": {
+            "a": 1
+          },
+          "data": {
+            "b": 2
+          }
+        }
+      ]
+    }
+  ],
+  "system_instruction": "<system-reminder>\nalready wrapped\n<\/system-reminder>",
+  "tools": [
+    {
+      "function_declarations": [
+        {
+          "name": "search",
+          "description": "<system-reminder>\nalready wrapped\n<\/system-reminder>",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      ]
+    },
+    "text",
+    {
+      "functionDeclarations": [
+        {
+          "name": "f"
+        }
+      ]
+    },
+    {
+      "type": "function",
+      "name": {
+        "a": 1
+      },
+      "description": 5
+    }
+  ],
+  "reasoning": {
+    "effort": "low",
+    "summary": "auto"
+  },
+  "tool_choice": "any",
+  "service_tier": "fast",
+  "generation_config": {
+    "HTTPServer": 1.50,
+    "a.:0": true,
+    ".a": 1e30,
+    "thinking_summaries": "",
+    "toolChoice": "none"
+  }
+}

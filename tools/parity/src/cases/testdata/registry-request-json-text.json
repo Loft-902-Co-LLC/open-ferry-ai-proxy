@@ -1,0 +1,258 @@
+{
+  "case": "builtin-11-3818",
+  "model": "gemini-2.5-flash-lite",
+  "differences": [
+    {
+      "path": "$.messages[2].content[1].image_url.url",
+      "go": "\"data:{\\n            \\\"a\\\": 1\\n          };base64,{\\n            \\\"b\\\": 2\\n          }\"",
+      "rust": "\"data:{\\\"a\\\":1};base64,{\\\"b\\\":2}\""
+    },
+    {
+      "path": "$.tools[2].function.name",
+      "go": "\"{\\n        \\\"a\\\": 1\\n      }\"",
+      "rust": "\"{\\\"a\\\":1}\""
+    }
+  ],
+  "request": {
+    "model": "models/gemini-2.5-flash",
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "audio",
+            "mime_type": "text/plain",
+            "data": "aGVsbG8="
+          }
+        ]
+      },
+      {
+        "type": "function_result",
+        "name": "mcp__server__tool",
+        "call_id": "call_9",
+        "result": "{\"$ref\":\"#/a\"}"
+      },
+      {
+        "type": "",
+        "text": "\n"
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "next line no-break space"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": " "
+          }
+        ]
+      },
+      {
+        "type": "model_output",
+        "content": [
+          {
+            "text": "no type"
+          },
+          {
+            "type": "image",
+            "mime_type": {
+              "a": 1
+            },
+            "data": {
+              "b": 2
+            }
+          }
+        ]
+      }
+    ],
+    "system_instruction": "<system-reminder>\nalready wrapped\n</system-reminder>",
+    "tools": [
+      {
+        "function_declarations": [
+          {
+            "name": "search",
+            "description": "<system-reminder>\nalready wrapped\n</system-reminder>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          }
+        ]
+      },
+      "text",
+      {
+        "functionDeclarations": [
+          {
+            "name": "f"
+          }
+        ]
+      },
+      {
+        "type": "function",
+        "name": {
+          "a": 1
+        },
+        "description": 5
+      }
+    ],
+    "reasoning": {
+      "effort": "low",
+      "summary": "auto"
+    },
+    "tool_choice": "any",
+    "service_tier": "fast",
+    "generation_config": {
+      "HTTPServer": 1.50,
+      "a.:0": true,
+      ".a": 1e+30,
+      "thinking_summaries": "",
+      "toolChoice": "none"
+    }
+  },
+  "request_text": "{\n  \"model\": \"models\\/gemini-2.5-flash\",\n  \"input\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"audio\",\n          \"mime_type\": \"text\\/plain\",\n          \"data\": \"aGVsbG8=\"\n        }\n      ]\n    },\n    {\n      \"type\": \"function_result\",\n      \"name\": \"mcp__server__tool\",\n      \"call_id\": \"call_9\",\n      \"result\": \"{\\\"$ref\\\":\\\"#\\/a\\\"}\"\n    },\n    {\n      \"type\": \"\",\n      \"text\": \"\\n\"\n    },\n    {\n      \"role\": \"model\",\n      \"parts\": [\n        {\n          \"text\": \"\\u0085next line\\u00a0no-break space\"\n        }\n      ]\n    },\n    {\n      \"role\": \"model\",\n      \"parts\": [\n        {\n          \"text\": \" \"\n        }\n      ]\n    },\n    {\n      \"type\": \"model_output\",\n      \"content\": [\n        {\n          \"text\": \"no type\"\n        },\n        {\n          \"type\": \"image\",\n          \"mime_type\": {\n            \"a\": 1\n          },\n          \"data\": {\n            \"b\": 2\n          }\n        }\n      ]\n    }\n  ],\n  \"system_instruction\": \"<system-reminder>\\nalready wrapped\\n<\\/system-reminder>\",\n  \"tools\": [\n    {\n      \"function_declarations\": [\n        {\n          \"name\": \"search\",\n          \"description\": \"<system-reminder>\\nalready wrapped\\n<\\/system-reminder>\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"city\": {\n                \"type\": \"string\"\n              }\n            },\n            \"required\": [\n              \"city\"\n            ]\n          }\n        }\n      ]\n    },\n    \"text\",\n    {\n      \"functionDeclarations\": [\n        {\n          \"name\": \"f\"\n        }\n      ]\n    },\n    {\n      \"type\": \"function\",\n      \"name\": {\n        \"a\": 1\n      },\n      \"description\": 5\n    }\n  ],\n  \"reasoning\": {\n    \"effort\": \"low\",\n    \"summary\": \"auto\"\n  },\n  \"tool_choice\": \"any\",\n  \"service_tier\": \"fast\",\n  \"generation_config\": {\n    \"HTTPServer\": 1.50,\n    \"a.:0\": true,\n    \".a\": 1e30,\n    \"thinking_summaries\": \"\",\n    \"toolChoice\": \"none\"\n  }\n}",
+  "options": {
+    "from": "interactions",
+    "to": "openai",
+    "stream": false
+  },
+  "upstream_output": {
+    "model": "gemini-2.5-flash-lite",
+    "messages": [
+      {
+        "role": "system",
+        "content": "<system-reminder>\nalready wrapped\n</system-reminder>"
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_9",
+        "content": "{\"$ref\":\"#/a\"}"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "no type"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:{\n            \"a\": 1\n          };base64,{\n            \"b\": 2\n          }"
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "search",
+          "description": "<system-reminder>\nalready wrapped\n</system-reminder>",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "f"
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "{\n        \"a\": 1\n      }",
+          "description": "5"
+        }
+      }
+    ],
+    "tool_choice": "any",
+    "service_tier": "fast"
+  },
+  "open_ferry_output": {
+    "model": "gemini-2.5-flash-lite",
+    "messages": [
+      {
+        "role": "system",
+        "content": "<system-reminder>\nalready wrapped\n</system-reminder>"
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_9",
+        "content": "{\"$ref\":\"#/a\"}"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "no type"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:{\"a\":1};base64,{\"b\":2}"
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "search",
+          "description": "<system-reminder>\nalready wrapped\n</system-reminder>",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "f"
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "{\"a\":1}",
+          "description": "5"
+        }
+      }
+    ],
+    "tool_choice": "any",
+    "service_tier": "fast"
+  }
+}
