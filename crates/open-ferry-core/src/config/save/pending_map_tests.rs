@@ -66,3 +66,35 @@ fn unrelated_own_comment_on_empty_mapping_remains_a_safe_refusal() {
     assert!(save_preserving_comments(&path, &cfg, false).is_err());
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
+
+#[test]
+fn deferred_empty_mapping_v8_saves_keep_plugin_values_and_comments() {
+    let f: Value =
+        serde_json::from_str(include_str!("../testdata/pending-empty-map-v8-save.json")).unwrap();
+    let source = f["options"]["file"].as_str().unwrap();
+    let original = super::super::AnyValue::parse_yaml(source).unwrap();
+    fn configs(v: &super::super::AnyValue) -> Option<&super::super::AnyValue> {
+        let super::super::AnyValue::Map(m) = v else {
+            return None;
+        };
+        let super::super::AnyValue::Map(p) = m.get("plugins")? else {
+            return None;
+        };
+        p.get("configs")
+    }
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, source).unwrap();
+    for step in f["options"]["steps"].as_array().unwrap() {
+        let current = std::fs::read_to_string(&path).unwrap();
+        let cfg = Config::parse(step["config"].as_str().unwrap_or(&current)).unwrap();
+        save_preserving_comments(&path, &cfg, step["migrate"].as_bool().unwrap_or(false)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        Config::load_bytes(text.as_bytes()).unwrap();
+        let reloaded = super::super::AnyValue::parse_yaml(&text).unwrap();
+        assert_eq!(configs(&original), configs(&reloaded));
+        for comment in ["#c38", "# c39"] {
+            assert_eq!(text.matches(comment).count(), 1);
+        }
+    }
+}
