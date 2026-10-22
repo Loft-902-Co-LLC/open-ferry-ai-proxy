@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/watcher/synthesizer/config.go
 // (synthesizeVertexCompat), ComputeVertexCompatModelsHash in
 // internal/modelconfig/model_hash.go and the vertex-api-key part of
-// ValidateCredentialWeights in internal/config/weight.go (v8.0.32, MIT).
+// ValidateCredentialWeights in internal/config/weight.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records for the config's `vertex-api-key` list: API keys for Vertex AI's
@@ -128,12 +128,7 @@ pub fn vertex_auth(
         updated_at: Some(ctx.now),
         ..Auth::default()
     };
-    apply_auth_excluded_models_meta(
-        &mut auth,
-        &ctx.oauth_excluded_models,
-        &entry.excluded_models,
-        AUTH_KIND_API_KEY,
-    );
+    apply_auth_excluded_models_meta(&mut auth, &entry.excluded_models, AUTH_KIND_API_KEY);
     auth
 }
 

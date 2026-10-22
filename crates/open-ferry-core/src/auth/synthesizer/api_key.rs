@@ -5,7 +5,7 @@
 // addRequestScopedErrorsToMetadata in helpers.go, ComputeGeminiModelsHash,
 // ComputeClaudeModelsHash and ComputeCodexModelsHash in
 // internal/modelconfig/model_hash.go, and ValidateCredentialWeights in
-// internal/config/weight.go (v8.0.32, MIT).
+// internal/config/weight.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records for the API keys in the config's `gemini-api-key`,
@@ -443,12 +443,7 @@ pub fn api_key_auth(
         updated_at: Some(ctx.now),
         ..Auth::default()
     };
-    apply_auth_excluded_models_meta(
-        &mut auth,
-        &ctx.oauth_excluded_models,
-        &entry.excluded_models,
-        AUTH_KIND_API_KEY,
-    );
+    apply_auth_excluded_models_meta(&mut auth, &entry.excluded_models, AUTH_KIND_API_KEY);
     Some(auth)
 }
 

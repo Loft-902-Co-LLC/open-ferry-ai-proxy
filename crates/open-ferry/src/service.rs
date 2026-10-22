@@ -11,7 +11,7 @@
 // builder.go (runtimeAuthSyncHook), the
 // order of internal/watcher/synthesizer/config.go (Synthesize), and the
 // auth dispatch of internal/watcher's clients.go and config_reload.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serving the proxy.
@@ -7315,8 +7315,16 @@ mod tests {
     #[tokio::test]
     async fn config_updates_published_unconsumed_registration() {
         let dir = tempfile::tempdir().unwrap();
-        let path = codex_file(dir.path(), "published.json", "");
+        let path = codex_file(dir.path(), "published.json", r#", "plan_type":"pro""#);
         let mut service = service(dir.path(), "oauth-excluded-models:\n  codex: [old-model]\n");
+        let catalogs = Arc::new(open_ferry_core::registry::CatalogStore::new());
+        catalogs
+            .publish_general(
+                br#"{"codex-pro":[{"id":"old-model"},{"id":"new-model"}]}"#,
+                "unconsumed-publication fixture",
+            )
+            .unwrap();
+        service.catalogs = CatalogRuntime::new(catalogs, Duration::from_secs(60));
         let mut held = hold_completion(&mut service);
         service.load_auth_file(&auth_file(&path), next_revision());
         held.entered().await;
@@ -7329,11 +7337,9 @@ mod tests {
         held.release();
         drain_reads(&mut service).await;
         let live = service.manager.list()[0].clone();
-        let mut expected = (*live).clone();
-        assert!(
-            !apply_config_attributes(&service.synthesis_context(), &mut expected),
-            "unconsumed publication receives C1 attributes"
-        );
+        let models = model_ids(&service, &live.id);
+        assert!(!models.iter().any(|model| model == "new-model"));
+        assert!(models.iter().any(|model| model == "old-model"));
         assert_eq!(service.file_auths.get(&path), Some(&live.id));
     }
 
@@ -10016,63 +10022,73 @@ port: {port}
     fn config_apply_keeps_refresh_published_after_its_previous_clone_point() {
         // Fixed code runs the hook before its locked edit; the old get/clone
         // negative control moves it after cloning and demonstrates the race.
-        struct FailingStore;
-        impl open_ferry_core::auth::AuthStore for FailingStore {
+        struct RefreshStore(bool);
+        impl open_ferry_core::auth::AuthStore for RefreshStore {
             fn list(&self) -> std::io::Result<Vec<Auth>> {
                 Ok(Vec::new())
             }
-            fn save(&self, _: &Auth) -> std::io::Result<String> {
-                Err(std::io::Error::other("injected save failure"))
+            fn save(&self, auth: &Auth) -> std::io::Result<String> {
+                if self.0 {
+                    Err(std::io::Error::other("injected save failure"))
+                } else {
+                    Ok(auth.id.clone())
+                }
             }
             fn delete(&self, _: &str) -> std::io::Result<()> {
                 Ok(())
             }
         }
-        let dir = tempfile::tempdir().unwrap();
-        let mut service = service(
-            dir.path(),
-            "oauth-excluded-models:\n  codex: [excluded-model]\n",
-        );
-        service.manager = Manager::new(
-            Settings::from(&*service.config),
-            service.registry.clone(),
-            Some(Arc::new(FailingStore)),
-        );
-        service.manager.register_executor(Arc::new(Refresher));
-        let auth = Auth {
-            id: "config-race.json".into(), provider: "codex".into(),
-            metadata: serde_json::json!({"type":"codex", "access_token":"before-config", "refresh_token":"fixture-refresh"}).as_object().unwrap().clone(),
-            ..Auth::default()
-        };
-        service.manager.register_unsaved(auth).unwrap();
-        service.file_auths.insert(
-            dir.path().join("config-race.json"),
-            "config-race.json".into(),
-        );
-        let manager = service.manager.clone();
-        service.file_config_hook = Some(Arc::new(move || {
-            let manager = manager.clone();
-            std::thread::spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(manager.force_refresh("config-race.json"))
-                    .unwrap();
-            })
-            .join()
-            .unwrap();
-        }));
-        service.apply_config_to_file_auths();
-        let live = service.manager.get("config-race.json").unwrap();
-        assert_eq!(live.metadata["access_token"], "refreshed");
-        assert_eq!(live.codex_pending_refresh.len(), 1);
-        let mut expected = (*live).clone();
-        assert!(
-            !apply_config_attributes(&service.synthesis_context(), &mut expected),
-            "config attributes were applied to the refreshed live entry"
-        );
-        assert!(live.attributes.contains_key("excluded_models"));
+        // A failed save protects pending rotations during stale replacements.
+        // The successful-save case must expose the get/clone lost-update race.
+        for fail_save in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut service = service(dir.path(), "");
+            service.manager = Manager::new(
+                Settings::from(&*service.config),
+                service.registry.clone(),
+                Some(Arc::new(RefreshStore(fail_save))),
+            );
+            service.manager.register_executor(Arc::new(Refresher));
+            let auth = Auth {
+                id: "config-race.json".into(), provider: "codex".into(),
+                attributes: BTreeMap::from([("auth_kind".into(), "oauth".into())]),
+                metadata: serde_json::json!({"type":"codex", "access_token":"before-config", "refresh_token":"fixture-refresh", "excluded_models":["credential-owned-model"]}).as_object().unwrap().clone(),
+                ..Auth::default()
+            };
+            service.manager.register_unsaved(auth).unwrap();
+            service.file_auths.insert(
+                dir.path().join("config-race.json"),
+                "config-race.json".into(),
+            );
+            let manager = service.manager.clone();
+            service.file_config_hook = Some(Arc::new(move || {
+                let manager = manager.clone();
+                std::thread::spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(manager.force_refresh("config-race.json"))
+                        .unwrap();
+                })
+                .join()
+                .unwrap();
+            }));
+            service.apply_config_to_file_auths();
+            let live = service.manager.get("config-race.json").unwrap();
+            assert_eq!(live.metadata["access_token"], "refreshed");
+            assert_eq!(live.codex_pending_refresh.len(), usize::from(fail_save));
+            let mut expected = (*live).clone();
+            assert!(
+                !apply_config_attributes(&service.synthesis_context(), &mut expected),
+                "config attributes were applied to the refreshed live entry"
+            );
+            assert_eq!(
+                live.attribute("excluded_models"),
+                Some("credential-owned-model"),
+                "the explicit exclusion edit committed after the refresh"
+            );
+        }
     }
 
     /// Not upstream's test, for its generations (sdk/cliproxy/service_auth.go,
@@ -10436,11 +10452,8 @@ port: {port}
         models
     }
 
-    /// Not upstream's test, for its reload (internal/watcher/config_reload.go,
-    /// reloadConfig, and clients.go, reloadClients): a file credential whose
-    /// provider's `oauth-excluded-models` a reload removes gets its models
-    /// back, keeping its own exclusions, its token and its state, and the
-    /// reverse.
+    /// Credential-owned rules override globals across reloads, retaining
+    /// runtime tokens and state without rereading or saving the file.
     #[tokio::test]
     async fn file_credentials_follow_oauth_excluded_models_reloads() {
         let all = codex_models();
@@ -10453,9 +10466,8 @@ port: {port}
         service.load_file_auths();
         let id = service.manager.list()[0].id.clone();
         let auth = service.manager.get(&id).unwrap();
-        let both = format!("*,{own}");
-        assert_eq!(auth.attribute("excluded_models"), Some(both.as_str()));
-        assert!(model_ids(&service, &id).is_empty());
+        assert_eq!(auth.attribute("excluded_models"), Some(own.as_str()));
+        assert_eq!(model_ids(&service, &id).len(), all.len() - 1);
 
         // Runtime state the file doesn't hold. Replace observes disk tokens;
         // install this live-only fixture through a live-locked edit instead.
@@ -10484,8 +10496,8 @@ port: {port}
 
         reload(&mut service, dir.path(), excluded).await;
         let auth = service.manager.get(&id).unwrap();
-        assert_eq!(auth.attribute("excluded_models"), Some(both.as_str()));
-        assert!(model_ids(&service, &id).is_empty());
+        assert_eq!(auth.attribute("excluded_models"), Some(own.as_str()));
+        assert_eq!(model_ids(&service, &id).len(), all.len() - 1);
         assert_eq!(access_token(&service, &id), "runtime");
         assert!(
             !std::fs::read_to_string(&path).unwrap().contains("runtime"),
@@ -10493,10 +10505,8 @@ port: {port}
         );
     }
 
-    /// Not upstream's test, for the same reload: a credential with no
-    /// exclusions of its own loses its excluded-models attributes once the
-    /// config has none for its provider, and one whose exclusions a reload
-    /// doesn't change is left as it is.
+    /// Global-only reloads alter registration without rewriting attributes
+    /// or advancing the credential generation.
     #[tokio::test]
     async fn a_reload_clears_excluded_models_from_the_config() {
         let own = codex_models().swap_remove(0);
@@ -10507,7 +10517,7 @@ port: {port}
         service.load_file_auths();
         let id = service.manager.list()[0].id.clone();
         let auth = service.manager.get(&id).unwrap();
-        assert_eq!(auth.attribute("excluded_models"), Some(own.as_str()));
+        assert_eq!(auth.attribute("excluded_models"), None);
         assert!(!model_ids(&service, &id).contains(&own));
 
         let other = "oauth-excluded-models:\n  claude:\n    - x\n";
@@ -10521,6 +10531,19 @@ port: {port}
         reload(&mut service, dir.path(), another).await;
         let unchanged = service.manager.get(&id).unwrap();
         assert_eq!(unchanged.generation, auth.generation);
+        reload(
+            &mut service,
+            dir.path(),
+            "oauth-excluded-models: {codex: ['*']}\n",
+        )
+        .await;
+        assert!(model_ids(&service, &id).is_empty());
+        assert_eq!(
+            service.manager.get(&id).unwrap().generation,
+            auth.generation
+        );
+        reload(&mut service, dir.path(), "").await;
+        assert!(model_ids(&service, &id).contains(&own));
     }
 
     /// A config with a Gemini key at `gemini_url` and a Vertex AI key at

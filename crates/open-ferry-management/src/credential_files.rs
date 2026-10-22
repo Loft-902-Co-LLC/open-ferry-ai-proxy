@@ -5,7 +5,7 @@
 // requestedAuthFileNamesForDelete, uniqueAuthFileNames,
 // deleteAuthFileByName, findAuthForDelete, authIDForPath), auth_files.go
 // (isUnsafeAuthFileName) and auth_files_fields.go (removeAuth,
-// removeAuthsForPath, deleteTokenRecord) (v8.0.32, MIT), with gin-gonic/gin
+// removeAuthsForPath, deleteTokenRecord) (v8.0.36, MIT), with gin-gonic/gin
 // v1.10.1 context.go (ContentType, QueryArray, MultipartForm) (MIT) and
 // Go's mime/multipart formdata.go (ReadForm) and multipart.go (FormName,
 // FileName, parseContentDisposition), mime/mediatype.go (ParseMediaType,
@@ -468,14 +468,37 @@ async fn write_auth_file(
 /// `buildAuthFromFileData`: checks that the service would read a credential
 /// from `data` saved at `path` in the auth directory `dir`.
 fn check_credential(dir: &Path, path: &Path, data: &[u8]) -> Result<(), Failure> {
+    // Strict write validation precedes the lenient file loader, including for
+    // payloads whose provider will be skipped. Canonicalize legacy field names.
+    if let Ok(Value::Object(mut metadata)) = serde_json::from_slice::<Value>(data) {
+        open_ferry_core::auth::metadata::normalize_credential_metadata(&mut metadata);
+        let (_, invalid) =
+            open_ferry_core::auth::synthesizer::file::extract_excluded_models(&metadata);
+        if let Some(error) = invalid {
+            return Err(Failure::bad_request(format!("invalid auth file: {error}")));
+        }
+    }
     let ctx = SynthesisContext::new(dir, Utc::now());
     let reason = match synthesize_auth_file(&ctx, path, data) {
-        Ok(Some(_)) => return Ok(()),
+        Ok(Some(auth)) => {
+            // The loader also replaces malformed UTF-8 as Go does. Validate
+            // that decoded metadata too.
+            let (_, invalid) =
+                open_ferry_core::auth::synthesizer::file::extract_excluded_models(&auth.metadata);
+            if let Some(error) = invalid {
+                return Err(Failure::bad_request(format!("invalid auth file: {error}")));
+            }
+            return Ok(());
+        }
         Err(error) => error.to_string(),
-        Ok(None) if path.to_str().is_none() => "the auth directory isn't valid UTF-8".to_owned(),
+        Ok(None) if path.to_str().is_none() => {
+            return Err(Failure::internal(
+                "invalid auth file: the auth directory isn't valid UTF-8",
+            ));
+        }
         Ok(None) => skipped_reason(data),
     };
-    Err(Failure::internal(format!("invalid auth file: {reason}")))
+    Err(Failure::bad_request(format!("invalid auth file: {reason}")))
 }
 
 /// Why the synthesizer reads no credential from `data`.

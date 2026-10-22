@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor.go,
 // codex_executor_execute.go, codex_executor_stream.go,
-// codex_executor_tokens.go and codex_executor_auth.go (v8.0.32, MIT).
+// codex_executor_tokens.go and codex_executor_auth.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`CodexExecutor`], which calls Codex with a ChatGPT sign-in or an API
@@ -17,7 +17,7 @@
 //! API or through the image generation tool (see the `images` module).
 //!
 //! The token is the `api_key` attribute, or else the OAuth access token,
-//! which [`refresh`](CodexExecutor::refresh) renews 24 hours before it
+//! which [`refresh`](CodexExecutor::refresh) renews 96 hours before it
 //! expires.
 //!
 //! Two settings of the config's `codex` section change how calls fail:
@@ -115,7 +115,7 @@ const COMPACT_ALT: &str = "responses/compact";
 /// How much of an error body is read.
 const MAX_ERROR_BODY: usize = 4 << 20;
 /// How long before its tokens expire a credential is refreshed.
-const REFRESH_LEAD: Duration = Duration::from_secs(24 * 60 * 60);
+const REFRESH_LEAD: Duration = Duration::from_secs(96 * 60 * 60);
 /// How many times a refresh is tried.
 const REFRESH_ATTEMPTS: u32 = 3;
 

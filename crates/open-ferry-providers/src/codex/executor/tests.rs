@@ -300,7 +300,10 @@ const COMPACTION: &str = r#"{"id":"resp_1","object":"response.compaction","usage
 fn identifies_and_refreshes_ahead() {
     let executor = executor();
     assert_eq!(executor.id(), "codex");
-    assert_eq!(executor.refresh_lead(), Some(Duration::from_secs(86_400)));
+    assert_eq!(
+        executor.refresh_lead(),
+        Some(Duration::from_secs(96 * 60 * 60))
+    );
 }
 
 // The request itself: path, headers present and absent, and body.

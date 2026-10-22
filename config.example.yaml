@@ -847,6 +847,9 @@ oauth:
   #       max-context-length: 1048576
 
   # OAuth provider excluded models
+  # A nonempty credential-file excluded_models list overrides these provider rules.
+  # Missing, null, empty or whitespace-only lists inherit the current global rules
+  # when models are registered, including after a config reload.
   # excluded-models:
   #   vertex:
   #     - "gemini-3-pro-preview"

@@ -3,7 +3,7 @@
 // sdk/cliproxy/auth/oauth_model_alias.go, SanitizeOAuthModelAlias in
 // internal/config/config_normalization.go, and the plan-type read of
 // ParseJWTToken and GetPlanType in internal/auth/codex/jwt_parser.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records from the credential files at the top of the auth directory, as
@@ -18,15 +18,14 @@
 //! - `headers` become `header:<name>` attributes.
 //! - `model_aliases` (or legacy `model-aliases`) becomes the
 //!   `model_aliases` attribute, sanitized.
-//! - `excluded_models` (or legacy `excluded-models`), merged with the
-//!   provider's `oauth-excluded-models`, becomes `excluded_models` and
-//!   `excluded_models_hash`, and `auth_kind` is `oauth`.
+//! - Credential-owned `excluded_models` (or legacy `excluded-models`) becomes
+//!   `excluded_models` and `excluded_models_hash`, and `auth_kind` is `oauth`.
+//!   Invalid rules warn but retain valid strings; legacy comma strings load.
 //! - A codex file's `plan_type`, or else the plan in its ID token, becomes
 //!   the `plan_type` attribute (`free` when the token has none).
 //!
-//! The only part the config plays is the provider's
-//! `oauth-excluded-models`; [`apply_config_attributes`] sets it again on a
-//! registered credential when the config is reloaded.
+//! Global OAuth exclusions resolve at model registration. Reloads retain the
+//! registered metadata and tokens without rereading files.
 //!
 //! Files of type `gemini` and files without a type are skipped. A Vertex AI
 //! service-account file (type `vertex`, as upstream's
@@ -236,7 +235,10 @@ pub fn synthesize_auth_file(
         .get("disabled")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let per_account_excluded = extract_excluded_models(&metadata);
+    let (per_account_excluded, invalid) = extract_excluded_models(&metadata);
+    if let Some(error) = invalid {
+        tracing::warn!(%error, "ignoring invalid excluded models in auth file {base}");
+    }
     let per_account_aliases = extract_model_aliases(&metadata);
     let note = metadata
         .get("note")
@@ -282,35 +284,24 @@ pub fn synthesize_auth_file(
     }
     apply_custom_headers_from_metadata(&mut auth);
     set_model_aliases_attribute(&mut auth, per_account_aliases);
-    apply_auth_excluded_models_meta(
-        &mut auth,
-        &ctx.oauth_excluded_models,
-        &per_account_excluded,
-        AUTH_KIND_OAUTH,
-    );
+    apply_auth_excluded_models_meta(&mut auth, &per_account_excluded, AUTH_KIND_OAUTH);
     if let Some(plan_type) = plan_type {
         auth.attributes.insert("plan_type".to_owned(), plan_type);
     }
     Ok(Some(auth))
 }
 
-/// Sets the attributes a file credential takes from the config again, as
-/// synthesizing its file with `ctx` would set them: `excluded_models` and
-/// `excluded_models_hash`, from the account's own list in its metadata and
-/// the provider's `oauth-excluded-models`, and `auth_kind`. Returns whether
-/// its attributes changed.
-pub fn apply_config_attributes(ctx: &SynthesisContext, auth: &mut Auth) -> bool {
+/// Rebuilds credential-owned exclusion attributes from registered metadata,
+/// keeping tokens and state. Global rules are resolved at registration.
+/// Returns whether the attributes changed. The context is retained for callers
+/// that also synthesize file credentials during a reload.
+pub fn apply_config_attributes(_ctx: &SynthesisContext, auth: &mut Auth) -> bool {
     let before = auth.attributes.clone();
     for key in [ATTRIBUTE_EXCLUDED_MODELS, ATTRIBUTE_EXCLUDED_MODELS_HASH] {
         auth.attributes.remove(key);
     }
-    let per_account_excluded = extract_excluded_models(&auth.metadata);
-    apply_auth_excluded_models_meta(
-        auth,
-        &ctx.oauth_excluded_models,
-        &per_account_excluded,
-        AUTH_KIND_OAUTH,
-    );
+    let (per_account_excluded, _) = extract_excluded_models(&auth.metadata);
+    apply_auth_excluded_models_meta(auth, &per_account_excluded, AUTH_KIND_OAUTH);
     auth.attributes != before
 }
 
@@ -435,22 +426,66 @@ fn decode_model_aliases(items: &[Value]) -> Option<Vec<ModelAlias>> {
         .collect()
 }
 
-/// A credential file's excluded models, from `excluded_models` or else
-/// `excluded-models`: the strings in the list, trimmed, empty ones dropped.
-fn extract_excluded_models(metadata: &Map<String, Value>) -> Vec<String> {
-    let raw = metadata
-        .get("excluded_models")
-        .or_else(|| metadata.get("excluded-models"));
-    let Some(Value::Array(items)) = raw else {
-        return Vec::new();
+/// Credential-owned rules, with canonical `excluded_models` taking priority over
+/// legacy `excluded-models`, even when null. Legacy comma strings are accepted.
+/// Returns valid, trimmed nonempty strings and the first invalid value's error.
+/// Loaders retain valid entries and warn; writers must reject the error before
+/// persisting. Error messages contain only keys, indices and types, never values.
+pub fn extract_excluded_models(
+    metadata: &Map<String, Value>,
+) -> (Vec<String>, Option<SynthesisError>) {
+    let key = if metadata.contains_key("excluded_models") {
+        "excluded_models"
+    } else {
+        "excluded-models"
     };
-    items
-        .iter()
-        .filter_map(Value::as_str)
+    let mut invalid = None;
+    let items: Vec<&str> = match metadata.get(key) {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(text)) => text.split(',').collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                if let Some(text) = item.as_str() {
+                    Some(text)
+                } else {
+                    invalid.get_or_insert_with(|| {
+                        SynthesisError::new(format!(
+                            "metadata {key}[{index}] must be a string, got {}",
+                            exclusion_value_type(item)
+                        ))
+                    });
+                    None
+                }
+            })
+            .collect(),
+        Some(value) => {
+            invalid = Some(SynthesisError::new(format!(
+                "metadata {key} must be a string array, got {}",
+                exclusion_value_type(value)
+            )));
+            Vec::new()
+        }
+    };
+    let models = items
+        .into_iter()
         .map(str::trim)
-        .filter(|model| !model.is_empty())
+        .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .collect()
+        .collect();
+    (models, invalid)
+}
+
+fn exclusion_value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "<nil>",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "float64",
+        Value::String(_) => "string",
+        Value::Array(_) => "[]interface {}",
+        Value::Object(_) => "map[string]interface {}",
+    }
 }
 
 /// A codex file's plan: its `plan_type`, else the plan claim of its ID
@@ -855,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_excluded_models_merged() {
+    fn oauth_exclusions_store_only_credential_rules() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
@@ -870,15 +905,14 @@ mod tests {
         let auths = synthesize_file_auths(&context);
         assert_eq!(
             auths[0].attribute("excluded_models"),
-            Some("custom-model,model-b,shared")
+            Some("custom-model,model-b")
         );
     }
 
-    /// Not upstream's: the config's excluded models set again on a
-    /// registered record match what synthesizing its file with that config
-    /// gives, whatever the old config added.
+    /// Rebuilding attributes retains only the credential's rules, independent
+    /// of global config, and removes stale values when those rules clear.
     #[test]
-    fn config_attributes_follow_the_config() {
+    fn rebuilding_credential_attributes_clears_stale_rules() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
@@ -888,11 +922,11 @@ mod tests {
         let mut old = ctx(dir.path());
         old.oauth_excluded_models = BTreeMap::from([("claude".to_owned(), vec!["*".to_owned()])]);
         let mut auth = synthesize_file_auths(&old).remove(0);
-        assert_eq!(auth.attribute("excluded_models"), Some("*,custom-model"));
+        assert_eq!(auth.attribute("excluded_models"), Some("custom-model"));
 
         let mut new = ctx(dir.path());
         new.oauth_excluded_models = BTreeMap::from([("codex".to_owned(), vec!["*".to_owned()])]);
-        assert!(apply_config_attributes(&new, &mut auth));
+        assert!(!apply_config_attributes(&new, &mut auth));
         let fresh = synthesize_file_auths(&new).remove(0);
         assert_eq!(auth.attributes, fresh.attributes);
         assert_eq!(auth.attribute("excluded_models"), Some("custom-model"));
@@ -906,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_oauth_excluded_models_merged() {
+    fn invalid_exclusions_keep_valid_credential_rules() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
@@ -925,8 +959,74 @@ mod tests {
         assert_eq!(auths[0].attribute("auth_kind"), Some("oauth"));
         assert_eq!(
             auths[0].attribute("excluded_models"),
-            Some("muse-spark-1.1,muse-spark-1.2")
+            Some("muse-spark-1.2")
         );
+    }
+
+    #[test]
+    fn exclusion_extraction_loads_legacy_and_partial_rules() {
+        for (metadata, expected, bad) in [
+            (json!({}), vec![], false),
+            (
+                json!({"excluded_models": null, "excluded-models": ["legacy"]}),
+                vec![],
+                false,
+            ),
+            (
+                json!({"excluded_models": [], "excluded-models": ["legacy"]}),
+                vec![],
+                false,
+            ),
+            (
+                json!({"excluded_models": [" a ", "", "b"]}),
+                vec!["a", "b"],
+                false,
+            ),
+            (
+                json!({"excluded-models": " a , ,b "}),
+                vec!["a", "b"],
+                false,
+            ),
+            (json!({"excluded_models": 123}), vec![], true),
+            (json!({"excluded_models": true}), vec![], true),
+            (json!({"excluded_models": {"x": 1}}), vec![], true),
+            (
+                json!({"excluded_models": ["a", 123, null, " b "]}),
+                vec!["a", "b"],
+                true,
+            ),
+        ] {
+            let (models, error) = extract_excluded_models(metadata.as_object().unwrap());
+            assert_eq!(models, expected);
+            assert_eq!(error.is_some(), bad);
+            let dir = tempfile::tempdir().unwrap();
+            let mut file = metadata;
+            file["type"] = json!("claude");
+            let auth = one(dir.path(), file);
+            assert_eq!(
+                auth.attribute("excluded_models"),
+                (!models.is_empty()).then(|| models.join(",")).as_deref()
+            );
+        }
+    }
+
+    #[test]
+    fn global_exclusions_are_never_synthesized() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut context = ctx(dir.path());
+        context
+            .oauth_excluded_models
+            .insert("claude".into(), vec!["*".into()]);
+        for value in [Value::Null, json!([]), json!([" ", "\t"]), json!(" , ")] {
+            write(
+                dir.path(),
+                "auth.json",
+                &json!({"type":"claude", "excluded_models":value}),
+            );
+            let auth = synthesize_file_auths(&context).remove(0);
+            assert_eq!(auth.attribute("excluded_models"), None);
+            assert_eq!(auth.attribute("excluded_models_hash"), None);
+        }
     }
 
     #[test]
