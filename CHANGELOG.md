@@ -6,9 +6,11 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 ## [Unreleased]
 
-The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.36.
+The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.38.
 
 ### Added
+
+- **Vertex AI OpenAPI routing overrides** per model and credential, with explicit OpenAPI locations in both configuration layouts and service-account auth files; explicit `false` values survive saves, a deviation from upstream's insertion pruning.
 
 - Real-server dashboard journeys in the required Ubuntu CI aggregate, covering first run, config saves, credentials, a loopback provider, usage, restart persistence and plain-install updates.
 - **Ingress resource limits**, open-ferry additions for both listeners: bounded connections and aggregate request-body storage, header and TLS handshake deadlines, upload progress and total deadlines, idle HTTP/2 GOAWAY, and stalled-response protection. Long SSE streams and upgraded WebSockets remain supported. Defaults, overrides and reload behavior are in [configuration](docs/configuration.md#ingress-limits-open-ferry-additions).
@@ -20,7 +22,8 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Management model definitions fall back to sorted available registry models**, including configured OpenAI-compatible provider channels.
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
-- **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, its calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing login is a 401; the usual token is never sent in its place. `POST /v8/management/oauth/siwc/bind` starts a bind, and credential listings expose `siwc_bind_supported`, `use_siwc`, `siwc_bound` and optional `siwc_expires_at`. Bindings and sign-ins saved during shutdown load on restart; the dashboard explains bindings stopped by shutdown or refused because the server is busy. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
+- **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, Responses calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing SIWC login is a 401 for Responses; the usual token is never sent in its place. ChatGPT Alpha Search instead requires the original outer OAuth token and returns a local 401 when it is missing, even if a SIWC login is present. `POST /v8/management/oauth/siwc/bind` starts a bind, and v8 credential listings expose `siwc_bind_supported`, `use_siwc`, `siwc_bound` and optional `siwc_expires_at`. Bindings and sign-ins saved during shutdown load on restart; the dashboard explains bindings stopped by shutdown or refused because the server is busy. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
+- **Local Sign in with ChatGPT status.** `GET /v8/management/oauth/siwc/status` and `GET /v8/management/credentials/siwc/status` report `off`, `valid` or `invalid` without refreshing or contacting a provider; v8 Codex credential listings include `siwc_status`. Status uses real expiry and remembers a rejected SIWC bearer across outer refreshes, sign-ins, toggles and same-token binds or refreshes until that nested bearer changes.
 - **The client APIs**, over HTTP and WebSocket, sending each part of a streamed answer as soon as it's ready, as CLIProxyAPI does:
   - OpenAI Chat Completions, legacy Completions and Responses;
   - Claude Messages;
@@ -62,6 +65,9 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Changed
 
+- **Ported from CLIProxyAPI v8.0.38**, up from v8.0.36. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8036-to-v8038-left-out).
+- **Dynamically registered Vertex OpenAPI models** advertise publisher ownership and default reasoning levels when explicit/static support is absent.
+
 - **Codex clients get direct tool mode on synthesized or non-Codex routes**, with Responses Lite and reasoning-effort updates disabled; pure-Codex template capabilities stay intact.
 - **Ported from CLIProxyAPI v8.0.36**, up from v8.0.32. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8032-to-v8036-left-out).
 - **Refresh outer Codex credentials 96 hours before nominal expiry.** Rejected unexpired JWTs and stream 401s recover in the background while sibling models remain blocked; SIWC keeps its independent five-minute lead.
@@ -100,6 +106,16 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   - **Usage**: an answer whose `apply_patch` call fails keeps the usage it read, and a Vertex AI stream that ends after its last chunk counts as a success.
 
 ### Fixed
+
+- **Gemini and Vertex AI stream accounting:** Preserve observed counts on generateContent stream cancellation or read failure; cancellation succeeds after a successful terminal is returned by the call's stream to the manager and records a 499 before it.
+- **Vertex AI Interactions bridge:** Deliver streamed text, thoughts, function calls and arguments, and completion usage to Interactions clients.
+- **Native Vertex AI Interactions usage:** Record token counts for streamed and non-stream calls, retaining observed counts on cancellation and the `vertex` provider name.
+- **Guardian reviews can inherit their parent's credential across model scopes**, including mixed-provider routes, when the parent's newest live selection among real providers available to the review is eligible; child bindings and session-affinity settings retain precedence.
+- **Preserve parent selection order** across result refreshes and transient failover without extending parent TTL during guardian lookups.
+- **Drop blank text sent to Claude** and keep dropped-part cache markers on the preceding surviving block without changing TTL order; Responses item markers are dropped when the final block cannot host them.
+- **Preserve explicit `parallel_tool_calls: false`** in Chat Completions and Responses requests sent to Codex.
+- **Honor standalone Claude `output_config.effort`** across thinking targets while retaining native defaults and final payload overrides.
+- **Preserve valid alias objects in mixed string/object auth-file model lists.** A string no longer causes valid alias objects in the same list to be discarded.
 
 - **Preserve xAI image credential prefixes**, and allow vendor-alias fallback under force-prefix.
 - **Keep OAuth query values out of access logs**, including arbitrary query parameters on v8 OAuth routes.
