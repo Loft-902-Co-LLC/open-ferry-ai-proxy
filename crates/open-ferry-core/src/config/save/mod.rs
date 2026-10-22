@@ -457,7 +457,7 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
         && let encode::Value::Struct(fields) = &mut plugins.value
         && let Some(field) = fields.iter_mut().find(|field| field.key == "configs")
     {
-        field.value = generated_plugin_configs(configs);
+        field.value = generated_plugin_configs(configs)?;
     }
     let rendered = encode::marshal(&value)?;
     let generated = match compose::unmarshal(&rendered) {
@@ -534,8 +534,8 @@ fn repair_generated_plugin_nodes(value: &mut encode::Value) {
 
 /// PluginInstanceConfig.MarshalYAML writes a default empty mapping when
 /// yaml.v3 skipped UnmarshalYAML for null; the null node's comments are lost.
-fn generated_plugin_configs(configs: &Node) -> encode::Value {
-    encode::Value::Map(
+fn generated_plugin_configs(configs: &Node) -> Result<encode::Value, YamlError> {
+    Ok(encode::Value::Map(
         configs
             .pairs()
             .map(|(key, value)| {
@@ -544,11 +544,13 @@ fn generated_plugin_configs(configs: &Node) -> encode::Value {
                 } else {
                     value.clone()
                 };
-                encode::protect_conflicting_key_comments(&mut value);
-                (encode::Value::str(&key.value), encode::Value::Node(value))
+                // Analyze this isolated intermediate too: a deferred comment
+                // must not escape the retained plugin subtree into generated settings.
+                encode::protect_conflicting_key_comments(&mut value, 4)?;
+                Ok((encode::Value::str(&key.value), encode::Value::Node(value)))
             })
-            .collect(),
-    )
+            .collect::<Result<_, YamlError>>()?,
+    ))
 }
 
 /// The OAuth maps whose keys follow the settings exactly.
@@ -926,7 +928,8 @@ mod tests {
         for case in cases {
             let layout =
                 expand_config_aliases(&root(case["file"].as_str().unwrap().as_bytes())).unwrap();
-            let configs = generated_plugin_configs(yaml_path(&layout, "plugins.configs").unwrap());
+            let configs =
+                generated_plugin_configs(yaml_path(&layout, "plugins.configs").unwrap()).unwrap();
             let value = encode::Value::Struct(vec![
                 encode::Field::new(
                     "plugins",
@@ -2125,3 +2128,6 @@ mod folded_tests;
 
 #[cfg(test)]
 mod pending_map_tests;
+
+#[cfg(test)]
+mod comment_transfer_tests;

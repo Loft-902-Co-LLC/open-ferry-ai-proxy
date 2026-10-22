@@ -1294,3 +1294,8 @@ These come from CLIProxyAPI's tracker. Each is a test case for us, and a fix we'
 | [#5360](https://github.com/router-for-me/CLIProxyAPI/issues/5360) | A stalled upstream never triggers credential rotation |
 | [#3783](https://github.com/router-for-me/CLIProxyAPI/issues/3783) | Concurrent token refreshes reuse the same refresh token |
 | [#3200](https://github.com/router-for-me/CLIProxyAPI/issues/3200) | Built-in usage statistics were removed |
+
+Deferred key comments are traced through protected config emission before a
+conflicting multiline key comment is moved to its head. A later plain recipient
+keeps yaml.v3 bytes; a block-body or dropped recipient is protected. This also
+runs before v8 regrouping and on isolated generated plugin intermediates.

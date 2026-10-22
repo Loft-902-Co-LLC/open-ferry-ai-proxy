@@ -285,6 +285,8 @@ impl fmt::Display for EventType {
 /// An event (`yaml_event_t`).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Event {
+    /// Stable preorder identity for tracing deferred config key comments.
+    pub(crate) source_node_id: usize,
     /// Config-writer hint: this key precedes an empty null or empty mapping.
     pub(crate) empty_inline_value: bool,
     /// An empty block-style mapping will actually be emitted in flow style.

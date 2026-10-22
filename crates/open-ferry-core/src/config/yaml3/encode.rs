@@ -156,7 +156,7 @@ pub(crate) fn protected_node(
     indent: usize,
 ) -> Result<(Vec<u8>, Vec<super::types::Mark>), YamlError> {
     let mut node = node.clone();
-    protect_conflicting_key_comments(&mut node);
+    protect_conflicting_key_comments(&mut node, indent)?;
     let mut encoder = Encoder::new();
     encoder.emitter.protect_config_comments = true;
     encoder.set_indent(indent);
@@ -166,27 +166,59 @@ pub(crate) fn protected_node(
     Ok((encoder.emitter.into_output(), protected))
 }
 
-/// Keep a multiline key comment on that key when the scalar value already
-/// has its own line comment. yaml.v3 otherwise defers it globally, possibly
-/// into another section or a setting an unrelated edit removes.
-pub(crate) fn protect_conflicting_key_comments(node: &mut Node) {
-    if node.kind == Kind::Mapping {
-        for [key, value] in node.content.as_chunks_mut::<2>().0 {
-            if key.line_comment.contains('\n')
-                && value.kind == Kind::Scalar
-                && !value.line_comment.is_empty()
-            {
-                if !key.head_comment.is_empty() {
-                    key.head_comment.push('\n');
+/// Transfer only comments the emitter actually quotes into a block scalar or
+/// loses. A dry pass follows deferred comments to their final recipient, so a
+/// harmless transfer to a later plain scalar stays byte-identical to yaml.v3.
+pub(crate) fn protect_conflicting_key_comments(
+    node: &mut Node,
+    indent: usize,
+) -> Result<(), YamlError> {
+    fn candidates(node: &Node) -> bool {
+        (node.kind == Kind::Mapping
+            && node.pairs().any(|(key, value)| {
+                key.line_comment.contains('\n')
+                    && value.kind == Kind::Scalar
+                    && !value.line_comment.is_empty()
+            }))
+            || node.content.iter().any(candidates)
+    }
+    if !candidates(node) {
+        return Ok(());
+    }
+    let mut encoder = Encoder::new();
+    encoder.emitter.protect_config_comments = true;
+    encoder.set_indent(indent);
+    encoder.encode_node(node)?;
+    encoder.finish()?;
+    let hazardous = encoder.emitter.hazardous_key_comments;
+    fn transfer(node: &mut Node, serial: &mut usize, hazardous: &[usize]) {
+        *serial += 1;
+        if node.kind == Kind::Mapping {
+            let mut key_serial = *serial + 1;
+            fn size(n: &Node) -> usize {
+                1 + n.content.iter().map(size).sum::<usize>()
+            }
+            for [key, value] in node.content.as_chunks_mut::<2>().0 {
+                if key.line_comment.contains('\n')
+                    && value.kind == Kind::Scalar
+                    && !value.line_comment.is_empty()
+                    && hazardous.contains(&key_serial)
+                {
+                    if !key.head_comment.is_empty() {
+                        key.head_comment.push('\n');
+                    }
+                    key.head_comment
+                        .push_str(&std::mem::take(&mut key.line_comment));
                 }
-                key.head_comment
-                    .push_str(&std::mem::take(&mut key.line_comment));
+                key_serial += size(key) + size(value);
             }
         }
+        for child in &mut node.content {
+            transfer(child, serial, hazardous);
+        }
     }
-    for child in &mut node.content {
-        protect_conflicting_key_comments(child);
-    }
+    transfer(node, &mut 0, &hazardous);
+    Ok(())
 }
 
 /// yaml.v3's `encoder`, as a `yaml.Encoder` writing to memory.
@@ -196,6 +228,7 @@ pub(crate) struct Encoder {
     flow: bool,
     indent: usize,
     done_init: bool,
+    node_serial: usize,
     empty_inline_value: bool,
     empty_block_mapping_value: bool,
 }
@@ -210,6 +243,7 @@ impl Encoder {
             flow: false,
             indent: 0,
             done_init: false,
+            node_serial: 0,
             empty_inline_value: false,
             empty_block_mapping_value: false,
         }
@@ -396,6 +430,7 @@ impl Encoder {
         event.foot_comment = comments.foot.as_bytes().to_vec();
         event.tail_comment = comments.tail.as_bytes().to_vec();
         event.start_mark = comments.mark;
+        event.source_node_id = comments.node_id;
         event.empty_inline_value = std::mem::take(&mut self.empty_inline_value);
         event.empty_block_mapping_value = std::mem::take(&mut self.empty_block_mapping_value);
         self.emit(event)
@@ -415,6 +450,8 @@ impl Encoder {
             return Err(depth_error());
         }
         let depth = depth.saturating_add(1);
+        self.node_serial += 1;
+        let node_id = self.node_serial;
         let foot = if drop_foot {
             ""
         } else {
@@ -571,6 +608,7 @@ impl Encoder {
                     tag,
                     style,
                     Comments {
+                        node_id,
                         head: &node.head_comment,
                         line: &node.line_comment,
                         foot,
@@ -591,6 +629,7 @@ impl Encoder {
 /// The comments `emitScalar` puts on a scalar event.
 #[derive(Clone, Copy, Default)]
 struct Comments<'a> {
+    node_id: usize,
     mark: super::types::Mark,
     head: &'a str,
     line: &'a str,
