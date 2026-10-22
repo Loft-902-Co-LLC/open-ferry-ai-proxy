@@ -1,0 +1,1640 @@
+[
+  {
+    "name": "W0",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "raw",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n# c107\n# c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W0",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "normalize",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c98\n        orphan-delegation-compatibility: false\n        # c99\n        stream-bootstrap-timeout: '' # c100\n    # c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n        # c107\n        # c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n        # c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W0",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "nested",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n#   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n# c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n# c101\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n# c107\n# c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n  auth-dir: /x\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n# c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels:\n# c119\n# c120\n  catalog: '' # c121\nconfig-version: 8 # c122\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W0",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "save",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W0",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "migrate",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W0",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "put",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W0",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "patch",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\nupstream:\n    codex:\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n\n# c93\n# c94\n\n#   c95 with words\n\n# c98\n        orphan-delegation-compatibility: false\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W1",
+    "source": "---\n# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "raw",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n# c107\n# c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W1",
+    "source": "---\n# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "normalize",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c98\n        orphan-delegation-compatibility: false\n        # c99\n        stream-bootstrap-timeout: '' # c100\n    # c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n        # c107\n        # c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n        # c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W1",
+    "source": "---\n# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "nested",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n#   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n# c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n# c101\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n# c107\n# c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n  auth-dir: /x\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n# c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels:\n# c119\n# c120\n  catalog: '' # c121\nconfig-version: 8 # c122\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W1",
+    "source": "---\n# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "save",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\n# c118\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W1",
+    "source": "---\n# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "migrate",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\n# c118\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W1",
+    "source": "---\n# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "put",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\n# c118\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W1",
+    "source": "---\n# c92\n# c118\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "patch",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\n# c118\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\nupstream:\n    codex:\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n\n# c93\n# c94\n\n#   c95 with words\n\n# c98\n        orphan-delegation-compatibility: false\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W2",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "raw",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n# c107\n# c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W2",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "normalize",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c98\n        orphan-delegation-compatibility: false\n        # c99\n        stream-bootstrap-timeout: '' # c100\n    # c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n        # c107\n        # c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n        # c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W2",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "nested",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n#   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n# c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n# c101\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n# c107\n# c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n  auth-dir: /x\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n# c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels:\n# c119\n# c120\n  catalog: '' # c121\nconfig-version: 8 # c122\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W2",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "save",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c118\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W2",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "migrate",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c118\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W2",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "put",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c93\nupstream: # c118\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W2",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c118\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "patch",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\nupstream:\n    codex:\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n\n# c93\n# c118\n\n#   c95 with words\n\n# c98\n        orphan-delegation-compatibility: false\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W3",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "raw",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c118\n# c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n# c107\n# c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W3",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "normalize",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c98\n        orphan-delegation-compatibility: false\n        # c99\n        stream-bootstrap-timeout: '' # c118\n    # c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n        # c107\n        # c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n        # c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W3",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "nested",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n#   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n# c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n# c101\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n# c107\n# c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n  auth-dir: /x\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n# c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels:\n# c119\n# c120\n  catalog: '' # c121\nconfig-version: 8 # c122\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W3",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "save",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c118\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W3",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "migrate",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c118\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W3",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "put",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c118\n# c101\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W3",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c118\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "patch",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\nupstream:\n    codex:\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c99\n        stream-bootstrap-timeout: '' # c118\n# c101\n\n# c93\n# c94\n\n#   c95 with words\n\n# c98\n        orphan-delegation-compatibility: false\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W4",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c118\n",
+    "op": "raw",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n# c107\n# c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c118\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W4",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c118\n",
+    "op": "normalize",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c98\n        orphan-delegation-compatibility: false\n        # c99\n        stream-bootstrap-timeout: '' # c100\n    # c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n        # c107\n        # c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n        # c110\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c118\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W4",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c118\n",
+    "op": "nested",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n#   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n# c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n# c101\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n# c107\n# c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n  auth-dir: /x\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n# c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels:\n# c119\n# c120\n  catalog: '' # c121\nconfig-version: 8 # c122\n\n# c118\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W4",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c118\n",
+    "op": "save",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c118\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W4",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c118\n",
+    "op": "migrate",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins: #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c118\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W4",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c118\n",
+    "op": "put",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\n\n# c118\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W4",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins: #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c118\n",
+    "op": "patch",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins: #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\nupstream:\n    codex:\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n\n# c93\n# c94\n\n#   c95 with words\n\n# c98\n        orphan-delegation-compatibility: false\n\n# c118\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W5",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "raw",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n# c107\n# c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n# c111\nplugins:\n    configs:\n        alpha:\n            text: '# c118' #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W5",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "normalize",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c98\n        orphan-delegation-compatibility: false\n        # c99\n        stream-bootstrap-timeout: '' # c100\n    # c101\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n    'providers': #c106\n        # c107\n        # c108\n        devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n        # c110\n# c111\nplugins:\n    configs:\n        alpha:\n            text: '# c118' #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8 # c118\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W5",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "nested",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n#   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n# c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n# c101\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n# c107\n# c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n# c110\n  auth-dir: /x\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n# c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels:\n# c119\n# c120\n  catalog: '' # c121\nconfig-version: 8 # c122\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W5",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "save",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins:\n    configs:\n        alpha:\n            text: '# c118' #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W5",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "migrate",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c111\nplugins:\n    configs:\n        alpha:\n            text: '# c118' #   c112 with words\n    enabled: false # c113\n    # c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n    # c119\n    # c120\n    catalog: '' # c121\nconfig-version: 8\n# c92\nrequests:\n    proxy-url: \"example.com:1234/path?x=1\"\n    nonstream-keepalive-interval: 15\nobservability:\n    logs:\n        logs-max-total-size-mb: 0\n    usage:\n        redis-usage-queue-retention-seconds: 60\n# c103\nrouting: # c104\n    cooldown:\n        transient-error-cooldown-seconds: 0\n        disable-cooling: false\n    retry:\n        request-retry: 0\n#c105\noauth:\n    providers: #c106\n        # c107\n        # c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n        aistudio:\n            ws-auth: true\n    auth-dir: /x\n# c110\n# c93\nupstream: # c94\n    codex: #   c95 with words\n        #   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n        # c99\n        stream-bootstrap-timeout: '' # c100\n        # c98\n        orphan-delegation-compatibility: false\n# c101\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # c118\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\n\n# c123\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W5",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "put",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c93\nupstream: # c94\n    codex: #   c95 with words\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c98\n        orphan-delegation-compatibility: false\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins:\n    configs:\n        alpha:\n            text: '# c118' #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "W5",
+    "source": "---\n# c92\nrequests: {nonstream-keepalive-interval: 15, proxy-url: \"example.com:1234/path?x=1\"}\n# c93\nupstream: # c94\n  codex: #   c95 with words\n    #   c96 with words\n    stream-bootstrap-buffering: true #   c97 with words\n    # c98\n    orphan-delegation-compatibility: false\n# c99\n    stream-bootstrap-timeout: '' # c100\n  # c101\n\n# c102\nx-extension: {owner: \"ops\", notes: [\"first\", 'second note'], limits: {burst: 10}}\n# c103\n\"routing\": {cooldown: {transient-error-cooldown-seconds: 0}}\n\nobservability: {logs: {'logs-max-total-size-mb': 0}} # c104\n#c105\noauth:\n  'providers': #c106\n    # c107\n    # c108\n    devin: {sensitive-words: ['internal name', project-x, acme]} # c109\n  # c110\n# c111\nplugins:\n  configs:\n    alpha:\n      text: '# c118' #   c112 with words\n  enabled: false # c113\n  # c114\n  dir: >- #   c115 with words\n    plugins\n# c116\nmodels: &m117 # c118\n  # c119\n  # c120\n  catalog: '' # c121\n\nconfig-version: 8 # c122\n\n# c123\n",
+    "op": "patch",
+    "keys": [
+      "oauth",
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "# c92\nrequests:\n    nonstream-keepalive-interval: 15\n    proxy-url: \"example.com:1234/path?x=1\"\n# c103\nrouting:\n    cooldown:\n        transient-error-cooldown-seconds: 0\nobservability:\n    logs:\n        'logs-max-total-size-mb': 0\n#c105\noauth: # c104\n    'providers': #c106\n# c107\n# c108\n        devin:\n            sensitive-words:\n                - 'internal name'\n                - project-x\n                - acme\n# c110\n    auth-dir: \"/x\" # c109\n# c111\nplugins:\n    configs:\n        alpha:\n            text: '# c118' #   c112 with words\n    enabled: false # c113\n# c114\n    dir: >- #   c115 with words\n        plugins\n# c116\nmodels:\n# c119\n# c120\n    catalog: '' # c121\nconfig-version: 8\nupstream:\n    codex:\n#   c96 with words\n        stream-bootstrap-buffering: true #   c97 with words\n# c99\n        stream-bootstrap-timeout: '' # c100\n# c101\n\n# c93\n# c94\n\n#   c95 with words\n\n# c98\n        orphan-delegation-compatibility: false\n\n# c123\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F1",
+    "source": "port: 1\nx-note: >\n  some long text\n  continues here\ndebug: false\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  some long text\n  continues here\ndebug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F1",
+    "source": "port: 1\nx-note: >\n  some long text\n  continues here\ndebug: false\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\n\n# x-note: >\n#     some long text continues here\n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F1",
+    "source": "port: 1\nx-note: >\n  some long text\n  continues here\ndebug: false\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  some long text continues here\n\ndebug: false\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F1",
+    "source": "port: 1\nx-note: >\n  some long text\n  continues here\ndebug: false\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  some long text continues here\n\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F1",
+    "source": "port: 1\nx-note: >\n  some long text\n  continues here\ndebug: false\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: >\n#     some long text continues here\n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F1",
+    "source": "port: 1\nx-note: >\n  some long text\n  continues here\ndebug: false\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note: >\n#     some long text continues here\n#\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F2",
+    "source": "port: 1\nx-note: >-\n  a\n  b\ndebug: false\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >-\n  a\n  b\ndebug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F2",
+    "source": "port: 1\nx-note: >-\n  a\n  b\ndebug: false\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\n\n# x-note: >-\n#     a b\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F2",
+    "source": "port: 1\nx-note: >-\n  a\n  b\ndebug: false\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >-\n  a b\ndebug: false\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F2",
+    "source": "port: 1\nx-note: >-\n  a\n  b\ndebug: false\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >-\n  a b\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F2",
+    "source": "port: 1\nx-note: >-\n  a\n  b\ndebug: false\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: >-\n#     a b\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F2",
+    "source": "port: 1\nx-note: >-\n  a\n  b\ndebug: false\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note: >-\n#     a b\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F3",
+    "source": "port: 1\nx-note: >\n  a\n\n  b\ndebug: false\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  a\n\n  b\ndebug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F3",
+    "source": "port: 1\nx-note: >\n  a\n\n  b\ndebug: false\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\n\n# x-note: >\n#     a\n# \n#     b\n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F3",
+    "source": "port: 1\nx-note: >\n  a\n\n  b\ndebug: false\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  a\n\n  b\n\ndebug: false\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F3",
+    "source": "port: 1\nx-note: >\n  a\n\n  b\ndebug: false\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  a\n\n  b\n\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F3",
+    "source": "port: 1\nx-note: >\n  a\n\n  b\ndebug: false\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: >\n#     a\n# \n#     b\n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F3",
+    "source": "port: 1\nx-note: >\n  a\n\n  b\ndebug: false\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note: >\n#     a\n# \n#     b\n#\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F5",
+    "source": "port: 1\nx-note: >+\n  a\n\ndebug: false\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >+\n  a\n\ndebug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F5",
+    "source": "port: 1\nx-note: >+\n  a\n\ndebug: false\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\n\n# x-note: >+\n#     a\n# \n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F5",
+    "source": "port: 1\nx-note: >+\n  a\n\ndebug: false\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >+\n  a\n\n\ndebug: false\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F5",
+    "source": "port: 1\nx-note: >+\n  a\n\ndebug: false\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >+\n  a\n\n\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F5",
+    "source": "port: 1\nx-note: >+\n  a\n\ndebug: false\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: >+\n#     a\n# \n# \n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F5",
+    "source": "port: 1\nx-note: >+\n  a\n\ndebug: false\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note: >+\n#     a\n# \n#\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F6",
+    "source": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\ndebug: false\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\ndebug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F6",
+    "source": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\ndebug: false\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "plugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\nserver:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F6",
+    "source": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\ndebug: false\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world again\n\ndebug: false\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F6",
+    "source": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\ndebug: false\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world again\n\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F6",
+    "source": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\ndebug: false\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "plugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\nserver:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F6",
+    "source": "port: 1\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\ndebug: false\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "plugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\nserver:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F7",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F7",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F7",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world again\n\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F7",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F7",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F7",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello world\n        again\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello world again\n\noauth:\n    auth-dir: \"/x\"\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F8",
+    "source": "port: 1\nx-note: >\n  some long text\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  some long text\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F8",
+    "source": "port: 1\nx-note: >\n  some long text\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nconfig-version: 8\n\n# x-note: >\n#     some long text\n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F8",
+    "source": "port: 1\nx-note: >\n  some long text\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  some long text\n\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F8",
+    "source": "port: 1\nx-note: >\n  some long text\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-note: >\n  some long text\n\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F8",
+    "source": "port: 1\nx-note: >\n  some long text\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: >\n#     some long text\n#\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F8",
+    "source": "port: 1\nx-note: >\n  some long text\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note: >\n#     some long text\n#\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F9",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello\n\n        world\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello\n\n                world\n\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F9",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello\n\n        world\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello\n\n                world\n\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F9",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello\n\n        world\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello\n\n        world\n\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F9",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello\n\n        world\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello\n\n                world\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F9",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello\n\n        world\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello\n\n                world\n\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "F9",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      text: >\n        hello\n\n        world\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            text: >\n                hello\n\n                world\n\noauth:\n    auth-dir: \"/x\"\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "M0",
+    "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "models:\n    catalog: '' # v\nconfig-version: 8 # k\nobservability:\n    logs:\n        debug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "M0",
+    "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "models:\n    catalog: '' # v\nconfig-version: 8 # k\nobservability:\n    logs:\n        debug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "M0",
+    "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "debug: false\nmodels:\n  catalog: '' # v\nconfig-version: 8 # cv\nauth-dir: /x # k\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "M0",
+    "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "models:\n    catalog: '' # v\nconfig-version: 8\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # k\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "M0",
+    "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "models:\n    catalog: '' # v\nconfig-version: 8\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        # k\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "M0",
+    "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "models:\n    catalog: '' # v\nconfig-version: 8\nobservability:\n    logs:\n        debug: false\noauth:\n    auth-dir: \"/x\"\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "V4",
+    "source": "debug: false\nconfig-version:\n  # hv\n  8 # cv\nport: 1\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nserver:\n    port: 1\nobservability:\n    logs:\n        debug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "V4",
+    "source": "debug: false\nconfig-version:\n  # hv\n  8 # cv\nport: 1\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nserver:\n    port: 1\nobservability:\n    logs:\n        debug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "V4",
+    "source": "debug: false\nconfig-version:\n  # hv\n  8 # cv\nport: 1\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "debug: false\nconfig-version: 8 # cv\n# hv\nport: 1\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "V4",
+    "source": "debug: false\nconfig-version:\n  # hv\n  8 # cv\nport: 1\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nserver:\n    # hv\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "V4",
+    "source": "debug: false\nconfig-version:\n  # hv\n  8 # cv\nport: 1\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nserver:\n    # hv\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "V4",
+    "source": "debug: false\nconfig-version:\n  # hv\n  8 # cv\nport: 1\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "config-version: 8\nserver:\n    port: 1\nobservability:\n    logs:\n        debug: false\noauth:\n    auth-dir: \"/x\"\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "U7",
+    "source": "port: 1\nx-note: !t 'a b'\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nconfig-version: 8\n\n# x-note: !t 'a #     b'\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "U7",
+    "source": "port: 1\nx-note: !t 'a b'\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: !t 'a #     b'\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "U7",
+    "source": "port: 1\nx-note: !t 'a b'\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n#     b'\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "U1",
+    "source": "port: 1\nx-note: \"a\\u2028b\"\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nconfig-version: 8\n\n# x-note: \"a\\Lb\"\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "U1",
+    "source": "port: 1\nx-note: \"a\\u2028b\"\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: \"a\\Lb\"\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "U1",
+    "source": "port: 1\nx-note: \"a\\u2028b\"\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note: \"a\\Lb\"\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "E15",
+    "source": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+    "op": "raw",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "E15",
+    "source": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+    "op": "normalize",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\n\n# x-empty: {}\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "E15",
+    "source": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+    "op": "nested",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-empty: {}\ndebug: false # own\nauth-dir: /x\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "E15",
+    "source": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+    "op": "save",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "port: 1\nx-empty: # own\n{}\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+      "status": 0,
+      "unloadable": "failed to parse config file: yaml: line 3: could not find expected ':'"
+    }
+  },
+  {
+    "name": "E15",
+    "source": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+    "op": "migrate",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "yaml: line 3: could not find expected ':'",
+      "file": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+      "status": 0,
+      "unloadable": ""
+    }
+  },
+  {
+    "name": "E15",
+    "source": "port: 1\nx-empty: # own\n  {}\ndebug: false\n",
+    "op": "put",
+    "keys": [
+      "auth-dir"
+    ],
+    "go": {
+      "error": "",
+      "file": "server:\n    port: 1\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-empty: {}\n",
+      "status": 200,
+      "unloadable": ""
+    }
+  }
+]

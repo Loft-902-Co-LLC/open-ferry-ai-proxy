@@ -350,21 +350,33 @@ pub(crate) fn normalize_config_layout_doc(
     if migrate {
         // Unknown fields are ignored at runtime: keep them as comments.
         comment_unknown_v8_sections(&mut root)?;
-        let mut version = Node::scalar(INT_TAG, "8");
-        let previous = yaml_path(&root, "config-version");
+        let previous = yaml_path(&root, "config-version").cloned();
         #[cfg(feature = "parity")]
         let previous = previous.filter(|_| {
             super::parity::ablation::enabled(
                 super::parity::ablation::Protection::CanonicalVersionComment,
             )
         });
+        let mut version = Node::scalar(INT_TAG, "8");
+        set_yaml_path(&mut root, "config-version", &version);
         if let Some(previous) = previous {
-            version.head_comment.clone_from(&previous.head_comment);
-            version.line_comment.clone_from(&previous.line_comment);
-            version
-                .line_comment_id
-                .clone_from(&previous.line_comment_id);
-            version.foot_comment.clone_from(&previous.foot_comment);
+            if !previous.line_comment.is_empty() {
+                super::encode::protect_pending_version_comments(&mut root)?;
+            }
+            // A scalar's head/foot would reload on the following key. Keep
+            // the canonical value's own comments on its mapping key instead.
+            let i = super::find_map_key_index(&root, "config-version").unwrap();
+            for comment in [&previous.head_comment, &previous.foot_comment] {
+                if !comment.is_empty() {
+                    let head = &mut root.content[i].head_comment;
+                    if !head.is_empty() {
+                        head.push('\n');
+                    }
+                    head.push_str(comment);
+                }
+            }
+            version.line_comment = previous.line_comment;
+            version.line_comment_id = previous.line_comment_id;
         }
         set_yaml_path(&mut root, "config-version", &version);
         changed = true;

@@ -269,6 +269,7 @@ pub(crate) struct Emitter {
     key_line_comment: Vec<u8>,
     key_comment_origin: Option<usize>,
     line_comment_origin: Option<usize>,
+    current_node_id: usize,
     line_comment_id: Option<super::CommentId>,
     key_comment_id: Option<super::CommentId>,
     event_has_line_comment: bool,
@@ -353,6 +354,7 @@ impl Emitter {
             key_line_comment: Vec::new(),
             key_comment_origin: None,
             line_comment_origin: None,
+            current_node_id: 0,
             line_comment_id: None,
             key_comment_id: None,
             event_has_line_comment: false,
@@ -1416,7 +1418,7 @@ impl Emitter {
         if !self.whitespace {
             self.put(b' ')?;
         }
-        self.line_comment_origin = None;
+        let pending_key = self.line_comment_origin.take();
         if self.record_comments
             && let Some(id) = self.line_comment_id.take()
         {
@@ -1426,6 +1428,8 @@ impl Emitter {
                     .saturating_add(1),
                 id,
                 text: self.line_comment.clone(),
+                pending_key,
+                recipient: self.current_node_id,
             });
         }
         self.line_comment_id = None;
@@ -1664,6 +1668,7 @@ impl Emitter {
     /// yaml_emitter_analyze_event: check if the event data is valid. The
     /// comments, anchor and value move from the event into the emitter.
     fn analyze_event(&mut self, event: &mut Event) -> Result<(), EmitterError> {
+        self.current_node_id = event.source_node_id;
         self.anchor_data.anchor = Vec::new();
         self.tag_data.handle = Vec::new();
         self.tag_data.suffix = Vec::new();

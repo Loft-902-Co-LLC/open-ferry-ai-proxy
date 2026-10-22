@@ -145,6 +145,77 @@ pub(crate) fn marshal_with_comment_ids(
     Ok((encoder.emitter.into_output(), ids))
 }
 
+/// Keep only pending key comments whose faithful recipient is the canonical
+/// version scalar. A preserved version comment would otherwise push them onto
+/// the next unrelated key. This dry pass never changes emitted scalar values.
+pub(crate) fn protect_pending_version_comments(root: &mut Node) -> Result<(), YamlError> {
+    fn size(n: &Node) -> usize {
+        1 + n.content.iter().map(size).sum::<usize>()
+    }
+    let mut serial = 2;
+    let mut version_id = None;
+    for (key, value) in root.pairs() {
+        serial += size(key);
+        if key.value == "config-version" {
+            version_id = Some(serial);
+        }
+        serial += size(value);
+    }
+    let Some(version_id) = version_id else {
+        return Ok(());
+    };
+    let mut encoder = Encoder::new();
+    encoder.emitter.record_comments = true;
+    encoder.encode_node(root)?;
+    encoder.finish()?;
+    let emitted = encoder.emitter.emitted_comments;
+    fn transfer(
+        n: &mut Node,
+        serial: &mut usize,
+        version_id: usize,
+        emitted: &[super::CommentEmission],
+    ) {
+        *serial += 1;
+        if n.kind == Kind::Mapping {
+            let mut key_serial = *serial + 1;
+            for [key, value] in n.content.as_chunks_mut::<2>().0 {
+                let value_serial = key_serial + size(key);
+                let is_pending = |node: &Node, id| {
+                    emitted.iter().any(|c| {
+                        c.pending_key == Some(id)
+                            && c.recipient == version_id
+                            && node.line_comment_id.as_ref() == Some(&c.id)
+                            && c.text == node.line_comment.as_bytes()
+                    })
+                };
+                let key_pending = is_pending(key, key_serial);
+                let value_pending = is_pending(value, value_serial);
+                let mut comments = Vec::new();
+                if key_pending {
+                    comments.push(std::mem::take(&mut key.line_comment));
+                    key.line_comment_id = None;
+                }
+                if value_pending {
+                    comments.push(std::mem::take(&mut value.line_comment));
+                    value.line_comment_id = None;
+                }
+                for comment in comments {
+                    if !key.head_comment.is_empty() {
+                        key.head_comment.push('\n');
+                    }
+                    key.head_comment.push_str(&comment);
+                }
+                key_serial = value_serial + size(value);
+            }
+        }
+        for c in &mut n.content {
+            transfer(c, serial, version_id, emitted);
+        }
+    }
+    transfer(root, &mut 0, version_id, &emitted);
+    Ok(())
+}
+
 /// A `yaml.Encoder` writing `node` with `SetIndent(indent)`, then closed:
 /// how upstream writes its config file (indent 2). Config writes also quote
 /// block scalars whose effective line comment would spill into their body.

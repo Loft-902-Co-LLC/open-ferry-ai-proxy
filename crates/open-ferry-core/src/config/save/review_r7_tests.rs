@@ -194,3 +194,178 @@ fn review_r7_custom_tagged_unicode_archives_survive_two_writes() {
         }
     }
 }
+
+fn exact_review_output(fixture: &serde_json::Value) -> Result<String, Box<dyn std::error::Error>> {
+    let source = fixture["source"].as_str().unwrap();
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, source).unwrap();
+    match fixture["op"].as_str().unwrap() {
+        "raw" => write_file(&path, source.as_bytes())?,
+        "normalize" => {
+            let (out, _) = normalize_config_layout(source.as_bytes(), true)?;
+            std::fs::write(&path, out).unwrap();
+        }
+        "nested" => {
+            let keys: Vec<_> = fixture["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|k| k.as_str().unwrap())
+                .collect();
+            update_nested_scalar(&path, &keys, "/x")?;
+        }
+        "save" | "migrate" => {
+            let mut cfg = Config::parse(source).unwrap();
+            cfg.auth_dir = "/x".into();
+            save_preserving_comments(&path, &cfg, fixture["op"] == "migrate")?;
+        }
+        "put" | "patch" => {
+            let patch = fixture["op"] == "patch";
+            let edit = V8Edit {
+                method: if patch {
+                    V8Method::Patch
+                } else {
+                    V8Method::Put
+                },
+                path: if patch {
+                    vec!["oauth".into()]
+                } else {
+                    vec!["oauth".into(), "auth-dir".into()]
+                },
+                body: if patch {
+                    br#"{"auth-dir":"/x"}"#.to_vec()
+                } else {
+                    br#""/x""#.to_vec()
+                },
+                yaml: false,
+            };
+            let preview = preview_v8(source.as_bytes(), &edit)?;
+            edit_v8(&path, &edit)?;
+            assert_eq!(preview, std::fs::read(&path).unwrap());
+        }
+        _ => unreachable!(),
+    }
+    Ok(std::fs::read_to_string(&path).unwrap())
+}
+
+#[test]
+fn review_r7_exact_canonical_comments_keep_their_owner() {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../testdata/review-r7-exact.json")).unwrap();
+    for f in fixtures
+        .iter()
+        .filter(|f| matches!(f["name"].as_str(), Some("M0" | "V4")))
+    {
+        let out = exact_review_output(f).unwrap();
+        Config::load_bytes(out.as_bytes()).unwrap();
+        let doc = unmarshal(out.as_bytes()).unwrap();
+        let root = &doc.content[0];
+        for comment in if f["name"] == "M0" {
+            vec!["# k", "# v", "# cv"]
+        } else {
+            vec!["# hv", "# cv"]
+        } {
+            assert_eq!(
+                out.matches(comment).count(),
+                1,
+                "{} {} {comment}: {out}",
+                f["name"],
+                f["op"]
+            );
+        }
+        assert!(
+            super::parity::retained_comment_ownership(
+                f["source"].as_str().unwrap(),
+                f["go"]["file"].as_str().unwrap(),
+                &out
+            ),
+            "{} {}: {out}",
+            f["name"],
+            f["op"]
+        );
+        assert_eq!(yaml_path(root, "config-version").unwrap().value, "8");
+        assert_eq!(
+            crate::config::AnyValue::parse_yaml(&out).unwrap(),
+            crate::config::AnyValue::parse_yaml(f["go"]["file"].as_str().unwrap()).unwrap()
+        );
+    }
+}
+
+#[test]
+fn review_r7_exact_probe_matrix_retains_comments_and_matches_lossless_clip() {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../testdata/review-r7-exact.json")).unwrap();
+    let mut rows = 0;
+    for f in &fixtures {
+        rows += 1;
+        let source = f["source"].as_str().unwrap();
+        let result = exact_review_output(f);
+        if f["name"] == "E15" && matches!(f["op"].as_str(), Some("save" | "migrate")) {
+            assert!(result.is_err());
+            assert!(
+                f["go"]["file"] == source || !f["go"]["unloadable"].as_str().unwrap().is_empty()
+            );
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            std::fs::write(&path, source).unwrap();
+            let mut config = Config::parse(source).unwrap();
+            config.auth_dir = "/x".into();
+            assert!(save_preserving_comments(&path, &config, f["op"] == "migrate").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            continue;
+        }
+        let out = result.unwrap_or_else(|e| panic!("{} {}: {e}", f["name"], f["op"]));
+        Config::load_bytes(out.as_bytes()).unwrap();
+        let name = f["name"].as_str().unwrap();
+        if name.starts_with('F') && name != "F5" {
+            assert_eq!(out, f["go"]["file"].as_str().unwrap(), "{name} {}", f["op"]);
+        }
+        if name.starts_with('W') {
+            assert_eq!(
+                super::parity::comment_occurrences(&out, "# c118", false),
+                super::parity::comment_occurrences(source, "# c118", true),
+                "{name} {}: {out}",
+                f["op"]
+            );
+            assert_eq!(
+                super::parity::comment_occurrences(&out, "# c122", false),
+                Some(1),
+                "{name} {}: {out}",
+                f["op"]
+            );
+        }
+        if name.starts_with('U') {
+            let archive = out
+                .lines()
+                .filter_map(|l| l.strip_prefix("# "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let original = unmarshal(source.as_bytes()).unwrap();
+            let recovered = unmarshal(archive.as_bytes()).unwrap();
+            let original = yaml_path(&original.content[0], "x-note").unwrap();
+            let recovered = yaml_path(&recovered.content[0], "x-note").unwrap();
+            assert_eq!(
+                (&original.tag, &original.value),
+                (&recovered.tag, &recovered.value),
+                "{name} {}: {out}",
+                f["op"]
+            );
+        }
+        if name == "F5" && matches!(f["op"].as_str(), Some("raw" | "nested" | "save")) {
+            let doc = unmarshal(out.as_bytes()).unwrap();
+            assert_eq!(yaml_path(&doc.content[0], "x-note").unwrap().value, "a\n\n");
+        }
+    }
+    assert_eq!(rows, 114);
+}
+
+#[test]
+fn review_r7_canonical_barrier_does_not_relocate_a_harmless_go_transfer() {
+    let source = "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8\n";
+    let (out, _) = normalize_config_layout(source.as_bytes(), true).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "models:\n    catalog: '' # v\nconfig-version: 8 # k\nobservability:\n    logs:\n        debug: false\n"
+    );
+}
