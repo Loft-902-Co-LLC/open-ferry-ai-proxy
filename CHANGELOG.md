@@ -10,6 +10,11 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Added
 
+- **Offline differential parity in CI** runs handwritten cases and a fixed-seed random set against the pinned CLIProxyAPI source in required checks, with larger daily and manually seeded runs and retained synthetic failure artifacts ([parity in CI](tools/parity/README.md#in-ci)).
+- **Repeatable parity suite filters** select named suites with `open-ferry-parity --suite`; unknown names are rejected before running Go.
+- **Claude tool-closure and embedded JSON comparisons** recognize independent closures within each provider event and compact object-valued text only at documented translator paths with raw-request provenance.
+- **Upstream defect proofs** count source-preserved comment and scalar losses and failed-write counterfactuals separately, retaining the original Go output and requiring complete output checks.
+
 - **Vertex AI OpenAPI routing overrides** per model and credential, with explicit OpenAPI locations in both configuration layouts and service-account auth files; explicit `false` values survive saves, a deviation from upstream's insertion pruning.
 
 - Real-server dashboard journeys in the required Ubuntu CI aggregate, covering first run, config saves, credentials, a loopback provider, usage, restart persistence and plain-install updates.
@@ -20,7 +25,6 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Claude web search result caching for Responses sessions**, opt-in and isolated by session, caller and selected credential, with entry limits, sliding expiry and invalidation when its settings change.
 - **Meta Muse reasoning-envelope recognition and replay** through Gemini and Interactions clients.
 - **Management model definitions fall back to sorted available registry models**, including configured OpenAI-compatible provider channels.
-- **Offline differential parity in CI**: relevant pull requests and merge-queue entries run every hand-written case and a fixed-seed random set against the pinned CLIProxyAPI source, as part of `check (ubuntu-latest)`. A separate daily and manually dispatched run uses a larger set with a rotating seed. Unexpected differences fail the run, with synthetic failing inputs kept for 14 days ([parity in CI](tools/parity/README.md#in-ci)).
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
 - **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, Responses calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing SIWC login is a 401 for Responses; the usual token is never sent in its place. ChatGPT Alpha Search instead requires the original outer OAuth token and returns a local 401 when it is missing, even if a SIWC login is present. `POST /v8/management/oauth/siwc/bind` starts a bind, and v8 credential listings expose `siwc_bind_supported`, `use_siwc`, `siwc_bound` and optional `siwc_expires_at`. Bindings and sign-ins saved during shutdown load on restart; the dashboard explains bindings stopped by shutdown or refused because the server is busy. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
@@ -107,6 +111,14 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   - **Usage**: an answer whose `apply_patch` call fails keeps the usage it read, and a Vertex AI stream that ends after its last chunk counts as a success.
 
 ### Fixed
+
+- **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.
+- **Keep original Responses tool identities** by preserving the original request's presence and raw bytes, including JSON null and readable truncated requests, so a fallback request cannot change custom-tool identities or apply-patch routing.
+- **Read the first complete Interactions response value** before trailing data consistently in the Chat Completions, Codex and Claude pairs.
+- **Match CPU-specific token-counter overflow** and wrapping arithmetic in translator and provider usage accounting.
+- **Preserve config comments during merges and v8 edits**, including canonical version comments, while retaining the file's plugin subtree and keeping one copy of plugin foot comments that upstream duplicates.
+- **Preserve multiline config values on every write path**, including Markdown headings, folded line breaks and trailing blank lines, tab-leading block values and archived Unicode line separators. Keep block styles where possible, quote scalars whose multiline header comments would damage their values, and transfer conflicting key comments only when their deferred recipient would damage or lose data.
+- **Make v8 config previews match written bytes**, including final comment normalization.
 
 - **Keep observed counts when Gemini and Vertex AI streams are cancelled or fail to read.** A `generateContent` stream cancelled after its final chunk reaches the manager counts as a success; cancellation before that is recorded as a 499 with the counts observed so far. A read failure is recorded as a failure with the observed counts.
 - **Deliver Vertex AI streamed text, thoughts, function calls and arguments, and completion usage** to Interactions clients.
