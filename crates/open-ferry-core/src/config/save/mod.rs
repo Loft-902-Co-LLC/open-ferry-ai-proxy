@@ -466,11 +466,13 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
             // This intermediate only supplies generated settings. Its plugin
             // nodes can carry a pending key comment into a null plugin's {}
             // and make yaml.v3 emit invalid YAML. Retry those nodes without
-            // comments; the merge retains every original plugin node/comment.
+            // comments and quote tab-leading block scalars, whose missing
+            // indentation hint also makes this faithful intermediate invalid.
+            // The merge retains every original plugin node/comment/style.
             let Some(plugins) = generated_plugins_field(&mut value) else {
                 return Err(error.into());
             };
-            clear_generated_plugin_comments(plugins);
+            repair_generated_plugin_nodes(plugins);
             compose::unmarshal(&encode::marshal(&value)?)?
         }
     };
@@ -502,11 +504,18 @@ fn generated_plugins_field(value: &mut encode::Value) -> Option<&mut encode::Val
     )
 }
 
-fn clear_generated_plugin_comments(value: &mut encode::Value) {
+fn repair_generated_plugin_nodes(value: &mut encode::Value) {
     fn clear(node: &mut Node) {
         node.head_comment.clear();
         node.line_comment.clear();
         node.foot_comment.clear();
+        if node.kind == Kind::Scalar
+            && node.value.starts_with('\t')
+            && (node.style.has(super::yaml3::Style::LITERAL)
+                || node.style.has(super::yaml3::Style::FOLDED))
+        {
+            node.style = super::yaml3::Style::DOUBLE_QUOTED;
+        }
         for child in &mut node.content {
             clear(child);
         }
@@ -515,8 +524,8 @@ fn clear_generated_plugin_comments(value: &mut encode::Value) {
         encode::Value::Node(node) => clear(node),
         encode::Value::Map(entries) => {
             for (key, value) in entries {
-                clear_generated_plugin_comments(key);
-                clear_generated_plugin_comments(value);
+                repair_generated_plugin_nodes(key);
+                repair_generated_plugin_nodes(value);
             }
         }
         _ => {}
@@ -2110,3 +2119,6 @@ mod block_comment_tests;
 
 #[cfg(test)]
 mod null_plugin_tests;
+
+#[cfg(test)]
+mod folded_tests;
