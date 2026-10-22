@@ -232,10 +232,16 @@ pub(crate) fn remove_map_key(node: &mut Node, key: &str) {
 /// comments go; its anchor node's come along.
 pub(crate) fn expand_config_aliases(node: &Node) -> Result<Node, YamlError> {
     let mut budget = MAX_ALIAS_COPIES;
-    expand(node, &mut budget, false, 0)
+    expand(node, &mut budget, false, 0, &mut Vec::new())
 }
 
-fn expand(node: &Node, budget: &mut usize, aliased: bool, depth: usize) -> Result<Node, YamlError> {
+fn expand(
+    node: &Node,
+    budget: &mut usize,
+    aliased: bool,
+    depth: usize,
+    scopes: &mut Vec<std::sync::Arc<()>>,
+) -> Result<Node, YamlError> {
     if depth > MAX_DEPTH {
         return Err(YamlError::fail(format!(
             "exceeded max depth of {MAX_DEPTH}"
@@ -243,7 +249,16 @@ fn expand(node: &Node, budget: &mut usize, aliased: bool, depth: usize) -> Resul
     }
     if node.kind == Kind::Alias {
         return match &node.alias {
-            Some(AliasTarget::Node(target)) => expand(target, budget, true, depth),
+            Some(AliasTarget::Node(target)) => {
+                if let Some(scope) = &node.alias_comment_scope {
+                    scopes.push(scope.clone());
+                }
+                let result = expand(target, budget, true, depth, scopes);
+                if node.alias_comment_scope.is_some() {
+                    scopes.pop();
+                }
+                result
+            }
             Some(AliasTarget::Cycle) => Err(YamlError::fail(format!(
                 "anchor '{}' value contains itself",
                 node.value
@@ -269,13 +284,23 @@ fn expand(node: &Node, budget: &mut usize, aliased: bool, depth: usize) -> Resul
         content: Vec::with_capacity(node.content.len()),
         head_comment: node.head_comment.clone(),
         line_comment: node.line_comment.clone(),
+        line_comment_id: node
+            .line_comment_id
+            .as_ref()
+            .map(|id| id.in_aliases(scopes)),
+        alias_comment_scope: node.alias_comment_scope.clone(),
         foot_comment: node.foot_comment.clone(),
         line: node.line,
         column: node.column,
     };
     for child in &node.content {
-        copy.content
-            .push(expand(child, budget, aliased, depth.saturating_add(1))?);
+        copy.content.push(expand(
+            child,
+            budget,
+            aliased,
+            depth.saturating_add(1),
+            scopes,
+        )?);
     }
     if copy.kind != Kind::Mapping {
         return Ok(copy);

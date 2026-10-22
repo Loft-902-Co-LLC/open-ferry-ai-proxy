@@ -269,10 +269,12 @@ pub(crate) struct Emitter {
     key_line_comment: Vec<u8>,
     key_comment_origin: Option<usize>,
     line_comment_origin: Option<usize>,
+    line_comment_id: Option<super::CommentId>,
+    key_comment_id: Option<super::CommentId>,
     event_has_line_comment: bool,
     pub(crate) hazardous_key_comments: Vec<usize>,
     pub(crate) record_comments: bool,
-    pub(crate) emitted_comments: Vec<Vec<u8>>,
+    pub(crate) emitted_comments: Vec<super::CommentEmission>,
     /// Config writers keep multiline comments out of scalar bodies.
     pub(crate) protect_config_comments: bool,
     pub(crate) protected_scalars: Vec<super::types::Mark>,
@@ -351,6 +353,8 @@ impl Emitter {
             key_line_comment: Vec::new(),
             key_comment_origin: None,
             line_comment_origin: None,
+            line_comment_id: None,
+            key_comment_id: None,
             event_has_line_comment: false,
             hazardous_key_comments: Vec::new(),
             record_comments: false,
@@ -1035,10 +1039,13 @@ impl Emitter {
             // Deferring its comment as for a block value puts {} at column 0.
             // Keep pending and current key comments before this key instead.
             let current = mem::take(&mut self.line_comment);
+            let current_id = self.line_comment_id.take();
             self.line_comment = mem::take(&mut self.key_line_comment);
+            self.line_comment_id = self.key_comment_id.take();
             self.line_comment_origin = self.key_comment_origin.take();
             self.process_line_comment()?;
             self.line_comment = current;
+            self.line_comment_id = current_id;
             self.process_line_comment()?;
             self.write_indent()?;
         }
@@ -1057,11 +1064,14 @@ impl Emitter {
                 // Go overwrites the older pending key comment here. Preserve
                 // it as a standalone comment before writing the new key.
                 let current = mem::take(&mut self.line_comment);
+                let current_id = self.line_comment_id.take();
                 self.line_comment = mem::take(&mut self.key_line_comment);
+                self.line_comment_id = self.key_comment_id.take();
                 self.line_comment_origin = self.key_comment_origin.take();
                 self.process_line_comment()?;
                 self.write_indent()?;
                 self.line_comment = current;
+                self.line_comment_id = current_id;
             }
             if let Some(origin) = self.key_comment_origin.take() {
                 self.hazardous_key_comments.push(origin);
@@ -1071,6 +1081,7 @@ impl Emitter {
                 .take()
                 .or(Some(event.source_node_id));
             self.key_line_comment = mem::take(&mut self.line_comment);
+            self.key_comment_id = self.line_comment_id.take();
         }
         if self.check_simple_key(event) {
             self.states.push(EmitterState::BlockMappingSimpleValue);
@@ -1104,6 +1115,7 @@ impl Emitter {
                     // usual. If it has a line comment, we can't have both so
                     // the one from the key is lost.
                     self.line_comment = mem::take(&mut self.key_line_comment);
+                    self.line_comment_id = self.key_comment_id.take();
                     self.line_comment_origin = self.key_comment_origin.take();
                 }
             } else if event.collection_style != CollectionStyle::Flow
@@ -1112,9 +1124,11 @@ impl Emitter {
                 // An indented block follows, so write the comment right now.
                 mem::swap(&mut self.line_comment, &mut self.key_line_comment);
                 mem::swap(&mut self.line_comment_origin, &mut self.key_comment_origin);
+                mem::swap(&mut self.line_comment_id, &mut self.key_comment_id);
                 self.process_line_comment()?;
                 mem::swap(&mut self.line_comment, &mut self.key_line_comment);
                 mem::swap(&mut self.line_comment_origin, &mut self.key_comment_origin);
+                mem::swap(&mut self.line_comment_id, &mut self.key_comment_id);
             }
         }
         self.states.push(EmitterState::BlockMappingKey);
@@ -1403,6 +1417,18 @@ impl Emitter {
             self.put(b' ')?;
         }
         self.line_comment_origin = None;
+        if self.record_comments
+            && let Some(id) = self.line_comment_id.take()
+        {
+            self.emitted_comments.push(super::CommentEmission {
+                line: usize::try_from(self.line)
+                    .unwrap_or_default()
+                    .saturating_add(1),
+                id,
+                text: self.line_comment.clone(),
+            });
+        }
+        self.line_comment_id = None;
         let line_comment = mem::take(&mut self.line_comment);
         self.write_comment(&line_comment)
     }
@@ -1652,6 +1678,7 @@ impl Emitter {
                 self.hazardous_key_comments.push(origin);
             }
             self.line_comment = mem::take(&mut event.line_comment);
+            self.line_comment_id = event.line_comment_id.take();
         }
         if !event.foot_comment.is_empty() {
             self.foot_comment = mem::take(&mut event.foot_comment);
@@ -2086,9 +2113,17 @@ impl Emitter {
                 if !breaks && !leading_spaces && at(value, i) == b'\n' {
                     // yaml.v3 looks from the value's start. With a more-indented
                     // first line that suppresses every later folding escape.
-                    // Config writes use libyaml's lookahead from this break so
-                    // ordinary lines still reload with their original breaks.
-                    let mut k = if self.protect_config_comments { i } else { 0 };
+                    // Use libyaml for value-changing breaks. In this branch
+                    // !breaks means the preceding character was not a break:
+                    // a final LF is therefore exactly one trailing break and
+                    // uses clip chomping. Go's extra physical LF is harmless
+                    // there, so retain its bytes.
+                    let clip_final_break = i + 1 == value.len();
+                    let mut k = if self.protect_config_comments && !clip_final_break {
+                        i
+                    } else {
+                        0
+                    };
                     while is_break(value, k) {
                         k = k.saturating_add(width(at(value, k)));
                     }
@@ -2123,9 +2158,6 @@ impl Emitter {
 
     /// yaml_emitter_write_comment.
     fn write_comment(&mut self, comment: &[u8]) -> Result<(), EmitterError> {
-        if self.record_comments {
-            self.emitted_comments.push(comment.to_vec());
-        }
         let mut breaks = false;
         let mut pound = false;
         let mut i = 0;

@@ -1,0 +1,326 @@
+[
+  {
+    "name": "one-nested",
+    "source": "x-note: >\n  text\nauth-dir: /old\n",
+    "op": "nested",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "x-note: >\n  text\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "nested",
+            "keys": [
+              "auth-dir"
+            ],
+            "value": "/x"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "x-note: >\n  text\n\nauth-dir: /x\n"
+      ]
+    }
+  },
+  {
+    "name": "one-save",
+    "source": "x-note: >\n  text\nauth-dir: /old\n",
+    "op": "save",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "x-note: >\n  text\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "save",
+            "config": "x-note: >\n  text\nauth-dir: /x\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "x-note: >\n  text\n\nauth-dir: /x\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    }
+  },
+  {
+    "name": "one-put",
+    "source": "x-note: >\n  text\nauth-dir: /old\n",
+    "op": "put",
+    "request": {
+      "translator": "r7/v8-put",
+      "options": {
+        "file": "x-note: >\n  text\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "save",
+            "config": "x-note: >\n  text\nauth-dir: /x\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "body": "{\"config-version\":8,\"status\":\"ok\"}",
+      "files": [
+        "oauth:\n    auth-dir: \"/x\"\nconfig-version: 8\n\n# x-note: >\n#     text\n#\n"
+      ],
+      "status": 200
+    }
+  },
+  {
+    "name": "several-nested",
+    "source": "x-note: >\n  first\n\n  second\nauth-dir: /old\n",
+    "op": "nested",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "x-note: >\n  first\n\n  second\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "nested",
+            "keys": [
+              "auth-dir"
+            ],
+            "value": "/x"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "x-note: >\n  first\n\n  second\n\nauth-dir: /x\n"
+      ]
+    }
+  },
+  {
+    "name": "several-save",
+    "source": "x-note: >\n  first\n\n  second\nauth-dir: /old\n",
+    "op": "save",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "x-note: >\n  first\n\n  second\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "save",
+            "config": "x-note: >\n  first\n\n  second\nauth-dir: /x\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "x-note: >\n  first\n\n  second\n\nauth-dir: /x\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    }
+  },
+  {
+    "name": "several-put",
+    "source": "x-note: >\n  first\n\n  second\nauth-dir: /old\n",
+    "op": "put",
+    "request": {
+      "translator": "r7/v8-put",
+      "options": {
+        "file": "x-note: >\n  first\n\n  second\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "save",
+            "config": "x-note: >\n  first\n\n  second\nauth-dir: /x\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "body": "{\"config-version\":8,\"status\":\"ok\"}",
+      "files": [
+        "oauth:\n    auth-dir: \"/x\"\nconfig-version: 8\n\n# x-note: >\n#     first\n# \n#     second\n#\n"
+      ],
+      "status": 200
+    }
+  },
+  {
+    "name": "comments-two",
+    "source": "auth-dir: /old # shared\n? x-note # shared\n: value # own\n",
+    "op": "nested",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "auth-dir: /old # shared\n? x-note # shared\n: value # own\n",
+        "steps": [
+          {
+            "op": "nested",
+            "keys": [
+              "auth-dir"
+            ],
+            "value": "/x"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "auth-dir: /x # shared\nx-note: value # own\n"
+      ]
+    }
+  },
+  {
+    "name": "comments-three",
+    "source": "auth-dir: /old # shared\ndebug: false # shared\n? x-note # shared\n: value # own\n",
+    "op": "nested",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "auth-dir: /old # shared\ndebug: false # shared\n? x-note # shared\n: value # own\n",
+        "steps": [
+          {
+            "op": "nested",
+            "keys": [
+              "auth-dir"
+            ],
+            "value": "/x"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "auth-dir: /x # shared\ndebug: false # shared\nx-note: value # own\n"
+      ]
+    }
+  },
+  {
+    "name": "custom-8232-literal",
+    "source": "config-version: 8\nx: !custom |-\n  a   b\nauth-dir: /old\n",
+    "op": "write",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "config-version: 8\nx: !custom |-\n  a   b\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "write",
+            "body": "config-version: 8\nx: !custom |-\n  a   b\nauth-dir: /old\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "config-version: 8\noauth:\n    auth-dir: /old\n\n# x: !custom |-\n#     a #     b\n"
+      ]
+    }
+  },
+  {
+    "name": "custom-8232-single",
+    "source": "config-version: 8\nx: !custom 'a   b'\nauth-dir: /old\n",
+    "op": "write",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "config-version: 8\nx: !custom 'a   b'\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "write",
+            "body": "config-version: 8\nx: !custom 'a   b'\nauth-dir: /old\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "config-version: 8\noauth:\n    auth-dir: /old\n\n# x: !custom 'a #     b'\n"
+      ]
+    }
+  },
+  {
+    "name": "custom-8233-literal",
+    "source": "config-version: 8\nx: !custom |-\n  a   b\nauth-dir: /old\n",
+    "op": "write",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "config-version: 8\nx: !custom |-\n  a   b\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "write",
+            "body": "config-version: 8\nx: !custom |-\n  a   b\nauth-dir: /old\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "config-version: 8\noauth:\n    auth-dir: /old\n\n# x: !custom |-\n#     a #     b\n"
+      ]
+    }
+  },
+  {
+    "name": "custom-8233-single",
+    "source": "config-version: 8\nx: !custom 'a   b'\nauth-dir: /old\n",
+    "op": "write",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "config-version: 8\nx: !custom 'a   b'\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "write",
+            "body": "config-version: 8\nx: !custom 'a   b'\nauth-dir: /old\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "config-version: 8\noauth:\n    auth-dir: /old\n\n# x: !custom 'a #     b'\n"
+      ]
+    }
+  },
+  {
+    "name": "custom-133-literal",
+    "source": "config-version: 8\nx: !custom |-\n  a  b\nauth-dir: /old\n",
+    "op": "write",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "config-version: 8\nx: !custom |-\n  a  b\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "write",
+            "body": "config-version: 8\nx: !custom |-\n  a  b\nauth-dir: /old\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "config-version: 8\noauth:\n    auth-dir: /old\n\n# x: !custom |-\n#     a\n#     b\n"
+      ]
+    }
+  },
+  {
+    "name": "custom-133-single",
+    "source": "config-version: 8\nx: !custom 'a  b'\nauth-dir: /old\n",
+    "op": "write",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "config-version: 8\nx: !custom 'a  b'\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "write",
+            "body": "config-version: 8\nx: !custom 'a  b'\nauth-dir: /old\n"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "config-version: 8\noauth:\n    auth-dir: /old\n\n# x: !custom 'a b'\n"
+      ]
+    }
+  }
+]

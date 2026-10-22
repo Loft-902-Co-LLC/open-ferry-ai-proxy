@@ -1,0 +1,74 @@
+[
+  {
+    "name": "internal-more-indented",
+    "source": "x-note: >2-\n   indented\n  ordinary\n\n  next\nauth-dir: /old\n",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "x-note: >2-\n   indented\n  ordinary\n\n  next\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "nested",
+            "keys": [
+              "auth-dir"
+            ],
+            "value": "/x"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "x-note: >2-\n   indented\n  ordinary\n  next\nauth-dir: /x\n"
+      ]
+    }
+  },
+  {
+    "name": "keep-trailing",
+    "source": "x-note: >+\n  text\n\nauth-dir: /old\n",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "x-note: >+\n  text\n\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "nested",
+            "keys": [
+              "auth-dir"
+            ],
+            "value": "/x"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "x-note: >+\n  text\n\n\nauth-dir: /x\n"
+      ]
+    }
+  },
+  {
+    "name": "blank-led-internal",
+    "source": "x-note: >-\n  first\n   leading\n  last\nauth-dir: /old\n",
+    "request": {
+      "translator": "config-save/steps",
+      "options": {
+        "file": "x-note: >-\n  first\n   leading\n  last\nauth-dir: /old\n",
+        "steps": [
+          {
+            "op": "nested",
+            "keys": [
+              "auth-dir"
+            ],
+            "value": "/x"
+          }
+        ]
+      }
+    },
+    "go": {
+      "files": [
+        "x-note: >-\n  first\n\n   leading\n  last\nauth-dir: /x\n"
+      ]
+    }
+  }
+]

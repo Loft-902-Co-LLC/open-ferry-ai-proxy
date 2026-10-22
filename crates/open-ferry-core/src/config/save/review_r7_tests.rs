@@ -1,0 +1,196 @@
+use super::*;
+use crate::config::testing::TempDir;
+use crate::config::v8_edit::{V8Edit, V8Method, edit_v8, preview_v8};
+
+#[test]
+fn review_r7_value_changing_breaks_remain_protected() {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../testdata/review-r7-folded-value-go.json")).unwrap();
+    for fixture in fixtures {
+        let source = fixture["source"].as_str().unwrap();
+        let source = unmarshal(source.as_bytes()).unwrap();
+        let expected = yaml_path(&source.content[0], "x-note")
+            .unwrap()
+            .value
+            .clone();
+        let go = unmarshal(fixture["go"]["files"][0].as_str().unwrap().as_bytes()).unwrap();
+        assert_ne!(yaml_path(&go.content[0], "x-note").unwrap().value, expected);
+        let mut protected = source;
+        yaml_path_mut(&mut protected.content[0], "auth-dir")
+            .unwrap()
+            .value = "/x".into();
+        let output = marshal_config(&protected).unwrap();
+        let output = unmarshal(&output).unwrap();
+        assert_eq!(
+            yaml_path(&output.content[0], "x-note").unwrap().value,
+            expected
+        );
+    }
+}
+
+#[test]
+fn review_r7_clip_bytes_match_go_on_nested_save_and_v8_put() {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../testdata/review-r7-go.json")).unwrap();
+    let mut count = 0;
+    for fixture in fixtures.iter().filter(|f| {
+        f["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("one-") || n.starts_with("several-"))
+    }) {
+        count += 1;
+        let source = fixture["source"].as_str().unwrap();
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        match fixture["op"].as_str().unwrap() {
+            "nested" => update_nested_scalar(&path, &["auth-dir"], "/x").unwrap(),
+            "save" => {
+                let mut config = Config::parse(source).unwrap();
+                config.auth_dir = "/x".into();
+                save_preserving_comments(&path, &config, false).unwrap();
+            }
+            "put" => {
+                let edit = V8Edit {
+                    method: V8Method::Put,
+                    path: vec!["oauth".into(), "auth-dir".into()],
+                    body: br#""/x""#.to_vec(),
+                    yaml: false,
+                };
+                let preview = preview_v8(source.as_bytes(), &edit).unwrap();
+                edit_v8(&path, &edit).unwrap();
+                assert_eq!(preview, std::fs::read(&path).unwrap());
+            }
+            _ => unreachable!(),
+        }
+        let output = std::fs::read(&path).unwrap();
+        assert_eq!(
+            output,
+            fixture["go"]["files"][0].as_str().unwrap().as_bytes(),
+            "{}",
+            fixture["name"]
+        );
+        Config::load_bytes(&output).unwrap();
+    }
+    assert_eq!(count, 6);
+}
+
+#[test]
+fn review_r7_clip_trailing_break_matches_lossless_go_bytes() {
+    for source in [
+        "x-note: >\n  text\nauth-dir: /old\n",
+        "x-note: >\n  first\n\n  second\nauth-dir: /old\n",
+    ] {
+        let mut doc = unmarshal(source.as_bytes()).unwrap();
+        yaml_path_mut(&mut doc.content[0], "auth-dir")
+            .unwrap()
+            .value = "/x".into();
+        let faithful = encode::faithful_node(&doc, 2).unwrap();
+        let protected = marshal_config(&doc).unwrap();
+        assert_eq!(protected, faithful);
+    }
+}
+
+#[test]
+fn review_r7_equal_text_comments_are_independent_occurrences() {
+    for (source, count) in [
+        (
+            "auth-dir: /old # shared\n? x-note # shared\n: value # own\n",
+            2,
+        ),
+        (
+            "auth-dir: /old # shared\ndebug: false # shared\n? x-note # shared\n: value # own\n",
+            3,
+        ),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        update_nested_scalar(&path, &["auth-dir"], "/x").unwrap();
+        let output = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(output.matches("# shared").count(), count, "{output}");
+        assert_eq!(output.matches("# own").count(), 1);
+        Config::load_bytes(output.as_bytes()).unwrap();
+        let doc = unmarshal(output.as_bytes()).unwrap();
+        let root = &doc.content[0];
+        assert_eq!(yaml_path(root, "auth-dir").unwrap().value, "/x");
+        assert_eq!(yaml_path(root, "x-note").unwrap().value, "value");
+    }
+}
+
+#[test]
+fn review_r7_alias_occurrences_are_distinct_and_stable_across_expansions() {
+    let source =
+        "auth-dir: /old # shared\na: &shape\n  ? note # shared\n  : value # own\nb: *shape\n";
+    let doc = unmarshal(source.as_bytes()).unwrap();
+    let first = expand_config_aliases(&doc.content[0]).unwrap();
+    let second = expand_config_aliases(&doc.content[0]).unwrap();
+    let key_id = |root: &Node, path: &str| {
+        yaml_path(root, path).unwrap().content[0]
+            .line_comment_id
+            .clone()
+            .unwrap()
+    };
+    assert_ne!(key_id(&first, "a"), key_id(&first, "b"));
+    assert_eq!(key_id(&first, "a"), key_id(&second, "a"));
+    assert_eq!(key_id(&first, "b"), key_id(&second, "b"));
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, source).unwrap();
+    update_nested_scalar(&path, &["auth-dir"], "/x").unwrap();
+    let output = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(output.matches("# shared").count(), 3);
+    assert_eq!(output.matches("# own").count(), 2);
+    Config::load_bytes(output.as_bytes()).unwrap();
+}
+
+#[test]
+fn review_r7_generated_copy_witness_still_matches_saved_go_bytes() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../testdata/plugin-anchor-comment-save.json")).unwrap();
+    let config = Config::parse(fixture["config"].as_str().unwrap()).unwrap();
+    let output = render_preserving_comments(
+        fixture["file"].as_str().unwrap().as_bytes(),
+        &config,
+        fixture["migrate"].as_bool().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(output, fixture["expected"].as_str().unwrap().as_bytes());
+    Config::load_bytes(&output).unwrap();
+}
+
+#[test]
+fn review_r7_custom_tagged_unicode_archives_survive_two_writes() {
+    for separator in ['\u{2028}', '\u{2029}', '\u{0085}'] {
+        for scalar in [
+            format!("!custom |-\n  a{separator}  b\n"),
+            format!("!custom 'a{separator}  b'\n"),
+        ] {
+            let source = format!("config-version: 8\nx: {scalar}auth-dir: /old\n");
+            let doc = unmarshal(source.as_bytes()).unwrap();
+            let original = yaml_path(&doc.content[0], "x").unwrap();
+            let expected = (original.tag.clone(), original.value.clone());
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            let mut bytes = source.into_bytes();
+            for pass in 0..2 {
+                write_file(&path, &bytes).unwrap();
+                bytes = std::fs::read(&path).unwrap();
+                Config::load_bytes(&bytes).unwrap();
+                let text = std::str::from_utf8(&bytes).unwrap();
+                let archived: String = text
+                    .split('\n')
+                    .filter_map(|line| line.strip_prefix("# "))
+                    .map(|line| format!("{line}\n"))
+                    .collect();
+                let doc = unmarshal(archived.as_bytes()).unwrap();
+                let saved = yaml_path(&doc.content[0], "x").unwrap();
+                assert_eq!(
+                    (&saved.tag, &saved.value),
+                    (&expected.0, &expected.1),
+                    "separator={separator:?}, pass={pass}, archive={archived:?}",
+                );
+            }
+        }
+    }
+}

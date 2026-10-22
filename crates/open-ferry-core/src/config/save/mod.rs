@@ -460,8 +460,8 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
     {
         field.value = generated_plugin_configs(configs)?;
     }
-    let rendered = encode::marshal(&value)?;
-    let generated = match compose::unmarshal(&rendered) {
+    let (rendered, mut identities) = encode::marshal_with_comment_ids(&value)?;
+    let mut generated = match compose::unmarshal(&rendered) {
         Ok(generated) => generated,
         Err(error) => {
             // This intermediate only supplies generated settings. Its plugin
@@ -474,9 +474,25 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
                 return Err(error.into());
             };
             repair_generated_plugin_nodes(plugins);
-            compose::unmarshal(&encode::marshal(&value)?)?
+            let (rendered, retry_ids) = encode::marshal_with_comment_ids(&value)?;
+            identities = retry_ids;
+            compose::unmarshal(&rendered)?
         }
     };
+    // Re-parsing generated YAML changes ownership/positions. Rebind only an
+    // actual emitted occurrence with the exact output line and full comment.
+    fn rebind(node: &mut Node, emitted: &[super::yaml3::CommentEmission]) {
+        if let Some(origin) = emitted
+            .iter()
+            .find(|origin| origin.line == node.line && origin.text == node.line_comment.as_bytes())
+        {
+            node.line_comment_id = Some(origin.id.clone());
+        }
+        for child in &mut node.content {
+            rebind(child, emitted);
+        }
+    }
+    rebind(&mut generated, &identities);
     if generated.kind != Kind::Document {
         return Err(invalid("invalid generated yaml structure"));
     }
@@ -2135,3 +2151,6 @@ mod pending_map_tests;
 
 #[cfg(test)]
 mod comment_transfer_tests;
+
+#[cfg(test)]
+mod review_r7_tests;

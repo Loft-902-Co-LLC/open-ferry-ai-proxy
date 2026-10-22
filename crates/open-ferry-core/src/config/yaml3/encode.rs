@@ -133,6 +133,18 @@ pub(crate) fn marshal(value: &Value) -> Result<Vec<u8>, YamlError> {
     encoder.close()
 }
 
+/// Faithful generated settings plus the identity of each emitted line comment.
+pub(crate) fn marshal_with_comment_ids(
+    value: &Value,
+) -> Result<(Vec<u8>, Vec<super::CommentEmission>), YamlError> {
+    let mut encoder = Encoder::new();
+    encoder.emitter.record_comments = true;
+    encoder.encode(value)?;
+    encoder.finish()?;
+    let ids = std::mem::take(&mut encoder.emitter.emitted_comments);
+    Ok((encoder.emitter.into_output(), ids))
+}
+
 /// A `yaml.Encoder` writing `node` with `SetIndent(indent)`, then closed:
 /// how upstream writes its config file (indent 2). Config writes also quote
 /// block scalars whose effective line comment would spill into their body.
@@ -212,7 +224,7 @@ pub(crate) fn protect_conflicting_key_comments(
         node: &mut Node,
         serial: &mut usize,
         hazardous: &[usize],
-        emitted: &[Vec<u8>],
+        emitted: &[super::CommentEmission],
         output_complete: bool,
     ) {
         *serial += 1;
@@ -223,10 +235,10 @@ pub(crate) fn protect_conflicting_key_comments(
             }
             for [key, value] in node.content.as_chunks_mut::<2>().0 {
                 let retained_elsewhere = !key.line_comment.contains('\n')
-                    && emitted
-                        .iter()
-                        .flat_map(|comment| comment.split(|b| *b == b'\n'))
-                        .any(|comment| comment == key.line_comment.as_bytes());
+                    && emitted.iter().any(|comment| {
+                        key.line_comment_id.as_ref() == Some(&comment.id)
+                            && comment.text == key.line_comment.as_bytes()
+                    });
                 if candidate(key, value, output_complete)
                     && hazardous.contains(&key_serial)
                     && !retained_elsewhere
@@ -458,6 +470,7 @@ impl Encoder {
         event.tail_comment = comments.tail.as_bytes().to_vec();
         event.start_mark = comments.mark;
         event.source_node_id = comments.node_id;
+        event.line_comment_id = comments.line_id.cloned();
         event.empty_inline_value = std::mem::take(&mut self.empty_inline_value);
         event.empty_block_mapping_value = std::mem::take(&mut self.empty_block_mapping_value);
         self.emit(event)
@@ -559,6 +572,7 @@ impl Encoder {
                 }
                 let mut event = Event::sequence_end();
                 event.line_comment = node.line_comment.as_bytes().to_vec();
+                event.line_comment_id = node.line_comment_id.clone();
                 event.foot_comment = foot.as_bytes().to_vec();
                 self.emit(event)
             }
@@ -603,6 +617,7 @@ impl Encoder {
                 let mut event = Event::mapping_end();
                 event.tail_comment = tail.as_bytes().to_vec();
                 event.line_comment = node.line_comment.as_bytes().to_vec();
+                event.line_comment_id = node.line_comment_id.clone();
                 event.foot_comment = foot.as_bytes().to_vec();
                 self.emit(event)
             }
@@ -610,6 +625,7 @@ impl Encoder {
                 let mut event = Event::alias(node.value.as_bytes().to_vec());
                 event.head_comment = node.head_comment.as_bytes().to_vec();
                 event.line_comment = node.line_comment.as_bytes().to_vec();
+                event.line_comment_id = node.line_comment_id.clone();
                 event.foot_comment = foot.as_bytes().to_vec();
                 self.emit(event)
             }
@@ -636,6 +652,7 @@ impl Encoder {
                     style,
                     Comments {
                         node_id,
+                        line_id: node.line_comment_id.as_ref(),
                         head: &node.head_comment,
                         line: &node.line_comment,
                         foot,
@@ -657,6 +674,7 @@ impl Encoder {
 #[derive(Clone, Copy, Default)]
 struct Comments<'a> {
     node_id: usize,
+    line_id: Option<&'a super::CommentId>,
     mark: super::types::Mark,
     head: &'a str,
     line: &'a str,
