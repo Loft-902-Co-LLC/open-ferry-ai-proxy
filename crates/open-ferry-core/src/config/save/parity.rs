@@ -7,6 +7,9 @@ use super::super::yaml3::parser::Parser;
 use super::super::yaml3::types::{ScalarStyle, TokenType};
 use super::{Node, STR_TAG, SaveError, marshal_config, unmarshal};
 
+#[cfg(feature = "parity")]
+pub mod ablation;
+
 mod folded;
 pub use folded::{folded_scalar_reencode, folded_scalar_values};
 

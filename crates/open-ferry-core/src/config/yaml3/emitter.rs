@@ -1020,7 +1020,13 @@ impl Emitter {
             return self.pop_state();
         }
         self.write_indent()?;
-        if self.protect_config_comments
+        let protect_empty_mapping = self.protect_config_comments;
+        #[cfg(feature = "parity")]
+        let protect_empty_mapping = protect_empty_mapping
+            && crate::config::save::parity::ablation::enabled(
+                crate::config::save::parity::ablation::Protection::EmptyMappingPendingComment,
+            );
+        if protect_empty_mapping
             && event.empty_block_mapping_value
             && (!self.key_line_comment.is_empty()
                 || (!self.event_has_line_comment && !self.line_comment.is_empty()))
@@ -1041,10 +1047,13 @@ impl Emitter {
             //      as the scanner associates line comments with the value.
             //      Either way, save the line comment and render it
             //      appropriately later.
-            if self.protect_config_comments
-                && event.empty_inline_value
-                && !self.key_line_comment.is_empty()
-            {
+            let protect_inline = self.protect_config_comments;
+            #[cfg(feature = "parity")]
+            let protect_inline = protect_inline
+                && crate::config::save::parity::ablation::enabled(
+                    crate::config::save::parity::ablation::Protection::InlineEmptyNullComment,
+                );
+            if protect_inline && event.empty_inline_value && !self.key_line_comment.is_empty() {
                 // Go overwrites the older pending key comment here. Preserve
                 // it as a standalone comment before writing the new key.
                 let current = mem::take(&mut self.line_comment);

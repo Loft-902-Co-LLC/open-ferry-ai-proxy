@@ -351,7 +351,14 @@ pub(crate) fn normalize_config_layout_doc(
         // Unknown fields are ignored at runtime: keep them as comments.
         comment_unknown_v8_sections(&mut root)?;
         let mut version = Node::scalar(INT_TAG, "8");
-        if let Some(previous) = yaml_path(&root, "config-version") {
+        let previous = yaml_path(&root, "config-version");
+        #[cfg(feature = "parity")]
+        let previous = previous.filter(|_| {
+            super::parity::ablation::enabled(
+                super::parity::ablation::Protection::CanonicalVersionComment,
+            )
+        });
+        if let Some(previous) = previous {
             version.head_comment.clone_from(&previous.head_comment);
             version.line_comment.clone_from(&previous.line_comment);
             version.foot_comment.clone_from(&previous.foot_comment);
