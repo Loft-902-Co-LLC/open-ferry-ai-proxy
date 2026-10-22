@@ -456,7 +456,18 @@ Where it differs from upstream:
 - **Loading still never writes.** Upstream's `LoadConfig` writes a plain `secret-key`'s bcrypt hash back to the file and removes legacy fields that a v8 field overrides; open-ferry's loader writes nothing (see the management API's foundation).
 - **The v8.0.32 settings are carried and ignored.** `requests.tls-handshake-timeout-seconds`, `upstream.claude.session-date-pin-days` and the four typed `claude-header-defaults` fields (`anthropic-beta-strip`, `anthropic-beta-append`, `inject-diagnostics`, `client-request-id`) load, save and reload in both layouts (`claude-header-defaults` is `upstream.claude.header-defaults` in the v8 layout), and `open-ferry migrate` reports them as ignored. They change nothing a request does, as they belong to the uTLS and cloaking code that isn't ported (see the move's left-out table and [docs/configuration.md](docs/configuration.md)). Where they differ from upstream: the unknown `client-request-id` warning leaves out the value, as every redacted log line does (upstream logs it); `claude-header-defaults: {user-agent: [x]}` loads, as the fingerprint fields are untyped (upstream rejects it), and `claude-header-defaults: 5` or `[]` fails to load, as upstream's does; an `inject-diagnostics: false` inserted into the file survives a save with its parent mapping (upstream's pruning drops it); clearing `claude.session-date-pin-days` writes `null` (upstream has no `omitempty`) and a reload gives the default 7, which the migrate report doesn't count as set; and `claude: null` followed by a save writes the whole generated mapping, as upstream does.
 
-- **Folded config scalars keep their line breaks after a more-indented first line.** Protected config emission looks ahead from the current break, as libyaml does, rather than from the value's start as yaml.v3 does. Otherwise `" indented\nordinary\nnext"` reloads as `" indented\nordinary next"`. Folded style is retained, including in archived unknown fields. Literal emission already preserves these breaks. A tab-leading literal or folded value gets an explicit indentation hint so it remains readable; if yaml.v3's missing hint makes the generated plugin intermediate invalid, only that intermediate is quoted, while the file's subtree keeps its value, comments and block style. Ordinary yaml.v3 encoding remains unchanged. The parity generator's block bodies are single-line strings without leading whitespace, so they cannot currently produce this shape; no equivalence is widened.
+Deferred key comments are traced through protected config emission before a
+conflicting multiline key comment is moved to its head. A later plain recipient
+keeps yaml.v3 bytes; a block-body or dropped recipient is protected. This also
+runs before v8 regrouping and on isolated generated plugin intermediates.
+
+
+- Archived config strings containing U+2028, U+2029 or U+0085 are quoted
+  before their YAML is commented out. Upstream prefixes only LF lines and
+  loses archived text across a Unicode YAML line break; escaping those breaks
+  keeps the archived value and comments recoverable.
+
+- **Folded config scalars keep their line breaks and trailing blank lines.** Protected config emission looks ahead from the current break, as libyaml does, rather than from the value's start as yaml.v3 does. Otherwise `" indented\nordinary\nnext"` reloads as `" indented\nordinary next"`, and `>+` values with an ordinary first line gain a trailing LF. Folded style is retained, including in archived unknown fields. Literal emission already preserves these breaks. A tab-leading literal or folded value gets an explicit indentation hint so it remains readable; if yaml.v3's missing hint makes the generated plugin intermediate invalid, only that intermediate is quoted, while the file's subtree keeps its value, comments and block style. Ordinary yaml.v3 encoding remains unchanged. The parity generator's block bodies are single-line strings without leading whitespace, so they cannot currently produce this shape; no equivalence is widened.
 
 The scalar-loss proof also counts **upstream folded scalar re-encode** separately. It accepts only complete single-save or single-nested-update cases: the Rust scalar must retain the folded string at the same source path, outside every explicitly supplied config root and nested edit path. The faithful emitter must reproduce each Go scalar byte, and the protected emitter must reproduce each Rust scalar byte, with every byte outside those spans equal. This extension requires exactly one faithful emission for an active span or two for a newly archived span; cases needing other pass counts remain Different. This covers yaml.v3 adding trailing newlines as well as losing ordinary line breaks. Longer histories and raw writes remain Different. Original Go files and decoded-value evidence are retained in the proof artifacts; the counterfactual four-check contract and general equivalences are unchanged.
 
@@ -1294,8 +1305,3 @@ These come from CLIProxyAPI's tracker. Each is a test case for us, and a fix we'
 | [#5360](https://github.com/router-for-me/CLIProxyAPI/issues/5360) | A stalled upstream never triggers credential rotation |
 | [#3783](https://github.com/router-for-me/CLIProxyAPI/issues/3783) | Concurrent token refreshes reuse the same refresh token |
 | [#3200](https://github.com/router-for-me/CLIProxyAPI/issues/3200) | Built-in usage statistics were removed |
-
-Deferred key comments are traced through protected config emission before a
-conflicting multiline key comment is moved to its head. A later plain recipient
-keeps yaml.v3 bytes; a block-body or dropped recipient is protected. This also
-runs before v8 regrouping and on isolated generated plugin intermediates.
