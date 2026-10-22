@@ -48,6 +48,8 @@ pub enum Deviation {
     /// Upstream fails on a hazardous scalar; quoting only the writer's
     /// protected scalars makes Go match, and leaves every Rust output identical.
     UpstreamBlockScalarCounterfactual,
+    /// A protected scalar in an archived section absorbs a source comment into data.
+    UpstreamArchivedScalarCounterfactual,
     /// Our reload log has a change line for a setting upstream reloads
     /// without one; upstream logs nothing for it.
     UnloggedChangeLine,
@@ -69,6 +71,7 @@ impl Deviation {
             Self::PluginCommentRepeated => "plugin comment written once, not twice",
             Self::UpstreamLossyPluginReencode => "upstream lossy plugin re-encode",
             Self::UpstreamBlockScalarCounterfactual => "upstream block scalar counterfactual",
+            Self::UpstreamArchivedScalarCounterfactual => "upstream archived scalar counterfactual",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
     }

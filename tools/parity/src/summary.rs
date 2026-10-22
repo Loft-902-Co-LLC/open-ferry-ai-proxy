@@ -27,6 +27,8 @@ pub struct SuiteResult {
     pub upstream_lossy_plugins: usize,
     /// Failed original Go runs justified by a successful scalar-only rewrite.
     pub upstream_counterfactuals: usize,
+    /// Successful Go archives whose scalar/comment loss has a complete counterfactual.
+    pub upstream_archived_counterfactuals: usize,
 }
 
 /// What the run compared against, and how its random cases were made.
@@ -87,6 +89,11 @@ pub fn render(run: &RunInfo<'_>, suites: &[SuiteResult]) -> String {
         out,
         "Upstream block scalar counterfactual: {} cases (included in Equivalent).",
         thousands(total(|s| s.upstream_counterfactuals))
+    );
+    let _ = writeln!(
+        out,
+        "Upstream archived scalar counterfactual: {} cases (included in Equivalent).",
+        thousands(total(|s| s.upstream_archived_counterfactuals))
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "<details>");
@@ -169,6 +176,7 @@ mod tests {
             different,
             upstream_lossy_plugins: 1,
             upstream_counterfactuals: 1,
+            upstream_archived_counterfactuals: 1,
         }
     }
 
@@ -200,6 +208,9 @@ mod tests {
         assert!(
             text.contains("Upstream lossy plugin re-encode: 2 cases (included in Equivalent).")
         );
+        assert!(text.contains(
+            "Upstream archived scalar counterfactual: 2 cases (included in Equivalent)."
+        ));
         assert!(
             text.contains(
                 "Upstream block scalar counterfactual: 2 cases (included in Equivalent)."

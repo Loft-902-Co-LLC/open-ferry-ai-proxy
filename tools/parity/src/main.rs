@@ -708,6 +708,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
                 .get(&Deviation::UpstreamLossyPluginReencode)
                 .copied()
                 .unwrap_or_default(),
+            upstream_archived_counterfactuals: tally
+                .deviations
+                .get(&Deviation::UpstreamArchivedScalarCounterfactual)
+                .copied()
+                .unwrap_or_default(),
             upstream_counterfactuals: tally
                 .deviations
                 .get(&Deviation::UpstreamBlockScalarCounterfactual)
@@ -968,6 +973,49 @@ fn evaluate_with_counterfactual(
     upstream: &Upstream,
     work_dir: &Path,
 ) -> Result<Evaluated, Box<dyn Error>> {
+    let mut evaluated =
+        evaluate_with_whole_counterfactual(translator, case, go, upstream, work_dir)?;
+    if translator == Translator::ConfigSave
+        && matches!(evaluated.outcome, Outcome::Different(_))
+        && let Ok(original_go) = serde_json::from_str::<Value>(&evaluated.go_output)
+        && let Ok(rust) = &evaluated.rust_output
+        && let Some(proof) =
+            config_save::counterfactual::stepwise(case, &original_go, rust, |single| {
+                Ok(upstream
+                    .run(translator.key(), std::slice::from_ref(single), work_dir)?
+                    .remove(0))
+            })?
+    {
+        save_counterfactual(work_dir, case, &proof.evidence)?;
+        evaluated.outcome = Outcome::Equivalent(proof.deviations);
+    }
+    Ok(evaluated)
+}
+
+fn save_counterfactual(work_dir: &Path, case: &Case, proof: &Value) -> Result<(), Box<dyn Error>> {
+    if !case
+        .name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("unsafe counterfactual evidence filename".into());
+    }
+    let dir = work_dir.join("counterfactual");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join(format!("{}.json", case.name)),
+        serde_json::to_vec_pretty(proof)?,
+    )?;
+    Ok(())
+}
+
+fn evaluate_with_whole_counterfactual(
+    translator: Translator,
+    case: &Case,
+    go: &GoResult,
+    upstream: &Upstream,
+    work_dir: &Path,
+) -> Result<Evaluated, Box<dyn Error>> {
     let mut evaluated = evaluate(translator, case, go);
     if translator != Translator::ConfigSave || !matches!(evaluated.outcome, Outcome::Different(_)) {
         return Ok(evaluated);
@@ -975,13 +1023,12 @@ fn evaluate_with_counterfactual(
     let Some(original_go) = serde_json::from_str::<Value>(&evaluated.go_output).ok() else {
         return Ok(evaluated);
     };
-    if !["error", "unloadable"].iter().any(|key| {
-        original_go[*key]
-            .as_str()
-            .is_some_and(|e| e.contains("yaml:"))
-    }) {
+    let Ok(rust) = &evaluated.rust_output else {
         return Ok(evaluated);
-    }
+    };
+    let Some(reason) = config_save::counterfactual::reason(case, &original_go, rust) else {
+        return Ok(evaluated);
+    };
     let Some(candidate) = config_save::counterfactual::rewritten(case) else {
         return Ok(evaluated);
     };
@@ -1006,15 +1053,6 @@ fn evaluate_with_counterfactual(
             rust_rewritten,
         )
     {
-        let dir = work_dir.join("counterfactual");
-        fs::create_dir_all(&dir)?;
-        if !case
-            .name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        {
-            return Err("unsafe counterfactual evidence filename".into());
-        }
         let proof = config_save::counterfactual::evidence(
             case,
             &candidate,
@@ -1023,13 +1061,8 @@ fn evaluate_with_counterfactual(
             rust_original,
             rust_rewritten,
         );
-        fs::write(
-            dir.join(format!("{}.json", case.name)),
-            serde_json::to_vec_pretty(&proof)?,
-        )?;
-        evaluated.outcome = Outcome::Equivalent(BTreeSet::from([
-            Deviation::UpstreamBlockScalarCounterfactual,
-        ]));
+        save_counterfactual(work_dir, case, &proof)?;
+        evaluated.outcome = Outcome::Equivalent(BTreeSet::from([reason]));
     }
     Ok(evaluated)
 }
