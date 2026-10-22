@@ -662,6 +662,8 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         .join("target")
         .join("parity");
     fs::create_dir_all(&work_dir)?;
+    // Even a failed upstream setup must not retain proofs from an older run.
+    fresh_dir(&work_dir.join("counterfactual"))?;
     let upstream = Upstream::build(&args.upstream, &args.go, &work_dir)?;
     if let (Some(url), Some(model)) = (&args.live, &args.model) {
         return run_live(url, model, &upstream, &work_dir);
@@ -669,7 +671,6 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
 
     let suites = selected_suites(args)?;
     let failures_dir = fresh_dir(&work_dir.join("failures"))?;
-    fresh_dir(&work_dir.join("counterfactual"))?;
 
     println!("open-ferry parity");
     println!(
