@@ -358,6 +358,7 @@ pub(crate) struct Encoder {
     node_serial: usize,
     empty_inline_value: bool,
     empty_block_mapping_value: bool,
+    empty_collection_value: bool,
 }
 
 impl Encoder {
@@ -374,6 +375,7 @@ impl Encoder {
             node_serial: 0,
             empty_inline_value: false,
             empty_block_mapping_value: false,
+            empty_collection_value: false,
         }
     }
 
@@ -566,6 +568,7 @@ impl Encoder {
         event.line_comment_id = comments.line_id.cloned();
         event.empty_inline_value = std::mem::take(&mut self.empty_inline_value);
         event.empty_block_mapping_value = std::mem::take(&mut self.empty_block_mapping_value);
+        event.empty_collection_value = std::mem::take(&mut self.empty_collection_value);
         self.emit(event)
     }
 
@@ -697,6 +700,9 @@ impl Encoder {
                         && value.kind == Kind::Mapping
                         && value.content.is_empty()
                         && !value.style.has(Style::FLOW);
+                    self.empty_collection_value = key.kind == Kind::Scalar
+                        && matches!(value.kind, Kind::Mapping | Kind::Sequence)
+                        && value.content.is_empty();
                     self.empty_inline_value = key.kind == Kind::Scalar
                         && ((value.kind == Kind::Scalar
                             && short_tag(&value.tag) == super::NULL_TAG

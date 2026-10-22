@@ -293,6 +293,8 @@ pub(crate) struct Event {
     pub(crate) empty_inline_value: bool,
     /// An empty block-style mapping will actually be emitted in flow style.
     pub(crate) empty_block_mapping_value: bool,
+    /// The actual value is an empty mapping or sequence, in either style.
+    pub(crate) empty_collection_value: bool,
     /// The event type.
     pub(crate) typ: EventType,
     /// The beginning of the event.

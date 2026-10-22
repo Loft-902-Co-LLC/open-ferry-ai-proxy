@@ -39,37 +39,71 @@ fn review_r8_pruned_mapping_foot_comment_remains_writable() {
 }
 
 #[test]
-fn review_r8_empty_mapping_flushes_a_previous_collections_foot_comment() {
-    let mut previous = Node::mapping();
-    previous.content.extend([
-        Node::scalar(STR_TAG, "child"),
-        Node::scalar(STR_TAG, "value"),
-    ]);
-    previous.foot_comment = "# previous foot".into();
-    let mut parent = Node::mapping();
-    parent.content.extend([
-        Node::scalar(STR_TAG, "previous"),
-        previous,
-        Node::scalar(STR_TAG, "empty"),
-        Node::mapping(),
-    ]);
-    let mut root = Node::mapping();
-    root.content
-        .extend([Node::scalar(STR_TAG, "parent"), parent]);
-    let faithful = encode::faithful_node(&root, 2).unwrap();
-    assert!(unmarshal(&faithful).is_err());
-    let (out, _) = encode::protected_node(&root, 2).unwrap();
-    let parsed = unmarshal(&out).unwrap();
-    let empty = yaml_path(&parsed.content[0], "parent.empty").unwrap();
-    assert_eq!(empty.kind, Kind::Mapping);
-    assert!(empty.content.is_empty());
-    assert_eq!(
-        String::from_utf8(out)
-            .unwrap()
-            .matches("# previous foot")
-            .count(),
-        1
-    );
+fn review_r8_empty_collections_flush_a_previous_collections_foot_comment() {
+    let mut failures = Vec::new();
+    for (name, mut value, flow) in [
+        ("block mapping", Node::mapping(), false),
+        ("flow mapping", Node::mapping(), true),
+        ("block sequence", Node::sequence(), false),
+        ("flow sequence", Node::sequence(), true),
+    ] {
+        if flow {
+            value.style = super::super::yaml3::Style::FLOW;
+        }
+        let kind = value.kind;
+        let mut previous = Node::mapping();
+        previous.content.extend([
+            Node::scalar(STR_TAG, "child"),
+            Node::scalar(STR_TAG, "value"),
+        ]);
+        previous.foot_comment = "# previous foot".into();
+        let mut parent = Node::mapping();
+        parent.content.extend([
+            Node::scalar(STR_TAG, "previous"),
+            previous,
+            Node::scalar(STR_TAG, "empty"),
+            value,
+        ]);
+        let mut root = Node::mapping();
+        root.content
+            .extend([Node::scalar(STR_TAG, "parent"), parent]);
+        let faithful = encode::faithful_node(&root, 2).unwrap();
+        assert!(unmarshal(&faithful).is_err());
+        let (out, _) = encode::protected_node(&root, 2).unwrap();
+        // This Round 8 fix isn't one of the six Round 7 protections that
+        // diagnostic ablation is authorized to disable.
+        use parity::ablation::{Protection::*, with_disabled};
+        let disabled = with_disabled(
+            &[
+                EmptyMappingPendingComment,
+                CanonicalVersionComment,
+                DroppedSingleKeyComment,
+                InlineEmptyNullComment,
+                EffectiveBlockScalarComment,
+                BlockScalarCommentIndentation,
+            ],
+            || encode::protected_node(&root, 2).unwrap().0,
+        );
+        assert_eq!(out, disabled, "{name}");
+        let parsed = match unmarshal(&out) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                failures.push((name, error.to_string()));
+                continue;
+            }
+        };
+        let empty = yaml_path(&parsed.content[0], "parent.empty").unwrap();
+        assert_eq!(empty.kind, kind);
+        assert!(empty.content.is_empty());
+        assert_eq!(
+            String::from_utf8(out)
+                .unwrap()
+                .matches("# previous foot")
+                .count(),
+            1
+        );
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]

@@ -1038,14 +1038,19 @@ impl Emitter {
             && crate::config::save::parity::ablation::enabled(
                 crate::config::save::parity::ablation::Protection::EmptyMappingPendingComment,
             );
-        if protect_empty_mapping
+        // This newly fixed foot-comment hazard also affects flow mappings and
+        // sequences. It is outside the Round 7 diagnostic switch set.
+        let pending_collection_foot = self.protect_config_comments
+            && event.empty_collection_value
+            && !self.foot_comment.is_empty();
+        if (protect_empty_mapping
             && event.empty_block_mapping_value
             && (!self.key_line_comment.is_empty()
-                || (!self.event_has_line_comment && !self.line_comment.is_empty())
-                || !self.foot_comment.is_empty())
+                || (!self.event_has_line_comment && !self.line_comment.is_empty())))
+            || pending_collection_foot
         {
-            // The block-style event is emitted as {} because it is empty.
-            // Deferring its comment as for a block value puts {} at column 0.
+            // An empty collection is emitted inline, including block-style
+            // nodes. Deferring comments as for a block value strands it at 0.
             // Keep pending and current key comments before this key instead.
             let current = mem::take(&mut self.line_comment);
             let current_id = self.line_comment_id.take();
@@ -1058,7 +1063,7 @@ impl Emitter {
             self.process_line_comment()?;
             // A preceding collection's end event can leave its foot comment
             // pending too. Flushing it after ':' precedes the delayed flow
-            // emission of {}, leaving the braces at column zero.
+            // emission of {} or [], leaving the value at column zero.
             self.process_foot_comment()?;
             self.write_indent()?;
         }
