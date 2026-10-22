@@ -14,6 +14,8 @@ pub enum Protection {
     CanonicalVersionComment,
     DroppedSingleKeyComment,
     InlineEmptyNullComment,
+    EffectiveBlockScalarComment,
+    BlockScalarCommentIndentation,
 }
 
 thread_local! {
@@ -39,16 +41,195 @@ pub fn with_disabled<T>(protections: &[Protection], call: impl FnOnce() -> T) ->
     call()
 }
 
+/// Rejected intermediate/final bytes, observed without permitting a bad write.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Rejected {
+    pub stage: &'static str,
+    pub bytes: Vec<u8>,
+}
+/// Exact comment write, excluding its terminating YAML line break.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct WrittenComment {
+    pub offset: usize,
+    pub bytes: Vec<u8>,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Emission {
+    pub bytes: Vec<u8>,
+    pub comments: Vec<WrittenComment>,
+}
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Trace {
+    pub rejected: Vec<Rejected>,
+    pub emissions: Vec<Emission>,
+}
+thread_local! {
+    static TRACE: std::cell::RefCell<Option<Trace>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn tracing() -> bool {
+    TRACE.with_borrow(Option::is_some)
+}
+pub(crate) fn record_rejected(stage: &'static str, bytes: &[u8]) {
+    TRACE.with_borrow_mut(|state| {
+        if let Some(t) = state {
+            t.rejected.push(Rejected {
+                stage,
+                bytes: bytes.to_vec(),
+            });
+        }
+    });
+}
+pub(crate) fn record_emission(bytes: &[u8], comments: &[WrittenComment]) {
+    TRACE.with_borrow_mut(|state| {
+        if let Some(t) = state {
+            t.emissions.push(Emission {
+                bytes: bytes.to_vec(),
+                comments: comments.to_vec(),
+            });
+        }
+    });
+}
+/// Observe one diagnostic call; nesting and unwinding restore the outer trace.
+pub fn with_trace<T>(call: impl FnOnce() -> T) -> (T, Trace) {
+    struct Restore(Option<Trace>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TRACE.with_borrow_mut(|s| *s = self.0.take());
+        }
+    }
+    let _restore = Restore(TRACE.with(|s| s.replace(Some(Trace::default()))));
+    let result = call();
+    let trace = TRACE.with_borrow_mut(|s| s.take().unwrap_or_default());
+    (result, trace)
+}
+
+/// Bind every exact write to the final bytes, with no overlap or string search.
+/// The only permitted offset adjustment is the writer's existing indentation
+/// normalization: each line either stays identical or loses its leading blanks.
+pub fn bind_comments(emission: &Emission, output: &[u8]) -> Option<Vec<WrittenComment>> {
+    let mut prior_end = 0;
+    for c in &emission.comments {
+        let end = c.offset.checked_add(c.bytes.len())?;
+        if c.offset < prior_end
+            || c.bytes.is_empty()
+            || c.bytes[0] != b'#'
+            || emission.bytes.get(c.offset..end)? != c.bytes
+        {
+            return None;
+        }
+        prior_end = end;
+    }
+    let mut records = emission.comments.clone();
+    if emission.bytes != output {
+        if super::super::normalize_comment_indentation(&emission.bytes) != output
+            && with_disabled(&[Protection::BlockScalarCommentIndentation], || {
+                super::super::normalize_comment_indentation(&emission.bytes)
+            }) != output
+        {
+            return None;
+        }
+        let mut old_at = 0;
+        let mut new_at = 0;
+        let old_lines: Vec<_> = emission.bytes.split_inclusive(|b| *b == b'\n').collect();
+        let new_lines: Vec<_> = output.split_inclusive(|b| *b == b'\n').collect();
+        if old_lines.len() != new_lines.len() {
+            return None;
+        }
+        for (old, new) in old_lines.into_iter().zip(new_lines) {
+            let removed = old.len().checked_sub(new.len())?;
+            if old.get(removed..)? != new
+                || old[..removed].iter().any(|b| !matches!(b, b' ' | b'\t'))
+            {
+                return None;
+            }
+            for c in &mut records {
+                // Read the original offset, not a previously mapped offset.
+                // Records belong to exactly one original line.
+                if c.offset >= old_at && c.offset < old_at + old.len() {
+                    c.offset = new_at + c.offset.checked_sub(old_at + removed)?;
+                }
+            }
+            old_at += old.len();
+            new_at += new.len();
+        }
+    }
+    let mut end = 0;
+    for c in &records {
+        let next = c.offset.checked_add(c.bytes.len())?;
+        if c.offset < end
+            || c.bytes.is_empty()
+            || c.bytes[0] != b'#'
+            || output.get(c.offset..next)? != c.bytes
+        {
+            return None;
+        }
+        end = next;
+    }
+    Some(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [Protection; 4] = [
+    const ALL: [Protection; 6] = [
         Protection::EmptyMappingPendingComment,
         Protection::CanonicalVersionComment,
         Protection::DroppedSingleKeyComment,
         Protection::InlineEmptyNullComment,
+        Protection::EffectiveBlockScalarComment,
+        Protection::BlockScalarCommentIndentation,
     ];
+
+    #[test]
+    fn nested_trace_scopes_restore_after_unwinding() {
+        let (_, outer) = with_trace(|| {
+            record_rejected("outer", b"first");
+            let (_, inner) = with_trace(|| record_rejected("inner", b"second"));
+            assert_eq!(inner.rejected.len(), 1);
+            assert!(
+                std::panic::catch_unwind(|| with_trace(|| panic!("trace restoration"))).is_err()
+            );
+            record_rejected("outer", b"last");
+        });
+        assert_eq!(outer.rejected.len(), 2);
+        assert!(!tracing());
+    }
+
+    #[test]
+    fn write_trace_is_byte_bound_and_nonoverlapping() {
+        let bytes = b"x: |\n# own\n  value\n";
+        let emission = Emission {
+            bytes: bytes.to_vec(),
+            comments: vec![WrittenComment {
+                offset: 5,
+                bytes: b"# own".to_vec(),
+            }],
+        };
+        assert_eq!(bytes[5], b'#');
+        assert!(bind_comments(&emission, bytes).is_some());
+        let mut wrong = emission.clone();
+        wrong.comments[0].offset += 1;
+        assert!(bind_comments(&wrong, bytes).is_none());
+        wrong = emission.clone();
+        wrong.comments[0].bytes = b"# absent".to_vec();
+        assert!(bind_comments(&wrong, bytes).is_none());
+        wrong = emission.clone();
+        wrong.comments.push(wrong.comments[0].clone());
+        assert!(bind_comments(&wrong, bytes).is_none());
+        assert!(bind_comments(&emission, b"x: |\n# other\n  value\n").is_none());
+    }
+
+    #[test]
+    fn emitter_trace_records_only_comment_writes_with_real_offsets() {
+        let doc =
+            super::super::super::unmarshal(b"x: 'data # own' # own\ny: |\n  data # own\n").unwrap();
+        let (bytes, trace) = with_trace(|| super::super::super::marshal_config(&doc).unwrap());
+        let emitted = trace.emissions.iter().find(|e| e.bytes == bytes).unwrap();
+        let bound = bind_comments(emitted, &bytes).unwrap();
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].bytes, b"# own");
+    }
 
     #[test]
     fn switches_are_independent_and_restore_after_each_call() {

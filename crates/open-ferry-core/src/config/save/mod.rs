@@ -482,10 +482,9 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
     // Re-parsing generated YAML changes ownership/positions. Rebind only an
     // actual emitted occurrence with the exact output line and full comment.
     fn rebind(node: &mut Node, emitted: &[super::yaml3::CommentEmission]) {
-        if let Some(origin) = emitted
-            .iter()
-            .find(|origin| origin.line == node.line && origin.text == node.line_comment.as_bytes())
-        {
+        if let Some(origin) = emitted.iter().find(|origin| {
+            origin.line == node.line_comment_line && origin.text == node.line_comment.as_bytes()
+        }) {
             node.line_comment_id = Some(origin.id.clone());
         }
         for child in &mut node.content {
@@ -634,6 +633,9 @@ pub(crate) fn render_preserving_comments(
         }
     }
     merge::normalize_collection_node_styles(root);
+    if migrating {
+        v8::retain_version_comment_owner(root)?;
+    }
 
     let mut out = normalize_comment_indentation(&marshal_config(&original)?);
     if migrating {
@@ -2154,3 +2156,6 @@ mod comment_transfer_tests;
 
 #[cfg(test)]
 mod review_r7_tests;
+
+#[cfg(test)]
+mod review_r8_tests;

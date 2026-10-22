@@ -10,8 +10,11 @@ use super::{Node, STR_TAG, SaveError, marshal_config, unmarshal};
 #[cfg(feature = "parity")]
 pub mod ablation;
 
+mod clean;
+pub use clean::{comment_free_source, faithful_without_comments, same_values};
+
 mod comments;
-pub use comments::{comment_occurrences, retained_comment_ownership};
+pub use comments::{comment_occurrences, retained_comment_ownership, retained_unloadable_comments};
 
 mod folded;
 pub use folded::{folded_scalar_reencode, folded_scalar_values};
