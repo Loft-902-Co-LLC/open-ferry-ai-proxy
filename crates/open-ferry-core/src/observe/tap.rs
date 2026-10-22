@@ -13,7 +13,7 @@
 //! ([`Tap::request_sent`]), then once an answer comes its head
 //! ([`Tap::response_head`]) and its body as it is read ([`Tap::chunk`]), and
 //! what failed if reading it did ([`Tap::attempt_error`]). A translated
-//! stream also reports each chunk returned to the client ([`Tap::stream_chunk`]);
+//! stream also reports each chunk returned to the manager ([`Tap::stream_chunk`]);
 //! chunks discarded on drop never reach that hook. Then, when the
 //! call failed, its error ([`Tap::error`]);
 //! and last how it ended ([`Tap::finish`]), once. The executor reports the
@@ -63,7 +63,7 @@ pub trait Tap: Send + Sync {
     /// The next part of the attempt's answer body, as it came off the wire.
     fn chunk(&self, _chunk: &Bytes) {}
 
-    /// A translated chunk is being returned to the client by the call's
+    /// A translated chunk is being returned to the manager by the call's
     /// stream. Unlike `chunk`, this observes delivery, not an upstream read;
     /// chunks discarded while a dropped stream drains are never reported.
     fn stream_chunk(&self, _chunk: &Bytes) {}
@@ -217,7 +217,7 @@ impl Observation {
         }
     }
 
-    /// Gives every tap a translated chunk being returned to the client.
+    /// Gives every tap a translated chunk being returned to the manager.
     pub fn stream_chunk(&self, chunk: &Bytes) {
         for tap in &self.taps {
             tap.stream_chunk(chunk);
