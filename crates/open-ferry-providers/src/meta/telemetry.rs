@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/meta_executor_execute.go
-// and meta_executor_stream.go (v8.0.36, MIT).
+// and meta_executor_stream.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Keep subscription telemetry out of client responses, preserving event boundaries.

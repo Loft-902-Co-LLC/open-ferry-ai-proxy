@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/gemini/*_test.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/gemini/*_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 use super::{
     CodexToGeminiStream, convert_codex_response_to_gemini_non_stream,

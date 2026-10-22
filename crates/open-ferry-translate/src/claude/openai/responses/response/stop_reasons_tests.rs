@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/
-// claude_openai-responses_stop_reasons_test.go (v8.0.36, MIT).
+// claude_openai-responses_stop_reasons_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

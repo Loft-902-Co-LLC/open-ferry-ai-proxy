@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_execution.go
 // (requestToFormat's openai-image, openai-video and openai-speech case) and
 // conductor_speech_format_test.go (TestRequestToFormatKeepsMediaSources)
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Calls from the image, video and speech endpoints go through the manager

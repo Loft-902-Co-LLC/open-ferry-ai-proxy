@@ -5,7 +5,7 @@
 // TestApplyPatchFailureStopsConsumptionAndNextAttemptIsFresh,
 // TestApplyPatchXAIWebsocketFailureMatrix,
 // TestApplyPatchInteractionsSourceFailureIsSealed,
-// TestApplyPatchFailurePreservesUpstreamUsage) (v8.0.36, MIT).
+// TestApplyPatchFailurePreservesUpstreamUsage) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `apply_patch_integration_test.go`: an invalid or unfinished call to

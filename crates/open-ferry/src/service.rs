@@ -11,7 +11,7 @@
 // builder.go (runtimeAuthSyncHook), the
 // order of internal/watcher/synthesizer/config.go (Synthesize), and the
 // auth dispatch of internal/watcher's clients.go and config_reload.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serving the proxy.

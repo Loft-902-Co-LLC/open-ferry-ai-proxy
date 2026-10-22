@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/payload_media.go
-// (ApplyMediaPayloadConfig, outOrBody, mediaPayloadJSON) (v8.0.36, MIT).
+// (ApplyMediaPayloadConfig, outOrBody, mediaPayloadJSON) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The payload rules applied to the body of an image or video call, JSON

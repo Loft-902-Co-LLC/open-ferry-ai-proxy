@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/api/handlers/management/auth_files_recent_requests_test.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Counts and recent requests in the credential list.

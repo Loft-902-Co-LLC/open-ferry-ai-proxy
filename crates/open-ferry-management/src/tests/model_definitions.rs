@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
-// model_definitions_test.go (v8.0.36, MIT).
+// model_definitions_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //! Static definitions and the sorted registry fallback for served providers.
 

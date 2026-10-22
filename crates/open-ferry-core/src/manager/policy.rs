@@ -3,7 +3,7 @@
 // (authSelectionEligibility, pickNextLegacy,
 // SelectAuthWithCredentialPolicy), sdk/cliproxy/auth/conductor_execution.go
 // (isFreeCodexAuth) and sdk/cliproxy/auth/conductor_models.go
-// (ResolveExecutionModel, executionModelCandidates) (v8.0.36, MIT).
+// (ResolveExecutionModel, executionModelCandidates) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Credential policies and the free-plan rule, which narrow the credentials

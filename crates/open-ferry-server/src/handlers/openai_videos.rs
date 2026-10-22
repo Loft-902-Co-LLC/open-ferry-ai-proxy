@@ -7,7 +7,7 @@
 // XAIVideosExtensions, handleXAIVideosNativePost, XAIVideosRetrieve,
 // VideosRetrieve, VideosContent, writeVideoContentFromURL,
 // videoContentDownloadAuth, copyVideoContentHeaders,
-// collectXAIVideosNative and collectXAIVideosCreate) (v8.0.36, MIT).
+// collectXAIVideosNative and collectXAIVideosCreate) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The video endpoints, all served by xAI's Grok Imagine Video:

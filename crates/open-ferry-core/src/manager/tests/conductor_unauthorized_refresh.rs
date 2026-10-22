@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A 401 refreshes the credential and retries it once before falling back
@@ -102,7 +102,7 @@ fn unauthorized_refresh_executor(tokens: &Arc<Mutex<Tokens>>) -> Arc<FakeExecuto
     executor
 }
 
-// Ported from conductor_issue6742_test.go (v8.0.36). JWTs are unsigned dummy
+// Ported from conductor_issue6742_test.go (v8.0.38). JWTs are unsigned dummy
 // fixtures; no provider or local proxy is contacted.
 fn issue6742_jwt(expiry: Timestamp) -> String {
     let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD

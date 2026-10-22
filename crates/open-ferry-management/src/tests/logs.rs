@@ -20,7 +20,7 @@
 // TestGetLogsInvalidCursorResetsToTail,
 // TestGetLogsMissingRotatedCursorFileResetsToTail,
 // TestGetLogsMissingLogDirKeepsOKEmptyResponse,
-// TestGetLogsLoggingDisabledKeepsBadRequest) (v8.0.36, MIT)
+// TestGetLogsLoggingDisabledKeepsBadRequest) (v8.0.38, MIT)
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the routes of `crate::logs`, and of the cursor helpers

@@ -3,7 +3,7 @@
 // codexReasoningReplaySessionKey, insertCodexReasoningReplayTurns,
 // cacheCodexReasoningReplayFromCompleted,
 // clearCodexReasoningReplayOnInvalidSignature and their helpers)
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reasoning replay for Claude clients.

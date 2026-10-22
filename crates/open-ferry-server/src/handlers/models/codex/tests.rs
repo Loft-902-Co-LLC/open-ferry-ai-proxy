@@ -1,4 +1,4 @@
-//! Ports these CLIProxyAPI tests (v8.0.36, MIT):
+//! Ports these CLIProxyAPI tests (v8.0.38, MIT):
 //! - internal/api/server_test.go: `TestModelsWithClientVersionReturnsCodexCatalog`,
 //!   `TestCodexClientModelsEndpoint_FiltersMaxAndUltraForOlderClientVersion`
 //!   and `TestModelsWithClientVersionApplyPatchRequiresExecutor`;

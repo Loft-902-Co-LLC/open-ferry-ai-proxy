@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/responses_tool_search.go,
-// helps/claude_tool_search_model.go and claude_executor.go (v8.0.36, MIT).
+// helps/claude_tool_search_model.go and claude_executor.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The native-search fallback and the value retained across both translations.
