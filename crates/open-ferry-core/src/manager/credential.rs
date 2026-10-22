@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (the expiry and override
 // readers), sdk/cliproxy/auth/classification.go, internal/credentialweight/
 // weight.go, the auth readers in sdk/cliproxy/auth/selector.go and the token
-// readers in sdk/cliproxy/auth/conductor_refresh.go (v8.0.36, MIT).
+// readers in sdk/cliproxy/auth/conductor_refresh.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the manager reads off a credential: its kind and source, priority,
@@ -340,6 +340,19 @@ fn duration_value(value: &Value) -> Option<Duration> {
         }
         Value::String(text) => parse_duration_string(text),
         _ => None,
+    }
+}
+
+/// Bearer eligible for the unchanged-token result exception. Codex API-key
+/// calls send the key instead, so their outcomes retain the version fence.
+pub(crate) fn result_access_token(auth: &Auth) -> &str {
+    if crate::auth::codex_refresh::is_codex_auth(auth)
+        && !auth.use_siwc()
+        && auth.attribute("api_key").is_some_and(|key| !key.is_empty())
+    {
+        ""
+    } else {
+        auth.access_token()
     }
 }
 

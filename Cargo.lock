@@ -1965,7 +1965,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "open-ferry-core",
- "open-ferry-server",
  "open-ferry-translate",
  "percent-encoding",
  "rand 0.10.3",

@@ -380,3 +380,86 @@ async fn execute_retry_401_survives_concurrent_outer_edit_and_same_token_bind() 
     assert_eq!(live.rejected_siwc_access_token, "retry-nested");
     assert_eq!(live.siwc_status(h.now()), "invalid");
 }
+
+#[test]
+fn local_status_legacy_access_alias() {
+    let mut auth = valid();
+    auth.metadata["siwc"] = json!({"access":"e30.eyJleHAiOjQwNzA5MDg4MDB9.sig"});
+    assert_eq!(auth.siwc_status(at("2026-10-21T12:00:00Z")), "valid");
+    assert_eq!(auth.access_token(), auth.siwc_access_token());
+}
+
+#[test]
+fn repeated_and_stale_rejection_preserve_snapshot_identity() {
+    let h = Harness::new(Default::default());
+    h.manager.register(valid()).unwrap();
+    h.manager
+        .mark_rejected_access_token("codex.json", "siwc-old-token");
+    let before = h.manager.get("codex.json").unwrap();
+    for token in ["siwc-old-token", "rotated-away-token", " "] {
+        h.manager.mark_rejected_access_token("codex.json", token);
+        let after = h.manager.get("codex.json").unwrap();
+        assert!(std::sync::Arc::ptr_eq(&before, &after));
+        assert_eq!(before.generation, after.generation);
+        assert_eq!(before.updated_at, after.updated_at);
+    }
+}
+
+#[test]
+fn local_status_future_sources_and_precedence() {
+    let now = at("2026-10-21T12:00:00Z");
+    let future_jwt = "e30.eyJleHAiOjQwNzA5MDg4MDB9.sig";
+    let past_jwt = "e30.eyJleHAiOjF9.sig";
+    let mut cases = vec![
+        (json!({"expires_at":"2026-10-21T12:00:01Z"}), "valid"),
+        (json!({"expiresAt":"2026-10-21T12:00:01Z"}), "valid"),
+        (json!({"access_token":future_jwt}), "valid"),
+        (
+            json!({"expires_at":"2000-01-01T00:00:00Z", "access_token":future_jwt}),
+            "invalid",
+        ),
+        (
+            json!({"expires_at":"2099-01-01T00:00:00Z", "access_token":past_jwt}),
+            "valid",
+        ),
+        (
+            json!({"expires_in":1, "issued_at":"2000-01-01T00:00:00Z", "access_token":future_jwt}),
+            "invalid",
+        ),
+        (
+            json!({"expires_in":3600, "issued_at":"2026-10-21T11:30:00Z", "access_token":past_jwt}),
+            "valid",
+        ),
+        (
+            json!({"expires_at":"2000-01-01T00:00:00Z", "expires_in":3600, "issued_at":"2026-10-21T11:30:00Z"}),
+            "invalid",
+        ),
+        (
+            json!({"expires_at":"2099-01-01T00:00:00Z", "expires_in":1, "issued_at":"2000-01-01T00:00:00Z"}),
+            "valid",
+        ),
+    ];
+    for lifetime in ["expires_in", "expiresIn"] {
+        for issuance in [
+            "last_refresh",
+            "lastRefresh",
+            "timestamp",
+            "issued_at",
+            "issuedAt",
+        ] {
+            let mut fields = serde_json::Map::new();
+            fields.insert(lifetime.into(), json!(3600));
+            fields.insert(issuance.into(), json!("2026-10-21T11:30:00Z"));
+            cases.push((serde_json::Value::Object(fields), "valid"));
+        }
+    }
+    for (fields, expected) in cases {
+        let mut auth = valid();
+        auth.metadata["siwc"] = json!({"access_token":"dummy-nested"});
+        auth.metadata["siwc"]
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert_eq!(auth.siwc_status(now), expected, "source: {fields}");
+    }
+}

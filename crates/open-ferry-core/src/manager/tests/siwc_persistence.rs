@@ -310,6 +310,12 @@ pub(super) fn observe(files: Arc<FileStore>, lease_unsupported: bool) -> Arc<Obs
 }
 
 pub(super) fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate) {
+    disk_manager_with_clock(Arc::new(chrono::Utc::now))
+}
+
+fn disk_manager_with_clock(
+    clock: crate::manager::Clock,
+) -> (tempfile::TempDir, Arc<ObservedStore>, Manager, ActiveGate) {
     let root = std::env::var_os("OFP_TEST_SCRATCH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -330,10 +336,11 @@ pub(super) fn disk_manager() -> (tempfile::TempDir, Arc<ObservedStore>, Manager,
     }
     std::fs::write(&path, serde_json::to_vec(&seeded).unwrap()).unwrap();
     let store = observe(files, false);
-    let manager = Manager::new(
+    let manager = Manager::with_clock(
         Settings::default(),
         Arc::new(FakeModels::default()),
         Some(store.clone()),
+        clock,
     );
     manager.set_gate(gate.clone());
     manager.register_unsaved(fixture()).unwrap();
@@ -4168,9 +4175,73 @@ fn unsupported_gemini_and_opaque_store_preserve_replacement_compatibility() {
     );
 }
 
+// These refusal fixtures use a clock that advances exactly once, immediately
+// before the 401. Only the rejection markers, generation and timestamp change.
+fn refusal_clock() -> (crate::manager::Clock, Arc<AtomicBool>) {
+    let recorded = Arc::new(AtomicBool::new(false));
+    let flag = recorded.clone();
+    let clock = Arc::new(move || {
+        super::siwc::at(if flag.load(Ordering::SeqCst) {
+            "2026-10-22T12:00:00Z"
+        } else {
+            "2026-10-21T12:00:00Z"
+        })
+    });
+    (clock, recorded)
+}
+
+fn assert_refused_adoption_records_only_rejection(before: &Auth, live: &Auth) {
+    let mut expected = before.clone();
+    let token = before.access_token().to_owned();
+    assert!(expected.record_rejected_token(&token));
+    expected.generation = before.generation.saturating_add(1);
+    expected.updated_at = Some(super::siwc::at("2026-10-22T12:00:00Z"));
+    assert_ne!(before.updated_at, expected.updated_at);
+    macro_rules! unchanged {
+        ($($field:ident),+ $(,)?) => { $(assert!(live.$field == expected.$field, "unexpected change to {}", stringify!($field));)+ };
+    }
+    unchanged!(
+        id,
+        registration_epoch,
+        generation,
+        credential_version,
+        provider,
+        prefix,
+        file_name,
+        index,
+        label,
+        status,
+        status_message,
+        disabled,
+        unavailable,
+        proxy_url,
+        attributes,
+        metadata,
+        quota,
+        last_error,
+        created_at,
+        updated_at,
+        last_refreshed_at,
+        next_refresh_after,
+        next_retry_after,
+        model_states,
+        success,
+        failed,
+        recent_requests,
+        rejected_access_token,
+        rejected_siwc_access_token,
+        codex_persist_intent,
+        codex_pending_refresh,
+        cooldown_recorded_seq,
+    );
+    assert!(before.codex_refresh_failure.is_none());
+    assert!(live.codex_refresh_failure.is_none());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn rejection_adoption_does_not_fall_back_to_consumed_disk_tokens() {
-    let (_dir, store, manager, gate) = disk_manager();
+    let (clock, recorded) = refusal_clock();
+    let (_dir, store, manager, gate) = disk_manager_with_clock(clock);
     // The fault or hook is on the unleased refresh save, so the store gives no lease.
     store.lease_unsupported.store(true, Ordering::SeqCst);
     manager.register_executor(partition_rotation_executor(false, "rotated"));
@@ -4187,6 +4258,7 @@ async fn rejection_adoption_does_not_fall_back_to_consumed_disk_tokens() {
         flag.store(true, Ordering::SeqCst);
     }));
     gate.close(gate.epoch()).await.unwrap();
+    recorded.store(true, Ordering::SeqCst);
     let adopted = manager
         .try_refresh_after_unauthorized(
             &failed,
@@ -4200,6 +4272,7 @@ async fn rejection_adoption_does_not_fall_back_to_consumed_disk_tokens() {
     );
     assert!(adopted.is_none(), "rebased failed token is not an adoption");
     let live = manager.get("codex.json").unwrap();
+    assert_refused_adoption_records_only_rejection(&failed, &live);
     assert!(
         live.metadata == failed.metadata && live.registration_epoch == failed.registration_epoch,
         "consumed disk token never replaces live rotation"
@@ -4614,7 +4687,8 @@ fn runtime_only_replace_keeps_supported_live_partitions() {
 #[tokio::test(flavor = "current_thread")]
 async fn marked_rejection_refuses_different_disk_tokens() {
     for outer in [true, false] {
-        let (_dir, store, manager, gate) = disk_manager();
+        let (clock, recorded) = refusal_clock();
+        let (_dir, store, manager, gate) = disk_manager_with_clock(clock);
         rotate_partition(&manager, &store, outer, "failed", true);
         discard_work(&manager);
         manager
@@ -4640,6 +4714,7 @@ async fn marked_rejection_refuses_different_disk_tokens() {
             flag.store(true, Ordering::SeqCst);
         }));
         gate.close(gate.epoch()).await.unwrap();
+        recorded.store(true, Ordering::SeqCst);
         let adopted = manager
             .try_refresh_after_unauthorized(
                 &failed,
@@ -4656,6 +4731,7 @@ async fn marked_rejection_refuses_different_disk_tokens() {
             "marked rejected partition cannot adopt a different disk token"
         );
         let live = manager.get("codex.json").unwrap();
+        assert_refused_adoption_records_only_rejection(&failed, &live);
         assert!(
             live.metadata == failed.metadata
                 && live.registration_epoch == failed.registration_epoch,
@@ -5035,10 +5111,12 @@ async fn missing_and_invalid_rejection_never_calls_legacy_readback() {
                 invalid,
                 legacy_calls: std::sync::atomic::AtomicUsize::new(0),
             });
-            let manager = Manager::new(
+            let (clock, recorded) = refusal_clock();
+            let manager = Manager::with_clock(
                 Settings::default(),
                 Arc::new(FakeModels::default()),
                 Some(store.clone()),
+                clock,
             );
             let gate = ActiveGate::open();
             manager.set_gate(gate.clone());
@@ -5047,6 +5125,7 @@ async fn missing_and_invalid_rejection_never_calls_legacy_readback() {
             manager.register_unsaved(auth).unwrap();
             let before = manager.get("codex.json").unwrap();
             gate.close(gate.epoch()).await.unwrap();
+            recorded.store(true, Ordering::SeqCst);
             let adopted = manager
                 .try_refresh_after_unauthorized(
                     &before,
@@ -5059,6 +5138,7 @@ async fn missing_and_invalid_rejection_never_calls_legacy_readback() {
                 "Missing and Invalid never call legacy read_back"
             );
             let live = manager.get("codex.json").unwrap();
+            assert_refused_adoption_records_only_rejection(&before, &live);
             assert!(
                 adopted.is_none()
                     && live.metadata == before.metadata

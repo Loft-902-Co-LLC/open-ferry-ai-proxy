@@ -581,10 +581,8 @@ fn entry_fields(auth: &Auth, now: Timestamp, v8: bool) -> Option<Entry> {
     if let Some(retry) = auth.request_retry_override() {
         set("request_retry", Json::Int(retry));
     }
-    if provider.eq_ignore_ascii_case("codex") {
-        set("siwc_status", Json::Str(auth.siwc_status(now).into()));
-    }
     if v8 && provider.eq_ignore_ascii_case("codex") {
+        set("siwc_status", Json::Str(auth.siwc_status(now).into()));
         set(
             "siwc_bind_supported",
             Json::Bool(crate::oauth::siwc_bind::eligible(auth)),

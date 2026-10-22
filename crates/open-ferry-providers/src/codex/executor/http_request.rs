@@ -25,7 +25,8 @@
 //!   its outer OAuth bearer. All other plain HTTP passthrough remains refused;
 //!   upstream would send the nested bearer to those destinations.
 //! - The URL is read as a WHATWG URL, so its `.` and `..` segments are
-//!   resolved, percent-encoded ones such as `%2e%2e` included, and a `\`
+//!   resolved, percent-encoded ones such as `%2e%2e` included, an explicit
+//!   HTTPS `:443` and host case are normalized, and a `\`
 //!   reads as `/`. Go sends `/v1/%2e%2e/alpha/search` as written and a `\`
 //!   as `%5C`. A URL with an ASCII control character before any `#`,
 //!   which the WHATWG parser would drop or encode, fails before anything is
@@ -135,9 +136,9 @@ impl CodexExecutor {
                 &attempt.request(&method, &url, &headers, &body, &secrets),
             )
         });
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let send_url = &url;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let send_url = self.http_mock_url.as_ref().unwrap_or(&url);
         let mut response = self
             .clients
@@ -284,70 +285,6 @@ mod tests {
 
     const SEARCH: &str = "https://chatgpt.com/backend-api/codex/alpha/search";
 
-    // The real public router, manager and executor, with only the last
-    // transport destination replaced by the loopback mock after validation.
-    #[tokio::test]
-    async fn siwc_alpha_search_public_routes_use_outer_oauth_at_transport() {
-        use open_ferry_core::manager::{Manager, Settings};
-        use open_ferry_core::models::ModelInfo;
-        use open_ferry_core::registry::ModelRegistry;
-        use open_ferry_server::{AppState, ServerConfig, router};
-        let (url, seen) = serve(200, r#"{"results":[]}"#).await;
-        let mut executor = CodexExecutor::new("direct");
-        executor.http_mock_url = Some(format!("{url}/backend-api/codex/alpha/search"));
-        let registry = Arc::new(ModelRegistry::new());
-        let manager = Arc::new(Manager::new(Settings::default(), registry.clone(), None));
-        manager.register_executor(Arc::new(executor));
-        let mut auth = dual();
-        auth.id = "dual".into();
-        auth.metadata["siwc"]["expires_at"] = json!("2099-01-01T00:00:00Z");
-        manager.register_unsaved(auth).unwrap();
-        registry.register_client(
-            "dual",
-            "codex",
-            &[ModelInfo {
-                id: "gpt-5".into(),
-                ..Default::default()
-            }],
-        );
-        let before = manager.get("dual").unwrap();
-        let state = AppState::new(
-            ServerConfig {
-                api_keys: vec!["dummy-client-key".into()],
-                ..Default::default()
-            },
-            manager.clone(),
-            registry,
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server =
-            tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for path in ["/v1/alpha/search", "/backend-api/codex/alpha/search"] {
-            let response = client
-                .post(format!("{base}{path}"))
-                .bearer_auth("dummy-client-key")
-                .header("content-type", "application/json")
-                .body(r#"{"model":"gpt-5","commands":{"search_query":[{"q":"dummy"}]}}"#)
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), 200);
-            assert_eq!(response.text().await.unwrap(), r#"{"results":[]}"#);
-            let sent = last(&seen);
-            assert_eq!(sent.path, "/backend-api/codex/alpha/search");
-            assert_eq!(
-                sent.headers[header::AUTHORIZATION],
-                "Bearer outer-search-dummy"
-            );
-            assert_eq!(sent.headers["chatgpt-account-id"], "dummy-account");
-            assert!(!sent.headers.contains_key("originator"));
-        }
-        assert_eq!(manager.get("dual").unwrap().metadata, before.metadata);
-        server.abort();
-    }
-
     #[tokio::test]
     async fn siwc_alpha_search_uses_outer_partition_at_mock_transport() {
         use open_ferry_core::exec::{Options, Request};
@@ -478,6 +415,26 @@ mod tests {
         let body = String::from_utf8(reply.body.to_vec()).unwrap();
         assert!(!body.contains("dummy-custom-bearer"));
         assert!(!body.contains("outer-search-dummy"));
+    }
+
+    #[tokio::test]
+    async fn siwc_normalized_search_destination_uses_outer_bearer() {
+        let (url, seen) = serve(200, "{}").await;
+        let mut executor = CodexExecutor::new("direct");
+        executor.http_mock_url = Some(url);
+        for destination in [
+            "https://chatgpt.com:443/backend-api/codex/alpha/search",
+            "https://CHATGPT.COM/backend-api/codex/alpha/search",
+        ] {
+            executor
+                .http_request_inner(&dual(), call(HttpTarget::Url(destination.into()), "{}"))
+                .await
+                .unwrap();
+            assert_eq!(
+                last(&seen).headers[header::AUTHORIZATION],
+                "Bearer outer-search-dummy"
+            );
+        }
     }
 
     // Ports the URL check of TestCodexAlphaSearchForwardsRequest

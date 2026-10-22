@@ -197,7 +197,7 @@ impl GoStruct for RefreshRequest {
 /// The credential `name` (an ID or a file name) and `index` name, after
 /// trimming (upstream's `lookupAuthFile`). Without an index, the ID is
 /// tried first.
-fn lookup(manager: &Manager, name: &str, index: &str) -> Option<Arc<Auth>> {
+pub(crate) fn lookup(manager: &Manager, name: &str, index: &str) -> Option<Arc<Auth>> {
     let name = name.trim();
     let index = index.trim();
     if name.is_empty() {

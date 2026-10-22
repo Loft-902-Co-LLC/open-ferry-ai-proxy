@@ -123,7 +123,7 @@ const REFRESH_ATTEMPTS: u32 = 3;
 pub struct CodexExecutor {
     clients: Clients,
     /// Loopback mock transport, applied only after destination/auth checks.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     http_mock_url: Option<String>,
     config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
@@ -143,7 +143,7 @@ impl CodexExecutor {
     pub fn new(global_proxy_url: impl Into<String>) -> Self {
         Self {
             clients: Clients::new(global_proxy_url),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             http_mock_url: None,
             config: None,
             models: None,
@@ -153,6 +153,14 @@ impl CodexExecutor {
             bootstrap_clock: Arc::new(Instant::now),
             websockets: Arc::new(websocket::Store::new()),
         }
+    }
+
+    /// Replaces only the final HTTP transport URL, after destination/auth checks.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_http_mock_url(mut self, url: impl Into<String>) -> Self {
+        self.http_mock_url = Some(url.into());
+        self
     }
 
     /// Follows `config` where upstream's executor reads its config.
