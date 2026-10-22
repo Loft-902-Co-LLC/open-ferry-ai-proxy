@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_request.go
-// (PrepareRequest, HttpRequest) (v8.0.36, MIT).
+// (PrepareRequest, HttpRequest) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`CodexExecutor`]'s plain HTTP requests (upstream's `HttpRequest`), which
@@ -21,6 +21,9 @@
 //!   dropped; a connection error reads as no answer, without the URL.
 //! - A custom header can't set a client identity header (see
 //!   [`crate::custom_headers`]).
+//! - SIWC permits only ChatGPT's exact HTTPS Alpha Search destination, using
+//!   its outer OAuth bearer. All other plain HTTP passthrough remains refused;
+//!   upstream would send the nested bearer to those destinations.
 //! - The URL is read as a WHATWG URL, so its `.` and `..` segments are
 //!   resolved, percent-encoded ones such as `%2e%2e` included, and a `\`
 //!   reads as `/`. Go sends `/v1/%2e%2e/alpha/search` as written and a `\`
@@ -61,9 +64,6 @@ impl CodexExecutor {
         auth: &Auth,
         call: HttpCall,
     ) -> Result<HttpReply, ExecError> {
-        if auth.use_siwc() {
-            return Err(ExecError::new(ErrorKind::Upstream, "codex executor: plain HTTP passthrough and Alpha Search are not supported with use_siwc").with_status(400));
-        }
         let HttpCall {
             method,
             target,
@@ -75,7 +75,31 @@ impl CodexExecutor {
         } = call;
         let url = self.target_url(target);
         refuse_control_characters(&url)?;
-        let (token, _) = credentials(auth);
+        let token = if auth.use_siwc() {
+            let destination = url::Url::parse(&url).map_err(|_| {
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    "codex executor: invalid passthrough destination",
+                )
+                .with_status(400)
+            })?;
+            if destination.scheme() != "https"
+                || destination.host_str() != Some("chatgpt.com")
+                || destination.port_or_known_default() != Some(443)
+                || destination.path() != "/backend-api/codex/alpha/search"
+                || !destination.username().is_empty()
+                || destination.password().is_some()
+            {
+                return Err(ExecError::new(ErrorKind::Upstream, "codex executor: plain HTTP passthrough is not supported with use_siwc outside ChatGPT HTTPS Alpha Search").with_status(400));
+            }
+            let token = auth.outer_access_token();
+            if token.is_empty() {
+                return Err(ExecError::new(ErrorKind::Upstream, "codex executor: original OAuth access_token is required for ChatGPT Alpha Search").with_status(401));
+            }
+            token
+        } else {
+            credentials(auth).0
+        };
         if token.trim().is_empty() {
             headers.remove(header::AUTHORIZATION);
         } else {
@@ -111,10 +135,14 @@ impl CodexExecutor {
                 &attempt.request(&method, &url, &headers, &body, &secrets),
             )
         });
+        #[cfg(not(test))]
+        let send_url = &url;
+        #[cfg(test)]
+        let send_url = self.http_mock_url.as_ref().unwrap_or(&url);
         let mut response = self
             .clients
             .get(&auth.proxy_url)
-            .request(method, url)
+            .request(method, send_url)
             .headers(headers)
             .body(body)
             .send()
@@ -168,6 +196,7 @@ mod tests {
 
     use super::*;
     use crate::codex::request::CONTROL_CHARACTER;
+    use serde_json::json;
 
     /// The API key of the credentials that quote it.
     const TOKEN: &str = "alpha-token-0123456789";
@@ -241,6 +270,214 @@ mod tests {
             response_limit: 1 << 20,
             observation: None,
         }
+    }
+
+    fn dual() -> Auth {
+        Auth {
+            provider: "codex".into(),
+            metadata: json!({"type":"codex", "use_siwc":true,
+                "access_token":"outer-search-dummy", "refresh_token":"outer-refresh-dummy", "account_id":"dummy-account",
+                "siwc":{"access_token":"nested-response-dummy", "refresh_token":"nested-refresh-dummy", "client_id":"dummy-client"}}).as_object().unwrap().clone(),
+            ..Default::default()
+        }
+    }
+
+    const SEARCH: &str = "https://chatgpt.com/backend-api/codex/alpha/search";
+
+    // The real public router, manager and executor, with only the last
+    // transport destination replaced by the loopback mock after validation.
+    #[tokio::test]
+    async fn siwc_alpha_search_public_routes_use_outer_oauth_at_transport() {
+        use open_ferry_core::manager::{Manager, Settings};
+        use open_ferry_core::models::ModelInfo;
+        use open_ferry_core::registry::ModelRegistry;
+        use open_ferry_server::{AppState, ServerConfig, router};
+        let (url, seen) = serve(200, r#"{"results":[]}"#).await;
+        let mut executor = CodexExecutor::new("direct");
+        executor.http_mock_url = Some(format!("{url}/backend-api/codex/alpha/search"));
+        let registry = Arc::new(ModelRegistry::new());
+        let manager = Arc::new(Manager::new(Settings::default(), registry.clone(), None));
+        manager.register_executor(Arc::new(executor));
+        let mut auth = dual();
+        auth.id = "dual".into();
+        auth.metadata["siwc"]["expires_at"] = json!("2099-01-01T00:00:00Z");
+        manager.register_unsaved(auth).unwrap();
+        registry.register_client(
+            "dual",
+            "codex",
+            &[ModelInfo {
+                id: "gpt-5".into(),
+                ..Default::default()
+            }],
+        );
+        let before = manager.get("dual").unwrap();
+        let state = AppState::new(
+            ServerConfig {
+                api_keys: vec!["dummy-client-key".into()],
+                ..Default::default()
+            },
+            manager.clone(),
+            registry,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server =
+            tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for path in ["/v1/alpha/search", "/backend-api/codex/alpha/search"] {
+            let response = client
+                .post(format!("{base}{path}"))
+                .bearer_auth("dummy-client-key")
+                .header("content-type", "application/json")
+                .body(r#"{"model":"gpt-5","commands":{"search_query":[{"q":"dummy"}]}}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.text().await.unwrap(), r#"{"results":[]}"#);
+            let sent = last(&seen);
+            assert_eq!(sent.path, "/backend-api/codex/alpha/search");
+            assert_eq!(
+                sent.headers[header::AUTHORIZATION],
+                "Bearer outer-search-dummy"
+            );
+            assert_eq!(sent.headers["chatgpt-account-id"], "dummy-account");
+            assert!(!sent.headers.contains_key("originator"));
+        }
+        assert_eq!(manager.get("dual").unwrap().metadata, before.metadata);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn siwc_alpha_search_uses_outer_partition_at_mock_transport() {
+        use open_ferry_core::exec::{Options, Request};
+        use open_ferry_core::executor::ProviderExecutor;
+        use std::sync::Arc;
+        let (url, seen) = serve(200, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[]}}\n\n").await;
+        let mut executor = CodexExecutor::new("direct");
+        executor.http_mock_url = Some(format!("{url}/backend-api/codex/alpha/search"));
+        let mut auth = dual();
+        // Responses is independently sent to a loopback API base.
+        auth.attributes.insert("base_url".into(), url);
+        let before = auth.metadata.clone();
+        for nested in [true, false] {
+            let mut search_auth = auth.clone();
+            if !nested {
+                search_auth.metadata.remove("siwc");
+            }
+            executor
+                .http_request_inner(&search_auth, call(HttpTarget::Url(SEARCH.into()), "{}"))
+                .await
+                .unwrap();
+            let sent = last(&seen);
+            assert_eq!(
+                sent.headers[header::AUTHORIZATION],
+                "Bearer outer-search-dummy"
+            );
+            assert_eq!(sent.path, "/backend-api/codex/alpha/search");
+            assert!(!sent.headers.contains_key("originator"));
+        }
+        executor
+            .execute(
+                Arc::new(auth.clone()),
+                Request {
+                    model: "gpt-5".into(),
+                    payload: Bytes::from_static(br#"{"model":"gpt-5","input":[]}"#),
+                },
+                Options::new(Format::from("openai-response")),
+            )
+            .await
+            .unwrap();
+        let sent = last(&seen);
+        assert_eq!(
+            sent.headers[header::AUTHORIZATION],
+            "Bearer nested-response-dummy"
+        );
+        assert!(!sent.headers.contains_key("chatgpt-account-id"));
+        assert_eq!(auth.metadata, before);
+    }
+
+    #[tokio::test]
+    async fn siwc_alpha_search_exact_destination_and_missing_outer_fail_before_transport() {
+        let (url, seen) = serve(200, "{}").await;
+        let mut executor = CodexExecutor::new("direct");
+        executor.http_mock_url = Some(url.clone());
+        for destination in [
+            "http://chatgpt.com/backend-api/codex/alpha/search",
+            "https://chatgpt.com.evil.test/backend-api/codex/alpha/search",
+            "https://other.test/backend-api/codex/alpha/search",
+            "https://chatgpt.com/backend-api/codex/responses",
+            "https://chatgpt.com:444/backend-api/codex/alpha/search",
+            "https://chatgpt.com/backend-api/codex/alpha/search/",
+            "https://dummy@chatgpt.com/backend-api/codex/alpha/search",
+            &url,
+        ] {
+            let error = executor
+                .http_request_inner(&dual(), call(HttpTarget::Url(destination.into()), "{}"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, 400);
+        }
+        // A relative target is checked after resolution too.
+        let local = CodexExecutor::new("direct").with_base_url(&url);
+        assert_eq!(
+            local
+                .http_request_inner(
+                    &dual(),
+                    call(HttpTarget::Path("/alpha/search".into()), "{}")
+                )
+                .await
+                .unwrap_err()
+                .status,
+            400
+        );
+        for token in [None, Some(""), Some(" \t ")] {
+            let mut auth = dual();
+            auth.metadata.remove("access_token");
+            if let Some(token) = token {
+                auth.metadata.insert("access_token".into(), json!(token));
+            }
+            auth.attributes
+                .insert("header:Authorization".into(), "Bearer dummy-custom".into());
+            let error = executor
+                .http_request_inner(&auth, call(HttpTarget::Url(SEARCH.into()), "{}"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, 401);
+            assert!(error.message.contains("original OAuth"));
+        }
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn siwc_search_preserves_permitted_custom_headers_and_redaction() {
+        let (url, seen) = serve(200, r#"{"echo":"dummy-custom-bearer outer-search-dummy"}"#).await;
+        let mut executor = CodexExecutor::new("direct");
+        executor.http_mock_url = Some(url);
+        let mut auth = dual();
+        auth.metadata.remove("siwc");
+        auth.attributes.insert(
+            "header:Authorization".into(),
+            "Bearer dummy-custom-bearer".into(),
+        );
+        auth.attributes
+            .insert("header:X-Allowed".into(), "allowed".into());
+        auth.attributes
+            .insert("header:Originator".into(), "codex_cli_rs".into());
+        let reply = executor
+            .http_request_inner(&auth, call(HttpTarget::Path("/alpha/search".into()), "{}"))
+            .await
+            .unwrap();
+        let sent = last(&seen);
+        assert_eq!(
+            sent.headers[header::AUTHORIZATION],
+            "Bearer dummy-custom-bearer"
+        );
+        assert_eq!(sent.headers["x-allowed"], "allowed");
+        assert!(!sent.headers.contains_key("originator"));
+        let body = String::from_utf8(reply.body.to_vec()).unwrap();
+        assert!(!body.contains("dummy-custom-bearer"));
+        assert!(!body.contains("outer-search-dummy"));
     }
 
     // Ports the URL check of TestCodexAlphaSearchForwardsRequest
