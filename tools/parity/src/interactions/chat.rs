@@ -78,13 +78,28 @@ pub fn suites(seed: u64, random: usize) -> Vec<Suite> {
 }
 
 /// Where the translators to Chat Completions write a value's JSON text
-/// compactly: a call's arguments, and a tool result that isn't text.
+/// compactly: text, names, IDs, media fields, a call's arguments and a tool
+/// result that isn't text. Joined text and data URLs retain their surrounding
+/// bytes; only the embedded objects/arrays can be written compactly.
 const TO_CHAT_REQUEST_JSON: &[JsonAt] = &[
     (
         "$.messages[*].tool_calls[*].function.arguments",
         JsonForm::Whole,
     ),
-    ("$.messages[*].content", JsonForm::Whole),
+    ("$.messages[*].content", JsonForm::InText),
+    ("$.messages[*].content[*].text", JsonForm::Whole),
+    ("$.messages[*].reasoning_content", JsonForm::InText),
+    ("$.messages[*].content[*].image_url.url", JsonForm::InText),
+    ("$.messages[*].content[*].video_url.url", JsonForm::InText),
+    ("$.messages[*].content[*].input_audio.data", JsonForm::Whole),
+    ("$.messages[*].content[*].file.file_data", JsonForm::Whole),
+    ("$.messages[*].content[*].file.file_url", JsonForm::Whole),
+    ("$.messages[*].content[*].file.filename", JsonForm::InText),
+    ("$.messages[*].tool_calls[*].function.name", JsonForm::Whole),
+    ("$.messages[*].tool_calls[*].id", JsonForm::Whole),
+    ("$.messages[*].tool_call_id", JsonForm::Whole),
+    ("$.tools[*].function.name", JsonForm::Whole),
+    ("$.tools[*].function.description", JsonForm::Whole),
 ];
 
 const TO_CHAT_STREAM_JSON: &[JsonAt] = &[(

@@ -81,6 +81,32 @@ pub fn suites(seed: u64, random: usize) -> Vec<Suite> {
         .collect()
 }
 
+/// Client JSON read as text; names and IDs sanitized for Claude are excluded.
+const CLAUDE_REQUEST_JSON: &[JsonAt] = &[
+    ("$.messages[*].content[*].content", JsonForm::Whole),
+    ("$.messages[*].content[*].text", JsonForm::InText),
+    ("$.messages[*].content[*].thinking", JsonForm::InText),
+    (
+        "$.messages[*].content[*].source.media_type",
+        JsonForm::Whole,
+    ),
+    ("$.messages[*].content[*].source.data", JsonForm::Whole),
+    ("$.messages[*].content[*].content[*].text", JsonForm::InText),
+    (
+        "$.messages[*].content[*].content[*].thinking",
+        JsonForm::InText,
+    ),
+    (
+        "$.messages[*].content[*].content[*].source.media_type",
+        JsonForm::Whole,
+    ),
+    (
+        "$.messages[*].content[*].content[*].source.data",
+        JsonForm::Whole,
+    ),
+    ("$.tools[*].description", JsonForm::Whole),
+];
+
 impl Kind {
     /// How each of a stream suite's frames ends: upstream's translator to
     /// Claude ends each with two blank lines.
@@ -239,7 +265,7 @@ impl Family for Kind {
                 ("$.input[*].result[*].text", JsonForm::InText),
             ],
             Self::InteractionsStream => &[("$[*].data.delta.partial_json", JsonForm::Whole)],
-            Self::ClaudeRequest => &[("$.messages[*].content[*].content", JsonForm::Whole)],
+            Self::ClaudeRequest => CLAUDE_REQUEST_JSON,
             Self::InteractionsNonStream | Self::ClaudeStream | Self::ClaudeNonStream => &[],
         }
     }
