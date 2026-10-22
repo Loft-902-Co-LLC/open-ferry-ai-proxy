@@ -72,19 +72,22 @@ fn review_r8_empty_collections_flush_a_previous_collections_foot_comment() {
         let (out, _) = encode::protected_node(&root, 2).unwrap();
         // This Round 8 fix isn't one of the six Round 7 protections that
         // diagnostic ablation is authorized to disable.
-        use parity::ablation::{Protection::*, with_disabled};
-        let disabled = with_disabled(
-            &[
-                EmptyMappingPendingComment,
-                CanonicalVersionComment,
-                DroppedSingleKeyComment,
-                InlineEmptyNullComment,
-                EffectiveBlockScalarComment,
-                BlockScalarCommentIndentation,
-            ],
-            || encode::protected_node(&root, 2).unwrap().0,
-        );
-        assert_eq!(out, disabled, "{name}");
+        #[cfg(feature = "parity")]
+        {
+            use parity::ablation::{Protection::*, with_disabled};
+            let disabled = with_disabled(
+                &[
+                    EmptyMappingPendingComment,
+                    CanonicalVersionComment,
+                    DroppedSingleKeyComment,
+                    InlineEmptyNullComment,
+                    EffectiveBlockScalarComment,
+                    BlockScalarCommentIndentation,
+                ],
+                || encode::protected_node(&root, 2).unwrap().0,
+            );
+            assert_eq!(out, disabled, "{name}");
+        }
         let parsed = match unmarshal(&out) {
             Ok(parsed) => parsed,
             Err(error) => {
