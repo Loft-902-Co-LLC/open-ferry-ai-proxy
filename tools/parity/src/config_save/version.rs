@@ -55,6 +55,70 @@ pub fn evidence(case: &Case, go: &Value, rust: &Value) -> Option<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn deferred_version_comment_histories_remain_different_without_a_field_witness() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../cases/testdata/config-save-version-history.json"
+        ))
+        .unwrap();
+        for f in fixtures.as_array().unwrap() {
+            let case =
+                Case::new(f["case"].as_str().unwrap(), "", "").with_options(f["options"].clone());
+            let go = crate::upstream::GoResult::Output(
+                f["upstream_output_text"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            );
+            let result = crate::evaluate(crate::translator::Translator::ConfigSave, &case, &go);
+            assert_eq!(
+                result.rust_output.as_ref().unwrap(),
+                &f["open_ferry_output"]
+            );
+            assert!(matches!(result.outcome, crate::Outcome::Different(_)));
+            let upstream: Value =
+                serde_json::from_str(f["upstream_output_text"].as_str().unwrap()).unwrap();
+            let rust = &f["open_ferry_output"];
+            let mut changed = 0;
+            for (g, r) in upstream["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(rust["files"].as_array().unwrap())
+            {
+                let (g, r) = (g.as_str().unwrap(), r.as_str().unwrap());
+                open_ferry_core::config::Config::load_bytes(r.as_bytes()).unwrap();
+                assert_eq!(
+                    open_ferry_core::config::AnyValue::parse_yaml(g).unwrap(),
+                    open_ferry_core::config::AnyValue::parse_yaml(r).unwrap()
+                );
+                if g == r {
+                    continue;
+                }
+                let glines: Vec<_> = g.split_inclusive('\n').collect();
+                let rlines: Vec<_> = r.split_inclusive('\n').collect();
+                assert_eq!(glines.len(), rlines.len());
+                let differences: Vec<_> = glines
+                    .iter()
+                    .zip(rlines)
+                    .filter(|(g, r)| **g != *r)
+                    .collect();
+                assert_eq!(differences.len(), 1);
+                let (gline, rline) = differences[0];
+                assert_eq!(*gline, "config-version: 8\n");
+                let comment = rline
+                    .strip_prefix("config-version: 8 ")
+                    .unwrap()
+                    .trim_end_matches('\n');
+                assert!(comment.starts_with('#'));
+                assert_eq!(r.matches(comment).count(), 1);
+                assert_eq!(g.matches(comment).count(), 0);
+                changed += 1;
+            }
+            assert!(changed > 0);
+        }
+    }
+    #[test]
     fn actual_go_raw_write_loses_its_source_version_comment() {
         let f: Value = serde_json::from_str(include_str!(
             "../cases/testdata/config-save-version-comment.json"

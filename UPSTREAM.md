@@ -492,7 +492,9 @@ comment on the same canonical integer. Only the corresponding field-line
 suffix is restored for comparison; every other byte still passes the normal
 comparison or another independently proved deviation. Explicit nested edits
 to config-version are excluded. Raw writes reset the source witness to their
-body. Original Go bytes, source options and the comparison transformation are
+body. A comment arriving from another field during an intermediate emission
+does not supply this field-specific witness and remains Different. Original Go
+bytes, source options and the comparison transformation are
 retained in proof artifacts. The failed-save counterfactual's four checks stay
 unchanged when this independent comment-loss proof is composed with them.
 
