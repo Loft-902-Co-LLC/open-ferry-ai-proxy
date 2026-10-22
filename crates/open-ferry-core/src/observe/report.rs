@@ -397,7 +397,7 @@ mod tests {
     }
 
     // Not upstream's: the delivery tap sees only chunks returned to the
-    // client, never the ready chunks discarded when the stream is dropped.
+    // manager, never the ready chunks discarded when the stream is dropped.
     #[tokio::test]
     async fn reports_delivered_chunks_without_reporting_discarded_chunks() {
         #[derive(Default)]

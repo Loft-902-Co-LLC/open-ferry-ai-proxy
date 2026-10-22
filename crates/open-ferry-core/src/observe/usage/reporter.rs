@@ -169,13 +169,16 @@
 //!   its cancellation error (`newClaudeOAuthCancellationError`) only for an
 //!   OAuth credential, and records another credential's read cut off by the
 //!   canceled context as the scanner's error.
-//! - A Gemini or Vertex AI stream dropped after a successful translated
-//!   terminal chunk reached the client is a success with its observed counts.
-//!   Dropped before that, it is a 499 failure retaining those counts. A real
-//!   read failure stays a failure even after a terminal chunk and retains
-//!   buffered counts, as upstream v8.0.38 does. Only chunks returned by the
-//!   translated stream count as delivered, never its raw provider finishReason
-//!   or the chunks discarded while a dropped stream drains.
+//! - Gemini/Vertex cancellation succeeds after a successful terminal chunk is
+//!   returned by the call's stream to the manager; before that it is a 499
+//!   retaining observed counts. Real read failures always retain counts and
+//!   fail. This matches upstream v8.0.38's Gemini AI Studio reader. Vertex
+//!   follows the same rule here; upstream's Vertex readers record a cancel
+//!   while handing on a chunk as success, and a read failure (including a
+//!   cut-off read) as failure without counts. Its native Interactions reader
+//!   always records success. Interactions completion (including legacy finish)
+//!   extends upstream's helper. Raw finishReason and discarded chunks never
+//!   establish delivery.
 //! - The image generation tool's model is read from the request as it was
 //!   sent, after the payload rules; upstream reads the body before its
 //!   payload finalizer, so a rule that changes the tool's model changes
@@ -738,7 +741,7 @@ struct Call {
     /// terminal event is held, and the rest don't replace it.
     ended: bool,
     /// A successful terminal chunk of the translated Gemini/Vertex stream
-    /// reached the client, rather than merely being read or discarded.
+    /// was returned by the call's stream, rather than read or discarded.
     terminal_delivered: bool,
     /// The request of a Codex call over HTTP, whose terminal event's image
     /// generation tool counts are read; none for any other call.

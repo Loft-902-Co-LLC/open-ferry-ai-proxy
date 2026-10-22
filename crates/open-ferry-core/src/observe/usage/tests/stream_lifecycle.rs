@@ -308,6 +308,30 @@ fn a_vertex_stream_canceled_after_its_terminal_chunk_is_not_failed() {
     }
 }
 
+// A tap may announce another attempt before concluding the call. Terminal
+// delivery belongs to that attempt, even though current executors don't retry
+// after returning chunks. This pins the defensive per-attempt reset.
+#[test]
+fn gemini_terminal_delivery_resets_for_each_attempt() {
+    for provider in ["gemini", "vertex"] {
+        let harness = Harness::new();
+        let driver = ClientCall::new("gemini-test").stream().tap(&harness);
+        let credential = auth("retry", "0", provider);
+        driver.attempt(AttemptKind::Stream, provider, "gemini-test", &credential);
+        driver.tap.stream_chunk(&Bytes::from_static(
+            b"data: {\"type\":\"response.completed\"}\n\n",
+        ));
+        driver.attempt(AttemptKind::Stream, provider, "gemini-test", &credential);
+        driver.head(200, &[("content-type", "text/event-stream")]);
+        driver.chunk("data: {\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n");
+        driver.finish(Outcome::Canceled);
+        let record = harness.record();
+        assert!(bool_at(&record, "/failed"), "{provider}: {record}");
+        assert_eq!(int_at(&record, "/fail/status_code"), 499, "{provider}");
+        assert_eq!(int_at(&record, "/tokens/total_tokens"), 15, "{provider}");
+    }
+}
+
 /// Not upstream's: a Claude stream whose reader goes away, with the
 /// manager's report around the executor's stream as it makes it, publishes
 /// the same failure, with the counts read.
