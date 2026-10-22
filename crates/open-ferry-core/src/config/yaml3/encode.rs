@@ -156,7 +156,7 @@ pub(crate) fn protected_node(
     indent: usize,
 ) -> Result<(Vec<u8>, Vec<super::types::Mark>), YamlError> {
     let mut node = node.clone();
-    protect_conflicting_key_comments(&mut node, indent)?;
+    protect_conflicting_key_comments(&mut node, indent, true)?;
     let mut encoder = Encoder::new();
     encoder.emitter.protect_config_comments = true;
     encoder.set_indent(indent);
@@ -169,29 +169,47 @@ pub(crate) fn protected_node(
 /// Transfer only comments the emitter actually quotes into a block scalar or
 /// loses. A dry pass follows deferred comments to their final recipient, so a
 /// harmless transfer to a later plain scalar stays byte-identical to yaml.v3.
+/// Single-line loss is checked only for complete output, and only when no
+/// emitted comment already retains the same text (a generated node can do so).
 pub(crate) fn protect_conflicting_key_comments(
     node: &mut Node,
     indent: usize,
+    output_complete: bool,
 ) -> Result<(), YamlError> {
-    fn candidates(node: &Node) -> bool {
-        (node.kind == Kind::Mapping
-            && node.pairs().any(|(key, value)| {
-                key.line_comment.contains('\n')
-                    && value.kind == Kind::Scalar
-                    && !value.line_comment.is_empty()
-            }))
-            || node.content.iter().any(candidates)
+    fn candidate(key: &Node, value: &Node, output_complete: bool) -> bool {
+        (key.line_comment.contains('\n')
+            && value.kind == Kind::Scalar
+            && !value.line_comment.is_empty())
+            || (output_complete && !key.line_comment.is_empty() && !key.line_comment.contains('\n'))
     }
-    if !candidates(node) {
+    fn candidates(node: &Node, output_complete: bool) -> bool {
+        (node.kind == Kind::Mapping
+            && node
+                .pairs()
+                .any(|(key, value)| candidate(key, value, output_complete)))
+            || node
+                .content
+                .iter()
+                .any(|child| candidates(child, output_complete))
+    }
+    if !candidates(node, output_complete) {
         return Ok(());
     }
     let mut encoder = Encoder::new();
     encoder.emitter.protect_config_comments = true;
+    encoder.emitter.record_comments = output_complete;
     encoder.set_indent(indent);
     encoder.encode_node(node)?;
     encoder.finish()?;
     let hazardous = encoder.emitter.hazardous_key_comments;
-    fn transfer(node: &mut Node, serial: &mut usize, hazardous: &[usize]) {
+    let emitted = encoder.emitter.emitted_comments;
+    fn transfer(
+        node: &mut Node,
+        serial: &mut usize,
+        hazardous: &[usize],
+        emitted: &[Vec<u8>],
+        output_complete: bool,
+    ) {
         *serial += 1;
         if node.kind == Kind::Mapping {
             let mut key_serial = *serial + 1;
@@ -199,10 +217,14 @@ pub(crate) fn protect_conflicting_key_comments(
                 1 + n.content.iter().map(size).sum::<usize>()
             }
             for [key, value] in node.content.as_chunks_mut::<2>().0 {
-                if key.line_comment.contains('\n')
-                    && value.kind == Kind::Scalar
-                    && !value.line_comment.is_empty()
+                let retained_elsewhere = !key.line_comment.contains('\n')
+                    && emitted
+                        .iter()
+                        .flat_map(|comment| comment.split(|b| *b == b'\n'))
+                        .any(|comment| comment == key.line_comment.as_bytes());
+                if candidate(key, value, output_complete)
                     && hazardous.contains(&key_serial)
+                    && !retained_elsewhere
                 {
                     if !key.head_comment.is_empty() {
                         key.head_comment.push('\n');
@@ -214,10 +236,10 @@ pub(crate) fn protect_conflicting_key_comments(
             }
         }
         for child in &mut node.content {
-            transfer(child, serial, hazardous);
+            transfer(child, serial, hazardous, emitted, output_complete);
         }
     }
-    transfer(node, &mut 0, &hazardous);
+    transfer(node, &mut 0, &hazardous, &emitted, output_complete);
     Ok(())
 }
 
