@@ -79,6 +79,14 @@ impl From<ParserError> for YamlError {
 /// `yaml.Unmarshal(data, &node)`: the document node of the first document,
 /// or a zero [`Node`] when the input holds none.
 pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, YamlError> {
+    let result = unmarshal_inner(data);
+    #[cfg(feature = "parity")]
+    if result.is_err() {
+        crate::config::save::parity::ablation::record_rejected("parse", data);
+    }
+    result
+}
+fn unmarshal_inner(data: &[u8]) -> Result<Node, YamlError> {
     // newParser: an empty input reads as a line break.
     let input: &[u8] = if data.is_empty() { b"\n" } else { data };
     let mut composer = Composer {
@@ -230,6 +238,7 @@ impl Composer<'_> {
             column: self.event.start_mark.column.saturating_add(1),
             head_comment: text(&self.event.head_comment),
             line_comment: text(&self.event.line_comment),
+            line_comment_line: self.event.line_comment_line,
             foot_comment: text(&self.event.foot_comment),
             ..Node::default()
         }
@@ -375,11 +384,13 @@ impl Composer<'_> {
         match node.kind {
             Kind::Sequence => {
                 node.line_comment = text(&self.event.line_comment);
+                node.line_comment_line = self.event.line_comment_line;
                 node.foot_comment = text(&self.event.foot_comment);
                 self.expect(EventType::SequenceEnd)?;
             }
             Kind::Mapping => {
                 node.line_comment = text(&self.event.line_comment);
+                node.line_comment_line = self.event.line_comment_line;
                 node.foot_comment = text(&self.event.foot_comment);
                 if !node.style.has(Style::FLOW)
                     && !node.foot_comment.is_empty()

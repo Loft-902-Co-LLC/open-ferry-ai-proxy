@@ -350,6 +350,7 @@ pub(crate) fn normalize_config_layout_doc(
     if migrate {
         // Unknown fields are ignored at runtime: keep them as comments.
         comment_unknown_v8_sections(&mut root)?;
+        retain_version_comment_owner(&mut root)?;
         let previous = yaml_path(&root, "config-version").cloned();
         #[cfg(feature = "parity")]
         let previous = previous.filter(|_| {
@@ -362,18 +363,6 @@ pub(crate) fn normalize_config_layout_doc(
         if let Some(previous) = previous {
             if !previous.line_comment.is_empty() {
                 super::encode::protect_pending_version_comments(&mut root)?;
-            }
-            // A scalar's head/foot would reload on the following key. Keep
-            // the canonical value's own comments on its mapping key instead.
-            let i = super::find_map_key_index(&root, "config-version").unwrap();
-            for comment in [&previous.head_comment, &previous.foot_comment] {
-                if !comment.is_empty() {
-                    let head = &mut root.content[i].head_comment;
-                    if !head.is_empty() {
-                        head.push('\n');
-                    }
-                    head.push_str(comment);
-                }
             }
             version.line_comment = previous.line_comment;
             version.line_comment_id = previous.line_comment_id;
@@ -388,6 +377,41 @@ pub(crate) fn normalize_config_layout_doc(
         *first = root;
     }
     Ok((doc, true))
+}
+
+/// Keep the canonical scalar's paragraphs at their owner before any emission,
+/// including the intermediate emission of save. A preceding blank line stops
+/// the scanner from assigning the first paragraph to the previous key's foot.
+pub(super) fn retain_version_comment_owner(root: &mut Node) -> Result<(), SaveError> {
+    #[cfg(feature = "parity")]
+    if !super::parity::ablation::enabled(
+        super::parity::ablation::Protection::CanonicalVersionComment,
+    ) {
+        return Ok(());
+    }
+    let Some(i) = super::find_map_key_index(root, "config-version") else {
+        return Ok(());
+    };
+    if !root.content[i + 1].line_comment.is_empty() {
+        super::encode::protect_pending_version_comments(root)?;
+    }
+    let comments = [
+        std::mem::take(&mut root.content[i + 1].head_comment),
+        std::mem::take(&mut root.content[i + 1].foot_comment),
+    ];
+    let head = &mut root.content[i].head_comment;
+    for comment in comments {
+        if !comment.is_empty() {
+            if !head.is_empty() {
+                head.push('\n');
+            }
+            head.push_str(&comment);
+        }
+    }
+    if i > 0 && head.contains("\n\n") && !head.starts_with('\n') {
+        head.insert(0, '\n');
+    }
+    Ok(())
 }
 
 /// `IsV8ConfigLayout`: whether a document uses the v8 layout, by its

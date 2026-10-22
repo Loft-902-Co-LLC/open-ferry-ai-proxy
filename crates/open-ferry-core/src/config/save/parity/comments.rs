@@ -129,9 +129,61 @@ pub fn retained_comment_ownership(source: &str, ablated: &str, protected: &str) 
     })
 }
 
+/// An unloadable ablated file supplies counts only. Every protected occurrence
+/// must reload at its source owner; an emission trace can never supply an owner.
+pub fn retained_unloadable_comments(source: &str, protected: &str, ablated: &[String]) -> bool {
+    let Some((s, r)) = inventory(source, true).zip(inventory(protected, false)) else {
+        return false;
+    };
+    let mut sc = BTreeMap::new();
+    let mut rc = BTreeMap::new();
+    let mut gc = BTreeMap::new();
+    for c in &s {
+        *sc.entry((&c.text, &c.owner)).or_insert(0usize) += 1;
+    }
+    for c in &r {
+        *rc.entry((&c.text, &c.owner)).or_insert(0usize) += 1;
+    }
+    for c in ablated {
+        *gc.entry(c).or_insert(0usize) += 1;
+    }
+    r.iter().all(|c| {
+        r.iter().filter(|other| other.text == c.text).count()
+            <= s.iter().filter(|other| other.text == c.text).count()
+    }) && rc
+        .iter()
+        .all(|(owner, n)| *n <= sc.get(owner).copied().unwrap_or_default())
+        && gc
+            .into_iter()
+            .all(|(text, n)| n <= r.iter().filter(|c| &c.text == text).count())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unloadable_output_never_supplies_a_comment_owner() {
+        let source = "auth-dir: /old # own\ndebug: false\n";
+        let protected = "auth-dir: /x\ndebug: false # own\n";
+        // Even an exact trace of invalid Go output may supply multiplicity
+        // only. This placement isn't in the parsed source.
+        assert!(!retained_unloadable_comments(
+            source,
+            protected,
+            &["# own".into()]
+        ));
+        assert!(retained_unloadable_comments(
+            source,
+            "# own\nauth-dir: /x\ndebug: false\n",
+            &["# own".into()]
+        ));
+        assert!(!retained_unloadable_comments(
+            source,
+            "auth-dir: /x # own\n",
+            &["# own".into(), "# own".into()]
+        ));
+    }
+
     #[test]
     fn budgets_are_multisets_and_scalar_data_is_not_a_comment() {
         assert_eq!(

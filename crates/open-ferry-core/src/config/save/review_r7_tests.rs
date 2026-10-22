@@ -195,7 +195,9 @@ fn review_r7_custom_tagged_unicode_archives_survive_two_writes() {
     }
 }
 
-fn exact_review_output(fixture: &serde_json::Value) -> Result<String, Box<dyn std::error::Error>> {
+pub(super) fn exact_review_output(
+    fixture: &serde_json::Value,
+) -> Result<String, Box<dyn std::error::Error>> {
     let source = fixture["source"].as_str().unwrap();
     let dir = TempDir::new();
     let path = dir.join("config.yaml");

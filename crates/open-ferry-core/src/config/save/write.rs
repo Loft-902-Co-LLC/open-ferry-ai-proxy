@@ -336,8 +336,14 @@ pub(crate) fn commit_locked(
 
 /// Fails when `data` doesn't load as a config.
 fn check(data: &[u8]) -> Result<(), SaveError> {
-    load_bytes(data).map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))?;
-    Ok(())
+    let result = load_bytes(data)
+        .map(|_| ())
+        .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()));
+    #[cfg(feature = "parity")]
+    if result.is_err() {
+        super::parity::ablation::record_rejected("write", data);
+    }
+    result
 }
 
 /// The read, the check of `expected`, the backup, the replacement and the

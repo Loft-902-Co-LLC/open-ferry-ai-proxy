@@ -288,6 +288,7 @@ fn expand(
             .line_comment_id
             .as_ref()
             .map(|id| id.in_aliases(scopes)),
+        line_comment_line: node.line_comment_line,
         alias_comment_scope: node.alias_comment_scope.clone(),
         foot_comment: node.foot_comment.clone(),
         line: node.line,
@@ -361,6 +362,12 @@ pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
                         .saturating_add(usize::from(token.end_mark.column > 0)),
             );
         }
+    }
+    #[cfg(feature = "parity")]
+    if !super::parity::ablation::enabled(
+        super::parity::ablation::Protection::BlockScalarCommentIndentation,
+    ) {
+        bodies.clear();
     }
     let mut out = Vec::with_capacity(data.len());
     let mut logical_line = 0usize;

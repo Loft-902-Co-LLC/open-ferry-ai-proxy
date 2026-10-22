@@ -200,6 +200,8 @@ pub(crate) struct Node {
     pub(crate) line_comment: String,
     /// Source occurrence, retained by intentional copies, never matched by text.
     pub(crate) line_comment_id: Option<CommentId>,
+    /// The parsed line comment occurrence's line, from 1 (0 if generated).
+    pub(crate) line_comment_line: usize,
     /// Stable identity for this alias occurrence across repeated expansions.
     pub(crate) alias_comment_scope: Option<Arc<()>>,
     /// The comments after the node.

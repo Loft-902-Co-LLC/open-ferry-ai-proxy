@@ -216,6 +216,7 @@ pub(crate) struct Parser<'a> {
     pub(super) head_comment: Vec<u8>,
     /// The current line comments.
     pub(super) line_comment: Vec<u8>,
+    pub(super) line_comment_line: usize,
     /// The current foot comments.
     pub(super) foot_comment: Vec<u8>,
     /// Foot comment that happens at the end of a block.
@@ -366,6 +367,9 @@ impl Parser<'_> {
                 self.foot_comment.extend_from_slice(&comment.foot);
             }
             if !comment.line.is_empty() {
+                if self.line_comment.is_empty() {
+                    self.line_comment_line = comment.start_mark.line.saturating_add(1);
+                }
                 if !self.line_comment.is_empty() {
                     self.line_comment.push(b'\n');
                 }
@@ -705,6 +709,7 @@ impl Parser<'_> {
     fn set_event_comments(&mut self, event: &mut Event) {
         event.head_comment = mem::take(&mut self.head_comment);
         event.line_comment = mem::take(&mut self.line_comment);
+        event.line_comment_line = mem::take(&mut self.line_comment_line);
         event.foot_comment = mem::take(&mut self.foot_comment);
         self.tail_comment = Vec::new();
         self.stem_comment = Vec::new();

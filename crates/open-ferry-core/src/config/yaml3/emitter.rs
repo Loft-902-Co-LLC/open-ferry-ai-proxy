@@ -270,6 +270,8 @@ pub(crate) struct Emitter {
     key_comment_origin: Option<usize>,
     line_comment_origin: Option<usize>,
     current_node_id: usize,
+    #[cfg(feature = "parity")]
+    trace_comments: Vec<crate::config::save::parity::ablation::WrittenComment>,
     line_comment_id: Option<super::CommentId>,
     key_comment_id: Option<super::CommentId>,
     event_has_line_comment: bool,
@@ -355,6 +357,8 @@ impl Emitter {
             key_comment_origin: None,
             line_comment_origin: None,
             current_node_id: 0,
+            #[cfg(feature = "parity")]
+            trace_comments: Vec::new(),
             line_comment_id: None,
             key_comment_id: None,
             event_has_line_comment: false,
@@ -458,6 +462,8 @@ impl Emitter {
 
     /// The bytes written, consuming the emitter.
     pub(crate) fn into_output(self) -> Vec<u8> {
+        #[cfg(feature = "parity")]
+        crate::config::save::parity::ablation::record_emission(&self.output, &self.trace_comments);
         self.output
     }
 
@@ -1314,7 +1320,13 @@ impl Emitter {
 
         // This must run after pending key comments have reached their final
         // recipient. Looking only at the scalar node misses those comments.
-        if self.protect_config_comments
+        let protect_block_comment = self.protect_config_comments;
+        #[cfg(feature = "parity")]
+        let protect_block_comment = protect_block_comment
+            && crate::config::save::parity::ablation::enabled(
+                crate::config::save::parity::ablation::Protection::EffectiveBlockScalarComment,
+            );
+        if protect_block_comment
             && matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
             && self.line_comment.contains(&b'\n')
         {
@@ -2162,12 +2174,33 @@ impl Emitter {
     }
 
     /// yaml_emitter_write_comment.
+    #[cfg(feature = "parity")]
+    fn trace_comment_end(&mut self, start: &mut Option<usize>) {
+        if let Some(offset) = start.take() {
+            let end = self.output.len() + self.buffer.len();
+            let bytes = self
+                .output
+                .iter()
+                .chain(&self.buffer)
+                .skip(offset)
+                .take(end - offset)
+                .copied()
+                .collect();
+            self.trace_comments
+                .push(crate::config::save::parity::ablation::WrittenComment { offset, bytes });
+        }
+    }
+
     fn write_comment(&mut self, comment: &[u8]) -> Result<(), EmitterError> {
+        #[cfg(feature = "parity")]
+        let mut trace_start = None;
         let mut breaks = false;
         let mut pound = false;
         let mut i = 0;
         while i < comment.len() {
             if is_break(comment, i) {
+                #[cfg(feature = "parity")]
+                self.trace_comment_end(&mut trace_start);
                 self.write_break(comment, &mut i)?;
                 //emitter.indention = true
                 breaks = true;
@@ -2177,6 +2210,10 @@ impl Emitter {
                     self.write_indent()?;
                 }
                 if !pound {
+                    #[cfg(feature = "parity")]
+                    if crate::config::save::parity::ablation::tracing() {
+                        trace_start = Some(self.output.len() + self.buffer.len());
+                    }
                     if at(comment, i) != b'#' {
                         self.put(b'#')?;
                         self.put(b' ')?;
@@ -2188,6 +2225,8 @@ impl Emitter {
                 breaks = false;
             }
         }
+        #[cfg(feature = "parity")]
+        self.trace_comment_end(&mut trace_start);
         if !breaks {
             self.put_break()?;
         }
