@@ -487,14 +487,30 @@ config-version keeps its own comments on that key. Pending key comments that
 would land on the replacement version move to their source key’s head, rather than leaking
 onto the following unrelated key; upstream drops the version comments.
 
-The offline parity feature has call-scoped diagnostic switches for the empty
-mapping flush, canonical-version comment copying, dropped single-key comment
-transfer and older inline empty-null flush. Disabling these switches alone
-does not certify a deviation. In the saved compound `random-31-2887`, every
-subset still protects the first block scalar while Go writes unloadable YAML;
-raw step-by-step equality therefore fails and the case remains Different.
-Product builds contain none of these switches and keep every protection.
+The offline parity feature has six call-scoped diagnostic switches: the empty
+mapping flush (`RetainedUpstreamEmptyMappingComment`), canonical-version comment
+copying (`RetainedCanonicalVersionComment`), dropped single-key comment transfer
+(`RetainedDroppedKeyComment`), older inline empty-null flush
+(`RetainedInlineEmptyNullComment`), emit-time effective block-scalar quoting
+(`RetainedEffectiveBlockScalarComment`), and block-scalar body indentation
+(`RetainedBlockScalarCommentIndentation`). The last two reproduce the complete
+invalid Go emission in `random-31-2887`. A minimal subset certifies a deviation
+only when every Go snapshot is byte-identical, comment-free Go proves all
+protected values, parsed source budgets and owners prove retained comments,
+and faithful comment-free re-emission proves no other changes. On unloadable
+steps, a nonoverlapping emitter trace supplies comment counts only, with exact
+bytes and offsets bound to that emission; every protected comment must retain
+its parsed source owner. `31-2887` currently fails that stricter owner check
+(the match key's comment reloads on its first list item), so it remains
+Different. Failed proofs are saved and counted; product builds contain none of
+the switches or traces and keep every protection.
 
+Generated-comment identities are rebound at the parsed comment's own position,
+including wrapped scalars. Canonical-version paragraph blocks are separated
+from the previous key before both intermediate and final emissions, so every
+paragraph reloads at the version owner. Config emission also escapes U+2028,
+U+2029 and U+0085 in generated and retained scalars: yaml.v3's quoted multiline
+emission can otherwise add indentation to their decoded values.
 
 - Archived config scalars containing U+2028, U+2029 or U+0085 are quoted
   before their YAML is commented out, including custom-tagged scalars. Their

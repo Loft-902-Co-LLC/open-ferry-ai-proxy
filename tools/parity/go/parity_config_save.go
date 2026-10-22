@@ -61,6 +61,7 @@ type configSaveStep struct {
 
 type configSaveOptions struct {
 	File  string           `json:"file"`
+	Trace bool             `json:"_ablation_trace"`
 	Steps []configSaveStep `json:"steps"`
 }
 
@@ -82,10 +83,24 @@ func configSaveSteps(in input) []byte {
 	if err := os.WriteFile(path, []byte(options.File), 0o600); err != nil {
 		panic(err)
 	}
+	rejected := [][]string{}
+	current := []string{}
+	if options.Trace {
+		config.ParityRejected = func(data []byte) { current = append(current, string(data)) }
+		defer func() { config.ParityRejected = nil }()
+	}
+	result := func(value map[string]any) []byte {
+		if options.Trace {
+			value["rejected"] = rejected
+		}
+		return configSaveJSON(value)
+	}
 	files := []string{}
 	for _, step := range options.Steps {
+		current = []string{}
 		if message := configSaveStepRun(path, step); message != "" {
-			return configSaveJSON(map[string]any{"files": files, "error": message})
+			rejected = append(rejected, current)
+			return result(map[string]any{"files": files, "error": message})
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -93,10 +108,12 @@ func configSaveSteps(in input) []byte {
 		}
 		files = append(files, string(data))
 		if message := configSaveLoad(data); message != "" {
-			return configSaveJSON(map[string]any{"files": files, "unloadable": message})
+			rejected = append(rejected, current)
+			return result(map[string]any{"files": files, "unloadable": message})
 		}
+		rejected = append(rejected, current)
 	}
-	return configSaveJSON(map[string]any{"files": files})
+	return result(map[string]any{"files": files})
 }
 
 // configSaveLoad reads data with config.LoadConfig from a copy, and returns
