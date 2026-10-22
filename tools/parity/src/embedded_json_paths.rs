@@ -345,3 +345,101 @@ fn responses_gemini_text_paths_reject_json_looking_client_strings() {
         );
     }
 }
+
+#[test]
+fn complete_raw_json_string_tokens_have_lexical_provenance() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "cases/testdata/embedded-request-string-tokens.json"
+    ))
+    .unwrap();
+    for f in fixtures.as_array().unwrap() {
+        let case = Case::new(
+            f["case"].as_str().unwrap(),
+            f["model"].as_str().unwrap(),
+            f["request_text"].as_str().unwrap(),
+        )
+        .with_options(f["options"].clone());
+        let go = crate::upstream::GoResult::Output(
+            f["upstream_output_text"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+        );
+        let native = Translator::Interactions(
+            crate::interactions::Kind::native(
+                crate::interactions::Stage::Request,
+                "interactions",
+                "claude",
+            )
+            .unwrap(),
+        );
+        let e = crate::evaluate(native, &case, &go);
+        if let crate::Outcome::Different(d) = &e.outcome {
+            panic!(
+                "{} {:?}",
+                case.name,
+                d.iter()
+                    .map(|d| (&d.path, &d.go, &d.rust))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            matches!(e.outcome, crate::Outcome::Equivalent(_)),
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn a_complete_string_token_never_licenses_changes_inside_its_value() {
+    let client = r#"Please keep [1, 2] and {"a": 1} exactly as typed"#;
+    let go = serde_json::to_string(client).unwrap();
+    let rust = serde_json::to_string(
+        &client
+            .replace("[1, 2]", "[1,2]")
+            .replace("{\"a\": 1}", "{\"a\":1}"),
+    )
+    .unwrap();
+    let request = format!("{{\"result\":{go}}}");
+    for form in [
+        crate::compare::JsonForm::Whole,
+        crate::compare::JsonForm::InText,
+    ] {
+        let paths = [("$.text", form)];
+        assert!(
+            !compare_numbers_from_request(
+                &json!({"text":go}),
+                &json!({"text":rust}),
+                &paths,
+                Numbers::AsWritten,
+                Some(&request)
+            )
+            .differences
+            .is_empty()
+        );
+    }
+}
+
+path_test!(
+    chat_function_arguments,
+    "openai",
+    "$.messages[*].tool_calls[*].function.arguments",
+    false
+);
+path_test!(
+    claude_result_content,
+    "claude",
+    "$.messages[*].content[*].content",
+    false
+);
+#[test]
+fn gemini_instructions_have_raw_value_provenance() {
+    check(
+        "openai-response",
+        "gemini",
+        "$.systemInstruction.parts[*].text",
+        false,
+    );
+}

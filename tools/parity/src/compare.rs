@@ -125,15 +125,17 @@ impl JsonForm {
     }
 }
 
-/// A changed JSON span must occur as a complete non-string request value.
-/// Parsing the lexical tree excludes text inside strings, including escaped
-/// quotes and nested JSON-looking text. None is for older response-only paths.
+/// A changed JSON span must occur as a complete lexical request value.
+/// Parsing the lexical tree excludes interiors of strings, including escaped
+/// quotes and nested JSON-looking text. A complete quoted JSON string token
+/// is allowed (for raw tool-result fallbacks), never its interior text. None
+/// is for older response-only paths.
 fn witnessed(source: Option<&crate::raw_json::Raw<'_>>, span: &str) -> bool {
     use crate::raw_json::Raw;
     let Some(source) = source else {
         return true;
     };
-    if !source.text().starts_with('"') && source.text() == span {
+    if source.text() == span {
         return true;
     }
     match source {
@@ -294,7 +296,7 @@ pub fn compare_numbers(
     compare_numbers_from_request(go, rust, embedded_json, numbers, None)
 }
 
-/// The reviewed request text paths require a raw, non-string source witness.
+/// The reviewed request text paths require a complete raw-value witness.
 pub fn compare_numbers_from_request(
     go: &Value,
     rust: &Value,
