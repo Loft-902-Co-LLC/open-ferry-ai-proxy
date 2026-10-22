@@ -470,7 +470,12 @@ Where it differs from upstream:
 - **The v8.0.32 settings are carried and ignored.** `requests.tls-handshake-timeout-seconds`, `upstream.claude.session-date-pin-days` and the four typed `claude-header-defaults` fields (`anthropic-beta-strip`, `anthropic-beta-append`, `inject-diagnostics`, `client-request-id`) load, save and reload in both layouts (`claude-header-defaults` is `upstream.claude.header-defaults` in the v8 layout), and `open-ferry migrate` reports them as ignored. They change nothing a request does, as they belong to the uTLS and cloaking code that isn't ported (see the move's left-out table and [docs/configuration.md](docs/configuration.md)). Where they differ from upstream: the unknown `client-request-id` warning leaves out the value, as every redacted log line does (upstream logs it); `claude-header-defaults: {user-agent: [x]}` loads, as the fingerprint fields are untyped (upstream rejects it), and `claude-header-defaults: 5` or `[]` fails to load, as upstream's does; an `inject-diagnostics: false` inserted into the file survives a save with its parent mapping (upstream's pruning drops it); clearing `claude.session-date-pin-days` writes `null` (upstream has no `omitempty`) and a reload gives the default 7, which the migrate report doesn't count as set; and `claude: null` followed by a save writes the whole generated mapping, as upstream does.
 
 Deferred key comments are traced through protected config emission before a
-conflicting multiline key comment is moved to its head. A later plain recipient
+conflicting multiline key comment with a value's own line comment, or a
+single-line key comment that would be dropped, is moved to its head. Both
+comments are kept once. Single-line transfer is limited to complete output and
+comments absent from the emitter's actual comment output; a generated auth-dir
+may already preserve a plugin comment. Text inside scalar values does not count
+as an emitted comment. A later harmless plain recipient
 keeps yaml.v3 bytes; a block-body or dropped recipient is protected. This also
 runs on isolated generated plugin intermediates. V8 edits keep the normalized
 tree until the edit is applied, so the emitter sees the actual final recipient

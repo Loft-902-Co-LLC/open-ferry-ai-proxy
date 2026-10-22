@@ -545,9 +545,10 @@ fn generated_plugin_configs(configs: &Node) -> Result<encode::Value, YamlError> 
                 } else {
                     value.clone()
                 };
-                // Analyze this isolated intermediate too: a deferred comment
-                // must not escape the retained plugin subtree into generated settings.
-                encode::protect_conflicting_key_comments(&mut value, 4)?;
+                // Multiline conflicts need protection in this intermediate too.
+                // A dangling single comment can continue into generated auth-dir:
+                // this subtree is not the final emitted document.
+                encode::protect_conflicting_key_comments(&mut value, 4, false)?;
                 Ok((encode::Value::str(&key.value), encode::Value::Node(value)))
             })
             .collect::<Result<_, YamlError>>()?,

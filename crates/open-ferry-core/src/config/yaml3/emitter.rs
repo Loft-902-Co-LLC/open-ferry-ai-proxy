@@ -271,6 +271,8 @@ pub(crate) struct Emitter {
     line_comment_origin: Option<usize>,
     event_has_line_comment: bool,
     pub(crate) hazardous_key_comments: Vec<usize>,
+    pub(crate) record_comments: bool,
+    pub(crate) emitted_comments: Vec<Vec<u8>>,
     /// Config writers keep multiline comments out of scalar bodies.
     pub(crate) protect_config_comments: bool,
     pub(crate) protected_scalars: Vec<super::types::Mark>,
@@ -351,6 +353,8 @@ impl Emitter {
             line_comment_origin: None,
             event_has_line_comment: false,
             hazardous_key_comments: Vec::new(),
+            record_comments: false,
+            emitted_comments: Vec::new(),
             protect_config_comments: false,
             protected_scalars: Vec::new(),
         }
@@ -2110,6 +2114,9 @@ impl Emitter {
 
     /// yaml_emitter_write_comment.
     fn write_comment(&mut self, comment: &[u8]) -> Result<(), EmitterError> {
+        if self.record_comments {
+            self.emitted_comments.push(comment.to_vec());
+        }
         let mut breaks = false;
         let mut pound = false;
         let mut i = 0;
