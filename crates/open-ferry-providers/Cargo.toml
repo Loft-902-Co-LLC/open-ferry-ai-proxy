@@ -39,5 +39,6 @@ url = "2.5.8"
 
 [dev-dependencies]
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+open-ferry-server = { path = "../open-ferry-server" }
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["full", "test-util"] }

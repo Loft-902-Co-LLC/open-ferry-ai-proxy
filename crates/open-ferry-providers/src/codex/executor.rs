@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor.go,
 // codex_executor_execute.go, codex_executor_stream.go,
-// codex_executor_tokens.go and codex_executor_auth.go (v8.0.36, MIT).
+// codex_executor_tokens.go and codex_executor_auth.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`CodexExecutor`], which calls Codex with a ChatGPT sign-in or an API
@@ -122,6 +122,9 @@ const REFRESH_ATTEMPTS: u32 = 3;
 /// Calls Codex (upstream's `CodexExecutor`).
 pub struct CodexExecutor {
     clients: Clients,
+    /// Loopback mock transport, applied only after destination/auth checks.
+    #[cfg(test)]
+    http_mock_url: Option<String>,
     config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
     base_url: String,
@@ -140,6 +143,8 @@ impl CodexExecutor {
     pub fn new(global_proxy_url: impl Into<String>) -> Self {
         Self {
             clients: Clients::new(global_proxy_url),
+            #[cfg(test)]
+            http_mock_url: None,
             config: None,
             models: None,
             base_url: DEFAULT_BASE_URL.to_owned(),

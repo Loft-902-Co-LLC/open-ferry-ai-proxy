@@ -7,7 +7,7 @@
 // TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias,
 // TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed,
 // TestCodexAlphaSearchRecordsRequestLog,
-// TestCodexAlphaSearchUsesRequestIDForSessionAffinity) (v8.0.36, MIT).
+// TestCodexAlphaSearchUsesRequestIDForSessionAffinity) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex Alpha Search through the whole router: the client key, the
@@ -180,6 +180,43 @@ fn build(
     };
     let state = AppState::new(config, manager.clone(), Arc::new(FakeCatalog::new()));
     (state, manager)
+}
+
+// Upstream 0db19025's public routes must reach the real executor's local
+// missing-outer-token 401, even with a valid nested SIWC bearer. No transport
+// can run in this case; successful token isolation is tested at the provider's
+// loopback mock transport.
+#[tokio::test]
+async fn codex_alpha_search_siwc_routes_require_original_oauth_locally() {
+    for path in ["/v1/alpha/search", "/backend-api/codex/alpha/search"] {
+        let credential = oauth(
+            "siwc-auth",
+            json!({"type":"codex", "use_siwc":true,
+            "access_token":" \t ", "refresh_token":"dummy-outer-refresh",
+            "siwc":{"access_token":"dummy-siwc-bearer", "refresh_token":"dummy-siwc-refresh", "client_id":"dummy-client", "expires_at":"2099-01-01T00:00:00Z"}}),
+        );
+        let (state, manager) = build(
+            Settings::default(),
+            "https://chatgpt.com",
+            vec![credential],
+            &[("siwc-auth", "gpt-5")],
+        );
+        let app = crate::app::router(state);
+        let (status, _, body) = send(
+            &app,
+            search(path, r#"{"model":"gpt-5","query":"dummy"}"#, &[]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(body.contains("original OAuth"));
+        assert_eq!(
+            manager
+                .get("siwc-auth")
+                .unwrap()
+                .siwc_token_field("access_token"),
+            "dummy-siwc-bearer"
+        );
+    }
 }
 
 /// The router over [`build`]'s state.
