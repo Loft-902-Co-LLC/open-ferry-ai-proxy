@@ -27,7 +27,7 @@ pub(crate) const LOSSY_PLUGIN_FIXTURES: &str = include_str!(concat!(
 
 /// Recognize only the proven folded-scalar loss: Go makes a source plugin
 /// string empty and appends its value to the next comment. Rust must retain
-/// the complete source plugin value, both source comments exactly once,
+/// the complete source plugin value, each source comment with its alias-expanded multiplicity,
 /// and every other output byte. Comment-only losses are not accepted here.
 /// An identical whole-file write starts a new source; differences during
 /// that write itself are never accepted by this rule.
@@ -116,7 +116,13 @@ pub fn repair_lossy_plugin_reencode(
             if !comment.starts_with('#')
                 || !next_comment.starts_with('#')
                 || ![comment, next_comment].into_iter().all(|comment| {
-                    plugin_comment(&sources, comment) && comment_occurrences(rust, comment) == 1
+                    plugin_comment(&sources, comment)
+                        && open_ferry_core::config::save::parity::expanded_plugin_comment_count(
+                            source, comment,
+                        )
+                        .is_some_and(|expected| {
+                            expected > 0 && comment_occurrences(rust, comment) == expected
+                        })
                 })
             {
                 return None;
@@ -505,6 +511,43 @@ mod tests {
                 Some(Deviation::UpstreamLossyPluginReencode)
             );
             assert_eq!(&go, rust);
+        }
+    }
+
+    #[test]
+    fn alias_shared_plugin_loss_requires_every_expanded_comment_copy() {
+        let f: serde_json::Value = serde_json::from_str(include_str!(
+            "cases/testdata/config-save-alias-plugin-loss.json"
+        ))
+        .unwrap();
+        let case = Case::new("alias-loss", "", "").with_options(f["options"].clone());
+        let mut go = f["upstream_output"].clone();
+        super::drop_repeated_plugin_comments(&case, &mut go);
+        let rust = &f["open_ferry_output"];
+        assert_eq!(
+            crate::translator::Translator::ConfigSave
+                .run_rust(&case)
+                .unwrap(),
+            *rust
+        );
+        let mut accepted = go.clone();
+        assert_eq!(
+            super::repair_lossy_plugin_reencode(&case, &mut accepted, rust),
+            Some(Deviation::UpstreamLossyPluginReencode)
+        );
+        assert_eq!(&accepted, rust);
+        for extra in [false, true] {
+            let mut changed = rust.clone();
+            let first = changed["files"][0].as_str().unwrap();
+            let comment = "# c32";
+            changed["files"][0] = if extra {
+                format!("{first}{comment}\n")
+            } else {
+                first.replacen(comment, "# changed", 1)
+            }
+            .into();
+            let mut original = go.clone();
+            assert!(super::repair_lossy_plugin_reencode(&case, &mut original, &changed).is_none());
         }
     }
 

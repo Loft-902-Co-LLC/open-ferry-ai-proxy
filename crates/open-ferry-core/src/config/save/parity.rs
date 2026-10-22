@@ -271,3 +271,24 @@ mod tests {
         }
     }
 }
+
+/// Multiplicity of a source plugin comment after config aliases are expanded.
+/// Used only by the offline matcher; product saves retain the source subtree.
+pub fn expanded_plugin_comment_count(source: &str, comment: &str) -> Option<usize> {
+    let doc = unmarshal(source.as_bytes()).ok()?;
+    let root = super::expand_config_aliases(doc.content.first()?).ok()?;
+    let plugins = super::yaml_path(&root, "plugins.configs")?;
+    fn count(node: &Node, comment: &str) -> usize {
+        [&node.head_comment, &node.line_comment, &node.foot_comment]
+            .into_iter()
+            .flat_map(|c| c.lines())
+            .filter(|line| line.trim_start_matches([' ', '\t']) == comment)
+            .count()
+            + node
+                .content
+                .iter()
+                .map(|n| count(n, comment))
+                .sum::<usize>()
+    }
+    Some(count(plugins, comment))
+}
