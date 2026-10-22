@@ -7,6 +7,9 @@ use super::super::yaml3::parser::Parser;
 use super::super::yaml3::types::{ScalarStyle, TokenType};
 use super::{Node, STR_TAG, SaveError, marshal_config, unmarshal};
 
+mod folded;
+pub use folded::{folded_scalar_reencode, folded_scalar_values};
+
 /// Quote only source block scalars the writer protects from multiline line
 /// comments. Anchors, explicit tags, header comments and all other bytes are
 /// kept exactly. Unsupported token/position shapes are refused.
