@@ -1026,6 +1026,14 @@ impl Emitter {
         if first {
             self.increase_indent(false, false)?;
         }
+        // A previous collection's foot must precede this key's head, with
+        // its separating blank line, or both reload on the previous owner.
+        let pending_collection_foot = self.protect_config_comments
+            && event.empty_collection_value
+            && !self.foot_comment.is_empty();
+        if pending_collection_foot {
+            self.process_foot_comment()?;
+        }
         self.process_head_comment()?;
         if event.typ == EventType::MappingEnd {
             self.pop_indent()?;
@@ -1040,9 +1048,6 @@ impl Emitter {
             );
         // This newly fixed foot-comment hazard also affects flow mappings and
         // sequences. It is outside the Round 7 diagnostic switch set.
-        let pending_collection_foot = self.protect_config_comments
-            && event.empty_collection_value
-            && !self.foot_comment.is_empty();
         if (protect_empty_mapping
             && event.empty_block_mapping_value
             && (!self.key_line_comment.is_empty()
@@ -1061,10 +1066,6 @@ impl Emitter {
             self.line_comment = current;
             self.line_comment_id = current_id;
             self.process_line_comment()?;
-            // A preceding collection's end event can leave its foot comment
-            // pending too. Flushing it after ':' precedes the delayed flow
-            // emission of {} or [], leaving the value at column zero.
-            self.process_foot_comment()?;
             self.write_indent()?;
         }
         if !self.line_comment.is_empty() {
