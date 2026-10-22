@@ -409,7 +409,7 @@ fn failure_result(
         credential_scope: credential_scope && is_credential_scoped_error(ErrView::Exec(err)),
         response_headers: err.headers.clone(),
         credential_version: auth.credential_version,
-        access_token: auth.access_token().to_owned(),
+        access_token: super::credential::result_access_token(auth).to_owned(),
         registration_epoch: auth.registration_epoch,
         execution_seq: attempt.execution_seq,
         ..CallResult::default()
@@ -1025,7 +1025,8 @@ impl Manager {
                                 // A token count says nothing of the quota.
                                 skip_quota_observation: kind == CallKind::CountTokens,
                                 credential_version: auth.credential_version,
-                                access_token: auth.access_token().to_owned(),
+                                access_token: super::credential::result_access_token(&auth)
+                                    .to_owned(),
                                 registration_epoch: auth.registration_epoch,
                                 execution_seq: attempt.execution_seq,
                                 ..CallResult::default()
@@ -1392,7 +1393,7 @@ impl Manager {
                             error: Some(result_error_from_error(ErrView::Exec(&empty))),
                             response_headers: headers.clone(),
                             credential_version: auth.credential_version,
-                            access_token: auth.access_token().to_owned(),
+                            access_token: super::credential::result_access_token(&auth).to_owned(),
                             registration_epoch: auth.registration_epoch,
                             execution_seq: attempt.execution_seq,
                             ..CallResult::default()

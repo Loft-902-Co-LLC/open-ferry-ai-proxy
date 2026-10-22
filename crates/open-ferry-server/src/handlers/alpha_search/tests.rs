@@ -156,11 +156,23 @@ fn build(
     credentials: Vec<Auth>,
     models: &[(&str, &str)],
 ) -> (AppState, Arc<Manager>) {
+    build_with_executor(
+        settings,
+        CodexExecutor::new("direct").with_base_url(format!("{chatgpt}/backend-api/codex")),
+        credentials,
+        models,
+    )
+}
+
+fn build_with_executor(
+    settings: Settings,
+    executor: CodexExecutor,
+    credentials: Vec<Auth>,
+    models: &[(&str, &str)],
+) -> (AppState, Arc<Manager>) {
     let registry = Arc::new(ModelRegistry::new());
     let manager = Arc::new(Manager::new(settings, registry.clone(), None));
-    manager.register_executor(Arc::new(
-        CodexExecutor::new("direct").with_base_url(format!("{chatgpt}/backend-api/codex")),
-    ));
+    manager.register_executor(Arc::new(executor));
     for credential in credentials {
         manager.register_unsaved(credential).unwrap();
     }
@@ -184,8 +196,7 @@ fn build(
 
 // Upstream 0db19025's public routes must reach the real executor's local
 // missing-outer-token 401, even with a valid nested SIWC bearer. No transport
-// can run in this case; successful token isolation is tested at the provider's
-// loopback mock transport.
+// can escape the loopback mock even if that local rejection regresses.
 #[tokio::test]
 async fn codex_alpha_search_siwc_routes_require_original_oauth_locally() {
     for path in ["/v1/alpha/search", "/backend-api/codex/alpha/search"] {
@@ -195,9 +206,11 @@ async fn codex_alpha_search_siwc_routes_require_original_oauth_locally() {
             "access_token":" \t ", "refresh_token":"dummy-outer-refresh",
             "siwc":{"access_token":"dummy-siwc-bearer", "refresh_token":"dummy-siwc-refresh", "client_id":"dummy-client", "expires_at":"2099-01-01T00:00:00Z"}}),
         );
-        let (state, manager) = build(
+        let mock = Mock::ok().await;
+        let (state, manager) = build_with_executor(
             Settings::default(),
-            "https://chatgpt.com",
+            CodexExecutor::new("direct")
+                .with_http_mock_url(format!("{}/backend-api/codex/alpha/search", mock.url)),
             vec![credential],
             &[("siwc-auth", "gpt-5")],
         );
@@ -209,6 +222,7 @@ async fn codex_alpha_search_siwc_routes_require_original_oauth_locally() {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
         assert!(body.contains("original OAuth"));
+        assert!(mock.requests().is_empty());
         assert_eq!(
             manager
                 .get("siwc-auth")
@@ -217,6 +231,51 @@ async fn codex_alpha_search_siwc_routes_require_original_oauth_locally() {
             "dummy-siwc-bearer"
         );
     }
+}
+
+// Moved from providers: public routes exercise the real manager/executor,
+// with the final transport replaced only after destination/auth validation.
+#[tokio::test]
+async fn siwc_alpha_search_public_routes_use_outer_oauth_at_transport() {
+    let mock = Mock::ok().await;
+    let credential = oauth(
+        "dual",
+        json!({"type":"codex", "use_siwc":true,
+            "access_token":"outer-search-dummy", "refresh_token":"outer-refresh-dummy", "account_id":"dummy-account",
+            "siwc":{"access_token":"nested-response-dummy", "refresh_token":"nested-refresh-dummy", "client_id":"dummy-client", "expires_at":"2099-01-01T00:00:00Z"}}),
+    );
+    let (state, manager) = build_with_executor(
+        Settings::default(),
+        CodexExecutor::new("direct")
+            .with_http_mock_url(format!("{}/backend-api/codex/alpha/search", mock.url)),
+        vec![credential],
+        &[("dual", "gpt-5")],
+    );
+    let before = manager.get("dual").unwrap();
+    let app = router(state);
+    for path in ["/v1/alpha/search", "/backend-api/codex/alpha/search"] {
+        let (status, _, body) = send(
+            &app,
+            search(
+                path,
+                r#"{"model":"gpt-5","commands":{"search_query":[{"q":"dummy"}]}}"#,
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, RESULTS);
+        let sent = mock.requests().pop().unwrap();
+        assert_eq!(sent.path, "/backend-api/codex/alpha/search");
+        assert_eq!(
+            sent.header("authorization"),
+            Some("Bearer outer-search-dummy")
+        );
+        assert_eq!(sent.header("chatgpt-account-id"), Some("dummy-account"));
+        assert_eq!(sent.header("originator"), None);
+    }
+    assert_eq!(mock.requests().len(), 2);
+    assert_eq!(manager.get("dual").unwrap().metadata, before.metadata);
 }
 
 /// The router over [`build`]'s state.

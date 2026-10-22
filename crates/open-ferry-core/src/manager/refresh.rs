@@ -2381,10 +2381,11 @@ impl Manager {
         if epoch > 0 && epoch != entry.auth.registration_epoch {
             return;
         }
-        let auth = Arc::make_mut(&mut entry.auth);
-        if !auth.record_rejected_token(failed_token) {
+        if !entry.auth.needs_rejected_token(failed_token) {
             return;
         }
+        let auth = Arc::make_mut(&mut entry.auth);
+        auth.record_rejected_token(failed_token);
         auth.generation = auth.generation.saturating_add(1);
         auth.updated_at = Some(now);
         state.sync_scheduler(self.models(), id, now);

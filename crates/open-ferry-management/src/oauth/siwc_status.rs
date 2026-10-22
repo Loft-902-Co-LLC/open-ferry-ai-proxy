@@ -33,12 +33,16 @@ pub(super) async fn status(
     if name.is_empty() && index.is_empty() {
         return json::error(StatusCode::BAD_REQUEST, "name or auth_index is required");
     }
-    let target = state.manager().list().into_iter().find(|auth| {
-        (name.is_empty()
-            || auth.id.trim().as_bytes() == name
-            || auth.file_name.trim().as_bytes() == name)
-            && (index.is_empty() || crate::auth_files::auth_index(auth).as_bytes() == index)
-    });
+    let target = std::str::from_utf8(name)
+        .ok()
+        .zip(std::str::from_utf8(index).ok())
+        .and_then(|(name, index)| {
+            if name.is_empty() {
+                crate::quota::auth_by_index(state.manager(), index)
+            } else {
+                crate::credential_state::lookup(state.manager(), name, index)
+            }
+        });
     let Some(auth) = target else {
         return json::error(StatusCode::NOT_FOUND, "auth file not found");
     };

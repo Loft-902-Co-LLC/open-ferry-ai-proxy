@@ -193,21 +193,27 @@ impl Auth {
             && (self.rejected_siwc_access_token == token || self.rejected_access_token == token)
     }
 
+    /// Whether recording this bearer would change either rejection marker.
+    pub(crate) fn needs_rejected_token(&self, token: &str) -> bool {
+        let token = token.trim();
+        !token.is_empty()
+            && ((token == self.siwc_access_token() && self.rejected_siwc_access_token != token)
+                || (token == self.access_token() && self.rejected_access_token != token))
+    }
+
     /// Called under the manager state lock, using the bearer actually sent.
     pub(crate) fn record_rejected_token(&mut self, token: &str) -> bool {
-        let token = token.trim();
-        if token.is_empty() {
+        if !self.needs_rejected_token(token) {
             return false;
         }
-        let nested = token == self.siwc_access_token() && self.rejected_siwc_access_token != token;
-        let active = token == self.access_token() && self.rejected_access_token != token;
-        if nested {
+        let token = token.trim();
+        if token == self.siwc_access_token() {
             self.rejected_siwc_access_token = token.to_owned();
         }
-        if active {
+        if token == self.access_token() {
             self.rejected_access_token = token.to_owned();
         }
-        nested || active
+        true
     }
 
     /// Preserve runtime rejection through publication/partition merges. A SIWC

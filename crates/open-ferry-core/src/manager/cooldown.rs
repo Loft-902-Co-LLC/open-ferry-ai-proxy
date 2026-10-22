@@ -23,6 +23,9 @@
 //!   ported.
 //! - Model states are walked in key order, where Go's map order is random.
 //! - The backoff level saturates where Go's shift would overflow.
+//! - Codex API-key calls retain the credential-version fence: an unchanged
+//!   OAuth bearer isn't the credential they sent. Upstream also permits its
+//!   unchanged-token exception for these API-key calls.
 //! - Result policies and hooks aren't ported.
 //! - The provider's response headers come in the [`CallResult`], where
 //!   upstream's `MarkResult` reads them from the request's context.
@@ -86,7 +89,8 @@ pub struct CallResult {
     /// response says nothing of the credential's quota (upstream's
     /// `SkipQuotaObservation`).
     pub skip_quota_observation: bool,
-    /// Bearer actually used by this call. Runtime only, excluded from Debug.
+    /// Captured bearer for result fencing; empty for Codex API-key calls.
+    /// Runtime only, excluded from Debug.
     pub access_token: String,
     /// The [`Auth::credential_version`] of the credential the call ran with,
     /// or 0 when not known (upstream's `CredentialVersion`).
@@ -127,7 +131,8 @@ pub(crate) fn is_stale_result(result: &CallResult, current: &Auth) -> bool {
         result.registration_epoch > 0 && result.registration_epoch < current.registration_epoch;
     stale_epoch
         || (stale_version
-            && (result.access_token.is_empty() || current.access_token() != result.access_token))
+            && (result.access_token.is_empty()
+                || super::credential::result_access_token(current) != result.access_token))
 }
 
 /// `t` plus `d`, saturating at the latest time chrono can hold.
