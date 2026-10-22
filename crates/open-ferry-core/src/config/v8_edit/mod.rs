@@ -377,6 +377,7 @@ fn apply_body(root: &mut Node, parts: &[&str], edit: &V8Edit) -> Result<Node, V8
 fn take_comments(node: &mut Node, from: &mut Node) {
     node.head_comment = std::mem::take(&mut from.head_comment);
     node.line_comment = std::mem::take(&mut from.line_comment);
+    node.line_comment_id = from.line_comment_id.take();
     node.foot_comment = std::mem::take(&mut from.foot_comment);
 }
 
