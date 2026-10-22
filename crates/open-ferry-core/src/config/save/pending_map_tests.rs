@@ -55,3 +55,14 @@ fn saved_pending_empty_mapping_keeps_values_comments_and_reloads() {
     assert_eq!(map.kind, Kind::Mapping);
     assert!(map.content.is_empty());
 }
+
+#[test]
+fn unrelated_own_comment_on_empty_mapping_remains_a_safe_refusal() {
+    let source = "port: 8317\noauth-excluded-models: # own\n  codex: [m]\n";
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, source).unwrap();
+    let cfg = Config::parse("port: 8317\n").unwrap();
+    assert!(save_preserving_comments(&path, &cfg, false).is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
