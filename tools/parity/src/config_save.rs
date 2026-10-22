@@ -213,14 +213,8 @@ fn scalar_losses(go: &AnyValue, rust: &AnyValue) -> Option<usize> {
 }
 
 fn comment_occurrences(text: &str, comment: &str) -> usize {
-    text.match_indices(comment)
-        .filter(|(at, _)| {
-            let before = &text[..*at];
-            let after = &text[at + comment.len()..];
-            (before.is_empty() || before.ends_with([' ', '\t', '\n']))
-                && (after.is_empty() || after.starts_with(['\n', '\r']))
-        })
-        .count()
+    open_ferry_core::config::save::parity::comment_occurrences(text, comment, false)
+        .unwrap_or_default()
 }
 
 /// Conservative byte span of a block `plugins.configs` value. Ambiguous,
@@ -489,6 +483,14 @@ impl Drop for TempDir {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn literal_scalar_data_does_not_spend_a_comment_budget() {
+        assert_eq!(
+            super::comment_occurrences("text: |\n  data # c\n", "# c"),
+            0
+        );
+        assert_eq!(super::comment_occurrences("text: value # c\n", "# c"), 1);
+    }
     use serde_json::json;
 
     use super::drop_repeated_plugin_comments;

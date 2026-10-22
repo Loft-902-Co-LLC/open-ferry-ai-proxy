@@ -10,6 +10,9 @@ use super::{Node, STR_TAG, SaveError, marshal_config, unmarshal};
 #[cfg(feature = "parity")]
 pub mod ablation;
 
+mod comments;
+pub use comments::{comment_occurrences, retained_comment_ownership};
+
 mod folded;
 pub use folded::{folded_scalar_reencode, folded_scalar_values};
 
@@ -301,6 +304,7 @@ pub fn config_version_comment(source: &str, go: &str, rust: &str) -> Option<Stri
         (n.kind == super::Kind::Scalar && n.tag == super::super::yaml3::INT_TAG && n.value == "8")
             .then(|| n.clone())
     }
+    let source_text = source;
     let (source, g, r) = (version(source)?, version(go)?, version(rust)?);
     let comment = &source.line_comment;
     if !comment.starts_with('#')
@@ -310,6 +314,8 @@ pub fn config_version_comment(source: &str, go: &str, rust: &str) -> Option<Stri
         || !g.line_comment.is_empty()
         || &r.line_comment != comment
         || g.line != r.line
+        || comment_occurrences(rust, comment, false)?
+            > comment_occurrences(source_text, comment, true)?
     {
         return None;
     }
