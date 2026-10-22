@@ -172,7 +172,20 @@ impl Auth {
     /// For an API key the value is the key itself, a secret: never log it.
     pub fn account_info(&self) -> Option<(&'static str, &str)> {
         match self.auth_kind()? {
-            AuthKind::OAuth => Some(("oauth", self.trimmed_metadata_str("email"))),
+            AuthKind::OAuth => {
+                let email = self.trimmed_metadata_str("email");
+                let email = if email.is_empty() {
+                    self.metadata
+                        .get("service_account")
+                        .and_then(|sa| sa.get("client_email"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                } else {
+                    email
+                };
+                Some(("oauth", email))
+            }
             AuthKind::ApiKey => Some(("api_key", self.trimmed_attribute(ATTRIBUTE_API_KEY))),
         }
     }
@@ -213,6 +226,11 @@ impl Auth {
         .into_iter()
         .any(|key| !self.trimmed_metadata_str(key).is_empty());
         token_field
+            || self
+                .metadata
+                .get("service_account")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|sa| !sa.is_empty())
             || (super::codex_refresh::is_codex_auth(self)
                 && self
                     .metadata

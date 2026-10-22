@@ -114,11 +114,15 @@ const NAME: &str = "openai compat executor";
 
 /// Calls an OpenAI-compatible provider (upstream's
 /// `OpenAICompatExecutor`).
+#[derive(Clone)]
 pub struct OpenAiCompatExecutor {
     provider: String,
     config: Arc<Config>,
     models: Option<Arc<dyn ModelCatalog>>,
-    clients: Clients,
+    clients: Arc<Clients>,
+    /// Explicit Vertex OpenAPI credentials reuse this executor without any
+    /// OpenAI-compatible provider settings.
+    vertex_credentials: Option<(String, String)>,
 }
 
 /// The credential's API key, sent as a bearer token unless it is empty.
@@ -163,12 +167,13 @@ impl OpenAiCompatExecutor {
     /// entries of `config`. Credentials without a `proxy_url` go through
     /// the config's `proxy-url`.
     pub fn new(provider: impl Into<String>, config: Arc<Config>) -> Self {
-        let clients = Clients::new(config.proxy_url.clone()).for_provider(NAME);
+        let clients = Arc::new(Clients::new(config.proxy_url.clone()).for_provider(NAME));
         Self {
             provider: provider.into(),
             config,
             models: None,
             clients,
+            vertex_credentials: None,
         }
     }
 
@@ -178,12 +183,20 @@ impl OpenAiCompatExecutor {
         self
     }
 
+    pub(crate) fn with_vertex_credentials(mut self, base_url: String, token: String) -> Self {
+        self.vertex_credentials = Some((base_url, token));
+        self
+    }
+
     /// The `openai-compatibility` entry `auth` belongs to
     /// (`resolveCompatConfig`): for a credential from the config file, the
     /// enabled entry at its `config_index`; else the first enabled entry
     /// named, regardless of case, by its `compat_name`, `provider_key` or
     /// provider.
     fn compat_config(&self, auth: &Auth) -> Option<&OpenAiCompatibility> {
+        if self.vertex_credentials.is_some() {
+            return None;
+        }
         let entries = &self.config.openai_compatibility;
         if auth.auth_source_kind() == Some(AuthSource::Config)
             && let Some(index) = auth.attribute("config_index")
@@ -223,8 +236,16 @@ impl OpenAiCompatExecutor {
         options: &Options,
         stream: bool,
     ) -> Result<Prepared, ExecError> {
-        let base_url = base_url(auth)?;
-        let api_key = api_key(auth);
+        let (base_url, api_key) = match &self.vertex_credentials {
+            Some((url, token)) => (url.as_str(), token.as_str()),
+            None => (base_url(auth)?, api_key(auth)),
+        };
+        if base_url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            return Err(ExecError::new(
+                ErrorKind::Upstream,
+                "net/url: invalid control character in URL",
+            ));
+        }
         let compact = options.alt == COMPACT_ALT;
         let (to, path, translate_stream) = if stream {
             (Format::OPENAI, "/chat/completions", true)
@@ -402,7 +423,9 @@ impl OpenAiCompatExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        if let Some(path) = images::endpoint(options) {
+        if self.vertex_credentials.is_none()
+            && let Some(path) = images::endpoint(options)
+        {
             return self.execute_images(auth, request, options, path).await;
         }
         let prepared = self.prepare(auth, request, options, false)?;
@@ -458,7 +481,9 @@ impl OpenAiCompatExecutor {
         request: Request,
         options: Options,
     ) -> Result<StreamResponse, ExecError> {
-        if let Some(path) = images::endpoint(&options) {
+        if self.vertex_credentials.is_none()
+            && let Some(path) = images::endpoint(&options)
+        {
             return self
                 .execute_images_stream(auth, &request, &options, path)
                 .await;

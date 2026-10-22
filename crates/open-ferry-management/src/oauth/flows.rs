@@ -19,7 +19,8 @@
 //! Cancelling the session stops its login at once, wherever it is, except
 //! while it saves: a login cancelled before its exchange sends no token
 //! request, and one cancelled during it drops the request and saves
-//! nothing. When the service shuts down, every login stops. However a
+//! nothing. Shutdown stops logins after a bounded grace for saving binds.
+//! A post-fence bind collector can outlive that grace. However a
 //! login ends, its forwarder stops, and its session is dropped unless the
 //! login completed or failed it.
 //!
@@ -49,9 +50,10 @@
 //! - The exchange, until the credential is made, has 60 seconds: past
 //!   that, the session fails with `Timeout exchanging authorization code
 //!   for tokens`. Upstream's has no deadline.
-//! - When the service shuts down, the logins stop and drop their sessions,
-//!   and a login can't start after that: it answers 503 `{"error":"server
-//!   shutting down"}`. Upstream's logins run until the process exits.
+//! - When the service shuts down, saving SIWC binds have a ten-second grace
+//!   before ordinary login owners stop. Post-fence collectors survive that
+//!   abort while the process stays alive. New logins answer 503
+//!   `{"error":"server shutting down"}`. Upstream's logins run until exit.
 //! - A failed exchange is logged with a fixed message and the token
 //!   endpoint's status, where upstream logs the error, which quotes the
 //!   endpoint's answer, and so may hold the code. A Codex session's status
@@ -154,6 +156,7 @@ pub(super) async fn auth_url(
                 );
             }
             let name = lossy(query.value("name"));
+            let _mutation = state.credential_lock().lock().await;
             match super::siwc_bind::prepare(&state, &name).await {
                 Ok(bind) => start_with_bind(&state, Provider::Codex, &query, Some(bind)).await,
                 Err(_) => json::error(StatusCode::BAD_REQUEST, "invalid SIWC bind target"),
@@ -161,6 +164,47 @@ pub(super) async fn auth_url(
         }
         "codex" => start(&state, Provider::Codex, &query).await,
         _ => json::error(StatusCode::NOT_FOUND, "provider_not_found"),
+    }
+}
+
+/// `POST /v8/management/oauth/siwc/bind`, without a server-side callback listener.
+pub(super) async fn siwc_bind(
+    State(state): State<ManagementState>,
+    body: axum::body::Body,
+) -> Response {
+    let body = match crate::bind::read_body(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let value = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => return json::error(StatusCode::BAD_REQUEST, "invalid request body"),
+    };
+    let Some(name) = value.get("name").and_then(serde_json::Value::as_str) else {
+        return json::error(StatusCode::BAD_REQUEST, "name is required");
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return json::error(StatusCode::BAD_REQUEST, "name is required");
+    }
+    if state.credential_store().is_err() {
+        return json::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "credential store unavailable",
+        );
+    }
+    let _mutation = state.credential_lock().lock().await;
+    if !state
+        .manager()
+        .list()
+        .iter()
+        .any(|a| a.id == name || a.file_name == name)
+    {
+        return json::error(StatusCode::NOT_FOUND, "auth file not found");
+    }
+    match super::siwc_bind::prepare(&state, name).await {
+        Ok(bind) => start_with_bind(&state, Provider::Codex, &Query::default(), Some(bind)).await,
+        Err(_) => json::error(StatusCode::BAD_REQUEST, "invalid SIWC bind target"),
     }
 }
 
@@ -209,9 +253,18 @@ async fn start_with_bind(
     let Some(registration) = sessions.store().register(&oauth_state, provider.name()) else {
         return json::error(StatusCode::TOO_MANY_REQUESTS, "too many oauth sessions");
     };
-    if matches!(client, Client::Siwc(_)) {
-        sessions.store().mark_bind(&oauth_state);
+    if let Client::Siwc(bind) = &client
+        && !sessions
+            .store()
+            .mark_bind_target(&oauth_state, bind.target.mutation_path(), &redirect)
+    {
+        sessions.store().release(&oauth_state, registration.id);
+        return json::error(
+            StatusCode::CONFLICT,
+            "a SIWC binding is already pending for this credential",
+        );
     }
+    let is_bind = matches!(client, Client::Siwc(_));
     // From here, a login that doesn't start drops its session.
     let login = Login {
         client,
@@ -227,7 +280,14 @@ async fn start_with_bind(
 
     let mut forwarder = None;
     if is_web_ui(query) {
-        let Some(target) = callback_url(&config, provider.page()) else {
+        let Some(target) = callback_url(
+            &config,
+            if is_bind {
+                "/v8/management/oauth/callback"
+            } else {
+                provider.page()
+            },
+        ) else {
             tracing::error!("Can't forward the {provider} OAuth callback: no server port");
             return json::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -250,14 +310,18 @@ async fn start_with_bind(
     if !sessions.spawn(run(state.clone(), login, registration, forwarder)) {
         return json::error(StatusCode::SERVICE_UNAVAILABLE, "server shutting down");
     }
-    json::response(
-        StatusCode::OK,
-        &Json::map([
-            ("status", Json::Str("ok".into())),
-            ("url", Json::Str(url)),
-            ("state", Json::Str(oauth_state)),
-        ]),
-    )
+    let mut response = vec![
+        ("status", Json::Str("ok".into())),
+        ("url", Json::Str(url)),
+        ("state", Json::Str(oauth_state)),
+    ];
+    if is_bind {
+        response.extend([
+            ("flow", Json::Str("siwc_bind".into())),
+            ("expires_in", Json::Int(300)),
+        ]);
+    }
+    json::response(StatusCode::OK, &Json::Struct(response))
 }
 
 /// Whether the login was started from the web UI: `is_webui` is `1`,
@@ -432,7 +496,7 @@ async fn run(
     let provider = login.client.provider();
     let callback = tokio::select! {
         callback = callback => callback,
-        () = tokio::time::sleep(sessions.wait_timeout()) => {
+        () = tokio::time::sleep(if matches!(login.client, Client::Siwc(_)) { sessions.wait_timeout().min(Duration::from_secs(300)) } else { sessions.wait_timeout() }) => {
             tracing::error!("Timed out waiting for the {provider} OAuth callback");
             store.set_error(&login.state, "Timeout waiting for OAuth callback");
             return;
@@ -456,6 +520,8 @@ async fn run(
         store.set_error(&login.state, crate::config_write::SWITCHING);
         return;
     };
+    let bind =
+        matches!(login.client, Client::Siwc(_)).then(|| (state.clone(), login.state.clone()));
     let work = complete(state.clone(), login, callback, lifeline);
     let Ok(task) = gate.spawn(&operation, work) else {
         return;
@@ -463,18 +529,31 @@ async fn run(
     drop(operation);
     // A login stopped here (shut down, or its session replaced) stops its
     // task, as when the exchange and the save ran in this one.
-    let mut task = StopOnDrop(task);
-    if let Err(error) = (&mut task.0).await {
+    let mut task = StopOnDrop { task, bind };
+    if let Err(error) = (&mut task.task).await {
         tracing::error!("The {provider} login's task failed: {error}");
     }
 }
 
-/// A task that is aborted when this is dropped.
-struct StopOnDrop(tokio::task::JoinHandle<()>);
+/// Abort with the login owner, except a post-fence bind during shutdown.
+struct StopOnDrop {
+    task: tokio::task::JoinHandle<()>,
+    bind: Option<(ManagementState, String)>,
+}
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        // After the bounded shutdown grace, a committed bind's collector
+        // remains gate-owned. If the process stays alive, it can still finish.
+        // The shutdown cutoff and admit_bind use the same login mutex, so no
+        // new final fence can pass after this check during shutdown.
+        if self.bind.as_ref().is_some_and(|(state, session)| {
+            state.oauth_sessions().is_shut_down()
+                && state.oauth_sessions().store().is_committing(session)
+        }) {
+            return;
+        }
+        self.task.abort();
     }
 }
 
@@ -490,6 +569,13 @@ async fn complete(
     let sessions = state.oauth_sessions();
     let store = sessions.store();
     let provider = login.client.provider();
+    let is_bind = matches!(login.client, Client::Siwc(_));
+    if is_bind && let Err(error) = sessions.check_bind_worker() {
+        bind_error(store, &login.state, error);
+        return;
+    }
+    // Advisory only: another exchange may consume the last permit; the
+    // non-waiting acquisition immediately before spawn is authoritative.
     let exchange = tokio::time::timeout(
         sessions.exchange_timeout(),
         login
@@ -523,12 +609,33 @@ async fn complete(
     if !store.is_pending(&login.state, provider.name()) {
         return;
     }
-    let is_bind = matches!(login.client, Client::Siwc(_));
+    // Shutdown keeps the production JoinSet/StopOnDrop ownership chain alive
+    // until this guard drops, after the session has its durable outcome.
+    let _completion = if is_bind {
+        let Some(completion) = sessions.bind_completion() else {
+            bind_error(
+                store,
+                &login.state,
+                super::siwc_bind::SaveError::ShuttingDown,
+            );
+            return;
+        };
+        Some(completion)
+    } else {
+        None
+    };
     let saved = match (record, login.client) {
         (Credential::Login(record), Client::Claude(_) | Client::Codex(_)) => {
-            save_token_record(&state, *record)
-                .await
-                .map_err(|error| error.to_string())
+            use crate::token_record::SaveError;
+            match save_token_record(&state, *record).await {
+                Ok(path) => Ok((path, true)),
+                Err(SaveError::Sync { path, .. }) => Ok((path, false)),
+                Err(error) => {
+                    tracing::error!("{SAVE_FAILED}: {error}");
+                    store.set_error(&login.state, SAVE_FAILED);
+                    return;
+                }
+            }
         }
         (Credential::Bind(tokens), Client::Siwc(bind)) => super::siwc_bind::save(
             &state,
@@ -536,33 +643,90 @@ async fn complete(
             *tokens,
             login.state.clone(),
             login._lease.id,
+            &mut lifeline,
         )
         .await
-        .map(|()| String::new())
-        .map_err(|error| {
-            format!(
-                "SIWC binding failed ({:?}, OS {:?})",
-                error.kind(),
-                error.raw_os_error()
+        .map(|outcome| {
+            (
+                String::new(),
+                outcome == super::siwc_bind::SaveOutcome::Synchronized,
             )
         }),
-        _ => Err("OAuth credential kind mismatch".to_owned()),
+        _ => {
+            tracing::error!("{SAVE_FAILED}: OAuth credential kind mismatch");
+            store.set_error(&login.state, SAVE_FAILED);
+            return;
+        }
     };
     match saved {
-        Ok(path) => {
+        Ok((path, synchronized)) => {
             if is_bind {
-                tracing::info!("SIWC credential bound and synchronized");
-            } else {
+                if synchronized {
+                    tracing::info!("SIWC credential bound and synchronized");
+                } else {
+                    tracing::warn!(
+                        "SIWC binding saved, runtime sync unavailable; the saved credential will load on restart"
+                    );
+                }
+            } else if synchronized {
                 tracing::info!(
                     "{provider} authentication successful; credential saved as {}",
                     saved_name(&path)
                 );
+            } else {
+                tracing::warn!(
+                    "{provider} authentication saved as {}; runtime sync unavailable; the saved credential will load on restart",
+                    saved_name(&path)
+                );
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            if is_bind {
+                let pause = sessions.overrides().bind_before_complete.clone();
+                if let Some(pause) = pause {
+                    pause.0.notify_one();
+                    pause.1.notified().await;
+                }
             }
             store.complete(&login.state);
+            #[cfg(test)]
+            if is_bind && let Some(events) = sessions.overrides().bind_shutdown_events.clone() {
+                events.lock().unwrap().push("collector finalized");
+            }
         }
-        Err(error) => {
-            tracing::error!("{SAVE_FAILED}: {error}");
-            store.set_error(&login.state, SAVE_FAILED);
+        Err(error) => bind_error(store, &login.state, error),
+    }
+}
+
+const BIND_BUSY: &str = "SIWC bind workers are busy; start a new binding";
+
+fn bind_error(store: &super::sessions::Store, session: &str, error: super::siwc_bind::SaveError) {
+    use super::siwc_bind::SaveError;
+    match error {
+        SaveError::Busy => {
+            if store.set_pending_error(session, BIND_BUSY) {
+                tracing::info!("{BIND_BUSY}");
+            }
+        }
+        SaveError::ShuttingDown => {
+            if store.set_pending_error(session, "server shutting down") {
+                tracing::info!("SIWC bind cancelled: server shutting down");
+            }
+        }
+        SaveError::Cancelled(cause) => {
+            // Keep the previous non-shutdown diagnostic, and retain a status
+            // already set by target invalidation, expiry or cancellation.
+            tracing::error!("{SAVE_FAILED}: SIWC binding failed (Other, OS None)");
+            if cause == super::siwc_bind::CancelCause::LifelineDropped {
+                store.set_pending_error(session, SAVE_FAILED);
+            }
+        }
+        SaveError::Failed(error) => {
+            tracing::error!(
+                "{SAVE_FAILED}: SIWC binding failed ({:?}, OS {:?})",
+                error.kind(),
+                error.raw_os_error()
+            );
+            store.set_error(session, SAVE_FAILED);
         }
     }
 }
@@ -703,5 +867,93 @@ fn outcome(status: &str, error: Option<&str>) -> Json {
             ("error", Json::Str(error.to_owned())),
         ]),
         None => Json::map([("status", Json::Str(status.to_owned()))]),
+    }
+}
+
+#[cfg(test)]
+mod round7_tests {
+    use super::*;
+    use crate::oauth::{Sessions, mutation_path::BindMutationPath, sessions::Registration};
+    use crate::tests::capture::Logs;
+
+    fn ended_session() -> (Sessions, Registration) {
+        let sessions = Sessions::default();
+        let registration = sessions.store().register("round7-ended", "codex").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = BindMutationPath::capture(dir.path().join("bind.json"));
+        assert!(
+            sessions
+                .store()
+                .mark_bind_target("round7-ended", target.clone(), "")
+        );
+        sessions.store().invalidate_bind_target(&target);
+        (sessions, registration)
+    }
+
+    async fn refused(shutdown: bool) {
+        let (logs, _capture) = Logs::capture();
+        let (sessions, _registration) = ended_session();
+        if shutdown {
+            sessions.shutdown().await;
+        } else {
+            sessions.bind_workers.limit_for_test(0);
+        }
+        // Drive the real pre-worker check and shared error arm directly:
+        // this synchronous window has no scheduling hook and needs no sleep.
+        bind_error(
+            sessions.store(),
+            "round7-ended",
+            sessions.check_bind_worker().unwrap_err(),
+        );
+        assert_eq!(
+            sessions.store().get("round7-ended").unwrap().status,
+            "SIWC binding target changed; start a new binding"
+        );
+        assert!(
+            logs.text().is_empty(),
+            "an ended session was logged as a new refusal"
+        );
+
+        // The same refusal must still change and log a pending session once.
+        let _pending = sessions
+            .store()
+            .register("round7-pending", "codex")
+            .unwrap();
+        bind_error(
+            sessions.store(),
+            "round7-pending",
+            sessions.check_bind_worker().unwrap_err(),
+        );
+        let expected = if shutdown {
+            "server shutting down"
+        } else {
+            BIND_BUSY
+        };
+        assert_eq!(
+            sessions.store().get("round7-pending").unwrap().status,
+            expected
+        );
+        assert!(logs.text().contains(expected));
+        assert_eq!(logs.levels(), [tracing::Level::INFO]);
+    }
+
+    #[tokio::test]
+    async fn round7_shutdown_refusal_preserves_an_ended_status() {
+        refused(true).await;
+    }
+
+    #[tokio::test]
+    async fn round7_busy_refusal_preserves_an_ended_status() {
+        refused(false).await;
+    }
+
+    #[tokio::test]
+    async fn round7_admit_bind_prioritizes_an_ended_session_over_shutdown() {
+        let (sessions, registration) = ended_session();
+        sessions.shutdown().await;
+        assert_eq!(
+            sessions.admit_bind("round7-ended", registration.id),
+            Err(crate::oauth::siwc_bind::CancelCause::SessionEnded)
+        );
     }
 }

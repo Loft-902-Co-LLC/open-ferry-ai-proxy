@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI sdk/auth/filestore.go, and the existing-file merge
-// in Manager.Login in sdk/auth/manager.go (v8.0.36, MIT).
+// in Manager.Login in sdk/auth/manager.go, and
+// sdk/cliproxy/auth/codex_siwc_bind.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`FileStore`]: credentials kept as JSON files in an auth directory.
@@ -294,6 +295,7 @@ fn reparse_tag(file: &fs::File) -> io::Result<u32> {
 /// no-user fallback. Neither values nor fingerprints are Debug-printable.
 /// This detects substitution, not ID-token authenticity or SIWC matching.
 pub struct BindIdentity {
+    account_id: Value,
     evidence: [Option<String>; 6],
     grant: [u8; 32],
     file: FileId,
@@ -303,6 +305,7 @@ impl BindIdentity {
     /// Captures the outer identity without keeping the credential file open.
     pub fn capture(metadata: &Map<String, Value>, file: FileId) -> Self {
         Self {
+            account_id: metadata.get("account_id").cloned().unwrap_or(Value::Null),
             evidence: bind_account(metadata),
             grant: bind_grant(metadata),
             file,
@@ -314,6 +317,11 @@ impl BindIdentity {
     pub fn check(&self, metadata: &Map<String, Value>, file: FileId) -> io::Result<()> {
         self.file.supported()?;
         file.supported()?;
+        if account_value(&self.account_id)?
+            != account_value(metadata.get("account_id").unwrap_or(&Value::Null))?
+        {
+            return Err(invalid("SIWC bind target identity changed"));
+        }
         let evidence = bind_account(metadata);
         let same = self
             .evidence
@@ -326,6 +334,39 @@ impl BindIdentity {
         } else {
             Err(invalid("SIWC bind target identity changed"))
         }
+    }
+}
+
+fn account_value(value: &Value) -> io::Result<&str> {
+    match value {
+        Value::Null => Ok(""),
+        Value::String(value) => Ok(value),
+        _ => Err(invalid("invalid SIWC bind account")),
+    }
+}
+
+/// Checks the registered account and independent user evidence without exposing
+/// any values. Empty and absent account IDs match only each other.
+pub fn check_bind_metadata(
+    expected: &Map<String, Value>,
+    current: &Map<String, Value>,
+) -> io::Result<()> {
+    if account_value(expected.get("account_id").unwrap_or(&Value::Null))?
+        != account_value(current.get("account_id").unwrap_or(&Value::Null))?
+    {
+        return Err(invalid("SIWC bind target identity changed"));
+    }
+    let before = bind_account(expected);
+    let after = bind_account(current);
+    if before
+        .iter()
+        .zip(&after)
+        .all(|(before, after)| before.is_none() || before == after)
+        && (before[2..].iter().any(Option::is_some) || bind_grant(expected) == bind_grant(current))
+    {
+        Ok(())
+    } else {
+        Err(invalid("SIWC bind target identity changed"))
     }
 }
 
@@ -522,11 +563,13 @@ fn open_bind_attributes(path: &Path, follow: bool) -> io::Result<fs::File> {
 /// Reads and validates a bind target through one no-follow handle, then closes it.
 /// The caller must independently check containment in a trusted auth directory.
 pub fn read_siwc_bind_target(path: &Path) -> io::Result<(Map<String, Value>, FileId)> {
-    let (_file, metadata, id) = open_siwc_bind_target(path)?;
+    let (_file, metadata, id, _) = open_siwc_bind_target(path)?;
     Ok((metadata, id))
 }
 
-fn open_siwc_bind_target(path: &Path) -> io::Result<(fs::File, Map<String, Value>, FileId)> {
+type BindTargetRead = (fs::File, Map<String, Value>, FileId, Vec<u8>);
+
+fn open_siwc_bind_target(path: &Path) -> io::Result<BindTargetRead> {
     require_bind_file(&fs::symlink_metadata(path)?)?;
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -588,7 +631,7 @@ fn open_siwc_bind_target(path: &Path) -> io::Result<(fs::File, Map<String, Value
     }
     validate_weights(&Default::default(), &metadata)
         .map_err(|_| invalid("invalid SIWC bind settings"))?;
-    Ok((file, metadata, id))
+    Ok((file, metadata, id, data))
 }
 
 fn require_bind_file(metadata: &fs::Metadata) -> io::Result<()> {
@@ -668,6 +711,39 @@ impl FileStore {
             Some(check),
         )
         .map(|p| p.auth)
+    }
+
+    /// The bind transaction with non-blocking save-mutex admission. A busy
+    /// store returns None so the caller can withdraw its manager reservation.
+    /// Every disk/account/identity/byte check is shared with bind_siwc_locked.
+    pub fn try_bind_siwc_locked(
+        &self,
+        auth: &Auth,
+        siwc: Map<String, Value>,
+        guard: &super::credential_lock::CredentialLock,
+        check: &BindCheck<'_>,
+    ) -> io::Result<Option<Auth>> {
+        let permit = self.permit()?;
+        let path = self.resolve_auth_path(auth)?;
+        refuse_lock_name(&path)?;
+        if !guard.guards(&path)? {
+            return Err(invalid(
+                "auth filestore: credential lock guard is for another file",
+            ));
+        }
+        let _save = match self.save_lock.try_lock() {
+            Ok(save) => save,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        };
+        self.persist_codex_partition_under_save(
+            &permit,
+            &path,
+            auth,
+            &super::codex_refresh::CodexPersistIntent::SiwcBind(siwc),
+            Some(check),
+        )
+        .map(|persisted| Some(persisted.auth))
     }
 
     /// Applies successful rotations against the locked, fresh disk baseline.
@@ -765,12 +841,26 @@ impl FileStore {
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.persist_codex_partition_under_save(_permit, path, auth, intent, check)
+    }
+
+    // The caller already holds this store's save mutex and the credential
+    // guard was checked immediately before taking it. Admission variants
+    // share this complete transaction body so no fence can drift.
+    fn persist_codex_partition_under_save(
+        &self,
+        _permit: &WritePermit,
+        path: &Path,
+        auth: &Auth,
+        intent: &super::codex_refresh::CodexPersistIntent,
+        check: Option<&BindCheck<'_>>,
+    ) -> io::Result<CodexPersisted> {
         self.check_file(path)?;
         if matches!(
             intent,
             super::codex_refresh::CodexPersistIntent::SiwcBind(_)
         ) {
-            let (file, disk, file_id) = open_siwc_bind_target(path)?;
+            let (file, disk, file_id, original_bytes) = open_siwc_bind_target(path)?;
             drop(file);
             #[cfg(test)]
             super::credential_lock::test_event(
@@ -783,7 +873,8 @@ impl FileStore {
             }
             let (metadata, applied) =
                 super::codex_refresh::merge_persist(Some(&disk), &auth.metadata, intent);
-            write_atomic_no_follow(path, marshal_map(&metadata).as_bytes(), file_id)?;
+            let raw = marshal_map(&metadata);
+            write_atomic_no_follow(path, raw.as_bytes(), file_id, &original_bytes)?;
             #[cfg(test)]
             super::credential_lock::test_event(
                 &super::credential_lock::credential_lock_path(path)?,
@@ -2110,7 +2201,12 @@ pub fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
 
 // Bind-only replacement: never resolve a link destination. The directory must
 // be trusted against uncooperative writers; rename replaces the leaf entry.
-fn write_atomic_no_follow(path: &Path, data: &[u8], expected: FileId) -> io::Result<()> {
+fn write_atomic_no_follow(
+    path: &Path,
+    data: &[u8],
+    expected: FileId,
+    expected_bytes: &[u8],
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     require_bind_file(&metadata)?;
     let directory = path
@@ -2129,9 +2225,9 @@ fn write_atomic_no_follow(path: &Path, data: &[u8], expected: FileId) -> io::Res
         &super::credential_lock::credential_lock_path(path)?,
         "bind-before-replace",
     );
-    let (file, _, current) = open_siwc_bind_target(path)
+    let (file, _, current, current_bytes) = open_siwc_bind_target(path)
         .map_err(|_| invalid("SIWC bind target changed before replacement"))?;
-    if current != expected {
+    if current != expected || current_bytes != expected_bytes {
         return Err(invalid("SIWC bind target changed before replacement"));
     }
     drop(file);
@@ -2454,7 +2550,13 @@ mod tests {
         let identity = BindIdentity::capture(&before, id);
         let mut after = before.clone();
         after.insert("access_token".into(), json!("rotated-test"));
-        write_atomic_no_follow(&path, marshal_map(&after).as_bytes(), id).unwrap();
+        write_atomic_no_follow(
+            &path,
+            marshal_map(&after).as_bytes(),
+            id,
+            &fs::read(&path).unwrap(),
+        )
+        .unwrap();
         let (fresh, fresh_id) = read_siwc_bind_target(&path).unwrap();
         assert!(id != fresh_id);
         assert!(identity.check(&fresh, fresh_id).is_ok());
@@ -2478,6 +2580,33 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"second-test"}"#);
         after.insert("id_token".into(), json!(format!("x.{payload}.x")));
         assert!(claims.check(&after, fresh_id).is_err());
+    }
+
+    #[test]
+    fn bind_try_variant_refuses_save_mutex_contention_without_running_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        let path = dir.path().join("codex.json");
+        fs::write(
+            &path,
+            br#"{"type":"codex","access_token":"dummy","refresh_token":"dummy"}"#,
+        )
+        .unwrap();
+        let auth = Auth {
+            file_name: "codex.json".into(),
+            provider: "codex".into(),
+            ..Auth::default()
+        };
+        let guard = super::super::credential_lock::acquire_sync(&path).unwrap();
+        let _held = store.save_lock.lock().unwrap();
+        assert!(
+            store
+                .try_bind_siwc_locked(&auth, Map::new(), &guard, &|_, _| panic!(
+                    "busy store admitted bind"
+                ))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[cfg(any(unix, windows))]
@@ -2526,7 +2655,7 @@ mod tests {
         );
         drop(guard);
         assert!(read_siwc_bind_target(&link).is_err());
-        assert!(write_atomic_no_follow(&link, b"replacement-test", id).is_err());
+        assert!(write_atomic_no_follow(&link, b"replacement-test", id, b"").is_err());
         assert!(fs::read(&target).unwrap() == data);
         assert!(
             fs::symlink_metadata(&link)
@@ -2538,7 +2667,7 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn bind_refuses_alias_refresh_between_read_and_scan() {
+    fn bind_refuses_alias_and_alias_refresh_waits_for_the_shared_lock() {
         use std::sync::{Arc, Mutex, mpsc};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("real.json");
@@ -2574,10 +2703,13 @@ mod tests {
                 if event == "bind-read" {
                     read.send(())
                         .expect("alias writer stopped before bind read");
-                    done.lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("alias writer did not finish");
+                    assert!(
+                        done.lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_millis(100))
+                            .is_err(),
+                        "alias writer bypassed the shared credential lock"
+                    );
                 }
             })),
         );
@@ -2612,6 +2744,7 @@ mod tests {
         });
         let result = store.bind_siwc_locked(&auth, Map::new(), &guard, &|_, _| Ok(()));
         super::super::credential_lock::set_test_hook(&path, None);
+        drop(guard);
         assert!(writer.join().unwrap().is_ok(), "alias refresh failed");
         let Err(error) = result else {
             panic!("bind accepted an alias");
@@ -3762,14 +3895,6 @@ mod tests {
         let via = alias.join("f");
 
         let (tx, rx) = mpsc::channel::<()>();
-        set_test_hook(
-            &file,
-            Some(Arc::new(move |event| {
-                if event == "waiting" {
-                    let _ = tx.send(());
-                }
-            })),
-        );
         let rx = std::sync::Mutex::new(rx);
         let peer = Arc::new(std::sync::Mutex::new(None));
         let between = Arc::new(AtomicUsize::new(0));
@@ -3777,6 +3902,10 @@ mod tests {
             let (peer, between, file, dir) =
                 (peer.clone(), between.clone(), file.clone(), dp.clone());
             move |event: &str| {
+                if event == "waiting" {
+                    let _ = tx.send(());
+                    return;
+                }
                 if event != "origin-between" || between.fetch_add(1, AtomicOrdering::SeqCst) > 0 {
                     return;
                 }
@@ -4970,14 +5099,6 @@ mod tests {
         let via = alias.join("f");
 
         let (tx, rx) = mpsc::channel::<()>();
-        set_test_hook(
-            &file,
-            Some(Arc::new(move |event| {
-                if event == "waiting" {
-                    let _ = tx.send(());
-                }
-            })),
-        );
         let rx = std::sync::Mutex::new(rx);
         let peer = Arc::new(std::sync::Mutex::new(None));
         let between = Arc::new(AtomicUsize::new(0));
@@ -4985,6 +5106,10 @@ mod tests {
             let (peer, between, file, dir) =
                 (peer.clone(), between.clone(), file.clone(), dp.clone());
             move |event: &str| {
+                if event == "waiting" {
+                    let _ = tx.send(());
+                    return;
+                }
                 if event != "origin-between" || between.fetch_add(1, AtomicOrdering::SeqCst) > 0 {
                     return;
                 }

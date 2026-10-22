@@ -44,6 +44,7 @@ use open_ferry_translate::go::to_lower;
 use tokio::sync::{oneshot, watch};
 
 use super::Redacted;
+use super::mutation_path::BindMutationPath;
 use crate::go::equal_fold;
 
 /// How long a session lasts after it starts or fails (`oauthSessionTTL`).
@@ -169,6 +170,8 @@ struct Inner {
 struct Entry {
     session: Session,
     bind: bool,
+    bind_target: Option<BindMutationPath>,
+    bind_redirect: String,
     committing: bool,
     /// Where the session's callback goes, until one has gone or the session
     /// stops being pending. Dropping it wakes the waiting login.
@@ -257,6 +260,8 @@ impl Store {
             state.to_owned(),
             Entry {
                 bind: false,
+                bind_target: None,
+                bind_redirect: String::new(),
                 committing: false,
                 session,
                 callback: Some(sender),
@@ -275,29 +280,39 @@ impl Store {
     /// when it is empty, unless the session is unknown or completed
     /// (`SetError`). The session then lasts the full time again.
     pub(crate) fn set_error(&self, state: &str, message: &str) {
+        self.fail(state, message, false);
+    }
+
+    /// Fails a pending session; returns whether its status changed.
+    pub(super) fn set_pending_error(&self, state: &str, message: &str) -> bool {
+        self.fail(state, message, true)
+    }
+
+    fn fail(&self, state: &str, message: &str, only_pending: bool) -> bool {
         let state = state.trim();
         let message = match message.trim() {
             "" => "Authentication failed",
             message => message,
         };
         if state.is_empty() {
-            return;
+            return false;
         }
         let now = Instant::now();
         let mut inner = self.lock();
         inner.purge(now);
         let ttl = inner.ttl;
         let Some(entry) = inner.sessions.get_mut(state) else {
-            return;
+            return false;
         };
-        if entry.session.completed {
-            return;
+        if entry.session.completed || (only_pending && !entry.session.is_pending()) {
+            return false;
         }
         message.clone_into(&mut entry.session.status);
         entry.session.expires_at = later(now, ttl);
         entry.callback = None;
         entry.committing = false;
         entry.changes.send_replace(());
+        true
     }
 
     /// Marks the login completed, unless the session is unknown or already
@@ -339,9 +354,64 @@ impl Store {
         self.get(state).filter(|session| !session.completed)
     }
 
+    #[cfg(test)]
     pub(super) fn mark_bind(&self, state: &str) {
         if let Some(entry) = self.lock().sessions.get_mut(state) {
             entry.bind = true;
+        }
+    }
+
+    pub(super) fn mark_bind_target(
+        &self,
+        state: &str,
+        target: BindMutationPath,
+        redirect: &str,
+    ) -> bool {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        inner.purge(now);
+        if inner.sessions.iter().any(|(key, entry)| {
+            key != state
+                && entry
+                    .bind_target
+                    .as_ref()
+                    .is_some_and(|bound| bound.matches(&target))
+                && entry.session.is_pending()
+        }) {
+            return false;
+        }
+        let Some(entry) = inner.sessions.get_mut(state) else {
+            return false;
+        };
+        entry.bind = true;
+        entry.bind_target = Some(target);
+        entry.bind_redirect = redirect.to_owned();
+        entry.session.expires_at = later(now, Duration::from_secs(300));
+        true
+    }
+
+    pub(super) fn bind_redirect(&self, state: &str) -> Option<String> {
+        self.lock()
+            .sessions
+            .get(state)
+            .filter(|entry| entry.bind)
+            .map(|entry| entry.bind_redirect.clone())
+    }
+
+    pub(crate) fn invalidate_bind_target(&self, target: &BindMutationPath) {
+        let mut inner = self.lock();
+        let expiry = later(Instant::now(), inner.completed_ttl);
+        for entry in inner.sessions.values_mut().filter(|e| {
+            e.bind_target
+                .as_ref()
+                .is_some_and(|bound| bound.current().matches(target))
+                && e.session.is_pending()
+                && !e.committing
+        }) {
+            entry.session.status = "SIWC binding target changed; start a new binding".to_owned();
+            entry.session.expires_at = expiry;
+            entry.callback = None;
+            entry.changes.send_replace(());
         }
     }
 
@@ -381,6 +451,21 @@ impl Store {
             .sessions
             .get(state)
             .is_some_and(|entry| pending_for(&entry.session, provider))
+    }
+
+    pub(super) fn is_committing(&self, state: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(state)
+            .is_some_and(|entry| entry.committing)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_bind_for_test(&self, state: &str) {
+        let mut inner = self.lock();
+        let entry = inner.sessions.get_mut(state).expect("a bind session");
+        assert!(entry.bind && !entry.committing);
+        entry.session.expires_at = Instant::now();
     }
 
     /// Drops the session for `state` if it is pending, which stops its
@@ -431,7 +516,7 @@ impl Store {
         let mut inner = self.lock();
         inner.purge(Instant::now());
         let entry = inner.sessions.get_mut(state).ok_or(NotPending)?;
-        if !pending_for(&entry.session, provider) {
+        if !pending_for(&entry.session, provider) || (entry.bind && entry.callback.is_none()) {
             return Err(NotPending);
         }
         // A login that stopped waiting has already ended the session or
