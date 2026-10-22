@@ -50,6 +50,28 @@ fn items(items: Vec<Value>) -> String {
 pub fn requests() -> Vec<Case> {
     let signature = claude_signature("claude-sonnet-4-6");
     let mut cases = vec![
+        Case::new("system-item-marker-thinking-tail", "claude-sonnet-4-6", json!({"input":[{
+            "role":"system","cache_control":{"type":"ephemeral"},
+            "content":[{"type":"input_text","text":"A"},{"type":"thinking"}]
+        }]}).to_string()),
+        Case::new("item-marker-yields-to-part-marker", "claude-sonnet-4-6", json!({"input":[
+            {"role":"developer","cache_control":{"type":"ephemeral","ttl":"5m"},
+             "content":[{"type":"input_text","text":"A","cache_control":{"type":"ephemeral","ttl":"1h"}}]},
+            {"role":"user","cache_control":{"type":"ephemeral","ttl":"5m"},
+             "content":[{"type":"input_text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+        ]}).to_string()),
+        Case::new("dropped-marker-yields-without-walking-back", "claude-sonnet-4-6", json!({"input":[
+            {"role":"developer","content":[
+                {"type":"input_text","text":"A"},
+                {"type":"input_text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":" ","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]},
+            {"role":"user","content":[
+                {"type":"input_text","text":"A"},
+                {"type":"input_text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":" ","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]}
+        ]}).to_string()),
         Case::new("blank-middle-cache-markers", "claude-sonnet-4-6", json!({"input":[
             {"role":"system","content":" \n "},
             {"role":"developer","content":[

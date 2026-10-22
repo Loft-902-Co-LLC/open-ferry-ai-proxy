@@ -27,6 +27,8 @@
 //! - Breakpoint text blocks are built as JSON values, so the body's bytes
 //!   follow `serde_json`'s escaping rather than Go's.
 
+use std::borrow::Cow;
+
 use serde_json::{Map, Value, json};
 use tracing::debug;
 
@@ -378,10 +380,16 @@ fn has_cacheable_system(body: &Value) -> bool {
     }
 }
 
+// Borrow normal string fields without changing gjson coercion of malformed ones.
+fn cache_block_string<'a>(block: &'a Value, field: &str) -> Cow<'a, str> {
+    json::string_at(block, field)
+        .map_or_else(|| Cow::Owned(json::str_at(block, field)), Cow::Borrowed)
+}
+
 fn system_block_can_host_cache_control(block: &Value) -> bool {
     block.is_object()
-        && matches!(json::str_at(block, "type").as_str(), "" | "text")
-        && !json::str_at(block, "text").trim().is_empty()
+        && matches!(cache_block_string(block, "type").as_ref(), "" | "text")
+        && !cache_block_string(block, "text").trim().is_empty()
 }
 
 /// `injectToolsCacheControl`: marks the last tool that isn't deferred, if no
@@ -435,11 +443,11 @@ fn last_cacheable_message_block(message: &Value) -> Option<usize> {
     let blocks = message.get("content")?.as_array()?;
     let assistant = json::str_at(message, "role") == "assistant";
     for (index, block) in blocks.iter().enumerate().rev() {
-        let kind = json::str_at(block, "type");
-        if kind == "text" && json::str_at(block, "text").trim().is_empty() {
+        let kind = cache_block_string(block, "type");
+        if kind == "text" && cache_block_string(block, "text").trim().is_empty() {
             continue;
         }
-        if matches!(kind.as_str(), "thinking" | "redacted_thinking") {
+        if matches!(kind.as_ref(), "thinking" | "redacted_thinking") {
             if assistant {
                 return None;
             }
@@ -1232,6 +1240,27 @@ mod tests {
         assert!(!payload_has_1h_ttl(
             &json!({"system": "x", "messages": [{"content": "y"}]})
         ));
+    }
+
+    #[test]
+    fn cache_eligibility_preserves_non_string_field_coercion() {
+        for (block, system, rolling) in [
+            (json!({"type":5,"text":"A"}), false, Some(0)),
+            (json!({"type":null,"text":5}), true, None),
+            (json!({"type":"text","text":false}), true, Some(0)),
+            (json!({"type":"text","text":null}), false, None),
+            (json!({"type":"text","text":[]}), true, Some(0)),
+        ] {
+            assert_eq!(
+                system_block_can_host_cache_control(&block),
+                system,
+                "{block}"
+            );
+            assert_eq!(
+                last_cacheable_message_block(&json!({"role":"user","content":[block]})),
+                rolling
+            );
+        }
     }
 
     #[test]
