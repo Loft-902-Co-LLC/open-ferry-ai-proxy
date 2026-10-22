@@ -1041,7 +1041,8 @@ impl Emitter {
         if protect_empty_mapping
             && event.empty_block_mapping_value
             && (!self.key_line_comment.is_empty()
-                || (!self.event_has_line_comment && !self.line_comment.is_empty()))
+                || (!self.event_has_line_comment && !self.line_comment.is_empty())
+                || !self.foot_comment.is_empty())
         {
             // The block-style event is emitted as {} because it is empty.
             // Deferring its comment as for a block value puts {} at column 0.
@@ -1055,6 +1056,10 @@ impl Emitter {
             self.line_comment = current;
             self.line_comment_id = current_id;
             self.process_line_comment()?;
+            // A preceding collection's end event can leave its foot comment
+            // pending too. Flushing it after ':' precedes the delayed flow
+            // emission of {}, leaving the braces at column zero.
+            self.process_foot_comment()?;
             self.write_indent()?;
         }
         if !self.line_comment.is_empty() {

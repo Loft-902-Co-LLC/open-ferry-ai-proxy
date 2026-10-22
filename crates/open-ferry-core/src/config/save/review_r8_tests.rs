@@ -4,6 +4,75 @@ use crate::config::testing::TempDir;
 const PENDING: &str = "plugins:\n  configs:\n    demo:\n      ? note # pending\n      : value # own\n? x-note # overwrite\n: value # other\n";
 
 #[test]
+fn review_r8_pruned_mapping_foot_comment_remains_writable() {
+    let source = include_str!("../testdata/review-r8-pruned-mapping-foot.yaml");
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    write_file(&path, source.as_bytes()).unwrap();
+    let before = Config::load(&path).unwrap();
+    save_preserving_comments(&path, &before, false).unwrap();
+    let out = std::fs::read_to_string(&path).unwrap();
+    let after = Config::load(&path).unwrap();
+    // Go's independently comment-free run completes and also prunes the
+    // rejected rules. Compare every reloaded setting to that value oracle.
+    let expected = Config::parse(include_str!(
+        "../testdata/review-r8-pruned-mapping-go-values.yaml"
+    ))
+    .unwrap();
+    assert!(
+        after == expected,
+        "{:?}",
+        crate::config::diff::build_change_details(&expected, &after)
+    );
+    for comment in ["# c200", "#   c254 with words"] {
+        assert_eq!(parity::comment_occurrences(&out, comment, false), Some(1));
+    }
+    assert_eq!(
+        yaml_path(
+            &unmarshal(out.as_bytes()).unwrap().content[0],
+            "plugins.configs.alpha.enabled"
+        )
+        .unwrap()
+        .value,
+        "true"
+    );
+}
+
+#[test]
+fn review_r8_empty_mapping_flushes_a_previous_collections_foot_comment() {
+    let mut previous = Node::mapping();
+    previous.content.extend([
+        Node::scalar(STR_TAG, "child"),
+        Node::scalar(STR_TAG, "value"),
+    ]);
+    previous.foot_comment = "# previous foot".into();
+    let mut parent = Node::mapping();
+    parent.content.extend([
+        Node::scalar(STR_TAG, "previous"),
+        previous,
+        Node::scalar(STR_TAG, "empty"),
+        Node::mapping(),
+    ]);
+    let mut root = Node::mapping();
+    root.content
+        .extend([Node::scalar(STR_TAG, "parent"), parent]);
+    let faithful = encode::faithful_node(&root, 2).unwrap();
+    assert!(unmarshal(&faithful).is_err());
+    let (out, _) = encode::protected_node(&root, 2).unwrap();
+    let parsed = unmarshal(&out).unwrap();
+    let empty = yaml_path(&parsed.content[0], "parent.empty").unwrap();
+    assert_eq!(empty.kind, Kind::Mapping);
+    assert!(empty.content.is_empty());
+    assert_eq!(
+        String::from_utf8(out)
+            .unwrap()
+            .matches("# previous foot")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn review_r8_generated_multiline_comment_keeps_occurrence_identity() {
     for value in [
         "/a\u{2028}b".to_owned(),

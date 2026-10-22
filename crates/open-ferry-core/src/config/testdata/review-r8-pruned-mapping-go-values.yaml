@@ -1,0 +1,197 @@
+plugins:
+    enabled: false
+    configs:
+        alpha:
+            enabled: true
+client:
+    codex:
+        optimize-multi-agent-v2: true
+config-version: 8
+requests:
+    proxy-url: socks5://proxy.example.com:1080/
+    payload:
+        default:
+            - models:
+                - name: gemini-*
+                  protocol: codex
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+                - name: gemini-*
+                  protocol: openai
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+              params:
+                max_output_tokens: 2
+                tools.0.name: über
+            - models:
+                - name: gemini-*
+                  protocol: gemini
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+                - name: '*'
+                  protocol: claude
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+              params:
+                metadata:
+                    nested:
+                        deep: true
+                tools.0.name: -7
+        filter:
+            - models:
+                - name: gemini-*
+                  protocol: gemini
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+                - name: gpt-*
+                  protocol: claude
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+              params:
+                - reasoning.effort
+                - store
+            - models:
+                - name: '*'
+                  protocol: ""
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+                - name: claude-sonnet-4-6
+                  protocol: gemini
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+              params:
+                - generationConfig.thinkingConfig
+                - reasoning.effort
+server:
+    port: 8317
+    discovery:
+        service-type: _ai-gateway._tcp
+        subtypes:
+            - _chat-completions
+            - _responses
+            - _messages
+            - _generate-content
+            - _interactions
+oauth:
+    auth-dir: /tmp/auth
+    model-alias:
+        aistudio:
+            - fork: true
+              name: 'İstanbul'
+              alias: "sol"
+        'antigravity':
+            - name: 'İstanbul'
+              alias: 'Pro'
+    request-scoped-errors: {}
+    providers:
+        aistudio:
+            ws-auth: true
+observability:
+    usage:
+        redis-usage-queue-retention-seconds: 3600
+routing:
+    retry:
+        request-retry: 1
+        max-retry-credentials: 1
+    cooldown:
+        disable-cooling: false
+api-keys:
+    interactions:
+        - name: interactions-1
+          proxy-url: 'https://ünicode.example/'
+          headers:
+            'X-Empty': 'Bearer secret'
+            x-team: ' padded '
+            ' X-Pad ': a
+          excluded-models:
+            - 'gpt-5.5-mini'
+            - >-
+              gpt-5.5-mini
+            - gpt-5.5-mini
+          request-retry: 0
+          keys:
+            - api-key: 'sk-été'
+    openai-compatibility:
+        - name: dup
+          base-url: "https://user:pass@b.example/v1?k=secret"
+          headers:
+            X-Team: 'a'
+          disable-cooling: true
+          keys: []
+        - name: "provider-a"
+          base-url: "https://a.example/v1"
+          models:
+            - name: claude-sonnet-4-6
+              alias: "pro"
+            - name: "claude-sonnet-4-6"
+              'alias': Pro
+          'headers':
+            ' X-Pad ': "b"
+            X-Team: ' padded '
+          keys: []
+        - name: ''
+          base-url: ''
+          models:
+            - name: '<b>&</b>'
+              alias: ' a1 '
+            - name: ''
+              alias: ' a1 '
+          headers:
+            Authorization: ' padded '
+          request-retry: 2
+          keys: []
+credentials:
+    concurrency:
+        cpa-heartbeat-timeout: 3s
+        cpa-cancel-bound: 5s
+        reclaim-grace: 5s
+        cleanup-interval: 5s
+        release-flush-interval: 250ms
+        release-max-backoff: 2s
+        busy-retry-min: 250ms
+        busy-retry-max: 1s
+        max-limit: 1000000
+    in-flight:
+        snapshot-interval: 2s
+        stale-after: 10s
+        max-part-bytes: 262144
+        max-part-count: 64
+        max-revision-bytes: 16777216
+        max-aggregate-groups: 100000
+        max-details: 10000
+        max-string-bytes: 256
+        staging-retention: 1m
+
+# x-extension: {owner: "ops", notes: [first, "second note"], limits: {burst: 10}}
