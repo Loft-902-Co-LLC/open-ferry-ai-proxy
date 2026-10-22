@@ -55,6 +55,8 @@ pub(crate) fn uncomment_root_example() -> String {
 
 pub(crate) const VERTEX_OPENAPI: &str = "vertex-api-key: [{api-key: dummy, openapi: false, openapi-location: global, models: [{name: partner/model, alias: native, openapi: false}, {name: custom, alias: compat, openapi: true}]}]\noauth-model-alias: {vertex: [{name: custom, alias: public, openapi: true}]}\noauth-settings: {vertex: [{name: partner/model, openapi: false}]}\n";
 
+pub(crate) const VERTEX_OPENAPI_V8: &str = "config-version: 8\napi-keys:\n  vertex: [{keys: [{api-key: dummy, openapi: false, openapi-location: global, models: [{name: partner/model, alias: native, openapi: false}, {name: custom, alias: compat, openapi: true}]}]}]\noauth:\n  model-alias: {vertex: [{name: custom, alias: public, openapi: true}]}\n  settings: {vertex: [{name: partner/model, openapi: false}]}\n";
+
 fn case(name: &str, old: &str, new: &str) -> Case {
     Case::new(name, "", "").with_options(json!({ "old": old, "new": new }))
 }
@@ -274,6 +276,23 @@ pub fn details() -> Vec<Case> {
                 .replace("global", "us-central1"),
         ),
         case("vertex-openapi-unchanged", VERTEX_OPENAPI, VERTEX_OPENAPI),
+        case(
+            "vertex-openapi-v8-flipped",
+            VERTEX_OPENAPI_V8,
+            &VERTEX_OPENAPI_V8
+                .replace("false", "true")
+                .replace("global", "europe-west4"),
+        ),
+        case(
+            "vertex-openapi-group-refused",
+            "config-version: 8\n",
+            "api-keys: {vertex: [{openapi: true, keys: [{api-key: dummy}]}]}\n",
+        ),
+        case(
+            "vertex-openapi-location-group-refused",
+            "config-version: 8\n",
+            "api-keys: {vertex: [{openapi-location: global, keys: [{api-key: dummy}]}]}\n",
+        ),
         case("no-changes", FULL, FULL),
         case("everything-removed", FULL, "port: 8317\n"),
         case("everything-added", "port: 8317\n", FULL),

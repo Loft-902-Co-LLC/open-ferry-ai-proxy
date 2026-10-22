@@ -45,8 +45,8 @@ fn is_partner(model: &str) -> bool {
 
 fn explicit_setting(auth: &Auth) -> Option<bool> {
     let parse = |raw: &str| match to_lower(raw.trim()).as_str() {
-        "true" | "t" | "1" => Some(true),
-        "false" | "f" | "0" => Some(false),
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
         _ => None,
     };
     auth.attribute("openapi").and_then(parse).or_else(|| {
@@ -252,7 +252,17 @@ fn rewrite_location(base: &str, location: &str) -> String {
         let _ = url.set_scheme("https");
         let _ = url.set_host(Some(&host));
         let _ = url.set_port(None);
-        return url.to_string();
+        // Url serializes a host-only HTTP URL with `/`; Go preserves its empty
+        // path. The caller appends `/endpoints/openapi` in both host-only branches.
+        return if url.path() == "/" {
+            format!(
+                "{}{}",
+                &url[..url::Position::BeforePath],
+                &url[url::Position::AfterPath..]
+            )
+        } else {
+            url.to_string()
+        };
     }
     rewritten
 }

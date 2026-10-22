@@ -16,7 +16,8 @@
 //! - Attributes: `source` (`config:vertex-apikey[<hash>]`), `base_url`
 //!   (even when empty), `provider_key` (`vertex`), `config_index`,
 //!   `priority`, `weight`, `api_key`, `models_hash`, `header:<name>`,
-//!   `excluded_models`, `excluded_models_hash` and `auth_kind` (`apikey`).
+//!   `excluded_models`, `excluded_models_hash`, `auth_kind` (`apikey`),
+//!   and optional `openapi` and `openapi_location`.
 //! - Metadata: `disable_cooling` and `request_retry`.
 //!
 //! Service-account credentials come from files of type `vertex` instead,

@@ -53,10 +53,11 @@ fn rule(name: &str, alias: &str, openapi: Option<bool>) -> ModelAlias {
 }
 
 fn from_value(value: Option<&Value>) -> Vec<ModelAlias> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| decode_model_aliases(items))
-        .unwrap_or_default()
+    match value {
+        Some(Value::Array(items)) => decode_model_aliases(items),
+        Some(value) => decode_model_aliases(std::slice::from_ref(value)),
+        None => Vec::new(),
+    }
 }
 
 fn from_attribute(auth: &Auth, key: &str) -> Vec<ModelAlias> {

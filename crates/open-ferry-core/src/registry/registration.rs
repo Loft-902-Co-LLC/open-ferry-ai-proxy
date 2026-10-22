@@ -1661,9 +1661,13 @@ fn is_vertex_openapi_model(name: &str) -> bool {
         !publisher.is_empty()
             && !model.is_empty()
             && !model.contains('/')
-            && !["google", "models", "publishers"]
-                .iter()
-                .any(|p| equal_fold(publisher, p))
+            && if go::to_lower(parse_suffix(name.trim()).trim()).starts_with("publishers/") {
+                !equal_fold(publisher, "google")
+            } else {
+                !["google", "models", "publishers"]
+                    .iter()
+                    .any(|p| equal_fold(publisher, p))
+            }
     })
 }
 
