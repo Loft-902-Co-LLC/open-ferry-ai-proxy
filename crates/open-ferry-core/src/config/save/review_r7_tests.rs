@@ -167,6 +167,16 @@ fn review_r7_custom_tagged_unicode_archives_survive_two_writes() {
             format!("!custom 'a{separator}  b'\n"),
         ] {
             let source = format!("config-version: 8\nx: {scalar}auth-dir: /old\n");
+            if let Err(error) = unmarshal(source.as_bytes()) {
+                assert_eq!(error.kind(), SaveErrorKind::Unwritable);
+                let dir = TempDir::new();
+                let path = dir.join("config.yaml");
+                std::fs::write(&path, &source).unwrap();
+                let error = write_file(&path, source.as_bytes()).unwrap_err();
+                assert_eq!(error.kind(), SaveErrorKind::Unwritable);
+                assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+                continue;
+            }
             let doc = unmarshal(source.as_bytes()).unwrap();
             let original = yaml_path(&doc.content[0], "x").unwrap();
             let expected = (original.tag.clone(), original.value.clone());

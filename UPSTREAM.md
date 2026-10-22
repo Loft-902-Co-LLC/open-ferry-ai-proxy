@@ -510,7 +510,13 @@ including wrapped scalars. Canonical-version paragraph blocks are separated
 from the previous key before both intermediate and final emissions, so every
 paragraph reloads at the version owner. Config emission also escapes U+2028,
 U+2029 and U+0085 in generated and retained scalars: yaml.v3's quoted multiline
-emission can otherwise add indentation to their decoded values.
+emission can otherwise add indentation to their decoded values. Before editing
+source text containing literal U+2028, U+2029 or U+0085, the writer compares its
+decoded scalars with the config loader's. If they disagree, it refuses the write
+with a clear error and leaves the file unchanged. Explicit escapes and generated
+values that both parsers read identically remain writable and safely quoted.
+The live loader and Go can already read these literal source forms differently;
+this write guard does not change loading.
 
 - Archived config scalars containing U+2028, U+2029 or U+0085 are quoted
   before their YAML is commented out, including custom-tagged scalars. Their

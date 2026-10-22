@@ -35,14 +35,13 @@ use super::super::v8::{
     V8_SHARED_STRUCT_PATHS,
 };
 use super::super::yaml::go_quote;
-use super::super::yaml3::compose::unmarshal;
 use super::super::yaml3::{BOOL_TAG, INT_TAG, Kind, MAP_TAG, NULL_TAG, Node, STR_TAG};
 use super::generate::family_value;
 use super::tree::{
     copy_yaml_path_value, delete_yaml_path, expand_config_aliases, find_map_key_index, legacy_path,
     marshal, set_yaml_path, set_yaml_path_with_comments, yaml_path, yaml_path_mut,
 };
-use super::{SaveError, SaveErrorKind, check_layout};
+use super::{SaveError, SaveErrorKind, check_layout, unmarshal};
 
 /// The deprecated relay flag and the setting it is the inverse of.
 const PRIVATE_IP_ALIAS: &str = "codex.live-media-relay.allow-private-remote-ips";

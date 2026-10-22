@@ -184,7 +184,35 @@ fn invalid(message: impl Into<String>) -> SaveError {
 /// `yaml.Unmarshal(data, &node)`: the document node of the first document
 /// in `data`, with its comments, or an empty node when there is none.
 pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, SaveError> {
-    Ok(compose::unmarshal(data)?)
+    let node = compose::unmarshal(data)?;
+    if std::str::from_utf8(data)
+        .is_ok_and(|text| text.contains(['\u{0085}', '\u{2028}', '\u{2029}']))
+        && let Some(loaded) = loader_root(data)?
+    {
+        let written = loader_yaml::from_writer_node(&node)
+            .map_err(|error| SaveError::new(SaveErrorKind::Yaml, error.message()))?;
+        if unicode_scalar_disagrees(&loaded, &written) {
+            return Err(SaveError::new(
+                SaveErrorKind::Unwritable,
+                "config scalar decodes differently between loader and writer at a Unicode line separator; write refused",
+            ));
+        }
+    }
+    Ok(node)
+}
+
+/// A source value must not silently take the writer scanner's interpretation.
+/// Generated escaped scalars agree in both parsers and still use safe quoting.
+fn unicode_scalar_disagrees(a: &loader_yaml::Node, b: &loader_yaml::Node) -> bool {
+    a.kind != b.kind
+        || a.content.len() != b.content.len()
+        || ((a.value.contains(['\u{0085}', '\u{2028}', '\u{2029}'])
+            || b.value.contains(['\u{0085}', '\u{2028}', '\u{2029}']))
+            && a.value != b.value)
+        || a.content
+            .iter()
+            .zip(&b.content)
+            .any(|(a, b)| unicode_scalar_disagrees(a, b))
 }
 
 /// The loader's tree of `data`, or `None` when it holds no document.
@@ -2160,3 +2188,5 @@ mod review_r7_tests;
 
 #[cfg(test)]
 mod review_r8_tests;
+#[cfg(test)]
+mod review_r9_unicode_tests;

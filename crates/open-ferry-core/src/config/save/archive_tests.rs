@@ -35,6 +35,47 @@ fn check(op: &str) {
         if op == "raw-v8" {
             source = format!("config-version: 8\n{source}");
         }
+        if let Err(error) = unmarshal(source.as_bytes()) {
+            assert_eq!(error.kind(), SaveErrorKind::Unwritable);
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            std::fs::write(&path, &source).unwrap();
+            let error = match op {
+                "save" | "migrate" => save_preserving_comments(
+                    &path,
+                    &Config::parse(&source).unwrap(),
+                    op == "migrate",
+                )
+                .unwrap_err()
+                .to_string(),
+                "nested" => update_nested_scalar(&path, &["auth-dir"], "/x")
+                    .unwrap_err()
+                    .to_string(),
+                "raw" | "raw-v8" => write_file(&path, source.as_bytes())
+                    .unwrap_err()
+                    .to_string(),
+                "normalize" => normalize_config_layout(source.as_bytes(), true)
+                    .unwrap_err()
+                    .to_string(),
+                _ => {
+                    let edit = V8Edit {
+                        method: match op {
+                            "put" => V8Method::Put,
+                            "patch" => V8Method::Patch,
+                            _ => V8Method::Delete,
+                        },
+                        path: vec!["oauth".into(), "auth-dir".into()],
+                        body: br#""/x""#.to_vec(),
+                        yaml: false,
+                    };
+                    assert!(preview_v8(source.as_bytes(), &edit).is_err());
+                    edit_v8(&path, &edit).unwrap_err().to_string()
+                }
+            };
+            assert!(error.contains("Unicode line separator; write refused"));
+            assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+            continue;
+        }
         let original = value(source.as_bytes());
         let dir = TempDir::new();
         let path = dir.join("config.yaml");
