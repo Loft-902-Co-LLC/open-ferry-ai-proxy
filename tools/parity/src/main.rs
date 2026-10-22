@@ -60,6 +60,7 @@ options:
 /// Failing cases written to disk; the rest are only counted.
 const MAX_FAILURE_FILES: usize = 200;
 
+#[derive(Clone)]
 struct Args {
     upstream: PathBuf,
     random: usize,
@@ -110,6 +111,13 @@ impl Args {
         }
         if parsed.live.is_some() && !parsed.suites.is_empty() {
             return Err("--suite cannot be combined with --live".into());
+        }
+        if !parsed.suites.is_empty() {
+            // Validate without generating random cases or invoking Go.
+            selected_suites(&Self {
+                random: 0,
+                ..parsed.clone()
+            })?;
         }
         Ok(parsed)
     }
@@ -1259,7 +1267,7 @@ fn write_failure(
 fn clip(text: &str) -> String {
     const MAX: usize = 160;
     match text.char_indices().nth(MAX) {
-        Some((end, _)) => format!("{}…", &text[..end]),
+        Some((end, _)) => format!("{}Ã¢â‚¬Â¦", &text[..end]),
         None => text.to_owned(),
     }
 }
@@ -1354,6 +1362,26 @@ mod tests {
             .record(&case, evaluated, Path::new("unused-no-failure"))
             .unwrap();
         assert_eq!(tally.resolved, ["resolved-marker"]);
+    }
+
+    #[test]
+    fn suite_filter_rejects_unknown_names_during_argument_parsing() {
+        let flags = [
+            "--upstream",
+            "missing-checkout",
+            "--go",
+            "missing-go",
+            "--random",
+            "18446744073709551615",
+            "--suite",
+            "typo",
+        ];
+        assert_eq!(
+            Args::parse(flags.into_iter().map(str::to_owned))
+                .err()
+                .unwrap(),
+            r#"unknown suite "typo"; use a suite directory slug"#
+        );
     }
 
     #[test]
