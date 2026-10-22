@@ -460,7 +460,20 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
         field.value = generated_plugin_configs(configs);
     }
     let rendered = encode::marshal(&value)?;
-    let generated = compose::unmarshal(&rendered)?;
+    let generated = match compose::unmarshal(&rendered) {
+        Ok(generated) => generated,
+        Err(error) => {
+            // This intermediate only supplies generated settings. Its plugin
+            // nodes can carry a pending key comment into a null plugin's {}
+            // and make yaml.v3 emit invalid YAML. Retry those nodes without
+            // comments; the merge retains every original plugin node/comment.
+            let Some(plugins) = generated_plugins_field(&mut value) else {
+                return Err(error.into());
+            };
+            clear_generated_plugin_comments(plugins);
+            compose::unmarshal(&encode::marshal(&value)?)?
+        }
+    };
     if generated.kind != Kind::Document {
         return Err(invalid("invalid generated yaml structure"));
     }
@@ -471,6 +484,43 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
         return Err(invalid("expected generated root mapping node"));
     }
     Ok(root)
+}
+
+fn generated_plugins_field(value: &mut encode::Value) -> Option<&mut encode::Value> {
+    let encode::Value::Struct(fields) = value else {
+        return None;
+    };
+    let plugins = fields.iter_mut().find(|field| field.key == "plugins")?;
+    let encode::Value::Struct(fields) = &mut plugins.value else {
+        return None;
+    };
+    Some(
+        &mut fields
+            .iter_mut()
+            .find(|field| field.key == "configs")?
+            .value,
+    )
+}
+
+fn clear_generated_plugin_comments(value: &mut encode::Value) {
+    fn clear(node: &mut Node) {
+        node.head_comment.clear();
+        node.line_comment.clear();
+        node.foot_comment.clear();
+        for child in &mut node.content {
+            clear(child);
+        }
+    }
+    match value {
+        encode::Value::Node(node) => clear(node),
+        encode::Value::Map(entries) => {
+            for (key, value) in entries {
+                clear_generated_plugin_comments(key);
+                clear_generated_plugin_comments(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// PluginInstanceConfig.MarshalYAML writes a default empty mapping when
@@ -2058,3 +2108,5 @@ mod tests {
 #[cfg(test)]
 mod block_comment_tests;
 
+#[cfg(test)]
+mod null_plugin_tests;
