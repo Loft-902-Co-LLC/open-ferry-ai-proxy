@@ -258,20 +258,6 @@ pub fn archived_scalar_comment_loss(sources: &[&str], go: &str, rust: &str) -> b
     attempt(sources, go, rust) == Some(true)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rewrite_changes_only_block_token_and_body_preserving_tag_anchor_and_comments() {
-        let source = "# top\nplugins:\n  configs:\n    a:\n      tags: &s # moved\n        - !!str |- # own\n          a\n        - b\nnext: unchanged # tail\n";
-        let expected = source.replace("|- # own\n          a\n", "\"a\" # own\n");
-        assert_eq!(quoted_source(source).unwrap(), Some(expected));
-        for unchanged in ["x: |-\n  # Heading\n  data\n", "x: >- # own\n  a\n"] {
-            assert_eq!(quoted_source(unchanged).unwrap(), None)
-        }
-    }
-}
-
 /// Multiplicity of a source plugin comment after config aliases are expanded.
 /// Used only by the offline matcher; product saves retain the source subtree.
 pub fn expanded_plugin_comment_count(source: &str, comment: &str) -> Option<usize> {
@@ -291,4 +277,62 @@ pub fn expanded_plugin_comment_count(source: &str, comment: &str) -> Option<usiz
                 .sum::<usize>()
     }
     Some(count(plugins, comment))
+}
+
+/// Restore only a source-owned root config-version line comment lost when
+/// upstream replaces its canonical integer 8. The caller still compares every
+/// other byte (and any other independently proved deviations).
+pub fn config_version_comment(source: &str, go: &str, rust: &str) -> Option<String> {
+    fn version(text: &str) -> Option<Node> {
+        let doc = unmarshal(text.as_bytes()).ok()?;
+        let root = doc.content.first()?;
+        if root
+            .pairs()
+            .filter(|(k, _)| k.value == "config-version")
+            .count()
+            != 1
+        {
+            return None;
+        }
+        let n = super::yaml_path(root, "config-version")?;
+        (n.kind == super::Kind::Scalar && n.tag == super::super::yaml3::INT_TAG && n.value == "8")
+            .then(|| n.clone())
+    }
+    let (source, g, r) = (version(source)?, version(go)?, version(rust)?);
+    let comment = &source.line_comment;
+    if !comment.starts_with('#')
+        || comment.contains(['\n', '\r', '\u{0085}', '\u{2028}', '\u{2029}'])
+        || g.style != Style::default()
+        || r.style != Style::default()
+        || !g.line_comment.is_empty()
+        || &r.line_comment != comment
+        || g.line != r.line
+    {
+        return None;
+    }
+    let glines: Vec<_> = go.split_inclusive('\n').collect();
+    let rlines: Vec<_> = rust.split_inclusive('\n').collect();
+    let index = g.line.checked_sub(1)?;
+    let (gl, rl) = (*glines.get(index)?, *rlines.get(index)?);
+    if format!("{} {comment}\n", gl.strip_suffix('\n')?) != rl {
+        return None;
+    }
+    let start: usize = glines[..index].iter().map(|s| s.len()).sum();
+    let mut repaired = go.to_owned();
+    repaired.replace_range(start..start + gl.len(), rl);
+    Some(repaired)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rewrite_changes_only_block_token_and_body_preserving_tag_anchor_and_comments() {
+        let source = "# top\nplugins:\n  configs:\n    a:\n      tags: &s # moved\n        - !!str |- # own\n          a\n        - b\nnext: unchanged # tail\n";
+        let expected = source.replace("|- # own\n          a\n", "\"a\" # own\n");
+        assert_eq!(quoted_source(source).unwrap(), Some(expected));
+        for unchanged in ["x: |-\n  # Heading\n  data\n", "x: >- # own\n  a\n"] {
+            assert_eq!(quoted_source(unchanged).unwrap(), None)
+        }
+    }
 }

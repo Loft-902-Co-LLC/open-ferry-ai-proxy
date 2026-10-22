@@ -1,0 +1,282 @@
+[
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\nconfig-version: 8\n\n# x-note: |-\n#     v\n",
+    "name": "escape-legacy",
+    "op": "normalize",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "name": "escape-legacy",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nconfig-version: 8\n\n# x-note: |-\n#     v\n",
+    "name": "escape-legacy",
+    "op": "put",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nconfig-version: 8\n\n# x-note: |-\n#     v\n",
+    "name": "escape-legacy",
+    "op": "patch",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nconfig-version: 8\n\n# x-note: |-\n#     v\n",
+    "name": "escape-legacy",
+    "op": "delete",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\n\n# x-note: |-\n#     v\n",
+    "name": "escape-v8",
+    "op": "normalize",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\n\n# x-note: |-\n#     v\n",
+    "name": "escape-v8",
+    "op": "raw",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\n\n# x-note: |-\n#     v\n",
+    "name": "escape-v8",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\n\n# x-note: |-\n#     v\n",
+    "name": "escape-v8",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n\n# x-note: |-\n#     v\n",
+    "name": "escape-v8",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\nconfig-version: 8\n",
+    "name": "plain-legacy",
+    "op": "normalize",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "name": "plain-legacy",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nconfig-version: 8\n",
+    "name": "plain-legacy",
+    "op": "put",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nconfig-version: 8\n",
+    "name": "plain-legacy",
+    "op": "patch",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nconfig-version: 8\n",
+    "name": "plain-legacy",
+    "op": "delete",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\n",
+    "name": "plain-v8",
+    "op": "normalize",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\n",
+    "name": "plain-v8",
+    "op": "raw",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\n",
+    "name": "plain-v8",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\n",
+    "name": "plain-v8",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n",
+    "name": "plain-v8",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n                  # c2\nobservability:\n    logs:\n        debug: false\nconfig-version: 8\n",
+    "name": "plain-child-legacy",
+    "op": "normalize",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "name": "plain-child-legacy",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n# c2\nobservability:\n    logs:\n        debug: true\nconfig-version: 8\n",
+    "name": "plain-child-legacy",
+    "op": "put",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n# c2\nobservability:\n    logs:\n        debug: true\nconfig-version: 8\n",
+    "name": "plain-child-legacy",
+    "op": "patch",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n# c2\nconfig-version: 8\n",
+    "name": "plain-child-legacy",
+    "op": "delete",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n                  # c2\nobservability:\n    logs:\n        debug: false\n",
+    "name": "plain-child-v8",
+    "op": "normalize",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n# c2\nobservability:\n    logs:\n        debug: false\n",
+    "name": "plain-child-v8",
+    "op": "raw",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n# c2\nobservability:\n    logs:\n        debug: true\n",
+    "name": "plain-child-v8",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n# c2\nobservability:\n    logs:\n        debug: true\n",
+    "name": "plain-child-v8",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\n                  k3: plain # c1\n# c2\n",
+    "name": "plain-child-v8",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n          k3: plain\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\nrouting:\n    retry:\n        request-retry: 1\nconfig-version: 8\n",
+    "name": "retry-legacy",
+    "op": "normalize",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "name": "retry-legacy",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nrouting:\n    retry:\n        request-retry: 1\nconfig-version: 8\n",
+    "name": "retry-legacy",
+    "op": "put",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nrouting:\n    retry:\n        request-retry: 1\nconfig-version: 8\n",
+    "name": "retry-legacy",
+    "op": "patch",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nrouting:\n    retry:\n        request-retry: 1\nconfig-version: 8\n",
+    "name": "retry-legacy",
+    "op": "delete",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\nrouting:\n    retry:\n        request-retry: 1\n",
+    "name": "retry-v8",
+    "op": "normalize",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 0
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n\n# c2\n    logs:\n        debug: false\nrouting:\n    retry:\n        request-retry: 1\n",
+    "name": "retry-v8",
+    "op": "raw",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nrouting:\n    retry:\n        request-retry: 1\n",
+    "name": "retry-v8",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: true\nrouting:\n    retry:\n        request-retry: 1\n",
+    "name": "retry-v8",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  },
+  {
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nrouting:\n    retry:\n        request-retry: 1\n",
+    "name": "retry-v8",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "status": 200
+  }
+]

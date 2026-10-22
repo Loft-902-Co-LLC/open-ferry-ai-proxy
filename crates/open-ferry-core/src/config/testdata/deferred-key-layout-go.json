@@ -1,0 +1,18 @@
+{
+  "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - k: first # own\nobservability: # c1\n# c2\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note: |-\n#     v\n",
+  "name": "m1-escape",
+  "op": "put",
+  "output_scalars": {
+    "/config-version": "8",
+    "/oauth/auth-dir": "/x",
+    "/observability/logs/debug": "false",
+    "/plugins/configs/alpha/list/[]/k": "first"
+  },
+  "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+  "source_scalars": {
+    "/debug": "false",
+    "/plugins/configs/alpha/list/[]/k": "first",
+    "/x-note": "v"
+  },
+  "status": 200
+}

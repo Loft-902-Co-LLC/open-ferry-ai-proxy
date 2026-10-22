@@ -1,0 +1,16 @@
+{
+  "options": {
+    "file": "config-version: 8 # version note\nobservability:\n  logs:\n    debug: false\n",
+    "steps": [
+      {
+        "op": "write",
+        "body": "config-version: 8 # version note\nobservability:\n  logs:\n    debug: false\n"
+      }
+    ]
+  },
+  "upstream_output": {
+    "files": [
+      "config-version: 8\nobservability:\n    logs:\n        debug: false\n"
+    ]
+  }
+}

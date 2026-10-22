@@ -65,6 +65,12 @@ pub fn reason(case: &Case, go: &Value, rust: &Value) -> Option<Deviation> {
     {
         return Some(Deviation::UpstreamBlockScalarCounterfactual);
     }
+    // Compose the independently source-proved version-comment loss before
+    // requiring byte equality outside the archived scalar spans. The raw Go
+    // output remains in the evidence; no failure or source rewrite changes.
+    let mut comparable = go.clone();
+    super::version::repair(case, &mut comparable, rust);
+    let go = &comparable;
     fn segments(text: &str) -> Vec<(bool, String)> {
         let mut out: Vec<(bool, String)> = Vec::new();
         for line in text.split_inclusive('\n') {
@@ -230,7 +236,14 @@ pub fn stepwise(
                 }
                 protected = true;
                 deviations.extend(crate::proof_deviations(reason, &cf.outcome));
-                let proof = evidence(&single, &candidate, &go, &cf_go, rust, cf_rust);
+                let mut proof = evidence(&single, &candidate, &go, &cf_go, rust, cf_rust);
+                if let Outcome::Equivalent(found) = &cf.outcome {
+                    proof["counterfactual_deviations"] =
+                        json!(found.iter().map(|d| d.describe()).collect::<Vec<_>>());
+                    if let Some(witness) = super::version::evidence(&candidate, &cf_go, cf_rust) {
+                        proof["version_comment_proof"] = witness;
+                    }
+                }
                 (cf_go, proof)
             }
         };

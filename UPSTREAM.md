@@ -472,7 +472,10 @@ Where it differs from upstream:
 Deferred key comments are traced through protected config emission before a
 conflicting multiline key comment is moved to its head. A later plain recipient
 keeps yaml.v3 bytes; a block-body or dropped recipient is protected. This also
-runs before v8 regrouping and on isolated generated plugin intermediates.
+runs on isolated generated plugin intermediates. V8 edits keep the normalized
+tree until the edit is applied, so the emitter sees the actual final recipient
+instead of relocating comments before layout conversion. Canonicalizing
+config-version keeps its comments; upstream replaces the value and drops them.
 
 
 - Archived config strings containing U+2028, U+2029 or U+0085 are quoted
@@ -481,6 +484,17 @@ runs before v8 regrouping and on isolated generated plugin intermediates.
   keeps the archived value and comments recoverable.
 
 - **Folded config scalars keep their line breaks and trailing blank lines.** Protected config emission looks ahead from the current break, as libyaml does, rather than from the value's start as yaml.v3 does. Otherwise `" indented\nordinary\nnext"` reloads as `" indented\nordinary next"`, and `>+` values with an ordinary first line gain a trailing LF. Folded style is retained, including in archived unknown fields. Literal emission already preserves these breaks. A tab-leading literal or folded value gets an explicit indentation hint so it remains readable; if yaml.v3's missing hint makes the generated plugin intermediate invalid, only that intermediate is quoted, while the file's subtree keeps its value, comments and block style. Ordinary yaml.v3 encoding remains unchanged. The parity generator's block bodies are single-line strings without leading whitespace, so they cannot currently produce this shape; no equivalence is widened.
+
+The source-proved **upstream config version comment loss** class covers only a
+single-line comment on the source's root integer config-version: 8. The Go
+field must have no line comment, and Rust must retain that exact source
+comment on the same canonical integer. Only the corresponding field-line
+suffix is restored for comparison; every other byte still passes the normal
+comparison or another independently proved deviation. Explicit nested edits
+to config-version are excluded. Raw writes reset the source witness to their
+body. Original Go bytes, source options and the comparison transformation are
+retained in proof artifacts. The failed-save counterfactual's four checks stay
+unchanged when this independent comment-loss proof is composed with them.
 
 The scalar-loss proof also counts **upstream folded scalar re-encode** separately. It accepts only complete single-save or single-nested-update cases: the Rust scalar must retain the folded string at the same source path, outside every explicitly supplied config root and nested edit path. The faithful emitter must reproduce each Go scalar byte, and the protected emitter must reproduce each Rust scalar byte, with every byte outside those spans equal. This extension requires exactly one faithful emission for an active span or two for a newly archived span; cases needing other pass counts remain Different. This covers yaml.v3 adding trailing newlines as well as losing ordinary line breaks. Longer histories and raw writes remain Different. Original Go files and decoded-value evidence are retained in the proof artifacts; the counterfactual four-check contract and general equivalences are unchanged.
 

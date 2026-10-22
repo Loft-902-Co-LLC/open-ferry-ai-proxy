@@ -271,17 +271,31 @@ pub(crate) fn normalize_config_layout(
     data: &[u8],
     migrate: bool,
 ) -> Result<(Vec<u8>, bool), SaveError> {
+    let (doc, changed) = normalize_config_layout_doc(data, migrate)?;
+    Ok((
+        if changed {
+            marshal(&doc)?
+        } else {
+            data.to_vec()
+        },
+        changed,
+    ))
+}
+
+/// The normalized tree, so edits keep source comment ownership until emission.
+pub(crate) fn normalize_config_layout_doc(
+    data: &[u8],
+    migrate: bool,
+) -> Result<(Node, bool), SaveError> {
     let mut doc = unmarshal(data)?;
     let Some(first) = doc.content.first() else {
         if !migrate {
-            return Ok((data.to_vec(), false));
+            return Ok((doc, false));
         }
         return Err(invalid("empty config"));
     };
     check_layout(data)?;
     let mut root = expand_config_aliases(first)?;
-    // Decide before regrouping or archiving can remove a hazardous recipient.
-    super::encode::protect_conflicting_key_comments(&mut root, 4)?;
     let mut changed = normalize_private_ip_alias(&mut root, migrate)?;
     // Empty legacy structs have no leaf fields to move. Preserve them as
     // empty v8 mappings; null structs also mean defaults.
@@ -336,16 +350,22 @@ pub(crate) fn normalize_config_layout(
     if migrate {
         // Unknown fields are ignored at runtime: keep them as comments.
         comment_unknown_v8_sections(&mut root)?;
-        set_yaml_path(&mut root, "config-version", &Node::scalar(INT_TAG, "8"));
+        let mut version = Node::scalar(INT_TAG, "8");
+        if let Some(previous) = yaml_path(&root, "config-version") {
+            version.head_comment.clone_from(&previous.head_comment);
+            version.line_comment.clone_from(&previous.line_comment);
+            version.foot_comment.clone_from(&previous.foot_comment);
+        }
+        set_yaml_path(&mut root, "config-version", &version);
         changed = true;
     }
     if !changed {
-        return Ok((data.to_vec(), false));
+        return Ok((doc, false));
     }
     if let Some(first) = doc.content.first_mut() {
         *first = root;
     }
-    Ok((marshal(&doc)?, true))
+    Ok((doc, true))
 }
 
 /// `IsV8ConfigLayout`: whether a document uses the v8 layout, by its
