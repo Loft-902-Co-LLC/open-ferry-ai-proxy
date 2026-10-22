@@ -185,3 +185,40 @@ async fn malformed_stream_retains_failure_and_split_usage_even_on_drop() {
         }
     }
 }
+
+// Test{Gemini,GeminiVertex}ExecutorClaudeStreamTruncationReportsError and
+// TestGeminiAndVertexClaudeStreamWithFinishSignalCompletes.
+#[tokio::test]
+async fn claude_stream_requires_gemini_finish_signal() {
+    for provider in PROVIDERS {
+        for (tail, fails) in [
+            ("", true),
+            (r#"{"candidates":[{"finishReason":"STOP"}]}"#, false),
+            (r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#, false),
+        ] {
+            let body = format!(
+                "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"hi\"}}]}}}}]}}\n\ndata: {USAGE}\n\ndata: {tail}\n\n"
+            );
+            let mock = server(Reply::sse(&body)).await;
+            let (executor, auth) = setup(provider, &mock);
+            let options = Options {
+                stream: true,
+                ..Options::new(Format::CLAUDE)
+            };
+            let response = executor
+                .execute_stream(auth, request("gemini-2.5-flash", PAYLOAD), options)
+                .await
+                .unwrap();
+            let (chunks, error) = collect(response).await;
+            assert_eq!(
+                error.is_some(),
+                fails,
+                "{provider} {tail}: {chunks:?} {error:?}"
+            );
+            if let Some(error) = error {
+                assert_eq!(error.status, 502);
+                assert!(error.keeps_usage);
+            }
+        }
+    }
+}

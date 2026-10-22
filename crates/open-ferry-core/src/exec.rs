@@ -67,6 +67,9 @@ pub use http_call::{AlphaSearch, HttpCall, HttpReply, HttpTarget};
 pub use open_ferry_translate::registry::Format;
 pub use websocket_input::{AuthCheck, InputFrame, WebsocketInput};
 
+/// The maximum stream line or event observation buffer, matching upstream's scanner limit.
+pub const MAX_STREAM_LINE: usize = 52_428_800;
+
 /// A provider's identifier, such as `codex` or `claude`.
 pub type ProviderId = String;
 

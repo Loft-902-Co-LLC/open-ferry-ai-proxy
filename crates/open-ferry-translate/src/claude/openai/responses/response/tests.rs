@@ -6,6 +6,20 @@
 use serde_json::{Value, json};
 
 use super::*;
+
+// Upstream keeps no translator state until the first call, including an empty
+// initializer call. Merely constructing this Rust stream must not fail a tool.
+#[test]
+fn empty_stream_tool_detection_requires_initialization() {
+    let original = serde_json::json!({"tools":[{"type":"custom","name":"apply_patch"}]});
+    let mut stream =
+        ClaudeToOpenAIResponsesStream::new("claude-sonnet-4-5", &original, &Value::Null);
+    assert!(stream.finalize_tool_input().is_empty());
+    assert!(stream.tool_input_error().is_none());
+    assert!(stream.translate_line(b"").is_empty());
+    assert!(stream.finalize_tool_input().contains("response.failed"));
+    assert!(stream.tool_input_error().is_some());
+}
 use crate::claude::openai::responses::test_support::*;
 
 type Events = Vec<(String, Value)>;

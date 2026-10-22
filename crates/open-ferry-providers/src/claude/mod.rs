@@ -34,7 +34,7 @@
 //!   Anthropic's API (a 501 for now).
 
 mod client;
-mod compaction;
+pub(crate) mod compaction;
 pub(crate) mod executor;
 mod headers;
 pub mod oauth;

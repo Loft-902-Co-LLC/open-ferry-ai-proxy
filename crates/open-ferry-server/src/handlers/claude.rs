@@ -1,5 +1,5 @@
 // Ported from ClaudeMessages, ClaudeCountTokens and their response handlers
-// in CLIProxyAPI sdk/api/handlers/claude/code_handlers.go (v8.0.32, MIT).
+// in CLIProxyAPI sdk/api/handlers/claude/code_handlers.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1/messages` and `POST /v1/messages/count_tokens`.
@@ -14,7 +14,7 @@ use axum::extract::State;
 use axum::response::Response;
 use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, stream};
-use open_ferry_core::exec::Format;
+use open_ferry_core::exec::{Format, MAX_STREAM_LINE as MAX_LINE};
 use serde_json::Value;
 
 use super::{gjson_string, parse_body};
@@ -95,7 +95,10 @@ pub(crate) async fn messages(
                 sse_response(&headers, forward(items, ClaudeWriter::default(), None))
             }
             Peeked::Failed(error) => claude_error_response(&error, passthrough),
-            Peeked::Closed => sse_response(&headers, Body::empty()),
+            Peeked::Closed => sse_response(
+                &headers,
+                forward(stream::empty().boxed(), ClaudeWriter::default(), None),
+            ),
             Peeked::First(first, rest) => {
                 let items = stream::iter([Ok(first)]).chain(rest).boxed();
                 sse_response(&headers, forward(items, ClaudeWriter::default(), keepalive))
@@ -155,29 +158,158 @@ fn gunzip(body: Bytes) -> Bytes {
 
 /// Writes a Claude event stream: payloads as they are, and an `error`
 /// event at the end of one that fails.
-#[derive(Default)]
 struct ClaudeWriter {
     saw_error_event: bool,
+    saw_message_stop: bool,
+    saw_bare_message: bool,
+    trailing_newlines: usize,
+    line: Vec<u8>,
+    line_overflow: bool,
+    event: String,
+    data: Vec<u8>,
+    observation_overflow: bool,
+}
+
+impl Default for ClaudeWriter {
+    fn default() -> Self {
+        Self {
+            saw_error_event: false,
+            saw_message_stop: false,
+            saw_bare_message: false,
+            trailing_newlines: 2,
+            line: Vec::new(),
+            line_overflow: false,
+            event: String::new(),
+            data: Vec::new(),
+            observation_overflow: false,
+        }
+    }
+}
+
+impl ClaudeWriter {
+    fn observe_line(&mut self) {
+        let line = std::mem::take(&mut self.line);
+        let line = open_ferry_translate::go::trim_space(&line);
+        let line_overflow = std::mem::take(&mut self.line_overflow);
+        if line.is_empty() && !line_overflow {
+            self.flush_event();
+            self.event.clear();
+            self.observation_overflow = false;
+            return;
+        }
+        if self.observation_overflow {
+            // Only a blank line can resume observation after an oversized event.
+            return;
+        }
+        if let Some(event) = line.strip_prefix(b"event:") {
+            self.event = String::from_utf8_lossy(event).trim().to_owned();
+        } else if let Some(data) = line.strip_prefix(b"data:") {
+            let data = open_ferry_translate::go::trim_space(data);
+            if self.data.len() + data.len() < MAX_LINE {
+                self.data.extend_from_slice(data);
+                self.data.push(b'\n');
+            } else {
+                self.overflow_event();
+            }
+        } else {
+            self.observe_json(line, false);
+        }
+    }
+
+    fn overflow_event(&mut self) {
+        self.observation_overflow = true;
+        self.data.clear();
+        self.event.clear();
+    }
+
+    fn observe_json(&mut self, data: &[u8], sse: bool) {
+        let Ok(root) = serde_json::from_slice::<Value>(data) else {
+            return;
+        };
+        match root["type"].as_str().unwrap_or_default() {
+            "message_stop" => self.saw_message_stop = true,
+            "error" => self.saw_error_event = true,
+            "message" => {
+                if !sse && !gjson_string(root.get("stop_reason")).trim().is_empty() {
+                    self.saw_message_stop = true;
+                    self.saw_bare_message = true;
+                }
+            }
+            _ if sse && self.event == "error" && root.get("error").is_some() => {
+                self.saw_error_event = true
+            }
+            _ => {}
+        }
+    }
+
+    fn flush_event(&mut self) {
+        let data = std::mem::take(&mut self.data);
+        if !self.observation_overflow && !data.is_empty() {
+            self.observe_json(&data, true);
+        }
+    }
+
+    fn flush_pending(&mut self) {
+        if !self.line.is_empty() {
+            self.observe_line();
+        }
+        self.flush_event();
+    }
+
+    fn boundary(&mut self, out: &mut BytesMut) {
+        if !self.saw_bare_message {
+            for _ in self.trailing_newlines..2 {
+                out.extend_from_slice(b"\n");
+            }
+            self.trailing_newlines = 2;
+        }
+    }
 }
 
 impl StreamWriter for ClaudeWriter {
     fn write_chunk(&mut self, chunk: Bytes, out: &mut BytesMut) {
-        self.saw_error_event |= chunk
-            .windows(b"event: error\n".len())
-            .any(|w| w == b"event: error\n")
-            || chunk
-                .windows(b"event: error\r\n".len())
-                .any(|w| w == b"event: error\r\n");
+        for &byte in &chunk {
+            match byte {
+                b'\r' => {}
+                b'\n' => self.trailing_newlines = (self.trailing_newlines + 1).min(2),
+                _ => self.trailing_newlines = 0,
+            }
+            if byte == b'\n' {
+                self.observe_line();
+            } else if !self.line_overflow {
+                if self.line.len() < MAX_LINE {
+                    self.line.push(byte);
+                } else {
+                    self.line_overflow = true;
+                    self.overflow_event();
+                }
+            }
+        }
         out.extend_from_slice(&chunk);
     }
 
     fn write_terminal_error(&mut self, error: &ErrorMessage, out: &mut BytesMut) {
+        self.flush_pending();
+        self.boundary(out);
         if self.saw_error_event {
             return;
         }
         out.extend_from_slice(b"event: error\ndata: ");
         out.extend_from_slice(claude_error_json(error).as_bytes());
         out.extend_from_slice(b"\n\n");
+    }
+
+    fn close_error(&mut self) -> Option<ErrorMessage> {
+        self.flush_pending();
+        (!self.saw_error_event && !self.saw_message_stop)
+            .then(|| ErrorMessage::new(502, "upstream stream closed before message_stop"))
+    }
+
+    fn write_done(&mut self, out: &mut BytesMut) {
+        self.flush_pending();
+        if self.saw_error_event || self.saw_message_stop {
+            self.boundary(out);
+        }
     }
 }
 
@@ -208,10 +340,198 @@ mod translated_error_tests {
         for newline in ["\n", "\r\n"] {
             let mut writer = ClaudeWriter::default();
             let mut out = BytesMut::new();
-            let chunk = Bytes::from(format!("event: error{newline}data: {{}}{newline}{newline}"));
+            let chunk = Bytes::from(format!(
+                "event: error{newline}data: {{\"type\":\"error\"}}{newline}{newline}"
+            ));
             writer.write_chunk(chunk.clone(), &mut out);
             writer.write_terminal_error(&ErrorMessage::new(502, "failed"), &mut out);
             assert_eq!(&out[..], &chunk[..]);
         }
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    #[test]
+    fn sse_message_body_ignores_an_error_header() {
+        for stop_reason in ["", "end_turn"] {
+            let mut writer = ClaudeWriter::default();
+            let mut out = BytesMut::new();
+            writer.write_chunk(
+                Bytes::from(format!(
+                    "event: error\ndata: {{\"type\":\"message\",\"stop_reason\":\"{stop_reason}\",\"error\":{{\"message\":\"ignored\"}}}}\n\n"
+                )),
+                &mut out,
+            );
+            assert!(writer.close_error().is_some());
+            assert!(!writer.saw_error_event);
+            assert!(!writer.saw_message_stop);
+            assert!(!writer.saw_bare_message);
+        }
+    }
+
+    fn forward_unchanged(writer: &mut ClaudeWriter, chunk: &[u8]) {
+        let mut out = BytesMut::new();
+        writer.write_chunk(Bytes::copy_from_slice(chunk), &mut out);
+        assert_eq!(&out[..], chunk);
+        assert!(writer.line.len() <= MAX_LINE);
+        assert!(writer.data.len() <= MAX_LINE);
+    }
+
+    #[test]
+    fn bounds_a_single_line_without_a_newline() {
+        let mut writer = ClaudeWriter::default();
+        forward_unchanged(
+            &mut writer,
+            b"data: {\"type\":\"message_stop\",\"padding\":\"",
+        );
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..=MAX_LINE / chunk.len() {
+            forward_unchanged(&mut writer, &chunk);
+        }
+        forward_unchanged(&mut writer, b"\"}");
+        assert_eq!(writer.line.len(), MAX_LINE);
+        assert!(writer.observation_overflow);
+        assert!(writer.close_error().is_some());
+        assert!(!writer.saw_message_stop);
+        assert!(!writer.saw_error_event);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+    }
+
+    #[test]
+    fn bounds_data_lines_without_an_event_boundary() {
+        let mut writer = ClaudeWriter::default();
+        forward_unchanged(
+            &mut writer,
+            b"event: error\ndata: {\"type\":\"error\",\"parts\":[\n",
+        );
+        let chunk = format!("data: {}\n", "0,".repeat(32 * 1024));
+        for _ in 0..=MAX_LINE / (chunk.len() - b"data: \n".len()) {
+            forward_unchanged(&mut writer, chunk.as_bytes());
+        }
+        forward_unchanged(&mut writer, b"data: 0]}\n");
+        assert!(writer.observation_overflow);
+        assert!(writer.close_error().is_some());
+        assert!(!writer.saw_error_event);
+        assert!(!writer.saw_message_stop);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+    }
+
+    #[test]
+    fn observes_message_stop_after_an_overflowed_event() {
+        let mut writer = ClaudeWriter::default();
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..=MAX_LINE / chunk.len() {
+            forward_unchanged(&mut writer, &chunk);
+        }
+        forward_unchanged(&mut writer, b"\ndata: {\"type\":\"error\"}\n\n");
+        assert!(!writer.observation_overflow);
+        assert!(!writer.saw_error_event);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+        forward_unchanged(
+            &mut writer,
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        assert!(writer.close_error().is_none());
+        assert!(writer.saw_message_stop);
+        assert!(!writer.saw_error_event);
+        assert!(writer.line.is_empty());
+        assert!(writer.data.is_empty());
+    }
+
+    // TestClaudeStream* completion, chunk splitting, error deduplication and framing.
+    #[test]
+    fn observes_terminal_events_across_every_chunk_boundary() {
+        for (input, complete, errors, suffix) in [
+            ("", false, 1, ""),
+            ("event: message_stop", false, 1, ""),
+            (
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"message_stop\"}}",
+                false,
+                1,
+                "",
+            ),
+            ("data: {\"type\" : \"message_stop\"}", true, 0, "\n\n"),
+            (
+                "data: {\"type\":\n\ndata: \"message_stop\"}\n\n",
+                false,
+                1,
+                "",
+            ),
+            (
+                "event: message_stop\r\ndata: {\"type\":\r\ndata: \"message_stop\"}\r\n\r\n",
+                true,
+                0,
+                "",
+            ),
+            (
+                "event: error\ndata: {\"error\":\ndata: {\"message\":\"failed\"}}",
+                true,
+                1,
+                "\n\n",
+            ),
+            ("event: error\n", false, 1, ""),
+            (
+                "{\"type\":\"message\",\"stop_reason\":\"end_turn\"}",
+                true,
+                0,
+                "",
+            ),
+        ] {
+            for split in 0..=input.len() {
+                let mut writer = ClaudeWriter::default();
+                let mut out = BytesMut::new();
+                writer.write_chunk(Bytes::copy_from_slice(&input.as_bytes()[..split]), &mut out);
+                writer.write_chunk(Bytes::copy_from_slice(&input.as_bytes()[split..]), &mut out);
+                let error = writer.close_error();
+                assert_eq!(error.is_none(), complete, "{input:?} split {split}");
+                match error {
+                    Some(error) => writer.write_terminal_error(&error, &mut out),
+                    None => writer.write_done(&mut out),
+                }
+                let output = String::from_utf8(out.to_vec()).unwrap();
+                assert_eq!(
+                    output.matches("event: error\ndata:").count(),
+                    errors,
+                    "{output:?}"
+                );
+                if complete {
+                    assert_eq!(output, format!("{input}{suffix}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_errors_have_an_event_boundary_and_are_deduplicated() {
+        for ending in ["", "\n", "\r\n", "\n\n"] {
+            let mut writer = ClaudeWriter::default();
+            let mut out = BytesMut::new();
+            writer.write_chunk(
+                Bytes::from(format!(
+                    "data: {{\"type\":\"content_block_delta\"}}{ending}"
+                )),
+                &mut out,
+            );
+            writer.write_terminal_error(&ErrorMessage::new(502, "failed"), &mut out);
+            assert!(
+                String::from_utf8(out.to_vec())
+                    .unwrap()
+                    .contains("\n\nevent: error\n")
+            );
+        }
+        let mut writer = ClaudeWriter::default();
+        let mut out = BytesMut::new();
+        writer.write_chunk(
+            Bytes::from_static(b"event: error\ndata: {\"type\":\"error\"}"),
+            &mut out,
+        );
+        writer.write_terminal_error(&ErrorMessage::new(502, "failed"), &mut out);
+        assert_eq!(&out[..], b"event: error\ndata: {\"type\":\"error\"}\n\n");
     }
 }

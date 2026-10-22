@@ -9,7 +9,7 @@
 // ParseInteractionsStreamUsage, hasNonZeroTokenUsage, extractResponseServiceTier,
 // extractResponseServiceTierFromValidJSON, firstExistingUsageNode,
 // safeUsageTokenSum, jsonPayload) and plugin_executor_usage.go
-// (ObserveMergedStreamUsage, MergeStreamUsageDetail) (v8.0.32, MIT).
+// (ObserveMergedStreamUsage, MergeStreamUsageDetail) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The token counts in an upstream's answer: a whole answer's, or a
@@ -86,7 +86,7 @@ fn first_existing<'a>(node: Node<'a>, paths: &[&str]) -> Node<'a> {
 }
 
 /// The token buckets an OpenAI-style `usage` may have.
-const OPENAI_BUCKET_FIELDS: [&str; 12] = [
+const OPENAI_BUCKET_FIELDS: [&str; 13] = [
     "prompt_tokens",
     "input_tokens",
     "completion_tokens",
@@ -99,6 +99,7 @@ const OPENAI_BUCKET_FIELDS: [&str; 12] = [
     "input_tokens_details.cache_creation_tokens",
     "completion_tokens_details.reasoning_tokens",
     "output_tokens_details.reasoning_tokens",
+    "reasoning_tokens",
 ];
 
 /// Whether `usage` is an object with a total or a bucket (upstream's
@@ -154,6 +155,7 @@ fn parse_openai_usage_node(usage: Node<'_>) -> Detail {
         &[
             "completion_tokens_details.reasoning_tokens",
             "output_tokens_details.reasoning_tokens",
+            "reasoning_tokens",
         ],
     );
     if reasoning.exists() {

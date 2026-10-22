@@ -143,12 +143,11 @@
 //!   one is read it is successful. The observer sees upstream reads, so a
 //!   terminal event read while the dropped stream drains ready chunks can
 //!   count even if its translated chunk never reached the client.
-//! - A failure whose error keeps the answer's usage
-//!   ([`ExecError::keeps_usage`], set by the Meta and xAI executors when an
-//!   answer's `apply_patch` call can't be carried over) keeps the counts
+//! - A failure explicitly marked to retain observed usage
+//!   ([`ExecError::keeps_usage`]) keeps the counts
 //!   the tap read of the whole answer, or of the stream as far as it was
-//!   read. Upstream's executors keep what they had observed when the bridge
-//!   failed, so where the bridge fails at an event before the terminal one
+//!   read. For bridge failures, upstream's executors keep what they had
+//!   observed when the bridge failed, so where it fails before the terminal event
 //!   of an answer read whole, upstream's record has no counts and this one
 //!   has the terminal event's.
 //! - OpenAI-compatible model names and usage counts are read both from
