@@ -703,12 +703,14 @@ fn bind_error(store: &super::sessions::Store, session: &str, error: super::siwc_
     use super::siwc_bind::SaveError;
     match error {
         SaveError::Busy => {
-            tracing::info!("{BIND_BUSY}");
-            store.set_error(session, BIND_BUSY);
+            if store.set_pending_error(session, BIND_BUSY) {
+                tracing::info!("{BIND_BUSY}");
+            }
         }
         SaveError::ShuttingDown => {
-            tracing::info!("SIWC bind cancelled: server shutting down");
-            store.set_error(session, "server shutting down");
+            if store.set_pending_error(session, "server shutting down") {
+                tracing::info!("SIWC bind cancelled: server shutting down");
+            }
         }
         SaveError::Cancelled(cause) => {
             // Keep the previous non-shutdown diagnostic, and retain a status
@@ -865,5 +867,93 @@ fn outcome(status: &str, error: Option<&str>) -> Json {
             ("error", Json::Str(error.to_owned())),
         ]),
         None => Json::map([("status", Json::Str(status.to_owned()))]),
+    }
+}
+
+#[cfg(test)]
+mod round7_tests {
+    use super::*;
+    use crate::oauth::{Sessions, mutation_path::BindMutationPath, sessions::Registration};
+    use crate::tests::capture::Logs;
+
+    fn ended_session() -> (Sessions, Registration) {
+        let sessions = Sessions::default();
+        let registration = sessions.store().register("round7-ended", "codex").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = BindMutationPath::capture(dir.path().join("bind.json"));
+        assert!(
+            sessions
+                .store()
+                .mark_bind_target("round7-ended", target.clone(), "")
+        );
+        sessions.store().invalidate_bind_target(&target);
+        (sessions, registration)
+    }
+
+    async fn refused(shutdown: bool) {
+        let (logs, _capture) = Logs::capture();
+        let (sessions, _registration) = ended_session();
+        if shutdown {
+            sessions.shutdown().await;
+        } else {
+            sessions.bind_workers.limit_for_test(0);
+        }
+        // Drive the real pre-worker check and shared error arm directly:
+        // this synchronous window has no scheduling hook and needs no sleep.
+        bind_error(
+            sessions.store(),
+            "round7-ended",
+            sessions.check_bind_worker().unwrap_err(),
+        );
+        assert_eq!(
+            sessions.store().get("round7-ended").unwrap().status,
+            "SIWC binding target changed; start a new binding"
+        );
+        assert!(
+            logs.text().is_empty(),
+            "an ended session was logged as a new refusal"
+        );
+
+        // The same refusal must still change and log a pending session once.
+        let _pending = sessions
+            .store()
+            .register("round7-pending", "codex")
+            .unwrap();
+        bind_error(
+            sessions.store(),
+            "round7-pending",
+            sessions.check_bind_worker().unwrap_err(),
+        );
+        let expected = if shutdown {
+            "server shutting down"
+        } else {
+            BIND_BUSY
+        };
+        assert_eq!(
+            sessions.store().get("round7-pending").unwrap().status,
+            expected
+        );
+        assert!(logs.text().contains(expected));
+        assert_eq!(logs.levels(), [tracing::Level::INFO]);
+    }
+
+    #[tokio::test]
+    async fn round7_shutdown_refusal_preserves_an_ended_status() {
+        refused(true).await;
+    }
+
+    #[tokio::test]
+    async fn round7_busy_refusal_preserves_an_ended_status() {
+        refused(false).await;
+    }
+
+    #[tokio::test]
+    async fn round7_admit_bind_prioritizes_an_ended_session_over_shutdown() {
+        let (sessions, registration) = ended_session();
+        sessions.shutdown().await;
+        assert_eq!(
+            sessions.admit_bind("round7-ended", registration.id),
+            Err(crate::oauth::siwc_bind::CancelCause::SessionEnded)
+        );
     }
 }

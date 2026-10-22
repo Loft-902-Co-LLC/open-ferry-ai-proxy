@@ -283,34 +283,36 @@ impl Store {
         self.fail(state, message, false);
     }
 
-    pub(super) fn set_pending_error(&self, state: &str, message: &str) {
-        self.fail(state, message, true);
+    /// Fails a pending session; returns whether its status changed.
+    pub(super) fn set_pending_error(&self, state: &str, message: &str) -> bool {
+        self.fail(state, message, true)
     }
 
-    fn fail(&self, state: &str, message: &str, only_pending: bool) {
+    fn fail(&self, state: &str, message: &str, only_pending: bool) -> bool {
         let state = state.trim();
         let message = match message.trim() {
             "" => "Authentication failed",
             message => message,
         };
         if state.is_empty() {
-            return;
+            return false;
         }
         let now = Instant::now();
         let mut inner = self.lock();
         inner.purge(now);
         let ttl = inner.ttl;
         let Some(entry) = inner.sessions.get_mut(state) else {
-            return;
+            return false;
         };
         if entry.session.completed || (only_pending && !entry.session.is_pending()) {
-            return;
+            return false;
         }
         message.clone_into(&mut entry.session.status);
         entry.session.expires_at = later(now, ttl);
         entry.callback = None;
         entry.committing = false;
         entry.changes.send_replace(());
+        true
     }
 
     /// Marks the login completed, unless the session is unknown or already

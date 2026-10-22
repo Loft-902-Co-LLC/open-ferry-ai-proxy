@@ -272,6 +272,7 @@ impl Sessions {
     fn admit_bind(&self, session: &str, registration: u64) -> Result<(), siwc_bind::CancelCause> {
         use siwc_bind::CancelCause;
         let logins = self.logins();
+        // Check session end first so its recorded cause wins over shutdown.
         if !self.store.is_pending(session, "codex") {
             Err(CancelCause::SessionEnded)
         } else if logins.shut_down {

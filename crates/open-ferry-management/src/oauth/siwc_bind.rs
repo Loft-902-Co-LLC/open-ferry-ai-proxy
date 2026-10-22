@@ -346,6 +346,8 @@ pub(super) async fn save(
                 .subsec_nanos()
                 % 21;
             let delay = retry_delay(attempted, failures);
+            let jitter = std::time::Duration::from_millis(u64::from(jitter));
+            let backoff = delay + jitter;
             #[cfg(test)]
             if let Some(records) = checking
                 .oauth_sessions()
@@ -353,10 +355,13 @@ pub(super) async fn save(
                 .bind_retry_records
                 .clone()
             {
-                records.1.lock().unwrap().push((attempted, failures, delay));
+                records
+                    .1
+                    .lock()
+                    .unwrap()
+                    .push((attempted, failures, backoff - jitter));
                 records.0.notify_one();
             }
-            let backoff = delay + std::time::Duration::from_millis(u64::from(jitter));
             if file_busy {
                 turn.defer_file_retry(backoff);
                 // Test pauses are after deferral and all transaction guards.
@@ -596,7 +601,7 @@ const ADMISSION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(
 
 async fn ended(state: &ManagementState, session: &str, lifeline: &mut Lifeline) -> CancelCause {
     loop {
-        // An already ended session keeps its own cause when shutdown overlaps.
+        // Check session end first so its recorded cause wins over shutdown.
         if !state.oauth_sessions().store().is_pending(session, "codex") {
             return CancelCause::SessionEnded;
         }
