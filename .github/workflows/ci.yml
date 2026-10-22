@@ -87,7 +87,7 @@ jobs:
                 dashboard_real=true
               fi
               case "$path" in
-                crates/open-ferry-translate/*|crates/open-ferry-providers/*|crates/open-ferry-core/*|tools/parity/*|reference/cliproxyapi|reference/cliproxyapi/*|Cargo.lock|Cargo.toml|rust-toolchain.toml|config.example.yaml|.gitmodules|.github/workflows/ci.yml|.github/workflows/parity-scheduled.yml|.github/scripts/run-parity.sh|.github/actions/setup-rust/*|.github/actions/save-rust-cache/*)
+                crates/open-ferry-translate/*|crates/open-ferry-providers/*|crates/open-ferry-core/*|tools/parity/*|reference/cliproxyapi|reference/cliproxyapi/*|Cargo.lock|Cargo.toml|rust-toolchain.toml|.cargo/*|config.example.yaml|.gitmodules|.github/workflows/ci.yml|.github/workflows/parity-scheduled.yml|.github/scripts/run-parity.sh|.github/actions/setup-rust/*|.github/actions/save-rust-cache/*)
                   echo "Parity change: $path"
                   parity=true
                   ;;

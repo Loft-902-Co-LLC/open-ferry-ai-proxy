@@ -708,6 +708,17 @@ fn plugin(rng: &mut Rng) -> Value {
         }
         config.insert("settings".to_owned(), Value::Object(settings));
     }
+    if rng.chance(30) {
+        config.insert(
+            "text".into(),
+            json!(rng.pick(&[
+                "plain",
+                "clip text\n",
+                "keep text\n\n",
+                "keep several\n\n\n"
+            ])),
+        );
+    }
     if config.is_empty() {
         config.insert("enabled".to_owned(), json!(true));
     }
@@ -987,16 +998,27 @@ impl<'a> Style<'a> {
             return;
         }
         if let Value::String(text) = value
-            && !self.canonical
             && block_ok(text)
-            && self.rng.chance(8)
+            && ((self.canonical && text.ends_with('\n')) || (!self.canonical && self.rng.chance(8)))
         {
-            out.push_str(if self.rng.chance(50) { "|-" } else { ">-" });
+            out.push(if self.canonical || self.rng.chance(50) {
+                '|'
+            } else {
+                '>'
+            });
+            let breaks = text.len() - text.trim_end_matches('\n').len();
+            match breaks {
+                0 => out.push('-'),
+                1 => {}
+                _ => out.push('+'),
+            }
             self.line_comment(out, key);
             out.push('\n');
             out.push_str(&" ".repeat(child));
-            out.push_str(text);
-            out.push('\n');
+            out.push_str(text.trim_end_matches('\n'));
+            for _ in 0..breaks.max(1) {
+                out.push('\n');
+            }
             return;
         }
         if !self.canonical && self.rng.chance(6) {
@@ -1198,7 +1220,8 @@ fn single_ok(text: &str) -> bool {
 /// Whether `text` can be a one-line block scalar: not empty, with no space
 /// at either end and nothing [`single_ok`] refuses.
 fn block_ok(text: &str) -> bool {
-    !text.is_empty() && text.trim() == text && single_ok(text)
+    let body = text.trim_end_matches('\n');
+    !body.is_empty() && body.trim() == body && single_ok(body)
 }
 
 fn single_quoted(text: &str) -> String {
@@ -1243,6 +1266,47 @@ mod tests {
         assert_eq!(
             double_quoted(&format!("a\"{backslash}{}", char::from(1u8))),
             format!("\"a{backslash}\"{backslash}{backslash}{backslash}U00000001\"")
+        );
+    }
+
+    #[test]
+    fn block_styles_cover_all_chomping_modes_without_changing_values() {
+        let mut seen = BTreeMap::new();
+        for seed in 0..300 {
+            let mut rng = Generator::new(seed, 0).rng;
+            let mut names = 0;
+            let mut style = Style::new(&mut rng, &mut names, false, false);
+            for text in [
+                "plain",
+                "clip text\n",
+                "keep text\n\n",
+                "keep several\n\n\n",
+            ] {
+                let mut out = "text: ".to_owned();
+                style.scalar_line(&mut out, "text", &json!(text), 2);
+                let parsed = open_ferry_core::config::AnyValue::parse_yaml(&out).unwrap();
+                let expected = open_ferry_core::config::AnyValue::parse_yaml(
+                    &json!({"text":text}).to_string(),
+                )
+                .unwrap();
+                assert_eq!(parsed, expected, "{out}");
+                let header = out
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                if ["|", ">", "|-", ">-", "|+", ">+"].contains(&header) {
+                    *seen.entry(header.to_owned()).or_insert(0usize) += 1;
+                }
+            }
+        }
+        assert_eq!(seen.len(), 6, "{seen:?}");
+        assert!(
+            step_cases(13, 200)
+                .iter()
+                .any(|case| case.options.to_string().contains("keep text"))
         );
     }
 
