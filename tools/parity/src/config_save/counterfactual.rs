@@ -4,14 +4,30 @@
 use crate::cases::Case;
 use serde_json::{Value, json};
 
-/// The exact source-only rewrite implemented beside the writer's protection.
-/// Configs supplied to individual steps and whole-file writes are untouched.
+/// Quote only the block scalars protected by the writer, in the initial
+/// file and in whole-file write bodies. Separate running configs and every
+/// other option stay unchanged. A write body starts a new file source.
 pub fn rewritten(case: &Case) -> Option<Case> {
-    let source = case.options["file"].as_str()?;
-    let source = open_ferry_core::config::save::parity::quoted_source(source).ok()??;
+    fn quote(input: &mut Value) -> Option<bool> {
+        let source = input.as_str()?;
+        if let Some(quoted) = open_ferry_core::config::save::parity::quoted_source(source)
+            .ok()
+            .flatten()
+        {
+            *input = quoted.into();
+            Some(true)
+        } else {
+            Some(false)
+        }
+    }
     let mut candidate = case.clone();
-    candidate.options["file"] = source.into();
-    Some(candidate)
+    let mut changed = quote(&mut candidate.options["file"])?;
+    for step in candidate.options["steps"].as_array_mut()? {
+        if step["op"] == "write" {
+            changed |= quote(&mut step["body"])?;
+        }
+    }
+    changed.then_some(candidate)
 }
 
 /// Failure shape, an exact permitted rewrite, successful complete Go output,
@@ -92,11 +108,16 @@ mod tests {
             "../cases/testdata/config-save-pending-key-counterfactual.json"
         ))
         .unwrap();
+        let writes: Value = serde_json::from_str(include_str!(
+            "../cases/testdata/config-save-write-body-counterfactual.json"
+        ))
+        .unwrap();
         for fixture in fixtures
             .as_array()
             .unwrap()
             .iter()
             .chain(pending.as_array().unwrap())
+            .chain(writes.as_array().unwrap())
         {
             let case = Case::new(fixture["case"].as_str().unwrap(), "", "")
                 .with_options(fixture["options"].clone());
@@ -135,6 +156,30 @@ mod tests {
                 &rust_original,
                 &rust_rewritten
             ));
+            if let Some(index) = candidate.options["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|step| step["op"] == "write")
+            {
+                let mut changed_body = candidate.clone();
+                changed_body.options["steps"][index]["body"] = format!(
+                    "{}\n",
+                    changed_body.options["steps"][index]["body"]
+                        .as_str()
+                        .unwrap()
+                )
+                .into();
+                assert!(!proves(
+                    &case,
+                    &changed_body,
+                    &fixture["original_go"],
+                    &fixture["counterfactual_go"],
+                    matching,
+                    &rust_original,
+                    &rust_rewritten
+                ));
+            }
             let mut failed = fixture["counterfactual_go"].clone();
             failed["error"] = "yaml: still fails".into();
             assert!(!proves(
