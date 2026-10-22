@@ -233,6 +233,21 @@ pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlE
     Ok(encoder.emitter.into_output())
 }
 
+/// Quote live config scalars before their config emission. Archive emission
+/// uses its own all-tag quote rule before prefixing lines with comments.
+pub(crate) fn quote_config_unicode(n: &mut Node) {
+    if n.kind == Kind::Scalar && n.value.contains(['\u{2028}', '\u{2029}', '\u{0085}']) {
+        n.style = if n.tag != STR_TAG || n.style.has(super::Style::TAGGED) {
+            super::Style::DOUBLE_QUOTED | super::Style::TAGGED
+        } else {
+            super::Style::DOUBLE_QUOTED
+        };
+    }
+    for c in &mut n.content {
+        quote_config_unicode(c);
+    }
+}
+
 /// Config writer protection, also exposing exactly which source scalars the
 /// emitter quotes for the offline counterfactual proof.
 pub(crate) fn protected_node(
@@ -240,15 +255,6 @@ pub(crate) fn protected_node(
     indent: usize,
 ) -> Result<(Vec<u8>, Vec<super::types::Mark>), YamlError> {
     let mut node = node.clone();
-    fn quote_unicode(n: &mut Node) {
-        if n.kind == Kind::Scalar && n.value.contains(['\u{2028}', '\u{2029}', '\u{0085}']) {
-            n.style = super::Style::DOUBLE_QUOTED;
-        }
-        for c in &mut n.content {
-            quote_unicode(c);
-        }
-    }
-    quote_unicode(&mut node);
     protect_conflicting_key_comments(&mut node, indent, true)?;
     let mut encoder = Encoder::new();
     encoder.emitter.protect_config_comments = true;
