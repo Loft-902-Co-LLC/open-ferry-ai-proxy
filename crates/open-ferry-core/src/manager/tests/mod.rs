@@ -96,6 +96,7 @@ mod selector;
 mod service_cooldown_store;
 mod siwc;
 mod siwc_persistence;
+mod siwc_status;
 mod stream_dropped_queued_failure;
 mod stream_request_span;
 mod stream_startup_cancel;

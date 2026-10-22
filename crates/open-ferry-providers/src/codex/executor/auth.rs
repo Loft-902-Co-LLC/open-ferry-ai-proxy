@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_auth.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Independent token rotations. No credential files are touched here: the
@@ -103,6 +103,7 @@ impl CodexExecutor {
             match result {
                 Ok(tokens) => {
                     let mut merged = stored_siwc.cloned().unwrap_or_default();
+                    merged.remove("expires_at");
                     merged.extend(tokens.to_json());
                     refreshed
                         .metadata

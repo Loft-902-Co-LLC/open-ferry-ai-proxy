@@ -13,6 +13,7 @@ mod round5;
 mod round6;
 mod round7;
 mod route_parity;
+mod status;
 
 const START: &str =
     "/v8/management/oauth/auth-url?provider=codex&mode=siwc-bind&name=codex-bind.json";

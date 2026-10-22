@@ -1,4 +1,4 @@
-// Regression tests for SIWC persistence and credential identity (v8.0.36).
+// Regression tests for SIWC persistence and credential identity (v8.0.38).
 use super::support::*;
 use crate::auth::codex_refresh::{CodexPersistIntent, CredentialRefreshPatch};
 use crate::auth::credential_lock::credential_lock_path;
@@ -4199,9 +4199,14 @@ async fn rejection_adoption_does_not_fall_back_to_consumed_disk_tokens() {
         "rejection fallback fresh read acknowledged"
     );
     assert!(adopted.is_none(), "rebased failed token is not an adoption");
+    let live = manager.get("codex.json").unwrap();
     assert!(
-        Arc::ptr_eq(&failed, &manager.get("codex.json").unwrap()),
+        live.metadata == failed.metadata && live.registration_epoch == failed.registration_epoch,
         "consumed disk token never replaces live rotation"
+    );
+    assert!(
+        live.rejected_access_token == failed.access_token(),
+        "read-only adoption refusal still remembers the executed bearer's 401"
     );
 }
 
@@ -4650,9 +4655,15 @@ async fn marked_rejection_refuses_different_disk_tokens() {
             adopted.is_none(),
             "marked rejected partition cannot adopt a different disk token"
         );
+        let live = manager.get("codex.json").unwrap();
         assert!(
-            Arc::ptr_eq(&failed, &manager.get("codex.json").unwrap()),
-            "marked rejection leaves live unchanged"
+            live.metadata == failed.metadata
+                && live.registration_epoch == failed.registration_epoch,
+            "marked rejection leaves credentials unchanged"
+        );
+        assert!(
+            live.rejected_access_token == failed.access_token(),
+            "adoption refusal still remembers the executed bearer's 401"
         );
     }
 }
@@ -5047,9 +5058,16 @@ async fn missing_and_invalid_rejection_never_calls_legacy_readback() {
                 store.legacy_calls.load(Ordering::SeqCst) == 0,
                 "Missing and Invalid never call legacy read_back"
             );
+            let live = manager.get("codex.json").unwrap();
             assert!(
-                adopted.is_none() && Arc::ptr_eq(&before, &manager.get("codex.json").unwrap()),
-                "classified rejection keeps live despite different legacy token"
+                adopted.is_none()
+                    && live.metadata == before.metadata
+                    && live.registration_epoch == before.registration_epoch,
+                "classified rejection keeps credentials despite different legacy token"
+            );
+            assert!(
+                live.rejected_access_token == before.access_token(),
+                "Missing and Invalid still remember the executed bearer's 401"
             );
         }
     }

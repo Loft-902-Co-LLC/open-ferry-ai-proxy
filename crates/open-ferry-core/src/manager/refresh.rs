@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_refresh.go and
-// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.36, MIT).
+// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Token refresh: the background loop that refreshes OAuth credentials
@@ -297,6 +297,19 @@ pub(super) fn schedule_unauthorized_refresh(
     now: Timestamp,
     was_terminal: bool,
 ) -> bool {
+    let unauthorized = !result.success
+        && !super::classify::should_skip_credential_cooldown(result.error.as_ref())
+        && result.error.as_ref().is_some_and(|error| {
+            error.http_status == 401 || is_unauthorized_error(ErrView::Auth(error))
+        });
+    if unauthorized {
+        let token = if result.access_token.is_empty() {
+            access_token(auth)
+        } else {
+            result.access_token.clone()
+        };
+        auth.record_rejected_token(&token);
+    }
     if was_terminal
         || result.success
         || !has_refresh_credential(auth)
@@ -306,10 +319,6 @@ pub(super) fn schedule_unauthorized_refresh(
         })
     {
         return false;
-    }
-    let token = access_token(auth);
-    if !token.is_empty() {
-        auth.rejected_access_token = token;
     }
     if non_zero(auth.next_refresh_after).is_none() {
         auth.next_refresh_after = Some(
@@ -1026,14 +1035,16 @@ impl Manager {
         err: &ExecError,
         already_tried: bool,
     ) -> Option<Arc<Auth>> {
-        if already_tried {
-            return None;
-        }
         // A request-scoped failure is about this request, not the token.
         if is_request_scoped_error(ErrView::Exec(err)) {
             return None;
         }
-        if !is_unauthorized_error(ErrView::Exec(err)) || !has_refresh_credential(auth) {
+        if !is_unauthorized_error(ErrView::Exec(err)) {
+            return None;
+        }
+        let failed_token = access_token(auth);
+        self.mark_rejected_access_token_at_epoch(&auth.id, &failed_token, auth.registration_epoch);
+        if already_tried || !has_refresh_credential(auth) {
             return None;
         }
         if has_unauthorized_auth_failure(auth) {
@@ -1045,10 +1056,19 @@ impl Manager {
             "unauthorized response, refreshing credentials before fallback"
         );
         match self
-            .refresh_at_epoch(&auth.id, &access_token(auth), 0)
+            .refresh_at_epoch(&auth.id, &failed_token, auth.registration_epoch)
             .await
         {
-            Ok(refreshed) => Some(refreshed),
+            Ok(refreshed) => {
+                if !failed_token.is_empty()
+                    && refreshed.access_token() == failed_token
+                    && !refreshed.has_valid_access_token(self.now())
+                {
+                    None
+                } else {
+                    Some(refreshed)
+                }
+            }
             Err(ManagerError::NotActive(_)) => {
                 let manager = self.clone();
                 let failed = auth.clone();
@@ -1290,10 +1310,11 @@ impl Manager {
                     self.permanently_ineligible(&entry.auth),
                 );
                 let auth = Arc::make_mut(&mut entry.auth);
+                let previous = auth.clone();
                 auth.metadata = disk.metadata;
                 auth.codex_pending_refresh = pending;
                 auth.codex_persist_intent = Default::default();
-                auth.rejected_access_token.clear();
+                auth.preserve_rejected_tokens_from(&previous, false);
                 auth.credential_version = auth.credential_version.saturating_add(1);
                 auth.generation = auth.generation.saturating_add(1);
                 auth.updated_at = Some(now);
@@ -1448,7 +1469,11 @@ impl Manager {
         resolution_only: bool,
     ) -> Result<Arc<Auth>, ManagerError> {
         if !failed_token.is_empty() {
-            self.mark_rejected_access_token(id, failed_token);
+            if epoch == 0 {
+                self.mark_rejected_access_token(id, failed_token);
+            } else {
+                self.mark_rejected_access_token_at_epoch(id, failed_token, epoch);
+            }
         }
         let id_lock = lock(&self.shared.refresh_locks)
             .entry(id.to_owned())
@@ -2023,24 +2048,19 @@ impl Manager {
         }
         updated.last_refreshed_at = Some(now);
         updated.next_refresh_after = None;
-        if partial_failure
-            .as_ref()
-            .is_some_and(|failure| failure.partition.is_active(&auth))
+        updated.preserve_rejected_tokens_from(&auth, true);
+        if updated.rejected_access_token.is_empty()
+            || updated.access_token() != updated.rejected_access_token
         {
-            updated
-                .rejected_access_token
-                .clone_from(&auth.rejected_access_token);
-        } else {
-            updated.rejected_access_token.clear();
-        }
-        updated.last_error = None;
-        updated.status_message.clear();
-        updated.unavailable = false;
-        if matches!(updated.status, Status::Error | Status::Unknown) {
-            updated.status = Status::Active;
+            updated.last_error = None;
+            updated.status_message.clear();
+            updated.unavailable = false;
+            if matches!(updated.status, Status::Error | Status::Unknown) {
+                updated.status = Status::Active;
+            }
+            clear_unauthorized_model_states(&mut updated, now);
         }
         updated.updated_at = Some(now);
-        clear_unauthorized_model_states(&mut updated, now);
         if should_refresh(&updated, executor.refresh_lead(), now) {
             updated.next_refresh_after = Some(add(now, REFRESH_INEFFECTIVE_BACKOFF));
         }
@@ -2344,26 +2364,29 @@ impl Manager {
         Ok(snapshot)
     }
 
-    /// Marks `failed_token` as refused by the provider while it is still the
-    /// credential's access token, regardless of its nominal expiry, so the
+    /// Marks `failed_token` as refused while it is still the active or nested
+    /// bearer, regardless of nominal expiry, so the
     /// credential reads as expired, and isn't picked, until a refresh works
     /// or its tokens change (upstream's `markRejectedAccessToken`).
     pub(crate) fn mark_rejected_access_token(&self, id: &str, failed_token: &str) {
+        self.mark_rejected_access_token_at_epoch(id, failed_token, 0);
+    }
+
+    fn mark_rejected_access_token_at_epoch(&self, id: &str, failed_token: &str, epoch: u64) {
         let now = self.now();
         let mut state = self.lock();
         let Some(entry) = state.auths.get_mut(id) else {
             return;
         };
-        if failed_token.is_empty()
-            || access_token(&entry.auth) != failed_token
-            || entry.auth.rejected_access_token == failed_token
-        {
+        if epoch > 0 && epoch != entry.auth.registration_epoch {
             return;
         }
         let auth = Arc::make_mut(&mut entry.auth);
+        if !auth.record_rejected_token(failed_token) {
+            return;
+        }
         auth.generation = auth.generation.saturating_add(1);
         auth.updated_at = Some(now);
-        auth.rejected_access_token = failed_token.to_owned();
         state.sync_scheduler(self.models(), id, now);
     }
 
@@ -3143,14 +3166,12 @@ impl Manager {
             }
         }
         let pending = pending_for_edit(&entry.auth, &metadata, false);
-        let previous_token = access_token(&entry.auth);
+        let previous = entry.auth.clone();
         let auth = Arc::make_mut(&mut entry.auth);
         auth.metadata = metadata;
         auth.codex_pending_refresh = pending;
         auth.codex_persist_intent = Default::default();
-        if access_token(auth) != previous_token {
-            auth.rejected_access_token.clear();
-        }
+        auth.preserve_rejected_tokens_from(&previous, false);
         if auth
             .codex_refresh_failure
             .as_ref()
@@ -3882,14 +3903,12 @@ impl Manager {
             live.credential_version = live.credential_version.saturating_add(1);
         }
         live.generation = live.generation.saturating_add(1);
-        if !refused
+        let refreshed_active = !refused
             && !updated
                 .codex_refresh_failure
                 .as_ref()
-                .is_some_and(|failure| failure.partition.is_active(live))
-        {
-            live.rejected_access_token.clear();
-        }
+                .is_some_and(|failure| failure.partition.is_active(live));
+        live.preserve_rejected_tokens_from(&before, refreshed_active);
         live.updated_at = Some(now);
         let generation = live.generation;
         let snapshot = Arc::clone(&entry.auth);

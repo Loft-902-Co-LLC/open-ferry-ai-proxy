@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/metadata_merge.go
 // (MergeRefreshedAuth, mergeAuthContent, IsAuthTokenPayloadKey) and
-// sdk/cliproxy/auth/metadata_keys.go (v8.0.36, MIT).
+// sdk/cliproxy/auth/metadata_keys.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Folding a refreshed credential back into the live one.
@@ -404,9 +404,7 @@ pub(crate) fn merge_refreshed_auth_with(
     credentials: ResponseCredentials,
 ) -> Auth {
     let mut merged = merge_auth_content_with(base, current, updated, credentials);
-    merged
-        .rejected_access_token
-        .clone_from(&updated.rejected_access_token);
+    merged.preserve_rejected_tokens_from(current, true);
 
     if updated.last_refreshed_at.is_some() {
         merged.last_refreshed_at = updated.last_refreshed_at;
@@ -473,7 +471,10 @@ pub(crate) fn merge_refreshed_auth_with(
             merged.unavailable = current.unavailable;
             merged.status = current.status;
             merged.status_message = current.status_message.clone();
-        } else if matches!(updated.status, Status::Active | Status::Unknown) {
+        } else if matches!(updated.status, Status::Active | Status::Unknown)
+            && (merged.rejected_access_token.is_empty()
+                || merged.access_token() != merged.rejected_access_token)
+        {
             merged.status = Status::Active;
             merged.unavailable = false;
             merged.status_message.clear();

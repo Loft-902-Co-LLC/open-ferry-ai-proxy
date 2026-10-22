@@ -3,7 +3,7 @@
 // clearCooldownStateForAuth and ResetQuota), clientModelProjectionForAuth in
 // sdk/cliproxy/auth/conductor_models.go, ReconcileRegistryModelStates in
 // sdk/cliproxy/auth/conductor_selection.go and applyCooldownFields in
-// sdk/cliproxy/auth/quota_signals.go (v8.0.36, MIT).
+// sdk/cliproxy/auth/quota_signals.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a call's outcome does to a credential: the cooldowns that keep a
@@ -60,7 +60,7 @@ const THIRTY_MINUTES: Duration = Duration::from_secs(30 * 60);
 const TWELVE_HOURS: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// The outcome of one call on a credential (upstream's `Result`).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct CallResult {
     /// The credential.
     pub auth_id: String,
@@ -86,6 +86,8 @@ pub struct CallResult {
     /// response says nothing of the credential's quota (upstream's
     /// `SkipQuotaObservation`).
     pub skip_quota_observation: bool,
+    /// Bearer actually used by this call. Runtime only, excluded from Debug.
+    pub access_token: String,
     /// The [`Auth::credential_version`] of the credential the call ran with,
     /// or 0 when not known (upstream's `CredentialVersion`).
     pub credential_version: u64,
@@ -99,16 +101,33 @@ pub struct CallResult {
     pub execution_seq: u64,
 }
 
+impl std::fmt::Debug for CallResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallResult")
+            .field("auth_id", &self.auth_id)
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("success", &self.success)
+            .field("credential_version", &self.credential_version)
+            .field("registration_epoch", &self.registration_epoch)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Whether `result` came from tokens or an API key `current` no longer has,
 /// or from an earlier registration of its ID (upstream's
 /// `isStaleExecutionResult`). A result that doesn't say which version it
 /// ran with counts as stale once the credential's secrets were replaced.
+/// An unchanged captured active bearer survives unrelated partition changes;
+/// a registration change always fences the result.
 pub(crate) fn is_stale_result(result: &CallResult, current: &Auth) -> bool {
     let stale_version = result.credential_version < current.credential_version
         && (result.credential_version > 0 || current.credential_version > 1);
     let stale_epoch =
         result.registration_epoch > 0 && result.registration_epoch < current.registration_epoch;
-    stale_version || stale_epoch
+    stale_epoch
+        || (stale_version
+            && (result.access_token.is_empty() || current.access_token() != result.access_token))
 }
 
 /// `t` plus `d`, saturating at the latest time chrono can hold.

@@ -3,7 +3,7 @@
 // executeStreamMixedOnce and their helpers), conductor_stream.go,
 // sanitizeDownstreamWebsocketFallbackRequest in conductor_home_execution.go,
 // and filterExecutionModels, nextModelPoolOffset and the force-mapped
-// response rewrites in conductor_models.go (v8.0.36, MIT).
+// response rewrites in conductor_models.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Running a call: pick a credential, call its executor, record the outcome,
@@ -409,6 +409,7 @@ fn failure_result(
         credential_scope: credential_scope && is_credential_scoped_error(ErrView::Exec(err)),
         response_headers: err.headers.clone(),
         credential_version: auth.credential_version,
+        access_token: auth.access_token().to_owned(),
         registration_epoch: auth.registration_epoch,
         execution_seq: attempt.execution_seq,
         ..CallResult::default()
@@ -1024,6 +1025,7 @@ impl Manager {
                                 // A token count says nothing of the quota.
                                 skip_quota_observation: kind == CallKind::CountTokens,
                                 credential_version: auth.credential_version,
+                                access_token: auth.access_token().to_owned(),
                                 registration_epoch: auth.registration_epoch,
                                 execution_seq: attempt.execution_seq,
                                 ..CallResult::default()
@@ -1390,6 +1392,7 @@ impl Manager {
                             error: Some(result_error_from_error(ErrView::Exec(&empty))),
                             response_headers: headers.clone(),
                             credential_version: auth.credential_version,
+                            access_token: auth.access_token().to_owned(),
                             registration_epoch: auth.registration_epoch,
                             execution_seq: attempt.execution_seq,
                             ..CallResult::default()
@@ -1522,6 +1525,7 @@ impl Manager {
                             success: true,
                             response_headers: forwarder.headers.clone(),
                             credential_version: forwarder.auth.credential_version,
+                            access_token: forwarder.auth.access_token().to_owned(),
                             registration_epoch: forwarder.auth.registration_epoch,
                             execution_seq: forwarder.execution_seq,
                             ..CallResult::default()
