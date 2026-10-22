@@ -632,6 +632,7 @@ func inspectSignature(in input) []byte {
 		WithoutPrefix  string                                     `json:"without_prefix"`
 		Claude         claudeReport                               `json:"claude"`
 		Gemini         geminiReport                               `json:"gemini"`
+		Meta           any                                        `json:"meta"`
 		GPT            any                                        `json:"gpt"`
 		Grok           any                                        `json:"grok"`
 		Kimi           any                                        `json:"kimi"`
@@ -667,6 +668,7 @@ func inspectSignature(in input) []byte {
 				return signature.GeminiReplaySignatureOrBypass(raw, kind)
 			}),
 		},
+		Meta:          fallible(signature.InspectMetaReasoningSignature(raw)),
 		GPT:           fallible(signature.InspectGPTReasoningSignature(raw)),
 		Grok:          fallible(signature.InspectGrokEncryptedContent(raw)),
 		Kimi:          fallible(signature.InspectKimiThinkingSignature(raw)),

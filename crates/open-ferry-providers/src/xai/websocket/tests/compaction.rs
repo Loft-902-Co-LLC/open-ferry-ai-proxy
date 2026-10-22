@@ -266,7 +266,8 @@ async fn compaction_trigger_needs_context_and_a_compaction() {
 async fn compaction_trigger_has_the_key_redacted() {
     const KEY: &str = "xai-review-fake-key-0123";
     let said = format!("your key is {KEY}");
-    let compact = json!({"id": "resp_compact_secret", "output": [{"type": "compaction", "encrypted_content": "ZW5jcnlwdGVk", "summary": said}]}).to_string();
+    let encrypted = grok_content(73);
+    let compact = json!({"id": "resp_compact_secret", "output": [{"type": "compaction", "encrypted_content": encrypted, "summary": said}]}).to_string();
     let server = Server::start(move |n| {
         if n == 0 {
             return compact_answer(&compact);
@@ -302,7 +303,7 @@ async fn compaction_trigger_has_the_key_redacted() {
         format!("your key is {REDACTED}"),
         "{done}"
     );
-    assert_eq!(done["item"]["encrypted_content"], "ZW5jcnlwdGVk", "{done}");
+    assert_eq!(done["item"]["encrypted_content"], encrypted, "{done}");
 
     streamed(
         &executor,
@@ -314,6 +315,7 @@ async fn compaction_trigger_has_the_key_redacted() {
     let next = super::message(&server, 0);
     assert_eq!(next["input"][0]["type"], "compaction", "{next}");
     assert_eq!(next["input"][0]["summary"], said, "{next}");
+    assert_eq!(next["input"][0]["encrypted_content"], encrypted, "{next}");
     executor.close_execution_session(session);
 }
 

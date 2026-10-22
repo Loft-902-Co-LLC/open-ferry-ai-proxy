@@ -2,7 +2,7 @@
 // (OpenAICompatExecutor: Execute, ExecuteStream, CountTokens, Refresh,
 // applyPromptCacheKey, resolveCredentials, resolveCompatConfig),
 // helps/payload_helpers.go (PayloadRequestedModel) and
-// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.32, MIT).
+// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`OpenAiCompatExecutor`], which calls a provider configured under
@@ -89,7 +89,7 @@ use super::tool_results::{normalize_tool_results_text_only, should_normalize_too
 use crate::apply_patch_responses;
 use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_body_prefix};
 use crate::codex::compat;
-use crate::codex::reasoning::sanitize_reasoning;
+
 use crate::codex::request::{
     base_model, original_request, parse_object, response_format, set_bool_if_different,
     set_string_if_different,
@@ -238,16 +238,19 @@ impl OpenAiCompatExecutor {
             (Format::OPENAI, "/chat/completions", options.stream)
         };
         let base = base_model(&request.model);
+        let signature_target =
+            crate::codex::reasoning::resolve_target_model(base, requested_model(request, options));
         let payload = parse_object(&request.payload);
         let mut prepared = payload.clone();
         compat::before_translation(Some(&self.config), options, &to, &mut prepared);
         let mut body = Registry::global().translate_request_checked(
             &options.source_format,
             &to,
-            base,
+            signature_target,
             prepared,
             translate_stream,
         )?;
+        set_string_if_different(&mut body, "model", base);
         self.apply_thinking(&mut body, request, options, &to)?;
 
         let compat = self.compat_config(auth);
@@ -266,7 +269,12 @@ impl OpenAiCompatExecutor {
             set_bool_if_different(&mut body, "stream_options.include_usage", true);
         } else if compact {
             delete(&mut body, "stream");
-            sanitize_reasoning(&mut body, false);
+            crate::codex::reasoning::sanitize_reasoning_for_destination(
+                &mut body,
+                true,
+                crate::codex::reasoning::resolve_target_model(base, requested),
+                base_url,
+            );
         }
         // The rules see the body as it is sent.
         let target = payload::Target {

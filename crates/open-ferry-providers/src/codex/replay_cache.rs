@@ -2,7 +2,7 @@
 // (AppendCodexReasoningReplayItemsBestEffort,
 // CacheCodexReasoningReplayItemsBestEffort, GetCodexReasoningReplayItems,
 // GetCodexReasoningReplayItem, DeleteCodexReasoningReplayItem and their
-// helpers) (v8.0.32, MIT).
+// helpers) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The reasoning replay cache: the reasoning items and tool calls of a
@@ -366,7 +366,10 @@ fn normalize_reasoning(item: &Value) -> Option<Value> {
     let Some(Value::String(encrypted)) = item.get("encrypted_content") else {
         return None;
     };
-    if encrypted.trim() != encrypted || inspect_gpt_reasoning_signature(encrypted).is_err() {
+    if encrypted.trim() != encrypted
+        || (inspect_gpt_reasoning_signature(encrypted).is_err()
+            && !open_ferry_translate::signature::is_valid_meta_reasoning_signature(encrypted))
+    {
         return None;
     }
     let mut reasoning = Map::new();
@@ -671,5 +674,22 @@ pub(crate) mod tests {
         let items = cache.get_at("m", "kept", much_later).unwrap();
         assert_eq!(str_at(&items[0], "id"), "two");
         assert_eq!(items.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod meta_signature_tests {
+    use super::*;
+    #[test]
+    fn normalizes_only_structurally_valid_native_or_routed_meta_reasoning() {
+        let native = format!("Q-PaDgE{}", "A".repeat(1419));
+        for sig in [&native, &format!("{native}.Router123")] {
+            let item = serde_json::json!({"type":"reasoning","encrypted_content":sig,"id":"drop","summary":[{"text":"drop"}]});
+            let saved = normalize_reasoning(&item).unwrap();
+            assert_eq!(saved["encrypted_content"], *sig);
+            assert!(saved.get("id").is_none());
+            assert_eq!(saved["summary"], serde_json::json!([]));
+        }
+        assert!(normalize_reasoning(&serde_json::json!({"encrypted_content":"opaque"})).is_none());
     }
 }
