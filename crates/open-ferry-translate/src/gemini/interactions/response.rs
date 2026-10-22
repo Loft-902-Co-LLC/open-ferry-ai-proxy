@@ -121,7 +121,12 @@ impl GeminiToInteractionsStream {
     /// The events for one Gemini chunk, each a whole SSE frame.
     pub fn translate(&mut self, chunk: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
-        if go::trim_space(chunk) == b"[DONE]" {
+        // Vertex passes raw SSE lines; AI Studio passes the JSON payload.
+        let chunk = go::trim_space(chunk.strip_prefix(b"data:").unwrap_or(chunk));
+        if chunk.is_empty() || chunk.starts_with(b"event:") {
+            return out;
+        }
+        if chunk == b"[DONE]" {
             if !self.completed {
                 self.stop_step(&mut out);
                 self.complete(&mut out, None);

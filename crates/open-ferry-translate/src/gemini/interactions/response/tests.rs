@@ -655,8 +655,8 @@ fn masked_frames(frames: &[String]) -> String {
         .collect()
 }
 
-// Not upstream's: a whole Gemini stream, checked against upstream's output.
-// A chunk with an SSE `data:` prefix isn't JSON, so it has no parts.
+// Not upstream's: a whole Gemini stream. Unlike upstream, the raw SSE chunk
+// delivers its text and signature too (the Vertex bridge deviation).
 #[test]
 fn whole_gemini_stream() {
     let out = gemini_stream(&[
@@ -677,17 +677,29 @@ data: {"index":0,"delta":{"content":{"text":"plan","type":"text"},"type":"though
         r#"event: step.stop
 data: {"index":0,"event_type":"step.stop"}"#,
         r#"event: step.start
-data: {"index":1,"step":{"type":"function_call","id":"step_*","name":"f","arguments":{}},"event_type":"step.start"}"#,
+data: {"index":1,"step":{"type":"model_output"},"event_type":"step.start"}"#,
         r#"event: step.delta
-data: {"index":1,"delta":{"arguments":"{\"a\":1}","type":"arguments_delta"},"event_type":"step.delta"}"#,
+data: {"index":1,"delta":{"text":"ok","type":"text"},"event_type":"step.delta"}"#,
         r#"event: step.stop
 data: {"index":1,"event_type":"step.stop"}"#,
         r#"event: step.start
-data: {"index":2,"step":{"type":"function_result"},"event_type":"step.start"}"#,
+data: {"index":2,"step":{"type":"thought"},"event_type":"step.start"}"#,
         r#"event: step.delta
-data: {"index":2,"delta":{"type":"function_result","name":"f","result":{"r":2}},"event_type":"step.delta"}"#,
+data: {"index":2,"delta":{"signature":"s1","type":"thought_signature"},"event_type":"step.delta"}"#,
         r#"event: step.stop
 data: {"index":2,"event_type":"step.stop"}"#,
+        r#"event: step.start
+data: {"index":3,"step":{"type":"function_call","id":"step_*","name":"f","arguments":{}},"event_type":"step.start"}"#,
+        r#"event: step.delta
+data: {"index":3,"delta":{"arguments":"{\"a\":1}","type":"arguments_delta"},"event_type":"step.delta"}"#,
+        r#"event: step.stop
+data: {"index":3,"event_type":"step.stop"}"#,
+        r#"event: step.start
+data: {"index":4,"step":{"type":"function_result"},"event_type":"step.start"}"#,
+        r#"event: step.delta
+data: {"index":4,"delta":{"type":"function_result","name":"f","result":{"r":2}},"event_type":"step.delta"}"#,
+        r#"event: step.stop
+data: {"index":4,"event_type":"step.stop"}"#,
         r#"event: interaction.completed
 data: {"interaction":{"id":"interaction_*","status":"completed","usage":{"total_tokens":9,"total_input_tokens":3,"input_tokens_by_modality":[{"modality":"text","tokens":3}],"total_cached_tokens":1,"total_output_tokens":4,"total_tool_use_tokens":0,"total_thought_tokens":2},"created":"*","updated":"*","service_tier":"standard","object":"interaction","model":"gemini-3.5-flash"},"event_type":"interaction.completed"}"#,
         "event: done\ndata: [DONE]",
@@ -866,4 +878,58 @@ fn function_result_text_keeps_its_numbers() {
     )
     .unwrap();
     assert_eq!(result.to_string(), spelled, "{out}");
+}
+
+// Pin the interaction and call IDs. Step IDs aren't exposed for text/thoughts.
+// Retry across a clock-second boundary so even completion timestamps compare
+// byte for byte, without masking or changing the translator's production clock.
+#[test]
+fn gemini_stream_bare_json_and_sse_are_byte_identical() {
+    let chunks = [
+        r#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_fixed","name":"weather","args":{"city":"Chicago"}}}]},"finishReason":"STOP"}]}"#,
+        r#"{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"totalTokenCount":15}}"#,
+        "[DONE]",
+        "[DONE]",
+    ];
+    for _ in 0..10 {
+        let before = unix_nanos().div_euclid(1_000_000_000);
+        let mut bare = GeminiToInteractionsStream::new(MODEL);
+        let mut sse = GeminiToInteractionsStream::new(MODEL);
+        bare.id = "interaction_fixed".into();
+        sse.id.clone_from(&bare.id);
+        let pairs: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    bare.translate(chunk.as_bytes()),
+                    sse.translate(format!("data: {chunk}\r\n").as_bytes()),
+                )
+            })
+            .collect();
+        if before != unix_nanos().div_euclid(1_000_000_000) {
+            continue;
+        }
+        for (index, (bare, sse)) in pairs.iter().enumerate() {
+            assert_eq!(bare, sse, "chunk {index}");
+        }
+        assert!(pairs[3].0.concat().contains("\"total_tokens\":15"));
+        assert!(pairs[4].0.concat().contains("data: [DONE]"));
+        return;
+    }
+    panic!("clock crossed a second in every comparison");
+}
+
+#[test]
+fn gemini_stream_ignores_sse_noise_and_accepts_data_done() {
+    let mut stream = GeminiToInteractionsStream::new(MODEL);
+    for line in ["", " \r\n", "event: message", "data: \t"] {
+        assert!(stream.translate(line.as_bytes()).is_empty(), "{line:?}");
+        assert!(!stream.started);
+    }
+    let events = stream.translate(b"data: [DONE]");
+    assert_eq!(count(&events, "interaction.completed"), 1);
+    assert_eq!(count(&events, "done"), 1);
+    assert!(stream.translate(b"data: [DONE]").is_empty());
 }

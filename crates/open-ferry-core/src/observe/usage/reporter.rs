@@ -109,12 +109,12 @@
 //! - Gemini stream lines are read without upstream's
 //!   `FilterSSEUsageMetadata`, which only drops usage from lines before
 //!   the last.
-//! - A Gemini Interactions stream is read line by line, where upstream
-//!   reads each SSE frame's `data:` lines joined: an event whose JSON is
-//!   split over several `data:` lines gives no counts. Its calls that the
-//!   executor hands to the Gemini executor, for a client format it doesn't
-//!   send natively or a credential that isn't `gemini-interactions`, are
-//!   recorded as `gemini`'s.
+//! - Native Gemini and Vertex AI Interactions streams use the Interactions
+//!   parser line by line, where upstream joins each SSE frame's `data:`
+//!   lines: JSON split over several `data:` lines gives no counts. The
+//!   attempt's upstream format selects Vertex's parser, preserving its
+//!   `vertex` provider name; its Gemini bridge uses the Gemini parser.
+//!   Calls delegated to the Gemini executor are recorded as `gemini`'s.
 //! - `reasoning_effort` is always empty: upstream reads it from the
 //!   translated request, which the tap doesn't see.
 //! - A failure's body is the error's text, scrubbed of every secret the
@@ -391,6 +391,12 @@ impl Mode {
             // open-ferry's `claude-cli` answers in Claude's events.
             ("claude" | "claude-cli", AttemptKind::Execute) => Self::ClaudeExecute,
             ("claude" | "claude-cli", AttemptKind::Stream) => Self::ClaudeStream,
+            ("vertex", AttemptKind::Execute) if *format == Format::INTERACTIONS => {
+                Self::InteractionsExecute
+            }
+            ("vertex", AttemptKind::Stream) if *format == Format::INTERACTIONS => {
+                Self::InteractionsStream
+            }
             ("gemini" | "vertex", AttemptKind::Execute) => Self::GeminiExecute,
             ("gemini" | "vertex", AttemptKind::Stream) => Self::GeminiStream,
             ("gemini-interactions", AttemptKind::Execute) => Self::InteractionsExecute,
@@ -398,6 +404,11 @@ impl Mode {
             (_, AttemptKind::Execute) => Self::OpenAiExecute,
             (_, AttemptKind::Stream) => Self::OpenAiStream,
         }
+    }
+
+    /// Whether cancellation depends on a terminal returned by the stream.
+    fn tracks_gemini_terminal(self, provider: &str) -> bool {
+        self == Self::GeminiStream || (self == Self::InteractionsStream && provider == "vertex")
     }
 
     /// Whether the answer is read whole, when the call completes.
@@ -1337,10 +1348,14 @@ impl Call {
                 ))
             }
             (Mode::ClaudeStream, _) => self.buffered().map(success),
-            (Mode::GeminiStream, Outcome::Canceled) if !self.terminal_delivered => Some(failure(
-                self.buffered().unwrap_or_default(),
-                Failure::canceled(),
-            )),
+            (mode, Outcome::Canceled)
+                if mode.tracks_gemini_terminal(&self.provider) && !self.terminal_delivered =>
+            {
+                Some(failure(
+                    self.buffered().unwrap_or_default(),
+                    Failure::canceled(),
+                ))
+            }
             (
                 Mode::GeminiStream | Mode::InteractionsStream | Mode::OpenAiStream,
                 Outcome::Failed,
@@ -1647,7 +1662,7 @@ impl Tap for UsageTap {
 
     fn stream_chunk(&self, chunk: &bytes::Bytes) {
         if let Some(call) = self.lock().call.as_mut()
-            && call.mode == Mode::GeminiStream
+            && call.mode.tracks_gemini_terminal(&call.provider)
             && !call.terminal_delivered
         {
             call.terminal_delivered = is_terminal_chunk(chunk);
