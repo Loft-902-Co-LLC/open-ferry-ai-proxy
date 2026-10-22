@@ -318,6 +318,8 @@ The opt-in `client.codex.web-search-result-cache` keeps Claude native search res
 for Responses history in process, scoped by the client's named session, caller and
 selected upstream credential. Expiry is checked on access; no Home KV is used.
 
+Upstream's Gemini-to-Interactions stream translator reads only bare JSON, so its Vertex AI bridge loses every SSE chunk's content and usage. open-ferry accepts `data:` lines as its other Gemini-source translators do, including `[DONE]`, and ignores blank and `event:` lines.
+
 ### Session affinity
 
 With `routing.session-affinity` on, a conversation stays on the credential that served it, so its prompt cache stays warm (`manager::affinity`, from `SessionAffinitySelector` in `sdk/cliproxy/auth/selector.go` and `session_cache.go`, and `session`, from `sdk/cliproxy/session`):

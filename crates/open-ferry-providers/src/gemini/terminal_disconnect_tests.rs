@@ -235,12 +235,8 @@ async fn check(
 async fn run(provider: &str, model: &str, format: &Format, case: Case) {
     let label = format!("{provider}/{model}/{format:?}/{}", case.name);
     let mut reply = Reply::sse(&case.body());
-    // Claude needs EOF for message_stop. Vertex's Gemini-to-Interactions
-    // bridge passes raw SSE lines to a JSON-only translator, so its terminal
-    // likewise comes only from the final [DONE]. Test that existing behavior
-    // by allowing EOF and dropping before polling the translated stream end.
-    let needs_eof =
-        *format == Format::CLAUDE || (*format == Format::INTERACTIONS && provider != "gemini");
+    // Claude needs EOF for message_stop; Interactions completes on finish plus usage.
+    let needs_eof = *format == Format::CLAUDE;
     if !case.cancel_on.is_empty() && !needs_eof {
         reply = reply.hold_open();
     }
@@ -380,14 +376,19 @@ async fn vertex_native_interactions_terminal_disconnect_usage() {
                 };
                 let usage =
                     json!({"total_input_tokens":11,"total_output_tokens":4,"total_tokens":15});
-                let mut data =
-                    json!({"interaction":{"id":"native", "status":"completed", "usage":usage}});
+                let final_usage =
+                    json!({"total_input_tokens":21,"total_output_tokens":8,"total_tokens":29});
+                let mut data = json!({"interaction":{"id":"native", "status":"completed", "usage":final_usage}});
                 if matches!(kind, "event_type" | "type") {
                     data[kind] = name.into();
                 }
-                let frames = format!(
+                let mut frames = format!(
                     "event: interaction.created\ndata: {{\"event_type\":\"interaction.created\",\"interaction\":{{\"id\":\"native\",\"status\":\"in_progress\",\"usage\":{usage}}}}}\n\nevent: {name}\ndata: {data}\n\n"
                 );
+                if before_terminal {
+                    // No terminal or later counts have been read on this connection.
+                    frames.truncate(frames.find("\n\n").unwrap() + 2);
+                }
                 let mock = Mock::answering(move |seen| {
                     if seen.path == "/token" {
                         Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
@@ -438,9 +439,22 @@ async fn vertex_native_interactions_terminal_disconnect_usage() {
                 let event = records.try_recv().unwrap();
                 assert_eq!(event.failed, failed, "{label}: {event:?}");
                 assert_eq!(event.status, if failed { 499 } else { 200 }, "{label}");
-                // Existing Mode::GeminiStream reads Gemini usageMetadata only;
-                // native Interactions usage parsing is a separate pre-existing gap.
-                assert_eq!(event.total_tokens, 0, "{label}");
+                assert_eq!(event.provider, "vertex", "{label}");
+                assert_eq!(
+                    event.tokens.input.total_tokens,
+                    if before_terminal { 11 } else { 21 },
+                    "{label}"
+                );
+                assert_eq!(
+                    event.tokens.output.total_tokens,
+                    if before_terminal { 4 } else { 8 },
+                    "{label}"
+                );
+                assert_eq!(
+                    event.total_tokens,
+                    if before_terminal { 15 } else { 29 },
+                    "{label}"
+                );
                 assert!(records.try_recv().is_err(), "{label}: duplicate record");
                 assert!(mock.last().path.ends_with("/interactions"), "{label}");
             }
@@ -501,5 +515,171 @@ async fn response_failed_then_drop_is_failure() {
         assert!(event.failed, "{provider}: {event:?}");
         assert_eq!(event.status, 502, "{provider}");
         assert!(records.try_recv().is_err(), "{provider}: duplicate record");
+    }
+}
+
+#[tokio::test]
+async fn vertex_bridge_interactions_stream_content_and_usage() {
+    vertex_interactions_content_and_usage(false, true).await;
+}
+
+#[tokio::test]
+async fn vertex_bridge_interactions_execute_content_and_usage() {
+    vertex_interactions_content_and_usage(false, false).await;
+}
+
+#[tokio::test]
+async fn vertex_native_interactions_stream_usage() {
+    vertex_interactions_content_and_usage(true, true).await;
+}
+
+#[tokio::test]
+async fn vertex_native_interactions_execute_usage() {
+    vertex_interactions_content_and_usage(true, false).await;
+}
+
+async fn vertex_interactions_content_and_usage(native: bool, stream: bool) {
+    for provider in ["vertex_api_key", "vertex_service_account"] {
+        let gemini = json!({
+            "responseId":"bridge_content",
+            "candidates":[{"content":{"role":"model","parts":[
+                {"text":"bridge text"},
+                {"thought":true,"text":"bridge thought"},
+                {"functionCall":{"id":"call_weather","name":"weather","args":{"city":"Chicago"}}}
+            ]},"finishReason":"STOP"}],
+            "usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"totalTokenCount":15}
+        });
+        let native_body = json!({"id":"native_counts","status":"completed",
+            "usage":{"total_input_tokens":11,"total_output_tokens":4,"total_tokens":15}});
+        let body = if native { native_body } else { gemini };
+        let reply = if stream {
+            if native {
+                Reply::sse(&format!(
+                    "event: interaction.completed\ndata: {{\"event_type\":\"interaction.completed\",\"interaction\":{body}}}\n\n"
+                ))
+            } else {
+                // Completion must arrive without EOF, including all translated parts.
+                Reply::sse(&format!("event: message\ndata: {body}\n\n")).hold_open()
+            }
+        } else {
+            Reply::json(&body.to_string())
+        };
+        let mock = Mock::answering(move |seen| {
+            if seen.path == "/token" {
+                Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
+            } else {
+                reply.clone()
+            }
+        })
+        .await;
+        let (executor, auth) = executor(provider, &mock);
+        let mut auth = Auth::clone(&auth);
+        if native {
+            auth.metadata.insert("interactions".into(), true.into());
+        }
+        let request = request("gemini-2.5-flash", r#"{"input":"hello"}"#);
+        let mut options = stream_options(&Format::INTERACTIONS);
+        options.original_request = request.payload.clone();
+        let mut config = Config::default();
+        config.usage_statistics_enabled = true;
+        let usage = Usage::new(&config);
+        let (records, _subscription) = usage.observe();
+        let context = Arc::new(RequestContext::new(http::Method::POST, "/test".into()));
+        let tap = usage.tap(&context, &request, &options).unwrap();
+        options.observation = Some(Arc::new(Observation::new(context, vec![tap])));
+        let report = CallReport::start(&options);
+        let mut events = Vec::new();
+        let response_body = if stream {
+            let mut response = report
+                .stream(
+                    executor
+                        .execute_stream(Arc::new(auth), request, options)
+                        .await,
+                )
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(chunk) = response.chunks.next().await {
+                    let chunk = chunk.unwrap();
+                    let text = std::str::from_utf8(&chunk).unwrap();
+                    for line in text.lines().filter_map(|line| line.strip_prefix("data: ")) {
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                            events.push(event);
+                        }
+                    }
+                    if !native && text.contains("event: interaction.completed\n") {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("completion must arrive before EOF for the held-open bridge");
+            drop(response);
+            events
+                .iter()
+                .find(|event| event["event_type"] == "interaction.completed")
+                .unwrap()["interaction"]
+                .clone()
+        } else {
+            let result = executor.execute(Arc::new(auth), request, options).await;
+            report.finish(&result);
+            serde_json::from_slice::<serde_json::Value>(&result.unwrap().payload).unwrap()
+        };
+        assert_eq!(response_body["usage"]["total_tokens"], 15);
+        if !native && stream {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["delta"]["text"] == "bridge text")
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["delta"]["type"] == "thought_summary"
+                        && event["delta"]["content"]["text"] == "bridge thought")
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["step"]["type"] == "function_call"
+                        && event["step"]["name"] == "weather"
+                        && event["step"]["id"] == "call_weather")
+            );
+            let args = events
+                .iter()
+                .find_map(|event| event["delta"]["arguments"].as_str())
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(args).unwrap(),
+                json!({"city":"Chicago"})
+            );
+            assert_eq!(response_body["usage"]["total_input_tokens"], 11);
+            assert_eq!(response_body["usage"]["total_output_tokens"], 4);
+        } else if !native {
+            assert_eq!(
+                response_body["steps"][0]["content"][0]["text"],
+                "bridge text"
+            );
+            assert_eq!(
+                response_body["steps"][1]["content"][0]["text"],
+                "bridge thought"
+            );
+            assert_eq!(response_body["steps"][2]["name"], "weather");
+            assert_eq!(
+                response_body["steps"][2]["arguments"],
+                json!({"city":"Chicago"})
+            );
+        }
+        let event = records.try_recv().unwrap();
+        assert_eq!(event.provider, "vertex");
+        assert!(
+            !event.failed,
+            "{provider}/native={native}/stream={stream}: {event:?}"
+        );
+        assert_eq!(event.status, 200);
+        assert_eq!(event.tokens.input.total_tokens, 11);
+        assert_eq!(event.tokens.output.total_tokens, 4);
+        assert_eq!(event.total_tokens, 15);
+        assert!(records.try_recv().is_err());
+        assert_eq!(mock.last().path.contains("/interactions"), native);
     }
 }
