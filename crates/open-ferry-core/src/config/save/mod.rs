@@ -2124,6 +2124,8 @@ mod block_comment_tests;
 mod null_plugin_tests;
 
 #[cfg(test)]
+mod archive_tests;
+#[cfg(test)]
 mod folded_tests;
 
 #[cfg(test)]
