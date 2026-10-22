@@ -1,4 +1,4 @@
-//! Bind a complete lexical request span to its actual translated output path.
+//! Bind a complete lexical request span to its translated path and byte position.
 use crate::{
     cases::Case,
     raw_json::{self, Raw},
@@ -13,6 +13,21 @@ pub fn bound_span(
     path: &str,
     span: &str,
     text: &str,
+    position: usize,
+) -> bool {
+    bound_span_replaying(case, baseline, path, span, text, position, |changed| {
+        translator.run_rust(changed)
+    })
+}
+
+fn bound_span_replaying(
+    case: &Case,
+    baseline: &Value,
+    path: &str,
+    span: &str,
+    text: &str,
+    position: usize,
+    mut replay: impl FnMut(&Case) -> Result<Value, String>,
 ) -> bool {
     if baseline.pointer(path).and_then(Value::as_str) != Some(text) {
         return false;
@@ -59,24 +74,53 @@ pub fn bound_span(
         }
         let mut changed = case.clone();
         changed.request.replace_range(at..at + span.len(), &probe);
-        let Ok(output) = translator.run_rust(&changed) else {
+        let Ok(output) = replay(&changed) else {
             continue;
         };
         let Some(output) = output.pointer(path).and_then(Value::as_str) else {
             continue;
         };
-        if text.replace(&compact, &probe) == output {
+        if changed_occurrences(text, output, &compact, &probe)
+            .is_some_and(|positions| positions.contains(&position))
+        {
             return true;
-        }
-        for (i, _) in text.match_indices(&compact) {
-            let mut expected = text.to_owned();
-            expected.replace_range(i..i + compact.len(), &probe);
-            if expected == output {
-                return true;
-            }
         }
     }
     false
+}
+/// Exact replacements only, with positions in the unreplayed Rust string.
+/// A copied source node may witness several positions, but never an unchanged
+/// equal occurrence. Marker uniqueness makes this byte alignment unambiguous.
+fn changed_occurrences(
+    text: &str,
+    replayed: &str,
+    compact: &str,
+    probe: &str,
+) -> Option<std::collections::BTreeSet<usize>> {
+    if compact.is_empty() || compact == probe || text.contains(probe) {
+        return None;
+    }
+    let (a, b, c, p) = (
+        text.as_bytes(),
+        replayed.as_bytes(),
+        compact.as_bytes(),
+        probe.as_bytes(),
+    );
+    let (mut i, mut j) = (0, 0);
+    let mut changed = std::collections::BTreeSet::new();
+    while i < a.len() {
+        if a[i..].starts_with(c) && b.get(j..).is_some_and(|s| s.starts_with(p)) {
+            changed.insert(i);
+            i += c.len();
+            j += p.len();
+        } else if a.get(i) == b.get(j) {
+            i += 1;
+            j += 1;
+        } else {
+            return None;
+        }
+    }
+    (j == b.len() && !changed.is_empty()).then_some(changed)
 }
 
 #[cfg(test)]
@@ -103,7 +147,8 @@ mod tests {
             &output,
             path,
             r#"{ "a": 1 }"#,
-            r#"{"a":1}"#
+            r#"{"a":1}"#,
+            0
         ));
         assert!(!bound_span(
             translator,
@@ -111,15 +156,17 @@ mod tests {
             &baseline,
             path,
             r#"{ "a": 1 }"#,
-            text
+            text,
+            0
         ));
         let mut compacted = baseline.clone();
         compacted
             .pointer_mut(path)
             .unwrap()
             .clone_from(&json!(r#"{"a":1}"#));
-        let witness =
-            |p: &str, s: &str, t: &str| bound_span(translator, &case, &compacted, p, s, t);
+        let witness = |p: &str, s: &str, t: &str, at: usize| {
+            bound_span(translator, &case, &compacted, p, s, t, at)
+        };
         let cmp = crate::compare::compare_numbers_with_witness(
             &baseline,
             &compacted,
@@ -141,7 +188,11 @@ mod tests {
             &baseline,
             path,
             r#"{ "a": 1 }"#,
-            r#"{"a":1}"#
+            r#"{"a":1}"#,
+            0
         ));
     }
 }
+
+#[cfg(test)]
+mod occurrence_tests;

@@ -1213,8 +1213,8 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
 
     let outcome = match (&go_value, compared) {
         (Some(go), Ok(rust)) => {
-            let witness = |path: &str, span: &str, text: &str| {
-                request_witness::bound_span(translator, case, rust, path, span, text)
+            let witness = |path: &str, span: &str, text: &str, at: usize| {
+                request_witness::bound_span(translator, case, rust, path, span, text, at)
             };
             let mut comparison = compare::compare_numbers_with_witness(
                 go,
@@ -1224,7 +1224,7 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
                 translator.embedded_json_request_source(case),
                 translator
                     .embedded_json_request_source(case)
-                    .map(|_| &witness as &dyn Fn(&str, &str, &str) -> bool),
+                    .map(|_| &witness as &dyn Fn(&str, &str, &str, usize) -> bool),
             );
             comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {
