@@ -45,6 +45,9 @@ pub enum Deviation {
     /// Upstream lost a source plugin scalar into a comment; our complete
     /// plugin value and its comments are retained, with all other bytes equal.
     UpstreamLossyPluginReencode,
+    /// Upstream fails on a hazardous scalar; quoting only the writer's
+    /// protected scalars makes Go match, and leaves every Rust output identical.
+    UpstreamBlockScalarCounterfactual,
     /// Our reload log has a change line for a setting upstream reloads
     /// without one; upstream logs nothing for it.
     UnloggedChangeLine,
@@ -65,6 +68,7 @@ impl Deviation {
             Self::UnloadableWrite => "unloadable file refused, not written",
             Self::PluginCommentRepeated => "plugin comment written once, not twice",
             Self::UpstreamLossyPluginReencode => "upstream lossy plugin re-encode",
+            Self::UpstreamBlockScalarCounterfactual => "upstream block scalar counterfactual",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
     }

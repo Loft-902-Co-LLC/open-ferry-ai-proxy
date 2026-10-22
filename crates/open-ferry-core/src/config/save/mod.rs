@@ -62,6 +62,9 @@
 
 mod generate;
 mod merge;
+#[cfg(any(feature = "parity", test))]
+#[doc(hidden)]
+pub mod parity;
 pub(crate) use merge::normalize_collection_node_styles;
 mod tree;
 mod v8;
