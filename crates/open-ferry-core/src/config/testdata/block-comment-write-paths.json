@@ -1,0 +1,434 @@
+[
+  {
+    "name": "s1",
+    "op": "save",
+    "source": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\n        - b\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "s1",
+    "op": "migrate",
+    "source": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "plugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n                # own\n                - b\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n"
+  },
+  {
+    "name": "s1",
+    "op": "nested",
+    "source": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\n        - b\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "s1",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n"
+  },
+  {
+    "name": "s1",
+    "op": "raw-v8",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: false\n"
+  },
+  {
+    "name": "s1",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "s1",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "s1",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "save",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list:\n        - template: \"v\" # c1\n# c2\nauth-dir: /x\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "migrate",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - template: \"v\" # c1\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    # c2\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "nested",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list:\n        - template: \"v\" # c1\n# c2\nauth-dir: /x\ndebug: false\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "raw-v8",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - template: \"v\" # c1\n# c2\noauth:\n    auth-dir: /x\nobservability:\n    logs:\n        debug: false\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - template: \"v\" # c1\n# c2\noauth:\n    auth-dir: /x\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - template: \"v\" # c1\n# c2\noauth:\n    auth-dir: /x\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "m1-plugin",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          template: |-\n            v\nauth-dir: /x\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - template: \"v\" # c1\n# c2\noauth:\n    auth-dir: /x\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "save",
+    "source": "pprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "pprof:\n  enable: true\n  list:\n    - template: \"v\" # c1\n# c2\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "migrate",
+    "source": "pprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "credentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        # c2\n        debug: false\n    pprof:\n        enable: true\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# pprof:\n#     list:\n#         - template: \"v\" # c1\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "nested",
+    "source": "pprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "pprof:\n  enable: true\n  list:\n    - template: \"v\" # c1\n# c2\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "raw",
+    "source": "pprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "pprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "raw-v8",
+    "source": "config-version: 8\npprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nobservability:\n    logs:\n        debug: false\n    pprof:\n        enable: true\n\n# pprof:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "put",
+    "source": "config-version: 8\npprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nobservability:\n    logs:\n        debug: true\n    pprof:\n        enable: true\n\n# pprof:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "patch",
+    "source": "config-version: 8\npprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nobservability:\n    logs:\n        debug: true\n    pprof:\n        enable: true\n\n# pprof:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-retained",
+    "op": "delete",
+    "source": "config-version: 8\npprof:\n  enable: true\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nobservability:\n    pprof:\n        enable: true\n\n# pprof:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "save",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - template: \"v\" # c1\n# c2\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "migrate",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "credentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        # c2\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note:\n#     list:\n#         - template: \"v\" # c1\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "nested",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - template: \"v\" # c1\n# c2\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "raw",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "x-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "raw-v8",
+    "source": "config-version: 8\nx-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nobservability:\n    logs:\n        debug: false\n\n# x-note:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "put",
+    "source": "config-version: 8\nx-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nobservability:\n    logs:\n        debug: true\n\n# x-note:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "patch",
+    "source": "config-version: 8\nx-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nobservability:\n    logs:\n        debug: true\n\n# x-note:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-unknown",
+    "op": "delete",
+    "source": "config-version: 8\nx-note:\n  list: &a # c1\n    - &b # c2\n      template: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\n\n# x-note:\n#     list:\n#         - template: \"v\" # c1\n#           # c2\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "save",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list:\n        - # c1\n# c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "migrate",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - # c2\n                  k: first # own\n                  # c1\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n\n# x-note: |-\n#     v\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "nested",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list:\n        - # c1\n# c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "raw-v8",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\nobservability:\n    logs:\n        debug: false\n\n# x-note: |-\n#     v\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\nobservability:\n    logs:\n        debug: true\n\n# x-note: |-\n#     v\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\nobservability:\n    logs:\n        debug: true\n\n# x-note: |-\n#     v\n"
+  },
+  {
+    "name": "m1-escape",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\nx-note: |-\n  v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\n\n# x-note: |-\n#     v\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "save",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list:\n        - # c1\n# c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "migrate",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "plugins:\n    configs:\n        alpha:\n            list:\n                - # c2\n                  k: first # own\n                  # c1\n            k2: |-\n                v\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "nested",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list:\n        - # c1\n# c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "raw-v8",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\n            k2: |-\n                v\nobservability:\n    logs:\n        debug: false\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\n            k2: |-\n                v\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\n            k2: |-\n                v\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "m1-later",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      list: &a # c1\n        - &b # c2\n          k: first # own\n      k2: |-\n        v\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            list:\n                - # c1\n# c2\n                  k: first # own\n            k2: |-\n                v\n"
+  },
+  {
+    "name": "n1",
+    "op": "save",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      template: |-\n         # y\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "n1",
+    "op": "migrate",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "plugins:\n    configs:\n        alpha:\n            template: |-\n                 # y\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n"
+  },
+  {
+    "name": "n1",
+    "op": "nested",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      template: |-\n         # y\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "n1",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      template: |-\n         # y\ndebug: false\n"
+  },
+  {
+    "name": "n1",
+    "op": "raw-v8",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |-\n                 # y\nobservability:\n    logs:\n        debug: false\n"
+  },
+  {
+    "name": "n1",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |-\n                 # y\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "n1",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |-\n                 # y\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "n1",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |-\n        Â # y\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |-\n                 # y\n"
+  },
+  {
+    "name": "preview",
+    "op": "save",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    # note\n    configs:\n        alpha:\n            enabled: true\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "name": "preview",
+    "op": "migrate",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    # note\n    configs:\n        alpha:\n            enabled: true\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "name": "preview",
+    "op": "nested",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n# note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "preview",
+    "op": "raw",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n# note\n    configs:\n        alpha:\n            enabled: true\nobservability:\n    logs:\n        debug: false\n"
+  },
+  {
+    "name": "preview",
+    "op": "raw-v8",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n# note\n    configs:\n        alpha:\n            enabled: true\nobservability:\n    logs:\n        debug: false\n"
+  },
+  {
+    "name": "preview",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n# note\n    configs:\n        alpha:\n            enabled: true\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "preview",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n# note\n    configs:\n        alpha:\n            enabled: true\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "preview",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  # note\n  configs:\n    alpha:\n      enabled: true\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n# note\n    configs:\n        alpha:\n            enabled: true\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "save",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "migrate",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "plugins:\n    configs:\n        alpha:\n            template: |\n                key=value\n                # trailing note\n            other: 1\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\nconfig-version: 8\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "nested",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "raw",
+    "source": "plugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "plugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "raw-v8",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |\n                key=value\n                # trailing note\n            other: 1\nobservability:\n    logs:\n        debug: false\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "put",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |\n                key=value\n                # trailing note\n            other: 1\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "patch",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |\n                key=value\n                # trailing note\n            other: 1\nobservability:\n    logs:\n        debug: true\n"
+  },
+  {
+    "name": "hash-body",
+    "op": "delete",
+    "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      template: |\n        key=value\n        # trailing note\n      other: 1\ndebug: false\n",
+    "file": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            template: |\n                key=value\n                # trailing note\n            other: 1\n"
+  }
+]

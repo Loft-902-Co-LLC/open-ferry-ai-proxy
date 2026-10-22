@@ -33,6 +33,8 @@
 //! UTF-8 (its `writerc.go` writes the buffer out unconverted).
 //!
 //! Deviations from upstream:
+//! - Config tree writers opt into quoting a block scalar when its effective
+//!   line comment has continuation lines, including a pending key comment.
 //! - Indexing is panic-free. Where yaml.v3 would panic or loop forever on
 //!   bytes that aren't UTF-8 (a byte that can't start a character, or a
 //!   character cut off by the end of a value, tag or comment), the emitter
@@ -265,6 +267,9 @@ pub(crate) struct Emitter {
 
     /// A line comment given for a mapping key, kept for its value.
     key_line_comment: Vec<u8>,
+    /// Config writers keep multiline comments out of scalar bodies.
+    pub(crate) protect_block_comments: bool,
+    pub(crate) protected_scalars: Vec<super::types::Mark>,
 }
 
 impl fmt::Debug for Emitter {
@@ -338,6 +343,8 @@ impl Emitter {
             foot_comment: Vec::new(),
             tail_comment: Vec::new(),
             key_line_comment: Vec::new(),
+            protect_block_comments: false,
+            protected_scalars: Vec::new(),
         }
     }
 
@@ -1226,6 +1233,15 @@ impl Emitter {
             style = ScalarStyle::DoubleQuoted;
         }
 
+        // This must run after pending key comments have reached their final
+        // recipient. Looking only at the scalar node misses those comments.
+        if self.protect_block_comments
+            && matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+            && self.line_comment.contains(&b'\n')
+        {
+            style = ScalarStyle::DoubleQuoted;
+            self.protected_scalars.push(event.start_mark);
+        }
         if no_tag && !event.quoted_implicit && style != ScalarStyle::Plain {
             self.tag_data.handle = b"!".to_vec();
         }

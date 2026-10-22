@@ -134,12 +134,50 @@ pub(crate) fn marshal(value: &Value) -> Result<Vec<u8>, YamlError> {
 }
 
 /// A `yaml.Encoder` writing `node` with `SetIndent(indent)`, then closed:
-/// how upstream writes its config file (indent 2).
+/// how upstream writes its config file (indent 2). Config writes also quote
+/// block scalars whose effective line comment would spill into their body.
 pub(crate) fn marshal_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlError> {
+    protected_node(node, indent).map(|(bytes, _)| bytes)
+}
+
+/// Config writer protection, also exposing exactly which source scalars the
+/// emitter quotes for the offline counterfactual proof.
+pub(crate) fn protected_node(
+    node: &Node,
+    indent: usize,
+) -> Result<(Vec<u8>, Vec<super::types::Mark>), YamlError> {
+    let mut node = node.clone();
+    protect_conflicting_key_comments(&mut node);
     let mut encoder = Encoder::new();
+    encoder.emitter.protect_block_comments = true;
     encoder.set_indent(indent);
-    encoder.encode_node(node)?;
-    encoder.close()
+    encoder.encode_node(&node)?;
+    encoder.finish()?;
+    let protected = std::mem::take(&mut encoder.emitter.protected_scalars);
+    Ok((encoder.emitter.into_output(), protected))
+}
+
+/// Keep a multiline key comment on that key when the scalar value already
+/// has its own line comment. yaml.v3 otherwise defers it globally, possibly
+/// into another section or a setting an unrelated edit removes.
+pub(crate) fn protect_conflicting_key_comments(node: &mut Node) {
+    if node.kind == Kind::Mapping {
+        for [key, value] in node.content.as_chunks_mut::<2>().0 {
+            if key.line_comment.contains('\n')
+                && value.kind == Kind::Scalar
+                && !value.line_comment.is_empty()
+            {
+                if !key.head_comment.is_empty() {
+                    key.head_comment.push('\n');
+                }
+                key.head_comment
+                    .push_str(&std::mem::take(&mut key.line_comment));
+            }
+        }
+    }
+    for child in &mut node.content {
+        protect_conflicting_key_comments(child);
+    }
 }
 
 /// yaml.v3's `encoder`, as a `yaml.Encoder` writing to memory.
@@ -344,6 +382,7 @@ impl Encoder {
         event.line_comment = comments.line.as_bytes().to_vec();
         event.foot_comment = comments.foot.as_bytes().to_vec();
         event.tail_comment = comments.tail.as_bytes().to_vec();
+        event.start_mark = comments.mark;
         self.emit(event)
     }
 
@@ -512,6 +551,11 @@ impl Encoder {
                         line: &node.line_comment,
                         foot,
                         tail,
+                        mark: super::types::Mark {
+                            index: 0,
+                            line: node.line.saturating_sub(1),
+                            column: node.column.saturating_sub(1),
+                        },
                     },
                 )
             }
@@ -523,6 +567,7 @@ impl Encoder {
 /// The comments `emitScalar` puts on a scalar event.
 #[derive(Clone, Copy, Default)]
 struct Comments<'a> {
+    mark: super::types::Mark,
     head: &'a str,
     line: &'a str,
     foot: &'a str,

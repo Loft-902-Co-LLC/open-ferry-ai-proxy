@@ -265,7 +265,8 @@ pub fn edit_v8_if(
 /// same checks, written nowhere. Not upstream's: `open-ferry config` shows
 /// what a change would make before it makes it.
 pub fn preview_v8(data: &[u8], edit: &V8Edit) -> Result<Vec<u8>, V8EditError> {
-    render(data, edit).map(|(data, _)| data)
+    let (data, _) = render(data, edit)?;
+    save::render_write_file(&data).map_err(|error| V8EditError::WriteFailed(error.to_string()))
 }
 
 /// The bytes [`edit_v8`] writes for the file `data`, and the config they

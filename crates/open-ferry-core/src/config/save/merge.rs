@@ -52,8 +52,10 @@
 //!   the list's key), and `preserveV8Comments` then puts the file's comments
 //!   back on their keys, so upstream writes such a comment twice in a row.
 //!   It is written once here.
-//!   Retained plugin block scalars are quoted when multiline line comments
-//!   or hash-prefixed content would be damaged by comment normalization.
+//!   All config tree writers quote block scalars whose effective multiline
+//!   line comment (including one pending from a key) would enter their body.
+//!   Comment normalization leaves scalar body lines in their block style.
+//!   Conflicting multiline key comments stay with that key as head comments.
 //!   Pending plugin line comments can also reach a new generated `auth-dir`
 //!   and a later original key. Go restores the original plugin key's comment
 //!   after replacement, so it writes both copies too; those outputs match.

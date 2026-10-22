@@ -69,7 +69,16 @@ mod tests {
             "../cases/testdata/config-save-counterfactual.json"
         ))
         .unwrap();
-        for fixture in fixtures.as_array().unwrap() {
+        let pending: Value = serde_json::from_str(include_str!(
+            "../cases/testdata/config-save-pending-key-counterfactual.json"
+        ))
+        .unwrap();
+        for fixture in fixtures
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(pending.as_array().unwrap())
+        {
             let case = Case::new(fixture["case"].as_str().unwrap(), "", "")
                 .with_options(fixture["options"].clone());
             let candidate = rewritten(&case).unwrap();

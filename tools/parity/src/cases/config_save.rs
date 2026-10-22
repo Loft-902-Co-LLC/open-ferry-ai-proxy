@@ -915,24 +915,27 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             vec![write(&uncommented)],
         ),
     ]);
-    cases.extend(
-        serde_json::from_str::<Vec<Value>>(include_str!(
-            "testdata/config-save-counterfactual.json"
-        ))
-        .unwrap()
-        .into_iter()
-        .map(|fixture| {
-            Case::new(
-                format!(
-                    "upstream-block-scalar-{}",
-                    fixture["case"].as_str().unwrap()
-                ),
-                "",
-                "",
-            )
-            .with_options(fixture["options"].clone())
-        }),
-    );
+    for fixtures in [
+        include_str!("testdata/config-save-counterfactual.json"),
+        include_str!("testdata/config-save-pending-key-counterfactual.json"),
+    ] {
+        cases.extend(
+            serde_json::from_str::<Vec<Value>>(fixtures)
+                .unwrap()
+                .into_iter()
+                .map(|fixture| {
+                    Case::new(
+                        format!(
+                            "upstream-block-scalar-{}",
+                            fixture["case"].as_str().unwrap()
+                        ),
+                        "",
+                        "",
+                    )
+                    .with_options(fixture["options"].clone())
+                }),
+        );
+    }
     cases
 }
 
