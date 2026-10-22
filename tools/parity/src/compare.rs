@@ -57,6 +57,12 @@ pub enum Deviation {
     /// Our reload log has a change line for a setting upstream reloads
     /// without one; upstream logs nothing for it.
     UnloggedChangeLine,
+    RetainedUpstreamEmptyMappingComment,
+    RetainedCanonicalVersionComment,
+    RetainedDroppedKeyComment,
+    RetainedInlineEmptyNullComment,
+    RetainedEffectiveBlockScalarComment,
+    RetainedBlockScalarCommentIndentation,
 }
 
 impl Deviation {
@@ -78,6 +84,14 @@ impl Deviation {
             Self::UpstreamArchivedScalarCounterfactual => "upstream archived scalar counterfactual",
             Self::UpstreamFoldedScalarReencode => "upstream folded scalar re-encode",
             Self::UpstreamVersionCommentLoss => "upstream config version comment loss",
+            Self::RetainedUpstreamEmptyMappingComment => "retained upstream empty mapping comment",
+            Self::RetainedCanonicalVersionComment => "retained canonical version comment",
+            Self::RetainedDroppedKeyComment => "retained dropped key comment",
+            Self::RetainedInlineEmptyNullComment => "retained inline empty-null comment",
+            Self::RetainedBlockScalarCommentIndentation => {
+                "retained block scalar comment indentation"
+            }
+            Self::RetainedEffectiveBlockScalarComment => "retained effective block scalar comment",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
     }

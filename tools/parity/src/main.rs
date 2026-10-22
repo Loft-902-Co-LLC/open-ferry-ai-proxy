@@ -703,6 +703,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         all_match &= tally.different == 0;
         results.push(summary::SuiteResult {
             title: translator.title(),
+            deviations: tally
+                .deviations
+                .iter()
+                .map(|(d, n)| (d.describe(), *n))
+                .collect(),
             cases: cases.len(),
             hand_written,
             identical: tally.identical,
@@ -1005,6 +1010,22 @@ fn evaluate_with_counterfactual(
     {
         save_counterfactual(work_dir, case, &proof.evidence)?;
         evaluated.outcome = Outcome::Equivalent(proof.deviations);
+    }
+    if translator == Translator::ConfigSave
+        && safe_case_name(&case.name)
+        && matches!(evaluated.outcome, Outcome::Different(_))
+        && let Ok(original_go) = serde_json::from_str::<Value>(&evaluated.go_output)
+        && let Ok(rust) = &evaluated.rust_output
+    {
+        let proof = config_save::ablation::certify(case, &original_go, rust, |candidate| {
+            Ok(upstream
+                .run(translator.key(), std::slice::from_ref(candidate), work_dir)?
+                .remove(0))
+        })?;
+        save_counterfactual(work_dir, case, &proof.evidence)?;
+        if let Some(deviations) = proof.deviations {
+            evaluated.outcome = Outcome::Equivalent(deviations);
+        }
     }
     Ok(evaluated)
 }

@@ -31,6 +31,7 @@ pub struct SuiteResult {
     pub upstream_archived_counterfactuals: usize,
     pub upstream_folded_reencodes: usize,
     pub upstream_version_comments: usize,
+    pub deviations: std::collections::BTreeMap<&'static str, usize>,
 }
 
 /// What the run compared against, and how its random cases were made.
@@ -108,6 +109,17 @@ pub fn render(run: &RunInfo<'_>, suites: &[SuiteResult]) -> String {
         "Upstream config version comment loss: {} cases (included in Equivalent).",
         thousands(total(|s| s.upstream_version_comments))
     );
+    let _ = writeln!(out);
+    let mut deviations = std::collections::BTreeMap::new();
+    for suite in suites {
+        for (name, count) in &suite.deviations {
+            *deviations.entry(*name).or_insert(0usize) += count;
+        }
+    }
+    let _ = writeln!(out, "| Deviation | Cases |\n|---|---:|");
+    for (name, count) in deviations {
+        let _ = writeln!(out, "| {name} | {} |", thousands(count));
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "<details>");
     let _ = writeln!(out, "<summary>Each suite</summary>");
@@ -192,6 +204,7 @@ mod tests {
             upstream_archived_counterfactuals: 1,
             upstream_folded_reencodes: 1,
             upstream_version_comments: 1,
+            deviations: std::collections::BTreeMap::new(),
         }
     }
 

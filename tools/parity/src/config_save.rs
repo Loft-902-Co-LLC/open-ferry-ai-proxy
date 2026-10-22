@@ -2,6 +2,7 @@
 //! written to a temporary directory, then each step run on it with
 //! `open_ferry_core::config::save` (see `go/parity_config_save.go`).
 
+pub mod ablation;
 pub mod counterfactual;
 pub mod folded;
 pub mod version;

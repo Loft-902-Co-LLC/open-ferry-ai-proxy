@@ -104,6 +104,28 @@ impl Upstream {
                 source.to_string_lossy().into_owned().into(),
             );
         }
+        // Observe exact rejected intermediate inputs without changing either
+        // yaml.v3 or the read-only snapshot. Each wrapper calls the original
+        // Unmarshal once and returns its error unchanged.
+        for name in ["config_yaml.go", "config_v8.go"] {
+            let original_path = dir.join("internal/config").join(name);
+            let original = fs::read_to_string(&original_path)?;
+            let traced = original.replace("yaml.Unmarshal(", "parityUnmarshal(");
+            let copy = std::path::absolute(work_dir.join(format!("trace-{name}")))?;
+            fs::write(&copy, traced)?;
+            replace.insert(
+                original_path.to_string_lossy().into_owned(),
+                copy.to_string_lossy().into_owned().into(),
+            );
+        }
+        let trace_file = std::path::absolute(work_dir.join("trace-unmarshal.go"))?;
+        fs::write(&trace_file, include_str!("../go/config/trace.go"))?;
+        replace.insert(
+            dir.join("internal/config/zz_parity_trace.go")
+                .to_string_lossy()
+                .into_owned(),
+            trace_file.to_string_lossy().into_owned().into(),
+        );
         let overlay = work_dir.join("overlay.json");
         fs::write(&overlay, json!({ "Replace": replace }).to_string())?;
 
