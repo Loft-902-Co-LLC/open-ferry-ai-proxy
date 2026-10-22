@@ -3,7 +3,7 @@
 // (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Gemini Interactions responses â†’ Claude Messages responses.
+//! Gemini Interactions responses → Claude Messages responses.
 //!
 //! [`InteractionsToClaudeStream`] turns each Interactions stream event into
 //! Claude SSE events, one chunk per event, and
