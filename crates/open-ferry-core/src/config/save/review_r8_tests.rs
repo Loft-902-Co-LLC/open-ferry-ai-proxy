@@ -227,7 +227,8 @@ fn review_r8_generated_node_rebind_uses_the_emitted_comment_position() {
     value.line_comment = "# pending".into();
     value.line_comment_id = Some(id.clone());
     let (bytes, emitted) = encode::marshal_with_comment_ids(&encode::Value::Node(value)).unwrap();
-    let mut parsed = unmarshal(&bytes).unwrap();
+    // This is an intermediate generated emission, not source config text.
+    let mut parsed = compose::unmarshal(&bytes).unwrap();
     assert_ne!(parsed.content[0].line, parsed.content[0].line_comment_line);
     assert_ne!(parsed.content[0].line_comment_id, Some(id.clone()));
     rebind_generated_comments(&mut parsed, &emitted);
@@ -262,6 +263,19 @@ fn review_r8_archive_tag_table_survives_two_writes() {
     ];
     for (name, shape) in cases {
         let source = format!("config-version: 8\n{shape}auth-dir: /old\n");
+        if let Err(error) = unmarshal(source.as_bytes()) {
+            assert_eq!(error.kind(), SaveErrorKind::Unwritable, "{name}");
+            for op in ["raw", "normalize", "put"] {
+                let fixture = serde_json::json!({"source":source,"op":op});
+                let error = super::review_r7_tests::exact_review_output(&fixture).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Unicode line separator; write refused")
+                );
+            }
+            continue;
+        }
         let original = unmarshal(source.as_bytes()).unwrap();
         let original = expand_config_aliases(&original.content[0]).unwrap();
         let expected = scalar_values(yaml_path(&original, "x").unwrap());
