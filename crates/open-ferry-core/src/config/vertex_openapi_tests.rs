@@ -26,7 +26,7 @@ fn yaml(v8: bool, flag: &str) -> String {
 }
 
 #[test]
-fn openapi_load_save_edit_and_clear_in_both_layouts() {
+fn openapi_load_save_and_clear_in_both_layouts() {
     for v8 in [false, true] {
         for enabled in [false, true] {
             let raw = yaml(v8, if enabled { "true" } else { "false" });
@@ -44,6 +44,9 @@ fn openapi_load_save_edit_and_clear_in_both_layouts() {
                 let dir = TempDir::new();
                 let path = dir.write("config.yaml", &raw);
                 save::save_preserving_comments(&path, &cfg, migrate).unwrap();
+                if v8 || migrate {
+                    assert_v8_key_settings_stay_on_keys(&path);
+                }
                 let loaded = Config::load(&path).unwrap();
                 assert_eq!(loaded.vertex_api_key, cfg.vertex_api_key);
                 assert_eq!(loaded.oauth_model_alias, cfg.oauth_model_alias);
@@ -63,26 +66,6 @@ fn openapi_load_save_edit_and_clear_in_both_layouts() {
             assert_eq!(loaded.oauth_settings, cfg.oauth_settings);
         }
     }
-}
-
-#[test]
-fn group_inheritance_and_key_overrides() {
-    let raw = b"config-version: 8\napi-keys:\n  vertex:\n    - openapi: true\n      openapi-location: global\n      models: [{name: partner/model, openapi: false}]\n      keys:\n        - api-key: dummy-one\n        - api-key: dummy-two\n          openapi: false\n          openapi-location: europe-west4\n";
-    let cfg = Config::parse(raw).unwrap();
-    assert_eq!(cfg.vertex_api_key[0].openapi, Some(true));
-    assert_eq!(cfg.vertex_api_key[0].openapi_location, "global");
-    assert_eq!(cfg.vertex_api_key[1].openapi, Some(false));
-    assert_eq!(cfg.vertex_api_key[1].openapi_location, "europe-west4");
-    for key in &cfg.vertex_api_key {
-        assert_eq!(key.models[0].openapi, Some(false));
-    }
-    let dir = TempDir::new();
-    let path = dir.write("config.yaml", std::str::from_utf8(raw).unwrap());
-    save::save_preserving_comments(&path, &cfg, false).unwrap();
-    assert_eq!(
-        Config::load(&path).unwrap().vertex_api_key,
-        cfg.vertex_api_key
-    );
 }
 
 #[test]
@@ -113,4 +96,150 @@ fn changes_and_hashes_distinguish_every_optional_state() {
         previous = cfg;
     }
     assert_eq!(hashes.len(), 3);
+}
+
+#[test]
+fn group_openapi_fields_are_refused_by_both_flatteners() {
+    for (field, value) in [("openapi", "true"), ("openapi-location", "global")] {
+        let raw = format!(
+            "config-version: 8\napi-keys:\n  vertex:\n    - {field}: {value}\n      keys: [{{api-key: dummy}}]\n"
+        );
+        let expected = format!("api-keys.vertex: unsupported group field {field}");
+        assert_eq!(Config::parse(&raw).unwrap_err().to_string(), expected);
+        let doc = save::unmarshal(raw.as_bytes()).unwrap();
+        assert_eq!(
+            save::flatten_v8(&doc.content[0]).unwrap_err().to_string(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn group_openapi_edits_are_refused_without_writing() {
+    use v8_edit::{V8Edit, V8EditError, V8Method, edit_v8};
+    for field in ["openapi", "openapi-location"] {
+        for method in [V8Method::Put, V8Method::Patch] {
+            let dir = TempDir::new();
+            let initial = "config-version: 8\napi-keys: {vertex: [{keys: [{api-key: dummy}]}]}\n";
+            let path = dir.write("config.yaml", initial);
+            let value = if field == "openapi" {
+                serde_json::json!(true)
+            } else {
+                serde_json::json!("global")
+            };
+            let body = serde_json::json!([{(field): value, "keys": [{"api-key": "dummy"}]}]);
+            let error = edit_v8(
+                &path,
+                &V8Edit {
+                    method,
+                    path: vec!["api-keys".into(), "vertex".into()],
+                    body: serde_json::to_vec(&body).unwrap(),
+                    yaml: false,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                V8EditError::Unprocessable(format!(
+                    "api-keys.vertex: unsupported group field {field}"
+                ))
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), initial);
+        }
+    }
+}
+
+fn without_openapi(v8: bool) -> &'static str {
+    if v8 {
+        "config-version: 8\napi-keys: {vertex: [{keys: [{api-key: dummy, models: [{name: custom, alias: public}]}]}]}\noauth:\n  model-alias: {vertex: [{name: custom, alias: public}], codex: [{name: custom, alias: public}]}\n  settings: {vertex: [{name: custom}], codex: [{name: custom}]}\n"
+    } else {
+        "vertex-api-key: [{api-key: dummy, models: [{name: custom, alias: public}]}]\noauth-model-alias: {vertex: [{name: custom, alias: public}], codex: [{name: custom, alias: public}]}\noauth-settings: {vertex: [{name: custom}], codex: [{name: custom}]}\n"
+    }
+}
+
+fn assert_inserted_false(path: &std::path::Path) {
+    let written = std::fs::read_to_string(path).unwrap();
+    assert_eq!(written.matches("openapi: false").count(), 6, "{written}");
+    let cfg = Config::load(path).unwrap();
+    assert_eq!(cfg.vertex_api_key[0].openapi, Some(false));
+    assert_eq!(cfg.vertex_api_key[0].models[0].openapi, Some(false));
+    for channel in ["vertex", "codex"] {
+        assert_eq!(cfg.oauth_model_alias[channel][0].openapi, Some(false));
+        assert_eq!(cfg.oauth_settings[channel][0].openapi, Some(false));
+    }
+}
+
+fn insert_false_with_save(v8: bool) {
+    for migrate in [false, true] {
+        let dir = TempDir::new();
+        let path = dir.write("config.yaml", without_openapi(v8));
+        let mut cfg = Config::load(&path).unwrap();
+        cfg.vertex_api_key[0].openapi = Some(false);
+        cfg.vertex_api_key[0].models[0].openapi = Some(false);
+        for rules in cfg.oauth_model_alias.values_mut() {
+            rules[0].openapi = Some(false);
+        }
+        for rules in cfg.oauth_settings.values_mut() {
+            rules[0].openapi = Some(false);
+        }
+        save::save_preserving_comments(&path, &cfg, migrate).unwrap();
+        assert_inserted_false(&path);
+    }
+}
+
+#[test]
+fn insert_false_in_legacy_save() {
+    insert_false_with_save(false);
+}
+#[test]
+fn insert_false_in_v8_save() {
+    insert_false_with_save(true);
+}
+
+fn insert_false_with_edit(v8: bool) {
+    use v8_edit::{V8Edit, V8Method, edit_v8};
+    for method in [V8Method::Put, V8Method::Patch] {
+        let dir = TempDir::new();
+        let path = dir.write("config.yaml", without_openapi(v8));
+        let body = serde_json::json!({
+            "api-keys": {"vertex": [{"keys": [{"api-key": "dummy", "openapi": false, "models": [{"name": "custom", "alias": "public", "openapi": false}]}]}]},
+            "oauth": {
+                "model-alias": {"vertex": [{"name": "custom", "alias": "public", "openapi": false}], "codex": [{"name": "custom", "alias": "public", "openapi": false}]},
+                "settings": {"vertex": [{"name": "custom", "openapi": false}], "codex": [{"name": "custom", "openapi": false}]}
+            }
+        });
+        edit_v8(
+            &path,
+            &V8Edit {
+                method,
+                path: vec![],
+                body: serde_json::to_vec(&body).unwrap(),
+                yaml: false,
+            },
+        )
+        .unwrap();
+        assert_inserted_false(&path);
+    }
+}
+
+#[test]
+fn insert_false_with_v8_edit_from_legacy() {
+    insert_false_with_edit(false);
+}
+#[test]
+fn insert_false_with_v8_edit_from_v8() {
+    insert_false_with_edit(true);
+}
+
+fn assert_v8_key_settings_stay_on_keys(path: &std::path::Path) {
+    let doc = save::unmarshal(&std::fs::read(path).unwrap()).unwrap();
+    let groups = save::yaml_path(&doc.content[0], "api-keys.vertex").unwrap();
+    for group in &groups.content {
+        assert!(save::yaml_path(group, "openapi").is_none());
+        assert!(save::yaml_path(group, "openapi-location").is_none());
+        for key in &save::yaml_path(group, "keys").unwrap().content {
+            assert!(save::yaml_path(key, "openapi").is_some());
+            assert!(save::yaml_path(key, "openapi-location").is_some());
+        }
+    }
 }

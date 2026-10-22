@@ -29,9 +29,10 @@
 //! - Claude's pointer-backed `inject-diagnostics: false` is preserved when
 //!   newly inserted, including a new parent mapping, as an explicit override.
 //!   Upstream's default-pruning whitelist omits it.
-//! - Vertex's pointer-backed `interactions: false` and `openapi: false` are
-//!   preserved when newly inserted, like the other optional booleans.
-//!   Upstream's default-pruning whitelist omits them, losing explicit false.
+//! - Newly inserted pointer-backed `interactions: false` on Vertex credentials
+//!   and `openapi: false` on Vertex credentials/models and OAuth aliases/settings
+//!   for every channel are preserved. Upstream's key-name whitelist omits them,
+//!   losing explicit false.
 //! - The settings this port doesn't type (see [`UNTYPED`]) are never written
 //!   from the generated tree, which only holds their defaults: the file's
 //!   value is kept as it is, a mapping only gains keys it lacks (through the

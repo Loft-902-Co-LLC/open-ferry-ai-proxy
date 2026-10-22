@@ -534,3 +534,90 @@ async fn full_resource_location_is_preserved_or_rewritten_on_execute_and_stream(
         }
     }
 }
+
+#[test]
+fn bool_shorthand_falls_through_to_the_next_source() {
+    for (raw, model, automatic) in [(" t ", "custom", false), (" F ", "partner/model", true)] {
+        for attribute in [false, true] {
+            let mut auth = Auth::default();
+            if attribute {
+                auth.attributes.insert("openapi".into(), raw.into());
+            } else {
+                auth.metadata.insert("openapi".into(), json!(raw));
+            }
+            assert_eq!(explicit_setting(&auth), None);
+            assert_eq!(should_execute(&auth, model), automatic, "{raw}/{attribute}");
+            auth.attributes.insert("api_key".into(), "dummy".into());
+            let mut cfg = Config::default();
+            cfg.vertex_api_key.push(VertexCompatKey {
+                api_key: "dummy".into(),
+                openapi: Some(automatic),
+                ..Default::default()
+            });
+            assert_eq!(
+                should_execute_request(Some(&cfg), &auth, model, &options(&Format::OPENAI)),
+                automatic
+            );
+            if attribute {
+                auth.metadata.insert("openapi".into(), json!(automatic));
+                cfg.vertex_api_key[0].openapi = Some(!automatic);
+                assert_eq!(
+                    should_execute_request(Some(&cfg), &auth, model, &options(&Format::OPENAI)),
+                    automatic
+                );
+            }
+        }
+    }
+    for (raw, expected) in [
+        (" TRUE ", true),
+        ("1", true),
+        (" False ", false),
+        ("0", false),
+    ] {
+        let mut auth = Auth::default();
+        auth.metadata.insert("openapi".into(), json!(raw));
+        assert_eq!(explicit_setting(&auth), Some(expected));
+    }
+}
+
+#[test]
+fn single_object_metadata_rules_route_like_one_element_arrays() {
+    for source in ["models", "model_aliases", "model-aliases"] {
+        for enabled in [false, true] {
+            let model = if enabled { "custom" } else { "partner/model" };
+            let mut auth = Auth::default();
+            auth.attributes
+                .insert("openapi".into(), (!enabled).to_string());
+            let rule = json!({"name": model, "alias": "public", "openapi": enabled});
+            let mut opts = options(&Format::OPENAI);
+            opts.metadata.requested_model = "public".into();
+            for value in [rule.clone(), json!([rule])] {
+                auth.metadata.insert(source.into(), value);
+                assert_eq!(
+                    should_execute_request(None, &auth, model, &opts),
+                    enabled,
+                    "{source}/{enabled}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn location_rewrite_keeps_host_only_openapi_paths_single_slashed() {
+    for suffix in ["/endpoints/openapi", "/publishers/meta/models/custom"] {
+        for (location, host) in [
+            ("europe-west4", "europe-west4-aiplatform.googleapis.com"),
+            ("global", "aiplatform.googleapis.com"),
+        ] {
+            assert_eq!(
+                base_url(
+                    &format!("https://us-central1-aiplatform.googleapis.com{suffix}"),
+                    "p",
+                    location
+                ),
+                format!("https://{host}/endpoints/openapi")
+            );
+        }
+    }
+}

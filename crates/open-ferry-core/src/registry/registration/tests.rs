@@ -7,7 +7,7 @@
 // and oauth_model_alias_test.go, internal/config/oauth_model_alias_test.go
 // and oauth_settings_test.go, internal/modelconfig/model_info_test.go,
 // internal/auth/codex/jwt_parser_test.go and
-// internal/watcher/synthesizer/file_test.go (v8.0.36, MIT).
+// internal/watcher/synthesizer/file_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of registration.
@@ -2570,5 +2570,49 @@ fn vertex_publisher_matches_openapi_model_normalization() {
         ("custom", "google"),
     ] {
         assert_eq!(vertex_publisher(model), publisher);
+    }
+}
+
+#[test]
+fn vertex_resource_partner_detection_matches_served_model_registration() {
+    use crate::config::{Config, VertexCompatKey, VertexCompatModel};
+    for (name, partner) in [
+        ("publishers/models/models/x", true),
+        ("publishers/publishers/models/x", true),
+        ("publishers/GOOGLE/models/x", false),
+        ("models/x", false),
+        ("publishers/x", false),
+    ] {
+        let cfg = Config {
+            vertex_api_key: vec![VertexCompatKey {
+                api_key: "dummy".into(),
+                models: vec![VertexCompatModel {
+                    name: name.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let credential = auth("vertex", "vertex", &[("api_key", "dummy")]);
+        let AuthModels::Register { models, .. } =
+            auth_models(&credential, &RegistrationRules::from(&cfg))
+        else {
+            panic!("unregistered {name}");
+        };
+        let levels = models[0]
+            .thinking
+            .as_ref()
+            .map(|t| t.levels.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            levels,
+            if partner {
+                vec!["low", "medium", "high"]
+            } else {
+                vec![]
+            },
+            "{name}"
+        );
     }
 }
