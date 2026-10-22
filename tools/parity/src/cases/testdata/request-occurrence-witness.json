@@ -1,0 +1,149 @@
+[
+  {
+    "case": "both-structured-first",
+    "input": {
+      "translator": "registry/request",
+      "model": "m",
+      "request": "{\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":{ \"a\": 1 }},{\"type\":\"text\",\"text\":\" and \"},{\"type\":\"text\",\"text\":\"{ \\\"a\\\": 1 }\"}]}]}",
+      "options": {
+        "from": "interactions",
+        "to": "openai"
+      }
+    },
+    "go": {
+      "model": "m",
+      "messages": [
+        {
+          "role": "user",
+          "content": "{ \"a\": 1 } and { \"a\": 1 }"
+        }
+      ]
+    }
+  },
+  {
+    "case": "both-client-first",
+    "input": {
+      "translator": "registry/request",
+      "model": "m",
+      "request": "{\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"{ \\\"a\\\": 1 }\"},{\"type\":\"text\",\"text\":\" and \"},{\"type\":\"text\",\"text\":{ \"a\": 1 }}]}]}",
+      "options": {
+        "from": "interactions",
+        "to": "openai"
+      }
+    },
+    "go": {
+      "model": "m",
+      "messages": [
+        {
+          "role": "user",
+          "content": "{ \"a\": 1 } and { \"a\": 1 }"
+        }
+      ]
+    }
+  },
+  {
+    "case": "both-adjacent",
+    "input": {
+      "translator": "registry/request",
+      "model": "m",
+      "request": "{\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":{ \"a\": 1 }},{\"type\":\"text\",\"text\":\"{ \\\"a\\\": 1 }\"}]}]}",
+      "options": {
+        "from": "interactions",
+        "to": "openai"
+      }
+    },
+    "go": {
+      "model": "m",
+      "messages": [
+        {
+          "role": "user",
+          "content": "{ \"a\": 1 }{ \"a\": 1 }"
+        }
+      ]
+    }
+  },
+  {
+    "case": "structured-only",
+    "input": {
+      "translator": "registry/request",
+      "model": "m",
+      "request": "{\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":{ \"a\": 1 }}]}]}",
+      "options": {
+        "from": "interactions",
+        "to": "openai"
+      }
+    },
+    "go": {
+      "model": "m",
+      "messages": [
+        {
+          "role": "user",
+          "content": "{ \"a\": 1 }"
+        }
+      ]
+    }
+  },
+  {
+    "case": "structured-and-distinct-client",
+    "input": {
+      "translator": "registry/request",
+      "model": "m",
+      "request": "{\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":{ \"a\": 1 }},{\"type\":\"text\",\"text\":\" and \"},{\"type\":\"text\",\"text\":\"{ \\\"b\\\": 2 }\"}]}]}",
+      "options": {
+        "from": "interactions",
+        "to": "openai"
+      }
+    },
+    "go": {
+      "model": "m",
+      "messages": [
+        {
+          "role": "user",
+          "content": "{ \"a\": 1 } and { \"b\": 2 }"
+        }
+      ]
+    }
+  },
+  {
+    "case": "client-only",
+    "input": {
+      "translator": "registry/request",
+      "model": "m",
+      "request": "{\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"{ \\\"a\\\": 1 }\"}]}]}",
+      "options": {
+        "from": "interactions",
+        "to": "openai"
+      }
+    },
+    "go": {
+      "model": "m",
+      "messages": [
+        {
+          "role": "user",
+          "content": "{ \"a\": 1 }"
+        }
+      ]
+    }
+  },
+  {
+    "case": "client-unused",
+    "input": {
+      "translator": "registry/request",
+      "model": "m",
+      "request": "{\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"{ \\\"a\\\": 1 }\"}]}],\"unused\":{ \"a\": 1 }}",
+      "options": {
+        "from": "interactions",
+        "to": "openai"
+      }
+    },
+    "go": {
+      "model": "m",
+      "messages": [
+        {
+          "role": "user",
+          "content": "{ \"a\": 1 }"
+        }
+      ]
+    }
+  }
+]

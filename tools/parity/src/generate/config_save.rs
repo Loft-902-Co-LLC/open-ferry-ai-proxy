@@ -805,6 +805,8 @@ struct Style<'a> {
     /// The text of each mapping entry outside lists, with its comments, by
     /// its dotted path.
     sections: Vec<(String, String)>,
+    /// A keep scalar is the last emitted value; extra blank lines would be data.
+    trailing_keep: bool,
 }
 
 impl<'a> Style<'a> {
@@ -835,6 +837,7 @@ impl<'a> Style<'a> {
             anchors: Vec::new(),
             plugins: false,
             sections: Vec::new(),
+            trailing_keep: false,
         }
     }
 
@@ -851,17 +854,21 @@ impl<'a> Style<'a> {
             out.push_str("\n\n");
         }
         for (index, (key, value)) in root.iter().enumerate() {
-            if index > 0 && !self.canonical && self.rng.chance(30) {
+            if index > 0 && !self.canonical && self.rng.chance(30) && !self.trailing_keep {
                 out.push('\n');
             }
             self.entry(&mut out, Some(""), key, value, 0, None);
         }
         if !self.canonical && self.rng.chance(25) {
             let comment = self.comment();
-            out.push('\n');
+            if !self.trailing_keep {
+                out.push('\n');
+            }
             out.push_str(&comment);
             out.push('\n');
         }
+        #[cfg(test)]
+        tests::check_rendered_model(&out, root);
         (out, std::mem::take(&mut self.sections))
     }
 
@@ -905,6 +912,7 @@ impl<'a> Style<'a> {
         indent: usize,
         lead: Option<&str>,
     ) {
+        self.trailing_keep = false;
         match lead {
             Some(lead) => out.push_str(lead),
             None => {
@@ -964,6 +972,7 @@ impl<'a> Style<'a> {
     /// A block list's items, their dashes at `indent`.
     fn sequence(&mut self, out: &mut String, items: &[Value], indent: usize) {
         for item in items {
+            self.trailing_keep = false;
             self.head_comment(out, indent);
             let dash = format!("{}- ", " ".repeat(indent));
             match item {
@@ -990,6 +999,7 @@ impl<'a> Style<'a> {
     /// A scalar after its key or dash, to the end of its line: an alias, a
     /// block scalar whose text is indented to `child`, or a scalar.
     fn scalar_line(&mut self, out: &mut String, key: &str, value: &Value, child: usize) {
+        self.trailing_keep = false;
         if let Some(alias) = self.alias(value) {
             out.push('*');
             out.push_str(&alias);
@@ -1007,6 +1017,7 @@ impl<'a> Style<'a> {
                 '>'
             });
             let breaks = text.len() - text.trim_end_matches('\n').len();
+            self.trailing_keep = breaks > 1;
             match breaks {
                 0 => out.push('-'),
                 1 => {}
@@ -1160,6 +1171,7 @@ impl<'a> Style<'a> {
             return;
         }
         let comment = self.comment();
+        self.trailing_keep = false;
         out.push_str(&" ".repeat(indent));
         out.push_str(&comment);
         out.push('\n');
@@ -1252,7 +1264,96 @@ fn double_quoted(text: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Not upstream's: the styles parse to the values they write.
+    type RenderChecks = Option<(usize, Vec<(String, Value)>)>;
+    // Not upstream's: the styles parse to the values they write.
+    thread_local! {
+        static RENDER_CHECKS: std::cell::RefCell<RenderChecks> = const {std::cell::RefCell::new(None)};
+    }
+    pub(super) fn check_rendered_model(text: &str, model: &Map<String, Value>) {
+        RENDER_CHECKS.with_borrow_mut(|state| {
+            let Some((count, bad)) = state else {
+                return;
+            };
+            *count += 1;
+            let expected = Value::Object(model.clone());
+            let actual = open_ferry_core::config::AnyValue::parse_yaml(text);
+            let model =
+                open_ferry_core::config::AnyValue::parse_yaml(&expected.to_string()).unwrap();
+            if actual.ok().as_ref() != Some(&model) {
+                bad.push((text.to_owned(), expected));
+            }
+        });
+    }
+    #[test]
+    fn whole_rendered_files_keep_every_model_value() {
+        use sha2::Digest;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                RENDER_CHECKS.with_borrow_mut(|s| *s = None);
+            }
+        }
+        let _reset = Reset;
+        RENDER_CHECKS.with_borrow_mut(|s| *s = Some((0, Vec::new())));
+        let mut hashes = BTreeMap::new();
+        for seed in 0..40 {
+            for case in step_cases(seed, 200) {
+                hashes.insert(
+                    case.name,
+                    sha2::Sha256::digest(serde_json::to_vec(&case.options).unwrap())
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>(),
+                );
+            }
+        }
+        for (seed, index) in [
+            (30, 0),
+            (30, 1397),
+            (30, 1554),
+            (31, 2887),
+            (37, 2286),
+            (38, 370),
+            (38, 65),
+        ] {
+            let name = format!("random-{seed}-{index}");
+            if hashes.contains_key(&name) {
+                continue;
+            }
+            let mut writes = Writes {
+                configs: Configs {
+                    rng: Generator::new(seed ^ SALT, index).rng,
+                },
+                extras: BTreeMap::new(),
+                names: 0,
+            };
+            let options = writes.case();
+            hashes.insert(
+                name,
+                sha2::Sha256::digest(serde_json::to_vec(&options).unwrap())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+            );
+        }
+        let (files, bad) = RENDER_CHECKS.with_borrow_mut(|s| s.take().unwrap());
+        if let Some(path) = std::env::var_os("PARITY_GENERATOR_EVIDENCE") {
+            std::fs::write(
+                path,
+                serde_json::to_vec_pretty(
+                    &json!({"cases":hashes.len(),"files":files,"violations":bad,"hashes":hashes}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(
+            bad.is_empty(),
+            "{files} whole files, {} model mismatches",
+            bad.len()
+        );
+    }
+
     #[test]
     fn styles_read_back() {
         assert!(plain_ok("gpt-6-sol", false));

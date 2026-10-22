@@ -111,6 +111,8 @@ pub enum JsonForm {
     GoEscaped,
 }
 
+type BoundPart<'a> = dyn Fn(&str, usize) -> bool + 'a;
+
 impl JsonForm {
     /// Whether `rust` is `go` with its JSON, read with `numbers`, written in
     /// this form.
@@ -120,22 +122,25 @@ impl JsonForm {
         rust: &str,
         numbers: Numbers,
         source: Option<&crate::raw_json::Raw<'_>>,
-        bound: Option<&dyn Fn(&str) -> bool>,
+        bound: Option<&BoundPart<'_>>,
     ) -> bool {
         match self {
             Self::Whole => {
-                bound.map_or_else(|| witnessed(source, go), |f| f(go))
+                bound.map_or_else(|| witnessed(source, go), |f| f(go, 0))
                     && numbers
                         .read(go)
                         .is_some_and(|value| compact(&value) == rust)
             }
             Self::InText => {
+                let rust_start = rust.as_ptr() as usize;
                 let (go, rust) = (parts(go, numbers), parts(rust, numbers));
                 go.len() == rust.len()
                     && go.iter().zip(&rust).all(|((go, value), (rust, _))| {
                         go == rust
-                            || (bound.map_or_else(|| witnessed(source, go), |f| f(go))
-                                && value.as_ref().is_some_and(|value| compact(value) == *rust))
+                            || (bound.map_or_else(
+                                || witnessed(source, go),
+                                |f| f(go, rust.as_ptr() as usize - rust_start),
+                            ) && value.as_ref().is_some_and(|value| compact(value) == *rust))
                     })
             }
             Self::GoEscaped => go_escaped(rust) == go,
@@ -320,7 +325,7 @@ pub fn compare_numbers_from_request(
     compare_numbers_with_witness(go, rust, embedded_json, numbers, request_text, None)
 }
 
-type Witness<'a> = dyn Fn(&str, &str, &str) -> bool + 'a;
+type Witness<'a> = dyn Fn(&str, &str, &str, usize) -> bool + 'a;
 
 pub fn compare_numbers_with_witness(
     go: &Value,
@@ -470,7 +475,8 @@ impl<'a> Walker<'a> {
             return;
         }
         let pointer = self.pointer();
-        let bound = |span: &str| self.witness.is_some_and(|f| f(&pointer, span, rust));
+        let bound =
+            |span: &str, at: usize| self.witness.is_some_and(|f| f(&pointer, span, rust, at));
         let mut source = self.source;
         for part in &self.path {
             source = match (source, part) {
@@ -490,7 +496,7 @@ impl<'a> Walker<'a> {
                 rust,
                 self.numbers,
                 source,
-                self.witness.map(|_| &bound as &dyn Fn(&str) -> bool),
+                self.witness.map(|_| &bound as &dyn Fn(&str, usize) -> bool),
             )
         }) {
             self.out.deviations.insert(Deviation::EmbeddedJson);
