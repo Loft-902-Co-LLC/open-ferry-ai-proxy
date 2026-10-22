@@ -4,6 +4,7 @@
 
 pub mod counterfactual;
 pub mod folded;
+pub mod version;
 
 use std::env;
 use std::fs;
@@ -529,6 +530,10 @@ mod tests {
                 .run_rust(&case)
                 .unwrap(),
             *rust
+        );
+        assert_eq!(
+            super::version::repair(&case, &mut go, rust),
+            Some(Deviation::UpstreamVersionCommentLoss)
         );
         let mut accepted = go.clone();
         assert_eq!(

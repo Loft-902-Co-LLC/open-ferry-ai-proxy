@@ -54,6 +54,8 @@
 //!   comments too, rather than only its root node's comments.
 //! - Those of [`validate_v8_config`].
 
+#[cfg(test)]
+mod deferred_tests;
 mod known;
 mod schema;
 mod validate;
@@ -71,8 +73,8 @@ use super::Config;
 use super::layout::decode_any_value;
 use super::save::{
     self, Node, copy_yaml_path_value, delete_yaml_path, expand_config_aliases, find_map_key_index,
-    marshal, normalize_config_layout, project_v8_config_aliases, remove_map_key,
-    set_yaml_path_with_comments, unmarshal, v8_aliases, yaml_path, yaml_path_mut,
+    marshal, normalize_config_layout, normalize_config_layout_doc, project_v8_config_aliases,
+    remove_map_key, set_yaml_path_with_comments, unmarshal, v8_aliases, yaml_path, yaml_path_mut,
 };
 use super::v8::V8_SHARED_STRUCT_PATHS;
 use super::yaml::{self as loader_yaml, Kind as LoaderKind};
@@ -273,8 +275,7 @@ pub fn preview_v8(data: &[u8], edit: &V8Edit) -> Result<Vec<u8>, V8EditError> {
 /// load as.
 pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8EditError> {
     let stored = |error: save::SaveError| V8EditError::StoredInvalid(error.to_string());
-    let (data, _) = normalize_config_layout(data, true).map_err(stored)?;
-    let mut doc = unmarshal(&data).map_err(stored)?;
+    let (mut doc, _) = normalize_config_layout_doc(data, true).map_err(stored)?;
     let Some(root) = doc.content.first_mut() else {
         return Err(V8EditError::StoredInvalid("empty config".to_owned()));
     };

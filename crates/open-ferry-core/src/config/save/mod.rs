@@ -48,8 +48,8 @@
 //! - Comment normalization leaves block scalar bodies alone in every section.
 //!   Multiline line comments on block scalars are quoted safely, so emitting
 //!   them cannot turn the comment into scalar data. Other block styles stay.
-//!   Multiline key comments blocked by a value's own comment stay as head
-//!   comments on their key, rather than passing into a later setting.
+//!   A conflicting multiline key comment moves to its key's head only if
+//!   its actual deferred recipient would damage scalar data or drop it.
 //! - The check, the backup, the record, the lock, the atomic replacement
 //!   and the symbolic link refusal are this port's; upstream writes the
 //!   file in place.
@@ -92,7 +92,8 @@ pub(crate) use tree::{
     remove_map_key, set_yaml_path_with_comments, yaml_path, yaml_path_mut,
 };
 pub(crate) use v8::{
-    flatten_v8, is_v8_config_layout, normalize_config_layout, project_v8_config_aliases, v8_aliases,
+    flatten_v8, is_v8_config_layout, normalize_config_layout, normalize_config_layout_doc,
+    project_v8_config_aliases, v8_aliases,
 };
 pub(crate) use write::WriteLock;
 

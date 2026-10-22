@@ -52,6 +52,8 @@ pub enum Deviation {
     UpstreamArchivedScalarCounterfactual,
     /// Exact source-preserved folded scalars replay both emitter modes.
     UpstreamFoldedScalarReencode,
+    /// Canonicalizing root version 8 discarded its exact source line comment.
+    UpstreamVersionCommentLoss,
     /// Our reload log has a change line for a setting upstream reloads
     /// without one; upstream logs nothing for it.
     UnloggedChangeLine,
@@ -75,6 +77,7 @@ impl Deviation {
             Self::UpstreamBlockScalarCounterfactual => "upstream block scalar counterfactual",
             Self::UpstreamArchivedScalarCounterfactual => "upstream archived scalar counterfactual",
             Self::UpstreamFoldedScalarReencode => "upstream folded scalar re-encode",
+            Self::UpstreamVersionCommentLoss => "upstream config version comment loss",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
     }

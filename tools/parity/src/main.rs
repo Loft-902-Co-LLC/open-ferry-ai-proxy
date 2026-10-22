@@ -726,6 +726,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
                 .get(&Deviation::UpstreamBlockScalarCounterfactual)
                 .copied()
                 .unwrap_or_default(),
+            upstream_version_comments: tally
+                .deviations
+                .get(&Deviation::UpstreamVersionCommentLoss)
+                .copied()
+                .unwrap_or(0),
         });
     }
     if let Some(path) = &args.summary {
@@ -1035,6 +1040,28 @@ fn evaluate_with_whole_counterfactual(
     work_dir: &Path,
 ) -> Result<Evaluated, Box<dyn Error>> {
     let mut evaluated = evaluate(translator, case, go);
+    if translator == Translator::ConfigSave
+        && matches!(&evaluated.outcome,Outcome::Equivalent(d) if d.contains(&Deviation::UpstreamVersionCommentLoss))
+    {
+        if !safe_case_name(&case.name) {
+            evaluated.outcome = Outcome::Different(vec![Difference::whole(
+                "safe counterfactual evidence filename".into(),
+                case.name.clone(),
+            )]);
+            return Ok(evaluated);
+        }
+        if let (Ok(original_go), Ok(rust)) = (
+            serde_json::from_str::<Value>(&evaluated.go_output),
+            &evaluated.rust_output,
+        ) && let Some(mut proof) = config_save::version::evidence(case, &original_go, rust)
+        {
+            if let Outcome::Equivalent(d) = &evaluated.outcome {
+                proof["comparison_deviations"] =
+                    json!(d.iter().map(|d| d.describe()).collect::<Vec<_>>());
+            }
+            save_counterfactual(work_dir, case, &proof)?;
+        }
+    }
     if translator != Translator::ConfigSave || !matches!(evaluated.outcome, Outcome::Different(_)) {
         return Ok(evaluated);
     }
@@ -1084,7 +1111,7 @@ fn evaluate_with_whole_counterfactual(
             rust_rewritten,
         )
     {
-        let proof = config_save::counterfactual::evidence(
+        let mut proof = config_save::counterfactual::evidence(
             case,
             &candidate,
             &original_go,
@@ -1092,6 +1119,15 @@ fn evaluate_with_whole_counterfactual(
             rust_original,
             rust_rewritten,
         );
+        if let Outcome::Equivalent(found) = &counterfactual.outcome {
+            proof["counterfactual_deviations"] =
+                json!(found.iter().map(|d| d.describe()).collect::<Vec<_>>());
+            if let Some(witness) =
+                config_save::version::evidence(&candidate, &counterfactual_go, rust_rewritten)
+            {
+                proof["version_comment_proof"] = witness;
+            }
+        }
         save_counterfactual(work_dir, case, &proof)?;
         evaluated.outcome = Outcome::Equivalent(proof_deviations(reason, &counterfactual.outcome));
     }
@@ -1131,6 +1167,12 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
         filtered = Some(Ok(rust));
     }
     let compared: &Result<Value, String> = filtered.as_ref().unwrap_or(&rust_output);
+    if translator == Translator::ConfigSave
+        && let (Some(go), Ok(rust)) = (&mut go_value, compared)
+        && let Some(loss) = config_save::version::repair(case, go, rust)
+    {
+        omitted.push(loss);
+    }
     if translator == Translator::ConfigSave
         && let (Some(go), Ok(rust)) = (&mut go_value, compared)
         && let Some(loss) = config_save::repair_lossy_plugin_reencode(case, go, rust)
@@ -1325,6 +1367,7 @@ fn write_failure(
     if !case.translated_request.is_empty() {
         report["translated_request"] = json!(case.translated_request);
     }
+    report["upstream_output_raw"] = Value::String(evaluated.go_output.clone());
     report["upstream_output"] = upstream_output;
     report["open_ferry_output"] = rust_output;
     fs::create_dir_all(dir)?;
