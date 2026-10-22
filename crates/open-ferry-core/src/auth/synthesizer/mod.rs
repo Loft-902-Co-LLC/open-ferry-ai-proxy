@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/watcher/synthesizer/context.go,
 // helpers.go and config.go (Synthesize), ComputeExcludedModelsHash in
 // internal/watcher/diff/model_hash.go and FormatSortedHeaders in
-// internal/config/config_normalization.go (v8.0.32, MIT).
+// internal/config/config_normalization.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Synthesizers: build [`Auth`] records from credential files
@@ -16,9 +16,9 @@
 //! `auth_kind`, and extra request headers as `header:<name>`.
 //!
 //! Deviations from upstream:
-//! - The context carries the one config setting the synthesizers here read,
-//!   `oauth-excluded-models`, rather than the whole config, and the ID
-//!   generator is passed on its own. A missing config, which upstream treats
+//! - The context retains `oauth-excluded-models` for reload callers, but
+//!   synthesis doesn't apply it; registration resolves global inheritance.
+//!   The ID generator is passed on its own. A missing config, which upstream treats
 //!   as "set no `auth_kind`", has no counterpart.
 //! - Plugin auth parsers and the fingerprint-profile attribute aren't
 //!   ported.
@@ -50,8 +50,8 @@ pub struct SynthesisContext {
     pub auth_dir: PathBuf,
     /// The time to stamp new records with.
     pub now: Timestamp,
-    /// Models to hide from every OAuth credential of a provider, keyed by
-    /// lowercase provider name (the config's `oauth-excluded-models`).
+    /// Global OAuth rules retained for reload callers. Synthesis stores only
+    /// credential-owned rules; model registration applies these globals.
     pub oauth_excluded_models: BTreeMap<String, Vec<String>>,
 }
 
@@ -183,17 +183,12 @@ impl StableIdGenerator {
     }
 }
 
-/// Sets `auth`'s excluded models and kind (upstream's
-/// `ApplyAuthExcludedModelsMeta`). API keys use only their own list; other
-/// credentials add the provider's `oauth-excluded-models`. Models are
-/// trimmed, lowercased, deduplicated and sorted.
-pub fn apply_auth_excluded_models_meta(
-    auth: &mut Auth,
-    oauth_excluded_models: &BTreeMap<String, Vec<String>>,
-    per_key: &[String],
-    auth_kind: &str,
-) {
-    let kind_key = open_ferry_translate::go::to_lower(auth_kind.trim());
+/// Stores the credential's own exclusions and kind (upstream's
+/// `ApplyAuthExcludedModelsMeta`). Global OAuth rules resolve at registration;
+/// a nonempty credential list overrides them. Models are trimmed, lowercased,
+/// deduplicated and sorted. Existing attributes are never cleared: callers
+/// rebuilding an existing record must remove stale exclusions first.
+pub fn apply_auth_excluded_models_meta(auth: &mut Auth, per_key: &[String], auth_kind: &str) {
     let mut seen = BTreeSet::new();
     let mut add = |list: &[String]| {
         for entry in list {
@@ -204,12 +199,6 @@ pub fn apply_auth_excluded_models_meta(
         }
     };
     add(per_key);
-    if kind_key != "apikey" {
-        let provider = open_ferry_translate::go::to_lower(auth.provider.trim());
-        if let Some(global) = oauth_excluded_models.get(&provider) {
-            add(global);
-        }
-    }
     let combined: Vec<String> = seen.into_iter().collect();
     let hash = compute_excluded_models_hash(&combined);
     if !hash.is_empty() {
@@ -331,66 +320,27 @@ mod tests {
     }
 
     #[test]
-    fn apply_auth_excluded_models_meta_cases() {
-        let none = BTreeMap::new();
-        let mut api = Auth {
-            provider: "gemini".into(),
-            ..Auth::default()
-        };
+    fn credential_exclusions_are_normalized_and_preserved() {
+        let mut auth = Auth::default();
         apply_auth_excluded_models_meta(
-            &mut api,
-            &none,
-            &strings(&["model-a", "MODEL-A", "model-b", "model-a"]),
-            "apikey",
+            &mut auth,
+            &strings(&[" Model-B ", "model-a", "MODEL-A", " "]),
+            "oauth",
         );
-        assert_eq!(api.attribute("excluded_models"), Some("model-a,model-b"));
-        assert_eq!(
-            api.attribute("excluded_models_hash"),
-            Some(compute_excluded_models_hash(&strings(&["model-b", "model-a"])).as_str())
-        );
-        assert_eq!(api.attribute("auth_kind"), Some("apikey"));
-
-        let global = BTreeMap::from([("claude".to_owned(), strings(&["claude-2.0"]))]);
-        let mut oauth = Auth {
-            provider: "claude".into(),
-            ..Auth::default()
-        };
-        apply_auth_excluded_models_meta(&mut oauth, &global, &[], "oauth");
-        assert_eq!(oauth.attribute("excluded_models"), Some("claude-2.0"));
-        assert!(oauth.attribute("excluded_models_hash").is_some());
-        assert_eq!(oauth.attribute("auth_kind"), Some("oauth"));
-
-        // An API key ignores the provider-wide list.
-        let mut api_claude = Auth {
-            provider: "claude".into(),
-            ..Auth::default()
-        };
-        apply_auth_excluded_models_meta(&mut api_claude, &global, &[], "apikey");
-        assert_eq!(api_claude.attribute("excluded_models"), None);
-        assert_eq!(api_claude.attribute("excluded_models_hash"), None);
-        assert_eq!(api_claude.attribute("auth_kind"), Some("apikey"));
-
-        let mut no_kind = Auth::default();
-        apply_auth_excluded_models_meta(&mut no_kind, &none, &[], "");
-        assert!(no_kind.attributes.is_empty());
-    }
-
-    #[test]
-    fn oauth_merge_writes_combined_models() {
-        let global = BTreeMap::from([("claude".to_owned(), strings(&["global-a", "shared"]))]);
-        let mut auth = Auth {
-            provider: "claude".into(),
-            ..Auth::default()
-        };
-        apply_auth_excluded_models_meta(&mut auth, &global, &strings(&["per", "SHARED"]), "oauth");
-        assert_eq!(
-            auth.attribute("excluded_models"),
-            Some("global-a,per,shared")
-        );
+        assert_eq!(auth.attribute("excluded_models"), Some("model-a,model-b"));
         assert_eq!(
             auth.attribute("excluded_models_hash"),
-            Some(compute_excluded_models_hash(&strings(&["global-a", "per", "shared"])).as_str())
+            Some(compute_excluded_models_hash(&strings(&["model-a", "model-b"])).as_str())
         );
+        let before = auth.attributes.clone();
+        apply_auth_excluded_models_meta(&mut auth, &[], "");
+        assert_eq!(auth.attributes, before);
+        apply_auth_excluded_models_meta(&mut auth, &strings(&["replacement"]), "");
+        assert_eq!(auth.attribute("excluded_models"), Some("replacement"));
+        assert_eq!(auth.attribute("auth_kind"), Some("oauth"));
+        let mut empty = Auth::default();
+        apply_auth_excluded_models_meta(&mut empty, &[], "");
+        assert!(empty.attributes.is_empty());
     }
 
     #[test]

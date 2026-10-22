@@ -7,7 +7,7 @@
 // and oauth_model_alias_test.go, internal/config/oauth_model_alias_test.go
 // and oauth_settings_test.go, internal/modelconfig/model_info_test.go,
 // internal/auth/codex/jwt_parser_test.go and
-// internal/watcher/synthesizer/file_test.go (v8.0.32, MIT).
+// internal/watcher/synthesizer/file_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of registration.
@@ -452,7 +452,7 @@ fn register_config_api_key_auths_codex_model_modes() {
 }
 
 #[test]
-fn register_models_for_auth_uses_pre_merged_excluded_models_attribute() {
+fn register_models_for_auth_uses_credential_exclusions_over_globals() {
     let rules = RegistrationRules {
         oauth_excluded_models: channel("claude", vec!["claude-opus-4-6".to_owned()]),
         ..RegistrationRules::default()
@@ -1553,11 +1553,7 @@ fn codex_accounts_get_their_plans_models() {
 }
 
 #[test]
-fn file_synthesizer_oauth_excluded_models_merged() {
-    let rules = RegistrationRules {
-        oauth_excluded_models: channel("claude", vec!["shared".to_owned(), "model-b".to_owned()]),
-        ..RegistrationRules::default()
-    };
+fn metadata_fallback_uses_only_credential_exclusions() {
     let auth = Auth {
         metadata: object(json!({
             "type": "claude",
@@ -1565,19 +1561,19 @@ fn file_synthesizer_oauth_excluded_models_merged() {
         })),
         ..auth("auth.json", "claude", &[])
     };
-    let excluded = credential_excluded_models(&auth, &rules, "claude").expect("a list");
+    let excluded = credential_excluded_models(&auth).expect("a list");
     let merged: BTreeSet<String> = excluded
         .iter()
         .map(|item| go::to_lower(item.trim()))
         .collect();
     assert_eq!(
         merged.into_iter().collect::<Vec<_>>().join(","),
-        "custom-model,model-b,shared"
+        "custom-model,model-b"
     );
 }
 
 #[test]
-fn per_account_exclusions_add_to_the_global_ones() {
+fn per_account_exclusions_override_the_global_ones() {
     let rules = RegistrationRules {
         oauth_excluded_models: channel("claude", vec!["claude-haiku-4-5-20251001".to_owned()]),
         ..RegistrationRules::default()
@@ -1590,13 +1586,10 @@ fn per_account_exclusions_add_to_the_global_ones() {
         ..auth("claude.json", "claude", &[])
     };
     let got = id_set(&registered(&file_auth, &rules));
-    for id in [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5-20251001",
-    ] {
+    for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
         assert!(!got.contains(id), "{id} is registered");
     }
+    assert!(got.contains("claude-haiku-4-5-20251001"));
     assert!(got.contains("claude-sonnet-5"));
 
     // An empty attribute leaves the global list.

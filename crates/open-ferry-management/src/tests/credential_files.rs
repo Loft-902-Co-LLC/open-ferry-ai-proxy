@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // auth_files_upload_test.go, auth_files_batch_test.go,
 // auth_files_delete_test.go, auth_files_download_test.go and
-// auth_files_download_windows_test.go (v8.0.32, MIT).
+// auth_files_download_windows_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the routes of `crate::credential_files`: downloading,
@@ -1002,13 +1002,13 @@ async fn raw_uploads() {
         (r#"{"type":"gemini"}"#, "type gemini isn't served"),
     ] {
         upload_raw(&api, "raw.json", body).await.assert(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_REQUEST,
             &json!({ "error": format!("invalid auth file: {reason}") }).to_string(),
         );
     }
     for body in ["", r#"{"type":"codex""#, "{} x"] {
         let answer = upload_raw(&api, "raw.json", body).await;
-        let body = answer.expect(StatusCode::INTERNAL_SERVER_ERROR);
+        let body = answer.expect(StatusCode::BAD_REQUEST);
         let error = body["error"].as_str().unwrap();
         assert!(error.starts_with("invalid auth file: "), "{error}");
     }
@@ -1274,4 +1274,55 @@ async fn form_debug_leaves_out_contents() {
         shown.contains(&format!("{} bytes", MARKER.len())),
         "{shown}"
     );
+}
+
+// Ported from auth_files_excluded_models_test.go (v8.0.36).
+#[tokio::test]
+async fn uploads_validate_exclusions_before_writing() {
+    for (content, reason) in [
+        (
+            r#"{"type":"codex","excluded_models":123}"#,
+            "must be a string",
+        ),
+        (
+            r#"{"type":"gemini-cli","excluded_models":123}"#,
+            "must be a string",
+        ),
+        (
+            r#"{"type":"codex","excluded-models":["new",1]}"#,
+            "must be a string",
+        ),
+        // The invalid surrogate fails JSON decoding before exclusion validation.
+        (
+            r#"{"type":"codex","unrelated":"\ud800","excluded_models":123}"#,
+            "invalid auth file:",
+        ),
+    ] {
+        for multipart in [false, true] {
+            let dir = AuthDir::new();
+            let api = Api::over(&dir);
+            let answer = if multipart {
+                upload(&api, &[("bad.json", content)]).await
+            } else {
+                upload_raw(&api, "bad.json", content).await
+            };
+            let body = answer.expect(StatusCode::BAD_REQUEST);
+            assert!(
+                body["error"].as_str().unwrap().contains(reason),
+                "content={content}; multipart={multipart}; response={body}"
+            );
+            assert!(listing(&dir).is_empty());
+            assert!(api.manager.list().is_empty());
+            assert!(api.sync.calls().is_empty());
+        }
+    }
+    let dir = AuthDir::new();
+    let api = Api::over(&dir);
+    upload_raw(
+        &api,
+        "legacy.json",
+        r#"{"type":"codex","excluded-models":" a , b "}"#,
+    )
+    .await
+    .expect(StatusCode::OK);
 }

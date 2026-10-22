@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/*_test.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/*_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the manager as a whole, with a fake executor, registry and
@@ -40,6 +40,7 @@ mod conductor_issue6416;
 mod conductor_issue6417;
 mod conductor_issue6643;
 mod conductor_load_persistence;
+mod conductor_modify;
 mod conductor_oauth_alias_nofork;
 mod conductor_oauth_alias_suspension;
 mod conductor_oauth_request_scoped_errors;

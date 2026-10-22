@@ -1,8 +1,8 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6415_test.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6415_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! An access token the provider refused with a 401, when the credential
-//! doesn't know when it expires, counts as expired: the credential stays
+//! An access token the provider refused with a 401 counts as expired, even
+//! with a future expiry: the credential stays
 //! out of rotation while it refreshes, and after a refresh that failed,
 //! until a refresh works or its tokens change. Clearing the 401 leaves a
 //! model's running quota cooldown alone.
@@ -209,10 +209,10 @@ async fn mark_rejected_access_token_advances_generation() {
     assert_eq!(after.rejected_access_token, token);
 }
 
-// Not upstream's: a token that is no longer the access token, or one with
-// an expiry of its own, isn't marked.
+// Not upstream's: a stale bearer cannot reject the current token; its own
+// future expiry cannot override a rejection by the provider.
 #[tokio::test(start_paused = true)]
-async fn mark_rejected_access_token_needs_the_current_token_without_expiry() {
+async fn mark_rejected_access_token_needs_the_current_token_even_with_expiry() {
     let (h, _executor, _tokens) = new_unauthorized_refresh_fixture(false);
     let initial = h.get(PRIMARY);
 
@@ -230,7 +230,7 @@ async fn mark_rejected_access_token_needs_the_current_token_without_expiry() {
     h.manager.update(expiring).expect("update");
     h.manager
         .mark_rejected_access_token(PRIMARY, &access_token(&initial));
-    assert!(h.get(PRIMARY).rejected_access_token.is_empty());
+    assert_eq!(h.get(PRIMARY).rejected_access_token, access_token(&initial));
 }
 
 #[tokio::test(start_paused = true)]

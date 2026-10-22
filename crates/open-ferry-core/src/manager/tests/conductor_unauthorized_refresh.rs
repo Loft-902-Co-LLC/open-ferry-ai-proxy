@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A 401 refreshes the credential and retries it once before falling back
@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::Engine as _;
 use chrono::{SecondsFormat, TimeDelta};
 use http::{HeaderMap, HeaderValue};
 use serde_json::json;
@@ -99,6 +100,272 @@ fn unauthorized_refresh_executor(tokens: &Arc<Mutex<Tokens>>) -> Arc<FakeExecuto
         Ok(auth)
     });
     executor
+}
+
+// Ported from conductor_issue6742_test.go (v8.0.36). JWTs are unsigned dummy
+// fixtures; no provider or local proxy is contacted.
+fn issue6742_jwt(expiry: Timestamp) -> String {
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(json!({"exp": expiry.timestamp()}).to_string());
+    format!("e30.{claims}.dummy")
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_ten_day_jwt_refreshes_on_day_six_without_an_executor_lead() {
+    use crate::manager::refresh::{next_refresh_check_at, should_refresh};
+    let h = Harness::new(Settings::default());
+    let issued = h.now();
+    let token = issue6742_jwt(issued + TimeDelta::days(10));
+    let auth = auth_with_metadata(
+        "codex",
+        "codex",
+        json!({"access_token":token,"refresh_token":"dummy-refresh"}),
+    );
+    let check = issued + TimeDelta::days(6) + TimeDelta::hours(1);
+    assert_eq!(
+        auth.outer_refresh_due_at(issued, None),
+        Some(issued + TimeDelta::days(6))
+    );
+    assert_eq!(
+        next_refresh_check_at(issued, &auth, None),
+        Some(issued + TimeDelta::days(6))
+    );
+    assert!(!should_refresh(&auth, None, issued));
+    assert!(should_refresh(&auth, None, check));
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejected_outer_bearer_is_due_even_with_future_expiry() {
+    use crate::manager::refresh::should_refresh;
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let token = issue6742_jwt(now + TimeDelta::days(8));
+    let mut auth = auth_with_metadata(
+        "codex",
+        "codex",
+        json!({"access_token":token,"refresh_token":"dummy-refresh","expired":rfc3339(now+TimeDelta::days(8))}),
+    );
+    assert!(!should_refresh(&auth, None, now));
+    auth.rejected_access_token = auth.outer_access_token().to_owned();
+    assert_eq!(auth.outer_refresh_due_at(now, None), Some(now));
+    assert!(should_refresh(&auth, None, now));
+}
+
+// Not upstream's: ordinary Codex records use the partition refresh path too.
+// Recover a missing bearer immediately even when metadata claims future expiry.
+#[tokio::test(start_paused = true)]
+async fn missing_outer_bearer_refreshes_immediately_as_open_ferry_deviation() {
+    use crate::manager::refresh::{next_refresh_check_at, should_refresh};
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let auth = auth_with_metadata(
+        "codex",
+        "codex",
+        json!({"refresh_token":"dummy-refresh","expired":rfc3339(now+TimeDelta::days(8))}),
+    );
+    assert!(!auth.use_siwc());
+    assert_eq!(auth.outer_refresh_due_at(now, None), Some(now));
+    assert_eq!(next_refresh_check_at(now, &auth, None), Some(now));
+    assert!(should_refresh(&auth, None, now));
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejecting_an_unexpired_jwt_is_idempotent_and_checks_the_live_bearer() {
+    let h = Harness::new(Settings::default());
+    let token = issue6742_jwt(h.now() + TimeDelta::days(8));
+    let registered = h.add(
+        auth_with_metadata(
+            PRIMARY,
+            "codex",
+            json!({"access_token":token,"refresh_token":"dummy-refresh"}),
+        ),
+        &[MODEL],
+    );
+    h.manager
+        .mark_rejected_access_token(PRIMARY, "different-dummy-bearer");
+    assert_eq!(h.get(PRIMARY).generation, registered.generation);
+    h.manager.mark_rejected_access_token(PRIMARY, &token);
+    let rejected = h.get(PRIMARY);
+    assert!(!rejected.has_valid_access_token(h.now()));
+    assert!(rejected.generation > registered.generation);
+    h.manager.mark_rejected_access_token(PRIMARY, &token);
+    assert_eq!(h.get(PRIMARY).generation, rejected.generation);
+}
+
+async fn issue6742_run_background_refresh(h: &Harness) {
+    use super::auto_refresh_issue6199::TestLoop;
+    let test_loop = TestLoop::install(&h.manager);
+    test_loop.rebuild(&h.manager, h.now());
+    test_loop.handle_due(&h.manager, h.now());
+    assert_eq!(test_loop.queued(), 1);
+    let worker = test_loop.worker(&h.manager);
+    settle().await;
+    test_loop.cancel();
+    worker.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejected_unexpired_jwt_recovers_in_background_after_transient_refresh_failure() {
+    use crate::manager::refresh::should_refresh;
+    let h = Harness::new(Settings::default());
+    let stale = issue6742_jwt(h.now() + TimeDelta::days(8));
+    let fresh = issue6742_jwt(h.now() + TimeDelta::days(10));
+    let tokens = Arc::new(Mutex::new(Tokens {
+        invalid: HashSet::from([stale.clone()]),
+        refresh_err: Some(plain_error("dummy upstream 503")),
+        refresh_tokens: HashMap::from([(PRIMARY.to_owned(), fresh.clone())]),
+        ..Tokens::default()
+    }));
+    let executor = unauthorized_refresh_executor(&tokens);
+    h.executor(&executor);
+    h.add(
+        auth_with_metadata(
+            PRIMARY,
+            "codex",
+            json!({"access_token":stale,"refresh_token":"dummy-refresh"}),
+        ),
+        &[MODEL],
+    );
+    assert!(!should_refresh(&h.get(PRIMARY), None, h.now()));
+    assert!(
+        h.manager
+            .execute(&providers(&["codex"]), request(MODEL), options())
+            .await
+            .is_err()
+    );
+    let failed = h.get(PRIMARY);
+    assert_eq!(failed.rejected_access_token, stale);
+    assert!(!failed.has_valid_access_token(h.now()));
+    let retry = failed.next_refresh_after.unwrap();
+    assert!(retry > h.now());
+    assert!(!should_refresh(&failed, None, h.now()));
+    assert!(should_refresh(&failed, None, retry));
+    lock(&tokens).refresh_err = None;
+    h.clock.advance((retry - h.now()).to_std().unwrap());
+    issue6742_run_background_refresh(&h).await;
+    assert_eq!(h.get(PRIMARY).access_token(), fresh);
+    assert!(h.get(PRIMARY).has_valid_access_token(h.now()));
+    h.manager
+        .execute(&providers(&["codex"]), request(MODEL), options())
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_401_rejects_jwt_blocks_warm_sibling_shards_and_recovers() {
+    use crate::manager::refresh::should_refresh;
+    let h = Harness::new(Settings {
+        routing_strategy: RoutingStrategy::FillFirst,
+        ..Settings::default()
+    });
+    let stale = issue6742_jwt(h.now() + TimeDelta::days(8));
+    let fresh = issue6742_jwt(h.now() + TimeDelta::days(10));
+    let invalid = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rejecting = invalid.clone();
+    let old = stale.clone();
+    let executor = FakeExecutor::with("codex", move |call| {
+        if rejecting.load(std::sync::atomic::Ordering::SeqCst) && call.auth.access_token() == old {
+            return Reply::chunks(vec![
+                Ok("data: {\"type\":\"response.created\"}\n\n".into()),
+                Err(ExecError::upstream(401, INVALIDATED)),
+            ]);
+        }
+        Reply::ok(call.auth_id.clone())
+    });
+    let refreshed = fresh.clone();
+    executor.set_refresh(move |auth| {
+        let mut updated = auth.clone();
+        updated
+            .metadata
+            .insert("access_token".into(), json!(refreshed));
+        Ok(updated)
+    });
+    h.executor(&executor);
+    for (id, token) in [(PRIMARY, stale.as_str()), (BACKUP, fresh.as_str())] {
+        h.add(
+            auth_with_metadata(
+                id,
+                "codex",
+                json!({"access_token":token,"refresh_token":"dummy-refresh"}),
+            ),
+            &[MODEL, "sibling"],
+        );
+    }
+    let warm = h
+        .manager
+        .execute(&providers(&["codex"]), request("sibling"), options())
+        .await
+        .unwrap();
+    assert_eq!(&warm.payload[..], PRIMARY.as_bytes());
+    invalid.store(true, std::sync::atomic::Ordering::SeqCst);
+    let stream = h
+        .manager
+        .execute_stream(&providers(&["codex"]), request(MODEL), options())
+        .await
+        .unwrap();
+    let (_, error) = collect(stream).await;
+    assert_eq!(error.unwrap().status, 401);
+    let failed = h.get(PRIMARY);
+    assert_eq!(failed.rejected_access_token, stale);
+    assert_eq!(failed.next_refresh_after, Some(h.now()));
+    assert!(should_refresh(&failed, None, h.now()));
+    let before = executor.ids(Kind::Execute).len();
+    let sibling = h
+        .manager
+        .execute(&providers(&["codex"]), request("sibling"), options())
+        .await
+        .unwrap();
+    assert_eq!(&sibling.payload[..], BACKUP.as_bytes());
+    assert!(
+        !executor.ids(Kind::Execute)[before..]
+            .iter()
+            .any(|id| id == PRIMARY)
+    );
+    issue6742_run_background_refresh(&h).await;
+    assert_eq!(h.get(PRIMARY).access_token(), fresh);
+    assert!(!h.get(PRIMARY).unavailable);
+    assert!(
+        h.get(PRIMARY)
+            .model_states
+            .values()
+            .all(|state| !state.unavailable)
+    );
+    let recovered = h
+        .manager
+        .execute(&providers(&["codex"]), request("sibling"), options())
+        .await
+        .unwrap();
+    assert_eq!(&recovered.payload[..], PRIMARY.as_bytes());
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_401_preserves_failure_backoff_and_throttles_recent_refreshes() {
+    for existing in [false, true] {
+        let h = Harness::new(Settings::default());
+        let mut auth = auth_with_metadata(
+            PRIMARY,
+            "codex",
+            json!({"access_token":issue6742_jwt(h.now()+TimeDelta::days(8)),"refresh_token":"dummy-refresh"}),
+        );
+        auth.last_refreshed_at = Some(h.now() - TimeDelta::minutes(1));
+        let expected = h.now() + TimeDelta::minutes(if existing { 10 } else { 5 });
+        if existing {
+            auth.next_refresh_after = Some(expected);
+        }
+        h.add(auth, &[MODEL]);
+        h.manager.mark_result(&CallResult {
+            auth_id: PRIMARY.into(),
+            model: MODEL.into(),
+            error: Some(AuthError {
+                http_status: 401,
+                message: INVALIDATED.into(),
+                ..AuthError::default()
+            }),
+            ..CallResult::default()
+        });
+        assert_eq!(h.get(PRIMARY).next_refresh_after, Some(expected));
+        assert!(!h.get(PRIMARY).has_valid_access_token(h.now()));
+    }
 }
 
 /// Upstream's `newUnauthorizedRefreshFixture`.
