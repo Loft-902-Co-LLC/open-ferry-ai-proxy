@@ -286,12 +286,12 @@ pub fn details() -> Vec<Case> {
         case(
             "vertex-openapi-group-refused",
             "config-version: 8\n",
-            "api-keys: {vertex: [{openapi: true, keys: [{api-key: dummy}]}]}\n",
+            "config-version: 8\napi-keys: {vertex: [{openapi: true, keys: [{api-key: dummy}]}]}\n",
         ),
         case(
             "vertex-openapi-location-group-refused",
             "config-version: 8\n",
-            "api-keys: {vertex: [{openapi-location: global, keys: [{api-key: dummy}]}]}\n",
+            "config-version: 8\napi-keys: {vertex: [{openapi-location: global, keys: [{api-key: dummy}]}]}\n",
         ),
         case("no-changes", FULL, FULL),
         case("everything-removed", FULL, "port: 8317\n"),
