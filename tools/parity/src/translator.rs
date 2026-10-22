@@ -1240,10 +1240,7 @@ impl Translator {
         Numbers::AsWritten
     }
 
-    /// Where this translator writes JSON it read compactly while upstream
-    /// copies the JSON's text, and the form it takes there. Each place is a
-    /// documented deviation (see UPSTREAM.md and the ported module's docs).
-    /// JSON in any other string must match upstream's exactly.
+    /// Only the reviewed Interactions-to-Claude collection-name route.
     pub fn collection_tool_name_source(self, case: &Case) -> bool {
         match self {
             Self::RegistryRequest => self
@@ -1254,6 +1251,7 @@ impl Translator {
         }
     }
 
+    /// Request routes whose text compaction requires a lexical source witness.
     pub fn embedded_json_request_source(self, case: &Case) -> Option<&str> {
         match self {
             Self::RegistryRequest => self.native(case)?.embedded_json_request_source(case),
@@ -1270,6 +1268,9 @@ impl Translator {
         }
     }
 
+    /// Where this translator writes JSON compactly while upstream copies its
+    /// text. Unlisted strings must match exactly; reviewed request routes also
+    /// require the non-string source witness above.
     pub fn embedded_json(self, case: &Case) -> &'static [JsonAt] {
         use JsonForm::{GoEscaped, InText, Whole};
         match self {

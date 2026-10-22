@@ -269,6 +269,7 @@ pub(crate) struct Emitter {
     key_line_comment: Vec<u8>,
     key_comment_origin: Option<usize>,
     line_comment_origin: Option<usize>,
+    event_has_line_comment: bool,
     pub(crate) hazardous_key_comments: Vec<usize>,
     /// Config writers keep multiline comments out of scalar bodies.
     pub(crate) protect_config_comments: bool,
@@ -348,6 +349,7 @@ impl Emitter {
             key_line_comment: Vec::new(),
             key_comment_origin: None,
             line_comment_origin: None,
+            event_has_line_comment: false,
             hazardous_key_comments: Vec::new(),
             protect_config_comments: false,
             protected_scalars: Vec::new(),
@@ -1016,7 +1018,8 @@ impl Emitter {
         self.write_indent()?;
         if self.protect_config_comments
             && event.empty_block_mapping_value
-            && (!self.line_comment.is_empty() || !self.key_line_comment.is_empty())
+            && (!self.key_line_comment.is_empty()
+                || (!self.event_has_line_comment && !self.line_comment.is_empty()))
         {
             // The block-style event is emitted as {} because it is empty.
             // Deferring its comment as for a block value puts {} at column 0.
@@ -1627,6 +1630,7 @@ impl Emitter {
         self.tag_data.suffix = Vec::new();
         self.scalar_data.value = Vec::new();
 
+        self.event_has_line_comment = !event.line_comment.is_empty();
         if !event.head_comment.is_empty() {
             self.head_comment = mem::take(&mut event.head_comment);
         }

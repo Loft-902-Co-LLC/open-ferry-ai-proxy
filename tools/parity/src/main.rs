@@ -980,17 +980,10 @@ fn evaluate_with_counterfactual(
     upstream: &Upstream,
     work_dir: &Path,
 ) -> Result<Evaluated, Box<dyn Error>> {
-    if !safe_case_name(&case.name) {
-        let mut e = evaluate(translator, case, go);
-        e.outcome = Outcome::Different(vec![Difference::whole(
-            "safe counterfactual evidence filename".into(),
-            case.name.clone(),
-        )]);
-        return Ok(e);
-    }
     let mut evaluated =
         evaluate_with_whole_counterfactual(translator, case, go, upstream, work_dir)?;
     if translator == Translator::ConfigSave
+        && safe_case_name(&case.name)
         && matches!(evaluated.outcome, Outcome::Different(_))
         && let Ok(original_go) = serde_json::from_str::<Value>(&evaluated.go_output)
         && let Ok(rust) = &evaluated.rust_output
@@ -1042,6 +1035,13 @@ fn evaluate_with_whole_counterfactual(
 ) -> Result<Evaluated, Box<dyn Error>> {
     let mut evaluated = evaluate(translator, case, go);
     if translator != Translator::ConfigSave || !matches!(evaluated.outcome, Outcome::Different(_)) {
+        return Ok(evaluated);
+    }
+    if !safe_case_name(&case.name) {
+        evaluated.outcome = Outcome::Different(vec![Difference::whole(
+            "safe counterfactual evidence filename".into(),
+            case.name.clone(),
+        )]);
         return Ok(evaluated);
     }
     let Some(original_go) = serde_json::from_str::<Value>(&evaluated.go_output).ok() else {
