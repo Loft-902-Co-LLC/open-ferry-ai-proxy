@@ -33,7 +33,7 @@ use super::process::{self, Invocation, Running};
 use super::prompt;
 use super::settings::{Entry, default_work_root};
 use crate::claude::executor::{
-    COMPACT_ALT, compact_error, original_request, response_format, translate_request_for_auth,
+    COMPACT_ALT, compact_error, response_format, translate_request_for_auth,
 };
 use crate::claude::stream::apply_patch_error;
 use crate::claude::usage::ensure_responses_usage_details;
@@ -338,15 +338,19 @@ impl ClaudeCliExecutor {
         format: &Format,
     ) -> Option<ResponseStream> {
         (format != &Format::CLAUDE).then(|| {
-            let original = original_request(request, options);
+            let original = crate::json::response_request(request, options);
             let context = ResponseContext {
                 model: &request.model,
-                original_request: &original,
+                original_request: original.as_request(),
                 request: translation,
             };
             let mut translator =
                 Registry::global().response_stream(&Format::CLAUDE, format, &context);
-            crate::apply_patch_responses::initialize_stream(&mut translator, format, &original);
+            crate::apply_patch_responses::initialize_stream(
+                &mut translator,
+                format,
+                original.value(),
+            );
             translator
         })
     }
