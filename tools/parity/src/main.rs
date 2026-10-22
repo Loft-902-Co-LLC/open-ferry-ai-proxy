@@ -60,6 +60,8 @@ options:
 
 /// Failing cases written to disk; the rest are only counted.
 const MAX_FAILURE_FILES: usize = 200;
+/// Dense config sweeps need all failures to measure upstream defect frequency.
+const MAX_CONFIG_FAILURE_FILES: usize = 1000;
 
 #[derive(Clone)]
 struct Args {
@@ -1285,7 +1287,12 @@ impl Tally {
                         case: case.name.clone(),
                         difference: first.clone(),
                     });
-                if self.failure_files < MAX_FAILURE_FILES {
+                let limit = if failures_dir.ends_with("config-save") {
+                    MAX_CONFIG_FAILURE_FILES
+                } else {
+                    MAX_FAILURE_FILES
+                };
+                if self.failure_files < limit {
                     self.failure_files += 1;
                     write_failure(failures_dir, case, &evaluated, differences)?;
                 }
